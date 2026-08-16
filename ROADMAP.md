@@ -105,7 +105,7 @@ none calls another's destructor to traverse the shared cycle), all verified in c
 stack at 1M+ nodes under a 1MB stack. A **struct** with more than one simultaneously-live
 recursive field still narrows to one chosen edge (D1, unchanged); an **enum**'s
 mutually-exclusive variants are not that restriction. Worklist-based disposal for
-branching structures stays out of scope, moved to Phase 6.
+branching structures stays out of scope, moved to Phase 7.
 **Phase 3 Slice 5 (general locals) is complete**: `| names |` binding at any point in a
 word body, clause body, or `if`/`else` arm (extent = the rest of the enclosing block, no
 new closing token), the checker's locals map evolving during the walk instead of a
@@ -226,7 +226,7 @@ review pipeline used for 8a/8b: one async implementation pass plus one fresh-con
 pass, proportional to migration blast radius rather than design risk.
 
 **Phase 3 is complete.** Slice 7's opt-in RC is
-deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
+deferred to Phase 7, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 **Phase 4 Slice 1 (type variables + row variable + length variables + monomorphization,
 native) is complete**: a user `:` word may declare `'T` (type variable), `..s` (row
 variable), and a length variable in an array count position `['T 'N]`, optionally bounded
@@ -652,11 +652,16 @@ droppable). Goldens: `times_carries_an_untouched_quotation_through_the_row`,
 
 The third shape `docs/phase4-slice10b-spec.md` named alongside these two (`while` over a
 *materialized* quotation panicking in `control_flow.rs`) is a different crash, not this one:
-it needs a way to feed a real `(code, env)` closure value into a `~[ ... ]` parameter, and
-no such value is constructible anywhere in the language today (7b's capturing closures are
-not built) — every path that could reach it is checker-rejected already (10b: "a materialized
-quotation value" at a `~` parameter), so it is presumed dead code, not verified reproducible.
-Revisit once 7b exists.
+it needs a way to feed a real `(code, env)` closure value into a `~[ ... ]` parameter. 7b's
+capturing closures are built (`examples/capturing_dispatch.sth` materializes and `call`s
+two same-frame closures via an array round-trip) and this text previously said otherwise;
+the dead-code conclusion still holds for a narrower reason, confirmed directly rather than
+read off the checker's source: loading a materialized quotation out of storage and passing
+it to `while`'s `~[ i64 -- i64 bool ]` parameter is rejected on sight (`error: while expects
+a quotation ~[...] here, found [...]`) regardless of whether a closure value exists
+elsewhere in the program. Every combinator's `~` parameter carries the same restriction, so
+this stays presumed dead code, verified by direct repro rather than by inference. Revisit if
+any combinator's `~` parameter is ever loosened to accept a materialized value.
 
 **Next action: none locked.** One previously-identified gap remains open and unscheduled
 (`docs/phase4-slice13-brief.md`'s Deferred section): closing slice 13's conservative
@@ -918,7 +923,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    error, and a destructor runs exactly once at its explicit `drop`.
 2. **Heap + owning pointer + allocator.** ✅ done. The first linear type with a real
    destructor, spelled `^T`: a single heap cell, not a sized buffer, because slice 3's
-   recursive data needs the *indirection* and a growable buffer wants Phase 6's `alloc`
+   recursive data needs the *indirection* and a growable buffer wants Phase 7's `alloc`
    layer. A fixed-capacity heap buffer composes as `^[u8 N]`, size in the type. `^T` is a
    **compiler-known type constructor, not generics** (one interned entry per concrete
    payload, builtin words checked ad hoc at the call site, exactly as `[T N]` arrays work).
@@ -927,7 +932,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    them. Allocation is a single global allocator, deliberately not parameterized per value,
    since a swappable global is cheap to retrofit later while per-value allocators change every
    value's representation. **Half that rationale is wrong, corrected rather than rewritten**:
-   under the type-parameter design Phase 6 will use (an allocator type parameter defaulted to
+   under the type-parameter design Phase 7 will use (an allocator type parameter defaulted to
    the global one, carrying a zero-size handle in that case), a per-value allocator does *not*
    change representation. The deferral holds on the other half — it needs generics, which did
    not exist here. See [the brief](./docs/phase3-slice2-brief.md) and
@@ -940,7 +945,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    rather than one at a time.
    **Rework expected, two items.** The allocator is a **compiler-emitted shim** wrapping
    `malloc`/`free` (as slice 1's backend emits the drop-spy's `printf` helper), because there
-   is no user-facing FFI yet; once Phase 6 lands FFI-to-libc, it should become ordinary bound
+   is no user-facing FFI yet; once Phase 7 lands FFI-to-libc, it should become ordinary bound
    foreign words rather than a backend special case. And the trace's gate is a `getenv` **per
    allocation and per free**, so it sits on the permanent allocator path in release builds,
    not merely a test path; caching it needs a mutable global, which has no precedent in the
@@ -996,7 +1001,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    was detection and loop-codegen reach, not aliasing safety. That stops being true once
    Slice 7's opt-in RC lands, since shared ownership is exactly what makes a real reference
    cycle constructible (and, without a `Weak` type, leak). **Worklist-based disposal for
-   branching structures stays moved to Phase 6** (see there): it needs a growable
+   branching structures stays moved to Phase 7** (see there): it needs a growable
    pending-pointer structure and a new OOM-during-disposal interaction, neither of which
    this slice's gaps required.
 5. **General locals.** ✅ done. `| names |` binding is no longer confined to the top of a
@@ -1071,13 +1076,13 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    borrows. No residual form was added. Reified residuals remain worth having only where
    the focus must escape, which is a later slice's zipper; escape prevention forbids storing
    a reference, so the zipper waits for that slice's RC rather than for a residual type.
-7. **Opt-in RC (`Rc`/`Arc`-equivalent).** **Deferred to Phase 6**, taking the stdlib-home
+7. **Opt-in RC (`Rc`/`Arc`-equivalent).** **Deferred to Phase 7**, taking the stdlib-home
    escape hatch this entry always carried. It is not named in Phase 3's exit criteria, no
    current dogfood needs shared ownership, second-class references already cover sharing
    within a dynamic extent, and an arena-plus-index owning container covers graph-shaped data
    without it. It is also the one deliberate crack in the linear spine (refcount traffic, and
    cycle leaks without a `Weak`), which sits badly mid-phase in the slice whose point is
-   nailing down deterministic linear disposal. In Phase 6 it lands beside `Box`/`Vec`/`Map`/
+   nailing down deterministic linear disposal. In Phase 7 it lands beside `Box`/`Vec`/`Map`/
    `String`, which is the coherent home: it is a way to point at heap data, not a way to
    dispose of it.
 8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** Split in
@@ -1206,7 +1211,7 @@ planned feature set to see what they actually need. The exercise inverted the ex
 answer: quotation *capture*, the question that looked hardest, turned out to be a
 quality-of-life issue (see slice 4), while two things absent from the plan turned out to
 be load-bearing: length polymorphism (now slice 1) and generic struct declarations
-(originally slice 3, since moved to Phase 6 once slice 1's synthesized return bundles
+(originally slice 3, since moved to Phase 7 once slice 1's synthesized return bundles
 removed `filter`'s need for it). Same technique as `vm.sth`, which shipped with zero
 compiler changes and made that fact the Phase 2 exit verdict: write the program first,
 then find out what the compiler owes it.
@@ -1233,7 +1238,7 @@ then find out what the compiler owes it.
    An array's length is part of its type, so `[i64 8]` and `[i64 4]` are distinct and a word
    taking one rejects the other, while the builtin `len` accepts both: the compiler already
    does length-polymorphism by hand and user words cannot. Since the only Phase 4 collection
-   is the fixed-size array (`Vec` is Phase 6), without `'N` every combinator is per-length
+   is the fixed-size array (`Vec` is Phase 7), without `'N` every combinator is per-length
    and **the phase exit criterion — a constant-stack `each`/`fold` over a collection — is
    unwritable**. This is also the third hand-rolled ad-hoc polymorphism site after `.` and
    the numeric-tower operators, which is exactly the tripwire slice 2 of Phase 3 set for `^`:
@@ -1310,7 +1315,7 @@ then find out what the compiler owes it.
    pointer into a carried slot (`field_value`'s `PtrOffset`), with no aliasing analysis.
    Scalars, references, ordinary (non-loop) join phis, and the fused destructor loops'
    own lowering are unchanged.
-   **This displaced generic struct declarations from the slot** (moved to Phase 6, see
+   **This displaced generic struct declarations from the slot** (moved to Phase 7, see
    there). That slice's whole claim to not being speculative structure was one named
    consumer, `filter` needing to bundle a filtered array with a count, and slice 1's
    synthesized multi-output return bundles closed that need: `: pass-through ( [i64 'N] --
@@ -1360,8 +1365,8 @@ then find out what the compiler owes it.
    precisely when the quotation is inlined, since the captured local is simply still in
    scope after inlining — no environment, no allocation, and no `FnOnce`/`FnMut`/`Fn` split
    if capture is restricted to `Copy` locals. Escaping quotations stay out of scope
-   regardless — they need the uniform-runtime-stack fallback and Phase 6's alloc layer.
-5. **Modules: multi-file compilation, word and type imports.** Pulled forward from Phase 6
+   regardless — they need the uniform-runtime-stack fallback and Phase 7's alloc layer.
+5. **Modules: multi-file compilation, word and type imports.** Pulled forward from Phase 7
    for two converging reasons, not one. Slice 6's combinator library needs somewhere to live
    besides copy-pasted into every dogfood — the original motivation — but the bigger one
    surfaced at this slice's brief conversation: a reusable component worth writing is rarely
@@ -1377,7 +1382,7 @@ then find out what the compiler owes it.
    the native path does not (`drop_overloads` keyed by `StructId`, frozen resolver snapshots,
    per-name generations, every `.so` resident under `RTLD_GLOBAL`), so what an import *means*
    there is a separate design problem, not the same one repeated.
-   **This settles the open design question Phase 6 had named**: how struct/enum
+   **This settles the open design question Phase 7 had named**: how struct/enum
    declarations from separate files join one shared type registry without a name collision
    or a duplicate registration. Type resolution, move-tracking, and the R21 aliasing rule
    are value-flow-based, not file-based, so none of that checker machinery should need to
@@ -1403,10 +1408,10 @@ then find out what the compiler owes it.
    named `queue`). Qualified-only, so there is no cross-module collision rule to invent. A
    file with no `export:` exports nothing: it is a program, not a library, which keeps every
    existing single-file example valid.
-   **Still narrower than Phase 6's eventual module system.** No serializable API description
+   **Still narrower than Phase 7's eventual module system.** No serializable API description
    and no version diffing. Those are a packaging/publishing concern — letting other people
    depend on you with enforced semver — not a personal-reuse one, and
-   `docs/dependency-management.md` still depends on Phase 6 for them; it consumes the export
+   `docs/dependency-management.md` still depends on Phase 7 for them; it consumes the export
    list this slice introduces rather than defining it.
    **Disposal crosses the export boundary, which constrains the export rule.** Two
    consequences of linearity meeting encapsulation, both wanting settled at this slice's
@@ -2059,7 +2064,7 @@ then find out what the compiler owes it.
    **Not this slice's problem:** whether *derived* disposal of a composite holding a resource
    that itself needs extra runtime inputs (a `Vec['T 'A]` field disposed via
    `free ( &!'A Vec['T 'A] -- )`, not `drop`) is possible at all remains open, and belongs to
-   Phase 6's allocator-rework question (below); every disposal word in this design is
+   Phase 7's allocator-rework question (below); every disposal word in this design is
    `drop ( 'T -- )`, so nothing here answers it.
    **Exit:** a bare `drop` of an imported resource is a located error unless its type is visible
    to the disposing module (imported by name or declared locally), a generic `drop ( 'T -- )`
@@ -2214,8 +2219,8 @@ per-instantiation generated words and destructor synthesis. `intern_bundle_struc
 already keys an interned struct per instantiation, so the layout half of the machinery
 exists; the user-facing declaration, resolution, and generation half does not. Scoped
 without an allocator-parameter slot: the default-allocator-parameter question
-(`Vec['T 'A = Global]`) stays Phase 6's, since this slice's own exit case allocates
-nothing — `Vec`/`Map` reuse the mechanism in Phase 6 rather than being its motivating
+(`Vec['T 'A = Global]`) stays Phase 7's, since this slice's own exit case allocates
+nothing — `Vec`/`Map` reuse the mechanism in Phase 7 rather than being its motivating
 case here. This slice does not need Result or Option to exist; any throwaway generic
 struct/enum proves it.
 **Exit:** a generic `type:` declaration monomorphizes per instantiation the way a
@@ -2227,7 +2232,82 @@ unwinding, `Option` importable from `core`.
 **Exit:** Result-based error handling with no `?` sugar; `Option['T]` importable from
 `core`; no exception/unwind path exists anywhere.
 
-### Phase 6 — Stdlib and `no_std` layering  `[L]`  `[where it becomes usable for real programs]`
+### Phase 6 — Term-level enum elimination  `[L]`
+
+Eliminating an enum is a **term**, not a word-body form. A match composes mid-body,
+nests inside a quotation, and needs no helper word and no bundle struct, the way every
+other construct in a concatenative language does. `WordBody::Clauses` and
+`parse_clauses` are deleted; the clause-style word is replaced, not joined, since two
+elimination forms in the language permanently is worse than one migration.
+
+The form is a generated per-enum eliminator word taking one quotation per variant, each
+arm annotated with the variant it handles. Arms are matched **by declared variant, not
+by position**, so reordering or inserting a variant in a `type:` declaration cannot
+silently rebind a call site; a missing or duplicated arm is a named error. Arms are
+ordinary quotation values, so an arm can be named and reused.
+
+```
+: area ( Shape -- f64 )
+  [ ( Circle )  Circle>r dup * 3.14159 * ]
+  [ ( Rect )    Rect> * ]
+  Shape? ;
+```
+
+An arm's annotation is a stack effect with an **elision rule scoped to arm position**:
+`( Circle )` names the variant and unifies inputs-below and outputs across sibling arms,
+escalating to `( Vm Push -- Vm )` and then `( ..a Vm Push -- ..b )` when an arm needs to
+say more. The elision is arm-only; a word signature never infers its outputs. Because
+elision moves a shape error off-site, the disagreement diagnostic names both arms by
+variant.
+
+Payload reaches an arm by **generated per-variant accessors** (`Circle>r` per field,
+`Rect>` destructuring all of them), mirroring the struct accessors, which retires the
+positional field binding clause elimination uses. A payload-free arm consumes its
+variant explicitly (`Halt>`): the linear spine does not auto-drop.
+
+**No open lowering prerequisite.** The row-carried-quotation backend crash this phase's
+design discussion once assumed open (a `times`/`while` self-tail loop with a quotation
+riding untouched in the row) is already fixed and covered by a green golden (`5749a14`,
+`tests/phase4_slice10b.rs`). One narrower case stays unconfirmed rather than fixed: `while`
+over a *materialized* (closure-captured) quotation. Slice 7b's capturing closures are
+built (`examples/capturing_dispatch.sth`); the dead-code conclusion holds for a narrower
+reason, confirmed by direct repro: every combinator's `~` parameter rejects a materialized
+quotation value on sight regardless of whether one exists elsewhere in the program — not a
+blocker for Slice 1 below, which checks annotated quotations against ordinary contexts, not
+materialized ones.
+
+**Phase 6 Slice 1 — quotation effect annotations.** A quotation literal may carry a
+declared stack effect (`[ ( ..a T -- ..b ) ... ]`), checked against its body and against
+the context consuming it. Independently useful and independently testable; no enum
+machinery involved.
+**Exit:** an annotated quotation whose body contradicts its declared effect is a located
+error.
+
+**Phase 6 Slice 2 — variant types and accessors.** `Type::Variant(EnumId, usize)`, legal
+only as an arm's declared input and as the value inside that arm, so it never becomes a
+general first-class type: the eliminator is its only introducer. Plus generated
+per-variant field accessors and whole-variant destructures. Layouts already exist per
+variant (`EnumLayout.variants[vi].fields`); nothing changes at runtime.
+**Exit:** a variant-typed value is reachable only inside an arm, with its fields readable
+by name.
+
+**Phase 6 Slice 3 — the eliminator word.** The generated per-enum eliminator, arms
+matched by declared variant, exhaustiveness and duplication as named errors, arm-position
+effect elision. Lowers to the existing N-way dispatch (`lower_clauses`).
+**Exit:** a match is a term usable mid-body and inside a quotation; reordering a `type:`
+declaration's variants leaves every call site correct.
+
+**Phase 6 Slice 4 — migration.** Every clause-dispatch site moves to the eliminator, and
+`WordBody::Clauses`/`parse_clauses` are deleted, including the `Bool` declaration
+injected in `src/ast.rs` and Phase 5's `Result`/`Option` consumers.
+**Exit:** the clause word body no longer parses; the tree builds green without it.
+
+**Exit:** enum elimination is a term, matched by variant name, with the clause-style word
+body deleted.
+**Dogfood:** `examples/vm.sth`'s nine-variant `Op` dispatch, rewritten, reads no worse
+than the clause form it replaces.
+
+### Phase 7 — Stdlib and `no_std` layering  `[L]`  `[where it becomes usable for real programs]`
 
 The four layers from DESIGN.md, with boundaries and the allocator *interface* fixed
 now even though hosted is built first: **core** (already accreting), **fixed**
@@ -2250,7 +2330,7 @@ keeps it honest, the statics a word touches and in what mode, inferred within a 
 declared on exported words. DESIGN.md's *Embedded* section carries the full design,
 including why a static needs its own carve-out from the must-consume rule beside `Copy`'s,
 and why this is a closed monomorphic list rather than the effect rows the type system
-declines. **It looks like a Phase 8 feature and isn't**, because two items in this phase
+declines. **It looks like a Phase 9 feature and isn't**, because two items in this phase
 need it first:
 
 - The **allocator rework**. A user-supplied allocator has state: a bump pointer, a free
@@ -2263,7 +2343,7 @@ need it first:
 
 Ordered before both; no ordering constraint against the lens item either way. The
 target-facing half of the embedded story (fixed-address MMIO overlays, the volatile aspect,
-bit-level register layout, ISR symbol export) stays in Phase 8, where its consumer is.
+bit-level register layout, ISR symbol export) stays in Phase 9, where its consumer is.
 This is what pushes the phase from `[L]` toward `[XL]`: it is a language feature and a new
 checker analysis, not a stdlib item.
 **Exit:** a module with private static state exports a word whose declared global set the
@@ -2340,10 +2420,10 @@ optional to report through, which only exists once Phase 5's generic `type:` dec
 land. Building a private
 version of either inside a Phase 3 destructor would be guessing at both. If the fixed-size
 bound turns out to be enough, the `fixed` layer's ringbuffer covers it without waiting for
-`alloc`. No dogfood forces this earlier: the first real pressure is Phase 9's self-hosted
+`alloc`. No dogfood forces this earlier: the first real pressure is Phase 10's self-hosted
 AST, a genuinely deep branching structure.
 
-### Phase 7 — Concurrency (library)  `[M]`
+### Phase 8 — Concurrency (library)  `[M]`
 
 Core intrinsics only: **atomics + memory ordering** and a **spawn** primitive (thin
 FFI to `pthread_create` at the hosted layer). Everything else is library:
@@ -2380,7 +2460,7 @@ fine; deviating without noticing is not.
 attempt to alias a sent value is a compile error.
 **Dogfood:** a small worker-pool or a producer/consumer pipeline.
 
-### Phase 8 — Bare metal  `[M]`  `[the craft milestone: own the vertical to the metal]`
+### Phase 9 — Bare metal  `[M]`  `[the craft milestone: own the vertical to the metal]`
 
 Cross-compile to arm64 (or Cortex-M) bare metal: per-target intrinsics
 (memcpy/memset, integer-divide/soft-float helpers), linker script, entry point,
@@ -2391,7 +2471,7 @@ concurrency, no allocation or spawning on the hot path) if you want it.
 blinking an LED or driving a sensor, from your own source language down to the
 machine code you emit.
 
-### Phase 9 — Self-hosting  `[XL]`
+### Phase 10 — Self-hosting  `[XL]`
 
 Stabilise the self-hosting subset S (smaller than before: concrete types + ADTs +
 pattern matching, growable collections + strings, words + modules, errors as
@@ -2439,7 +2519,7 @@ completion. The piped (non-tty) path is unchanged byte-for-byte.
 - **Phase 0 is done and the go/no-go came back *go***: the virtual-stack → IR → QBE
   → native path holds. The remaining mass and risk is **Phase 3** (the linear memory
   model, the most novel work and the reason the language exists); do it carefully.
-  **Phase 9** (self-hosting) is the other large lift but is well understood.
+  **Phase 10** (self-hosting) is the other large lift but is well understood.
 - Phases 4-8 are more independent than the numbering implies. Errors (5) is nearly
   free once ADTs exist (2). Concurrency (7) needs the linear model (3) but little
   else. Bare metal (8) needs the `fixed` layer (6) but not the hosted one. Reorder

@@ -660,7 +660,7 @@ located rejection naming the file and the word, at import time — the native pa
 exposure to the same collision (recon #4, ROADMAP) stays unfixed. `export:` as a REPL
 line is its own located rejection: a live session has no export boundary to cross.
 
-Out of scope for this slice, all deferred to Phase 6's eventual package/versioning
+Out of scope for this slice, all deferred to Phase 7's eventual package/versioning
 layer or later: a serializable API description and semver enforcement (which will
 consume this slice's export list, not redefine it), package manifests and a registry,
 re-exports or aliasing an import to a different local qualifier, a `mod.sth`-style
@@ -1046,7 +1046,7 @@ rows, no borrow analysis needed to write the compiler in it.
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
 - Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in (deferred to
-  the `alloc` layer, Phase 6); second-class refs (Hylo-style), no lifetime-tracking borrow
+  the `alloc` layer, Phase 7); second-class refs (Hylo-style), no lifetime-tracking borrow
   checker; non-null pointers; hidden/checked return stack.
 - Strings: two types, taking Zig's *split* (a length-carrying view plus a bare C pointer) but not
   its sentinel-in-the-type. `str` is pointer + length and promises nothing about `byte[len]`, so
@@ -1224,7 +1224,7 @@ that were argued out rather than assumed.
   explicit allocators (viral through every collection's type parameter, so they land with the
   collections or not at all), is that a view type is additive: a collection specified without one
   gains view-returning words later without changing existing signatures. The first plausible
-  client is Phase 6's collections wanting to hand out a view over their storage, earlier than the
+  client is Phase 7's collections wanting to hand out a view over their storage, earlier than the
   self-hosted lexer this entry used to name, which wants byte offsets for diagnostics anyway and
   remains where the evidence to justify whatever it costs would exist.
 - **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
@@ -1333,7 +1333,7 @@ that were argued out rather than assumed.
   **Placement.** Needs one `&>` to accept both arrays and structs, i.e. static overloading
   (Phase 4 slice 8), so it cannot precede that. It belongs *before* the stdlib is written,
   for the same reason modules did: writing `Vec`/`Map`/`String` against the old accessors
-  and migrating them afterwards is the waste. Filed as a Phase 6 prerequisite item rather
+  and migrating them afterwards is the waste. Filed as a Phase 7 prerequisite item rather
   than its own phase, since it is a surface-syntax direction plus a corpus migration rather
   than a theme on the scale of the other phases. Not settled; the selector-representation
   question above is genuinely open.
@@ -1353,7 +1353,7 @@ be written without it, never on principle.
   large families; baking a computed value into the binary is external codegen or
   runtime init. Declining it also keeps one "when does code run" story, with no
   compile-time phase in the user's model. **Revisit if** a bare-metal / no-allocator
-  target (Phase 8) needs precomputed tables it genuinely can't build at startup; the
+  target (Phase 9) needs precomputed tables it genuinely can't build at startup; the
   answer then is a minimal comptime const-eval (a foldable-pure-word evaluator or a
   build-emitted data section), not a macro system and not an interpreter.
 - **Open multimethods** (`generic:`/`method:` on a sum). Declined. The expression
