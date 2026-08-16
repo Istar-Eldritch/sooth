@@ -93,19 +93,25 @@ Mechanics:
 
 - Add a whole-closure step in `assemble_module` (`src/driver.rs`), inserted **after**
   `let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());`
-  (currently around `src/driver.rs:203`) and **before** the `for (m, node) in
-  closure.nodes.iter().enumerate()` body-parse loop (currently around `:210`) — not
-  "immediately after `prepass_and_register`", which runs before `generics`,
-  `arrays`/`owned_cells`/`refs` even exist. For each module `m` in discovery order,
-  construct a `Parser` sharing the *same* `&mut arrays`/`owned_cells`/`refs` vecs the
-  body loop will use (so ids stay in sync across the two passes), with **empty**
-  import/exports/selective maps (the pattern already used at `src/parser.rs:4128`'s
-  `no_imports`/`&[]`), and call `parse_generic_typedefs()` on it.
-- Extract or expose `parse_generic_typedefs` so it can run standalone per module this
-  way, against the concrete registries already populated by `prepass_and_register`.
+  (`src/driver.rs:210`) and **before** the `for (m, node) in closure.nodes.iter()...`
+  body-parse loop — not "immediately after `prepass_and_register`", which runs before
+  `generics`, `arrays`/`owned_cells`/`refs` even exist. For each module `m` in
+  discovery order, construct a `Parser` sharing the *same* `&mut arrays`/`owned_cells`/
+  `refs` vecs the body loop will use (so ids stay in sync across the two passes), with
+  **empty** import/exports/selective maps (the pattern already used at
+  `src/parser.rs:4128`'s `no_imports`/`&[]`), and call `parse_generic_typedefs()` on it.
+- Extract a new `pub(crate) fn prepass_generic_typedefs(tokens, structs, enums, module,
+  arrays, owned_cells, refs, generics)` in `parser.rs` that constructs exactly this
+  `Parser` and calls `parse_generic_typedefs()` — `driver.rs` cannot reach a private
+  `Parser`/method directly, only a `pub` function (mirroring how it already calls
+  `parser::parse_bodies`/`parser::prepass_and_register`), so name this wrapper rather
+  than leaving its shape to the implementer.
 - Keep the per-module `parse_generic_typedefs()` call at the top of `parse_bodies`
   (`src/parser.rs:337`) exactly where it is; make it idempotent per the correction
-  above rather than removing it.
+  above rather than removing it. **The skip branch must still advance `self.pos` past
+  the already-registered header to its terminating `;`** (reuse `skip_typedef`'s
+  terminator scan) before continuing the scan loop — skipping the push without
+  advancing the cursor infinite-loops.
 - Update the two now-stale comments: the `continue` comment at `src/parser.rs:74` and
   the `GenericTypes` doc-comment at `src/ast.rs:327-341` still say generic headers
   are *not* pre-pass-registered; after this slice they are, for a closure assembled
@@ -134,7 +140,7 @@ Implementation: an unnamed field is stored with an internal placeholder name in
 `GenericVariantDecl.fields` (`Vec<(String, PolyType)>`, `src/ast.rs:322`) that is not a
 parseable identifier (so it can never be typed as a field/accessor reference, and reads
 sensibly if it ever surfaces in the `payload field` diagnostic at
-`src/check/declarations.rs:554`). **Corrected during review (round 1): no accessor
+`src/check/declarations.rs:556`). **Corrected during review (round 1): no accessor
 suppression is needed, because none exists to suppress.** Enum variant fields already
 mint no accessor words today — only a per-variant constructor (`src/ir/layout.rs`'s
 `ewords` loop); Get/Set/Peek accessors are struct-only (`src/ir/layout.rs:494`). So a
@@ -213,9 +219,16 @@ Do not weaken the bare-name rejection.
 
 Unit tests: qualified cross-module application resolves and monomorphizes (via
 `assemble_module`, both discovery orders); bare cross-module application still rejects
-(via direct `parse_bodies`, unchanged); idempotent registration doesn't double-register
-a single-file/direct-`parse_bodies` generic type (a direct assertion that `generics.structs`/
-`enums` has exactly one entry per declared generic type, not two).
+(via direct `parse_bodies`, unchanged). **The no-double-registration witness must also
+be built on `assemble_module`, not the single-file/direct-`parse_bodies` path**
+(correction, round 2): on the direct-`parse_bodies` path `parse_generic_typedefs` runs
+exactly once (no pre-pass exists there), so an "exactly one entry" assertion on that
+path passes whether or not the idempotency guard exists — it is a placebo, since
+double-registration is only reachable where the pre-pass *and* the in-body call both
+fire on the same shared `generics` (the `assemble_module` path). Build this as a
+two-file `assemble_module` closure (reusing the qualified-application test's closure)
+and assert `generic_structs`/`generic_enums` has exactly one entry for the owner
+module's declared type, not two.
 
 Exit: `cargo fmt --check && cargo clippy -- -D warnings && cargo test` green; a
 qualified cross-module generic application resolves and monomorphizes regardless of
@@ -236,16 +249,20 @@ Difficulty: **hard** (whole-closure ordering + resolution, the slice's core mech
     from the brief's probe, or the chosen inputs).
   - **1-variable (`Option`)**: construct, monomorphize, and eliminate an
     `Option[i64]` instantiation with a concrete stdout assertion (both `Some` and
-    `None` arms). **Also instantiate `Option` over a pointer type (`Option[^SomeStruct]`
-    or equivalent), the nullability shape DESIGN.md names as `Option`'s actual reason
-    for existing** (`^T` stays non-null; `Option['T]` is the named answer). Every
-    existing generic-instantiation test in this codebase uses `i64`/`bool`/nested
-    aggregates only — never a pointer type argument — so this shape is currently
-    unwitnessed. If it builds and runs cleanly, this is a cheap golden that turns the
-    ROADMAP/DESIGN exit claim from inferred into tested. If it does *not* work cleanly
-    (e.g. a disposal/`Copy`-classification wrinkle for a variant holding a pointer),
-    that is a real finding this slice must surface and report, not silently skip —
-    do not substitute a non-pointer instantiation and call the exit criterion met.
+    `None` arms). **Also instantiate `Option` over a pointer type
+    (`type: Node val i64 ;` or any one-field struct defined in the golden's own
+    source, then `Option[^Node]`), the nullability shape DESIGN.md names as `Option`'s
+    actual reason for existing** (`^T` stays non-null; `Option['T]` is the named
+    answer). Every existing generic-instantiation test in this codebase uses
+    `i64`/`bool`/nested aggregates only — never a pointer type argument — so this
+    shape is currently unwitnessed. **Explicit disposition (correction, round 2):** if
+    `Option[^Node]` builds and runs cleanly, assert its exact stdout like every other
+    golden here. If it does **not** build or run cleanly, commit the golden anyway as
+    a `#[ignore = "<verbatim compiler/runtime error>"]`-annotated test (so `cargo test`
+    stays green and the phase still exits) and state the limitation as the first line
+    of the phase's summary; do not delete the golden and do not substitute a
+    non-pointer instantiation to make the criterion pass quietly. Either outcome
+    satisfies this bullet; silence about which one occurred does not.
   - **Cross-module import**: a program that `import:`s `Result` (or `Option`) from its
     `lib/` file by ordinary relative path, applies it qualified at the importing module,
     and monomorphizes correctly — a direct witness of Phase 2, exercising both discovery
