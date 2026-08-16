@@ -395,7 +395,7 @@ mod tests {
         // Case 3a: a borrow whose `owned_root` names a current-frame local ->
         // FrameRooted.
         let mut prov = Provenance::default();
-        let d = prov.borrow("arr", false, span);
+        let d = prov.borrow("arr", false, false, span);
         let mut framed = Scope::default();
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let borrow_local = capture_binding("r", ref_ty, Some(d));
@@ -417,6 +417,7 @@ mod tests {
         let d = prov.add(Deriv {
             place: "p".to_string(),
             owned_root: None,
+            static_root: false,
             reborrow: true,
             mutable: false,
             projected: false,

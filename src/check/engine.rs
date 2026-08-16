@@ -56,6 +56,12 @@ pub(super) struct Deriv {
     /// A reborrow of a reference *parameter* has none: its referent lives in an
     /// ancestor frame, so there is no place in this body to protect.
     pub(super) owned_root: Option<String>,
+    /// R3 (P7 slice 2): whether that root is a module `static:` rather than a
+    /// local. Recorded at the borrow, never re-derived by looking `owned_root`
+    /// up in the static table: locals are not mangled and statics are, so a
+    /// local spelled `COUNT__m0` in a module declaring `static: COUNT` answers
+    /// that lookup and would inherit a static's exemptions.
+    pub(super) static_root: bool,
     /// Whether `place` is a reference local this was reborrowed from, which is
     /// what the suspend rule is keyed on. Binding into a local does *not*
     /// clear this: the place stays suspended for as long as the bound
@@ -326,11 +332,18 @@ impl Provenance {
         id
     }
 
-    /// A fresh borrow of an owned aggregate place.
-    pub(super) fn borrow(&mut self, place: &str, mutable: bool, span: Span) -> DerivId {
+    /// A fresh borrow of an owned aggregate place, or (R3) of a module static.
+    pub(super) fn borrow(
+        &mut self,
+        place: &str,
+        mutable: bool,
+        static_root: bool,
+        span: Span,
+    ) -> DerivId {
         self.add(Deriv {
             place: place.to_string(),
             owned_root: Some(place.to_string()),
+            static_root,
             reborrow: false,
             mutable,
             projected: false,
@@ -348,9 +361,11 @@ impl Provenance {
         span: Span,
     ) -> DerivId {
         let owned_root = held.and_then(|id| self.deriv(id).owned_root.clone());
+        let static_root = held.is_some_and(|id| self.deriv(id).static_root);
         self.add(Deriv {
             place: place.to_string(),
             owned_root,
+            static_root,
             reborrow: true,
             mutable,
             projected: false,
@@ -1879,7 +1894,7 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let fresh = prov.borrow("v", true, span);
+        let fresh = prov.borrow("v", true, false, span);
         let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
         assert!(prov.deriv(projected).reborrow, "still suspends `r`");

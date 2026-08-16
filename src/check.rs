@@ -1351,12 +1351,13 @@ fn check_reference_across_back_edge(
 ) -> Result<(), String> {
     for slot in args {
         if let Some(id) = slot.deriv {
-            if let Some(place) = &prov.deriv(id).owned_root {
+            let deriv = prov.deriv(id);
+            if let Some(place) = &deriv.owned_root {
                 // R3: a static's data-segment storage survives every loop
                 // iteration, unlike a local's slot (rebound at the loop
                 // header); only a genuine local's owned_root crosses the
                 // back-edge unsafely.
-                if ctx.static_type(place).is_some() {
+                if deriv.static_root {
                     continue;
                 }
                 return Err(reference_across_back_edge_error(ctx, span, callee, place));

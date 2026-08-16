@@ -266,12 +266,23 @@ for a static root.
   field, array, cell, or another static, because that rule *is* type-keyed
   (`contains_reference`), independent of what the ref points at.
 
+That disposal/consume exemption is **vacuous in code, by design**: no branch
+enacts it. A static's borrow is a `&T`/`&!T`, already non-linear, and the static
+itself never reaches the stack, so the surplus/disposal and move-state scans
+have nothing to reach for in the first place. The exemption states what cannot
+fire, it is not a carve-out to implement — a later reader who finds no static
+case in those scans should not "restore" one.
+
 One `owned_root`-keyed scan is neither exclusivity nor disposal, and the
 exemption list above needs its own carve-out for it: `check_reference_across_back_edge`
 (`src/check.rs`) rejects any reference whose `owned_root` is set when it
 crosses a self-tail-call back-edge, because a *local*'s storage does not
 survive to the next iteration. A static's data-segment storage does, so this
-scan skips a place `ctx.static_type` resolves: a freshly borrowed `&!COUNT`
+scan skips a borrow *recorded* as static-rooted — a `static_root` flag set on
+the `Deriv` at the borrow site, never re-derived by looking the root name up in
+the static table, because locals are not mangled and statics are: a local
+spelled `COUNT__m0` in a module declaring `static: COUNT` answers that lookup
+and would inherit the exemption. A freshly borrowed `&!COUNT`
 passed to a self-tail call
 (`: spin ( &!i64 i64 -- ) | c n | c 1 +! n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;`)
 is accepted, while the same call passing a reference rooted in an ordinary
@@ -437,6 +448,19 @@ storage and that S4 forces it anyway, so I have folded minimal lowering in. If
 you would rather ship S2 as checker-only and land lowering with S4 (or as its
 own slice), drop Phase 4 and scope the exit witnesses to diagnostic goldens
 plus a check-passes unit test for the agreeing case. Tell me which.
+
+**Dropping Phase 4 stopped being free once Phase 2 landed.** Every
+static-borrowing program now type-checks and reaches lowering, where
+`lower_reference_word` still asserts its operand is a bound local
+(`src/ir/func_builder/word_families.rs:66`): `&!COUNT 1 +!` panics with
+`checked: a borrow's operand is a local`, where before this slice it produced a
+located error naming the static. Every shape reaches it — `i64`/`bool`/`str`
+statics, a borrow inside an inline quotation, a self-tail loop, a closure
+factory. So the choice is now between keeping Phase 4 and having whoever drops
+it add a located "static lowering not implemented" rejection in its place; there
+is no option that leaves the compiler panic-free without one of the two. Not
+patched in Phase 2 on purpose: the guard belongs to whichever phase settles
+this, not to the phase that exposed it.
 
 The volatile aspect, fixed-address MMIO overlay, and bit-level register layout
 stay Phase 9 regardless: this is plain compiler-allocated storage only.
@@ -606,11 +630,13 @@ Checker/borrow unit (`src/check/word_families.rs` `#[cfg(test)]`):
   in a module that also declares `static: COUNT`: `&COUNT` resolves to the
   **local** (R1's resolution order: local, then static, then word/builtin).
   Proves the ordering, not just asserts it.
-- `storing_a_static_ref_in_a_field_is_error` — a struct field typed to hold a
-  ref rooted in a static is the existing `stored_reference_error`, unchanged
-  (R3): the *store* rule is type-keyed (`contains_reference`). This is a
-  **mutation witness** for R3 — it must fail if the static branch accidentally
-  routes around `check_no_stored_references`.
+- `storing_a_static_ref_in_a_cell_is_error` — `&!COUNT ^` is the existing
+  `stored_reference_error`, unchanged (R3): the *store* rule is type-keyed
+  (`contains_reference`). This is a **mutation witness** for R3 — it must fail
+  if the static branch accidentally routes around `check_no_stored_references`.
+  A *struct-field* spelling of the same test would be a placebo: a field typed
+  `&!i64` is rejected at the type declaration itself, in a program with no
+  static anywhere, so it never routes a static-rooted ref through the rule.
 
 Goldens (`tests/phase7_slice2.rs`, source in -> diagnostic / build out — the
 phase exit criteria):
@@ -633,15 +659,18 @@ phase exit criteria):
   other ref" is most likely to be false or to crash exactly here. This golden's
   job is to prove **no new ICE** — a located diagnostic, not a backend panic —
   not merely that *some* error fires.
-  **Flagged (review, before this golden is written):** `ref_root_is_in_frame`
-  (`src/check/captures.rs`) looks a borrow's `owned_root` up in the *local*
-  scope; a static root is found nowhere there and classifies as `OuterRooted`
-  — semantically correct for data-segment storage, but the opposite of what
-  this golden expects (a rejection). Reconcile before implementing: either the
-  golden's premise is wrong (a static ref captured into an escaping closure
-  is not the same hazard as a local one, so admitting it is correct and the
-  golden should assert *acceptance*), or the classification needs its own
-  static carve-out.
+  **Resolved after Phase 2 (measured, not argued): assert *acceptance*.**
+  `ref_root_is_in_frame` (`src/check/captures.rs`) looks a borrow's
+  `owned_root` up in the *local* scope, finds no static there, and classifies
+  it `OuterRooted`; a closure factory
+  (`: mk ( -- [ i64 -- i64 ] ) [ &!COUNT @ + ] ;`) therefore checks clean with
+  no checker ICE. That is the semantically right answer — data-segment storage
+  outlives every frame, so the local-rooted hazard this rule guards does not
+  exist for a static — so the golden asserts the program is admitted, and the
+  classification needs **no** static carve-out. What it must still pin down is
+  that admission is not a *panic* downstream: today the same program dies in
+  lowering (see the Phase 4 note above), so this golden only becomes
+  meaningful once that is settled.
 - `duplicate_static_declaration_diagnostic` — two `static: COUNT ...` in one
   module is a located error at the second declaration.
 - `static_name_collides_with_word_or_type_diagnostic` — a `static: COUNT` whose

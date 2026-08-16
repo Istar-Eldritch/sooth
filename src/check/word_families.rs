@@ -153,6 +153,7 @@ pub(super) fn check_reference_word(
             // R1's resolution order: a bound local first, then a static of
             // this module, then nothing. A local shadowing a static therefore
             // wins, exactly as it does for every other name.
+            let mut static_root = false;
             let referent_ty = if let Some(local_ty) = scope.local_type(rest) {
                 // R11: `&q` on a quotation local currently reaches
                 // `borrow_of_scalar_local_error`, whose message lies about the
@@ -185,12 +186,17 @@ pub(super) fn check_reference_word(
                 // the same `owned_root` an owned local's borrow carries (R3).
                 // A static is never owned, moved or dropped, so the move and
                 // aggregate-only gates above have nothing to say about it.
+                static_root = true;
                 static_ty
             } else {
+                // `rest` reaches here mangled whenever it named a type
+                // (`&!Point__m0>z`, an accessor whose field does not exist),
+                // so it is demangled like every other rendered name.
+                let shown = crate::resolve::demangle_call(rest);
                 let found = if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                    format!("`{rest}` is a literal, not a local")
+                    format!("`{shown}` is a literal, not a local")
                 } else {
-                    format!("`{rest}` is not a local in scope")
+                    format!("`{shown}` is not a local in scope")
                 };
                 return Err(borrow_of_non_place_error(ctx, span, name, &found));
             };
@@ -229,7 +235,7 @@ pub(super) fn check_reference_word(
                 }
             }
             let out = intern_ref_type(refs, referent_ty, mutable);
-            let deriv = prov.borrow(rest, mutable, span);
+            let deriv = prov.borrow(rest, mutable, static_root, span);
             stack.push(Slot::derived(out, Some(deriv)));
         }
     }
@@ -1076,7 +1082,7 @@ fn peek_of_linear_owned_payload_error(
 /// local name and nothing more, so the diagnostic names what was found there
 /// and points at the binding that would make it one.
 fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
-    let spelled = crate::resolve::demangle_word(spelled);
+    let spelled = crate::resolve::demangle_call(spelled);
     format!(
         "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name or a module `static:`; bind the value with `| name |` first, then borrow that name",
         in_word(ctx),
@@ -1635,6 +1641,47 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("`&!COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    /// R3: the back-edge carve-out belongs to a borrow that actually rooted in
+    /// a static, not to every borrow whose root *name* answers the static
+    /// table. A local shadowing a static (legal, R1) wins the borrow, so its
+    /// reference must still be refused at the back-edge: the local's slot is
+    /// rebound each iteration whatever it is called.
+    #[test]
+    fn local_shadowing_a_static_keeps_the_back_edge_check() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             type: V x i64 ;\n\
+             : spin ( &!V i64 -- )\n  | r n |\n  n 0 = ~[\n  ] ~[\n    \
+             0 V | COUNT |\n    &!COUNT n 1 - spin\n  ] if ;\n\
+             : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a reference to a local cannot cross a loop")
+                && err.contains("`COUNT`, a local of this frame"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The non-place rejection renders a name too. It is reached with a
+    /// *mangled* one whenever the borrow named a type: `&!Point>z` resolves
+    /// `Point` and mangles it, then falls through here because `z` is not a
+    /// field.
+    #[test]
+    fn borrow_of_unknown_field_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point | p | &!Point>z drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!Point>z` does not borrow a place")
+                && err.contains("`Point>z` is not a local in scope"),
             "unexpected message: {err}"
         );
         assert!(!err.contains("__m"), "leaked a mangled name: {err}");
