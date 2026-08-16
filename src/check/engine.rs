@@ -1171,18 +1171,20 @@ impl Ctx<'_> {
         }
     }
 
-    /// R1 (P7 slice 2): the declared type of the module static `name`, or
-    /// `None` when this module declares no such static. Module-scoped because
-    /// a static is module-private (R2): another module's same-named static is
-    /// not this word's to borrow. A REPL line declares no statics.
+    /// R1 (P7 slice 2): the declared type of the static `name`, or `None`
+    /// when no static of that name reached this check. `resolve::mangle` is
+    /// unconditional per module (R2), so by the time `check::check` runs,
+    /// `name` already carries its declaring module baked in (`COUNT__m1`) --
+    /// matching on it alone is what module-private lookup means post-mangle.
+    /// An additional `s.module == ctx.module()` filter is not just redundant
+    /// but wrong: a combinator splice checks the caller's own quotation
+    /// arguments under the callee's module (`inline_combinator`'s
+    /// `ctx.with_module`), so `ctx.module()` need not be the module that
+    /// mangled `name` even though the lookup is still correct. A REPL line
+    /// declares no statics.
     pub(super) fn static_type(&self, name: &str) -> Option<Type> {
         match self {
-            Ctx::Word {
-                statics, module, ..
-            } => statics
-                .iter()
-                .find(|s| s.name == name && s.module == *module)
-                .map(|s| s.ty),
+            Ctx::Word { statics, .. } => statics.iter().find(|s| s.name == name).map(|s| s.ty),
             Ctx::Line { .. } => None,
         }
     }
@@ -1837,15 +1839,20 @@ mod tests {
             "unrelated parents share no ancestry"
         );
     }
-    /// R1/R2: a static is module-private, so the borrow-typing lookup is
-    /// scoped to the accessing word's own module. Constructed directly: a
-    /// real build mangles every static name per module, so no source program
-    /// can put two same-named raw statics in front of this lookup to
-    /// discriminate the scoping.
+    /// R1/R2 (P7 slice 2 review fix): post-mangle, module-private scoping
+    /// lives in the name itself (`resolve::mangle` bakes `COUNT` declared in
+    /// module 1 as `COUNT__m1`, unconditionally, before `check::check` ever
+    /// runs), so lookup matches on the mangled name alone. A combinator
+    /// splice checks the caller's own quotation arguments under the callee's
+    /// module (`inline_combinator`'s `ctx.with_module`), so `ctx.module()`
+    /// can legitimately differ from the module that mangled `name` --
+    /// filtering on `s.module == ctx.module()` (the prior behavior) rejected
+    /// exactly that case, making every static-touching program that called an
+    /// imported combinator fail to check.
     #[test]
-    fn static_lookup_is_scoped_to_the_accessing_module() {
+    fn static_lookup_matches_by_mangled_name_under_a_splice_rescoped_ctx() {
         let statics = vec![StaticDecl {
-            name: "COUNT".to_string(),
+            name: "COUNT__m1".to_string(),
             ty: Type::I64,
             init: crate::ast::StaticInit::Zero,
             module: 1,
@@ -1853,7 +1860,11 @@ mod tests {
         }];
         let enums: Vec<EnumDecl> = Vec::new();
         let structs: Vec<StructDecl> = Vec::new();
-        let owner = bare_word("bump", 1);
+        // `main` declared `COUNT` in module 1, but is checked here under
+        // module 0 -- exactly what `ctx.with_module(comb.word.module)` does
+        // while splicing a module-0 combinator's body around `main`'s own
+        // `~[ ... ]` argument.
+        let owner = bare_word("main", 0);
         let ctx = word_ctx(
             &owner,
             &structs,
@@ -1862,20 +1873,15 @@ mod tests {
             None,
             &CombinatorIndex::new(),
         );
-        assert_eq!(ctx.static_type("COUNT"), Some(Type::I64));
-        let outsider = bare_word("main", 0);
-        let ctx = word_ctx(
-            &outsider,
-            &structs,
-            &enums,
-            &statics,
-            None,
-            &CombinatorIndex::new(),
+        assert_eq!(
+            ctx.static_type("COUNT__m1"),
+            Some(Type::I64),
+            "a mangled name resolves even under a splice-rescoped ctx"
         );
         assert_eq!(
-            ctx.static_type("COUNT"),
+            ctx.static_type("COUNT__m0"),
             None,
-            "another module's static is not this word's to borrow"
+            "a different module's mangled name is simply absent, no filter needed"
         );
     }
     #[test]

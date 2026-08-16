@@ -597,6 +597,33 @@ mod tests {
             .expect("module 0's own `main` is allowed");
     }
 
+    /// P7 slice 2 review fix: an imported inline combinator splices its body
+    /// under its own declaring module (`ctx.with_module`), including the
+    /// caller's own `~[ ... ]` argument, so a caller borrowing its own static
+    /// inside that argument used to fail to check -- `Ctx::static_type`
+    /// filtered on `s.module == ctx.module()`, which the splice sets to the
+    /// *callee's* module, not the caller's. This is exactly the shape every
+    /// `lib/combinators.sth` user (`while`/`each`/`map`/`fold`/`filter`/
+    /// `times`) reaches with a static in play.
+    #[test]
+    fn imported_inline_combinator_sees_callers_own_static() {
+        let s = Sandbox::new("combinator-sees-static");
+        s.write(
+            "lib.sth",
+            ": apply inline ( ~[ -- ] -- ) call ;\nexport: apply ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: c \"lib.sth\" ;\n\
+             static: COUNT i64 = 0 ;\n\
+             : main ( -- ) ~[ &!COUNT 1 +! ] c::apply &COUNT @ drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module)
+            .expect("`main`'s own static is in scope inside the spliced quotation argument");
+    }
+
     /// The native build path rejects an *imported* file that also declares
     /// `main`, naming that file and the word -- the bug this test guards
     /// against regressing (previously nothing rejected this).
