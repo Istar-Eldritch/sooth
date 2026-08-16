@@ -11,11 +11,11 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    instantiation_symbol, intern_array_type, intern_bundle_struct, intern_owned_cell_type,
-    intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl,
-    GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType,
-    QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term, TermKind, Type,
-    TypedSlot, VariantDecl, WordBody, WordDef,
+    generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
+    intern_owned_cell_type, intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId,
+    ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
+    PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term,
+    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 mod audits;
@@ -448,13 +448,17 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // Builtins are resolved by table (`BUILTIN_TABLE`) inside `check_operator`,
     // not by env lookup, so the concrete env holds only user/generated words.
     let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
-    for (name, sig) in struct_generated_sigs(&module.structs) {
-        let symbol = name.clone();
-        env.insert(name, vec![Overload { sig, symbol }]);
+    // D7/R5: keyed by the bare surface name (`struct_generated_sigs`'s first
+    // element), appended rather than inserted -- two instantiations of one
+    // generic `type:` share this key, so an `env.insert` here would let the
+    // second silently clobber the first's constructor/accessor entry. Each
+    // candidate's `Overload::symbol` stays the mangled per-instantiation
+    // spelling, so the operand-type match below still picks the right one.
+    for (name, symbol, sig) in struct_generated_sigs(&module.structs) {
+        env.entry(name).or_default().push(Overload { sig, symbol });
     }
-    for (name, sig) in enum_generated_sigs(&module.enums) {
-        let symbol = name.clone();
-        env.insert(name, vec![Overload { sig, symbol }]);
+    for (name, symbol, sig) in enum_generated_sigs(&module.enums) {
+        env.entry(name).or_default().push(Overload { sig, symbol });
     }
 
     // R1: an `extern:` declaration is registered into the same word
@@ -2216,10 +2220,7 @@ mod tests {
         // calls; a session registers them from the injected `bool` enum.
         let env: HashMap<String, Vec<Overload>> = enum_generated_sigs(&bool_enums)
             .into_iter()
-            .map(|(name, sig)| {
-                let symbol = name.clone();
-                (name, vec![Overload { sig, symbol }])
-            })
+            .map(|(name, symbol, sig)| (name, vec![Overload { sig, symbol }]))
             .collect();
         infer_line(
             &terms,

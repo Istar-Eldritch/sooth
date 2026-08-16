@@ -1201,13 +1201,24 @@ fn visit_recursion(
 /// join the env alongside user words, so applying one to the wrong arity or
 /// operand type is caught by the same arity/type-mismatch path as any other
 /// word call.
-pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
+///
+/// D7: each entry is `(env key, lowering symbol, Sig)`. For a hand-written
+/// concrete `type:` the two names coincide (`decl.name` carries no `[...]`
+/// suffix). For a monomorphized instantiation `decl.name` is the mangled
+/// registry identity (`Box[i64]`) -- unspellable by any source term, since
+/// `[` is a lexer delimiter -- so the env key is instead the bare surface
+/// name (`generic_surface_name`, `Box`) every use site actually calls,
+/// while the symbol stays the mangled spelling so two instantiations'
+/// generated words keep distinct lowering identities (R5).
+pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in structs.iter().enumerate() {
         let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
         let field_types: Vec<Type> = decl.fields.iter().map(|(_, ty)| *ty).collect();
+        let surface = generic_surface_name(&decl.name);
 
         sigs.push((
+            surface.to_string(),
             decl.name.clone(),
             Sig {
                 inputs: field_types.clone(),
@@ -1215,6 +1226,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
             },
         ));
         sigs.push((
+            format!("{surface}>"),
             format!("{}>", decl.name),
             Sig {
                 inputs: vec![struct_ty],
@@ -1223,6 +1235,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
         ));
         for (field_name, field_ty) in &decl.fields {
             sigs.push((
+                format!("{surface}>{field_name}"),
                 format!("{}>{}", decl.name, field_name),
                 Sig {
                     inputs: vec![struct_ty],
@@ -1230,6 +1243,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
                 },
             ));
             sigs.push((
+                format!("{surface}<{field_name}"),
                 format!("{}<{}", decl.name, field_name),
                 Sig {
                     inputs: vec![struct_ty, *field_ty],
@@ -1249,13 +1263,15 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
 /// join the env alongside user words and struct-generated words, so a
 /// constructor's arity/field-type misuse (X9) falls out of the existing
 /// call-check path.
-pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
+pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in enums.iter().enumerate() {
         let enum_ty = Type::Enum(EnumId::from_index(idx), decl.name_static);
         for variant in &decl.variants {
             let field_types: Vec<Type> = variant.fields.iter().map(|(_, ty)| *ty).collect();
+            let surface = generic_surface_name(&variant.name);
             sigs.push((
+                surface.to_string(),
                 variant.name.clone(),
                 Sig {
                     inputs: field_types,

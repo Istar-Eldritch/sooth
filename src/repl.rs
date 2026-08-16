@@ -1211,12 +1211,10 @@ impl Session {
     fn typed_env(&self) -> HashMap<String, Vec<check::Overload>> {
         // Builtins are table-resolved in the checker, not held in the env.
         let mut env: HashMap<String, Vec<check::Overload>> = HashMap::new();
-        for (name, sig) in check::struct_generated_sigs(&self.structs) {
-            let symbol = name.clone();
+        for (name, symbol, sig) in check::struct_generated_sigs(&self.structs) {
             env.insert(name, vec![check::Overload { sig, symbol }]);
         }
-        for (name, sig) in check::enum_generated_sigs(&self.enums) {
-            let symbol = name.clone();
+        for (name, symbol, sig) in check::enum_generated_sigs(&self.enums) {
             env.insert(name, vec![check::Overload { sig, symbol }]);
         }
         for (name, entry) in &self.env {

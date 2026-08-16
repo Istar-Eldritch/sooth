@@ -232,6 +232,25 @@ impl<'a> FuncBuilder<'a> {
         // resolve + bundle-unpack shape as the ordinary user-word path in the
         // `_` arm below, since this *is* that path, reached early.
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
+            // D7/R5: two generic-type instantiations sharing a bare surface
+            // name (`Box`'s constructor/accessor) resolve here too -- the
+            // checker records the *mangled* per-instantiation symbol
+            // (`Box[i64]>val`) once its operand-type match picks a candidate
+            // (`src/check/terms.rs`'s multi-candidate arm), and that mangled
+            // spelling is exactly the key `structs.words`/`enums.words` still
+            // carry (`ir/layout.rs`). A generated struct/enum word is never a
+            // real `Instr::Call` (it inlines to alloc/blit/field ops), so it
+            // must be tried before the ordinary-user-overload path below,
+            // which would otherwise `expect` a `self.env` entry no struct or
+            // enum word ever registers.
+            if let Some(&sw) = self.structs.words.get(&sym_name) {
+                self.lower_struct_word(sw);
+                return;
+            }
+            if let Some(&ew) = self.enums.words.get(&sym_name) {
+                self.lower_enum_word(ew);
+                return;
+            }
             let (in_arity, out_arity, ret_ty) = {
                 let a = self
                     .env

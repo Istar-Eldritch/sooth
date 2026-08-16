@@ -122,3 +122,57 @@ fn generic_enum_declared_but_never_used_builds_and_runs() {
     assert_eq!(stdout, "7\n");
     assert_eq!(code, 0);
 }
+
+/// Phase 3 (R5/D7): two instantiations of one generic struct construct and
+/// read back through their bare, shared-surface-name constructor/accessor
+/// (`Box`, `Box>val`) -- unspellable as anything else, `[` being a lexer
+/// delimiter, so this is the only call-site spelling a real program can
+/// ever use. Before phase 3, the second instantiation's registration
+/// silently clobbered the first's (`env.insert`), so the wrong constructor
+/// resolved for one of the two operand types; the exit case correct layout
+/// claim can only be seen by reading back a value narrower than a pointer
+/// (`bool`), which a clobbered-but-same-size constructor would still pass.
+#[test]
+fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
+    let (stdout, code) = build_and_run(
+        "phase5-slice1-shared-surface-dispatch",
+        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[bool] ;\n\
+         : main ( -- )\n  7 Box Box>val .\n  true Box Box>val .\n;\n",
+    );
+    assert_eq!(stdout, "7\ntrue\n");
+    assert_eq!(code, 0);
+}
+
+/// R5, destructor half: a monomorphized instantiation's destructor is
+/// synthesized and actually runs, not merely constructed and read back
+/// (the case above). `Box>` (the generated destructure) is called from a
+/// user `drop` overload exactly as a hand-written concrete struct's would
+/// be, so this also exercises the destructor-synthesis path over a minted
+/// `StructDecl`.
+#[test]
+fn generic_instantiation_destructor_runs_like_a_concrete_types() {
+    let (stdout, code) = build_and_run(
+        "phase5-slice1-destructor",
+        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\n\
+         : drop ( Box[i64] -- ) Box> . ;\n\
+         : main ( -- ) 42 Box drop ;\n",
+    );
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+/// R2/R5, signature-slot half: a generic-type application at a word's own
+/// `( -- )` slot (`parse_slot`/`parse_poly_slot`), distinct from the field-
+/// position case `generic_instantiations_reach_the_backend_and_run` already
+/// covers -- a separate parser call site, and here also the only site that
+/// mints the instantiation at all (no `type:` field ever names `Box[i64]`).
+#[test]
+fn generic_application_at_a_word_signature_slot_resolves_and_runs() {
+    let (stdout, code) = build_and_run(
+        "phase5-slice1-signature-slot",
+        "type: Box 'T val 'T ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
+         : main ( -- ) 7 Box unwrap . ;\n",
+    );
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+}

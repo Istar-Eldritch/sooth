@@ -11,9 +11,9 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module, OwnedCellDecl,
-    OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span, StackEffect, StructDecl,
-    StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
+    generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module,
+    OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span, StackEffect,
+    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 mod destructors;

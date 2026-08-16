@@ -447,6 +447,20 @@ pub fn type_instantiation_name(base: &str, args: &[Type], regs: NameRegistries) 
     format!("{base}[{}]", args.join(" "))
 }
 
+/// D7: the bare surface spelling a monomorphized `StructDecl`/`EnumDecl`/
+/// `VariantDecl`'s mangled `name` carries -- the generic header's (or
+/// variant's) own declared name, with every `type_instantiation_name`
+/// `[...]` suffix stripped. `[` is a lexer delimiter no hand-written `type:`
+/// name can contain, so splitting on the first one recovers exactly the
+/// declared name for both a non-generic decl (no `[` at all, returned
+/// unchanged) and an instantiation, without a separate field threaded
+/// through every `StructDecl`/`EnumDecl` construction site in the crate.
+pub fn generic_surface_name(name: &str) -> &str {
+    name.split('[')
+        .next()
+        .expect("split always yields at least one piece")
+}
+
 /// Substitute a generic declaration's field type against a use site's
 /// concrete type arguments. `parse_generic_field_type_expr` admits exactly
 /// two field forms -- a bare bound variable and a fully concrete type (D1

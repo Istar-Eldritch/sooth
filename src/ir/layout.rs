@@ -459,15 +459,50 @@ pub(super) fn build_registries_ww(
     // R10: a synthesized bundle is an ABI detail with no source spelling, so it
     // contributes no generated words; lowering reaches its pack and unpack
     // through `StructWord` directly, never by name.
+    //
+    // D7: each generated word is keyed under both `decl.name` (the mangled
+    // spelling, e.g. `Box[i64]>val` -- what a resolved-overload call site's
+    // `builtin_overloads` symbol names when two instantiations share a bare
+    // surface name) and the bare surface spelling (`Box>val` -- the only
+    // spelling a source term can ever contain, `[` being a lexer delimiter).
+    // The surface key collides across instantiations sharing one surface
+    // name, but that is only ever consulted by the unambiguous
+    // single-instantiation case, where exactly one insert reaches it; an
+    // ambiguous call site's checker-resolved symbol is looked up under the
+    // (unique) mangled key instead (`lower_call`'s `builtin_overloads` arm).
     for (idx, decl) in structs.iter().enumerate().filter(|(_, d)| !d.is_bundle) {
         let id = StructId::from_index(idx);
-        swords.insert(decl.name.clone(), StructWord::Construct(id));
-        swords.insert(format!("{}>", decl.name), StructWord::Destructure(id));
+        let surface = generic_surface_name(&decl.name);
+        let mut insert = |mangled_key: String, surface_key: String, sw: StructWord| {
+            if surface_key != mangled_key {
+                swords.insert(surface_key, sw);
+            }
+            swords.insert(mangled_key, sw);
+        };
+        insert(
+            decl.name.clone(),
+            surface.to_string(),
+            StructWord::Construct(id),
+        );
+        insert(
+            format!("{}>", decl.name),
+            format!("{surface}>"),
+            StructWord::Destructure(id),
+        );
         for (fi, (fname, _)) in decl.fields.iter().enumerate() {
-            swords.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
-            swords.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
-            swords.insert(
+            insert(
+                format!("{}>{}", decl.name, fname),
+                format!("{surface}>{fname}"),
+                StructWord::Get(id, fi),
+            );
+            insert(
+                format!("{}<{}", decl.name, fname),
+                format!("{surface}<{fname}"),
+                StructWord::Set(id, fi),
+            );
+            insert(
                 format!("{}|>{}", decl.name, fname),
+                format!("{surface}|>{fname}"),
                 StructWord::Peek(id, fi),
             );
         }
@@ -477,6 +512,10 @@ pub(super) fn build_registries_ww(
     for (idx, decl) in enums.iter().enumerate() {
         let id = EnumId::from_index(idx);
         for (vi, variant) in decl.variants.iter().enumerate() {
+            let surface = generic_surface_name(&variant.name);
+            if surface != variant.name {
+                ewords.insert(surface.to_string(), EnumWord::Construct(id, vi));
+            }
             ewords.insert(variant.name.clone(), EnumWord::Construct(id, vi));
         }
     }
