@@ -1386,6 +1386,7 @@ mod tests {
             declares_inline: false,
             module: 0,
             span: Span::default(),
+            declared_globals: None,
         };
         let mut module = Module {
             words: vec![mk_word],
@@ -1404,6 +1405,7 @@ mod tests {
                 exports: vec![("mk".to_string(), Span::default())],
                 selective: HashMap::new(),
             }],
+            statics: Vec::new(),
         };
 
         let err = check_exported_signatures(&module).unwrap_err();
@@ -1445,6 +1447,7 @@ mod tests {
                 declares_inline: false,
                 module,
                 span: Span::default(),
+                declared_globals: None,
             }
         }
         fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
@@ -1461,6 +1464,7 @@ mod tests {
                 instantiations: HashMap::new(),
                 builtin_overloads: HashMap::new(),
                 modules,
+                statics: Vec::new(),
             }
         }
         fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
@@ -1642,6 +1646,7 @@ mod tests {
                     col: 1,
                     module: 0,
                 },
+                declared_globals: None,
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -1835,6 +1840,7 @@ mod tests {
                 declares_inline: false,
                 module,
                 span: Span::default(),
+                declared_globals: None,
             }
         }
         fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
@@ -1859,6 +1865,7 @@ mod tests {
                 declares_inline: false,
                 module,
                 span: Span::default(),
+                declared_globals: None,
             }
         }
 

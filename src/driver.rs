@@ -234,6 +234,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // the six comparison words beside it, from `lib/core.sth`.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
+    let mut statics = Vec::new();
     // Phase 5 slice 1 (D5): shared across the closure, its instantiation ids
     // computed against the concrete registries as the pre-pass left them --
     // every file's `type:` names are registered above before any body parses,
@@ -289,6 +290,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         }
         words.extend(bodies.words);
         externs.extend(bodies.externs);
+        statics.extend(bodies.statics);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -319,6 +321,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
         modules,
+        statics,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
     // module's `export:` list are both still their raw source spellings here,

@@ -781,6 +781,7 @@ mod tests {
             declares_inline: false,
             module: 0,
             span: Span::default(),
+            declared_globals: None,
         };
         assert!(word_declares_quotation_parameter(&w));
     }
@@ -839,6 +840,7 @@ mod tests {
             declares_inline: true,
             module: 0,
             span: Span::default(),
+            declared_globals: None,
         };
         assert!(!word_declares_quotation_parameter(&w));
         assert!(is_combinator(&w), "`inline` alone makes a word spliced");

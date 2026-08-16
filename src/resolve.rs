@@ -847,6 +847,7 @@ mod tests {
                     selective: HashMap::new(),
                 },
             ],
+            statics: Vec::new(),
         }
     }
 }

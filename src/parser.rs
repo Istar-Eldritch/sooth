@@ -16,9 +16,10 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, Import, Len,
-    Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl,
-    Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
+    GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
+    PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
+    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -151,6 +152,26 @@ const ACCESS_WORDS: [&str; 3] = ["@", "!", "+!"];
 fn shadowed_access_word_error(name: &str, span: Span) -> String {
     format!(
         "error: `{name}` is a builtin access word (`@`, `!`, `+!`) and cannot be redefined at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// D1/OQ1: a `static:` declaration's type token is outside the fixed scalar
+/// keyword set (`i64`/`u32`/`bool`/`str`). Allow-list-based, not
+/// struct-detection-based (see `Parser::parse_static_decl`): a genuine struct
+/// type and a mistyped or forward-referenced user type are indistinguishable
+/// here and get the same message.
+fn static_scalar_type_error(name: &str, span: Span) -> String {
+    format!(
+        "error: static `{name}` is not a scalar type (only `i64`, `u32`, `bool`, and `str` are supported this slice; struct-typed statics are deferred) at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// D2: a `global:` entry's mode token is neither `r` nor `w` (nor `r,`/`w,`).
+fn invalid_global_mode_error(found: &str, span: Span) -> String {
+    format!(
+        "parse error: expected a global-set mode (`r` or `w`), found `{found}` at line {}, col {}",
         span.line, span.col
     )
 }
@@ -301,6 +322,9 @@ pub struct ParsedBodies {
     pub struct_fields_by_decl: Vec<Vec<(String, Type)>>,
     pub enum_fields_by_decl: Vec<Vec<Vec<(String, Type)>>>,
     pub exports: Vec<(String, Span)>,
+    /// Phase 7 slice 2 (D1/D4): one entry per `static:` declaration, in
+    /// source order.
+    pub statics: Vec<StaticDecl>,
 }
 
 /// Parse one module's bodies (R3): the word/extern definitions and `type:`
@@ -330,6 +354,7 @@ pub fn parse_bodies(
         struct_fields_by_decl: Vec::new(),
         enum_fields_by_decl: Vec::new(),
         exports: Vec::new(),
+        statics: Vec::new(),
     };
     let mut parser = Parser {
         tokens,
@@ -361,6 +386,8 @@ pub fn parse_bodies(
             parser.parse_import()?;
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "export:") {
             out.exports.extend(parser.parse_export()?);
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "static:") {
+            out.statics.push(parser.parse_static_decl()?);
         } else {
             out.words.push(parser.parse_worddef()?);
         }
@@ -508,6 +535,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
             exports: bodies.exports,
             selective: HashMap::new(),
         }],
+        statics: bodies.statics,
     })
 }
 
@@ -1371,6 +1399,16 @@ impl<'t> Parser<'t> {
             (self.parse_effect()?, None)
         };
         self.expect(Token::RParen)?;
+        // D2: the optional trailing `global:` clause, its own keyword-headed
+        // clause sitting right after the effect's closing `)` and before the
+        // body -- mirrors the `declares_inline` peek above, not a change to
+        // `parse_effect`/`parse_poly_effect` themselves.
+        let declared_globals = if matches!(self.peek(), Some((Token::Word(w), _)) if w == "global:")
+        {
+            Some(self.parse_global_clause()?)
+        } else {
+            None
+        };
         // D8: a `|` immediately followed by a known variant name opens a
         // clause-style body; otherwise a `|` is an ordinary binding term.
         let body = if self.at_clause_start() {
@@ -1388,6 +1426,7 @@ impl<'t> Parser<'t> {
             declares_inline,
             module: self.module,
             span: name_span,
+            declared_globals,
         })
     }
 
@@ -1499,6 +1538,113 @@ impl<'t> Parser<'t> {
             span,
             module: self.module,
         })
+    }
+
+    /// `static:` declaration (D1): a module-level place, scalar-only this
+    /// slice. Grammar mirrors `extern:`'s shape (a keyword, a name, then the
+    /// declared shape) but with a type instead of an effect and an optional
+    /// `= literal` initialiser instead of a mandatory C symbol.
+    fn parse_static_decl(&mut self) -> Result<StaticDecl, String> {
+        let span = self.expect_word("static:")?;
+        let (name, name_span) = self.expect_word_any_spanned()?;
+        reject_reserved_name("static", &name, name_span)?;
+        if ACCESS_WORDS.contains(&name.as_str()) {
+            return Err(shadowed_access_word_error(&name, name_span));
+        }
+        let (ty_name, ty_span) = self.expect_word_any_spanned()?;
+        // D1/OQ1: an allow-list of the fixed scalar keyword set, not a
+        // struct-detection check -- the parser is single-pass with no type
+        // table at declaration-parse time (a `type:` may follow a `static:`
+        // in the same file), so a genuine struct type and a mistyped or
+        // forward-referenced user type both fall through to the same "not a
+        // scalar" error here.
+        let ty = match ty_name.as_str() {
+            "i64" => Type::I64,
+            "u32" => Type::U32,
+            "bool" => Type::BOOL,
+            "str" => Type::Str,
+            _ => return Err(static_scalar_type_error(&ty_name, ty_span)),
+        };
+        let init = if matches!(self.peek(), Some((Token::Word(w), _)) if w == "=") {
+            self.pos += 1;
+            self.parse_static_init(ty)?
+        } else {
+            StaticInit::Zero
+        };
+        self.expect(Token::Semicolon)?;
+        Ok(StaticDecl {
+            name,
+            ty,
+            init,
+            module: self.module,
+            span,
+        })
+    }
+
+    /// D1/D3: the `= literal` initialiser, one literal matching the static's
+    /// declared scalar type -- no arithmetic, no reference to another
+    /// static, no struct-literal aggregate.
+    fn parse_static_init(&mut self, ty: Type) -> Result<StaticInit, String> {
+        match self.peek() {
+            Some((Token::Int(n), _)) if ty == Type::I64 || ty == Type::U32 => {
+                let n = *n;
+                self.pos += 1;
+                Ok(StaticInit::Int(n))
+            }
+            Some((Token::Str(s), _)) if ty == Type::Str => {
+                let s = s.clone();
+                self.pos += 1;
+                Ok(StaticInit::Str(s))
+            }
+            Some((Token::Word(w), _)) if ty == Type::BOOL && (w == "true" || w == "false") => {
+                let b = w == "true";
+                self.pos += 1;
+                Ok(StaticInit::Bool(b))
+            }
+            Some((tok, span)) => Err(format!(
+                "parse error: expected a literal matching the static's declared type `{}`, found {tok:?} at line {}, col {}",
+                ty.name(),
+                span.line,
+                span.col
+            )),
+            None => Err(self.eof_error("a literal initializer")),
+        }
+    }
+
+    /// D2: a word's trailing `global:` clause, right after the effect's
+    /// closing `)` and before the body -- its own keyword-headed clause, not
+    /// nested inside the stack-effect parens. `self.pos` must point at
+    /// `global:`.
+    fn parse_global_clause(&mut self) -> Result<Vec<GlobalEntry>, String> {
+        self.expect_word("global:")?;
+        let mut entries = Vec::new();
+        loop {
+            let (name, name_span) = self.expect_word_any_spanned()?;
+            let (mode_word, mode_span) = self.expect_word_any_spanned()?;
+            let (mode_str, glued_comma) = match mode_word.strip_suffix(',') {
+                Some(m) => (m, true),
+                None => (mode_word.as_str(), false),
+            };
+            let mode = match mode_str {
+                "r" => GlobalMode::R,
+                "w" => GlobalMode::W,
+                _ => return Err(invalid_global_mode_error(&mode_word, mode_span)),
+            };
+            entries.push(GlobalEntry {
+                name,
+                mode,
+                span: name_span,
+            });
+            if glued_comma {
+                continue;
+            }
+            if matches!(self.peek(), Some((Token::Word(w), _)) if w == ",") {
+                self.pos += 1;
+                continue;
+            }
+            break;
+        }
+        Ok(entries)
     }
 
     /// The `extern:` declaration's C-symbol string literal (R1): an explicit
@@ -5274,6 +5420,105 @@ mod tests {
         let err =
             parse_src(": main ( -- )\n  extern: foo ( i64 -- i64 ) \"foo\" ;\n;").unwrap_err();
         assert!(err.starts_with("parse error"), "unexpected message: {err}");
+    }
+
+    // -- Phase 7 slice 2 (D1/D2): `static:` and the `global:` clause --------
+
+    #[test]
+    fn parse_static_scalar_with_initializer_ok() {
+        let module = parse_src("static: LIMIT i64 = 10 ;").unwrap();
+        assert_eq!(module.statics.len(), 1);
+        let decl = &module.statics[0];
+        assert_eq!(decl.name, "LIMIT");
+        assert_eq!(decl.ty, Type::I64);
+        assert_eq!(decl.init, StaticInit::Int(10));
+    }
+
+    #[test]
+    fn parse_static_zero_elided_initializer_ok() {
+        let module = parse_src("static: COUNT i64 ;").unwrap();
+        assert_eq!(module.statics[0].init, StaticInit::Zero);
+    }
+
+    #[test]
+    fn parse_static_bool_elided_zero_ok() {
+        let module = parse_src("static: FLAG bool ;").unwrap();
+        let decl = &module.statics[0];
+        assert_eq!(decl.ty, Type::BOOL);
+        assert_eq!(decl.init, StaticInit::Zero);
+    }
+
+    #[test]
+    fn parse_static_str_elided_zero_is_empty_ok() {
+        // D1/D3: `str`'s zero value is the empty string, distinct from `Zero`
+        // meaning "uninitialised" -- `Zero` is the marker the checker/lowering
+        // reads *as* `""` for a `str` static.
+        let module = parse_src("static: NAME str ;").unwrap();
+        let decl = &module.statics[0];
+        assert_eq!(decl.ty, Type::Str);
+        assert_eq!(decl.init, StaticInit::Zero);
+    }
+
+    #[test]
+    fn parse_static_bool_and_str_initializer_ok() {
+        let module = parse_src("static: FLAG bool = true ;\nstatic: TAG str = \"x\" ;").unwrap();
+        assert_eq!(module.statics[0].init, StaticInit::Bool(true));
+        assert_eq!(module.statics[1].init, StaticInit::Str("x".to_string()));
+    }
+
+    #[test]
+    fn parse_static_struct_type_is_error() {
+        // OQ1/D1: allow-list-based, not struct-detection-based -- a genuine
+        // struct type and a mistyped/forward-referenced user type produce the
+        // same "not a scalar" error.
+        let err = parse_src("type: Uart n i64 ;\nstatic: U Uart ;").unwrap_err();
+        assert!(err.contains("not a scalar"), "unexpected message: {err}");
+        assert!(err.contains("Uart"), "names the type: {err}");
+    }
+
+    #[test]
+    fn parse_global_clause_records_entries() {
+        let module = parse_src(": tick ( -- i64 ) global: COUNT w, LIMIT r 0 ;").unwrap();
+        let entries = module.words[0].declared_globals.as_ref().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "COUNT");
+        assert_eq!(entries[0].mode, GlobalMode::W);
+        assert_eq!(entries[1].name, "LIMIT");
+        assert_eq!(entries[1].mode, GlobalMode::R);
+    }
+
+    #[test]
+    fn parse_global_clause_empty_is_error() {
+        let err = parse_src(": tick ( -- ) global: ;").unwrap_err();
+        assert!(err.starts_with("parse error"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_global_clause_invalid_mode_is_error() {
+        let err = parse_src(": tick ( -- ) global: COUNT x 0 ;").unwrap_err();
+        assert!(err.starts_with("parse error"), "unexpected message: {err}");
+        assert!(err.contains('x'), "names the bad mode token: {err}");
+    }
+
+    #[test]
+    fn parse_effect_without_global_clause_unchanged() {
+        let module = parse_src(": inc ( i64 -- i64 ) 1 + ;").unwrap();
+        assert!(module.words[0].declared_globals.is_none());
+        assert_eq!(module.words[0].effect.inputs.len(), 1);
+        assert_eq!(module.words[0].effect.outputs.len(), 1);
+    }
+
+    #[test]
+    fn parse_global_clause_on_poly_effect_ok() {
+        // The clause reads the same after a variable-bearing effect (the
+        // `parse_poly_effect` path), unaffected by D2's byte-for-byte
+        // guarantee on the effect reader itself.
+        let module = parse_src(": dupit ( 'T: Copy -- 'T 'T ) global: COUNT w dup ;").unwrap();
+        let entries = module.words[0].declared_globals.as_ref().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "COUNT");
+        assert_eq!(entries[0].mode, GlobalMode::W);
+        assert!(module.words[0].poly.is_some());
     }
 
     #[test]

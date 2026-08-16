@@ -1274,6 +1274,7 @@ mod tests {
             declares_inline: false,
             module,
             span: Span::default(),
+            declared_globals: None,
         }
     }
     /// A `Res` owned by `defining`, mangled as `resolve` would in a multi-module
@@ -1894,6 +1895,7 @@ mod tests {
                 declares_inline: false,
                 module: 0,
                 span: Span::default(),
+                declared_globals: None,
             };
             let ctx = Ctx::Line {
                 structs: &[],

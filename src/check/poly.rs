@@ -183,6 +183,7 @@ pub(super) fn check_poly_combinator_standalone(
         declares_inline: word.declares_inline,
         module: word.module,
         span: word.span,
+        declared_globals: None,
     };
     let mut dropped = Vec::new();
     check_word(

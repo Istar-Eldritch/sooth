@@ -589,6 +589,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         instantiations: _,
         builtin_overloads: _,
         modules,
+        statics: _,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below

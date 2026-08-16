@@ -345,6 +345,7 @@ mod tests {
             declares_inline: false,
             module,
             span: Span::default(),
+            declared_globals: None,
         }
     }
     fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
