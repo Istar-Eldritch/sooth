@@ -14,8 +14,8 @@ use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
     intern_owned_cell_type, intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId,
     ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
-    PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term,
-    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
+    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 mod audits;
@@ -194,6 +194,23 @@ struct QuotBody {
     body: Vec<Term>,
     span: Span,
     is_inline: bool,
+    /// Phase 6 slice 1: the literal's own declared effect, already resolved to
+    /// concrete types by `resolve_annotation` at the interning site (`None`
+    /// for every unannotated literal).
+    annot: Option<AnnotEffect>,
+}
+
+/// Phase 6 slice 1 (R1): a quotation annotation once every slot has been
+/// resolved to a concrete `Type`. A `QuotAnnot` may still name variables the
+/// literal itself cannot bind (R2), so the resolution is fallible and happens
+/// once, where the literal is interned; everything downstream reads plain
+/// types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AnnotEffect {
+    inputs: Vec<Type>,
+    outputs: Vec<Type>,
+    /// The annotation's opening `(`, where both its diagnostics locate.
+    span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1382,6 +1399,205 @@ fn back_edge_declared_shape(
     Ok((inputs, outputs, index_map))
 }
 
+/// Phase 6 slice 1 (R2): resolve a parsed annotation's slots to concrete
+/// types. A literal is checked against its own body, and a body supplies
+/// neither an instantiation for a type variable nor a fixed point for a row
+/// that changes shape, so both are located errors here rather than silently
+/// admitted spellings.
+fn resolve_annotation(ctx: &Ctx, annot: &QuotAnnot) -> Result<AnnotEffect, String> {
+    if annot.row_in != annot.row_out {
+        return Err(shape_changing_row_unbound_error(ctx, annot));
+    }
+    Ok(AnnotEffect {
+        inputs: resolve_annot_slots(ctx, annot, &annot.inputs)?,
+        outputs: resolve_annot_slots(ctx, annot, &annot.outputs)?,
+        span: annot.span,
+    })
+}
+
+fn resolve_annot_slots(
+    ctx: &Ctx,
+    annot: &QuotAnnot,
+    slots: &[PolyType],
+) -> Result<Vec<Type>, String> {
+    slots
+        .iter()
+        .map(|slot| match slot {
+            PolyType::Concrete(ty) => Ok(*ty),
+            PolyType::Var(v) => Err(unbound_effect_variable_error(ctx, annot, *v)),
+            other => unreachable!("the annotation reader mints only `Concrete`/`Var`: {other:?}"),
+        })
+        .collect()
+}
+
+/// R2: a type variable in an annotation. Nothing a freestanding literal can
+/// see supplies its instantiation, so it is rejected rather than given an
+/// invented meaning.
+fn unbound_effect_variable_error(ctx: &Ctx, annot: &QuotAnnot, var: u32) -> String {
+    let name = &annot.ty_var_names[var as usize];
+    format!(
+        "error: effect variable `{name}` in a quotation annotation is unbound{} (line {})\n  an annotation is checked against the literal's own body, which supplies no instantiation for a type variable: write the concrete type",
+        in_word(ctx),
+        annot.span.line,
+    )
+}
+
+/// R2: a row that differs between the two sides of an annotation. A
+/// shape-changing effect has no fixed point to check a body against (nothing
+/// supplies the difference between the two rows).
+fn shape_changing_row_unbound_error(ctx: &Ctx, annot: &QuotAnnot) -> String {
+    let row = |id: Option<u32>| id.map_or("", |i| annot.row_var_names[i as usize].as_str());
+    format!(
+        "error: shape-changing row `{} -- {}` in a quotation annotation is unbound{} (line {})\n  a standalone shape-changing row has no fixed point to check against: only a passthrough row or a concrete effect can be checked against a literal's own body",
+        row(annot.row_in),
+        row(annot.row_out),
+        in_word(ctx),
+        annot.span.line,
+    )
+}
+
+/// The `Type::Quotation`/`Type::InlineQuotation` a literal's own flavour
+/// renders an effect as, for the two annotation diagnostics below.
+fn annotated_effect_type(is_inline: bool, inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
+    if is_inline {
+        crate::ast::inline_quotation_type(inputs, outputs)
+    } else {
+        crate::ast::quotation_type(inputs, outputs)
+    }
+}
+
+/// R3: an annotated literal's body disagrees with its own annotation. R11's
+/// shape (declared effect, actual body effect) minus the consuming word: this
+/// fires wherever the literal is written, whether or not it ever fills a
+/// parameter.
+fn annotation_body_mismatch_error(ctx: &Ctx, span: Span, declared: Type, actual: Type) -> String {
+    format!(
+        "error: this quotation is annotated `{declared}` but its body has effect `{actual}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4: an annotated literal disagrees with the (already grounded) quotation
+/// parameter it fills. Names both effects, so a substitution that grounded the
+/// parameter somewhere else in the call is legible at the literal.
+fn annotation_parameter_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: Type,
+    annotated: Type,
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: the quotation passed to `{word}` is annotated `{annotated}` but `{word}` declares it `{declared}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R1/R3: run an annotated literal's body against its own annotation, the same
+/// directional check `check_literal_against_declared_effect` runs against a
+/// declared parameter -- seed a fresh sub-stack with the annotation's inputs,
+/// run the body, require the exit row to equal the annotation's outputs. Runs
+/// where the literal is interned, so it is independent of whether the literal
+/// ever fills a parameter.
+///
+/// The consuming site re-runs this body against the caller's own stack, so
+/// this probe restores the move states it touched. The R12 capture guards are
+/// deliberately not repeated here: they are argument-site rules (whose
+/// premise, that the callee may call the literal any number of times, this
+/// site cannot judge), and a branch arm is legitimately exempt from them.
+#[allow(clippy::too_many_arguments)]
+fn check_literal_against_annotation(
+    annot: &AnnotEffect,
+    body: &[Term],
+    is_inline: bool,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    let moves_before = scope.moves.states.clone();
+    let depth = scope.depth();
+    let fresh: Vec<Slot> = annot.inputs.iter().map(|t| Slot::computed(*t)).collect();
+    let result = check_terms_relaxed(
+        body,
+        fresh,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        false,
+        poly,
+        &HashSet::new(),
+        true,
+    )?;
+    scope.moves.states = moves_before;
+    leave_block(
+        ctx,
+        scope,
+        depth,
+        BlockEnd::Arm {
+            token: "quotation",
+            span: annot.span,
+        },
+    )?;
+    let matches_out = result.len() == annot.outputs.len()
+        && result.iter().zip(&annot.outputs).all(|(f, w)| {
+            matches!(
+                match_slot(*f, *w),
+                SlotMatch::Exact | SlotMatch::LiteralSizeType
+            )
+        });
+    if matches_out {
+        return Ok(());
+    }
+    let declared = annotated_effect_type(is_inline, annot.inputs.clone(), annot.outputs.clone());
+    let actual = annotated_effect_type(
+        is_inline,
+        annot.inputs.clone(),
+        result.iter().map(|s| s.ty).collect(),
+    );
+    Err(annotation_body_mismatch_error(
+        ctx, annot.span, declared, actual,
+    ))
+}
+
+/// R4/R5: reconcile an annotated literal against the quotation parameter it
+/// fills. By this point `eff` is already grounded -- `PolyCtx`'s substitution
+/// has replaced each declared type variable with its concrete ground -- so the
+/// two effects are compared slot for slot under strict structural equality (no
+/// narrowing, no compatible-but-not-identical acceptance).
+///
+/// This is the one comparison R3 (body vs annotation) and R11 (body vs
+/// parameter) cannot make: a polymorphic body absorbs the annotation's claim
+/// and the parameter's ground alike without contradiction, so only holding the
+/// two declarations against each other sees the conflict.
+fn reconcile_annotation_with_parameter(
+    annot: &AnnotEffect,
+    eff: &QuotEffect,
+    is_inline: bool,
+    ctx: &Ctx,
+    word: &str,
+) -> Result<(), String> {
+    if annot.inputs == eff.inputs && annot.outputs == eff.outputs {
+        return Ok(());
+    }
+    let declared = annotated_effect_type(is_inline, eff.inputs.clone(), eff.outputs.clone());
+    let annotated = annotated_effect_type(is_inline, annot.inputs.clone(), annot.outputs.clone());
+    Err(annotation_parameter_mismatch_error(
+        ctx, annot.span, word, declared, annotated,
+    ))
+}
+
 /// R11/R12: check a quotation *literal* against a declared quotation parameter
 /// directionally (slice 4 D3): seed a fresh sub-stack with the declared input
 /// row, run the literal's body against it, and require the exit row to equal
@@ -1446,6 +1662,15 @@ fn check_literal_against_declared_effect(
         } else {
             ordinary_literal_at_inline_param_error(ctx, literal_span, word, param)
         });
+    }
+    // Phase 6 slice 1 (R4/R5): an annotated literal must also agree with the
+    // parameter it fills. Skipped for a shape-changing declared parameter:
+    // its rows have no fixed point (R-P2-4), so there is nothing to hold the
+    // annotation's own fixed slots against.
+    if !shape_changing {
+        if let Some(annot) = prov.quotations[id.0].annot.clone() {
+            reconcile_annotation_with_parameter(&annot, eff, is_inline, ctx, word)?;
+        }
     }
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
@@ -2325,6 +2550,85 @@ mod tests {
         // and its name has no `>`, so it never matches the guard.
         check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd 8 Fd<n drop ;\n")).unwrap();
     }
+    /// Phase 6 slice 1: the poly quotation parameter the R4 tests turn on.
+    /// `inline` is not decoration: `check_inline_quotation_requires_inline`
+    /// rejects any word declaring a `~[ ... ]` poly parameter that is not
+    /// itself inline, which would fail these tests on the wrong diagnostic.
+    const ON_DEF: &str = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n";
+
+    /// R1/R3: an annotation that describes the body is a no-op confirmation.
+    /// (`dup 10 <` leaves the original `i64` under the `bool`, so its effect
+    /// is `i64 -- i64 bool`, not `i64 -- bool`.)
+    #[test]
+    fn check_annotation_matches_body_ok() {
+        check_src(": w ( -- ) [ ( i64 -- i64 bool ) dup 10 < ] drop ;").unwrap();
+    }
+
+    /// R3: the disagreement is located at the annotation and fires with no
+    /// consuming parameter anywhere in sight -- the literal is dropped.
+    #[test]
+    fn check_annotation_disagrees_with_body_is_error() {
+        let err = check_src(": w ( -- ) [ ( i64 -- i64 ) dup 10 < ] drop ;").unwrap_err();
+        assert_eq!(
+            err,
+            "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 bool ]` in `w` (line 1)"
+        );
+    }
+
+    /// R4/R5: the annotation's concrete claim against the parameter's already
+    /// grounded effect. `true` grounds `'T` to `bool`, so `on`'s parameter is
+    /// `~[ bool -- bool ]` while the annotation claims `i64`. The body
+    /// `dup drop` is net identity, so it absorbs both claims: R3 (body vs
+    /// annotation) and R11 (body vs parameter) each check out, and only R4's
+    /// comparison of the two declarations sees the conflict. Asserted on the
+    /// exact message, since `is_err()` alone cannot tell R4 firing from an
+    /// unrelated rejection firing for the wrong reason.
+    #[test]
+    fn check_annotation_disagrees_with_poly_parameter_is_error() {
+        let src = format!("{ON_DEF}: w ( -- ) true ~[ ( i64 -- i64 ) dup drop ] on drop ;\n");
+        let err = check_src(&src).unwrap_err();
+        assert_eq!(
+            err,
+            "error: the quotation passed to `on` is annotated `~[ i64 -- i64 ]` but `on` declares it `~[ bool -- bool ]` in `w` (line 2)"
+        );
+    }
+
+    /// R5: the same call whose annotation matches the grounded parameter is an
+    /// identity no-op, not a narrowing to argue about.
+    #[test]
+    fn check_annotation_agrees_with_poly_parameter_ok() {
+        let src = format!("{ON_DEF}: w ( -- ) true ~[ ( bool -- bool ) dup drop ] on drop ;\n");
+        check_src(&src).unwrap();
+    }
+
+    /// R2: nothing a freestanding literal can see instantiates `'T`. Asserted
+    /// on the exact message: an ordinary row/arity mismatch from the standard
+    /// body check would satisfy an `is_err()`-only assertion vacuously.
+    #[test]
+    fn check_standalone_type_variable_annotation_is_unbound_error() {
+        let err = check_src(": w ( -- ) [ ( 'T -- 'T ) ] drop ;").unwrap_err();
+        assert!(
+            err.starts_with(
+                "error: effect variable `'T` in a quotation annotation is unbound in `w` (line 1)"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R2: a row that differs between the two sides has no fixed point to
+    /// check a body against; a passthrough row in the same shape does.
+    #[test]
+    fn check_standalone_shape_changing_row_is_unbound_error() {
+        let err = check_src(": w ( -- ) [ ( ..a -- ..b ) ] drop ;").unwrap_err();
+        assert!(
+            err.starts_with(
+                "error: shape-changing row `..a -- ..b` in a quotation annotation is unbound in `w` (line 1)"
+            ),
+            "unexpected message: {err}"
+        );
+        check_src(": w ( -- ) [ ( ..a -- ..a ) ] drop ;").unwrap();
+    }
+
     #[test]
     fn check_outputs_rejects_a_quotation_left_on_exit() {
         // R10: a matching output *count* means the ordinary path would emit a
