@@ -74,7 +74,7 @@ ISR. Those stay Phase 9, where their consumer is.
    arbitrary startup code). One static per declaration, not a batch form, matching every
    other top-level form in the file.
 
-2. **`<const-expr>` is a literal only** (an integer/float/bool/string literal, or bare
+2. **`<const-expr>` is a literal only** (an integer/bool/string literal, or bare
    zero-value elision per decision 1) — no arithmetic, no referencing another static, no
    struct-literal aggregate initializer. If a real client needs an aggregate static before
    this ships, that is new information for the spec to weigh; the brief's default is the
