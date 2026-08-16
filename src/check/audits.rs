@@ -179,12 +179,14 @@ pub(crate) fn audit_quotation_type_registries(
     }
     for e in enums {
         for v in &e.variants {
-            for (fname, fty) in &v.fields {
+            for (idx, (fname, fty)) in v.fields.iter().enumerate() {
                 reject_quotation_type_position(
                     *fty,
                     &format!(
-                        "the field `{fname}` of enum variant `{}::{}`",
-                        e.name, v.name
+                        "the {} of enum variant `{}::{}`",
+                        super::variant_field_desc(fname, idx),
+                        e.name,
+                        v.name
                     ),
                 )?;
             }
@@ -462,6 +464,25 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    #[test]
+    fn quotation_in_a_positional_variant_field_is_named_by_index() {
+        // OQ4/Phase 1: the type-position audit prints a variant field name
+        // too, so it must name an attributeless field by position rather than
+        // leaking the internal placeholder.
+        let err = check_src(
+            "type: Option 'T | None | Some 'T ;\n: w ( Option[[ i64 -- i64 ]] -- ) drop ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the field 0 of enum variant"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains(crate::parser::POSITIONAL_FIELD_NAME),
+            "the internal placeholder leaked into a diagnostic: {err}"
+        );
+    }
+
     #[test]
     fn poly_quotation_behind_a_reference_is_rejected() {
         // Slice 13 (R-A9): the default-deny recurses through a reference's

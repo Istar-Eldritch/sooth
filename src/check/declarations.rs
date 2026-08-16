@@ -547,12 +547,14 @@ fn check_no_stored_references(
     }
     for decl in enums {
         for variant in &decl.variants {
-            for (field, ty) in &variant.fields {
+            for (idx, (field, ty)) in variant.fields.iter().enumerate() {
                 if contains_reference(*ty, structs, enums, arrays) {
                     return Err(stored_reference_error(
                         &format!(
-                            "payload field `{field}` of variant `{}` of type `{}`",
-                            variant.name, decl.name
+                            "payload {} of variant `{}` of type `{}`",
+                            super::variant_field_desc(field, idx),
+                            variant.name,
+                            decl.name
                         ),
                         *ty,
                         Some(variant.span),
@@ -1308,6 +1310,25 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    #[test]
+    fn stored_reference_in_a_positional_variant_field_is_named_by_index() {
+        // OQ4/Phase 1: an attributeless field's stored name is an internal
+        // placeholder, so every diagnostic that prints a variant field name
+        // must identify it by position instead of leaking the placeholder.
+        let err = check_src(
+            "type: Option 'T | None | Some 'T ;\n: w ( Option[&i64] -- ) drop ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("payload field 0 of variant `Some[&i64]`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains(crate::parser::POSITIONAL_FIELD_NAME),
+            "the internal placeholder leaked into a diagnostic: {err}"
+        );
+    }
+
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
@@ -1584,6 +1605,25 @@ mod tests {
         assert!(
             check_duplicate_type_names(&[], &[], &[generic_box(0), generic_box(1)], &[]).is_ok()
         );
+    }
+    /// Round-2 review fix: `check_duplicate_type_names` seeing a generic
+    /// vs. generic collision (above) is only load-bearing if two literal
+    /// `type:` headers of the same name actually both reach the registry.
+    /// The parse-time idempotency guard added for slice 2's whole-closure
+    /// pre-pass (`generic_header_at_cursor_is_registered`) used to conflate
+    /// "registered by an earlier pass" with "registered by an earlier header
+    /// in this very pass", so the second of two real declarations vanished
+    /// before this check ever ran on it -- the direct-construction test above
+    /// can't see that, since it builds both `GenericStructDecl`s by hand.
+    #[test]
+    fn duplicate_generic_struct_header_through_real_source_is_error() {
+        let err = check_src("type: Box 'T val 'T ;\ntype: Box 'T val 'T ;\n").unwrap_err();
+        assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
+    }
+    #[test]
+    fn duplicate_generic_enum_header_through_real_source_is_error() {
+        let err = check_src("type: E 'T | V a 'T ;\ntype: E 'T | V a 'T ;\n").unwrap_err();
+        assert!(err.contains("duplicate type `E`"), "unexpected: {err}");
     }
     /// Two words of the same name in one module are rejected; the same pair
     /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).

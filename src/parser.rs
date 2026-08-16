@@ -67,11 +67,11 @@ fn prepass_type_decls(
                     reject_reserved_name("type", name, *span)?;
                     // Phase 5 slice 1 (R1/D5): a generic header mints no
                     // concrete struct/enum registry entry here -- its full
-                    // variable-scoped shape is parsed directly into
+                    // variable-scoped shape is parsed into
                     // `Module::generic_structs`/`generic_enums` by
-                    // `parse_bodies`, which already has the complete
-                    // (pre-pass-populated) concrete registries in scope for
-                    // any forward-referenced concrete field type.
+                    // `prepass_generic_typedefs`, run over every file in the
+                    // closure once this pass has registered every concrete
+                    // name a generic field might forward-reference.
                     if header_ty_var_count(tokens, i + 2) > 0 {
                         continue;
                     }
@@ -168,10 +168,13 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
 }
 
 /// Phase 5 slice 1: a `'`-prefixed word inside a `type:` body is a type
-/// variable, never a field name. Rejected at every field-name position so the
-/// rule holds uniformly -- a generic header consumes its `'`-prefixed words
-/// before any field is read, which would otherwise leave `'x` legal as a field
-/// name everywhere except directly after the type name.
+/// variable, never a field name. Rejected at every named-field-name position
+/// so the rule holds uniformly -- a generic header consumes its `'`-prefixed
+/// words before any field is read, which would otherwise leave `'x` legal as
+/// a field name everywhere except directly after the type name. One caller
+/// (`parse_generic_variant_fields`, Phase 5 slice 2) never actually needs
+/// this check: its `'`-prefixed arm already diverts every such token to the
+/// attributeless-field path before the named-field arm is reached.
 fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
     if name.starts_with('\'') {
         return Err(format!(
@@ -181,6 +184,14 @@ fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// OQ4: the internal name stored for an attributeless (positional) generic
+/// variant field. It contains a space, which the lexer never produces inside
+/// a single `Word` token (words are whitespace-delimited), so this string can
+/// never be typed, matched as a field name, or collide with a real one.
+/// `pub(crate)` so `check::variant_field_desc` can recognize it and report the
+/// field's position instead of this literal string.
+pub(crate) const POSITIONAL_FIELD_NAME: &str = "$positional field$";
 
 /// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
 /// once lowered, so it must already be a valid C identifier here at the
@@ -355,6 +366,46 @@ pub fn parse_bodies(
         }
     }
     Ok(out)
+}
+
+/// Phase 5 slice 2 (OQ1): register one file's generic `type:` headers into the
+/// shared `generics` registry. The driver runs this over every file in the
+/// closure, after `prepass_and_register` has named every concrete type and
+/// before any file's body parses, so a qualified application (`q::Box[i64]`)
+/// resolves whatever the discovery order put the declaring file at.
+///
+/// Takes the same name environment `parse_bodies` will: a generic
+/// declaration's field can name an imported concrete type, and it resolves the
+/// same either side of the split.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepass_generic_typedefs(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module: u32,
+    imports: &HashMap<String, u32>,
+    exports: &[Vec<(String, Span)>],
+    selective: &HashMap<String, u32>,
+    arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    generics: &mut GenericTypes,
+) -> Result<(), String> {
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        structs,
+        enums,
+        arrays,
+        owned_cells,
+        refs,
+        module,
+        imports,
+        exports,
+        selective,
+        generics,
+    };
+    parser.parse_generic_typedefs()
 }
 
 /// Run one file's type pre-pass and append its structs/enums (names only,
@@ -2628,9 +2679,20 @@ impl<'t> Parser<'t> {
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
+                // OQ4: a bare `'`-prefixed token is never a field name
+                // (`reject_ty_var_field_name`), so it unambiguously opens an
+                // attributeless field -- no lookahead needed, unlike the
+                // named-field-missing-its-type case below.
+                Some((Token::Word(w), _)) if w.starts_with('\'') => {
+                    let ty = self.parse_generic_field_type_expr(decl_name, ty_vars, used)?;
+                    fields.push((POSITIONAL_FIELD_NAME.to_string(), ty));
+                }
                 Some(_) => {
-                    let (field_name, field_span) = self.expect_word_any_spanned()?;
-                    reject_ty_var_field_name(&field_name, field_span)?;
+                    // The `'`-prefixed arm above already consumes every
+                    // type-variable token, so `field_name` here can never
+                    // start with `'`; unlike the other three field-name
+                    // sites, `reject_ty_var_field_name` would be dead code.
+                    let field_name = self.expect_word_any()?;
                     if let Some((tok, span)) = self.peek() {
                         if matches!(tok, Token::Semicolon | Token::Pipe) {
                             return Err(generic_odd_field_count_error(
@@ -2665,14 +2727,29 @@ impl<'t> Parser<'t> {
     /// further down -- the order-independence the concrete pre-pass already
     /// gives a plain `type:` name. The body pass skips each declaration when
     /// it reaches it, so every one is parsed exactly once.
+    ///
+    /// Idempotent (slice 2, OQ1): a header already registered *before this
+    /// pass began* is skipped rather than reparsed, so the driver's
+    /// whole-closure `prepass_generic_typedefs` and the `parse_bodies` call
+    /// below can both run over the same tokens without the second call
+    /// swallowing its own declaration. The snapshot (`already`) is what keeps
+    /// this from also swallowing a genuine second header for the same name
+    /// within this very pass: without it, the first header's own push would
+    /// make the second look pre-registered, so a real duplicate never reached
+    /// `check_duplicate_type_names` (round-2 review fix). The single-file and
+    /// direct-`parse_bodies` paths have no whole-closure pre-pass and register
+    /// here alone.
     fn parse_generic_typedefs(&mut self) -> Result<(), String> {
+        let already = (self.generics.structs.len(), self.generics.enums.len());
         let mut i = 0;
         while i < self.tokens.len() {
             if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
                 && header_ty_var_count(self.tokens, i + 2) > 0
             {
                 self.pos = i;
-                if self.current_typedef_is_enum() {
+                if self.generic_header_at_cursor_is_registered(already) {
+                    self.skip_typedef();
+                } else if self.current_typedef_is_enum() {
                     let decl = self.parse_generic_enum_typedef()?;
                     self.generics.enums.push(decl);
                 } else {
@@ -2686,6 +2763,28 @@ impl<'t> Parser<'t> {
         }
         self.pos = 0;
         Ok(())
+    }
+
+    /// Whether the generic `type:` header at the cursor already had a
+    /// declaration in this module's `generics` registry *before this pass
+    /// began* -- `already` is `(structs.len(), enums.len())` snapshotted at
+    /// entry to `parse_generic_typedefs`, so an index registered by an
+    /// earlier iteration of this same pass does not count, and a true
+    /// duplicate header still reaches the real production (and downstream,
+    /// `check_duplicate_type_names`). `self.pos` must point at `type:`; a
+    /// header whose name token is missing is left unregistered for the real
+    /// production to reject.
+    fn generic_header_at_cursor_is_registered(&self, already: (usize, usize)) -> bool {
+        let Some((Token::Word(name), _)) = self.tokens.get(self.pos + 1) else {
+            return false;
+        };
+        self.generics
+            .find_struct(name, self.module)
+            .is_some_and(|idx| idx < already.0)
+            || self
+                .generics
+                .find_enum(name, self.module)
+                .is_some_and(|idx| idx < already.1)
     }
 
     /// Advance past a whole `type:` declaration without parsing it. An
@@ -2703,14 +2802,39 @@ impl<'t> Parser<'t> {
     }
 
     /// R2/R3/R4: resolve a type name that may be a generic type applied to
-    /// concrete type arguments (`Box[i64]`). A name a generic `type:` header
-    /// in this module declared (D4: own module only, so a generic type never
-    /// leaks across the merged registry) must be applied here and nowhere
-    /// else -- bare `Box` names no concrete type, which is why an unapplied
-    /// generic reports the argument-count error rather than `unknown type`.
-    /// Every other name resolves exactly as it did before.
+    /// concrete type arguments (`Box[i64]`). A generic name must be applied
+    /// where it is named -- bare `Box` names no concrete type, which is why an
+    /// unapplied generic reports the argument-count error rather than
+    /// `unknown type`. Every other name resolves exactly as it did before.
+    ///
+    /// Slice 2 (OQ1): a `q::Box[i64]` name maps `q` through the import map and
+    /// looks the header up in that module, mirroring how
+    /// `resolve_type_name_in_module` reaches a concrete cross-module type. A
+    /// bare name resolves against this module, or, failing that, against the
+    /// module it is selectively imported from -- again as for a concrete type.
+    ///
+    /// R14/R16 (phase 2 review fix): a declared-but-unexported generic header
+    /// is gated here, mirroring `resolve_type`'s check for a concrete
+    /// cross-module type -- otherwise a private generic type would be
+    /// reachable from another module while a private concrete one is not. A
+    /// bare selectively imported name needs no gate here: `check`'s
+    /// `check_selective_imports` rejects a private one post-assembly, which is
+    /// how a concrete selective import is validated too.
     fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
-        if let Some(idx) = self.generics.find_struct(name, self.module) {
+        let (base, owner, qualifier) = match name.split_once("::") {
+            Some((qualifier, base)) => match self.imports.get(qualifier) {
+                Some(&target) => (base, target, Some(qualifier)),
+                // An unbound qualifier is `resolve_type`'s error to report.
+                None => return self.resolve_type(name, span),
+            },
+            None => (name, self.bare_generic_owner(name), None),
+        };
+        if let Some(qualifier) = qualifier {
+            if self.generic_is_declared(base, owner) && !self.type_is_exported(qualifier, base) {
+                return Err(not_exported_error(base, qualifier, span));
+            }
+        }
+        if let Some(idx) = self.generics.find_struct(base, owner) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = NameRegistries {
@@ -2724,7 +2848,7 @@ impl<'t> Parser<'t> {
                 .generics
                 .instantiate_struct(idx, &args, self.module, regs));
         }
-        if let Some(idx) = self.generics.find_enum(name, self.module) {
+        if let Some(idx) = self.generics.find_enum(base, owner) {
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = NameRegistries {
@@ -2739,6 +2863,25 @@ impl<'t> Parser<'t> {
                 .instantiate_enum(idx, &args, self.module, regs));
         }
         self.resolve_type(name, span)
+    }
+
+    /// R15c: the module a bare generic name is declared in -- this one, or,
+    /// when this one declares no such header, the module the name is
+    /// selectively imported from (`import: q | Box | "box.sth"`). Own module
+    /// first, exactly as `resolve_type_name_in_module` orders the two for a
+    /// concrete name, so a local header shadows a selectively imported one.
+    fn bare_generic_owner(&self, name: &str) -> u32 {
+        if self.generic_is_declared(name, self.module) {
+            return self.module;
+        }
+        self.selective.get(name).copied().unwrap_or(self.module)
+    }
+
+    /// Whether `module` declares a generic `type:` header named `name`, of
+    /// either shape.
+    fn generic_is_declared(&self, name: &str, module: u32) -> bool {
+        self.generics.find_struct(name, module).is_some()
+            || self.generics.find_enum(name, module).is_some()
     }
 
     /// R2/R3: a generic-type application's bracketed argument list,
@@ -3787,14 +3930,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_generic_variant_tick_prefixed_field_name_is_error() {
-        // The same gate inside a generic enum variant, where the header has
-        // already consumed its own `'`-prefixed words.
+    fn parse_generic_variant_unbound_type_variable_is_error() {
+        // Not the field-name gate: since positional fields landed, a trailing
+        // `'z` in a variant body opens a positional field, so what rejects
+        // this is `'z` not being bound by the `E 'T` header. Binding it (`type:
+        // E 'T 'z | Ok v 'T 'z ;`) parses clean.
         let result = parse_src("type: E 'T | Ok v 'T 'z ;");
         let err = result.unwrap_err();
         assert!(err.contains("'z"), "unexpected message: {err}");
-        assert!(err.contains("type variable"), "unexpected message: {err}");
+        assert!(err.contains("bound by"), "unexpected message: {err}");
         assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        assert!(
+            parse_src("type: E 'T 'z | Ok v 'T 'z ;").is_ok(),
+            "binding `'z` in the header should make the same body legal"
+        );
     }
 
     #[test]
@@ -3884,6 +4033,54 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("^Evil"), "unexpected message: {err}");
         assert!(err.contains("reserved"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_attributeless_variants_parse_positionally() {
+        // OQ4/Phase 1: `Option`'s exact shape -- a zero-field variant
+        // (`None`) and a one-field variant with no leading field name
+        // (`Some 'T`).
+        let module = parse_src("type: Option 'T | None | Some 'T ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "None");
+        assert!(decl.variants[0].fields.is_empty());
+        assert_eq!(decl.variants[1].name, "Some");
+        assert_eq!(decl.variants[1].fields.len(), 1);
+        assert_eq!(decl.variants[1].fields[0].1, PolyType::Var(0));
+        // The placeholder name is not a word the lexer can ever produce (it
+        // contains a space), so it can never be referenced as an accessor
+        // and never collides with a real field name.
+        assert!(decl.variants[1].fields[0].0.contains(' '));
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_attributeless_two_var_variants_parse() {
+        // `Result`'s exact shape: both arms attributeless.
+        let module = parse_src("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "Ok");
+        assert_eq!(decl.variants[0].fields.len(), 1);
+        assert_eq!(decl.variants[0].fields[0].1, PolyType::Var(0));
+        assert_eq!(decl.variants[1].name, "Err");
+        assert_eq!(decl.variants[1].fields.len(), 1);
+        assert_eq!(decl.variants[1].fields[0].1, PolyType::Var(1));
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_mixed_named_and_attributeless_fields_parses() {
+        // A named field followed by an attributeless field in the same
+        // variant: each field position is disambiguated independently (a
+        // leading `'` always opens an attributeless field, regardless of
+        // what came before it in the same variant), so this is accepted
+        // rather than rejected.
+        let module = parse_src("type: E 'T 'U | V val 'T 'U ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "V");
+        assert_eq!(decl.variants[0].fields.len(), 2);
+        assert_eq!(decl.variants[0].fields[0].0, "val");
+        assert_eq!(decl.variants[0].fields[0].1, PolyType::Var(0));
+        assert_ne!(decl.variants[0].fields[1].0, "val");
+        assert_eq!(decl.variants[0].fields[1].1, PolyType::Var(1));
     }
 
     #[test]
@@ -4145,6 +4342,105 @@ mod tests {
         run(&owner, 0).unwrap();
         let err = run(&other, 1).unwrap_err();
         assert!(err.contains("unknown type `Box`"), "unexpected: {err}");
+    }
+
+    /// Slice 2 (OQ1): the positive twin of the bare-name rejection above -- a
+    /// `q::Box[i64]` application maps `q` through the import map, finds the
+    /// header in the target module, and monomorphizes there. The minted
+    /// instantiation is stamped with the *applying* module, not the declaring
+    /// one, exactly as a same-module application is. `owner` exports `Box`
+    /// (R16, round-2 review fix): a qualified generic application is gated on
+    /// export exactly like a concrete cross-module type, so this positive
+    /// case needs the export to reach the application at all.
+    #[test]
+    fn parse_qualified_generic_application_from_another_module_resolves() {
+        let owner = lex("type: Box 'T val 'T ;\nexport: Box ;\n").unwrap();
+        let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let exports = vec![vec![("Box".to_string(), Span::default())]];
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        {
+            let mut run =
+                |tokens: &[(Token, Span)], module: u32, imports: &HashMap<String, u32>| {
+                    parse_bodies(
+                        tokens,
+                        &[],
+                        &[],
+                        module,
+                        imports,
+                        &exports,
+                        &no_imports,
+                        &mut arrays,
+                        &mut cells,
+                        &mut refs,
+                        &mut generics,
+                    )
+                    .map(|_| ())
+                };
+            run(&owner, 0, &no_imports).unwrap();
+            run(&other, 1, &imports).unwrap();
+        }
+        assert_eq!(generics.inst_structs.len(), 1);
+        assert_eq!(generics.inst_structs[0].name, "Box[i64]");
+        assert_eq!(generics.inst_structs[0].module, 1);
+        assert_eq!(
+            generics.inst_structs[0].fields,
+            vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// R14/R16 (round-2 review fix): a generic header with no `export:` line
+    /// is gated exactly like a private concrete type -- reachable through
+    /// `resolve_type_or_apply`'s own-module `find_struct`/`find_enum` lookup
+    /// (the same registry `resolve_type` never consults), so without this
+    /// gate a private generic type would be importable while a private
+    /// concrete one is not.
+    #[test]
+    fn parse_qualified_generic_application_of_unexported_type_is_not_exported() {
+        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let no_exports: Vec<Vec<(String, Span)>> = vec![Vec::new()];
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        let mut run = |tokens: &[(Token, Span)], module: u32, imports: &HashMap<String, u32>| {
+            parse_bodies(
+                tokens,
+                &[],
+                &[],
+                module,
+                imports,
+                &no_exports,
+                &no_imports,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+                &mut generics,
+            )
+            .map(|_| ())
+        };
+        run(&owner, 0, &no_imports).unwrap();
+        let err = run(&other, 1, &imports).unwrap_err();
+        assert!(
+            err.contains("`Box` is not exported from module `b`"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// A qualifier bound by no `import:` is an ordinary unknown type, not a
+    /// panic or a silent own-module fallback that would let `q::Box` reach a
+    /// local `Box`.
+    #[test]
+    fn parse_generic_application_with_unbound_qualifier_is_unknown_type() {
+        let err = parse_src("type: Box 'T val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
+        assert!(err.contains("unknown type `q::Box`"), "unexpected: {err}");
     }
 
     /// The minted instantiation carries the *instantiating* module's id, not

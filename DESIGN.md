@@ -288,11 +288,10 @@ join: selecting one of two owned records takes no borrow and compiles, and the e
 for the borrow, where the diagnostic can name both ends.
 
 Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
-pointer type, now or planned before Phase 5's generic `type:` declarations. Nullability,
-when a program wants it, is `Option['T]`, a `core` library type built from those
-declarations (Phase 5) rather than a compiler primitive — a compiler-synthesized
-`Option` would be exactly the throwaway machinery generics exist to replace, so it is
-never built. The return stack is
+pointer type. Nullability, when a program wants it, is `Option['T]` (`lib/option.sth`),
+an ordinary generic enum built from Phase 5's `type:` declarations rather than a
+compiler primitive — a compiler-synthesized `Option` would be exactly the throwaway
+machinery generics exist to replace, so it is never built. The return stack is
 hidden or balance-checked; raw return addresses are never exposed.
 FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 (same discipline as Rust std over libc), and only exists at the hosted layer.

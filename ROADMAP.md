@@ -2193,14 +2193,14 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
 
 ### Phase 5 — Errors as values  `[S]`
 
-Result/Either as an ordinary generic ADT (`type: Result 'T 'E | Ok val 'T | Err val 'E
-;`), plus the convention that fallible words return it. Branch-on-result codegen, no
-unwinding. FFI/C error returns map to Result at the (later) safe-wrapper layer. No `?`
-short-circuit sugar: it has no DESIGN.md mandate, proves no new mechanism, and is pure
-parser sugar that can be added later against a stable Result without touching this
-phase's exit criteria.
-**`Option['T]` (`type: Option 'T | None | Some val 'T ;`) ships as a `core` library type
-in the same phase**, DESIGN.md's own named answer to pointer nullability (`^T` stays
+Result/Either as an ordinary generic ADT (`type: Result 'T 'E | Ok 'T | Err 'E ;`,
+`lib/result.sth`), plus the convention that fallible words return it. Branch-on-result
+codegen, no unwinding. FFI/C error returns map to Result at the (later) safe-wrapper
+layer. No `?` short-circuit sugar: it has no DESIGN.md mandate, proves no new
+mechanism, and is pure parser sugar that can be added later against a stable Result
+without touching this phase's exit criteria.
+**`Option['T]` (`type: Option 'T | None | Some 'T ;`, `lib/option.sth`) ships in the
+same phase**, DESIGN.md's own named answer to pointer nullability (`^T` stays
 non-null; a program wanting nullability names this type rather than each redeclaring an
 equivalent enum, which would make two modules' "same" option type nominally distinct).
 It is also the mechanism's cheapest second consumer: one type variable against Result's
@@ -2228,9 +2228,9 @@ polymorphic word already does.
 
 **Phase 5 Slice 2 — Result and Option.** Built on Slice 1's generic `type:` machinery:
 `Result 'T 'E` and `Option 'T` as ordinary generic enums, branch-on-result codegen, no
-unwinding, `Option` importable from `core`.
+unwinding, `Option` importable from `lib/option.sth`.
 **Exit:** Result-based error handling with no `?` sugar; `Option['T]` importable from
-`core`; no exception/unwind path exists anywhere.
+`lib/option.sth`; no exception/unwind path exists anywhere.
 
 ### Phase 6 — Term-level enum elimination  `[L]`
 
