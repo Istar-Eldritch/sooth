@@ -243,9 +243,17 @@ Difficulty: **hard** (whole-closure ordering + resolution, the slice's core mech
 
 ### Phase 3 — Result and Option library files plus goldens
 
-- Add `lib/result.sth` containing exactly
-  `type: Result 'T 'E | Ok 'T | Err 'E ;` (attributeless spelling, Phase 1).
-- Add `lib/option.sth` containing exactly `type: Option 'T | None | Some 'T ;`.
+- Add `lib/result.sth` containing
+  `type: Result 'T 'E | Ok 'T | Err 'E ;` (attributeless spelling, Phase 1),
+  plus `export: Result ;`. Without the export line an importer fails with
+  ``not exported from module `r` ``.
+- Add `lib/option.sth` containing `type: Option 'T | None | Some 'T ;` and
+  `export: Option ;`.
+- At least one `Result` golden must instantiate the two variables at **distinct**
+  types (e.g. `Result[i64 str]`). Every other instantiation in the repo is
+  symmetric (`Result[i64 i64]`, `Result[bool bool]`), and a symmetric one cannot
+  tell `Ok 'T | Err 'E` from `Ok 'E | Err 'T`, so the whole point of the 2-variable
+  case goes unwitnessed.
 - Golden tests (source in → concrete stdout, not merely "it builds"):
   - **2-variable (`Result`)**: a fallible word returns `Result[i64 i64]`
     (e.g. `dup 0 < ~[ drop drop -1 Err ] ~[ + Ok ] if`) and a clause eliminator
@@ -289,6 +297,14 @@ directory) is explicitly Phase 6's, not re-attempted by this slice.
 - Struct positional (unnamed) fields — only enum variant fields are sugared here.
 - Bounds, recursion, nested generics — still Slice 1 out-of-scope.
 - The allocator returning `Option`/`Result` (a future consumer, not this slice).
+- **Inferring bare `None`'s instantiation from context.** `None` carries no payload,
+  so it binds to exactly one `Option[T]` per program: with both `Option[i64]` and
+  `Option[^Node]` in scope, `0 None unwrap-node` fails with ``expected
+  `Option[^Node]`, found `Option[i64]` ``. A nullable pointer and a nullable int in
+  one program is therefore not currently expressible, which blunts `Option`'s
+  headline nullability use. Needs either inference from the consuming position or a
+  qualified/annotated `None`; belongs to whichever later slice takes on generic
+  argument inference, not to this one.
 - **A generic instantiation in a cross-module word effect** (later slice; it gates the
   same Phase 6 territory as the general import rule). An exported word whose effect
   names `Box[i64]` is rejected with ``exported word `make` names private type

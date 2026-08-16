@@ -144,6 +144,30 @@ fn result_imports_and_applies_qualified_across_a_module() {
     assert_eq!(code, 0);
 }
 
+/// The witness that `Result`'s two variables bind *positionally*: every other
+/// instantiation in this repo is symmetric (`Result[i64 i64]` above,
+/// `Result[bool bool]` in `tests/phase5_generic_enum_elimination.rs`), so
+/// rewriting `lib/result.sth` to `| Ok 'E | Err 'T` leaves them all green.
+/// Here `Ok` carries `i64` and `Err` carries `str`, so a swap is a type error.
+#[test]
+fn result_binds_its_two_variables_positionally() {
+    let (stdout, code) = build_and_run(
+        "slice2-result-asymmetric",
+        &format!(
+            "{}\
+             : report ( r::Result[i64 str] -- )\n\
+             | Ok  |v| v .\n\
+             | Err |e| e . ;\n\
+             : main ( -- )\n\
+               12 Ok report\n\
+               \"boom\" Err report ;\n",
+            result_import("r")
+        ),
+    );
+    assert_eq!(stdout, "12\nboom");
+    assert_eq!(code, 0);
+}
+
 /// The genuine two-discovery-order witness (OQ1): `use.sth` applies
 /// `r::Result[i64 i64]` qualified against the real `lib/result.sth`, and the
 /// entry file imports both `use.sth` and `lib/result.sth` directly, in each
