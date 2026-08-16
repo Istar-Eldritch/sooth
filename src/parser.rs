@@ -2728,19 +2728,26 @@ impl<'t> Parser<'t> {
     /// gives a plain `type:` name. The body pass skips each declaration when
     /// it reaches it, so every one is parsed exactly once.
     ///
-    /// Idempotent (slice 2, OQ1): a header already registered for this module
-    /// is skipped rather than pushed twice, so the driver's whole-closure
-    /// `prepass_generic_typedefs` and the `parse_bodies` call below can both
-    /// run over the same tokens. The single-file and direct-`parse_bodies`
-    /// paths have no whole-closure pre-pass and register here alone.
+    /// Idempotent (slice 2, OQ1): a header already registered *before this
+    /// pass began* is skipped rather than reparsed, so the driver's
+    /// whole-closure `prepass_generic_typedefs` and the `parse_bodies` call
+    /// below can both run over the same tokens without the second call
+    /// swallowing its own declaration. The snapshot (`already`) is what keeps
+    /// this from also swallowing a genuine second header for the same name
+    /// within this very pass: without it, the first header's own push would
+    /// make the second look pre-registered, so a real duplicate never reached
+    /// `check_duplicate_type_names` (round-2 review fix). The single-file and
+    /// direct-`parse_bodies` paths have no whole-closure pre-pass and register
+    /// here alone.
     fn parse_generic_typedefs(&mut self) -> Result<(), String> {
+        let already = (self.generics.structs.len(), self.generics.enums.len());
         let mut i = 0;
         while i < self.tokens.len() {
             if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
                 && header_ty_var_count(self.tokens, i + 2) > 0
             {
                 self.pos = i;
-                if self.generic_header_at_cursor_is_registered() {
+                if self.generic_header_at_cursor_is_registered(already) {
                     self.skip_typedef();
                 } else if self.current_typedef_is_enum() {
                     let decl = self.parse_generic_enum_typedef()?;
@@ -2758,16 +2765,26 @@ impl<'t> Parser<'t> {
         Ok(())
     }
 
-    /// Whether the generic `type:` header at the cursor already has a
-    /// declaration in this module's `generics` registry. `self.pos` must point
-    /// at `type:`; a header whose name token is missing is left unregistered
-    /// for the real production to reject.
-    fn generic_header_at_cursor_is_registered(&self) -> bool {
+    /// Whether the generic `type:` header at the cursor already had a
+    /// declaration in this module's `generics` registry *before this pass
+    /// began* -- `already` is `(structs.len(), enums.len())` snapshotted at
+    /// entry to `parse_generic_typedefs`, so an index registered by an
+    /// earlier iteration of this same pass does not count, and a true
+    /// duplicate header still reaches the real production (and downstream,
+    /// `check_duplicate_type_names`). `self.pos` must point at `type:`; a
+    /// header whose name token is missing is left unregistered for the real
+    /// production to reject.
+    fn generic_header_at_cursor_is_registered(&self, already: (usize, usize)) -> bool {
         let Some((Token::Word(name), _)) = self.tokens.get(self.pos + 1) else {
             return false;
         };
-        self.generics.find_struct(name, self.module).is_some()
-            || self.generics.find_enum(name, self.module).is_some()
+        self.generics
+            .find_struct(name, self.module)
+            .is_some_and(|idx| idx < already.0)
+            || self
+                .generics
+                .find_enum(name, self.module)
+                .is_some_and(|idx| idx < already.1)
     }
 
     /// Advance past a whole `type:` declaration without parsing it. An
@@ -2794,15 +2811,27 @@ impl<'t> Parser<'t> {
     /// looks the header up in that module, mirroring how
     /// `resolve_type_name_in_module` reaches a concrete cross-module type. A
     /// bare name stays own-module-only, again as for a concrete type.
+    ///
+    /// R14/R16 (phase 2 review fix): a declared-but-unexported generic header
+    /// is gated here, mirroring `resolve_type`'s check for a concrete
+    /// cross-module type -- otherwise a private generic type would be
+    /// reachable from another module while a private concrete one is not.
     fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
-        let (base, owner) = match name.split_once("::") {
+        let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
-                Some(&target) => (base, target),
+                Some(&target) => (base, target, Some(qualifier)),
                 // An unbound qualifier is `resolve_type`'s error to report.
                 None => return self.resolve_type(name, span),
             },
-            None => (name, self.module),
+            None => (name, self.module, None),
         };
+        if let Some(qualifier) = qualifier {
+            let declared = self.generics.find_struct(base, owner).is_some()
+                || self.generics.find_enum(base, owner).is_some();
+            if declared && !self.type_is_exported(qualifier, base) {
+                return Err(not_exported_error(base, qualifier, span));
+            }
+        }
         if let Some(idx) = self.generics.find_struct(base, owner) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
@@ -4298,16 +4327,20 @@ mod tests {
     /// `q::Box[i64]` application maps `q` through the import map, finds the
     /// header in the target module, and monomorphizes there. The minted
     /// instantiation is stamped with the *applying* module, not the declaring
-    /// one, exactly as a same-module application is.
+    /// one, exactly as a same-module application is. `owner` exports `Box`
+    /// (R16, round-2 review fix): a qualified generic application is gated on
+    /// export exactly like a concrete cross-module type, so this positive
+    /// case needs the export to reach the application at all.
     #[test]
     fn parse_qualified_generic_application_from_another_module_resolves() {
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box 'T val 'T ;\nexport: Box ;\n").unwrap();
         let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
         let no_imports = HashMap::new();
         let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let exports = vec![vec![("Box".to_string(), Span::default())]];
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         {
             let mut run =
@@ -4318,7 +4351,7 @@ mod tests {
                         &[],
                         module,
                         imports,
-                        &[],
+                        &exports,
                         &no_imports,
                         &mut arrays,
                         &mut cells,
@@ -4336,6 +4369,47 @@ mod tests {
         assert_eq!(
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// R14/R16 (round-2 review fix): a generic header with no `export:` line
+    /// is gated exactly like a private concrete type -- reachable through
+    /// `resolve_type_or_apply`'s own-module `find_struct`/`find_enum` lookup
+    /// (the same registry `resolve_type` never consults), so without this
+    /// gate a private generic type would be importable while a private
+    /// concrete one is not.
+    #[test]
+    fn parse_qualified_generic_application_of_unexported_type_is_not_exported() {
+        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let no_exports: Vec<Vec<(String, Span)>> = vec![Vec::new()];
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        let mut run = |tokens: &[(Token, Span)], module: u32, imports: &HashMap<String, u32>| {
+            parse_bodies(
+                tokens,
+                &[],
+                &[],
+                module,
+                imports,
+                &no_exports,
+                &no_imports,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+                &mut generics,
+            )
+            .map(|_| ())
+        };
+        run(&owner, 0, &no_imports).unwrap();
+        let err = run(&other, 1, &imports).unwrap_err();
+        assert!(
+            err.contains("`Box` is not exported from module `b`"),
+            "unexpected: {err}"
         );
     }
 

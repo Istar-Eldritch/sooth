@@ -751,7 +751,7 @@ mod tests {
     /// two discovery reaches first.
     fn assemble_generic_cross_module_closure(tag: &str, entry_src: &str) -> Module {
         let s = Sandbox::new(tag);
-        s.write("box.sth", "type: Box 'T val 'T ;\n");
+        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
         s.write(
             "use.sth",
             "import: b \"box.sth\" ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\

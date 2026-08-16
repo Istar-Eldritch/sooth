@@ -1606,6 +1606,25 @@ mod tests {
             check_duplicate_type_names(&[], &[], &[generic_box(0), generic_box(1)], &[]).is_ok()
         );
     }
+    /// Round-2 review fix: `check_duplicate_type_names` seeing a generic
+    /// vs. generic collision (above) is only load-bearing if two literal
+    /// `type:` headers of the same name actually both reach the registry.
+    /// The parse-time idempotency guard added for slice 2's whole-closure
+    /// pre-pass (`generic_header_at_cursor_is_registered`) used to conflate
+    /// "registered by an earlier pass" with "registered by an earlier header
+    /// in this very pass", so the second of two real declarations vanished
+    /// before this check ever ran on it -- the direct-construction test above
+    /// can't see that, since it builds both `GenericStructDecl`s by hand.
+    #[test]
+    fn duplicate_generic_struct_header_through_real_source_is_error() {
+        let err = check_src("type: Box 'T val 'T ;\ntype: Box 'T val 'T ;\n").unwrap_err();
+        assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
+    }
+    #[test]
+    fn duplicate_generic_enum_header_through_real_source_is_error() {
+        let err = check_src("type: E 'T | V a 'T ;\ntype: E 'T | V a 'T ;\n").unwrap_err();
+        assert!(err.contains("duplicate type `E`"), "unexpected: {err}");
+    }
     /// Two words of the same name in one module are rejected; the same pair
     /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
     #[test]
