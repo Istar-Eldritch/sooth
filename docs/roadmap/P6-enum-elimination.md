@@ -56,13 +56,29 @@ involved. See `docs/roadmap/P6/slice1-spec.md` for the full design.
 **Exit:** an annotated quotation whose body contradicts its declared effect is a located
 error, standalone or parameter-filling.
 
-**P6.S2 — Phase 6 Slice 2 — variant types and accessors.** `Type::Variant(EnumId, usize, &'static str)`, legal
-only as an arm's declared input and as the value inside that arm, so it never becomes a
-general first-class type: the eliminator is its only introducer. Plus generated
-per-variant field accessors and whole-variant destructures. Layouts already exist per
-variant (`EnumLayout.variants[vi].fields`); nothing changes at runtime.
+**P6.S2 — Phase 6 Slice 2 — variant types and accessors.** `[ done ]` `Type::Variant(EnumId, usize,
+&'static str)`, legal only as an arm's declared input and as the value inside that arm, so
+it never becomes a general first-class type: nothing in this slice can construct one from
+surface syntax, since the eliminator (Slice 3) is its only introducer. The leaked
+`&'static str` carries the stable `Enum.Variant` display name (`display_static` on
+`VariantDecl`, one source of truth read by the sole constructor `variant_type`), needed so
+two `Type::Variant`s for the same variant always compare equal. Generated per-variant field
+accessors and whole-variant destructures mirror the struct-generated words, split across
+three existing mechanisms rather than one: a scalar getter and the whole destructure go
+through ordinary `Sig` dispatch (`variant_generated_sigs`), an aggregate getter through a
+new `check_variant_get_word` (interior-address aliasing, like the struct getter), and
+reference-mode access (`&Variant>field`/`&!Variant>field`) through a new arm in
+`check_reference_word`. All three resolve the variant from the `EnumId` the operand
+already carries, not a global name scan: variant names are not unique across enums (only
+type names are deduped), so a scan would mis-resolve the second enum's same-named variant.
+Layouts already existed per variant (`EnumLayout.variants[vi].fields`); nothing changed at
+runtime. See `docs/roadmap/P6/slice2-spec.md` for the full design and its review history
+(three rounds; the operand-EnumId resolution rule and the single-source-of-truth display
+name both replaced earlier, unsound drafts).
 **Exit:** a variant-typed value is reachable only inside an arm, with its fields readable
-by name.
+by name. Verified by unit tests against hand-built checker state, not an `.sth` golden,
+since no program can construct a `Type::Variant` until Slice 3 ships; `examples/vm.sth` is
+untouched this slice.
 
 **P6.S3 — Phase 6 Slice 3 — the eliminator word.** The generated per-enum eliminator, arms
 matched by declared variant, exhaustiveness and duplication as named errors, arm-position
