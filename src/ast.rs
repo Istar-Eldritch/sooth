@@ -332,9 +332,11 @@ pub struct GenericVariantDecl {
 /// ahead of parsing, so the registry grows as field and slot type
 /// expressions resolve.
 ///
-/// `structs`/`enums` hold the variable-bearing declarations;
-/// `inst_structs`/`inst_enums` hold ordinary concrete decls, appended onto
-/// `Module::structs`/`Module::enums` once the whole closure has parsed.
+/// `structs`/`enums` hold the variable-bearing declarations, registered for
+/// every file in the closure by `parser::prepass_generic_typedefs` before any
+/// body parses, so an application reaches a header in another module (slice 2,
+/// OQ1). `inst_structs`/`inst_enums` hold ordinary concrete decls, appended
+/// onto `Module::structs`/`Module::enums` once the whole closure has parsed.
 /// `struct_base`/`enum_base` are those registries' post-pre-pass lengths, so
 /// an instantiation's `StructId`/`EnumId` is final the moment it is minted:
 /// the pre-pass has already registered every named `type:` in every file
@@ -492,9 +494,10 @@ impl GenericTypes {
         }
     }
 
-    /// The generic struct declaration `name` names in `module`, if any. D4:
-    /// own-module only, so a generic type declared in one file is invisible
-    /// to another even once both share this registry.
+    /// The generic struct declaration `name` names in `module`, if any.
+    /// `module` is the *declaring* module: an application spells it out
+    /// through an import qualifier, exactly as a concrete cross-module type
+    /// reference does.
     pub fn find_struct(&self, name: &str, module: u32) -> Option<usize> {
         self.structs
             .iter()

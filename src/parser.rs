@@ -67,11 +67,11 @@ fn prepass_type_decls(
                     reject_reserved_name("type", name, *span)?;
                     // Phase 5 slice 1 (R1/D5): a generic header mints no
                     // concrete struct/enum registry entry here -- its full
-                    // variable-scoped shape is parsed directly into
+                    // variable-scoped shape is parsed into
                     // `Module::generic_structs`/`generic_enums` by
-                    // `parse_bodies`, which already has the complete
-                    // (pre-pass-populated) concrete registries in scope for
-                    // any forward-referenced concrete field type.
+                    // `prepass_generic_typedefs`, run over every file in the
+                    // closure once this pass has registered every concrete
+                    // name a generic field might forward-reference.
                     if header_ty_var_count(tokens, i + 2) > 0 {
                         continue;
                     }
@@ -366,6 +366,46 @@ pub fn parse_bodies(
         }
     }
     Ok(out)
+}
+
+/// Phase 5 slice 2 (OQ1): register one file's generic `type:` headers into the
+/// shared `generics` registry. The driver runs this over every file in the
+/// closure, after `prepass_and_register` has named every concrete type and
+/// before any file's body parses, so a qualified application (`q::Box[i64]`)
+/// resolves whatever the discovery order put the declaring file at.
+///
+/// Takes the same name environment `parse_bodies` will: a generic
+/// declaration's field can name an imported concrete type, and it resolves the
+/// same either side of the split.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepass_generic_typedefs(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module: u32,
+    imports: &HashMap<String, u32>,
+    exports: &[Vec<(String, Span)>],
+    selective: &HashMap<String, u32>,
+    arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    generics: &mut GenericTypes,
+) -> Result<(), String> {
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        structs,
+        enums,
+        arrays,
+        owned_cells,
+        refs,
+        module,
+        imports,
+        exports,
+        selective,
+        generics,
+    };
+    parser.parse_generic_typedefs()
 }
 
 /// Run one file's type pre-pass and append its structs/enums (names only,
@@ -2687,6 +2727,12 @@ impl<'t> Parser<'t> {
     /// further down -- the order-independence the concrete pre-pass already
     /// gives a plain `type:` name. The body pass skips each declaration when
     /// it reaches it, so every one is parsed exactly once.
+    ///
+    /// Idempotent (slice 2, OQ1): a header already registered for this module
+    /// is skipped rather than pushed twice, so the driver's whole-closure
+    /// `prepass_generic_typedefs` and the `parse_bodies` call below can both
+    /// run over the same tokens. The single-file and direct-`parse_bodies`
+    /// paths have no whole-closure pre-pass and register here alone.
     fn parse_generic_typedefs(&mut self) -> Result<(), String> {
         let mut i = 0;
         while i < self.tokens.len() {
@@ -2694,7 +2740,9 @@ impl<'t> Parser<'t> {
                 && header_ty_var_count(self.tokens, i + 2) > 0
             {
                 self.pos = i;
-                if self.current_typedef_is_enum() {
+                if self.generic_header_at_cursor_is_registered() {
+                    self.skip_typedef();
+                } else if self.current_typedef_is_enum() {
                     let decl = self.parse_generic_enum_typedef()?;
                     self.generics.enums.push(decl);
                 } else {
@@ -2708,6 +2756,18 @@ impl<'t> Parser<'t> {
         }
         self.pos = 0;
         Ok(())
+    }
+
+    /// Whether the generic `type:` header at the cursor already has a
+    /// declaration in this module's `generics` registry. `self.pos` must point
+    /// at `type:`; a header whose name token is missing is left unregistered
+    /// for the real production to reject.
+    fn generic_header_at_cursor_is_registered(&self) -> bool {
+        let Some((Token::Word(name), _)) = self.tokens.get(self.pos + 1) else {
+            return false;
+        };
+        self.generics.find_struct(name, self.module).is_some()
+            || self.generics.find_enum(name, self.module).is_some()
     }
 
     /// Advance past a whole `type:` declaration without parsing it. An
@@ -2725,14 +2785,25 @@ impl<'t> Parser<'t> {
     }
 
     /// R2/R3/R4: resolve a type name that may be a generic type applied to
-    /// concrete type arguments (`Box[i64]`). A name a generic `type:` header
-    /// in this module declared (D4: own module only, so a generic type never
-    /// leaks across the merged registry) must be applied here and nowhere
-    /// else -- bare `Box` names no concrete type, which is why an unapplied
-    /// generic reports the argument-count error rather than `unknown type`.
-    /// Every other name resolves exactly as it did before.
+    /// concrete type arguments (`Box[i64]`). A generic name must be applied
+    /// where it is named -- bare `Box` names no concrete type, which is why an
+    /// unapplied generic reports the argument-count error rather than
+    /// `unknown type`. Every other name resolves exactly as it did before.
+    ///
+    /// Slice 2 (OQ1): a `q::Box[i64]` name maps `q` through the import map and
+    /// looks the header up in that module, mirroring how
+    /// `resolve_type_name_in_module` reaches a concrete cross-module type. A
+    /// bare name stays own-module-only, again as for a concrete type.
     fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
-        if let Some(idx) = self.generics.find_struct(name, self.module) {
+        let (base, owner) = match name.split_once("::") {
+            Some((qualifier, base)) => match self.imports.get(qualifier) {
+                Some(&target) => (base, target),
+                // An unbound qualifier is `resolve_type`'s error to report.
+                None => return self.resolve_type(name, span),
+            },
+            None => (name, self.module),
+        };
+        if let Some(idx) = self.generics.find_struct(base, owner) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = NameRegistries {
@@ -2746,7 +2817,7 @@ impl<'t> Parser<'t> {
                 .generics
                 .instantiate_struct(idx, &args, self.module, regs));
         }
-        if let Some(idx) = self.generics.find_enum(name, self.module) {
+        if let Some(idx) = self.generics.find_enum(base, owner) {
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = NameRegistries {
@@ -4221,6 +4292,60 @@ mod tests {
         run(&owner, 0).unwrap();
         let err = run(&other, 1).unwrap_err();
         assert!(err.contains("unknown type `Box`"), "unexpected: {err}");
+    }
+
+    /// Slice 2 (OQ1): the positive twin of the bare-name rejection above -- a
+    /// `q::Box[i64]` application maps `q` through the import map, finds the
+    /// header in the target module, and monomorphizes there. The minted
+    /// instantiation is stamped with the *applying* module, not the declaring
+    /// one, exactly as a same-module application is.
+    #[test]
+    fn parse_qualified_generic_application_from_another_module_resolves() {
+        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        {
+            let mut run =
+                |tokens: &[(Token, Span)], module: u32, imports: &HashMap<String, u32>| {
+                    parse_bodies(
+                        tokens,
+                        &[],
+                        &[],
+                        module,
+                        imports,
+                        &[],
+                        &no_imports,
+                        &mut arrays,
+                        &mut cells,
+                        &mut refs,
+                        &mut generics,
+                    )
+                    .map(|_| ())
+                };
+            run(&owner, 0, &no_imports).unwrap();
+            run(&other, 1, &imports).unwrap();
+        }
+        assert_eq!(generics.inst_structs.len(), 1);
+        assert_eq!(generics.inst_structs[0].name, "Box[i64]");
+        assert_eq!(generics.inst_structs[0].module, 1);
+        assert_eq!(
+            generics.inst_structs[0].fields,
+            vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// A qualifier bound by no `import:` is an ordinary unknown type, not a
+    /// panic or a silent own-module fallback that would let `q::Box` reach a
+    /// local `Box`.
+    #[test]
+    fn parse_generic_application_with_unbound_qualifier_is_unknown_type() {
+        let err = parse_src("type: Box 'T val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
+        assert!(err.contains("unknown type `q::Box`"), "unexpected: {err}");
     }
 
     /// The minted instantiation carries the *instantiating* module's id, not

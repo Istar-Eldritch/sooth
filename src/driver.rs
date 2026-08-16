@@ -191,6 +191,40 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         .map(|node| parser::scan_exports(&node.tokens))
         .collect::<Result<_, _>>()?;
 
+    // Each module's qualifier -> target module map, and its unqualified
+    // selective names -> target module map (R20/R15c). Built for the whole
+    // closure upfront because both parse passes below need them; the selective
+    // maps are unvalidated here, so body parsing can resolve a bare selective
+    // `Type` and `check::check_selective_imports` rejects a private or
+    // colliding name before any codegen (own-module-first resolution means a
+    // collision shadows to the local decl at parse, never miscompiles).
+    let mut import_by_module: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
+    let mut selective_maps: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
+    // R20/R21: every module's selective-import entries, kept with their source
+    // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
+    let mut selective_by_module: Vec<Vec<check::SelectiveName>> =
+        Vec::with_capacity(closure.nodes.len());
+    for node in closure.nodes.iter() {
+        let mut import_map: HashMap<String, u32> = HashMap::new();
+        let mut selective_map: HashMap<String, u32> = HashMap::new();
+        let mut selective_entries: Vec<check::SelectiveName> = Vec::new();
+        for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
+            import_map.insert(imp.qualifier.clone(), target);
+            for (name, span) in &imp.selective {
+                selective_map.insert(name.clone(), target);
+                selective_entries.push(check::SelectiveName {
+                    name: name.clone(),
+                    qualifier: imp.qualifier.clone(),
+                    target,
+                    span: *span,
+                });
+            }
+        }
+        import_by_module.push(import_map);
+        selective_maps.push(selective_map);
+        selective_by_module.push(selective_entries);
+    }
+
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
@@ -205,35 +239,33 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // every file's `type:` names are registered above before any body parses,
     // so nothing lands between those entries and the appended instantiations.
     let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
-    let mut modules = Vec::with_capacity(closure.nodes.len());
-    // R20/R21: every module's selective-import entries, kept with their source
-    // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
-    let mut selective_by_module: Vec<Vec<check::SelectiveName>> =
-        Vec::with_capacity(closure.nodes.len());
+    // Phase 5 slice 2 (OQ1): every file's generic `type:` headers registered
+    // across the whole closure before any body parses, the generic twin of
+    // `prepass_and_register` above -- so a qualified application
+    // (`q::Box[i64]`) resolves whether or not the declaring file has been
+    // body-parsed yet. Shares the `arrays`/`owned_cells`/`refs` registries the
+    // body loop below uses, keeping interned ids in sync across both passes,
+    // and the same name environment, so a generic field naming an imported
+    // concrete type resolves here exactly as it does in the body pass.
     for (m, node) in closure.nodes.iter().enumerate() {
-        let mut import_map: HashMap<String, u32> = HashMap::new();
-        for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
-            import_map.insert(imp.qualifier.clone(), target);
-        }
-        // R20/R15c: the module's unqualified selective names -> target module.
-        // Built unvalidated here so body parsing can resolve a bare selective
-        // `Type`; `check::check_selective_imports` below rejects a private or
-        // colliding name before any codegen (own-module-first resolution means
-        // a collision shadows to the local decl at parse, never miscompiles).
-        let mut selective_map: HashMap<String, u32> = HashMap::new();
-        let mut selective_entries: Vec<check::SelectiveName> = Vec::new();
-        for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
-            for (name, span) in &imp.selective {
-                selective_map.insert(name.clone(), target);
-                selective_entries.push(check::SelectiveName {
-                    name: name.clone(),
-                    qualifier: imp.qualifier.clone(),
-                    target,
-                    span: *span,
-                });
-            }
-        }
-        selective_by_module.push(selective_entries);
+        parser::prepass_generic_typedefs(
+            &node.tokens,
+            &structs,
+            &enums,
+            m as u32,
+            &import_by_module[m],
+            &exports_by_module,
+            &selective_maps[m],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut generics,
+        )?;
+    }
+    let mut modules = Vec::with_capacity(closure.nodes.len());
+    for (m, node) in closure.nodes.iter().enumerate() {
+        let import_map = import_by_module[m].clone();
+        let selective_map = &selective_maps[m];
         let bodies = parser::parse_bodies(
             &node.tokens,
             &structs,
@@ -241,7 +273,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             m as u32,
             &import_map,
             &exports_by_module,
-            &selective_map,
+            selective_map,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -260,7 +292,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
-            selective: selective_map,
+            selective: selective_map.clone(),
         });
     }
 
@@ -711,6 +743,93 @@ mod tests {
             4,
             "each wrapped instantiation needs its own name: {names:?}"
         );
+    }
+
+    /// A two-file generic closure assembled through the real `assemble_module`
+    /// path: `box.sth` declares `Box 'T`, `use.sth` applies it qualified as
+    /// `b::Box[i64]`, and the entry file's `import:` order decides which of the
+    /// two discovery reaches first.
+    fn assemble_generic_cross_module_closure(tag: &str, entry_src: &str) -> Module {
+        let s = Sandbox::new(tag);
+        s.write("box.sth", "type: Box 'T val 'T ;\n");
+        s.write(
+            "use.sth",
+            "import: b \"box.sth\" ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
+             : show ( i64 -- ) Box unwrap . ;\nexport: show ;\n",
+        );
+        let entry = s.write("main.sth", entry_src);
+        let closure = discover_closure(&entry).expect("closure resolves");
+        assemble_module(&closure, true).expect("assembles")
+    }
+
+    const APPLIER_FIRST: &str =
+        "import: u \"use.sth\" ;\nimport: b \"box.sth\" ;\n: main ( -- ) 7 u::show ;\n";
+    const OWNER_FIRST: &str =
+        "import: b \"box.sth\" ;\nimport: u \"use.sth\" ;\n: main ( -- ) 7 u::show ;\n";
+
+    /// Slice 2 (OQ1): a qualified cross-module generic application resolves and
+    /// monomorphizes whichever order discovery reached the two files in. The
+    /// applier-first arrangement is the one the whole-closure header pre-pass
+    /// exists for: without it the applying module body-parses before the
+    /// declaring module has registered its header, and a legal program fails
+    /// with `unknown type` on nothing but its entry file's import order.
+    #[test]
+    fn generic_application_resolves_cross_module_in_either_discovery_order() {
+        for (tag, entry_src) in [
+            ("generic-xmod-applier-first", APPLIER_FIRST),
+            ("generic-xmod-owner-first", OWNER_FIRST),
+        ] {
+            let mut module = assemble_generic_cross_module_closure(tag, entry_src);
+            check::check(&mut module).unwrap_or_else(|e| panic!("{tag} checks: {e}"));
+            assert!(
+                module.structs.iter().any(|d| d.name_static == "Box[i64]"),
+                "{tag}: the qualified application monomorphized"
+            );
+        }
+    }
+
+    /// Slice 2 (OQ1), the idempotency half: the declaring module's header is
+    /// registered by the whole-closure pre-pass and not a second time by that
+    /// module's own `parse_bodies`. This is the only path where both can fire
+    /// over the same tokens -- the single-file and direct-`parse_bodies`
+    /// callers have no pre-pass above them, so a count assertion there would
+    /// pass with or without the guard.
+    #[test]
+    fn whole_closure_generic_pre_pass_registers_each_header_once() {
+        let module = assemble_generic_cross_module_closure("generic-xmod-once", OWNER_FIRST);
+        let declared = module
+            .generic_structs
+            .iter()
+            .filter(|d| d.name == "Box")
+            .count();
+        assert_eq!(declared, 1, "`Box` is registered once, not per pass");
+    }
+
+    /// The whole-closure pre-pass parses a generic header against the same
+    /// name environment `parse_bodies` gets, not a bare one: a field naming an
+    /// imported concrete type (`o::P`) has to resolve through the declaring
+    /// module's import map and its target's `export:` list in both passes.
+    #[test]
+    fn generic_header_field_naming_an_imported_type_resolves_in_the_pre_pass() {
+        let s = Sandbox::new("generic-field-imported-type");
+        s.write("other.sth", "type: P a i64 ;\nexport: P ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: o \"other.sth\" ;\ntype: Box 'T val 'T p o::P ;\n\
+             type: W b Box[i64] ;\n: main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let module = assemble_module(&closure, true).expect("assembles");
+        let boxed = module
+            .structs
+            .iter()
+            .find(|d| d.name_static == "Box[i64]")
+            .expect("the application monomorphized");
+        let (_, p_field) = &boxed.fields[1];
+        let crate::ast::Type::Struct(id, _) = p_field else {
+            panic!("the imported field is a struct: {p_field:?}")
+        };
+        assert_eq!(module.structs[id.index()].name_static, "P");
     }
 
     #[test]
