@@ -451,8 +451,10 @@ list into `src/ir` and `src/backend`, which the brief did not list.
 brief) for a checker/parser slice; I think the slice is half-built without
 storage and that S4 forces it anyway, so I have folded minimal lowering in. If
 you would rather ship S2 as checker-only and land lowering with S4 (or as its
-own slice), drop Phase 4 and scope the exit witnesses to diagnostic goldens
-plus a check-passes unit test for the agreeing case. Tell me which.
+own slice), Phase 4 must be *replaced* by the located rejection described in
+the next paragraph, not simply dropped, and the exit witnesses rescoped to
+diagnostic goldens plus a check-passes unit test for the agreeing case. Tell
+me which.
 
 **Dropping Phase 4 stopped being free once Phase 2 landed.** Every
 static-borrowing program now type-checks and reaches lowering, where
@@ -686,9 +688,12 @@ phase exit criteria):
 - `static_name_collides_with_word_or_type_diagnostic` — a `static: COUNT` whose
   name already names a word or type in the same module is a located error
   (same name-category collision the prepass already enforces for words/types).
-- **(Phase 4, if retained)** `agreeing_static_program_builds_and_runs` — a
+- **(Phase 4)** `agreeing_static_program_builds_and_runs` — a
   module with a private static counter, an exported word with the correct global
   clause, incrementing it through `&!`; builds and runs to the expected output.
+  If Phase 4 ships the rejection instead of lowering, this witness becomes a
+  diagnostic golden: the same program is refused with a located "static
+  lowering not implemented" error rather than panicking.
 
 Regression: the full existing suite stays green; every effect with no `global:`
 clause and every program with no `static:` declaration parses and checks
@@ -719,7 +724,7 @@ byte-for-byte as before (the additive guarantee).
     },
     {
       "phase": 4,
-      "focus": "FLAGGED (see Scope note): minimal scalar-static lowering so an agreeing static-using program builds and runs. Module.statics into the IR module; a data $NAME symbol per static in the QBE preamble mirroring the string data emission (src/backend/qbe.rs:650-700), zero/const-initialised per StaticInit; a new Instr::StaticAddr(Value, symbol) pushing the static's address as a Ptr, consumed by push_reference; the &STATIC arm in lower_reference_word. The agreeing-builds-and-runs golden. DROP THIS PHASE if S2 is to ship checker-only with lowering deferred to S4; scope the exit to diagnostic goldens + a check-passes unit test in that case.",
+      "focus": "FLAGGED (see Scope note): minimal scalar-static lowering so an agreeing static-using program builds and runs. Module.statics into the IR module; a data $NAME symbol per static in the QBE preamble mirroring the string data emission (src/backend/qbe.rs:650-700), zero/const-initialised per StaticInit; a new Instr::StaticAddr(Value, symbol) pushing the static's address as a Ptr, consumed by push_reference; the &STATIC arm in lower_reference_word. The agreeing-builds-and-runs golden. THIS PHASE IS LOAD-BEARING as of Phase 3: an agreeing program (`: bump ( -- ) global: COUNT w &!COUNT 1 +! ;`) now passes every check and then panics at src/ir/func_builder/word_families.rs:66 with `checked: a borrow's operand is a local`. If S2 is to ship checker-only with lowering deferred to S4, this phase must be REPLACED, not dropped, by a located `static lowering not implemented` rejection covering every static-borrowing shape (i64/bool/str, borrow inside an inline quotation, self-tail loop, closure factory), with that rejection as the exit golden -- otherwise the slice ships a compiler panic on its own happy path.",
       "effort": "M",
       "difficulty": "hard"
     }

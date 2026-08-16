@@ -1441,6 +1441,16 @@ impl Session {
                 // an imported name's internal tag; reject it up front (covers
                 // the drop / def / poly fan-out with one check).
                 reject_double_colon_name("word", &word.name, word_span(&word))?;
+                // R6: `check_globals` runs only in `assemble_module`, so a
+                // `global:` clause here would be accepted and never checked.
+                // A live session declares no statics, so no entry could ever
+                // resolve; reject the clause, as `export:` is rejected above.
+                if let Some(entry) = word.declared_globals.as_ref().and_then(|e| e.first()) {
+                    return Err(format!(
+                        "error: `global:` has no meaning at the REPL (line {}, col {})\n  note: a live session declares no `static:` storage, so a word's global set cannot be checked",
+                        entry.span.line, entry.span.col
+                    ));
+                }
                 if word.name == "drop" {
                     self.eval_drop_overload(word, writer)
                 } else {
@@ -4150,6 +4160,25 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(session.drop_overloads.is_empty());
+    }
+
+    #[test]
+    fn repl_global_clause_is_a_located_rejection() {
+        // R6: the boundary check lives in `assemble_module`, which the REPL
+        // never reaches, so without this gate the clause is accepted and
+        // silently unchecked -- the same line a file build rejects for naming
+        // no such static. The error is located at the offending entry, and the
+        // word does not enter the session.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line(": tick ( -- i64 ) global: NOPE w 1 ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("`global:` has no meaning at the REPL") && err.contains("col 27"),
+            "unexpected message: {err}"
+        );
+        assert!(!session.env.contains_key("tick"));
     }
 
     #[test]
