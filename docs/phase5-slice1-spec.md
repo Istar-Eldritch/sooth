@@ -97,19 +97,21 @@ variable-only, never a nested open application.
   field list in a new declaration form; a concrete `Type::Struct`/`Type::Enum` is minted
   only once every type argument at a use site is concrete, mirroring Phase 4 Slice 1's own
   rule that `Type` gains no variable-carrying variant (`src/ast.rs:619-621`).
-- **Deterministic, order-independent mangled names.** The synthesized name for a
-  monomorphized instantiation's QBE-facing symbol reuses `instantiation_symbol`
-  (`src/ast.rs:729`)'s own sanitize-and-join *scheme* (`sooth_mono_{name}__t{id}_{ty}`-style),
-  not a new ad hoc format — a pure function of `(generic name, concrete type arguments)`
-  with no dependence on processing order, most likely by factoring the existing
-  sanitize-and-join helper out for both call sites rather than forcing a type-instantiation
-  key through `instantiation_symbol`'s own `Subst`-shaped signature (which is word/`Subst`-
-  oriented; a type instantiation's key is `(name, Vec<Type>)`, not a `Subst`). `decl.name`/
-  `decl.name_static` for the minted `StructDecl`/`EnumDecl` uses this mangled string
-  (leaked to `'static` via `Box::leak`, matching `StructDecl::name_static`'s existing
-  obligation, `src/ast.rs:207`); the generated words' *env keys* stay the bare surface
-  spelling (`Box>val`) per R5's fix, so the mangled name is purely the registry/QBE-symbol
-  identity, never user-visible.
+- **Deterministic, order-independent instantiation names.** The synthesized name for a
+  monomorphized instantiation is a pure function of `(generic name, concrete type
+  arguments)` with no dependence on processing order, leaked to `'static` via `Box::leak`
+  for `decl.name`/`decl.name_static` (matching `StructDecl::name_static`'s existing
+  obligation, `src/ast.rs:207`). **Corrected in phase 2:** the spelling is the structural
+  one, `Box[i64]`, the way `ArrayDecl` already names a shape `[i64 4]` — *not*
+  `instantiation_symbol`'s `sooth_mono_{name}__t{id}_{ty}` sanitize-and-join. Two reasons:
+  a struct/enum's own QBE symbols are minted from its `StructId`/`EnumId`
+  (`struct_drop_symbol`), and the one QBE-facing use of the name — the aggregate
+  `type :Name` — is sanitized at the emission site by the existing *injective* `qbe_name`,
+  whereas `instantiation_symbol`'s sanitize is lossy enough for two distinct argument lists
+  to collide on one aggregate; and this name renders in every diagnostic naming the type,
+  where `sooth_mono_Box__t0_i64` would be a regression. `[` is a lexer delimiter, so no
+  single source type-name token can equal one of these. The generated words' *env keys*
+  stay the bare surface spelling (`Box>val`) per R5's fix.
 - **`module: u32` is set on every minted declaration.** `StructDecl.module` is
   `src/ast.rs:234`, `EnumDecl.module` is `:267`, `VariantDecl` mirrors it; D4 fixes it to
   the instantiating module's id (`0` under this slice's single-module scope) but the mint
@@ -257,11 +259,19 @@ instantiation registry's own growing offset) before `check`'s `struct_generated_
 ## Open questions
 
 None blocking; all four raised in the brief are settled above (D1-D4), plus D5 (parse-time
-minting site) settled during round-1 review. If implementation surfaces a further question
-(e.g. exact syntax for a multi-argument application: `Pair i64 bool` vs a bracketed
-`Pair[i64 bool]`), prefer the bare juxtaposed form — it matches how a word's concrete call
-arguments are already juxtaposed with no bracketing, and how `'T 'E` are juxtaposed in a
-`type:` header itself (R1/R2).
+minting site) settled during round-1 review.
+
+**D6 (settled in phase 2) — an application's type arguments are bracketed,
+`Box[i64]`/`Pair[i64 bool]`, not juxtaposed.** The doc previously preferred the bare
+juxtaposed form; implementing R3 falsified it. Juxtaposed, a signature slot list
+`( Box i64 bool -- )` reads identically as an over-applied `Box` and as a correctly applied
+`Box i64` beside a `bool` slot, so an extra argument is *undecidable* at a slot position and
+R3's over-application error could never be raised there — while parsing arguments greedily
+instead would make `( Box i64 bool -- )` unwritable. Brackets also match how ROADMAP.md
+already spells a use site (`Option['T]`, `Map['K 'V]`, `Vec['T 'A = Global]`), and `[` is
+already the type sublanguage's delimiter (array shapes, quotation effects). The *header*
+stays juxtaposed (`type: Result 'T 'E`), where `'`-prefixing makes the variable list
+unambiguous.
 
 **Flagged for the user, not blocking this slice:** D4's correction means Slice 2's own
 spec (not this one) must explicitly plan for cross-module generic instantiation to meet
