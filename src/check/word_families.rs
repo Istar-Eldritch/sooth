@@ -659,7 +659,15 @@ pub(super) fn check_struct_peek_word(
         return Ok(None);
     };
     let structs = ctx.structs();
-    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
+    // D7: `struct_name` is always the bare surface spelling (`[` is a lexer
+    // delimiter, so no source term can ever spell a mangled instantiation
+    // name), but an instantiated `decl.name` is mangled (`Box[i64]`); compare
+    // against the surface name it carries, same as the generated-word
+    // registries this peek's own key lives beside in `layout.rs`.
+    let Some(idx) = structs
+        .iter()
+        .position(|d| generic_surface_name(&d.name) == struct_name)
+    else {
         return Ok(None);
     };
     let decl = &structs[idx];

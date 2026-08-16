@@ -302,6 +302,27 @@ ROADMAP's "`Option` importable from `core`" exit criterion — either as an in-s
 Slice 2 or a small prerequisite slice ahead of it. No action needed now; noting it so it
 isn't silently rediscovered when Slice 2 is briefed.
 
+**D7 addendum (phase 3 review round 2) — `check_struct_peek_word` also compared against
+the mangled name.** `S|>fi` (R10) is a fourth checker-side site that resolves a struct by
+name directly against `ctx.structs()`, independent of `struct_generated_sigs`/`swords`;
+phase 3 missed it because its own exit golden never exercised peek. Fixed: the comparison
+now goes through `generic_surface_name`, same as the other three sites, with a golden
+(`generic_instantiation_peek_word_dispatches_by_surface_name`) pinning it.
+
+**Flagged for the user, not blocking this slice: generic enums cannot be eliminated at
+all, only constructed.** Three more mangled-name comparisons block a clause-style body
+over a generic enum's variants — `is_variant_name` (`src/parser.rs`), `is_registered_variant`
+(`src/check.rs`), and the clause matcher (`src/check/word_entry.rs`) — and fixing all three
+is not sufficient on its own: `prepass_type_decls` (`src/parser.rs`) skips a generic header
+entirely, so the parse-time clause-vs-locals discriminator never learns a generic enum's
+variant names in the first place. A clause body over `Res[i64 bool]`'s `Ok`/`Err` today
+parses as a locals binding and fails with a name-collision error, not a working match. This
+slice's own exit criteria only require construction
+(`generic_enum_instantiation_reaches_the_backend_and_runs`), so it is unaffected, but
+Slice 2's `Result 'T 'E` is an enum whose whole point is elimination — this is a
+prerequisite for Slice 2, either as an explicit in-scope line there or a small slice ahead
+of it. No action needed now.
+
 ## Solution approach (advisory)
 
 1. Add the generic-declaration registry (`GenericStructDecl`/`GenericEnumDecl`, per the
