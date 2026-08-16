@@ -348,6 +348,26 @@ pub(crate) fn variant_field_desc(field: &str, idx: usize) -> String {
     }
 }
 
+/// Phase 6 slice 2 (R4): a variant's field types in declared order (first
+/// field deepest), value-mode as the plain field type, ref-mode via
+/// `intern_ref_type`. Shared by the clause-body path (`check_clause_body`)
+/// and the accessor path (Phase 3), so both project a variant's payload
+/// identically.
+pub(crate) fn variant_field_projection(
+    variant: &VariantDecl,
+    ref_mutable: Option<bool>,
+    refs: &mut Vec<RefDecl>,
+) -> Vec<Type> {
+    variant
+        .fields
+        .iter()
+        .map(|(_, ty)| match ref_mutable {
+            Some(mutable) => intern_ref_type(refs, *ty, mutable),
+            None => *ty,
+        })
+        .collect()
+}
+
 /// D3 (slice 6h phase 2): whether `ty` transitively contains a pointer-shaped
 /// `Copy` type the array constructor cannot safely zero-initialize --
 /// `Type::Str`, `Type::Cstr`, `Type::Quotation` -- recursing through struct
@@ -2447,6 +2467,78 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
+    }
+
+    fn test_variant(fields: Vec<(String, Type)>) -> VariantDecl {
+        VariantDecl {
+            name: "Circle".to_string(),
+            name_static: "Circle",
+            display_static: "Shape.Circle",
+            fields,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn variant_field_projection_value_mode_is_declared_order() {
+        let variant = test_variant(vec![
+            ("r".to_string(), Type::F64),
+            ("n".to_string(), Type::I64),
+        ]);
+        let mut refs = Vec::new();
+        let projected = variant_field_projection(&variant, None, &mut refs);
+        assert_eq!(projected, vec![Type::F64, Type::I64]);
+    }
+
+    #[test]
+    fn variant_field_projection_ref_mode_interns_each_field() {
+        let variant = test_variant(vec![
+            ("r".to_string(), Type::F64),
+            ("n".to_string(), Type::I64),
+        ]);
+        let mut refs = Vec::new();
+        let projected = variant_field_projection(&variant, Some(true), &mut refs);
+        let expected_r = intern_ref_type(&mut refs, Type::F64, true);
+        let expected_n = intern_ref_type(&mut refs, Type::I64, true);
+        assert_eq!(projected, vec![expected_r, expected_n]);
+    }
+
+    #[test]
+    fn variant_field_projection_zero_field_is_empty() {
+        let variant = test_variant(vec![]);
+        let mut refs = Vec::new();
+        assert_eq!(variant_field_projection(&variant, None, &mut refs), vec![]);
+        assert_eq!(
+            variant_field_projection(&variant, Some(false), &mut refs),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn variant_field_projection_matches_pre_extraction_inline_loop() {
+        // Mutation check (R5): reproduces the loop check_clause_body ran
+        // before the R4 extraction, field by field, in both modes.
+        let variant = test_variant(vec![
+            ("r".to_string(), Type::F64),
+            ("n".to_string(), Type::I64),
+        ]);
+        for ref_mutable in [None, Some(false), Some(true)] {
+            let mut refs = Vec::new();
+            let mut inline = Vec::new();
+            for (_, ty) in &variant.fields {
+                let field_ty = match ref_mutable {
+                    Some(mutable) => intern_ref_type(&mut refs, *ty, mutable),
+                    None => *ty,
+                };
+                inline.push(field_ty);
+            }
+            let mut refs_via_helper = Vec::new();
+            let projected = variant_field_projection(&variant, ref_mutable, &mut refs_via_helper);
+            assert_eq!(
+                projected, inline,
+                "mismatch for ref_mutable={ref_mutable:?}"
+            );
+        }
     }
 
     #[test]

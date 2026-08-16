@@ -438,13 +438,7 @@ fn check_clause_body(
     // mutability, projecting through it exactly as a struct-field projection
     // would — the payload is never owned, so it is never moved or freed.
     let mut initial = below.to_vec();
-    for (_, ty) in &variant.fields {
-        let field_ty = match ref_mutable {
-            Some(mutable) => intern_ref_type(refs, *ty, mutable),
-            None => *ty,
-        };
-        initial.push(field_ty);
-    }
+    initial.extend(variant_field_projection(variant, ref_mutable, refs));
 
     // Clause-body `| names |` bind the top N (payload then below), leftmost
     // deepest, reusing the word-entry local-binding shape.
