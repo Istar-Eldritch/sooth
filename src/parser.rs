@@ -182,6 +182,12 @@ fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
     Ok(())
 }
 
+/// OQ4: the internal name stored for an attributeless (positional) generic
+/// variant field. It contains a space, which the lexer never produces inside
+/// a single `Word` token (words are whitespace-delimited), so this string can
+/// never be typed, matched as a field name, or collide with a real one.
+const POSITIONAL_FIELD_NAME: &str = "$positional field$";
+
 /// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
 /// once lowered, so it must already be a valid C identifier here at the
 /// declaration — the trust boundary — rather than surfacing as broken QBE
@@ -2628,6 +2634,14 @@ impl<'t> Parser<'t> {
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
+                // OQ4: a bare `'`-prefixed token is never a field name
+                // (`reject_ty_var_field_name`), so it unambiguously opens an
+                // attributeless field -- no lookahead needed, unlike the
+                // named-field-missing-its-type case below.
+                Some((Token::Word(w), _)) if w.starts_with('\'') => {
+                    let ty = self.parse_generic_field_type_expr(decl_name, ty_vars, used)?;
+                    fields.push((POSITIONAL_FIELD_NAME.to_string(), ty));
+                }
                 Some(_) => {
                     let (field_name, field_span) = self.expect_word_any_spanned()?;
                     reject_ty_var_field_name(&field_name, field_span)?;
@@ -3884,6 +3898,54 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("^Evil"), "unexpected message: {err}");
         assert!(err.contains("reserved"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_attributeless_variants_parse_positionally() {
+        // OQ4/Phase 1: `Option`'s exact shape -- a zero-field variant
+        // (`None`) and a one-field variant with no leading field name
+        // (`Some 'T`).
+        let module = parse_src("type: Option 'T | None | Some 'T ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "None");
+        assert!(decl.variants[0].fields.is_empty());
+        assert_eq!(decl.variants[1].name, "Some");
+        assert_eq!(decl.variants[1].fields.len(), 1);
+        assert_eq!(decl.variants[1].fields[0].1, PolyType::Var(0));
+        // The placeholder name is not a word the lexer can ever produce (it
+        // contains a space), so it can never be referenced as an accessor
+        // and never collides with a real field name.
+        assert!(decl.variants[1].fields[0].0.contains(' '));
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_attributeless_two_var_variants_parse() {
+        // `Result`'s exact shape: both arms attributeless.
+        let module = parse_src("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "Ok");
+        assert_eq!(decl.variants[0].fields.len(), 1);
+        assert_eq!(decl.variants[0].fields[0].1, PolyType::Var(0));
+        assert_eq!(decl.variants[1].name, "Err");
+        assert_eq!(decl.variants[1].fields.len(), 1);
+        assert_eq!(decl.variants[1].fields[0].1, PolyType::Var(1));
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_mixed_named_and_attributeless_fields_parses() {
+        // A named field followed by an attributeless field in the same
+        // variant: each field position is disambiguated independently (a
+        // leading `'` always opens an attributeless field, regardless of
+        // what came before it in the same variant), so this is accepted
+        // rather than rejected.
+        let module = parse_src("type: E 'T 'U | V val 'T 'U ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "V");
+        assert_eq!(decl.variants[0].fields.len(), 2);
+        assert_eq!(decl.variants[0].fields[0].0, "val");
+        assert_eq!(decl.variants[0].fields[0].1, PolyType::Var(0));
+        assert_ne!(decl.variants[0].fields[1].0, "val");
+        assert_eq!(decl.variants[0].fields[1].1, PolyType::Var(1));
     }
 
     #[test]
