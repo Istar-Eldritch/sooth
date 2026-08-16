@@ -1668,6 +1668,29 @@ mod tests {
     }
 
     #[test]
+    fn check_variant_get_word_scalar_field_returns_none() {
+        // Mechanism boundary (R9): a scalar field must never be claimed by
+        // `check_variant_get_word` -- it is typed entirely by mechanism 1
+        // above (`variant_scalar_getter_types_by_sig_dispatch`). Paired with
+        // that test, asserting the direct `Ok(None)` here is not a lone
+        // vacuous case: deleting the `is_aggregate` bail would still leave
+        // the Sig-dispatch test green (mechanism 1 wins env dispatch first),
+        // so only this direct call on the check function catches it.
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut prov = Provenance::default();
+        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        assert!(
+            check_variant_get_word("Circle>r", Span::default(), &mut stack, &ctx, &mut prov)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn variant_whole_destructure_types_by_sig_dispatch() {
         // Mechanism 1 (R6): the whole destructure projects every field in
         // declared order, first field deepest, and has no check function at
@@ -1765,6 +1788,44 @@ mod tests {
         assert!(
             !err.contains("Shape"),
             "invented a variant diagnostic: {err}"
+        );
+    }
+
+    /// Two enums (`A`, `B`) that each spell a `Circle p` variant, with
+    /// different field types (`P`, `Q`). Proves R11/R12's central claim: the
+    /// variant is resolved from the operand's own `EnumId`, never a global
+    /// first-match scan over variant names, since variant names are not
+    /// unique across enums. `bool` occupies enum 0, so `A` is 1 and `B` is 2.
+    const TWO_ENUM_SRC: &str =
+        "type: P a i64 ;\ntype: Q b i64 ;\ntype: A | Circle p P ;\ntype: B | Circle p Q ;\n: main ( -- ) ;\n";
+
+    fn two_enum_module() -> Module {
+        let tokens = lex(TWO_ENUM_SRC).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+
+    #[test]
+    fn variant_accessor_resolves_the_operand_enum_not_a_global_scan() {
+        // A global first-match scan over `variant_accessor_field` would
+        // resolve `Circle>p` against whichever enum lists a `Circle` first
+        // (`A`), mis-typing `B`'s operand as `P` instead of `Q`.
+        let module = two_enum_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut prov = Provenance::default();
+        let b_circle = variant_type(&module.enums, EnumId::from_index(2), 0);
+        let mut stack = vec![Slot::computed(b_circle)];
+        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
+            .unwrap()
+            .expect("Circle>p is claimed for B's own Circle variant");
+        assert_eq!(
+            out[0].ty,
+            struct_ty(&module, "Q"),
+            "resolved in the wrong enum"
         );
     }
 
