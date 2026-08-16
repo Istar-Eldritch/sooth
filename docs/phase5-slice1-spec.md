@@ -111,7 +111,9 @@ variable-only, never a nested open application.
   to collide on one aggregate; and this name renders in every diagnostic naming the type,
   where `sooth_mono_Box__t0_i64` would be a regression. `[` is a lexer delimiter, so no
   single source type-name token can equal one of these. The generated words' *env keys*
-  stay the bare surface spelling (`Box>val`) per R5's fix.
+  must stay the bare surface spelling (`Box>val`) per R5's fix, so the mangled name is
+  registry/QBE-symbol identity only, never user-visible. **This does not hold as of phase
+  2 and is phase 3's to deliver — see D7.**
 - **`module: u32` is set on every minted declaration.** `StructDecl.module` is
   `src/ast.rs:234`, `EnumDecl.module` is `:267`, `VariantDecl` mirrors it; D4 fixes it to
   the instantiating module's id (`0` under this slice's single-module scope) but the mint
@@ -273,6 +275,27 @@ already the type sublanguage's delimiter (array shapes, quotation effects). The 
 stays juxtaposed (`type: Result 'T 'E`), where `'`-prefixing makes the variable list
 unambiguous.
 
+**D7 (settled in phase 3 review of phase 2) — an instantiation needs a surface name
+alongside its mangled one; the R5 registration fix alone does not give R5's behaviour.**
+`struct_generated_sigs`/`enum_generated_sigs` key every generated word on `decl.name`, and
+phase 2 sets `decl.name` to the mangled `Box[i64]`, so the env keys are today `Box[i64]`,
+`Box[i64]>val`, `Box[i64]<val`. `[` is a lexer delimiter, so no term can spell one: `7
+Box[i64] Box[i64]>val` fails with an unknown-word error on `Box`, and there is no other
+spelling.
+The mangled `decl.name` is nonetheless correct and stays: it is what keeps two
+instantiations distinct in the duplicate-type check and in every diagnostic.
+
+Phase 3's stated fix (`env.insert` -> `env.entry().or_default().push()`) is therefore
+necessary but not sufficient, and on its own is unobservable: under mangled names no two
+instantiations share a key, so nothing clobbers and nothing appends. Phase 3 must *also*
+carry the bare surface spelling on the minted `StructDecl`/`EnumDecl` (the generic
+header's own name, `Box`, and the variant's own name, `Ok`) and key the generated `Sig`s
+off that, keeping `Overload::symbol` on the mangled name so the QBE symbols stay distinct
+-- `src/check.rs:449-454` currently sets `symbol = name.clone()`, so the two must be
+split there. Only then does R5's overload-by-operand-type dispatch have two entries under
+one key to choose between, and only then can phase 3's exit golden ("constructs and reads
+back both instantiations") be written at all.
+
 **Flagged for the user, not blocking this slice:** D4's correction means Slice 2's own
 spec (not this one) must explicitly plan for cross-module generic instantiation to meet
 ROADMAP's "`Option` importable from `core`" exit criterion — either as an in-scope line on
@@ -354,7 +377,7 @@ isn't silently rediscovered when Slice 2 is briefed.
     },
     {
       "phase": 3,
-      "focus": "Fix generated-word registration from overwrite to overload-append (struct_generated_sigs/enum_generated_sigs into env) -- layout and destructor synthesis already apply automatically once phase 2 appends a minted instantiation into Module::structs/enums, so this phase is the registration fix plus golden test coverage including the signature-slot and destructor witnesses",
+      "focus": "Give a minted instantiation a bare surface name (D7) and key struct_generated_sigs/enum_generated_sigs off it while keeping Overload::symbol on the mangled name, then fix generated-word registration from overwrite to overload-append (env.insert -> entry().or_default().push()) so two instantiations coexist as operand-type-disambiguated overloads -- layout and destructor synthesis already apply automatically once phase 2 appends a minted instantiation into Module::structs/enums, so this phase is those two changes plus golden test coverage including the signature-slot and destructor witnesses",
       "difficulty": "standard"
     }
   ]
