@@ -23,7 +23,8 @@ impl<'a> FuncBuilder<'a> {
     /// field projection is a `PtrOffset`, an array element projection an
     /// `ElemAddr` behind a runtime bounds guard, and a cell payload
     /// projection a `Load` of the pointer the place holds.
-    pub(super) fn lower_reference_word(&mut self, name: &str, line: u32) {
+    pub(super) fn lower_reference_word(&mut self, name: &str, span: Span) {
+        let line = span.line;
         let mutable = name.starts_with("&!");
         let rest = &name[if mutable { 2 } else { 1 }..];
         match rest {
@@ -51,8 +52,20 @@ impl<'a> FuncBuilder<'a> {
                 self.push_reference(cell_ptr, payload);
             }
             _ => {
-                if let Some(&StructWord::Get(id, fi)) = self.structs.words.get(rest) {
-                    let base = self.stack.pop().expect("field projection: receiver");
+                // P7 slice 1 (R6): a receiver-directed projection `&f`/`&!f`.
+                // The name says nothing about which struct it projects out of,
+                // so the receiver comes from the checker's per-call-site
+                // record; an owned receiver keeps its place on the stack (D2).
+                if let Some(&(id, fi)) = self.resolved_fields.get(&span) {
+                    let base = *self.stack.last().expect("projection: receiver");
+                    // D2: a reference receiver is consumed by the projection,
+                    // an owned one stays. `ref_inner` is what tells them
+                    // apart -- every reference `Value` records its referent,
+                    // an owned aggregate's own value does not -- and either
+                    // way the value *is* the address the field offsets from.
+                    if self.ref_inner.contains_key(&base) {
+                        self.stack.pop();
+                    }
                     let field = self.structs.layouts[id.index()].fields[fi];
                     let addr = self.field_ptr(base, field.offset);
                     self.push_reference(addr, field.ty);
@@ -736,8 +749,8 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
-    /// or the interior pointer as a nested struct/enum/quotation value (the
-    /// getter reads a stored quotation back out as a runtime value).
+    /// or the interior pointer as a nested struct/enum/quotation value (a
+    /// destructure reads a stored quotation back out as a runtime value).
     pub(super) fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
         match field.ty {
             // Slice 9 (R1): a zero-payload-enum field loads as a scalar, not
@@ -808,7 +821,7 @@ mod tests {
         // about what it points at, so the join has to carry the referent shape
         // across or the projection past it has no field offset to use.
         let ir = lower_src(
-            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c ~[ &v ] ~[ &v ] if &V>x @ ;",
+            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c ~[ &v ] ~[ &v ] if &x @ ;",
         );
         let w = &ir.funcs[0];
         let phi = instrs(w)
@@ -1121,7 +1134,7 @@ mod tests {
         let ir = lower_src(
             "static: COUNT i64 = 0 ;\n\
              type: P x i64 ;\n\
-             : w ( -- i64 ) 1 P | COUNT | &COUNT &P>x @ ;",
+             : w ( -- i64 ) 1 P | COUNT | &COUNT &x @ ;",
         );
         let w = func(&ir, "w");
         assert_eq!(
@@ -1153,5 +1166,116 @@ mod tests {
             "the materialized body addresses the static: {:?}",
             instrs(quot)
         );
+    }
+
+    /// P7 slice 1 (D2/R6): an owned receiver is *not* consumed, so two
+    /// projections off one struct both offset from that struct's own value.
+    /// A consuming lowering would have popped it and offset the second
+    /// projection from whatever sat beneath.
+    #[test]
+    fn owned_receiver_projection_leaves_receiver() {
+        let ir = lower_src("type: Point x i64 y i64 ;\n: w ( -- ) 1 2 Point &x @ . &y @ . drop ;");
+        let w = &ir.funcs[0];
+        let alloc = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Alloc(v, ..) => Some(*v),
+                _ => None,
+            })
+            .expect("the struct is alloc'd");
+        let bases: Vec<Value> = read_bases(w);
+        assert_eq!(
+            bases,
+            vec![alloc, alloc],
+            "both projections offset from the receiver, which stayed: {:?}",
+            instrs(w)
+        );
+    }
+
+    /// P7 slice 1 (D2/R6): a *reference* receiver is consumed, so a chain
+    /// hands each step's result to the next and leaves nothing behind. This is
+    /// what keeps `u &stats &hp` from stranding an intermediate reference on
+    /// the stack at every level.
+    ///
+    /// The `+` beneath the chain is what makes the emitted code witness the
+    /// pop: the chain's own `PtrOffset`s look identical either way (a
+    /// non-consuming lowering would orphan the intermediates rather than
+    /// re-base anything), but a stranded reference shifts everything under it,
+    /// so `+` would add the fetched field to `&stats` instead of to the `5`.
+    #[test]
+    fn ref_receiver_projection_consumes_receiver() {
+        let ir = lower_src(
+            "type: Stats hp i64 mp i64 ;\n\
+             type: Unit tag i64 stats Stats ;\n\
+             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ + . u drop ;",
+        );
+        let w = &ir.funcs[0];
+        let five = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, 5) => Some(*v),
+                _ => None,
+            })
+            .expect("the addend is a constant");
+        let fetched = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::FieldLoad(v, _) => Some(*v),
+                _ => None,
+            })
+            .expect("`@` fetches the field");
+        let (a, b) = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(_, BinOp::Add, a, b) => Some((*a, *b)),
+                _ => None,
+            })
+            .expect("the fetched field is added");
+        assert_eq!(
+            (a, b),
+            (five, fetched),
+            "the chain left nothing between the `5` and the fetched field: {:?}",
+            instrs(w)
+        );
+        // ... and each step of the chain bases on the previous step's result.
+        let offsets: HashMap<Value, Value> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::PtrOffset(dst, base, _) => Some((*dst, *base)),
+                _ => None,
+            })
+            .collect();
+        let read = read_bases(w);
+        assert_eq!(read.len(), 1, "one read: {:?}", instrs(w));
+        let stats = read[0];
+        let borrow = offsets[&stats];
+        let storage = offsets[&borrow];
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Alloc(v, ..) if *v == storage)),
+            "the chain bottoms out at the receiver's own storage: {:?}",
+            instrs(w)
+        );
+    }
+
+    /// The base each `@` reads through, in emission order: the `PtrOffset`
+    /// whose result a `FieldLoad` consumes. Skips the construction-time
+    /// offsets a `Point`/`Unit` literal emits, which are not projections.
+    fn read_bases(w: &IrFunc) -> Vec<Value> {
+        let offsets: HashMap<Value, Value> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::PtrOffset(dst, base, _) => Some((*dst, *base)),
+                _ => None,
+            })
+            .collect();
+        instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::FieldLoad(_, src) => Some(offsets[src]),
+                _ => None,
+            })
+            .collect()
     }
 }

@@ -267,7 +267,7 @@ fn linear_value_across_the_spliced_back_edge_is_error() {
     // type and the location are all part of the assertion.
     let src = format!(
         "type: Spy tag i64 ;\n\
-         : drop ( Spy -- ) | s | \"drop \" . s Spy>tag . ;\n\
+         : drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n\
          {BOOL_Q}: spin ( i64 -- i64 )\n\
          | n | 9 Spy | s |\n\
          n 0 = ~[ 0 ] ~[ n 1 - spin ] Bool? ;\n\
@@ -288,7 +288,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
     // stranded, so the guard must not fire -- and the loop really is built
     // (the `Spy` rides the carried row) and disposes exactly once.
     let src = "type: Spy tag i64 ;\n\
-        : drop ( Spy -- ) | s | \"drop \" . s Spy>tag . ;\n\
+        : drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n\
         : Bool? inline ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n\
         : spin ( Spy i64 -- i64 )\n\

@@ -21,6 +21,7 @@ pub(super) fn check_reference_word(
     prov: &mut Provenance,
     live: &Liveness,
     at: usize,
+    resolved_fields: &mut HashMap<Span, (StructId, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -65,8 +66,18 @@ pub(super) fn check_reference_word(
             check_array_index(index, count, ctx, span, name)?;
             let out = intern_ref_type(refs, elem, mutable);
             let deriv = prov.project(stack[n - 2].deriv);
+            // Review fix (P7 slice 1): forward the receiver's region
+            // unchanged onto the narrowed reference -- an over-approximation
+            // (every index looks like it aliases the whole array), but
+            // without it a receiver whose only live reference chains through
+            // this word would look unborrowed to the consume-time check
+            // below.
+            let alias = stack[n - 2].alias;
             stack.truncate(n - 2);
-            stack.push(Slot::derived(out, deriv));
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
         }
         "^" => {
             let n = stack.len();
@@ -101,82 +112,36 @@ pub(super) fn check_reference_word(
             let payload = cells[cell_id.index()].payload;
             let out = intern_ref_type(refs, payload, mutable);
             let deriv = prov.project(stack[n - 1].deriv);
+            // Review fix (P7 slice 1): forward the receiver's region, same
+            // reasoning as `&>` above.
+            let alias = stack[n - 1].alias;
             stack.truncate(n - 1);
-            stack.push(Slot::derived(out, deriv));
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
         }
         _ => {
-            if let Some((head, field_name)) = rest.split_once('>') {
-                if let Some(idx) = ctx.structs().iter().position(|d| d.name == head) {
-                    let decl = &ctx.structs()[idx];
-                    if let Some(field_ty) = decl
-                        .fields
-                        .iter()
-                        .find(|(f, _)| f == field_name)
-                        .map(|(_, ty)| *ty)
-                    {
-                        let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-                        let want = intern_ref_type(refs, struct_ty, mutable);
-                        let n = stack.len();
-                        if n < 1 {
-                            return Err(need(name, 1, n));
-                        }
-                        if stack[n - 1].quot.is_some() {
-                            return Err(reject_quotation_operand(ctx, span, name));
-                        }
-                        if stack[n - 1].ty != want {
-                            return Err(type_mismatch_error(
-                                ctx,
-                                span,
-                                name,
-                                want,
-                                stack[n - 1].ty,
-                            ));
-                        }
-                        let out = intern_ref_type(refs, field_ty, mutable);
-                        let deriv = prov.project(stack[n - 1].deriv);
-                        stack.truncate(n - 1);
-                        stack.push(Slot::derived(out, deriv));
-                        return Ok(Some(std::mem::take(stack)));
-                    }
-                }
-                // Phase 6 slice 2 (R9 mechanism 3 / R11): `&Variant>fi` /
-                // `&!Variant>fi`. Shaped like the struct arm above, but the
-                // variant is resolved from the `EnumId` the operand already
-                // carries rather than by a global name scan: variant names
-                // are not unique across enums (only *type* names are deduped),
-                // so a scan would mis-resolve the second enum's variant.
-                let n = stack.len();
-                if n >= 1 {
-                    if let Some((Type::Variant(id, _, _), _)) = ref_parts(stack[n - 1].ty, refs) {
-                        if let Some((spelled_vi, field_ty)) =
-                            variant_accessor_field(ctx.enums(), id, head, field_name)
-                        {
-                            let variant_ty = variant_type(ctx.enums(), id, spelled_vi);
-                            let want = intern_ref_type(refs, variant_ty, mutable);
-                            if stack[n - 1].quot.is_some() {
-                                return Err(reject_quotation_operand(ctx, span, name));
-                            }
-                            // Full-type equality, the struct arm's idiom: it
-                            // catches a wrong variant and a wrong mutability
-                            // in one comparison, since the two interned
-                            // reference types differ either way.
-                            if stack[n - 1].ty != want {
-                                return Err(type_mismatch_error(
-                                    ctx,
-                                    span,
-                                    name,
-                                    want,
-                                    stack[n - 1].ty,
-                                ));
-                            }
-                            let out = intern_ref_type(refs, field_ty, mutable);
-                            let deriv = prov.project(stack[n - 1].deriv);
-                            stack.truncate(n - 1);
-                            stack.push(Slot::derived(out, deriv));
-                            return Ok(Some(std::mem::take(stack)));
-                        }
-                    }
-                }
+            // P7 slice 1 (D1/R1): a receiver-directed projection. `&hp` names
+            // no type, so the field resolves against the type already on the
+            // stack; the resolution is recorded per call site for lowering,
+            // which has no checker stack to re-derive it from (R2). Tried
+            // ahead of the local/static borrow below: the receiver wins (R3).
+            if let Some(out) = check_field_projection(
+                name,
+                rest,
+                mutable,
+                span,
+                stack,
+                ctx,
+                scope,
+                refs,
+                prov,
+                live,
+                at,
+                resolved_fields,
+            )? {
+                return Ok(Some(out));
             }
             // Everything else is a prefix borrow of a place: a bound local,
             // or (R1) a module static.
@@ -278,6 +243,226 @@ pub(super) fn check_reference_word(
         }
     }
     Ok(Some(std::mem::take(stack)))
+}
+
+/// P7 slice 1 (D2/R1): `&f` / `&!f`, a field projection resolved against the
+/// receiver on top of the stack rather than against a type name baked into the
+/// word. `None` when the stack top is not a struct or variant (or a reference
+/// to one) with a field `field`, so the caller falls through to the
+/// prefix-borrow chain and an unrelated `&x` keeps its existing meaning.
+///
+/// Two effects, by receiver:
+///
+/// - `( &S -- &A )` / `( &!S -- &!A )`, **consuming**. A reference left on the
+///   stack is a surplus value, so a non-consuming chain would strand an
+///   intermediate at every step of `u &stats &hp @`.
+/// - owned `S`: `( S -- S &A )`, **non-consuming**. Consuming the receiver
+///   would oblige this word to dispose the fields it did not project, which is
+///   exactly the implicit disposal this slice deletes.
+///
+/// R4: a variant receiver (`Type::Variant`) is resolved the same way, but
+/// checker-only -- there is no `EnumId` shape in `resolved_fields` and no
+/// lowering arm for it, so a variant projection never reaches the insert at
+/// the bottom of this function.
+#[allow(clippy::too_many_arguments)]
+fn check_field_projection(
+    name: &str,
+    field: &str,
+    mutable: bool,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    scope: &Scope,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    live: &Liveness,
+    at: usize,
+    resolved_fields: &mut HashMap<Span, (StructId, usize)>,
+) -> Result<Option<Vec<Slot>>, String> {
+    // D1's grammar makes a receiver-directed field an ordinary identifier,
+    // never an accessor, and `>` is not a lexer delimiter -- so a leftover
+    // `&!Type>field` arrives here as one token whose whole text would be read
+    // as a field name, answering "`Point` declares no field named `Point>z`"
+    // and implying that spelling could name a field. It cannot: the fused
+    // accessors are retired, so the honest answer is the borrow chain's
+    // "not a place" / "not a local in scope" below.
+    if field.contains('>') {
+        return Ok(None);
+    }
+    let n = stack.len();
+    if n < 1 {
+        return Ok(None);
+    }
+    let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Ok(None);
+    }
+    let (referent, recv_mut) = match ref_parts(top.ty, refs) {
+        Some((referent, recv_mut)) => (referent, Some(recv_mut)),
+        None => (top.ty, None),
+    };
+    // R4: a variant receiver is resolved by the same rule as a struct one --
+    // the fields and display name just come from a different declaration
+    // table. Checker-only (R4): `resolved_fields` is `StructId`-keyed and has
+    // no `EnumId` shape, and there is no lowering arm for a variant field
+    // reference, so the variant arm below never reaches that insert.
+    let (fields, receiver_name): (&[(String, Type)], &str) = match referent {
+        Type::Struct(id, _) => (
+            &ctx.structs()[id.index()].fields,
+            ctx.structs()[id.index()].name_static,
+        ),
+        Type::Variant(id, vi, _) => {
+            let variant = &ctx.enums()[id.index()].variants[vi];
+            (&variant.fields, variant.display_static)
+        }
+        _ => return Ok(None),
+    };
+    // `field` arrives as `resolve` left it, which mangles it whenever it
+    // matches a static of this module (R2) -- struct field names are never
+    // mangled, so the lookup below has to compare against the demangled
+    // spelling or a static's mangled name can never be seen to collide with
+    // a field of the same source name.
+    let field_name = crate::resolve::demangle_call(field);
+    let field_pos = fields.iter().position(|(f, _)| f == field_name.as_ref());
+    // R3: the receiver is tried first, but a local/static of the same name
+    // still has a say -- present on both sides it is a shadow error, present
+    // only there (the receiver lacking the field) it is the fallback that
+    // keeps `&n` meaning what it always meant, and present on neither side
+    // the diagnostic can finally name the receiver type.
+    let existing_place = scope.local_type(field).is_some() || ctx.static_type(field).is_some();
+    let fi = match field_pos {
+        Some(_fi) if existing_place => {
+            return Err(projection_field_shadowed_by_local_error(
+                ctx,
+                span,
+                name,
+                receiver_name,
+                field_name.as_ref(),
+            ));
+        }
+        Some(fi) => fi,
+        None if existing_place => return Ok(None),
+        None => {
+            return Err(projection_unknown_field_error(
+                ctx,
+                span,
+                name,
+                receiver_name,
+                field_name.as_ref(),
+            ));
+        }
+    };
+    let field_ty = fields[fi].1;
+    match recv_mut {
+        Some(recv_mut) => {
+            // Full-type equality: a wrong mutability is a type mismatch
+            // between the two interned reference shapes.
+            if recv_mut != mutable {
+                let want = intern_ref_type(refs, referent, mutable);
+                return Err(type_mismatch_error(ctx, span, name, want, top.ty));
+            }
+            let out = intern_ref_type(refs, field_ty, mutable);
+            let deriv = prov.project(top.deriv);
+            // Review fix (P7 slice 1): forward the receiver's region, same
+            // reasoning as `&>` above -- a receiver reached only through a
+            // chain of projections (`&!s &!v`) would otherwise look
+            // unborrowed to the consume-time check.
+            let alias = top.alias;
+            stack.truncate(n - 1);
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
+        }
+        None => {
+            // The receiver stays, so this arm needs region machinery: the
+            // projection is interned as a child region of the receiver's own,
+            // which is what makes two overlapping projections off one
+            // *anonymous* receiver (`p &!hp swap &!hp`) a checked conflict
+            // rather than an unchecked pair of aliases. Nothing is gated on
+            // `is_copy`: a projection borrows the field rather than
+            // duplicating its value, so a linear field is not special here
+            // (`@`/`!` still refuse to move one through it).
+            let alias = projected_region(&mut stack[n - 1], field, span, prov);
+            if let Some(origin) =
+                overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, mutable)
+            {
+                return Err(conflicting_projection_error(
+                    ctx, span, name, mutable, origin,
+                ));
+            }
+            let out = intern_ref_type(refs, field_ty, mutable);
+            stack.push(Slot {
+                alias: Some(alias),
+                ..Slot::computed(out)
+            });
+        }
+    }
+    if let Type::Struct(id, _) = referent {
+        resolved_fields.insert(span, (id, fi));
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// Where a live reference denoting a region overlapping a new projection's is,
+/// when one exists and the pair cannot coexist (a new `&!` conflicts with any
+/// live projection, a new `&` only with a live mutable one). Only
+/// *reference*-typed values are candidates: the receiver and its copies denote
+/// the same regions but hold no borrow, and consuming one is what ends it.
+pub(super) fn overlapping_projection<'a>(
+    below: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    set: AliasSetId,
+    mutable: bool,
+) -> Option<AliasOrigin<'a>> {
+    let conflicts = |ty: Type, alias: Option<AliasSetId>| {
+        let Type::Ref(_, other_mutable, _) = ty else {
+            return false;
+        };
+        (mutable || other_mutable) && alias.is_some_and(|other| prov.alias_sets_overlap(set, other))
+    };
+    if let Some(b) = scope
+        .bound
+        .iter()
+        .find(|b| !live.dead(&b.name, at) && conflicts(b.ty, b.aliases))
+    {
+        return Some(AliasOrigin::Name(&b.name));
+    }
+    below
+        .iter()
+        .find(|slot| conflicts(slot.ty, slot.alias.map(|a| a.set)))
+        .and_then(|slot| slot.alias)
+        .map(|alias| AliasOrigin::Stack(alias.span))
+}
+
+/// P7 slice 1 review fix: the live reference that consuming `consumed` would
+/// strand, when one exists. The guard at every point a place with a region --
+/// named or, via the owned-receiver projection arm, anonymous -- is consumed
+/// for good (`drop`, a moving word call, `^`, a moving field getter). That arm
+/// produces a reference with a region (`Slot.alias`) but no `Deriv` (there is
+/// no place name to root one on), so it is invisible to the named-place
+/// consume checks (`consume_of_borrowed_place_error`) and needs this
+/// region-keyed sibling instead. `mutable: true` so *any* live reference
+/// (shared or mutable) counts, not only a mutable one.
+///
+/// A *reference* being consumed is not a place ending: consuming one of two
+/// shared projections of a field is how a borrow ends, and the storage it
+/// pointed into outlives it either way.
+pub(super) fn consumed_place_conflict<'a>(
+    consumed: Slot,
+    others: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+) -> Option<AliasOrigin<'a>> {
+    if matches!(consumed.ty, Type::Ref(..)) {
+        return None;
+    }
+    overlapping_projection(others, scope, prov, live, at, consumed.alias?.set, true)
 }
 
 /// `@` fetches, `!` stores, `+!` adds in place. All three are restricted
@@ -602,6 +787,7 @@ pub(super) fn check_array_word(
 /// `^> ( ^T -- T )` consumes it and yields the payload, `^|> ( ^T -- ^T T )`
 /// is a non-consuming peek restricted to a `Copy` payload. Matched by exact
 /// name only, so `^>x`/`^|>x` fall through to the ordinary unknown-word error.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_owned_cell_word(
     name: &str,
     span: Span,
@@ -609,6 +795,10 @@ pub(super) fn check_owned_cell_word(
     ctx: &Ctx,
     arrays: &[ArrayDecl],
     cells: &mut Vec<OwnedCellDecl>,
+    prov: &Provenance,
+    scope: &Scope,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     // R11: `^`/`^>`/`^|>` each inspect the top operand's `ty`.
     if matches!(name, "^" | "^>" | "^|>") && stack.last().is_some_and(|s| s.quot.is_some()) {
@@ -631,6 +821,14 @@ pub(super) fn check_owned_cell_word(
                     "the payload `^` would store",
                     payload,
                 ));
+            }
+            // Review fix (P7 slice 1): `^` consumes its payload just as
+            // `drop` does, so a payload a live projection still reaches
+            // cannot be moved into the cell out from under that reference.
+            if let Some(origin) =
+                consumed_place_conflict(stack[n - 1], &stack[..n - 1], scope, prov, live, at)
+            {
+                return Err(consuming_borrowed_value_error(ctx, span, "^", origin));
             }
             // Review fix: forward the payload's surviving set (R19) onto the
             // cell -- `^` allocating a closure-carrying value must keep it
@@ -692,215 +890,6 @@ pub(super) fn check_owned_cell_word(
         }
         _ => return Ok(None),
     }
-    Ok(Some(std::mem::take(stack)))
-}
-
-/// `S|>fi` (R10): a new non-consuming `( S -- S field )` peek, keyed by the
-/// per-struct-per-field name (unlike `fill`, it is not generic over a
-/// shape, so it is not a fixed entry in `struct_generated_sigs`
-/// either: it is looked up by parsing the `Struct|>field` name against the
-/// struct registry, same as the IR's `structs.words` map). `None` if `name`
-/// doesn't split on `|>` or doesn't resolve to a known struct+field (the
-/// caller falls through to the env lookup, so an unrelated word still gets
-/// the ordinary unknown-word error). A linear field is rejected outright
-/// (R10): the peek would leave a second, unowned reference to a resource the
-/// aggregate still owns, with no reference machinery to make that legal.
-pub(super) fn check_struct_peek_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    arrays: &[ArrayDecl],
-    prov: &mut Provenance,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((struct_name, field_name)) = name.split_once("|>") else {
-        return Ok(None);
-    };
-    let structs = ctx.structs();
-    // D7: `struct_name` is always the bare surface spelling (`[` is a lexer
-    // delimiter, so no source term can ever spell a mangled instantiation
-    // name), but an instantiated `decl.name` is mangled (`Box[i64]`); compare
-    // against the surface name it carries, same as the generated-word
-    // registries this peek's own key lives beside in `layout.rs`.
-    let Some(idx) = structs
-        .iter()
-        .position(|d| generic_surface_name(&d.name) == struct_name)
-    else {
-        return Ok(None);
-    };
-    let decl = &structs[idx];
-    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
-        return Ok(None);
-    };
-    let field_ty = *field_ty;
-    if !is_copy(field_ty, structs, ctx.enums(), arrays) {
-        return Err(peek_of_linear_field_error(ctx, span, name, field_ty));
-    }
-    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-    let n = stack.len();
-    if n < 1 {
-        return Err(underflow_error(ctx, span, name, 1, n));
-    }
-    let top = stack[n - 1];
-    if top.quot.is_some() {
-        return Err(reject_quotation_operand(ctx, span, name));
-    }
-    if top.ty != struct_ty {
-        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
-    }
-    // The peek is non-consuming and pushes the field's *interior address*,
-    // so two peeks of one field of one struct are two names for one region.
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    // Review fix: forward the struct operand's surviving set (R19) onto the
-    // peeked field -- a closure the struct carries stays visible through a
-    // peek exactly as it would through the consuming getter below.
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
-    Ok(Some(std::mem::take(stack)))
-}
-
-/// `S>fi` (R21's third route): the ordinary, consuming field getter, already
-/// registered in `struct_generated_sigs` and otherwise left to the generic
-/// env-based dispatch. That generic path pushes a plain `Slot::computed`
-/// with no alias, but for an aggregate field this getter's IR lowering
-/// pushes the field's *interior address* rather than copying it out (same
-/// device as `S|>fi`'s peek), so the struct operand and the extracted field
-/// alias one region exactly as two peeks would. `None` for a scalar field
-/// (no region to alias) or an unresolved name, so every other call site is
-/// untouched. Consuming, unlike the peek: the struct operand is popped, not
-/// left on the stack, but the aliasing hazard is unaffected by that, since
-/// the operand's own local binding (if it is named) keeps the same region
-/// regardless of what happens to the stack-level copy of its slot.
-pub(super) fn check_struct_get_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    prov: &mut Provenance,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((struct_name, field_name)) = name.split_once('>') else {
-        return Ok(None);
-    };
-    let structs = ctx.structs();
-    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
-        return Ok(None);
-    };
-    let decl = &structs[idx];
-    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
-        return Ok(None);
-    };
-    let field_ty = *field_ty;
-    if !field_ty.is_aggregate() {
-        return Ok(None);
-    }
-    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-    let n = stack.len();
-    if n < 1 {
-        return Err(underflow_error(ctx, span, name, 1, n));
-    }
-    let top = stack[n - 1];
-    if top.quot.is_some() {
-        return Err(reject_quotation_operand(ctx, span, name));
-    }
-    if top.ty != struct_ty {
-        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
-    }
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    stack.truncate(n - 1);
-    // Review fix: forward the struct operand's surviving set (R19) onto the
-    // extracted field -- an aggregate field carrying a closure (a nested
-    // struct/array/cell) must keep that closure visible to R22's return
-    // guard past this getter.
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
-    Ok(Some(std::mem::take(stack)))
-}
-
-/// Phase 6 slice 2 (R11/R12): resolve an accessor's spelled variant name and
-/// field name against the enum the **operand** names -- never a global
-/// variant-name scan, which would mis-resolve, since variant names are not
-/// unique across enums (only *type* names are deduped). `None` if that enum
-/// holds no variant by that name, or that variant no such field; both
-/// accessor mechanisms then fall through rather than invent a diagnostic for
-/// a name they have not established is an accessor at all.
-fn variant_accessor_field(
-    enums: &[EnumDecl],
-    id: EnumId,
-    variant_name: &str,
-    field_name: &str,
-) -> Option<(usize, Type)> {
-    // D7: a source term can only ever spell the bare surface name (`[` is a
-    // lexer delimiter), while an instantiated `variant.name` is mangled.
-    let vi = enums[id.index()]
-        .variants
-        .iter()
-        .position(|v| generic_surface_name(&v.name) == variant_name)?;
-    let field_ty = enums[id.index()].variants[vi]
-        .fields
-        .iter()
-        .find(|(f, _)| f == field_name)
-        .map(|(_, ty)| *ty)?;
-    Some((vi, field_ty))
-}
-
-/// Phase 6 slice 2 (R9 mechanism 2): `Variant>fi` for an **aggregate** field,
-/// the variant twin of `check_struct_get_word`. A scalar field and the whole
-/// `Variant>` destructure never reach here: they are typed entirely by the
-/// `Sig` `variant_generated_sigs` registered, and this returns `Ok(None)` for
-/// them. An aggregate field is claimed here so the getter pushes the field's
-/// *interior address* (the `peek_region` device) rather than copying it out,
-/// exactly as the struct getter does.
-///
-/// R11/R12: the variant is resolved from the `EnumId` the operand already
-/// carries, never by a global variant-name scan -- variant names are not
-/// unique across enums, so a scan would pick the first match arbitrarily.
-/// Every fall-through is `Ok(None)` (not a variant operand, name absent from
-/// the operand's own enum, scalar field), leaving an unrelated word to the
-/// ordinary lookup chain; only a resolved aggregate field with the wrong
-/// variant on top is an error here.
-pub(super) fn check_variant_get_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    prov: &mut Provenance,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((variant_name, field_name)) = name.split_once('>') else {
-        return Ok(None);
-    };
-    let n = stack.len();
-    if n < 1 {
-        return Ok(None);
-    }
-    let top = stack[n - 1];
-    let Type::Variant(id, vi, _) = top.ty else {
-        return Ok(None);
-    };
-    let enums = ctx.enums();
-    let Some((spelled_vi, field_ty)) = variant_accessor_field(enums, id, variant_name, field_name)
-    else {
-        return Ok(None);
-    };
-    if !field_ty.is_aggregate() {
-        return Ok(None);
-    }
-    let want = variant_type(enums, id, spelled_vi);
-    if spelled_vi != vi {
-        return Err(type_mismatch_error(ctx, span, name, want, top.ty));
-    }
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    stack.truncate(n - 1);
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
     Ok(Some(std::mem::take(stack)))
 }
 
@@ -1150,21 +1139,6 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
         }
     }
 }
-/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
-/// the aggregate live, so it can't also transfer ownership of a linear
-/// field's value; the workaround is `S>` (destructure the whole aggregate).
-fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
-            op, name, span.line, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
-        ),
-    }
-}
 /// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
 /// word and the offending operand type, mirroring `array_word_operand_error`.
 fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
@@ -1297,6 +1271,101 @@ fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Ty
 /// the virtual stack — can denote one region; mutating through one would then be
 /// silently observable through the other, which is exactly the class of silent
 /// failure the language exists to reject.
+/// P7 slice 1 (R1/OQ3): two projections into one region off an owned receiver
+/// that has no name to key the place-based `conflicting_borrow_error` on. The
+/// remedy is the same one that error gives, phrased for a projection.
+fn conflicting_projection_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    mutable: bool,
+    origin: AliasOrigin<'_>,
+) -> String {
+    let held = match origin {
+        AliasOrigin::Name(name) => format!("the projection bound as `{name}`"),
+        AliasOrigin::Stack(pushed) => format!(
+            "the projection taken at line {}, col {}",
+            pushed.line, pushed.col
+        ),
+    };
+    let taken = if mutable { "mutable" } else { "shared" };
+    format!(
+        "error: `{name}` conflicts with a live projection of the same field{} (line {}, col {})\n  {held} is still live, and this one is {taken}\n  at most one `&!` into a field, and never a `&` alongside a `&!`; consume the earlier projection first",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
+/// R3: the receiver resolved to a struct, but it has no field of that name,
+/// and no local or static shares the name either -- there is no fallback
+/// left to try. Named at check-time, where the receiver type is known, so
+/// the diagnostic points at that type rather than saying `unknown word`.
+fn projection_unknown_field_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    receiver: &str,
+    field: &str,
+) -> String {
+    format!(
+        "error: `{receiver}` has no field `{field}`{} (line {}, col {})\n  `{name}` projects a field of the receiver on top of the stack; `{receiver}` declares no field named `{field}`",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
+/// R3: the receiver has a field of this name *and* a local (or static) of the
+/// same name is in scope. `&`-led resolution tries the receiver first, so a
+/// collision here is silent precedence unless it is a located error naming
+/// both candidates -- field and local names are short in this corpus and
+/// collide easily (`arr`, `acc`, `key`, `n`).
+fn projection_field_shadowed_by_local_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    receiver: &str,
+    field: &str,
+) -> String {
+    let name = crate::resolve::demangle_call(name);
+    format!(
+        "error: `{name}` is ambiguous{} (line {}, col {})\n  `{receiver}` has a field `{field}`, and a local (or static) named `{field}` is also in scope\n  rename one of them",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
+/// P7 slice 1 review fix: `drop`, a moving word call, or a moving field
+/// getter discards a place -- named or anonymous -- while a reference the
+/// owned-receiver projection arm took from it is still live. That arm
+/// produces a reference with a region (`Slot.alias`) but no `Deriv` (there is
+/// no place name to root one on), so it is invisible to the named-place
+/// consume checks (`consume_of_borrowed_place_error`) and needs this region-
+/// keyed sibling instead.
+pub(super) fn consuming_borrowed_value_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    origin: AliasOrigin<'_>,
+) -> String {
+    let name = crate::resolve::demangle_call(name);
+    let held = match origin {
+        AliasOrigin::Name(n) => format!("the projection bound as `{n}`"),
+        AliasOrigin::Stack(pushed) => format!(
+            "the projection taken at line {}, col {}",
+            pushed.line, pushed.col
+        ),
+    };
+    format!(
+        "error: `{name}` consumes a value while a reference derived from it is still live{} (line {}, col {})\n  {held} is still live\n  a place stays borrowed until every reference derived from it is consumed",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 fn aliased_place_borrow_error(
     ctx: &Ctx,
     span: Span,
@@ -1370,7 +1439,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
 
@@ -1475,23 +1544,16 @@ mod tests {
             ),
             // check_array_index, reached through the `&>` reference word.
             op(
-                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &x [ + ] &> drop drop ;\n",
                 "`&>`",
             ),
             // check_owned_cell_word.
             op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
             // check_reference_word's `&q` prefix-borrow-of-a-local form.
             op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
-            // check_struct_peek_word and check_struct_get_word (an aggregate
-            // field, so the getter is intercepted here, not by the env loop).
-            op("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
-            op(
-                "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
-                "`Outer>b`",
-            ),
             // check_access_word's store paths: the value and the receiver.
             w(
-                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
                 "a quotation cannot be stored",
                 "escaping quotations are slice 7",
             ),
@@ -1635,9 +1697,9 @@ mod tests {
     // No surface syntax mints a `Type::Variant` operand until slice 3's
     // eliminator, so every case here seeds one onto a hand-built stack. Each
     // names the mechanism it guards and asserts a discriminating shape: a
-    // scalar getter driven through `check_variant_get_word` would return
-    // `Ok(None)` and pass vacuously, so scalar cases go through env dispatch
-    // instead, and only the R12 fall-through case asserts on `Ok(None)`.
+    // scalar field driven through the projection path would return `Ok(None)`
+    // and pass vacuously, so scalar cases go through env dispatch instead, and
+    // only the R12 fall-through case asserts on `Ok(None)`.
 
     /// `Circle` carries one scalar (`r`) and one aggregate (`p`) field, `Rect`
     /// an aggregate one, `Dot` none. Parsed and checked from source so each
@@ -1686,40 +1748,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
-    }
-
-    #[test]
-    fn variant_scalar_getter_types_by_sig_dispatch() {
-        // Mechanism 1: `check_variant_get_word` bails `Ok(None)` on a scalar
-        // field, so the registered `Sig` alone types this. The exact residual
-        // stack is the discriminator.
-        let module = shape_module();
-        let stack = infer_variant_line(&module, &[shape_variant(&module, 0)], "Circle>r").unwrap();
-        assert_eq!(stack, vec![Type::I64]);
-    }
-
-    #[test]
-    fn check_variant_get_word_scalar_field_returns_none() {
-        // Mechanism boundary (R9): a scalar field must never be claimed by
-        // `check_variant_get_word` -- it is typed entirely by mechanism 1
-        // above (`variant_scalar_getter_types_by_sig_dispatch`). Paired with
-        // that test, asserting the direct `Ok(None)` here is not a lone
-        // vacuous case: deleting the `is_aggregate` bail would still leave
-        // the Sig-dispatch test green (mechanism 1 wins env dispatch first),
-        // so only this direct call on the check function catches it.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        assert!(
-            check_variant_get_word("Circle>r", Span::default(), &mut stack, &ctx, &mut prov)
-                .unwrap()
-                .is_none()
-        );
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
 
     #[test]
@@ -1744,57 +1773,6 @@ mod tests {
             .filter(|key| key.starts_with("Dot>"))
             .collect();
         assert_eq!(minted, vec!["Dot>".to_string()]);
-    }
-
-    #[test]
-    fn variant_aggregate_getter_aliases_the_operand_region() {
-        // Mechanism 2 (R-OQ3): an aggregate field is claimed by
-        // `check_variant_get_word`, which pushes the field's *interior
-        // address* rather than a fresh unaliased slot. The pushed alias must
-        // be the operand region's `p` projection, which is what a bare
-        // `Slot::computed(field_ty)` placebo would not produce.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let region = prov.fresh_region();
-        let base = prov.alias_set_of(region);
-        let mut stack = vec![Slot {
-            alias: Some(Alias {
-                set: base,
-                span: Span::default(),
-            }),
-            ..Slot::computed(shape_variant(&module, 0))
-        }];
-        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap()
-            .expect("an aggregate variant field is claimed here");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].ty, struct_ty(&module, "P"));
-        let alias = out[0].alias.expect("the field aliases the operand");
-        assert_eq!(alias.set, prov.field_alias_set(base, "p"));
-    }
-
-    #[test]
-    fn variant_aggregate_getter_of_the_wrong_variant_names_both_spellings() {
-        // Mechanism 2 + R2: the wrong-operand mismatch renders the leaked
-        // `Enum.Variant` names. It must use an aggregate field -- a scalar one
-        // never reaches `check_variant_get_word` at all.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        let err = check_variant_get_word("Rect>q", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap_err();
-        assert!(
-            err.contains("expected `Shape.Rect`, found `Shape.Circle`"),
-            "unexpected message: {err}"
-        );
     }
 
     // --- P7 slice 2, R1/R3: borrowing a module static. ---
@@ -1878,70 +1856,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn variant_accessor_absent_from_the_operands_enum_falls_through() {
-        // R12: a name the operand's own enum does not hold is not established
-        // to be an accessor at all, so both mechanisms return `Ok(None)` and
-        // the call degrades to the ordinary unknown-word error rather than a
-        // variant-specific one. The single case that may assert on `Ok(None)`.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        assert!(
-            check_variant_get_word("Nope>q", Span::default(), &mut stack, &ctx, &mut prov)
-                .unwrap()
-                .is_none()
-        );
-        let err = infer_variant_line(&module, &[shape_variant(&module, 0)], "Nope>q").unwrap_err();
-        assert!(err.contains("unknown word `Nope>q`"), "unexpected: {err}");
-        assert!(
-            !err.contains("Shape"),
-            "invented a variant diagnostic: {err}"
-        );
-    }
-
-    /// Two enums (`A`, `B`) that each spell a `Circle p` variant, with
-    /// different field types (`P`, `Q`). Proves R11/R12's central claim: the
-    /// variant is resolved from the operand's own `EnumId`, never a global
-    /// first-match scan over variant names, since variant names are not
-    /// unique across enums. `bool` occupies enum 0, so `A` is 1 and `B` is 2.
-    const TWO_ENUM_SRC: &str =
-        "type: P a i64 ;\ntype: Q b i64 ;\ntype: A | Circle p P ;\ntype: B | Circle p Q ;\n: main ( -- ) ;\n";
-
-    fn two_enum_module() -> Module {
-        let tokens = lex(TWO_ENUM_SRC).unwrap();
-        let mut module = parse(&tokens).unwrap();
-        check(&mut module).unwrap();
-        module
-    }
-
-    #[test]
-    fn variant_accessor_resolves_the_operand_enum_not_a_global_scan() {
-        // A global first-match scan over `variant_accessor_field` would
-        // resolve `Circle>p` against whichever enum lists a `Circle` first
-        // (`A`), mis-typing `B`'s operand as `P` instead of `Q`.
-        let module = two_enum_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let b_circle = variant_type(&module.enums, EnumId::from_index(2), 0);
-        let mut stack = vec![Slot::computed(b_circle)];
-        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap()
-            .expect("Circle>p is claimed for B's own Circle variant");
-        assert_eq!(
-            out[0].ty,
-            struct_ty(&module, "Q"),
-            "resolved in the wrong enum"
-        );
-    }
-
     /// Mechanism 3 (R11): `check_reference_word` raw, since no source line can
     /// produce a `&Variant` operand this slice. Returns the pushed slot plus
     /// the operand's own derivation, so the caller can assert the projection.
@@ -1971,53 +1885,11 @@ mod tests {
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
+            &mut HashMap::new(),
         )?
         .expect("the variant reference arm claims this word");
         assert_eq!(out.len(), 1);
         Ok((out[0], prov, operand, refs))
-    }
-
-    #[test]
-    fn variant_reference_getter_projects_through_the_operand() {
-        // Mechanism 3: pushes `&field`/`&!field` and a *projected* derivation
-        // that keeps the operand's chain. `project` mints a fresh `DerivId`,
-        // so the discriminator is the derivation's contents: `projected` set,
-        // place and owned root inherited. A placebo forwarding the parent id
-        // unchanged leaves `projected` false.
-        for mutable in [false, true] {
-            let module = shape_module();
-            let word = if mutable { "&!Circle>r" } else { "&Circle>r" };
-            let (pushed, prov, operand, mut refs) =
-                call_variant_ref_word(&module, word, mutable).unwrap();
-            assert_eq!(
-                pushed.ty,
-                intern_ref_type(&mut refs, Type::I64, mutable),
-                "{word}"
-            );
-            let deriv = prov.deriv(pushed.deriv.expect("a reference carries provenance"));
-            assert!(deriv.projected, "{word}: not a projection");
-            assert_eq!(deriv.place, prov.deriv(operand).place, "{word}");
-            assert_eq!(deriv.owned_root, prov.deriv(operand).owned_root, "{word}");
-        }
-    }
-
-    #[test]
-    fn variant_reference_getter_rejects_a_mutability_mismatch() {
-        // Mechanism 3 (R11): caught on the `want`-equality path -- the two
-        // interned reference types differ -- not by a `recv_mut != mutable`
-        // test, which belongs only to the `&>`/`&^` arms. The message spells
-        // both interned reference names, which is what R1's leaked name buys.
-        let module = shape_module();
-        let err = call_variant_ref_word(&module, "&!Circle>r", false).unwrap_err();
-        assert!(
-            err.contains("expected `&!Shape.Circle`, found `&Shape.Circle`"),
-            "unexpected message: {err}"
-        );
-        let err = call_variant_ref_word(&module, "&Circle>r", true).unwrap_err();
-        assert!(
-            err.contains("expected `&Shape.Circle`, found `&!Shape.Circle`"),
-            "unexpected message: {err}"
-        );
     }
 
     /// R3: the no-stored-reference rule is type-keyed (`contains_reference`),
@@ -2114,5 +1986,508 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    /// Review fix (P7 slice 1, D1): the sibling of the test above with the
+    /// receiver *on the stack* rather than bound to a local first --
+    /// `check_field_projection` (D2's receiver-directed arm) sees this same
+    /// `Point>z` token before the prefix-borrow chain does, and used to treat
+    /// the whole mangled `Point>z` string as a plain field name instead of
+    /// falling through, leaking it into `projection_unknown_field_error`.
+    #[test]
+    fn borrow_of_unknown_field_names_the_source_spelling_with_receiver_on_stack() {
+        let err = check_src_mangled(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!Point>z drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!Point>z` does not borrow a place")
+                && err.contains("`Point>z` is not a local in scope"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    // --- P7 slice 1, D2/R1: receiver-directed field projections. ---
+
+    /// R1: the field resolves against the type on the stack, not against a
+    /// type name in the word. Both modes, and the chain D2 exists for.
+    #[test]
+    fn projection_resolves_field_against_receiver_type() {
+        assert!(check_src(
+            "type: Stats hp i64 ;\n\
+             type: Unit stats Stats ;\n\
+             : main ( -- ) 1 Stats Unit | u | &u &stats &hp @ . &!u &!stats &!hp 2 ! u drop ;",
+        )
+        .is_ok());
+    }
+
+    /// A receiver with no field of that name at all is not a projection, so
+    /// the borrow chain still gets it and a non-place still says so.
+    #[test]
+    fn projection_on_non_struct_receiver_is_error() {
+        let err = check_src("type: Point x i64 ;\n: main ( -- ) 7 &x @ . ;").unwrap_err();
+        assert!(
+            err.contains("`&x` does not borrow a place"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The sigil carries the mode; it is never inherited from the receiver.
+    #[test]
+    fn projection_mode_mismatch_is_error() {
+        let err = check_src("type: Point x i64 ;\n: main ( -- ) 1 Point | p | &p &!x 2 ! p drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("`&!x` expected `&!Point`, found `&Point`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R3: a receiver lacking the field leaves `&n` meaning what it always
+    /// meant. Guards the fall-through, which a projection arm that claimed
+    /// every `&`-led name would break.
+    #[test]
+    fn projection_falls_back_to_local_borrow_when_receiver_lacks_field() {
+        assert!(check_src(
+            "type: Point x i64 ;\n\
+             type: Box w i64 ;\n\
+             : main ( -- ) 1 Point | p | 2 Box &p &x @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// R3: the receiver has no field of that name, and there is no local or
+    /// static to fall back to either -- this is check-time's own error,
+    /// naming the receiver type rather than saying `unknown word`.
+    #[test]
+    fn projection_unknown_field_names_the_receiver_type() {
+        let err = check_src(
+            "type: Buf len usize ;\n\
+             : main ( -- ) 0 >usize Buf &lenn @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`Buf` has no field `lenn`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R3: the receiver has field `hp` *and* a local `hp` is in scope --
+    /// a located error naming both, not silent precedence either way.
+    #[test]
+    fn projection_field_shadowed_by_local_is_error() {
+        let err = check_src(
+            "type: Stats hp i64 ;\n\
+             : main ( -- ) 9 | hp | 1 Stats &hp @ . drop hp drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&hp` is ambiguous")
+                && err.contains("`Stats` has a field `hp`")
+                && err.contains("local"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Review fix (P7 slice 1, D2): the same shadow, but with a *static*
+    /// rather than a local. `resolve` mangles `&n` to `&n__m0` before the
+    /// checker runs (R2's static mangle is unconditional), so the field
+    /// lookup here has to demangle before comparing against the struct's own
+    /// field names -- otherwise the static wins silently, with no ambiguity
+    /// error at all, and the field becomes unreachable through `&n`.
+    #[test]
+    fn projection_field_shadowed_by_static_is_error() {
+        let err = check_src_mangled(
+            "static: n i64 = 0 ;\n\
+             type: Cnt n i64 ;\n\
+             : main ( -- ) 1 Cnt &n @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&n` is ambiguous")
+                && err.contains("`Cnt` has a field `n`")
+                && err.contains("local (or static)"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    /// The point of R1: one spelling, two receivers, two different fields.
+    /// A resolution keyed on the name alone could not tell these apart.
+    #[test]
+    fn projection_same_field_name_on_two_structs_resolves_by_receiver() {
+        assert!(check_src(
+            "type: A n i64 ;\n\
+             type: B tag i64 n bool ;\n\
+             : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;",
+        )
+        .is_ok());
+        // ... and the field's *type* is the receiver's, not the other's:
+        // `B`'s `n` is a `bool`, so printing it as an `i64` must not resolve.
+        let err = check_src(
+            "type: A n i64 ;\n\
+             type: B tag i64 n bool ;\n\
+             : sum ( i64 i64 -- i64 ) + ;\n\
+             : main ( -- ) 2 true B &n @ 1 sum . drop ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("`sum`"), "unexpected message: {err}");
+    }
+
+    /// OQ3's actual hazard: two live mutable projections of one field off an
+    /// *anonymous* owned receiver, which has no place name for the ordinary
+    /// borrow-conflict scan to key on. Rejected through the region overlap
+    /// the projection interns off the receiver.
+    #[test]
+    fn two_mutable_projections_off_one_anonymous_receiver_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!x swap &!x 3 ! swap 4 ! drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!x` conflicts with a live projection of the same field")
+                && err.contains("the projection taken at line 2, col 25 is still live"),
+            "unexpected message: {err}"
+        );
+        // A shared projection alongside a mutable one is the same conflict,
+        // and a projection bound to a local is found by name.
+        let bound = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x | a | &!x 3 ! a @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            bound.contains("the projection bound as `a` is still live"),
+            "unexpected message: {bound}"
+        );
+        // Two *disjoint* fields off one receiver stay legal: the conflict is
+        // region overlap, not "any second projection".
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!x swap &!y 3 ! swap 4 ! drop ;",
+        )
+        .is_ok());
+    }
+
+    /// R4: `&r` resolves against an owned `Type::Variant` receiver exactly
+    /// like a struct receiver -- the receiver-directed lookup does not care
+    /// which declaration table the field comes from. Checker-only (R4):
+    /// `resolved_fields` has no `EnumId` shape and no lowering arm exists for
+    /// a variant projection yet, so this only ever asserts acceptance/output
+    /// shape through `check_reference_word` directly, never build or run.
+    #[test]
+    fn projection_on_variant_receiver_ok() {
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut refs = Vec::new();
+        let mut prov = Provenance::default();
+        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        let mut resolved_fields = HashMap::new();
+        let out = check_reference_word(
+            "&r",
+            Span::default(),
+            &mut stack,
+            &ctx,
+            &Scope::default(),
+            &[],
+            &[],
+            &mut refs,
+            &mut prov,
+            &Liveness::scan(&[], &HashSet::new(), false),
+            0,
+            &mut resolved_fields,
+        )
+        .unwrap()
+        .expect("the projection arm claims a bare field on a variant receiver");
+        // D2: owned receiver, non-consuming -- the receiver stays and the
+        // projected reference joins it.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].ty, shape_variant(&module, 0));
+        assert_eq!(out[1].ty, intern_ref_type(&mut refs, Type::I64, false));
+        // R4 is checker-only: `resolved_fields` is `StructId`-keyed, so a
+        // variant projection recording one there would hand lowering an index
+        // into the wrong declaration table.
+        assert!(
+            resolved_fields.is_empty(),
+            "a variant projection must not be routed through `resolved_fields`"
+        );
+
+        // A reference receiver is consuming, the same as the struct case.
+        let (pushed, _prov, _operand, mut refs) =
+            call_variant_ref_word(&module, "&r", false).unwrap();
+        assert_eq!(pushed.ty, intern_ref_type(&mut refs, Type::I64, false));
+    }
+
+    /// Review fix: the owned-receiver arm's output has a region
+    /// (`Slot.alias`) but no `Deriv`, so it is invisible to the named-place
+    /// consume checks. Without a region-keyed guard at the point the
+    /// receiver is actually discarded, `drop`ping it while the projection is
+    /// still live leaves that reference aimed at storage that no longer
+    /// exists -- a use-after-free.
+    #[test]
+    fn drop_of_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live")
+                && err.contains("the projection taken at line 2, col 25 is still live"),
+            "unexpected message: {err}"
+        );
+        // Binding the receiver to a name first does not launder the hazard:
+        // the alias set rides the binding (`Scope::bind`) exactly as it
+        // rides an anonymous stack slot.
+        let bound = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap | p | p drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            bound.contains(
+                "`drop` consumes a value while a reference derived from it is still live"
+            ),
+            "unexpected message: {bound}"
+        );
+        // Consuming the *projection* first, then the receiver, is the sound
+        // order and stays legal.
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// The same hazard, reached through an ordinary word call rather than
+    /// `drop`: any word consuming the receiver by value is an equally live
+    /// route to the dangling reference, so the guard belongs on the generic
+    /// dispatch path too, not only on the `drop` builtin.
+    #[test]
+    fn word_call_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( Point -- ) drop ;\n\
+             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Review fix: the stranded reference is as often another *operand of the
+    /// same call* as a value left below it -- `mk &data &^ eat` passes the
+    /// receiver and its projection together, and a scan that stops at the
+    /// call's own base sees neither. Both operand orders, since the scan has
+    /// to reach past the consumed operand in both directions.
+    #[test]
+    fn word_call_consuming_a_receiver_its_own_argument_projects_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( Point &i64 -- ) swap drop @ . ;\n\
+             : main ( -- ) 1 2 Point &x eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+        let swapped = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( &i64 Point -- ) drop @ . ;\n\
+             : main ( -- ) 1 2 Point &x swap eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            swapped
+                .contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {swapped}"
+        );
+    }
+
+    /// Review fix: a polymorphic word is intercepted before the concrete `env`
+    /// lookup and so misses the guard on that path entirely -- `'T` binds to
+    /// the receiver's struct type as readily as a declared `Point` does, which
+    /// makes any generic consumer (`drop`-alike, a container `push`) a route to
+    /// the same dangling reference.
+    #[test]
+    fn poly_call_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( 'T -- ) drop ;\n\
+             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+        // And with the receiver and its projection as operands of that same
+        // generic call, the shape the concrete path also has to reach past.
+        let same_call = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( 'T &i64 -- ) drop drop ;\n\
+             : main ( -- ) 1 2 Point &x eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            same_call
+                .contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {same_call}"
+        );
+    }
+
+    /// Review fix: consuming a *reference* is how a borrow ends, not a place
+    /// ending. Two shared projections of one field coexist by design (a new
+    /// `&` conflicts only with a live `&!`), so discarding one while the other
+    /// is live has to stay legal -- the consume guard keys on the value that
+    /// owns the storage, never on a reference into it.
+    #[test]
+    fn dropping_one_of_two_shared_projections_is_allowed() {
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap &x drop swap @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// Review fix: `&>` narrows a reference to one element, and the region it
+    /// forwards is the only thing tying that element back to the receiver the
+    /// storage belongs to. Without the forwarding the consume guard reads the
+    /// receiver as unborrowed and this compiles into a read through a freed
+    /// heap block.
+    #[test]
+    fn array_index_ref_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Buf data ^[u8 4] len usize ;\n\
+             : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
+             : main ( -- ) mk &data &^ 0 >usize &> swap drop @ >i64 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The same forwarding through a projection off an already-referenced
+    /// struct (`&b &data`), the step a chain out of a nested receiver runs
+    /// through.
+    #[test]
+    fn nested_field_ref_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Buf data ^[u8 4] len usize ;\n\
+             type: Wrap b Buf ;\n\
+             : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
+             : main ( -- ) mk Wrap &b &data &^ swap drop 0 >usize &> @ >i64 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The projection's *reference*-receiver arm needs the same forwarding as
+    /// its fused sibling above. A single hop is caught by the receiver's own
+    /// region, so only a two-hop chain (`&!s &!v`) discriminates: without the
+    /// forwarding the second hop drops the region and the store lands in
+    /// storage `drop` already consumed.
+    #[test]
+    fn chained_projection_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer s Inner ;\n\
+             : main ( -- ) 1 Inner Outer &!s &!v swap drop 7 ! ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The forwarding is an over-approximation, so it needs a canary against
+    /// over-rejection: a chained borrow stays legal across the consumption of
+    /// an unrelated receiver of the same type, which a region coarse enough to
+    /// conflate the two would refuse.
+    #[test]
+    fn chained_projection_does_not_borrow_an_unrelated_receiver() {
+        assert!(check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer s Inner ;\n\
+             : main ( -- ) 2 Inner Outer &s &v @ . \
+             &!s &!v 1 Inner Outer drop 9 ! &s &v @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// A real build always mangles (`always_mangle`, `driver.rs`), so the
+    /// consumer reaches this diagnostic as `eat__m0` / `Outer__m0>n` unless it
+    /// demangles, exactly as every sibling error in this file does.
+    #[test]
+    fn consuming_borrowed_value_error_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "type: Wrap n i64 ;\n\
+             : eat ( Wrap -- ) drop ;\n\
+             : main ( -- ) 1 Wrap &n swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("`eat` consumes"), "unexpected message: {err}");
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+        // The generated destructure reaches it as a mangled *accessor*
+        // spelling, the case a bare `demangle_word` would miss.
+        let getter = check_src_mangled(
+            "type: Inner v i64 ;\n\
+             type: Outer tag i64 n Inner ;\n\
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            getter.contains("`Outer>` consumes"),
+            "unexpected message: {getter}"
+        );
+        assert!(!getter.contains("__m"), "leaked a mangled name: {getter}");
+    }
+
+    /// And through `^`, which heap-allocates its top-of-stack operand and so
+    /// pops the receiver exactly as `drop` does.
+    #[test]
+    fn owned_cell_alloc_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Wrap n i64 ;\n\
+             : main ( -- ) 1 Wrap &n swap ^ drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`^` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// And through the whole-struct destructure (`Outer>`), which pops its
+    /// struct receiver exactly as `drop` does.
+    #[test]
+    fn struct_get_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer tag i64 n Inner ;\n\
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "`Outer>` consumes a value while a reference derived from it is still live"
+            ),
+            "unexpected message: {err}"
+        );
     }
 }

@@ -68,7 +68,7 @@ fn combinators_import(qualifier: &str) -> String {
 /// The linear stand-in: a one-field struct with a `drop` overload that prints
 /// its tag, so disposal is observable in stdout.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n\
-    : drop ( Spy -- )  | s | s Spy>tag . ;\n";
+    : drop ( Spy -- )  | s | s Spy> . ;\n";
 
 /// The `times-helper` shape 10b's library `times` will be built on: an ordinary
 /// self-tail combinator carrying a from/to pair over a row.
@@ -307,7 +307,7 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
         "lib.sth",
         "export: Res make run ;\n\
          type: Res n i64 ;\n\
-         : drop ( Res -- )  | r | r Res>n . ;\n\
+         : drop ( Res -- )  | r | r Res> . ;\n\
          : make ( i64 -- Res ) Res ;\n\
          : run ( Res [ Res -- ] -- )  | f | f call ;\n",
     );
@@ -352,7 +352,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
         "import: c \"c.sth\" ;\n\
          export: outer Res ;\n\
          type: Res n i64 ;\n\
-         : drop ( Res -- )  | r | r Res>n . ;\n\
+         : drop ( Res -- )  | r | r Res> . ;\n\
          : outer inline ( ..s ~[ ..s -- ..s ] -- ..s )  | f | 9 Res f c::inner ;\n",
     );
     let entry = c.write(

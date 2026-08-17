@@ -123,7 +123,7 @@ fn alloc_sizes(src: &str, func: &str) -> Vec<u32> {
 #[test]
 fn quotation_stored_in_struct_field_compiles_and_calls() {
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) [ 1 + ] Holder Holder>q 4 swap call . ;\n";
+               : main ( -- ) [ 1 + ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qfield", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
@@ -181,7 +181,7 @@ fn capturing_scalar_stored_snapshots_into_env() {
     // rather than rejected. Stored into a field, read back, and called with 4:
     // 4 + 10 = 14.
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) 10 | x | [ x + ] Holder Holder>q 4 swap call . ;\n";
+               : main ( -- ) 10 | x | [ x + ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapfield", src);
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
@@ -215,7 +215,7 @@ fn capturing_scalar_through_nested_quotation_snapshots() {
     // top level. The capture scan recurses into nested quotation bodies, so the
     // outer `[ [ x + ] call ]` snapshots `x` and stores admissibly: 4 + 10 = 14.
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) 10 | x | [ [ x + ] call ] Holder Holder>q 4 swap call . ;\n";
+               : main ( -- ) 10 | x | [ [ x + ] call ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapnested", src);
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
@@ -232,7 +232,7 @@ fn capturing_bool_scalar_snapshots_into_env() {
     // add read garbage upper bytes); the fix round-trips through a scratch
     // slot at each type's own width instead.
     let src = "type: BoolHolder q [ -- bool ] ;\n\
-               : main ( -- ) true | x | [ x ] BoolHolder BoolHolder>q call . ;\n";
+               : main ( -- ) true | x | [ x ] BoolHolder BoolHolder> call . ;\n";
     let (stdout, code) = run_src("qcapbool", src);
     assert_eq!(stdout, "true\n");
     assert_eq!(code, 0);
@@ -245,7 +245,7 @@ fn capturing_f32_scalar_snapshots_into_env() {
     // since a float capture cannot share `Ptr`'s add-of-zero reinterpret.
     // 2.5 + 4.0 = 6.5, widened to `f64` by `.`.
     let src = "type: F32Holder q [ f32 -- f32 ] ;\n\
-               : main ( -- ) 2.5 >f32 | x | [ x + ] F32Holder F32Holder>q 4.0 >f32 swap call . ;\n";
+               : main ( -- ) 2.5 >f32 | x | [ x + ] F32Holder F32Holder> 4.0 >f32 swap call . ;\n";
     let (stdout, code) = run_src("qcapf32", src);
     assert_eq!(stdout, "6.5\n");
     assert_eq!(code, 0);
@@ -256,7 +256,7 @@ fn capturing_f64_scalar_snapshots_into_env() {
     // The `f64` sibling of the `f32` case above, same backend failure mode.
     // 2.5 + 4.0 = 6.5.
     let src = "type: Holder q [ f64 -- f64 ] ;\n\
-               : main ( -- ) 2.5 | x | [ x + ] Holder Holder>q 4.0 swap call . ;\n";
+               : main ( -- ) 2.5 | x | [ x + ] Holder Holder> 4.0 swap call . ;\n";
     let (stdout, code) = run_src("qcapf64", src);
     assert_eq!(stdout, "6.5\n");
     assert_eq!(code, 0);
@@ -273,9 +273,9 @@ fn capturing_i32_u32_and_usize_scalars_snapshot_into_env() {
                type: U32Holder q [ u32 -- u32 ] ;\n\
                type: UsizeHolder q [ usize -- usize ] ;\n\
                : main ( -- )\n\
-               10 >i32 | a | [ a + ] I32Holder I32Holder>q 4 >i32 swap call .\n\
-               20 >u32 | b | [ b + ] U32Holder U32Holder>q 4 >u32 swap call .\n\
-               30 >usize | c | [ c + ] UsizeHolder UsizeHolder>q 4 >usize swap call . ;\n";
+               10 >i32 | a | [ a + ] I32Holder I32Holder> 4 >i32 swap call .\n\
+               20 >u32 | b | [ b + ] U32Holder U32Holder> 4 >u32 swap call .\n\
+               30 >usize | c | [ c + ] UsizeHolder UsizeHolder> 4 >usize swap call . ;\n";
     let (stdout, code) = run_src("qcapints", src);
     assert_eq!(stdout, "14\n24\n34\n");
     assert_eq!(code, 0);
@@ -591,7 +591,7 @@ fn struct_stored_closure_observes_later_mutation() {
                &!arr | r |\n\
                [ r 0 >usize &!> @ ] Holder | h |\n\
                r 0 >usize &!> 9 !\n\
-               h Holder>q call .\n\
+               h Holder> call .\n\
                arr drop ;\n";
     let (stdout, code) = run_src("qlateread", src);
     assert_eq!(stdout, "9\n");
@@ -617,7 +617,7 @@ fn captured_reference_read_past_last_use_is_error() {
          &!arr | r |\n\
          [ r 0 >usize &!> @ ] Holder | h |\n\
          &!arr 0 >usize &!> 9 !\n\
-         h Holder>q call .\n\
+         h Holder> call .\n\
          arr drop ;\n",
     );
     assert_eq!(
@@ -663,14 +663,14 @@ fn materialized_multi_capture_builds_stack_bundle() {
                &a | ra |\n\
                &b | rb |\n\
                [ ra 0 >usize &> @ rb 0 >usize &> @ + ] Holder | h |\n\
-               h Holder>q call .\n\
+               h Holder> call .\n\
                a drop b drop ;\n";
     let one = "type: Holder q [ -- i64 ] ;\n\
                : main ( -- )\n\
                10 1 fill | a |\n\
                &a | ra |\n\
                [ ra 0 >usize &> @ ] Holder | h |\n\
-               h Holder>q call .\n\
+               h Holder> call .\n\
                a drop ;\n";
     let (stdout, code) = run_src("qbundle", two);
     assert_eq!(stdout, "30\n");
@@ -708,7 +708,7 @@ fn frame_capture_escaping_via_struct_is_past_owning_frame() {
          0 2 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder ;\n\
-         : main ( -- ) make Holder>q call . ;\n",
+         : main ( -- ) make Holder> call . ;\n",
     );
     assert_eq!(
         err,
@@ -743,7 +743,7 @@ fn frame_capture_escaping_via_struct_carrier_stored_through_param_ref_is_past_ow
          : main ( -- )\n\
          [ 7 ] Holder | box |\n\
          &!box install\n\
-         box Holder>q call . ;\n",
+         box Holder> call . ;\n",
     );
     assert_eq!(
         err,
@@ -753,7 +753,7 @@ fn frame_capture_escaping_via_struct_carrier_stored_through_param_ref_is_past_ow
 
 #[test]
 fn frame_capture_escaping_via_struct_field_getter_return_is_past_owning_frame() {
-    // `Holder>q`'s field type is `Quotation`, not `is_aggregate`, so the
+    // `Holder>`'s field type is `Quotation`, not `is_aggregate`, so the
     // consuming getter falls to the generic env-based call dispatch, whose
     // constructor-output propagation gate required `is_aggregate` and so
     // dropped `h`'s surviving set even though `q` legitimately carries the
@@ -764,7 +764,7 @@ fn frame_capture_escaping_via_struct_field_getter_return_is_past_owning_frame() 
          4242 4 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder | h |\n\
-         h Holder>q | q |\n\
+         h Holder> | q |\n\
          arr drop\n\
          q ;\n\
          : clobber ( -- ) 987654 8 fill | z | &z 0 >usize &> @ drop z drop ;\n\
@@ -796,7 +796,7 @@ fn frame_capture_escaping_via_heap_cell_return_is_past_owning_frame() {
          : main ( -- )\n\
          make | c |\n\
          clobber\n\
-         c ^> Holder>q call . ;\n",
+         c ^> Holder> call . ;\n",
     );
     assert_eq!(
         err,
@@ -817,7 +817,7 @@ fn same_frame_closure_through_struct_field_getter_runs() {
          4242 4 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder | h |\n\
-         h Holder>q call .\n\
+         h Holder> call .\n\
          arr drop ;\n",
     );
     assert_eq!(stdout, "4242\n");
@@ -833,7 +833,7 @@ fn same_frame_closure_through_array_element_access_runs() {
          4242 4 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder 1 fill | tbl |\n\
-         &tbl 0 >usize &> @ Holder>q call .\n\
+         &tbl 0 >usize &> @ Holder> call .\n\
          arr drop tbl drop ;\n",
     );
     assert_eq!(stdout, "4242\n");
@@ -849,7 +849,7 @@ fn same_frame_closure_through_heap_cell_runs() {
          4242 4 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder ^ | c |\n\
-         c ^> Holder>q call .\n\
+         c ^> Holder> call .\n\
          arr drop ;\n",
     );
     assert_eq!(stdout, "4242\n");
@@ -876,7 +876,7 @@ fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
          : main ( -- )\n\
          10 2 fill | a |\n\
          20 2 fill | b |\n\
-         &a &b make Holder>q call .\n\
+         &a &b make Holder> call .\n\
          a drop b drop ;\n",
     );
     assert_eq!(
@@ -899,7 +899,7 @@ fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
          [ ra 0 >usize &> @ n + ] Holder ;\n\
          : main ( -- )\n\
          10 3 fill | a |\n\
-         &a 5 make Holder>q call .\n\
+         &a 5 make Holder> call .\n\
          a drop ;\n",
     );
     assert_eq!(
@@ -924,7 +924,7 @@ fn scalar_only_bundle_escaping_via_carrier_is_rejected_deferred() {
          10 | x |\n\
          20 | y |\n\
          [ x y + ] Holder ;\n\
-         : main ( -- ) make Holder>q call . ;\n",
+         : main ( -- ) make Holder> call . ;\n",
     );
     assert_eq!(
         err,
@@ -936,7 +936,7 @@ fn scalar_only_bundle_escaping_via_carrier_is_rejected_deferred() {
 
 #[test]
 fn join_of_two_capturing_arms_unions_capture_sets() {
-    // Two differing capturing literals joined and stored through a `&!Holder>q`
+    // Two differing capturing literals joined and stored through a `&!q`
     // referent (an in-frame boundary that types the erased join). Both arms
     // capture `r = &arr`, so the merged closure reads it and, called, yields
     // `arr[0] = 10`; the join dispatch is indirect.
@@ -945,8 +945,8 @@ fn join_of_two_capturing_arms_unions_capture_sets() {
                10 2 fill | a |\n\
                &a | r |\n\
                [ 0 ] Holder | h |\n\
-               &!h &!Holder>q true ~[ [ r 0 >usize &> @ ] ] ~[ [ r 1 >usize &> @ ] ] if !\n\
-               h Holder>q call .\n\
+               &!h &!q true ~[ [ r 0 >usize &> @ ] ] ~[ [ r 1 >usize &> @ ] ] if !\n\
+               h Holder> call .\n\
                a drop ;\n";
     let (stdout, code) = run_src("qjoinunion", src);
     assert_eq!(stdout, "10\n");
@@ -974,9 +974,9 @@ fn join_capture_union_kills_either_arm_referent_is_past_last_use() {
              &a | ra |\n\
              &b | rb |\n\
              [ 0 ] Holder | h |\n\
-             &!h &!Holder>q true ~[ [ ra 0 >usize &> @ ] ] ~[ [ rb 0 >usize &> @ ] ] if !\n\
+             &!h &!q true ~[ [ ra 0 >usize &> @ ] ] ~[ [ rb 0 >usize &> @ ] ] if !\n\
              &!{kill} 0 >usize &!> 9 !\n\
-             h Holder>q call .\n\
+             h Holder> call .\n\
              a drop b drop ;\n"
         )
     };

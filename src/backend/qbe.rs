@@ -1379,6 +1379,7 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -1741,6 +1742,7 @@ mod tests {
                 refs: &Refs::default(),
                 statics: empty_statics(),
             },
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
@@ -2430,7 +2432,7 @@ mod tests {
 
     #[test]
     fn emit_getter_i8_field_sign_extends_via_loadsb() {
-        let il = emit_src("type: P p i8 q i8 r i64 ; : g ( P -- i8 ) P>p ;");
+        let il = emit_src("type: P p i8 q i8 r i64 ; : g ( P -- i8 ) &p @ swap drop ;");
         assert!(
             il.contains("loadsb"),
             "expected a width-exact i8 load: {il}"
@@ -2667,7 +2669,7 @@ mod tests {
         );
     }
 
-    /// The buffer dogfood plus a rebuild-style control word in the same
+    /// The buffer dogfood plus a struct-copy control word in the same
     /// module, so the two structural criteria read the same emitted IL.
     const MUTATION_PROBE: &str = "\
 type: Buf  data ^[u8 64]  len usize ;
@@ -2678,20 +2680,19 @@ type: Counter n i64 ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b &!Buf>len @ | i |
-  b &!Buf>data &!^ | arr |
+  b &!len @ | i |
+  b &!data &!^ | arr |
   arr i &!> x !
-  b &!Buf>len 1 +! ;
+  b &!len 1 +! ;
 
-: bump-rebuild ( Counter -- Counter )
-  | c |
-  c c Counter>n 1 + Counter<n ;
+: struct-copy ( Counter -- Counter )
+  dup drop ;
 
 : main ( -- )
   new | a |
   &!a 7 >u8 push-byte
   a drop
-  0 Counter bump-rebuild Counter> . ;
+  0 Counter struct-copy Counter> . ;
 ";
 
     /// Instruction lines (tab-indented) in an emitted function body: the
@@ -2733,19 +2734,20 @@ type: Counter n i64 ;
     }
 
     #[test]
-    fn rebuild_style_equivalent_still_emits_alloc_and_blit() {
-        // The control: the functional setter in the same module keeps the
-        // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
-        // `push-byte` rather than an emitter that stopped emitting `alloc`.
+    fn struct_copy_still_emits_alloc_and_blit() {
+        // The control: `dup` of a Copy struct in the same module still
+        // allocs and blits a fresh shell, so the no-rebuild test's assertion
+        // is measuring `push-byte` rather than an emitter that stopped
+        // emitting `alloc` altogether.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function :Counter $bump.2d.rebuild(");
+        let body = func_body(&il, "export function :Counter $struct.2d.copy(");
         assert!(
             body.contains("alloc"),
-            "a functional setter still allocates its new shell: {body}"
+            "a struct copy still allocates its new shell: {body}"
         );
         assert!(
             body.contains("blit"),
-            "a functional setter still copies the old shell: {body}"
+            "a struct copy still copies the old shell: {body}"
         );
     }
 

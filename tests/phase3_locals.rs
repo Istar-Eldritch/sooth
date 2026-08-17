@@ -73,7 +73,7 @@ fn parse_error(src: &str) -> String {
 /// overload, so it is linear for the same reason any resource is, not by
 /// any compiler-known bit. Two lines, so every line number in a source
 /// string it is prepended to shifts up by 2.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 #[test]
 fn mid_body_binding_consumes_from_the_stack() {

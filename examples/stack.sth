@@ -18,20 +18,21 @@ type: Stack
 
 : push ( Stack i64 -- Stack )
   | s x |
-  s Stack>top | i |
-  &!s &!Stack>items i &!> x !   \ write in place, no whole-array rebuild
-  s s Stack>top 1 + Stack<top ;
+  &s &top @ | i |
+  &!s &!items i &!> x !   \ write in place, no whole-array rebuild
+  &s &top @ 1 + | newtop |
+  s &!top newtop ! ;
 
 : pop ( Stack -- Stack i64 )
   | s |
-  s Stack>top 1 - | i |
-  &s &Stack>items i &> @ | v |  \ read without aliasing the array
-  s i Stack<top v ;
+  &s &top @ 1 - | i |
+  &s &items i &> @ | v |  \ read without aliasing the array
+  s &!top i ! v ;
 
 : peek ( Stack -- Stack i64 )
   | s |
-  s Stack>top 1 - | i |
-  &s &Stack>items i &> @ | v |
+  &s &top @ 1 - | i |
+  &s &items i &> @ | v |
   s v ;
 
 : main ( -- )
@@ -41,5 +42,6 @@ type: Stack
   pop .                         \ 3
   pop .                         \ 2
   peek .                        \ 1, one item left
-  Stack>items len .             \ 16, len is a compile-time constant of the array shape
+  &items @ swap drop
+  len .                         \ 16, len is a compile-time constant of the array shape
   drop ;                        \ discard the residual items array

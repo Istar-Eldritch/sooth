@@ -69,6 +69,15 @@ fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7 slice 1 (R2): the resolved-field companion of `empty_instantiations`,
+/// handed to every lowering path that resolved no field projection
+/// (destructor synthesis and unit tests).
+pub(crate) fn empty_resolved_fields() -> &'static HashMap<Span, (StructId, usize)> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, (StructId, usize)>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// The poly-arity companion of `empty_instantiations`.
 fn empty_poly_arities() -> &'static HashMap<String, usize> {
     static EMPTY: std::sync::OnceLock<HashMap<String, usize>> = std::sync::OnceLock::new();

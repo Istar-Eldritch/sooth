@@ -406,8 +406,8 @@ fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> St
 /// from the driver's closure assembly with the qualifier and target module it
 /// came from and the span of the name in the `import:` form, for the R20/R21
 /// validation. A type name exposes its generated words as one unit (R15c), so
-/// only the base name appears here; a member (`Type>field`) can only collide
-/// when its base does.
+/// only the base name appears here; a member (`Type>`) can only collide when
+/// its base does.
 pub struct SelectiveName {
     pub name: String,
     pub qualifier: String,
@@ -1267,12 +1267,13 @@ fn visit_recursion(
 
 /// Synthesize the generated-word `Sig`s for every registered struct, in
 /// declared field order (first field deepest): a constructor
-/// `S ( T1 … Tn -- S )`, a destructure `S> ( S -- T1 … Tn )`, and per field a
-/// getter `S>fi ( S -- Ti )` and a functional setter `S<fi ( S Ti -- S )`. A
-/// zero-field struct registers only the constructor and destructure. These
-/// join the env alongside user words, so applying one to the wrong arity or
-/// operand type is caught by the same arity/type-mismatch path as any other
-/// word call.
+/// `S ( T1 … Tn -- S )` and a destructure `S> ( S -- T1 … Tn )`. Per-field
+/// access goes through a receiver-directed projection (`&f`/`&!f`,
+/// `check/word_families.rs`) instead of a generated word, since the field
+/// name alone is not globally unique the way `decl.name` is. These join the
+/// env alongside user words, so applying one to the wrong arity or operand
+/// type is caught by the same arity/type-mismatch path as any other word
+/// call.
 ///
 /// D7: each entry is `(env key, lowering symbol, Sig)`. For a hand-written
 /// concrete `type:` the two names coincide (`decl.name` carries no `[...]`
@@ -1305,24 +1306,6 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
                 outputs: field_types.clone(),
             },
         ));
-        for (field_name, field_ty) in &decl.fields {
-            sigs.push((
-                format!("{surface}>{field_name}"),
-                format!("{}>{}", decl.name, field_name),
-                Sig {
-                    inputs: vec![struct_ty],
-                    outputs: vec![*field_ty],
-                },
-            ));
-            sigs.push((
-                format!("{surface}<{field_name}"),
-                format!("{}<{}", decl.name, field_name),
-                Sig {
-                    inputs: vec![struct_ty, *field_ty],
-                    outputs: vec![struct_ty],
-                },
-            ));
-        }
     }
     sigs
 }
@@ -1330,12 +1313,13 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
 /// Synthesize the generated-word `Sig` for every registered enum variant
 /// (D2, R9): a constructor `Variant ( T1 … Tn -- Enum )`, fields in declared
 /// order (first field deepest), a zero-field variant being `Variant ( --
-/// Enum )`. The destructure and getters live beside this in
-/// `variant_generated_sigs` (phase 6 slice 2 reverses D2's "a variant has no
-/// destructure/getter": it is a standalone `Type::Variant` now); a variant
-/// still has no setter (R8). These join the env alongside user words and
-/// struct-generated words, so a constructor's arity/field-type misuse (X9)
-/// falls out of the existing call-check path.
+/// Enum )`. The destructure lives beside this in `variant_generated_sigs`
+/// (phase 6 slice 2 reverses D2's "a variant has no destructure": it is a
+/// standalone `Type::Variant` now); a variant still has no setter (R8), and
+/// per-field access goes through a receiver-directed projection (`&f`,
+/// P7 slice 1) rather than a generated getter. These join the env alongside
+/// user words and struct-generated words, so a constructor's arity/field-type
+/// misuse (X9) falls out of the existing call-check path.
 pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in enums.iter().enumerate() {
@@ -1357,11 +1341,12 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
 }
 
 /// Phase 6 slice 2 (R6): per enum variant, the whole-variant destructure
-/// `Variant> ( Variant -- T1 … Tn )` and a per-field getter
-/// `Variant>fi ( Variant -- Ti )`, fields in declared order (first field
+/// `Variant> ( Variant -- T1 … Tn )`, fields in declared order (first field
 /// deepest). A zero-field variant registers only the (no-op) destructure
-/// (R7), and no variant gets a `Variant<fi` setter: a `Type::Variant` value
-/// has no legal destination outside the arm that bound it (R8).
+/// (R7); no variant gets a setter, and per-field access is a receiver-
+/// directed projection (P7 slice 1, R4) rather than a generated getter: a
+/// `Type::Variant` value has no legal destination outside the arm that bound
+/// it (R8).
 ///
 /// The input slot is built through `variant_type`, the sole constructor of a
 /// `Type::Variant`, so its leaked `Enum.Variant` display name has one origin
@@ -1388,16 +1373,6 @@ pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> 
                     outputs: field_types,
                 },
             ));
-            for (field_name, field_ty) in &variant.fields {
-                sigs.push((
-                    format!("{surface}>{field_name}"),
-                    format!("{}>{}", variant.name, field_name),
-                    Sig {
-                        inputs: vec![variant_ty],
-                        outputs: vec![*field_ty],
-                    },
-                ));
-            }
         }
     }
     sigs
@@ -1411,26 +1386,26 @@ mod tests {
 
     #[test]
     fn variant_accessor_sigs_reach_the_module_env() {
-        // R6/R-OQ2: the accessors register globally now, with no eliminator to
-        // mint an operand. Nothing can call one legally yet, so what discriminates
-        // "registered" from "never wired into `check`" is *which* diagnostic a
-        // bare call gets: a registered word underflows, an unregistered one is
-        // an unknown word. The zero-field row is R7: `Dot>` registers, `Dot>x`
-        // never exists.
-        let rows = [
-            ("Circle>r", "`Circle>r` needs 1 values"),
-            ("Circle>", "`Circle>` needs 1 values"),
-        ];
-        for (call, wanted) in rows {
-            let err = check_src(&format!(
-                "type: Shape | Circle r i64 | Dot ;\n: main ( -- ) {call} ;\n"
-            ))
-            .unwrap_err();
-            assert!(err.contains(wanted), "{call}: unexpected message: {err}");
-        }
+        // R6/R-OQ2: the whole-variant destructure registers globally now,
+        // with no eliminator to mint an operand. Nothing can call one
+        // legally yet, so what discriminates "registered" from "never wired
+        // into `check`" is *which* diagnostic a bare call gets: a registered
+        // word underflows, an unregistered one is an unknown word. The
+        // zero-field row is R7: `Dot>` registers.
+        let err =
+            check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Circle> ;\n").unwrap_err();
+        assert!(
+            err.contains("`Circle>` needs 1 values"),
+            "unexpected message: {err}"
+        );
         let err =
             check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Dot> ;\n").unwrap_err();
         assert!(err.contains("`Dot>` needs 1 values"), "unexpected: {err}");
+        // Per-field access is a receiver-directed projection now (R4), not a
+        // generated word, so `Circle>r`/`Dot>x` are simply unknown.
+        let err = check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Circle>r ;\n")
+            .unwrap_err();
+        assert!(err.contains("unknown word `Circle>r`"), "unexpected: {err}");
         let err =
             check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Dot>x ;\n").unwrap_err();
         assert!(err.contains("unknown word `Dot>x`"), "unexpected: {err}");
@@ -1494,15 +1469,14 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn struct_ty(module: &Module, name: &str) -> Type {
         let idx = module
             .structs
@@ -1554,6 +1528,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
+            resolved_fields: HashMap::new(),
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
@@ -1617,6 +1592,7 @@ mod tests {
                 externs: Vec::new(),
                 instantiations: HashMap::new(),
                 builtin_overloads: HashMap::new(),
+                resolved_fields: HashMap::new(),
                 modules,
                 statics: Vec::new(),
             }
@@ -2365,7 +2341,7 @@ mod tests {
     fn check_struct_generated_words_flat_struct_ok() {
         check_src(
             "type: Vec2 x i64 y i64 ;
-             : main ( -- ) 1 2 Vec2 dup Vec2>x drop Vec2>y drop ;",
+             : main ( -- ) 1 2 Vec2 &x @ drop &y @ drop drop ;",
         )
         .unwrap();
     }
@@ -2374,7 +2350,7 @@ mod tests {
         check_src(
             "type: Vec2 x i64 y i64 ;
              type: Segment from Vec2 to Vec2 ;
-             : main ( -- ) 1 2 Vec2 3 4 Vec2 Segment dup Segment>from Vec2>x drop Segment> drop drop ;",
+             : main ( -- ) 1 2 Vec2 3 4 Vec2 Segment &from &x @ drop Segment> drop drop ;",
         )
         .unwrap();
     }
@@ -2383,39 +2359,49 @@ mod tests {
         check_src("type: Unit ; : main ( -- ) Unit Unit> ;").unwrap();
     }
     #[test]
+    fn check_struct_per_field_accessor_spellings_are_unknown_words() {
+        // P7 slice 1 (D1/R11 deletion guard): the only struct-generated words
+        // are the constructor and the whole-struct destructure. Reinstating a
+        // per-field row in `struct_generated_sigs` would type-check these
+        // three spellings again with no lowering arm behind them, so this is
+        // what discriminates "retired" from "still registered": a registered
+        // word gets an arity/type diagnostic, a retired one is unknown. The
+        // matching variant-side pin is `variant_accessor_sigs_reach_the_module_env`.
+        for call in ["Vec2>x", "Vec2<x", "Vec2|>x"] {
+            let err = check_src(&format!(
+                "type: Vec2 x i64 y i64 ;\n: main ( -- ) 1 2 Vec2 {call} ;\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.contains(&format!("unknown word `{call}`")),
+                "{call}: unexpected message: {err}"
+            );
+        }
+    }
+    #[test]
     fn check_struct_setter_returns_updated_struct_ok() {
-        check_src("type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 3 Vec2<x ;").unwrap();
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 &!x 3 ! ;").unwrap();
     }
     #[test]
     fn check_struct_peek_copy_field_leaves_struct_live_ok() {
-        // R10: `Vec2|>x` is non-consuming, so the struct is still on the
-        // stack for the second peek and the trailing `Vec2>` destructure.
-        check_src("type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 Vec2|>x drop Vec2> drop drop ;")
+        // D2: `&x`'s owned-receiver arm is non-consuming, so the struct is
+        // still on the stack for the second read and the trailing `Vec2>`
+        // destructure.
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 &x @ drop Vec2> drop drop ;")
             .unwrap();
     }
     #[test]
-    fn check_struct_peek_on_linear_field_is_error() {
-        // R10: a linear field can't be peeked (workaround: `S>`).
+    fn check_struct_peek_of_linear_field_is_error_at_the_read_not_the_projection() {
+        // D2: producing `&a` is legal even for a linear field (it borrows,
+        // never duplicates); the gate that used to sit on the retired
+        // `S|>fi` peek now sits on `@` reading the linear referent instead,
+        // the same rejection `!`'s D3 store-gate is symmetric with.
         let err = check_src(&format!(
-            "{SPY_DEF}type: Holds a Spy b i64 ; : main ( -- ) 7 Spy 1 Holds Holds|>a drop drop ;"
+            "{SPY_DEF}type: Holds a Spy b i64 ; : main ( -- ) 7 Spy 1 Holds &a @ drop drop ;"
         ))
         .unwrap_err();
-        assert!(
-            err.contains("cannot `Holds|>a`"),
-            "unexpected message: {err}"
-        );
+        assert!(err.contains("`@`"), "unexpected message: {err}");
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
-        assert!(err.contains("`S>`"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_struct_peek_on_wrong_type_is_error() {
-        // A peek word applied to a value that isn't its struct: names the
-        // peek word and both types, same shape as the getter/setter checks.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2|>x drop ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("Vec2|>x"), "unexpected message: {err}");
-        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
-        assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
     #[test]
     fn check_struct_duplicate_type_name_is_error() {
@@ -2631,25 +2617,6 @@ mod tests {
         assert!(err.contains("Vec2"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
         assert!(err.contains("`bool`"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_struct_accessor_on_wrong_type_is_error() {
-        // X5: `Vec2>x` applied to a bare `i64` names the accessor and both types.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2>x ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
-        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
-        assert!(err.contains("`i64`"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_struct_accessor_on_other_struct_is_error() {
-        // X5: a `Vec2` accessor applied to a `Segment` names both struct types.
-        let src = "type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;
-            : main ( -- i64 ) 1 2 Vec2 3 4 Vec2 Segment Vec2>x ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
-        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
-        assert!(err.contains("`Segment`"), "unexpected message: {err}");
     }
     #[test]
     fn check_struct_print_is_error() {

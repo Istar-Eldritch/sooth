@@ -535,8 +535,7 @@ mod tests {
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     #[test]
     fn check_declared_output_type_mismatch_is_error() {
         let src = ": w ( i64 -- bool ) 1 + ;";

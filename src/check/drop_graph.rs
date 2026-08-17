@@ -333,9 +333,9 @@ fn param_binds(terms: &[Term], inputs: usize) -> HashMap<&str, usize> {
 /// match. A builtin name in tail position resolves against the builtin table
 /// first, so it need not mean the enclosing word: `: drop ( T -- )`'s trailing
 /// `drop` disposes whatever is on top (the dogfood's own
-/// `| f | f File>fd close drop ;` closes the fd rather than looping), and since
+/// `| f | f File> close drop ;` closes the fd rather than looping), and since
 /// slice 8a made every builtin name overloadable the same applies throughout,
-/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;` ends in the
+/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;` ends in the
 /// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
 /// machinery whose phi operands never arrive, and lowering then panics on the
 /// missing header.
@@ -801,8 +801,7 @@ mod tests {
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn first_word(src: &str) -> WordDef {
         let tokens = lex(src).unwrap();
         let module = parse(&tokens).unwrap();
@@ -884,7 +883,7 @@ mod tests {
         // of the `Copy` `i64` its extern call returns, which a name-keyed
         // graph would read as a call to the override itself and reject.
         let src = "type: File fd i64 ; \
-                   : drop ( File -- ) | f | f File>fd drop ; \
+                   : drop ( File -- ) | f | f File> drop ; \
                    : main ( -- ) 1 File drop ;";
         check_src(src).unwrap();
     }
@@ -894,8 +893,8 @@ mod tests {
         // `B` is an edge to `drop@B` and nothing more -- no cycle, since
         // `drop@B` reaches nothing back.
         let src = "type: A x i64 ; type: B y i64 ; \
-                   : drop ( A -- ) | a | a A>x B drop ; \
-                   : drop ( B -- ) | b | b B>y drop ; \
+                   : drop ( A -- ) | a | a A> B drop ; \
+                   : drop ( B -- ) | b | b B> drop ; \
                    : main ( -- ) 1 A drop ;";
         check_src(src).unwrap();
     }
@@ -926,8 +925,8 @@ mod tests {
         // own rejection), forming exactly one edge, `B` -> `A`; since `A`'s
         // own override never calls back into `B`, this is not a cycle.
         let src = "type: A x i64 ; type: B a A ; \
-                   : drop ( A -- ) | a | a A>x drop ; \
-                   : drop ( B -- ) | b | b B>a drop ; \
+                   : drop ( A -- ) | a | a A> drop ; \
+                   : drop ( B -- ) | b | b B> drop ; \
                    : main ( -- ) 1 A B drop ;";
         check_src(src).unwrap();
     }
@@ -992,7 +991,7 @@ mod tests {
         // just for being reachable from two places.
         let src = "type: File fd i64 ; \
                    : show ( i64 -- ) . ; \
-                   : drop ( File -- ) | f | f File>fd show ; \
+                   : drop ( File -- ) | f | f File> show ; \
                    : main ( -- ) 1 File drop 2 show ;";
         check_src(src).unwrap();
     }
@@ -1005,7 +1004,7 @@ mod tests {
         // that tail-calls `helper`.
         let src = "type: T x i64 ; \
                    : helper ( i64 -- ) drop ; \
-                   : drop ( T -- ) | t | t T>x helper ; \
+                   : drop ( T -- ) | t | t T> helper ; \
                    : main ( -- ) 1 T drop ;";
         check_src(src).unwrap();
     }
@@ -1077,7 +1076,7 @@ mod tests {
         // `tail_position_calls` still reports the name (it is syntactic);
         // only the self-call conclusion changes.
         let w = first_word(
-            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;",
+            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;",
         );
         assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["<"]);
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
@@ -1258,7 +1257,7 @@ mod tests {
         // be kept away from.
         for src in [
             "type: Vec2 x i64 y i64 ;\n\
-             : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n",
+             : < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;\n",
             ": branch inline ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c t e branch ;\n",
         ] {

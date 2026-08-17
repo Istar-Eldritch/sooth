@@ -84,10 +84,21 @@ use self::word_families::*;
 /// The per-call-site records a body walk fills: `CallInst` per polymorphic
 /// instantiation (R14) and, since slice 8a, the resolved candidate's lowering
 /// symbol per overloaded call (R7). Lowering reads both keyed by `Span`.
-type ResolvedCalls = (HashMap<Span, CallInst>, HashMap<Span, String>);
+type ResolvedCalls = (
+    HashMap<Span, CallInst>,
+    HashMap<Span, String>,
+    HashMap<Span, (StructId, usize)>,
+);
 
-/// `ResolvedCalls` plus the residual stack a REPL line leaves behind.
-type InferredLine = (Vec<Type>, HashMap<Span, CallInst>, HashMap<Span, String>);
+/// `ResolvedCalls` plus the residual stack a REPL line leaves behind and the
+/// field projections it resolved (R2), which the session's own lowering path
+/// needs exactly as the module path does.
+type InferredLine = (
+    Vec<Type>,
+    HashMap<Span, CallInst>,
+    HashMap<Span, String>,
+    HashMap<Span, (StructId, usize)>,
+);
 
 /// R5/R14: every candidate registered under one polymorphic-word name, its
 /// `PolySig` paired with the REPL generation it was retained at (`None` on
@@ -119,6 +130,14 @@ struct PolyCtx<'a> {
     /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
     /// not lower a builtin overload (out of scope this slice).
     builtin_overloads: &'a mut HashMap<Span, String>,
+    /// P7 slice 1 (R2): the receiver-directed field projections this walk
+    /// resolved (`&hp` against a `&Sprite` on the stack), span -> the struct
+    /// and field index, relayed onto `Module::resolved_fields` so lowering can
+    /// read back a resolution it cannot re-derive without a checker stack.
+    /// Rides `PolyCtx` rather than `Scope` for the same reason
+    /// `builtin_overloads` does: an `if` arm clones the scope, and a record
+    /// made in one arm must outlive it.
+    resolved_fields: &'a mut HashMap<Span, (StructId, usize)>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
@@ -615,6 +634,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         externs: _,
         instantiations: _,
         builtin_overloads: _,
+        resolved_fields: _,
         modules,
         statics,
     } = module;
@@ -657,6 +677,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // module for lowering (empty for the whole corpus, so its lowering is
     // untouched byte-for-byte).
     let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
+    // P7 slice 1 (R2): the receiver-directed field projections, filled as each
+    // monomorphic body resolves one against its stack, then relayed to the
+    // module for lowering.
+    let mut resolved_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -671,10 +695,12 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // instantiation records it produces here are scratch.
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+                let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
                     builtin_overloads: &mut scratch_overloads,
+                    resolved_fields: &mut scratch_fields,
                     combinators: &combinators,
                 };
                 check_poly_combinator_standalone(
@@ -711,6 +737,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 env: &poly_env,
                 insts: &mut insts,
                 builtin_overloads: &mut builtin_overloads,
+                resolved_fields: &mut resolved_fields,
                 combinators: &combinators,
             };
             check_word(
@@ -765,6 +792,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     }
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
+    module.resolved_fields = resolved_fields;
     Ok(())
 }
 
@@ -802,7 +830,7 @@ pub(crate) fn check_def(
     poly_env: &PolyEnv,
     combinators: &CombinatorEnv,
 ) -> Result<ResolvedCalls, String> {
-    let (_sites, insts, overloads) = check_def_collecting_drop_sites(
+    let (_sites, insts, overloads, fields) = check_def_collecting_drop_sites(
         word,
         enums,
         env,
@@ -813,7 +841,7 @@ pub(crate) fn check_def(
         poly_env,
         combinators,
     )?;
-    Ok((insts, overloads))
+    Ok((insts, overloads, fields))
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -863,6 +891,9 @@ pub(crate) fn check_def_collecting_drop_sites(
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
     let mut overloads: HashMap<Span, String> = HashMap::new();
+    // R2 (P7 slice 1): this body's receiver-directed field projections,
+    // relayed to the caller so the session lowers them like a native build.
+    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
@@ -871,6 +902,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
+        resolved_fields: &mut fields,
         combinators,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
@@ -890,7 +922,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         &mut sites,
         &mut poly,
     )?;
-    Ok((sites, insts, overloads))
+    Ok((sites, insts, overloads, fields))
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -925,6 +957,9 @@ pub(crate) fn infer_line(
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
     let mut overloads: HashMap<Span, String> = HashMap::new();
+    // R2 (P7 slice 1): this line's receiver-directed field projections,
+    // relayed to the caller so the session lowers them like a native build.
+    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
@@ -932,6 +967,7 @@ pub(crate) fn infer_line(
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
+        resolved_fields: &mut fields,
         combinators,
     };
     let final_stack = check_terms(
@@ -964,6 +1000,7 @@ pub(crate) fn infer_line(
         final_stack.into_iter().map(|s| s.ty).collect(),
         insts,
         overloads,
+        fields,
     ))
 }
 
@@ -2330,18 +2367,14 @@ fn constructed_reference_error(ctx: &Ctx, span: Span, position: &str, ty: Type) 
     )
 }
 
-/// D3 (slice 8b): a struct's destructure (`S>`) or field getter (`S>f`) moves
-/// fields out of `S`, bypassing whatever `drop` override `S` owns -- the value
-/// never reaches a bare `drop` call site for D1's gate to see. `name` is
-/// checked as-parsed (mangled in a >=2-module build, matching
-/// `struct_generated_sigs`'s own keys), so this runs ahead of both
-/// `check_struct_get_word` (which alone claims an aggregate-typed field) and
-/// the ordinary `env` call path (every other field type, and the full
-/// destructure), catching the accessor before either applies its signature.
-/// The functional setter (`S<f`) has no `>` in its name and never matches
-/// here; it returns the struct itself, so the value stays live.
+/// D3 (slice 8b): a struct's destructure (`S>`) moves every field out of
+/// `S`, bypassing whatever `drop` override `S` owns -- the value never
+/// reaches a bare `drop` call site for D1's gate to see. `name` is checked
+/// as-parsed (mangled in a >=2-module build, matching `struct_generated_sigs`'s
+/// own keys), so this runs ahead of the ordinary `env` call path that would
+/// otherwise apply the destructure's `Sig`.
 fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(), String> {
-    let Some((struct_name, field_name)) = name.split_once('>') else {
+    let Some(struct_name) = name.strip_suffix('>') else {
         return Ok(());
     };
     let Some((struct_idx, decl)) = ctx
@@ -2359,7 +2392,7 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
     // own declared effect names (`find_drop_overloads` rejects any other
     // input shape before body checking ever starts): its own body is exactly
     // where moving that struct's fields out implements disposal
-    // (`examples/resources.sth`'s `Fd>n` inside `: drop`). `resolve::mangle`
+    // (`examples/resources.sth`'s `Fd>` inside `: drop`). `resolve::mangle`
     // leaves `drop` unmangled program-wide, so a name-only check would wave
     // through *any* word named `drop`, including one overriding a different
     // struct that destructures this one -- compare the struct identity the
@@ -2371,12 +2404,7 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
     if is_own_drop_body {
         return Ok(());
     }
-    let is_destructure = field_name.is_empty();
-    let is_field_move = decl.fields.iter().any(|(f, _)| f == field_name);
-    if is_destructure || is_field_move {
-        return Err(destructure_drop_overloaded_error(ctx, span, decl));
-    }
-    Ok(())
+    Err(destructure_drop_overloaded_error(ctx, span, decl))
 }
 
 /// R11 (slice 8b, D3): the located diagnostic for destructuring a type whose
@@ -2396,6 +2424,7 @@ fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_shuffle(
     name: &str,
     span: Span,
@@ -2403,6 +2432,9 @@ fn check_shuffle(
     ctx: &Ctx,
     arrays: &[ArrayDecl],
     prov: &mut Provenance,
+    scope: &Scope,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -2422,6 +2454,14 @@ fn check_shuffle(
         }
         "drop" => {
             let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
+            // Review fix (P7 slice 1): dropping a place a live projection
+            // still reaches would leave that reference aimed at storage
+            // that no longer exists; the anonymous analogue of
+            // `consume_of_borrowed_place_error`, keyed by region rather than
+            // by a place name.
+            if let Some(origin) = consumed_place_conflict(top, stack, scope, prov, live, at) {
+                return Err(consuming_borrowed_value_error(ctx, span, "drop", origin));
+            }
             // R6 (slice 8b): a side observation only. `drop` still pops one
             // value of any type with no type check, exactly as before; the
             // recorded type is what lets `check`'s post-pass resolve which
@@ -2620,23 +2660,22 @@ mod tests {
     }
 
     /// D3's leaf resource: one field, a `drop` override implemented exactly
-    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>`
     /// inside `drop`'s own body -- exempted, since a word literally named
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
-    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
         let tokens = lex(src).unwrap();
         let terms = match crate::parser::parse_line(&tokens).unwrap() {
@@ -2674,19 +2713,11 @@ mod tests {
             &HashMap::new(),
             &combinators,
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {
         let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
-        assert_eq!(
-            err,
-            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
-        );
-    }
-    #[test]
-    fn field_move_of_drop_overloaded_type_is_error() {
-        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
         assert_eq!(
             err,
             "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
@@ -2702,7 +2733,7 @@ mod tests {
         // skip *that* struct's destructor. `Box`'s own `drop` here
         // destructures `Fd`, not `Box`, so it must still be rejected.
         let err = check_src(&format!(
-            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd>n drop x Box>b drop ;\n: main ( -- ) 1 Box drop ;\n"
+            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd> drop x Box> drop ;\n: main ( -- ) 1 Box drop ;\n"
         ))
         .unwrap_err();
         assert_eq!(
@@ -2717,15 +2748,16 @@ mod tests {
         // on `File`'s. The extracted `Fd` is disposed by an ordinary bare
         // `drop`, unrelated to D3.
         check_src(&format!(
-            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File>fd drop ;\n"
+            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File> drop ;\n"
         ))
         .unwrap();
     }
     #[test]
-    fn setter_on_drop_overloaded_type_is_not_guarded() {
-        // The functional setter returns `Fd` itself (the value stays live),
-        // and its name has no `>`, so it never matches the guard.
-        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd 8 Fd<n drop ;\n")).unwrap();
+    fn borrow_projection_on_drop_overloaded_type_is_not_guarded() {
+        // D3: a field projection (`&!n`) never moves the aggregate out --
+        // `Fd` stays live and reaches the ordinary `drop` call, so the
+        // destructure-drop guard has nothing to say about it.
+        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd &!n 8 ! drop ;\n")).unwrap();
     }
     /// Phase 6 slice 1: the poly quotation parameter the R4 tests turn on.
     /// `inline` is not decoration: `check_inline_quotation_requires_inline`
@@ -3192,9 +3224,9 @@ mod tests {
         // surviving-capture-set (`let surviving = element.surviving;`) onto
         // the array it produces, exactly as a struct/enum constructor's
         // output does -- the array is the closure's carrier now, having
-        // replicated it N times. `Boxed>f` materializes a quotation field
-        // getter's output with its surviving set intact (the R19/R22 comment
-        // on the generic accessor path), so `b Boxed>f` hands `fill` an
+        // replicated it N times. `Boxed>` materializes a quotation field
+        // destructure's output with its surviving set intact (the R19/R22
+        // comment on the generic accessor path), so `b Boxed>` hands `fill` an
         // already-erased closure whose surviving set has one frame-rooted
         // member (`r`, a reference into `mk`'s own local `arr`). If `fill`
         // did not forward that set onto the array, `mk`'s R22 word-output
@@ -3215,7 +3247,7 @@ mod tests {
              0 4 fill | arr |\n\
              &arr | r |\n\
              [ r 0 >usize &> @ ] Boxed | b |\n\
-             b Boxed>f\n\
+             b Boxed>\n\
              4 fill ;\n\
              : main ( -- ) mk drop ;\n",
         )
@@ -3477,5 +3509,40 @@ mod tests {
             ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n",
         )
         .expect("`while` still type-checks after the back-edge rewrite");
+    }
+
+    /// P7 slice 1 (R2): the side table lowering reads back. One entry per
+    /// projection call site, each carrying the receiver `StructId` and the
+    /// field index -- neither of which the projection's own name states.
+    #[test]
+    fn resolved_fields_records_one_entry_per_call_site() {
+        let tokens = lex("type: A n i64 ;\n\
+                          type: B tag i64 n bool ;\n\
+                          : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;")
+        .unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).expect("both projections resolve");
+        let a = module
+            .structs
+            .iter()
+            .position(|d| d.name == "A")
+            .expect("`A` is registered");
+        let b = module
+            .structs
+            .iter()
+            .position(|d| d.name == "B")
+            .expect("`B` is registered");
+        let mut recorded: Vec<(usize, usize)> = module
+            .resolved_fields
+            .values()
+            .map(|(id, fi)| (id.index(), *fi))
+            .collect();
+        recorded.sort_unstable();
+        let mut want = vec![(a, 0), (b, 1)];
+        want.sort_unstable();
+        assert_eq!(
+            recorded, want,
+            "one entry per site, resolved against each site's own receiver"
+        );
     }
 }

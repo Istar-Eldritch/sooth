@@ -28,9 +28,10 @@ say more. The elision is arm-only; a word signature never infers its outputs. Be
 elision moves a shape error off-site, the disagreement diagnostic names both arms by
 variant.
 
-Payload reaches an arm by **generated per-variant accessors** (`Circle>r` per field,
-`Rect>` destructuring all of them), mirroring the struct accessors, which retires the
-positional field binding clause elimination uses. A payload-free arm consumes its
+Payload reaches an arm by **generated per-variant accessors**: `&r`/`&!r` per field
+(receiver-directed projection, P7.S1's shape, not the retired `Circle>r` fused spelling)
+and `Rect>` destructuring all of them, which retires the positional field binding clause
+elimination uses. A payload-free arm consumes its
 variant explicitly (`Halt>`): the linear spine does not auto-drop.
 
 **No open lowering prerequisite.** The row-carried-quotation backend crash this phase's
@@ -63,11 +64,13 @@ surface syntax, since the eliminator (Slice 3) is its only introducer. The leake
 `&'static str` carries the stable `Enum.Variant` display name (`display_static` on
 `VariantDecl`, one source of truth read by the sole constructor `variant_type`), needed so
 two `Type::Variant`s for the same variant always compare equal. Generated per-variant field
-accessors and whole-variant destructures mirror the struct-generated words, split across
-three existing mechanisms rather than one: a scalar getter and the whole destructure go
-through ordinary `Sig` dispatch (`variant_generated_sigs`), an aggregate getter through a
-new `check_variant_get_word` (interior-address aliasing, like the struct getter), and
-reference-mode access (`&Variant>field`/`&!Variant>field`) through a new arm in
+accessors and whole-variant destructures follow P7.S1's struct shape (a scalar/aggregate
+projection via `&field`/`&!field`, resolved per call site against the receiver, not a
+fused `&Variant>field` spelling), split across three existing mechanisms rather than one:
+a scalar getter and the whole destructure go through ordinary `Sig` dispatch
+(`variant_generated_sigs`), an aggregate getter through a new `check_variant_get_word`
+(interior-address aliasing, like the struct getter), and reference-mode access
+(`&field`/`&!field` on a variant receiver) through a new arm in
 `check_reference_word`. All three resolve the variant from the `EnumId` the operand
 already carries, not a global name scan: variant names are not unique across enums (only
 type names are deduped), so a scan would mis-resolve the second enum's same-named variant.

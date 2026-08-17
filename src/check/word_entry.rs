@@ -170,17 +170,14 @@ pub(super) fn check_reference_free_signature(
 ) -> Result<(), String> {
     for slot in &effect.outputs {
         if contains_reference(slot.ty, structs, enums, arrays) {
-            return Err(format!(
-                "error: a reference cannot be stored: `{}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
-                name, slot.ty
-            ));
+            return Err(stored_reference_output_error(name, slot.ty, ""));
         }
     }
     for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
+            let ty = slot.ty;
             return Err(format!(
-                "error: a reference cannot be stored: `{}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
-                name, slot.ty
+                "error: a reference cannot be stored: `{name}` declares the input `{ty}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
             ));
         }
     }
@@ -660,10 +657,10 @@ mod tests {
     /// still rejected.
     #[test]
     fn check_reference_free_signature_skipped_for_combinator() {
-        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")
+        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!n ;\n")
             .expect("an `inline` word may declare a reference output");
         check_src(
-            "type: P n u32 ;\n: pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n",
+            "type: P n u32 ;\n: pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!n ;\n",
         )
         .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
         // A *poly* combinator takes the same exemption by the same guard: it
@@ -671,11 +668,11 @@ mod tests {
         // `check_poly_combinator_standalone` builds, which carries the quotation
         // parameter (and the flag) across and so is itself `is_combinator`.
         check_src(
-            "type: P n u32 ;\n: pick inline ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
+            "type: P n u32 ;\n: pick inline ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!n ;\n",
         )
         .expect("a poly combinator is exempt through its concrete stand-in");
         let err =
-            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!P>n ;\n").unwrap_err();
+            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!n ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
@@ -692,7 +689,7 @@ mod tests {
     fn check_inline_builtin_operator_overload_is_error() {
         let err = check_src(
             "type: A n i64 ;\n\
-             : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+             : + inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -703,7 +700,7 @@ mod tests {
         // rejection is keyed on the name, not on the overload.
         check_src(
             "type: A n i64 ;\n\
-             : add inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+             : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .expect("an `inline` word whose name no operator claims is accepted");
     }

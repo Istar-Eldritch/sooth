@@ -39,6 +39,7 @@ pub fn synthesize_aggregate_destructors(
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     let Registries {
@@ -67,6 +68,7 @@ pub fn synthesize_aggregate_destructors(
                     env,
                     resolve,
                     regs,
+                    resolved_fields,
                     combinators,
                 )),
                 Some(DropOverride::AlreadyLoaded) => None,
@@ -294,8 +296,8 @@ fn prepend(step: PathStep, rest: Vec<PathStep>) -> Vec<PathStep> {
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
 /// that type: drop each linear field, in declaration order. Built via a
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
-/// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
-/// is disposed" stays in one place.
+/// `field_value`/`emit_drop` the `drop` builtin uses, so "how a field is
+/// disposed" stays in one place.
 ///
 /// A struct on a disposal cycle (a `^Self` field, or a longer route back to
 /// itself through other types) is disposed by one fused loop that walks the
@@ -360,6 +362,7 @@ fn synthesize_struct_destructor_override(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     // R9: element 0 is the override body itself, renamed to the destructor
@@ -375,6 +378,7 @@ fn synthesize_struct_destructor_override(
         regs,
         empty_instantiations(),
         empty_builtin_overloads(),
+        resolved_fields,
         empty_poly_arities(),
         combinators,
         EnvPlan::None,
@@ -493,7 +497,7 @@ mod tests {
         // its own struct's destructor symbol with its own body.
         let module = lower_src(
             "type: A x i64 ; type: B y i64 ; \
-             : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y drop ; \
+             : drop ( A -- ) | a | a A> . ; : drop ( B -- ) | b | b B> drop ; \
              : main ( -- ) 1 A drop 2 B drop ;",
         );
         assert!(
@@ -619,7 +623,7 @@ mod tests {
         // This is the check that is red when the gate is missing.
         let ir = lower_src(
             "type: Res n i64 ;\n\
-             : drop ( Res -- ) | r | r Res>n 5000 + . ;\n\
+             : drop ( Res -- ) | r | r Res> 5000 + . ;\n\
              : mkres ( i64 -- Res ) | n | n Res ;\n\
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",

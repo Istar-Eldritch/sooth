@@ -981,7 +981,7 @@ fn run_struct_golden(tag: &str, src: &str) -> String {
 fn struct_flat_construct_get_destructure_native() {
     // S2: construct a flat struct, read each field, and destructure it.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: main ( -- )\n  3 4 Vec2 dup Vec2>x . Vec2>y .\n  5 6 Vec2 Vec2> . . ;\n";
+: main ( -- )\n  3 4 Vec2 &x @ . &y @ . drop\n  5 6 Vec2 Vec2> . . ;\n";
     // destructure pushes x then y (first deepest); `. .` prints top-first: 6 then 5.
     assert_eq!(run_struct_golden("flat", src), "3\n4\n6\n5\n");
 }
@@ -991,7 +991,7 @@ fn struct_functional_setter_leaves_duped_original_intact_native() {
     // S4: `dup` copies the aggregate; a functional setter on the copy returns a
     // new value while the original is unchanged.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: main ( -- )\n  1 2 Vec2 dup 99 Vec2<x Vec2>x . Vec2>x . ;\n";
+: main ( -- )\n  1 2 Vec2 dup &!x 99 ! &x @ . drop &x @ . drop ;\n";
     assert_eq!(run_struct_golden("setter-intact", src), "99\n1\n");
 }
 
@@ -999,7 +999,7 @@ fn struct_functional_setter_leaves_duped_original_intact_native() {
 fn struct_mixed_i64_f64_field_readback_native() {
     // S3: offset-correct read-back for mixed-width fields (an i64 and an f64).
     let src = "type: Mix a i64 b f64 ;\n\
-: main ( -- )\n  7 2.5 Mix dup Mix>a . Mix>b . ;\n";
+: main ( -- )\n  7 2.5 Mix &a @ . &b @ . drop ;\n";
     assert_eq!(run_struct_golden("mixed", src), "7\n2.5\n");
 }
 
@@ -1008,17 +1008,17 @@ fn struct_adjacent_subword_fields_do_not_clobber_native() {
     // RISK 3: two adjacent `i8` fields then an `i64` must each read back their
     // own value; a width-exact field store never clobbers its neighbour.
     let src = "type: P p i8 q i8 r i64 ;\n\
-: main ( -- )\n  1 >i8 2 >i8 300 P dup P>p >i64 . dup P>q >i64 . P>r . ;\n";
+: main ( -- )\n  1 >i8 2 >i8 300 P &p @ >i64 . &q @ >i64 . &r @ . drop ;\n";
     assert_eq!(run_struct_golden("packed", src), "1\n2\n300\n");
 }
 
 #[test]
 fn struct_nested_juxtaposition_access_native() {
-    // S3: a nested struct field accessed by juxtaposition (`Segment>to Vec2>x`),
+    // S3: a nested struct field accessed by a chained projection (`&to &x @`),
     // read back per-field.
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Segment from Vec2 to Vec2 ;\n\
-: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  dup Segment>from Vec2>x .\n  Segment>to Vec2>y . ;\n";
+: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  &from &x @ .\n  &to &y @ . drop ;\n";
     assert_eq!(run_struct_golden("nested", src), "1\n4\n");
 }
 
@@ -1027,8 +1027,8 @@ fn struct_survives_word_call_boundary_native() {
     // S5: a struct argument and a struct return cross a word-call boundary
     // (by-value QBE C-ABI), then the returned struct's field is read back.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: shift ( Vec2 i64 -- Vec2 ) | v d |\n  v Vec2>x d + v Vec2>y Vec2 ;\n\
-: main ( -- )\n  10 20 Vec2 5 shift dup Vec2>x . Vec2>y . ;\n";
+: shift ( Vec2 i64 -- Vec2 ) | v d |\n  &v &x @ d + &v &y @ Vec2 ;\n\
+: main ( -- )\n  10 20 Vec2 5 shift &x @ . &y @ . drop ;\n";
     assert_eq!(run_struct_golden("call-boundary", src), "15\n20\n");
 }
 
@@ -1041,7 +1041,7 @@ fn struct_nested_struct_crosses_word_call_boundary_native() {
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Segment from Vec2 to Vec2 ;\n\
 : swap-ends ( Segment -- Segment )\n  Segment> swap Segment ;\n\
-: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  swap-ends\n  dup Segment>from Vec2>x .\n  Segment>to Vec2>y . ;\n";
+: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  swap-ends\n  &from &x @ .\n  &to &y @ . drop ;\n";
     // from=(1,2) to=(3,4) swapped -> from=(3,4) to=(1,2): from.x=3, to.y=2.
     assert_eq!(run_struct_golden("nested-call-boundary", src), "3\n2\n");
 }
@@ -1084,7 +1084,7 @@ fn vectors_dogfood_compiles_and_runs() {
     // S8: `examples/vectors.sth` — a flat `Vec2` and a nested `Segment`, a
     // reusable componentwise `sub`, `len2`, `span` (= `Segment> swap sub`),
     // and a functional-setter `shift-x` demo. Builds segment (0,0)-(3,4),
-    // prints `span len2 .` (25) and `5 6 Vec2 1 shift-x Vec2>x .` (6).
+    // prints `span len2 .` (25) and `5 6 Vec2 1 shift-&x &x @ .` (6).
     let (stdout, code) = run_and_capture_stdout("examples/vectors.sth");
     assert_eq!(stdout, "25\n6\n");
     assert_eq!(code, 0);
@@ -1131,16 +1131,16 @@ fn nested_aggregate_clause_word_reads_back_through_registries_native() {
     // Slice 4 (criterion 3, D9): a variant carrying a struct payload (`Dot p
     // Vec2`) constructs, passes through a clause word, and its nested field
     // reads back; and an enum used as a struct field (`Wrap s Shape`) is
-    // unwrapped through the getter into the same clause word — guarding the
+    // unwrapped through the destructure into the same clause word — guarding the
     // combined-registry field sizing in both directions.
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Shape | Dot p Vec2 | Nothing ;\n\
 type: Wrap s Shape ;\n\
 : px ( Shape -- i64 )\n\
-| Dot      Vec2>x\n\
+| Dot      &x @ swap drop\n\
 | Nothing  0\n\
 ;\n\
-: main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap>s px . ;\n";
+: main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap> px . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-nested-clause-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
@@ -1440,11 +1440,11 @@ fn nested_array_shapes_construct_and_read_back_native() {
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Box arr [i64 3] ;\n\
 : vx ( [Vec2 2] usize -- i64 )\n\
-| a i | &a i &> @ Vec2>x ;\n\
+| a i | &a i &> &x @ ;\n\
 : inner-at ( [[i64 2] 2] usize usize -- i64 )\n\
 | a i j | &a i &> j &> @ ;\n\
 : box-at ( Box usize -- i64 )\n\
-| b i | &b &Box>arr i &> @ ;\n\
+| b i | &b &arr i &> @ ;\n\
 : main ( -- )\n\
   1 2 Vec2 2 fill\n\
   dup 0 vx .\n\
@@ -1660,22 +1660,24 @@ type: Fetched vm Vm op Op ;\n\
 type: VmPop vm Vm val i64 ;\n\
 : vm-push ( Vm i64 -- Vm )\n\
   | vm x |\n\
-  vm Vm>sp | i |\n\
-  &!vm &!Vm>stack i &!> x !\n\
-  vm vm Vm>sp 1 + Vm<sp ;\n\
+  &vm &sp @ | i |\n\
+  &!vm &!stack i &!> x !\n\
+  &vm &sp @ 1 + | newsp |\n\
+  vm &!sp newsp ! ;\n\
 : vm-pop ( Vm -- VmPop )\n\
   | vm |\n\
-  vm Vm>sp 1 - | i |\n\
-  &vm &Vm>stack i &> @ | x |\n\
-  vm i Vm<sp\n\
+  &vm &sp @ 1 - | i |\n\
+  &vm &stack i &> @ | x |\n\
+  vm &!sp i !\n\
   x\n\
   VmPop ;\n\
 : bump-pc ( Vm -- Vm )\n\
-  dup Vm>pc 1 + Vm<pc ;\n\
+  &pc @ 1 + | newpc |\n\
+  &!pc newpc ! ;\n\
 : fetch ( Vm -- Fetched )\n\
   | vm |\n\
-  vm Vm>pc | i |\n\
-  &vm &Vm>prog i &> @ | op |\n\
+  &vm &pc @ | i |\n\
+  &vm &prog i &> @ | op |\n\
   vm op Fetched ;\n\
 : run ( Vm Op -- i64 )\n\
 | Push  | vm v |\n\
@@ -1707,14 +1709,14 @@ type: VmPop vm Vm val i64 ;\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Load  | vm addr |\n\
-    &vm &Vm>mem addr &> @ | x |\n\
+    &vm &mem addr &> @ | x |\n\
     vm x vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Store | vm addr |\n\
     vm vm-pop VmPop>\n\
     | v x |\n\
-    &!v &!Vm>mem addr &!> x !\n\
+    &!v &!mem addr &!> x !\n\
     v\n\
     bump-pc\n\
     fetch Fetched> run\n\
@@ -1722,13 +1724,13 @@ type: VmPop vm Vm val i64 ;\n\
     vm vm-pop VmPop>\n\
     0 =\n\
     ~[\n\
-      target Vm<pc\n\
+      &!pc target !\n\
     ] ~[\n\
       bump-pc\n\
     ] if\n\
     fetch Fetched> run\n\
 | Jmp   | vm target |\n\
-    vm target Vm<pc\n\
+    vm &!pc target !\n\
     fetch Fetched> run\n\
 | Halt  | vm |\n\
     vm vm-pop VmPop>\n\
@@ -1822,7 +1824,7 @@ fn linear_check_error(src: &str) -> String {
 /// overload, so it is linear for the same reason any resource is, not by
 /// any compiler-known bit. Two lines, so every line number in a source
 /// string it is prepended to shifts up by 2.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 #[test]
 fn dup_of_linear_value_is_error() {
@@ -1996,10 +1998,10 @@ fn copy_loop_still_compiles() {
 }
 
 // Phase 3 Slice 1, Phase 2: struct aggregates via destructure-whole. A struct
-// is linear iff any field is (transitively); `S>fi`/`S<fi`/`drop` on a linear
-// struct run compiler-synthesized field drop glue. Every drop-observing
-// golden compares the *whole* stdout, so drop count and order are proven, not
-// just "it compiled".
+// is linear iff any field is (transitively); `drop` on a linear struct runs
+// compiler-synthesized field drop glue. Every drop-observing golden compares
+// the *whole* stdout, so drop count and order are proven, not just "it
+// compiled".
 
 #[test]
 fn destructure_whole_drops_each_field() {
@@ -2042,35 +2044,42 @@ fn nested_struct_is_linear_transitively() {
 }
 
 #[test]
-fn get_field_drops_the_rest_on_linear_struct() {
-    // Criterion 6: `S>fi` still consumes the whole aggregate on a linear
-    // receiver, so the non-extracted field (`b`, tag 2) is dropped as part of
-    // the getter itself, before the explicit `drop` of the extracted `a`
-    // (tag 1) that follows.
+fn destructure_extracts_a_field_with_no_implicit_disposal() {
+    // P7 slice 1 (D3/R9 deletion guard): `S>` destructure moves every field
+    // out onto the stack with no implicit disposal of its own, so ordering
+    // is exactly what the program writes (here `b` first, since it is
+    // destructured deeper but consumed first). This golden alone does not
+    // discriminate a reinstated sibling-drop: `S>`'s destructure of a
+    // freshly built struct never had one to reinstate. The guard that does
+    // catch a reinstated implicit disposal is
+    // `projection_read_of_copy_field_keeps_struct`, whose non-consuming `&a`
+    // read is a real sibling-drop hazard: it fails if `b` is dropped early.
     let stdout = run_linear_golden(
-        "get-drops-rest",
+        "destructure-no-implicit-drop",
         &format!(
             "{SPY_DEF}type: Pair a Spy b Spy ;\n\
-: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair>a drop ;\n"
+: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair> drop drop ;\n"
         ),
     );
     assert_eq!(stdout, "drop 2\ndrop 1\n");
 }
 
 #[test]
-fn set_field_drops_overwritten_linear_field() {
-    // Criterion 8: `S<fi` drops the field it overwrites (old `a`, tag 1)
-    // before storing the new value (tag 9); the other field (`b`, tag 2)
-    // transfers via the blit untouched, and both surface later at the final
-    // destructure+drop.
-    let stdout = run_linear_golden(
-        "set-drops-overwritten",
-        &format!(
-            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
-: main ( -- )\n  1 Spy 2 Spy Pair\n  9 Spy Pair<a\n  Pair> drop drop ;\n"
-        ),
+fn store_over_a_linear_field_through_a_reference_is_error() {
+    // P7 slice 1 (D3/R11 deletion guard): the retired `S<fi` setter used to
+    // drop the field it overwrote. Its replacement, `&!f v !`, has no such
+    // glue to reinstate -- `!` already refuses to store over a linear
+    // referent outright (the value being overwritten would otherwise leak
+    // with nothing to drop it), so this guard is a diagnostic assertion, not
+    // a drop-count golden.
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+: main ( -- )\n  1 Spy 2 Spy Pair\n  &!a 9 Spy !\n  Pair> drop drop ;\n"
+    ));
+    assert!(
+        err.contains("`!` cannot access the linear referent `Spy`"),
+        "unexpected message: {err}"
     );
-    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 9\n");
 }
 
 #[test]
@@ -2104,39 +2113,39 @@ fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
     assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
 }
 
-// Phase 3 Slice 1, Phase 3: `S|>fi`, the non-consuming peek. Copy fields only;
-// a linear field is a compile error (workaround: `S>`).
+// Phase 3 Slice 1, Phase 3: the non-consuming read, `&f @`. Projecting a
+// linear field is legal; moving one out through `@` is a compile error
+// (workaround: `S>`).
 
 #[test]
-fn peek_copy_field_keeps_struct() {
-    // Criterion 7a: `Pair|>a` peeks the Copy field `a` twice, leaving the
-    // aggregate itself live both times (proven because the final `drop` of
-    // the whole struct still finds its linear field `b` intact and disposes
-    // it exactly once — a consuming `Pair>a` in its place would have dropped
-    // `b` at the first peek, or left nothing for the trailing `drop` to see).
+fn projection_read_of_copy_field_keeps_struct() {
+    // D2: `&a @` (the retired `Pair|>a` peek's replacement) is non-consuming,
+    // leaving the aggregate itself live both times (proven because the final
+    // `drop` of the whole struct still finds its linear field `b` intact and
+    // disposes it exactly once -- a consuming read in its place would have
+    // dropped `b` at the first read, or left nothing for the trailing `drop`
+    // to see).
     let stdout = run_linear_golden(
-        "peek-copy-field",
+        "projection-read-copy-field",
         &format!(
             "{SPY_DEF}type: Pair a i64 b Spy ;\n\
-: main ( -- )\n  5 3 Spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n"
+: main ( -- )\n  5 3 Spy Pair\n  &a @ drop\n  &a @ drop\n  drop ;\n"
         ),
     );
     assert_eq!(stdout, "drop 3\n");
 }
 
 #[test]
-fn peek_linear_field_is_error() {
-    // Criterion 7b: peeking the linear field `b` is a compile error naming
-    // both the peek workaround and the offending field's type.
+fn projection_read_of_linear_field_is_error() {
+    // D2 (verified 2026-08-17): producing `&b` off a linear field is legal --
+    // a projection borrows rather than duplicates. The rejection moves to
+    // `@`, which refuses to read a linear referent, symmetric to `!`'s
+    // refusal to store over one.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  Pair|>b drop drop ;\n"
+        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  &b @ drop drop ;\n"
     ));
-    assert!(
-        err.contains("cannot `Pair|>b`"),
-        "unexpected message: {err}"
-    );
+    assert!(err.contains("`@`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
-    assert!(err.contains("`S>`"), "unexpected message: {err}");
 }
 
 // Phase 3 Slice 1, Phase 4: enums via a synthesized, tag-dispatched
@@ -2485,7 +2494,7 @@ fn owned_unwrap_aggregate_copies_out_before_free() {
 : use ( Point -- )\n  \
   | p |\n  \
   3 4 Point ^ ^> drop\n  \
-  p Point>y . ;\n\
+  &p &y @ . ;\n\
 : main ( -- )\n  1 2 Point ^ ^> use ;\n",
     );
     assert_eq!(stdout, "2\n");
@@ -2695,11 +2704,9 @@ fn caret_field_suffix_is_unknown_word() {
     // Criterion 21 (R12b): `^>x` and `^|>x` lex as one word each and match
     // none of the three exact cell-word spellings, so they fall through to
     // the ordinary unknown-word error. This pins the exact-name matching only,
-    // *not* R12b's arm-ordering clause, which turns out to be unobservable:
-    // `check_struct_peek_word` returns `None` for any name whose struct half
-    // misses the registry, and R12a makes a struct named `^` undeclarable, so
-    // swapping the two arms leaves the whole suite green. No test can guard
-    // that ordering because nothing depends on it.
+    // *not* R12b's arm-ordering clause, which no longer has two arms to order:
+    // P7 slice 1 retired the fused struct peek family that clause was written
+    // against, so nothing but the exact cell-word names can claim these.
     let err = linear_check_error(": main ( -- )\n  5 ^ ^>x ;\n");
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("^>x"), "unexpected message: {err}");
@@ -3204,7 +3211,7 @@ drop 1\nfree 8\nfree 24\ndrop 2\nfree 8\nfree 24\ndrop 3\nfree 8\nfree 24\n"
 /// level whichever end the disposal starts from. A-node tags are `n * 10`,
 /// B-node tags `n`, so every node in the chain is distinguishable.
 const MUTUAL_CHAIN_TYPES: &str = "type: Spy tag i64 ;\n\
-: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n\
+: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n\
 type: A | ANil | ACons next ^B tag Spy ;\n\
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
@@ -3579,7 +3586,7 @@ fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
     // `mutual tail recursion`.
     let src = "type: Vec2 x i64 y i64 ;\n\
 : foo ( i64 i64 -- bool ) < ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x foo ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ foo ;\n\
 : main ( -- ) 1 0 Vec2 5 0 Vec2 < . ;\n";
     let (stdout, code) = run_overload_src("tail-cycle-builtin", src);
     assert_eq!(stdout, "true\n");
@@ -3595,7 +3602,7 @@ fn a_tail_call_to_an_overloaded_ordinary_name_is_not_a_fabricated_cycle() {
     // `show(Vec2)` instead and closed a cycle that does not exist.
     let src = "type: Vec2 x i64 y i64 ;\n\
 : show ( i64 -- ) . ;\n\
-: p ( Vec2 -- ) | v | v Vec2>x show ;\n\
+: p ( Vec2 -- ) | v | &v &x @ show ;\n\
 : show ( Vec2 -- ) | v | v p ;\n\
 : main ( -- ) 3 4 Vec2 show ;\n";
     let (stdout, code) = run_overload_src("tail-cycle-ordinary-overload", src);
@@ -3768,7 +3775,7 @@ fn overloads_of_an_ordinary_word_name_get_distinct_symbols() {
     // only one body would print the wrong pair.
     let src = "type: Vec2 x i64 y i64 ;\n\
 : mag ( i64 -- i64 ) 10 * ;\n\
-: mag ( Vec2 -- i64 ) | v | v Vec2>x v Vec2>y + ;\n\
+: mag ( Vec2 -- i64 ) | v | &v &x @ &v &y @ + ;\n\
 : main ( -- ) 7 mag . 3 4 Vec2 mag . ;\n";
     let (stdout, code) = run_overload_src("user-name-symbols", src);
     assert_eq!(stdout, "70\n7\n");
@@ -3808,8 +3815,8 @@ fn overload_vec2_plus_dispatches_to_user_word() {
     // reads. `lower_call` must check `builtin_overloads` first and emit an
     // `Instr::Call` to the user word instead.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
-: main ( -- ) 1 2 Vec2 3 4 Vec2 + dup Vec2>x . Vec2>y . ;\n";
+: + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 + &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("plus", src);
     assert_eq!(stdout, "4\n6\n");
     assert_eq!(code, 0);
@@ -3821,8 +3828,8 @@ fn overload_vec2_minus_dispatches_to_user_word() {
     // subtracts addresses rather than fields, yielding a bogus pointer whose
     // field reads then segfault.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: - ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x - a Vec2>y b Vec2>y - Vec2 ;\n\
-: main ( -- ) 5 6 Vec2 1 2 Vec2 - dup Vec2>x . Vec2>y . ;\n";
+: - ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ - &a &y @ &b &y @ - Vec2 ;\n\
+: main ( -- ) 5 6 Vec2 1 2 Vec2 - &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("minus", src);
     assert_eq!(stdout, "4\n4\n");
     assert_eq!(code, 0);
@@ -3837,7 +3844,7 @@ fn overload_vec2_lt_dispatches_to_user_word() {
     // answer is `false`) still allocate `a` before `b` (a lower address), so
     // the old pointer-compare silently printed `true` here.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + + 0 > ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + + 0 > ;\n\
 : main ( -- ) -3 -4 Vec2 -1 -2 Vec2 < . ;\n";
     let (stdout, code) = run_overload_src("lt", src);
     assert_eq!(stdout, "false\n");
@@ -3854,7 +3861,7 @@ fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
     // two `Vec2`s, and the compiler panicked on the missing header block
     // (`expect("header block")`) rather than emitting a comparison.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;\n\
 : main ( -- ) 1 2 Vec2 3 4 Vec2 < . ;\n";
     let (stdout, code) = run_overload_src("lt-tail-self-name", src);
     assert_eq!(stdout, "true\n");
@@ -3867,7 +3874,7 @@ fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
     // `Vec2` print overload naturally ends by printing its last field with
     // the builtin `.`, which is also its own name.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: . ( Vec2 -- ) | v | v Vec2>x . v Vec2>y . ;\n\
+: . ( Vec2 -- ) | v | &v &x @ . &v &y @ . ;\n\
 : main ( -- ) 3 4 Vec2 . ;\n";
     let (stdout, code) = run_overload_src("print-tail-self-name", src);
     assert_eq!(stdout, "3\n4\n");
@@ -3884,9 +3891,9 @@ fn overload_from_poly_body_dispatches_to_user_word() {
     // the builtin `Instr::Bin(Add)` arm on the two struct pointers and
     // segfaulted, identically to the monomorphic bug fix 1 addresses.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
 : pair-sum ( 'T Vec2 Vec2 -- 'T Vec2 ) + ;\n\
-: main ( -- ) 42 1 2 Vec2 3 4 Vec2 pair-sum swap drop dup Vec2>x . Vec2>y . ;\n";
+: main ( -- ) 42 1 2 Vec2 3 4 Vec2 pair-sum swap drop &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("poly-plus", src);
     assert_eq!(stdout, "4\n6\n");
     assert_eq!(code, 0);

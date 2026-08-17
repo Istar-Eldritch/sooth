@@ -198,6 +198,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 regs,
                 &module.instantiations,
                 &module.builtin_overloads,
+                &module.resolved_fields,
                 &poly_arities,
                 &combinator_bodies,
                 EnvPlan::None,
@@ -259,6 +260,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             regs,
             &module.instantiations,
             &module.builtin_overloads,
+            &module.resolved_fields,
             &poly_arities,
             &combinator_bodies,
             EnvPlan::None,
@@ -281,6 +283,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &resolve,
         regs,
         &overrides,
+        &module.resolved_fields,
         &combinator_bodies,
     ));
 
@@ -388,6 +391,7 @@ pub fn lower_line(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
 ) -> (IrFunc, Vec<IrFunc>, usize, usize) {
@@ -398,6 +402,9 @@ pub fn lower_line(
     // per-span record, exactly as a compiled body does; without it the call
     // falls into the name-directed builtin arm and miscompiles.
     b.builtin_overloads = builtin_overloads;
+    // R2 (P7 slice 1): a field projection in a session line resolves through
+    // the checker's per-span record, exactly as a compiled body's does.
+    b.resolved_fields = resolved_fields;
     // R7 (Slice 2): a call to a retained polymorphic word resolves through the
     // instantiation table keyed by its call-site span, not the name-keyed env.
     b.instantiations = instantiations;
@@ -575,6 +582,7 @@ pub fn lower_line(
         regs,
         instantiations,
         builtin_overloads,
+        resolved_fields,
         poly_arities,
         combinators,
     );
@@ -666,6 +674,7 @@ pub(crate) fn lower_word(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
@@ -680,6 +689,7 @@ pub(crate) fn lower_word(
         regs,
         instantiations,
         builtin_overloads,
+        resolved_fields,
         poly_arities,
         combinators,
         EnvPlan::None,
@@ -698,6 +708,7 @@ pub(crate) fn lower_instantiation(
     symbol: &str,
     sig: &PolySig,
     builtin_overloads: &HashMap<Span, String>,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     subst: &Subst,
     body: &WordBody,
     env: &HashMap<String, Arity>,
@@ -718,6 +729,7 @@ pub(crate) fn lower_instantiation(
         regs,
         empty_instantiations(),
         builtin_overloads,
+        resolved_fields,
         empty_poly_arities(),
         combinators,
         EnvPlan::None,
@@ -811,6 +823,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -841,6 +854,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -920,6 +934,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -957,6 +972,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -997,6 +1013,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -1043,6 +1060,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -1092,6 +1110,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -1131,6 +1150,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -1191,6 +1211,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_builtin_overloads(),
+            empty_resolved_fields(),
             empty_poly_arities(),
             empty_combinators(),
         );

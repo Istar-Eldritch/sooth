@@ -65,7 +65,7 @@ fn repl_dispose_of_session_defined_override_is_unaffected() {
     // entire residual stack every line.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         "drop",
     ]);
@@ -92,7 +92,7 @@ fn repl_drop_overload_still_runs_on_a_later_line() {
     // here.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         "drop",
     ]);
@@ -118,10 +118,10 @@ fn repl_redefined_drop_overload_runs_the_new_body() {
     // running the old body.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         "drop",
-        ": drop ( Res -- ) | r | r Res>n 100 + . ;",
+        ": drop ( Res -- ) | r | r Res> 100 + . ;",
         "7 Res",
         "drop",
     ]);
@@ -156,7 +156,7 @@ fn repl_redefining_an_overrides_callee_leaves_the_override_alone() {
     let out = run_session(&[
         "type: Res n i64 ;",
         ": helper ( i64 -- ) . ;",
-        ": drop ( Res -- ) | r | r Res>n helper ;",
+        ": drop ( Res -- ) | r | r Res> helper ;",
         ": helper ( i64 i64 -- ) + . ;",
         "7 Res",
         "drop",
@@ -187,9 +187,9 @@ fn repl_declaring_a_second_override_leaves_the_first_alone() {
         "type: A n i64 ;",
         "type: B n i64 ;",
         ": helper ( i64 -- ) . ;",
-        ": drop ( A -- ) | a | a A>n helper ;",
+        ": drop ( A -- ) | a | a A> helper ;",
         ": helper ( i64 i64 -- ) + . ;",
-        ": drop ( B -- ) | b | b B>n . ;",
+        ": drop ( B -- ) | b | b B> . ;",
         "1 A",
         "drop",
         "2 B",
@@ -222,7 +222,7 @@ fn repl_quit_disposes_a_residual_resource_through_its_overload() {
     // disposed by the user's own body.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         ":quit",
     ]);
@@ -247,11 +247,11 @@ fn repl_redefining_drop_overload_refreshes_a_composing_structs_glue() {
     // stale symbol forever under `RTLD_GLOBAL`.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "type: Holder r Res ;",
         "7 Res Holder",
         "drop",
-        ": drop ( Res -- ) | r | r Res>n 100 + . ;",
+        ": drop ( Res -- ) | r | r Res> 100 + . ;",
         "7 Res Holder",
         "drop",
     ]);
@@ -282,7 +282,7 @@ fn repl_composing_structs_glue_is_correct_when_override_postdates_it() {
     // override, not left running the pre-override body forever.
     let out = run_session(&[
         "type: Spy tag i64 ;",
-        ": drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;",
+        ": drop ( Spy -- )  | s | \"drop \" . s Spy> . ;",
         "type: Res n Spy ;",
         "type: Holder r Res ;",
         "1 Spy Res Holder",
@@ -318,7 +318,7 @@ fn repl_resource_field_is_disposed_through_the_overload() {
     // resource's own destructor, not by inlining the field glue.
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "type: Holder r Res ;",
         "7 Res Holder",
         "drop",

@@ -76,7 +76,7 @@ fn combinators_import(qualifier: &str) -> String {
 /// The linear stand-in: a one-field struct with a `drop` overload, so a
 /// capture of it is a linear (not `Copy`) capture (D3).
 const SPY_DEF: &str = "type: Spy tag i64 ;\n\
-    : drop ( Spy -- )  | s | s Spy>tag . ;\n";
+    : drop ( Spy -- )  | s | s Spy> . ;\n";
 
 /// `lib/combinators.sth`'s `times`, inlined: `check_error`/`check_ok` run the
 /// checker in process, where an `import:` line never resolves, and a REPL
@@ -946,8 +946,8 @@ fn while_carrying_an_aggregate_state_runs() {
     let src = format!(
         "{}type: Box n i64 ;\n\
          : main ( -- )\n\
-           0 Box ~[ | b | b Box>n dup 5 < ~[ 1 + Box true ] ~[ Box false ] if ] c::while\n\
-           | r | r Box>n . ;\n",
+           0 Box ~[ | b | &b &n @ dup 5 < ~[ 1 + Box true ] ~[ Box false ] if ] c::while\n\
+           | r | &r &n @ . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_aggregate", &src);
@@ -1339,14 +1339,14 @@ fn poly_combinator_literal_borrowing_enclosing_place_is_error() {
                   | f | | v | v f call drop ;\n\
                 : main ( -- )\n\
                   7 Box | b |\n\
-                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  0 [ | x | x drop &b &v ] applyr\n\
                   b drop ;\n";
     let poly = "type: Box v i64 ;\n\
                 : applyr inline ( 'T [ 'T -- &i64 ] -- )\n\
                   | f | | v | v f call drop ;\n\
                 : main ( -- )\n\
                   7 Box | b |\n\
-                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  0 [ | x | x drop &b &v ] applyr\n\
                   b drop ;\n";
     for (label, src) in [("mono", mono), ("poly", poly)] {
         let err = check_error(src);
@@ -1386,7 +1386,7 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
          arr drop ;\n\
          : main ( -- )\n\
          7 Box | b |\n\
-         0 4 fill [ | x | &b &Box>v ] refout\n\
+         0 4 fill [ | x | &b &v ] refout\n\
          b drop ;\n"
     );
     let err = check_error(&src);
@@ -1753,7 +1753,7 @@ fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
     // reliably segfaults when mutated back to an empty map.
     let transcript = repl_error(
         "type: Vec2 x i64 y i64 ;\n\
-         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
          : vsum ( 'T Vec2 Vec2 -- i64 ) + Vec2> + swap drop ;\n\
          42 1 2 Vec2 3 4 Vec2 vsum\n",
     );
@@ -2082,7 +2082,7 @@ fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
         "crit10-private",
         "type: Secret tag i64 ;\n\
          export: run ;\n\
-         : run ( Secret [ i64 -- i64 ] -- ) | q | Secret>tag q call drop ;\n",
+         : run ( Secret [ i64 -- i64 ] -- ) | q | &tag @ swap drop q call drop ;\n",
     );
     let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
     std::fs::remove_file(&path).ok();
@@ -2296,8 +2296,8 @@ fn everyday_diagnostics_show_the_unmangled_enclosing_word() {
 #[test]
 fn cycle_and_accessor_diagnostics_show_unmangled_names() {
     // Two shapes the first sweep missed. The cycle renders a chain of `WordDef`
-    // names, which never passed through the rendering boundary; the accessor
-    // mangles as `P__m0>x`, so `__m0` sits mid-string and a trailing-suffix
+    // names, which never passed through the rendering boundary; the destructure
+    // mangles as `P__m0>`, so `__m0` sits mid-string and a trailing-suffix
     // strip cannot see it.
     let cycle = build_error_with_import(
         "m0-cycle",
@@ -2314,15 +2314,15 @@ fn cycle_and_accessor_diagnostics_show_unmangled_names() {
 
     let accessor = build_error_with_import(
         "m0-accessor",
-        "type: P x i64 y i64 ;\n: main ( -- ) 1 P>x ;\n",
+        "type: P x i64 y i64 ;\n: main ( -- ) 1 P> drop ;\n",
     );
     assert!(
-        accessor.contains("`P>x` expected `P`"),
-        "the accessor should render as written: {accessor}"
+        accessor.contains("`P>` expected `P`"),
+        "the destructure should render as written: {accessor}"
     );
     assert!(
         !accessor.contains("__m"),
-        "accessor leaked a mangled name: {accessor}"
+        "destructure leaked a mangled name: {accessor}"
     );
 }
 
@@ -2366,7 +2366,7 @@ fn combinator_called_from_drop_override_body_lowers_correctly() {
         "drop-override-combinator",
         ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;\n\
          type: Bx v i64 ;\n\
-         : drop ( Bx -- ) Bx>v [ 1 + ] twice . ;\n\
+         : drop ( Bx -- ) Bx> [ 1 + ] twice . ;\n\
          : main ( -- ) 1 Bx drop ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");

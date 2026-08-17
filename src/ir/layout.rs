@@ -162,16 +162,11 @@ pub struct FieldLayout {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum StructWord {
     Construct(StructId),
-    Get(StructId, usize),
-    Set(StructId, usize),
     Destructure(StructId),
-    /// `S|>fi` (R10): a non-consuming `( S -- S field )` peek, Copy fields
-    /// only (the checker rejects a linear field before this is ever reached).
-    Peek(StructId, usize),
 }
 
 /// The IR's view of a program's structs: the per-`StructId` layout registry and
-/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi` → `StructWord`). Built
+/// the generated-word name map (`S`/`S>` → `StructWord`). Built
 /// once from the module and threaded into lowering; empty for a struct-free
 /// program (the scalar paths never consult it).
 #[derive(Debug, Default)]
@@ -542,23 +537,6 @@ pub(super) fn build_registries_ww(
             format!("{surface}>"),
             StructWord::Destructure(id),
         );
-        for (fi, (fname, _)) in decl.fields.iter().enumerate() {
-            insert(
-                format!("{}>{}", decl.name, fname),
-                format!("{surface}>{fname}"),
-                StructWord::Get(id, fi),
-            );
-            insert(
-                format!("{}<{}", decl.name, fname),
-                format!("{surface}<{fname}"),
-                StructWord::Set(id, fi),
-            );
-            insert(
-                format!("{}|>{}", decl.name, fname),
-                format!("{surface}|>{fname}"),
-                StructWord::Peek(id, fi),
-            );
-        }
     }
 
     let mut ewords = HashMap::new();

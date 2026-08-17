@@ -86,7 +86,7 @@ fn imported_type_is_nameable_and_runs() {
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: mk ( -- geo::Point ) 3 4 geo::Point ;\n: main ( -- ) mk geo::Point>x . ;\n",
+        "import: geo \"geo.sth\" ;\n: mk ( -- geo::Point ) 3 4 geo::Point ;\n: main ( -- ) mk &x @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "3\n");
@@ -102,7 +102,7 @@ fn same_named_types_in_two_modules_coexist() {
     c.write("b.sth", "type: Point v i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: a \"a.sth\" ;\nimport: b \"b.sth\" ;\n: main ( -- ) 1 a::Point a::Point>x . 2 b::Point b::Point>v . ;\n",
+        "import: a \"a.sth\" ;\nimport: b \"b.sth\" ;\n: main ( -- ) 1 a::Point &x @ swap drop . 2 b::Point &v @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n2\n");
@@ -257,14 +257,15 @@ fn absent_word_in_module_is_unknown_not_unexported() {
 }
 
 #[test]
-fn qualified_accessors_get_set_peek_all_resolve() {
-    // Criterion 12: an exported type's getter, setter, and peek accessors
-    // (`>`, `<`, `|>`) all resolve when qualified.
+fn qualified_constructor_destructure_and_projection_all_resolve() {
+    // Criterion 12: an exported type's generated words (`Point`, `Point>`) all
+    // resolve when qualified, and a projection off the imported type resolves by
+    // receiver, so it needs no qualification of its own.
     let c = Closure::new("accessors");
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: main ( -- ) 1 2 geo::Point geo::Point|>x . 9 geo::Point<x geo::Point>x . ;\n",
+        "import: geo \"geo.sth\" ;\n: main ( -- ) 1 2 geo::Point &x @ . &!x 9 ! &x @ . geo::Point> drop drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n9\n");
@@ -394,7 +395,7 @@ fn exported_word_naming_exported_type_is_accepted() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk lib::Res>n . ;\n",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk lib::Res> . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n");
@@ -410,7 +411,7 @@ fn imported_linear_type_dropped_without_importing_it_is_error() {
     let c = Closure::new("imported-linear-drop-ungated");
     c.write(
         "lib.sth",
-        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> . ;\nexport: mk Res ;\n",
     );
     let entry = c.write(
         "main.sth",
@@ -438,7 +439,7 @@ fn imported_linear_type_dropped_after_selective_import_ok() {
     let c = Closure::new("imported-linear-drop-selective");
     c.write(
         "lib.sth",
-        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> . ;\nexport: mk Res ;\n",
     );
     let entry = c.write(
         "main.sth",
@@ -462,8 +463,8 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
             "type: Res n i64 ;\n",
             ": mk ( -- Res ) 7 Res ;\n",
             ": sink ( Res -- ) drop ;\n",
-            ": peek ( &Res -- i64 ) &Res>n @ ;\n",
-            ": drop ( Res -- ) | r | r Res>n . ;\n",
+            ": peek ( &Res -- i64 ) &n @ ;\n",
+            ": drop ( Res -- ) | r | r Res> . ;\n",
             "export: mk Res sink peek ;\n",
         ),
     );
@@ -496,8 +497,8 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
         concat!(
             "type: Res n i64 ;\n",
             ": mk ( -- Res ) 1 Res ;\n",
-            ": drop ( Res -- ) | r | r Res>n . ;\n",
-            ": with inline ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &Res>n @ q call r drop ;\n",
+            ": drop ( Res -- ) | r | r Res> . ;\n",
+            ": with inline ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &n @ q call r drop ;\n",
             "export: with ;\n",
         ),
     );
@@ -533,7 +534,7 @@ fn own_module_operator_overload_reachable_bare_in_multi_module() {
             "import: lib \"lib.sth\" ;\n",
             "type: Vec2 x i64 y i64 ;\n",
             ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 + &x @ . drop ;\n",
         ),
     );
     let (stdout, code) = build_and_run(&entry);
@@ -560,7 +561,7 @@ fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
             "import: lib \"lib.sth\" ;\n",
             "type: Vec2 x i64 y i64 ;\n",
             ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 + Vec2>x ;\n",
+            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 + Vec2> drop ;\n",
             ": main ( -- ) lib::p . 42 probe . . ;\n",
         ),
     );
@@ -591,7 +592,7 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
         "main.sth",
         concat!(
             "import: x \"x.sth\" ;\n",
-            ": main ( -- ) 1 x::mk 2 x::mk + x::XT>v . ;\n",
+            ": main ( -- ) 1 x::mk 2 x::mk + &v @ swap drop . ;\n",
         ),
     );
     let err = build_err(&entry);
@@ -621,8 +622,8 @@ fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
             "type: Vec2 x i64 y i64 ;\n",
             ": + ( Vec2 Vec2 -- Vec2 )\n",
             "  | a b |\n",
-            "  a Vec2>x b Vec2>x +\n",
-            "  a Vec2>y b Vec2>y +\n",
+            "  a &x @ swap drop b &x @ swap drop +\n",
+            "  a &y @ swap drop b &y @ swap drop +\n",
             "  Vec2 ;\n",
             "export: Vec2 + ;\n",
         ),
@@ -632,7 +633,7 @@ fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
         concat!(
             "import: v | Vec2 + | \"v.sth\" ;\n",
             ": main ( -- )\n",
-            "  1 2 Vec2 3 4 Vec2 + Vec2>x .\n",
+            "  1 2 Vec2 3 4 Vec2 + &x @ swap drop .\n",
             "  1 2 + . ;\n",
         ),
     );
@@ -657,7 +658,7 @@ fn single_module_operator_overload_unchanged() {
         concat!(
             "type: Vec2 x i64 y i64 ;\n",
             ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": main ( -- ) 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+            ": main ( -- ) 1 2 Vec2 3 4 Vec2 + &x @ swap drop . ;\n",
         ),
     );
     let (stdout, code) = build_and_run(&entry);
@@ -747,16 +748,19 @@ fn selective_import_colliding_with_local_word_is_error() {
 #[test]
 fn selective_import_of_type_exposes_members_unqualified() {
     // Criterion 21a: selectively importing `Point` exposes the type unqualified
-    // and its generated words unqualified too (constructor, peek `|>`, set `<`,
-    // get `>`), as one unit (R15c).
+    // and its generated words unqualified too (constructor, destructure `>`), as
+    // one unit (R15c).
     let c = Closure::new("selective-type");
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo | Point | \"geo.sth\" ;\n: main ( -- ) 1 2 Point Point|>x . 9 Point<x Point>x . ;\n",
+        "import: geo | Point | \"geo.sth\" ;\n: main ( -- ) 1 2 Point &x @ . &!x 9 ! &x @ . Point> drop drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
-    assert_eq!(stdout, "1\n9\n", "peek/set/get all resolve unqualified");
+    assert_eq!(
+        stdout, "1\n9\n",
+        "constructor and destructure resolve unqualified"
+    );
     assert_eq!(code, 0);
 }
 
@@ -805,12 +809,12 @@ fn qualified_call_to_builtin_named_overload_dispatches_to_user_word() {
         "lib.sth",
         "export: Vec2 + ;\n\
          type: Vec2 x i64 y i64 ;\n\
-         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n",
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop + a &y @ swap drop b &y @ swap drop + Vec2 ;\n",
     );
     let entry = c.write(
         "main.sth",
         "import: v | Vec2 | \"lib.sth\" ;\n\
-         : main ( -- ) 1 2 Vec2 3 4 Vec2 v::+ Vec2>x . ;\n",
+         : main ( -- ) 1 2 Vec2 3 4 Vec2 v::+ &x @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "4\n");

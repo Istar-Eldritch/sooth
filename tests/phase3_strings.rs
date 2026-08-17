@@ -281,8 +281,8 @@ fn str_stored_in_a_struct_field_round_trips_native() {
         "type: Box s str ;\n\n",
         ": main ( -- )\n",
         "  \"hi\" Box | b |\n",
-        "  b Box>s len .\n",
-        "  b Box>s . ;"
+        "  b Box> len .\n",
+        "  b Box> . ;"
     );
     let (stdout, code) = run_src("str-struct-field", src);
     assert_eq!(code, 0, "golden should exit 0");

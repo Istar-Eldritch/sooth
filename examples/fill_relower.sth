@@ -13,8 +13,8 @@ type: Pair a i64 b i64 ;
 \ A struct (aggregate) seed reaches the last slot; both fields survive the
 \ `store_elem` `Blit` under the loop.
 : struct_last ( -- i64 i64 )
-  3 4 Pair 8 fill | a | &a 7 >usize &> @ | v | a drop
-  v Pair>a v Pair>b ;
+  3 4 Pair 8 fill | arr | &arr 7 >usize &> @ | v | arr drop
+  &v &a @ &v &b @ ;
 
 \ A self-tail-recursive word that fills an array each iteration: `fill`'s loop
 \ opens inside the word's own self-tail loop, so without save/restore loop-

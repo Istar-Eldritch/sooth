@@ -320,6 +320,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
+        resolved_fields: HashMap::new(),
         modules,
         statics,
     };
@@ -935,5 +936,47 @@ mod tests {
         let so = dir.join("libsq.so");
         compile_so(&ssa, &so).expect("compile_so should succeed");
         assert!(so.exists(), "shared object should exist at {so:?}");
+    }
+
+    /// P7 slice 1 (R2): `resolved_fields` is keyed on the whole `Span`,
+    /// `module` field included. Two files whose projections land on the
+    /// identical (line, col) resolve to different structs and different
+    /// fields; a bare (line, col) key would collapse them into one entry and
+    /// silently lower one of the two against the other's layout.
+    #[test]
+    fn resolved_fields_key_includes_module() {
+        let s = Sandbox::new("resolved-fields-span-module");
+        // Both `&n` sites sit at the same line and column in their own file.
+        s.write(
+            "lib.sth",
+            ": show ( -- ) 1 true B &n @ drop drop ;\nexport: show ;\ntype: B tag i64 n bool ;\nexport: B ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: l \"lib.sth\" ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+        let sites: Vec<(u32, u32, u32, usize)> = module
+            .resolved_fields
+            .iter()
+            .map(|(span, (_, fi))| (span.line, span.col, span.module, *fi))
+            .collect();
+        assert_eq!(sites.len(), 2, "one entry per file's site: {sites:?}");
+        let (l0, c0, _, _) = sites[0];
+        let (l1, c1, _, _) = sites[1];
+        assert_eq!(
+            (l0, c0),
+            (l1, c1),
+            "the two sites must collide on (line, col) or this proves nothing"
+        );
+        let mut fields: Vec<usize> = sites.iter().map(|&(_, _, _, fi)| fi).collect();
+        fields.sort_unstable();
+        assert_eq!(
+            fields,
+            vec![0, 1],
+            "each file's `&n` resolved against its own receiver: {sites:?}"
+        );
     }
 }

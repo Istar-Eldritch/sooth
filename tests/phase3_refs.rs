@@ -54,7 +54,7 @@ fn check_error(src: &str) -> String {
 /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
 /// overload, so it is linear for the same reason any resource is, not by
 /// any compiler-known bit.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 /// An `import:` line for the committed combinator library by *absolute* path,
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
@@ -117,14 +117,14 @@ type: Buf  data ^[u8 64]  len usize ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b &!Buf>len @ | i |
-  b &!Buf>data &!^ | arr |
+  b &!len @ | i |
+  b &!data &!^ | arr |
   arr i &!> x !
-  b &!Buf>len 1 +! ;
+  b &!len 1 +! ;
 
 : byte-at ( &Buf usize -- u8 )
   | b i |
-  b &Buf>data &^ i &> @ ;
+  b &data &^ i &> @ ;
 
 : copy-byte ( &!Buf &Buf usize -- )
   | dst src i |
@@ -138,7 +138,7 @@ fn borrow_of_place_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-of-place",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &v &V>x @ .\n  &!v &!V>y @ . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &v &x @ .\n  &!v &!y @ . ;\n",
     );
     assert_eq!(stdout, "1\n2\n");
     assert_eq!(code, 0);
@@ -236,7 +236,7 @@ fn borrow_of_moved_local_is_error() {
     // the reference would read freed storage.
     let err = check_error(
         "type: Box c ^i64 ;\n\
-         : main ( -- )\n  7 ^ Box | b |\n  b drop\n  &b &Box>c &^ @ . ;\n",
+         : main ( -- )\n  7 ^ Box | b |\n  b drop\n  &b &c &^ @ . ;\n",
     );
     assert!(
         err.contains("use after move") && err.contains("local `b` of type `Box`"),
@@ -249,7 +249,7 @@ fn borrow_of_moved_local_is_error() {
 fn borrow_of_reference_local_is_error() {
     // A reference parameter needs no sigil, so the sigil a reader might
     // add by habit gets its own diagnostic rather than the scalar-root one.
-    let err = check_error("type: V x i64 y i64 ;\n: f ( &!V -- ) | b |\n  &!b &!V>x 1 +! ;\n");
+    let err = check_error("type: V x i64 y i64 ;\n: f ( &!V -- ) | b |\n  &!b &!x 1 +! ;\n");
     assert!(
         err.contains("it is already the reference `&!V`"),
         "expected the already-a-reference rejection: {err}"
@@ -267,7 +267,7 @@ fn projection_to_scalar_field_is_accepted() {
     let (stdout, code) = run_src(
         "projection-to-scalar-field",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 41 +!\n  &v &V>x @ . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v &!x 41 +!\n  &v &x @ . ;\n",
     );
     assert_eq!(stdout, "42\n");
     assert_eq!(code, 0);
@@ -278,7 +278,7 @@ fn dup_of_shared_reference_is_accepted() {
     let (stdout, code) = run_src(
         "dup-of-shared-reference",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  7 8 V | v |\n  &v dup &V>x @ . &V>y @ . ;\n",
+         : main ( -- )\n  7 8 V | v |\n  &v dup &x @ . &y @ . ;\n",
     );
     assert_eq!(stdout, "7\n8\n");
     assert_eq!(code, 0);
@@ -315,7 +315,7 @@ fn projection_through_field_element_and_cell_reads_correctly() {
              \x20 &!a 90 >u8 push-byte\n\
              \x20 &a 0 byte-at .\n\
              \x20 &a 1 byte-at .\n\
-             \x20 &a &Buf>len @ .\n\
+             \x20 &a &len @ .\n\
              \x20 a drop ;\n"
         ),
     );
@@ -368,7 +368,7 @@ fn mutable_element_projection_through_mutable_reference_is_accepted() {
 #[test]
 fn store_through_shared_reference_is_error() {
     let err = check_error(
-        "type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &V>x 5 !\n  v V> . . ;\n",
+        "type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &x 5 !\n  v V> . . ;\n",
     );
     assert!(
         err.contains("`!` cannot store through the shared reference `&i64`"),
@@ -387,7 +387,7 @@ fn access_through_reference_reads_and_writes() {
     let (stdout, code) = run_src(
         "access-reads-and-writes",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 40 !\n  &v &V>x @ .\n  &v &V>y @ . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v &!x 40 !\n  &v &x @ .\n  &v &y @ . ;\n",
     );
     assert_eq!(stdout, "40\n2\n");
     assert_eq!(code, 0);
@@ -398,8 +398,8 @@ fn increment_through_mutable_reference_adds_in_place() {
     let (stdout, code) = run_src(
         "increment-in-place",
         "type: Counter n usize ;\n\
-         : main ( -- )\n  0 >usize Counter | c |\n  &!c &!Counter>n 1 +!\n  \
-         &!c &!Counter>n 1 +!\n  &c &Counter>n @ . ;\n",
+         : main ( -- )\n  0 >usize Counter | c |\n  &!c &!n 1 +!\n  \
+         &!c &!n 1 +!\n  &c &n @ . ;\n",
     );
     assert_eq!(stdout, "2\n");
     assert_eq!(code, 0);
@@ -408,7 +408,7 @@ fn increment_through_mutable_reference_adds_in_place() {
 #[test]
 fn fetch_of_linear_referent_is_error() {
     let err = check_error(&format!(
-        "{SPY_DEF}type: Holds a Spy ;\n: peek ( &Holds -- ) | h |\n  h &Holds>a @ drop ;\n"
+        "{SPY_DEF}type: Holds a Spy ;\n: peek ( &Holds -- ) | h |\n  h &a @ drop ;\n"
     ));
     assert!(
         err.contains("`@` cannot access the linear referent `Spy`"),
@@ -423,7 +423,7 @@ fn fetch_of_linear_referent_is_error() {
 #[test]
 fn store_of_linear_referent_is_error() {
     let err = check_error(&format!(
-        "{SPY_DEF}type: Holds a Spy ;\n: put ( &!Holds Spy -- ) | h s |\n  h &!Holds>a s ! ;\n"
+        "{SPY_DEF}type: Holds a Spy ;\n: put ( &!Holds Spy -- ) | h s |\n  h &!a s ! ;\n"
     ));
     assert!(
         err.contains("`!` cannot access the linear referent `Spy`"),
@@ -445,11 +445,11 @@ fn fetch_or_store_of_copy_aggregate_reads_and_writes() {
          type: Holder v V ;\n\
          : main ( -- )\n\
          \x20 1 2 V Holder | h |\n\
-         \x20 &h &Holder>v @ | got |\n\
+         \x20 &h &v @ | got |\n\
          \x20 got V> . .\n\
          \x20 8 9 V | fresh |\n\
-         \x20 &!h &!Holder>v fresh !\n\
-         \x20 &h &Holder>v @ V> . . ;\n",
+         \x20 &!h &!v fresh !\n\
+         \x20 &h &v @ V> . . ;\n",
     );
     assert_eq!(stdout, "2\n1\n9\n8\n");
     assert_eq!(code, 0);
@@ -465,10 +465,10 @@ fn fetch_of_copy_aggregate_survives_source_mutation() {
          type: Holder v V ;\n\
          : main ( -- )\n\
          \x20 1 2 V Holder | h |\n\
-         \x20 &h &Holder>v @ | got |\n\
-         \x20 &!h &!Holder>v &!V>x 99 !\n\
+         \x20 &h &v @ | got |\n\
+         \x20 &!h &!v &!x 99 !\n\
          \x20 got V> . .\n\
-         \x20 &h &Holder>v &V>x @ . ;\n",
+         \x20 &h &v &x @ . ;\n",
     );
     assert_eq!(
         stdout, "2\n1\n99\n",
@@ -530,9 +530,8 @@ fn reference_in_cell_payload_is_error() {
 fn reference_returned_from_word_is_error() {
     // The direct consequence: a projection can never be factored into its own
     // helper word.
-    let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n: len-of ( &!Buf -- &!usize ) &!Buf>len ;\n",
-    );
+    let err =
+        check_error("type: Buf data ^[u8 64] len usize ;\n: len-of ( &!Buf -- &!usize ) &!len ;\n");
     assert!(
         err.contains("a reference cannot be stored")
             && err.contains("`len-of` declares the output `&!usize`"),
@@ -560,7 +559,7 @@ fn reference_in_effect_input_is_accepted() {
     let (stdout, code) = run_src(
         "reference-input-accepted",
         "type: V x i64 y i64 ;\n\
-         : sum ( &V -- i64 ) | v |\n  v &V>x @ v &V>y @ + ;\n\
+         : sum ( &V -- i64 ) | v |\n  v &x @ v &y @ + ;\n\
          : main ( -- )\n  3 4 V | v |\n  &v sum . ;\n",
     );
     assert_eq!(stdout, "7\n");
@@ -591,8 +590,8 @@ fn mutation_through_reference_parameter_is_visible_to_caller() {
     let (stdout, code) = run_src(
         "mutation-visible-to-caller",
         "type: Counter n i64 ;\n\
-         : bump ( &!Counter -- ) &!Counter>n 1 +! ;\n\
-         : main ( -- )\n  0 Counter | c |\n  &!c bump\n  &!c bump\n  &c &Counter>n @ . ;\n",
+         : bump ( &!Counter -- ) &!n 1 +! ;\n\
+         : main ( -- )\n  0 Counter | c |\n  &!c bump\n  &!c bump\n  &c &n @ . ;\n",
     );
     assert_eq!(stdout, "2\n");
     assert_eq!(code, 0);
@@ -622,7 +621,7 @@ fn reference_local_expires_without_drop() {
         "reference-local-expires",
         "type: V x i64 y i64 ;\n\
          : hold ( &!V -- ) | b | ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v hold\n  &v &V>x @ . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v hold\n  &v &x @ . ;\n",
     );
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
@@ -684,7 +683,7 @@ fn reborrow_while_projected_reference_still_live_is_error() {
     // `b` suspended.
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
-         : two-live ( &!Buf -- )\n  | b |\n  b &!Buf>len\n  b &!Buf>len\n  1 +! 1 +! ;\n",
+         : two-live ( &!Buf -- )\n  | b |\n  b &!len\n  b &!len\n  1 +! 1 +! ;\n",
     );
     assert!(
         err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
@@ -708,8 +707,8 @@ fn mutable_borrow_bound_to_a_local_still_suspends_its_place_is_error() {
     // stack-resident twin above.
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf -- )\n  | p |\n  p &!Buf>len | e |\n  \
-         p &!Buf>len 1 +!\n  e 1 +! ;\n: main ( -- ) ;\n",
+         : f ( &!Buf -- )\n  | p |\n  p &!len | e |\n  \
+         p &!len 1 +!\n  e 1 +! ;\n: main ( -- ) ;\n",
     );
     assert!(
         err.contains("cannot reborrow `p`") && err.contains("a reference derived from it is live"),
@@ -733,7 +732,7 @@ fn mutable_borrow_bound_to_a_local_over_an_owned_root_still_suspends_its_place_i
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | b |\n  \
-         &!b | p |\n  p &!Buf>len | e |\n  p &!Buf>len 1 +!\n  \
+         &!b | p |\n  p &!len | e |\n  p &!len 1 +!\n  \
          e 1 +!\n  b drop ;\n",
     );
     assert!(
@@ -756,8 +755,8 @@ fn mutable_borrow_bound_to_a_local_released_at_its_last_use_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-bound-local-released-at-last-use",
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf -- )\n  | p |\n  p &!Buf>len | e |\n  e 1 +!\n  \
-         p &!Buf>len @ . ;\n: main ( -- )\n  \
+         : f ( &!Buf -- )\n  | p |\n  p &!len | e |\n  e 1 +!\n  \
+         p &!len @ . ;\n: main ( -- )\n  \
          0 >u8 64 fill ^ 0 >usize Buf | b |\n  &!b f\n  b drop ;\n",
     );
     assert_eq!(stdout, "1\n");
@@ -779,10 +778,10 @@ fn mutable_borrow_dead_before_an_if_arm_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-dead-before-if-arm",
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  p @ drop\n  \
-         n 0 = ~[\n    b &!Buf>len 1 +!\n  ] ~[\n  ] if ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
+         n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+         &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
@@ -798,10 +797,10 @@ fn mutable_borrow_dead_before_a_times_body_is_accepted() {
         "borrow-dead-before-times-body",
         &format!(
             "{}type: Buf data ^[u8 64] len usize ;\n\
-             : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  p @ drop\n  \
-             3 ~[ drop b &!Buf>len 1 +! ] times ;\n\
+             : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  p @ drop\n  \
+             3 ~[ drop b &!len 1 +! ] times ;\n\
              : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-             &!a f\n  &a &Buf>len @ .\n  a drop ;\n",
+             &!a f\n  &a &len @ .\n  a drop ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -818,11 +817,11 @@ fn mutable_borrow_dead_before_an_if_arm_through_a_projection_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-dead-before-if-arm-through-projection",
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>data &!^ | arr |\n  \
-         arr 0 >usize &!> 7 >u8 !\n  n 0 = ~[\n    b &!Buf>len 1 +!\n  ] ~[\n  ] if ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!data &!^ | arr |\n  \
+         arr 0 >usize &!> 7 >u8 !\n  n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-         &!a 0 f\n  &a &Buf>data &^ 0 >usize &> @ .\n  \
-         &a &Buf>len @ .\n  a drop ;\n",
+         &!a 0 f\n  &a &data &^ 0 >usize &> @ .\n  \
+         &a &len @ .\n  a drop ;\n",
     );
     assert_eq!(stdout, "7\n1\n");
     assert_eq!(code, 0);
@@ -838,10 +837,10 @@ fn mutable_borrow_used_then_reborrowed_within_one_if_arm_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-used-then-reborrowed-within-one-if-arm",
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
-         n 0 = ~[\n    p @ drop\n    b &!Buf>len 1 +!\n  ] ~[\n    p @ drop\n  ] if ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
+         n 0 = ~[\n    p @ drop\n    b &!len 1 +!\n  ] ~[\n    p @ drop\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+         &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
@@ -856,8 +855,8 @@ fn mutable_borrow_used_after_an_if_term_is_still_error() {
     // that is genuinely still ahead.
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
-         n 0 = ~[\n    b &!Buf>len 1 +!\n  ] ~[\n  ] if\n  p @ drop ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
+         n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if\n  p @ drop ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -876,8 +875,8 @@ fn mutable_borrow_used_across_a_times_back_edge_is_still_error() {
     // body end while `p` is still meant to be live.
     let err = check_error(&format!(
         "{TIMES_DEF}type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  \
-         3 ~[ drop p @ drop b &!Buf>len 1 +! ] times ;\n\
+         : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  \
+         3 ~[ drop p @ drop b &!len 1 +! ] times ;\n\
          : main ( -- ) ;\n"
     ));
     assert!(
@@ -894,10 +893,10 @@ fn mutable_borrow_dead_before_two_levels_of_nested_if_arms_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-dead-before-two-levels-of-nested-if-arms",
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  p @ drop\n  \
-         n 0 = ~[\n    true ~[\n      b &!Buf>len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
+         n 0 = ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+         &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
@@ -910,8 +909,8 @@ fn mutable_borrow_used_after_two_levels_of_nested_if_arms_is_still_error() {
     // arms, however deeply nested the reborrow is.
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
-         n 0 = ~[\n    true ~[\n      b &!Buf>len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
+         n 0 = ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
          p @ drop ;\n\
          : main ( -- ) ;\n",
     );
@@ -930,8 +929,8 @@ fn mutable_borrow_captured_by_a_still_callable_quotation_is_still_error() {
     // whether `p` would otherwise be `outer_releasable`.
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  \
-         [ p @ drop ] | q |\n  b &!Buf>len 1 +!\n  q call ;\n\
+         : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  \
+         [ p @ drop ] | q |\n  b &!len 1 +!\n  q call ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -969,7 +968,7 @@ fn shared_reference_is_copy() {
     let (stdout, code) = run_src(
         "shared-reference-is-copy",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  7 8 V | v |\n  &v &v\n  &V>x @ .\n  &V>y @ . ;\n",
+         : main ( -- )\n  7 8 V | v |\n  &v &v\n  &x @ .\n  &y @ . ;\n",
     );
     assert_eq!(stdout, "7\n8\n");
     assert_eq!(code, 0);
@@ -983,8 +982,8 @@ fn naming_mutable_reference_local_reborrows() {
         "reborrow-accepted",
         "type: Counter n i64 ;\n\
          : bump-twice ( &!Counter -- )\n  | c |\n  \
-         c &!Counter>n 1 +!\n  c &!Counter>n 1 +! ;\n\
-         : main ( -- )\n  0 Counter | k |\n  &!k bump-twice\n  &k &Counter>n @ . ;\n",
+         c &!n 1 +!\n  c &!n 1 +! ;\n\
+         : main ( -- )\n  0 Counter | k |\n  &!k bump-twice\n  &k &n @ . ;\n",
     );
     assert_eq!(stdout, "2\n");
     assert_eq!(code, 0);
@@ -1021,7 +1020,7 @@ fn move_of_place_borrowed_on_stack_is_error() {
 /// applies (T3/T4).
 const ACC_PRELUDE: &str = "\
 type: Acc arr [i64 4] ;
-: drop ( Acc -- ) | a | &a &Acc>arr 0 &> @ . a Acc> drop ;
+: drop ( Acc -- ) | a | &a &arr 0 &> @ . a Acc> drop ;
 ";
 
 #[test]
@@ -1032,7 +1031,7 @@ fn move_of_place_borrowed_in_locals_is_error() {
     // trailing use of `r` is what makes the rejection real, not the binding.
     let err = check_error(&format!(
         "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b | r |\n  b sink\n  \
-         r &Box>c &^ @ . ;\n"
+         r &c &^ @ . ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
@@ -1050,7 +1049,7 @@ fn dispose_of_borrowed_place_is_error() {
     // D5/T2: the mutable-borrow twin of T1, used after the dispose.
     let err = check_error(&format!(
         "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &!b | r |\n  b drop\n  \
-         r &!Box>c &^ @ . ;\n"
+         r &!c &^ @ . ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
@@ -1072,7 +1071,7 @@ fn borrow_via_local_dead_before_consume_is_accepted() {
         "borrow-via-local-dead-before-consume",
         &format!(
             "{ACC_PRELUDE}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
-             &!acc &!Acc>arr | f |\n  f 0 >usize &!> 5 !\n  acc drop ;\n"
+             &!acc &!arr | f |\n  f 0 >usize &!> 5 !\n  acc drop ;\n"
         ),
     );
     assert_eq!(stdout, "5\n");
@@ -1086,7 +1085,7 @@ fn use_of_borrow_local_after_consume_is_error() {
     // rejected. T3/T4 are a mutation pair: same terms, reordered.
     let err = check_error(&format!(
         "{ACC_PRELUDE}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
-         &!acc &!Acc>arr | f |\n  acc drop\n  f 0 >usize &!> 5 ! ;\n"
+         &!acc &!arr | f |\n  acc drop\n  f 0 >usize &!> 5 ! ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `acc`"),
@@ -1104,8 +1103,8 @@ fn two_sequential_mutable_borrows_first_unused_is_accepted() {
     let (stdout, code) = run_src(
         "two-sequential-mutable-borrows-first-unused",
         "type: V x i64 ;\n\
-         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!V>x 1 +!\n  \
-         &v &V>x @ . ;\n",
+         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!x 1 +!\n  \
+         &v &x @ . ;\n",
     );
     assert_eq!(stdout, "2\n");
     assert_eq!(code, 0);
@@ -1113,8 +1112,8 @@ fn two_sequential_mutable_borrows_first_unused_is_accepted() {
     // conflict: `f` is then live when the second `&!v` is taken.
     let err = check_error(
         "type: V x i64 ;\n\
-         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!V>x 1 +!\n  \
-         f &!V>x 2 +! ;\n",
+         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!x 1 +!\n  \
+         f &!x 2 +! ;\n",
     );
     assert!(
         err.contains("conflicts with a live borrow of `v`"),
@@ -1128,7 +1127,7 @@ fn move_after_borrow_ends_is_accepted() {
         "move-after-borrow-ends",
         &format!(
             "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  \
-             &b &Box>c &^ @ .\n  b Box> ^> . ;\n"
+             &b &c &^ @ .\n  b Box> ^> . ;\n"
         ),
     );
     assert_eq!(stdout, "7\n7\n");
@@ -1141,7 +1140,7 @@ fn move_after_borrow_ends_is_accepted() {
 fn disjoint_field_borrows_are_conservatively_rejected() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x\n  &!v &!V>y\n  1 +! 1 +! ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v &!x\n  &!v &!y\n  1 +! 1 +! ;\n",
     );
     assert!(
         err.contains("`&!v` conflicts with a live borrow of `v`"),
@@ -1159,8 +1158,8 @@ fn sequenced_borrows_of_two_fields_are_accepted() {
     let (stdout, code) = run_src(
         "sequenced-field-borrows",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 10 +!\n  &!v &!V>y 20 +!\n  \
-         &v &V>x @ .\n  &v &V>y @ . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v &!x 10 +!\n  &!v &!y 20 +!\n  \
+         &v &x @ .\n  &v &y @ . ;\n",
     );
     assert_eq!(stdout, "11\n22\n");
     assert_eq!(code, 0);
@@ -1174,7 +1173,7 @@ fn mutable_borrow_of_name_aliased_place_is_error() {
     // frame slot, so a mutation through `p` would be visible through `q`.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  &!p &!V>x 1 +!\n  q V> . . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  &!p &!x 1 +!\n  q V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
@@ -1199,38 +1198,24 @@ fn mutable_borrow_of_name_aliased_place_dead_is_accepted() {
         "name-aliased-place-dead-accepted",
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  q V> . .\n  \
-         &!p &!V>x 1 +!\n  p V> . . ;\n",
+         &!p &!x 1 +!\n  p V> . . ;\n",
     );
     assert_eq!(stdout, "2\n1\n2\n2\n");
     assert_eq!(code, 0);
 }
 
 #[test]
-fn mutable_borrow_of_peek_aliased_place_is_error() {
-    // The second route: a non-consuming peek pushes the field's interior
-    // address, so two peeks of one field alias with no naming involved.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S\n  S|>a swap S|>a swap drop\n  | p q |\n  \
-         &!p &!V>x 1 +!\n  q V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
-        "a peek-aliased place must be rejected too: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
-    // A peeked field is still a name for part of the whole struct, so
-    // borrowing the struct while the peek's binding is live must be rejected
-    // the same as any other aliasing name — region *overlap*, not equality.
+    // D2/R1: a shared field projection off an owned receiver is non-
+    // consuming, so `s` and the projection bound as `peeked` both stay live
+    // and denote overlapping regions -- borrowing `s` mutably while `peeked`
+    // is still live must be rejected the same as any other aliasing name,
+    // region *overlap* rather than equality.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
-         &!s &!S>a &!V>x 40 +!\n  peeked V> . . ;\n",
+         : main ( -- )\n  1 2 V 3 S | s |\n  s &a | peeked |\n  \
+         &!s &!a &!x 40 +!\n  peeked @ V> . .\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `peeked`"),
@@ -1239,30 +1224,14 @@ fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
-    // The same overlap from the other end: borrowing the field's own name
-    // while the struct it was peeked from is still live.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
-         &!peeked &!V>x 40 +!\n  s S>a V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `peeked` mutably") && err.contains("it is aliased by `s`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
-    // The third route: the ordinary, *consuming* getter `S>fi` still pushes
-    // the aggregate field's interior address, so naming its result aliases
-    // the struct it was gotten from just as a peek would.
+    // The same overlap through an aggregate field: a non-consuming `&arr`
+    // off an owned receiver still pushes the field's interior address, so
+    // naming its result aliases the struct it was projected from.
     let err = check_error(
         "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
-         &!s &!S>arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+         : main ( -- )\n  0 4 fill S | s |\n  s &arr | items |\n  \
+         &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `items`"),
@@ -1271,52 +1240,22 @@ fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_gotten_field_aliased_by_struct_is_error() {
-    // The same overlap from the other end: borrowing the gotten field's own
-    // name while the struct it came from is still live.
-    let err = check_error(
-        "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
-         &!items 0 &!> 9 !\n  &s &S>arr 0 &> @ . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `items` mutably") && err.contains("it is aliased by `s`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
-}
-
-#[test]
 fn dup_makes_gotten_field_independent_of_struct() {
-    // `dup` is the remedy here too: feeding the getter an independent copy
-    // (dup, swap, drop the original) breaks the alias, and the resulting
-    // field is provably independent of a later mutation through `s`.
+    // `dup` is the remedy here too: feeding the projection an independent
+    // copy (dup, swap, drop the original) breaks the alias, and the
+    // resulting field is provably independent of a later mutation through
+    // `s`.
     let (stdout, code) = run_src(
         "dup-makes-gotten-field-independent",
         "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop S>arr | items |\n  \
-         &!s &!S>arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+         : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop &arr | items |\n  \
+         &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  drop\n  s drop ;\n",
     );
     assert_eq!(
         stdout, "0\n",
         "the gotten field must stay independent of the struct's later mutation"
     );
     assert_eq!(code, 0);
-}
-
-#[test]
-fn mutable_borrow_of_one_of_two_gotten_fields_from_same_struct_is_error() {
-    // Two getters off the *same* struct value, with no mutation of the
-    // struct itself in between, still alias each other: both denote the
-    // one region the struct's field occupies.
-    let err = check_error(
-        "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | a |\n  s S>arr | b |\n  \
-         &!a 0 &!> 9 !\n  &b 0 &> @ . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `b`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
 }
 
 #[test]
@@ -1328,7 +1267,7 @@ fn mutable_borrow_aliased_by_if_join_result_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  1 0 = ~[ v ] ~[ v ] if | p |\n  \
-         &!v &!V>x 40 +!\n  p V> . . ;\n",
+         &!v &!x 40 +!\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `v` mutably") && err.contains("it is aliased by `p`"),
@@ -1345,7 +1284,7 @@ fn mutable_borrow_aliased_by_one_if_arm_only_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
          1 0 > ~[ v ] ~[ v dup swap drop ] if | p |\n  \
-         &!p &!V>x 99 !\n  v V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably")
@@ -1363,7 +1302,7 @@ fn mutable_borrow_aliased_by_the_second_if_arm_only_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
          0 0 > ~[ v dup swap drop ] ~[ v ] if | p |\n  \
-         &!p &!V>x 99 !\n  v V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
@@ -1379,7 +1318,7 @@ fn mutable_borrow_of_a_merge_of_two_aliased_arms_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
          1 0 > ~[ v ] ~[ w ] if | p |\n  \
-         &!p &!V>x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably")
@@ -1398,7 +1337,7 @@ fn mutable_borrow_of_a_place_a_merge_may_denote_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
          0 0 > ~[ v ] ~[ w ] if | p |\n  \
-         &!w &!V>x 99 !\n  p V> drop .\n  w V> drop . ;\n",
+         &!w &!x 99 !\n  p V> drop .\n  w V> drop . ;\n",
     );
     assert!(
         err.contains("cannot borrow `w` mutably") && err.contains("it is aliased by `p`"),
@@ -1429,7 +1368,7 @@ fn mutable_borrow_of_a_place_over_duplicated_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V 7 over | a b c |\n  \
-         &!a &!V>x 99 !\n  a V> . .\n  c V> . .\n  b . ;\n",
+         &!a &!x 99 !\n  a V> . .\n  c V> . .\n  b . ;\n",
     );
     assert!(
         err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `c`"),
@@ -1443,7 +1382,7 @@ fn mutable_borrow_of_an_array_over_duplicated_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V 4 fill 7 over | arr n arr2 |\n  \
-         &!arr 0 &!> &!V>x 99 !\n  &arr 0 &> @ V> drop .\n  \
+         &!arr 0 &!> &!x 99 !\n  &arr 0 &> @ V> drop .\n  \
          &arr2 0 &> @ V> drop .\n  n . ;\n",
     );
     assert!(
@@ -1467,20 +1406,21 @@ fn over_of_an_aggregate_without_a_mutable_borrow_is_accepted() {
 }
 
 #[test]
-fn mutable_borrow_of_a_place_a_merged_peek_may_denote_is_error() {
-    // A projection out of a merged value must project the field out of every
-    // region the merge could denote. Dropping the merged parent leaves only the
-    // peeked field, so nothing but that projection can catch the borrow.
+fn mutable_borrow_of_a_place_a_merged_field_projection_may_denote_is_error() {
+    // A field projection out of a merged value must project the field out of
+    // every region the merge could denote. Dropping the merged parent leaves
+    // only the projected field, so nothing but that projection can catch the
+    // borrow.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
          : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
-         0 0 > ~[ s ] ~[ t ] if S|>a swap drop | inner |\n  \
-         &!t &!S>a &!V>x 99 !\n  inner V> . . ;\n",
+         0 0 > ~[ s ] ~[ t ] if &a | inner |\n  \
+         &!t &!a &!x 99 !\n  inner @ V> . .\n  swap drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
-        "a peek out of a merge must keep every arm's field region: {err}"
+        "a field projection out of a merge must keep every arm's field region: {err}"
     );
 }
 
@@ -1495,7 +1435,7 @@ fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  v | p |\n  \
-         &!p &!V>x 99 !\n  1 0 > ~[ v V> . . ] ~[ 5 5 . . ] if ;\n",
+         &!p &!x 99 !\n  1 0 > ~[ v V> . . ] ~[ 5 5 . . ] if ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
@@ -1510,7 +1450,7 @@ fn dup_makes_aliased_names_independent() {
     let (stdout, code) = run_src(
         "dup-makes-independent",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V dup | p q |\n  &!p &!V>x 40 +!\n  p V> . .\n  q V> . . ;\n",
+         : main ( -- )\n  1 2 V dup | p q |\n  &!p &!x 40 +!\n  p V> . .\n  q V> . . ;\n",
     );
     assert_eq!(
         stdout, "2\n41\n2\n1\n",
@@ -1541,7 +1481,7 @@ fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
     // locates it by the site that pushed it.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  v\n  &!v &!V>x 40 +!\n  V> . . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  v\n  &!v &!x 40 +!\n  V> . . ;\n",
     );
     assert!(
         err.contains("cannot borrow `v` mutably") && err.contains("a value on the stack"),
@@ -1554,25 +1494,6 @@ fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_struct_aliased_by_peek_on_the_stack_is_error() {
-    // The peek route with neither end bound. The parent copy `s` leaves behind
-    // is dropped, so the only thing left overlapping is the peeked interior
-    // itself and the diagnostic has to locate the peek rather than the naming.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a swap drop\n  \
-         &!s &!S>a &!V>x 40 +!\n  V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `s` mutably")
-            && err.contains("a value on the stack")
-            && err.contains("col 5"),
-        "a peeked interior left on the stack still aliases its parent: {err}"
-    );
-}
-
-#[test]
 fn naming_a_place_while_mutably_borrowed_is_error() {
     // The symmetric direction, the one an exclusivity rule makes easy to omit: checking
     // only at the borrow catches `v ... &!v` and misses `&!v ... v`, which is
@@ -1580,7 +1501,7 @@ fn naming_a_place_while_mutably_borrowed_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  &!v\n  v | p |\n  \
-         &!V>x 40 +!\n  p V> . . ;\n",
+         &!x 40 +!\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),
@@ -1599,7 +1520,7 @@ fn naming_a_place_whose_mutable_borrow_is_bound_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  &!v | r |\n  v | p |\n  \
-         r &!V>x 40 +!\n  p V> . . ;\n",
+         r &!x 40 +!\n  p V> . . ;\n",
     );
     assert!(
         err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),
@@ -1615,7 +1536,7 @@ fn naming_a_place_after_its_borrow_ends_is_accepted() {
     let (stdout, code) = run_src(
         "naming-after-borrow-ends",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 40 +!\n  v V> . . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  &!v &!x 40 +!\n  v V> . . ;\n",
     );
     assert_eq!(stdout, "2\n41\n");
     assert_eq!(code, 0);
@@ -1630,7 +1551,7 @@ fn dup_makes_a_stack_alias_independent() {
         "dup-makes-stack-alias-independent",
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  v dup swap drop\n  \
-         &!v &!V>x 40 +!\n  V> . .\n  v V> . . ;\n",
+         &!v &!x 40 +!\n  V> . .\n  v V> . . ;\n",
     );
     assert_eq!(
         stdout, "2\n1\n2\n41\n",
@@ -1985,7 +1906,7 @@ fn borrowed_local_used_in_tail_arm_before_recursive_call_is_accepted() {
         "borrowed-local-used-before-recursive-call",
         "type: V x i64 ;\n\
          : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = ~[\n    0 V\n  ] ~[\n    \
-         r &!V>x @ drop\n    acc n 1 - spin\n  ] if ;\n\
+         r &!x @ drop\n    acc n 1 - spin\n  ] if ;\n\
          : main ( -- ) 1 V 3 spin V> . ;\n",
     );
     assert_eq!(stdout, "0\n");
@@ -2000,7 +1921,7 @@ fn borrowed_local_used_in_tail_arm_after_recursive_call_is_error() {
     let err = check_error(
         "type: V x i64 ;\n\
          : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = ~[\n    0 V\n  ] ~[\n    \
-         acc n 1 - spin\n    r &!V>x @ drop\n  ] if ;\n\
+         acc n 1 - spin\n    r &!x @ drop\n  ] if ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -2021,7 +1942,7 @@ fn reference_carried_into_loop_body_stays_live() {
     let err = check_error(&format!(
         "{TIMES_DEF}type: V x i64 ;\n\
          : main ( -- )\n  1 V | v |\n  &!v | r |\n  \
-         3 ~[ r &!V>x @ drop  &!v &!V>x 1 +! ] times\n  v drop ;\n"
+         3 ~[ r &!x @ drop  &!v &!x 1 +! ] times\n  v drop ;\n"
     ));
     assert!(
         err.contains("conflicts with a live borrow of `v`"),
@@ -2039,7 +1960,7 @@ fn borrow_on_one_arm_only_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  1 3 V | w |\n  true ~[\n    &!v\n  ] ~[\n    &!w\n  ] if\n  \
-         &!V>x 1 +!\n  v drop\n  w drop ;\n",
+         &!x 1 +!\n  v drop\n  w drop ;\n",
     );
     assert!(
         err.contains("borrow state disagrees"),
@@ -2059,7 +1980,7 @@ fn borrow_live_on_both_arms_is_accepted() {
         "borrow-live-on-both-arms",
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  true ~[\n    &!v\n  ] ~[\n    &!v\n  ] if\n  \
-         &!V>x 1 +!\n  v V> . . ;\n",
+         &!x 1 +!\n  v V> . . ;\n",
     );
     assert_eq!(stdout, "2\n2\n");
     assert_eq!(code, 0);
@@ -2070,13 +1991,13 @@ fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
     // The two arms reborrow *different* reference parameters, so neither
     // derivation has an owned root in this frame — yet each suspends its own
     // reference local, and the merge keeps only one. Without rejecting it,
-    // the `else` path reaches `q &!Buf>len` with a `&!usize` derived from `q`
+    // the `else` path reaches `q &!len` with a `&!usize` derived from `q`
     // still live: the two-live-mutable-references hazard the suspend rule
     // exists to stop.
     let err = check_error(
         "type: Buf  data ^[u8 64]  len usize ;\n\
          : two-parents ( &!Buf &!Buf -- )\n  | p q |\n  \
-         true ~[ p ] ~[ q ] if\n  &!Buf>len\n  q &!Buf>len 1 +!\n  1 +! ;\n\
+         true ~[ p ] ~[ q ] if\n  &!len\n  q &!len 1 +!\n  1 +! ;\n\
          : main ( -- ) ;\n",
     );
     assert!(

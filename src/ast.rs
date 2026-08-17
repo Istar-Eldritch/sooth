@@ -65,6 +65,21 @@ pub struct Module {
     /// `Instr::Call` to the user word instead of the builtin instruction. The
     /// corpus produces no records, so its lowering is untouched byte-for-byte.
     pub builtin_overloads: std::collections::HashMap<Span, String>,
+    /// Phase 7 slice 1 (R2): one entry per receiver-directed field projection
+    /// (`&hp`/`&!hp`), keyed by the call site's `Span`, valued by the struct
+    /// and field index the checker resolved it against. Lowering has no
+    /// checker stack to re-derive the receiver type from, and a projection's
+    /// name is not globally unique the way the fused `Sprite>hp` spelling was,
+    /// so the checker's resolution is recorded here and read back per site.
+    ///
+    /// `Span` alone suffices as a key only because a generic body rejects a
+    /// field projection outright (`poly_reference_word`) and is checked once,
+    /// never re-walked per instantiation: every projection is therefore
+    /// resolved in the monomorphic walk, where the receiver already carries
+    /// the concrete `StructId`. Admitting a projection inside a generic body
+    /// breaks that, and two instantiations of one call site would then share
+    /// (and silently misdispatch through) a single entry.
+    pub resolved_fields: std::collections::HashMap<Span, (StructId, usize)>,
     /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
     /// topological order, module 0 being the entry file. A single-file program
     /// (and every REPL session) has exactly one entry. Every `StructDecl`/
@@ -1204,7 +1219,7 @@ pub fn overload_symbols(words: &[WordDef]) -> Vec<String> {
 
 /// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
 /// the explicit C symbol string, kept separate from `name` because a Sooth
-/// word name may use characters C cannot (`&!S>fi`), and because binding a
+/// word name may use characters C cannot (`^|>`), and because binding a
 /// C name like `open` to a differently-named Sooth word must be possible.
 #[derive(Debug)]
 pub struct ExternDecl {
@@ -1974,6 +1989,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
+            resolved_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         }
@@ -2094,6 +2110,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
+            resolved_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         }
@@ -2162,6 +2179,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
+            resolved_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         };

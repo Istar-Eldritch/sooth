@@ -355,7 +355,18 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
-                name, span, &mut stack, ctx, scope, arrays, cells, refs, prov, live, at,
+                name,
+                span,
+                &mut stack,
+                ctx,
+                scope,
+                arrays,
+                cells,
+                refs,
+                prov,
+                live,
+                at,
+                poly.resolved_fields,
             )? {
                 return Ok(stack);
             }
@@ -428,7 +439,9 @@ fn check_term(
             {
                 return Ok(stack);
             }
-            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
+            if let Some(stack) =
+                check_shuffle(name, span, &mut stack, ctx, arrays, prov, scope, live, at)?
+            {
                 return Ok(stack);
             }
             // R12 (slice 8b, 8a): a bare operator resolves against the
@@ -464,32 +477,14 @@ fn check_term(
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
-            {
+            if let Some(stack) = check_owned_cell_word(
+                name, span, &mut stack, ctx, arrays, cells, prov, scope, live, at,
+            )? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays, prov)?
-            {
-                return Ok(stack);
-            }
-            // D3 (slice 8b): ahead of both the aggregate-field getter below
-            // and the ordinary env call path further down, so it catches a
-            // moving accessor of a drop-overloaded struct regardless of the
-            // extracted field's own type.
+            // D3 (slice 8b): ahead of the ordinary env call path below, so it
+            // catches a moving destructure (`S>`) of a drop-overloaded struct.
             check_destructure_drop_guard(name, span, ctx)?;
-            if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
-                return Ok(stack);
-            }
-            // Phase 6 slice 2 (R9 mechanism 2): the variant twin, claiming an
-            // aggregate variant field for the same interior-address device. A
-            // scalar field and the whole `Variant>` destructure fall through
-            // to the env call path below, typed by their generated `Sig`.
-            // Nothing reachable from source claims a term here until slice 3's
-            // eliminator binds an arm: no surface syntax puts a `Type::Variant`
-            // on the stack, so every name still falls through today.
-            if let Some(stack) = check_variant_get_word(name, span, &mut stack, ctx, prov)? {
-                return Ok(stack);
-            }
             // R6-R9: a tail-position call, inside a self-tail combinator
             // body splice, to that same combinator is the loop back-edge, not
             // a re-splice (which would recurse forever). Intercepted before
@@ -642,7 +637,9 @@ fn check_term(
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
             if poly.env.contains_key(name) && !fall_through_to_env {
-                return check_poly_call(name, span, &mut stack, ctx, arrays, refs, poly);
+                return check_poly_call(
+                    name, span, &mut stack, ctx, scope, arrays, refs, prov, live, at, poly,
+                );
             }
             // R1/R2: one name can carry several candidates. A single one is
             // the ordinary case and resolves by name at lowering exactly as
@@ -767,12 +764,29 @@ fn check_term(
             // through the carrier. The union is `None` for the overwhelming
             // majority of calls (no closure argument), a no-op there.
             //
-            // Review fix: this same generic dispatch also handles a struct
-            // field getter whose field type is `Quotation` (not `is_aggregate`)
-            // -- e.g. `Holder>q`, left to the env path because
-            // `check_struct_get_word` only claims an aggregate-typed field. A
+            // Review fix: this same generic dispatch also handles a
+            // destructure with a `Quotation`-typed field (not `is_aggregate`)
+            // -- e.g. `Holder>` on `type: Holder q [ i64 -- i64 ] ;`. A
             // quotation-typed output legitimately carries the closure onward
             // exactly as an aggregate output does, so it forwards too.
+            // Review fix (P7 slice 1): an ordinary word call consumes its
+            // operands just as `drop` does, so a struct operand a live
+            // projection still reaches (the owned-receiver projection arm's
+            // `Slot.alias`, which carries no `Deriv` to be caught by the
+            // named-place consume checks) cannot be moved into the call out
+            // from under that reference. The stranded reference is as often
+            // another operand of this same call (`mk &data &^ eat`) as a value
+            // left below it, so the scan covers the whole stack bar the
+            // operand being consumed itself.
+            for i in base..stack.len() {
+                let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
+                    .or_else(|| {
+                        consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at)
+                    });
+                if let Some(origin) = origin {
+                    return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+                }
+            }
             let carried = (base..stack.len())
                 .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
             stack.truncate(base);

@@ -17,37 +17,45 @@ type :Segment = { :Vec2, :Vec2 }
 export function :Vec2 $sub__m0(:Vec2 %v0, :Vec2 %v1) {
 @start
 	%v2 =l add %v0, 0
-	%v3 =l loadl %v2
-	%v4 =l add %v1, 0
-	%v5 =l loadl %v4
-	%v6 =l sub %v3, %v5
-	%v7 =l add %v0, 8
-	%v8 =l loadl %v7
-	%v9 =l add %v1, 8
-	%v10 =l loadl %v9
-	%v11 =l sub %v8, %v10
-	%v12 =l alloc8 16
-	%v13 =l add %v12, 0
-	storel %v6, %v13
-	%v14 =l add %v12, 8
-	storel %v11, %v14
-	ret %v12
+	%v3 =l add %v2, 0
+	%v4 =l loadl %v3
+	%v5 =l add %v1, 0
+	%v6 =l add %v5, 0
+	%v7 =l loadl %v6
+	%v8 =l sub %v4, %v7
+	%v9 =l add %v0, 0
+	%v10 =l add %v9, 8
+	%v11 =l loadl %v10
+	%v12 =l add %v1, 0
+	%v13 =l add %v12, 8
+	%v14 =l loadl %v13
+	%v15 =l sub %v11, %v14
+	%v16 =l alloc8 16
+	%v17 =l add %v16, 0
+	storel %v8, %v17
+	%v18 =l add %v16, 8
+	storel %v15, %v18
+	ret %v16
 }
 
 export function l $len2__m0(:Vec2 %v0) {
 @start
 	%v1 =l add %v0, 0
-	%v2 =l loadl %v1
-	%v3 =l add %v0, 0
-	%v4 =l loadl %v3
-	%v5 =l mul %v2, %v4
-	%v6 =l add %v0, 8
-	%v7 =l loadl %v6
-	%v8 =l add %v0, 8
-	%v9 =l loadl %v8
-	%v10 =l mul %v7, %v9
-	%v11 =l add %v5, %v10
-	ret %v11
+	%v2 =l add %v1, 0
+	%v3 =l loadl %v2
+	%v4 =l add %v0, 0
+	%v5 =l add %v4, 0
+	%v6 =l loadl %v5
+	%v7 =l mul %v3, %v6
+	%v8 =l add %v0, 0
+	%v9 =l add %v8, 8
+	%v10 =l loadl %v9
+	%v11 =l add %v0, 0
+	%v12 =l add %v11, 8
+	%v13 =l loadl %v12
+	%v14 =l mul %v10, %v13
+	%v15 =l add %v7, %v14
+	ret %v15
 }
 
 export function :Vec2 $span__m0(:Segment %v0) {
@@ -61,13 +69,12 @@ export function :Vec2 $span__m0(:Segment %v0) {
 export function :Vec2 $shift.2d.x__m0(:Vec2 %v0, l %v1) {
 @start
 	%v2 =l add %v0, 0
-	%v3 =l loadl %v2
-	%v4 =l add %v3, %v1
-	%v5 =l alloc8 16
-	blit %v0, %v5, 16
-	%v6 =l add %v5, 0
-	storel %v4, %v6
-	ret %v5
+	%v3 =l add %v2, 0
+	%v4 =l loadl %v3
+	%v5 =l add %v4, %v1
+	%v6 =l add %v0, 0
+	storel %v5, %v6
+	ret %v0
 }
 
 export function $sooth_main() {

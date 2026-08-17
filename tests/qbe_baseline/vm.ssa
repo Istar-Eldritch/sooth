@@ -21,105 +21,101 @@ type :VmPop = { :Vm, l }
 
 export function :Vm $vm.2d.push__m0(:Vm %v0, l %v1) {
 @start
-	%v2 =l add %v0, 280
-	%v3 =l loadl %v2
-	%v4 =l add %v0, 0
-	%v5 =l add %v4, 216
-	%v6 =l copy 8
-	%v7 =w cultl %v3, %v6
-	jnz %v7, @blk1, @blk2
-@blk2
-	%v8 =l copy 51
-	%v9 =l copy 8
-	call $sooth_oob_trap(l %v8, l %v3, l %v9)
-	jmp @blk1
-@blk1
-	%eoff0 =l mul %v3, 8
-	%v10 =l add %v5, %eoff0
-	storel %v1, %v10
-	%v11 =l add %v0, 280
-	%v12 =l loadl %v11
-	%v13 =l copy 1
-	%v14 =l add %v12, %v13
-	%v15 =l alloc8 320
-	blit %v0, %v15, 320
-	%v16 =l add %v15, 280
-	storel %v14, %v16
-	ret %v15
-}
-
-export function :VmPop $vm.2d.pop__m0(:Vm %v0) {
-@start
-	%v1 =l add %v0, 280
-	%v2 =l loadl %v1
-	%v3 =l copy 1
-	%v4 =l sub %v2, %v3
+	%v2 =l add %v0, 0
+	%v3 =l add %v2, 280
+	%v4 =l loadl %v3
 	%v5 =l add %v0, 0
 	%v6 =l add %v5, 216
 	%v7 =l copy 8
 	%v8 =w cultl %v4, %v7
 	jnz %v8, @blk1, @blk2
 @blk2
-	%v9 =l copy 57
+	%v9 =l copy 51
 	%v10 =l copy 8
 	call $sooth_oob_trap(l %v9, l %v4, l %v10)
 	jmp @blk1
 @blk1
 	%eoff0 =l mul %v4, 8
 	%v11 =l add %v6, %eoff0
-	%v12 =l loadl %v11
-	%v13 =l alloc8 320
-	blit %v0, %v13, 320
-	%v14 =l add %v13, 280
-	storel %v4, %v14
+	storel %v1, %v11
+	%v12 =l add %v0, 0
+	%v13 =l add %v12, 280
+	%v14 =l loadl %v13
+	%v15 =l copy 1
+	%v16 =l add %v14, %v15
+	%v17 =l add %v0, 280
+	storel %v16, %v17
+	ret %v0
+}
+
+export function :VmPop $vm.2d.pop__m0(:Vm %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 280
+	%v3 =l loadl %v2
+	%v4 =l copy 1
+	%v5 =l sub %v3, %v4
+	%v6 =l add %v0, 0
+	%v7 =l add %v6, 216
+	%v8 =l copy 8
+	%v9 =w cultl %v5, %v8
+	jnz %v9, @blk1, @blk2
+@blk2
+	%v10 =l copy 58
+	%v11 =l copy 8
+	call $sooth_oob_trap(l %v10, l %v5, l %v11)
+	jmp @blk1
+@blk1
+	%eoff0 =l mul %v5, 8
+	%v12 =l add %v7, %eoff0
+	%v13 =l loadl %v12
+	%v14 =l add %v0, 280
+	storel %v5, %v14
 	%v15 =l alloc8 328
 	%v16 =l add %v15, 0
-	blit %v13, %v16, 320
+	blit %v0, %v16, 320
 	%v17 =l add %v15, 320
-	storel %v12, %v17
+	storel %v13, %v17
 	ret %v15
 }
 
 export function :Vm $bump.2d.pc__m0(:Vm %v0) {
 @start
-	%v1 =l alloc8 320
-	blit %v0, %v1, 320
-	%v2 =l add %v1, 208
-	%v3 =l loadl %v2
-	%v4 =l copy 1
-	%v5 =l add %v3, %v4
-	%v6 =l alloc8 320
-	blit %v0, %v6, 320
-	%v7 =l add %v6, 208
-	storel %v5, %v7
-	ret %v6
+	%v1 =l add %v0, 208
+	%v2 =l loadl %v1
+	%v3 =l copy 1
+	%v4 =l add %v2, %v3
+	%v5 =l add %v0, 208
+	storel %v4, %v5
+	ret %v0
 }
 
 export function :Fetched $fetch__m0(:Vm %v0) {
 @start
-	%v1 =l add %v0, 208
-	%v2 =l loadl %v1
-	%v3 =l add %v0, 0
-	%v4 =l add %v3, 0
-	%v5 =l copy 13
-	%v6 =w cultl %v2, %v5
-	jnz %v6, @blk1, @blk2
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 208
+	%v3 =l loadl %v2
+	%v4 =l add %v0, 0
+	%v5 =l add %v4, 0
+	%v6 =l copy 13
+	%v7 =w cultl %v3, %v6
+	jnz %v7, @blk1, @blk2
 @blk2
-	%v7 =l copy 68
-	%v8 =l copy 13
-	call $sooth_oob_trap(l %v7, l %v2, l %v8)
+	%v8 =l copy 70
+	%v9 =l copy 13
+	call $sooth_oob_trap(l %v8, l %v3, l %v9)
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v2, 16
-	%v9 =l add %v4, %eoff0
-	%v10 =l alloc8 16
-	blit %v9, %v10, 16
-	%v11 =l alloc8 336
-	%v12 =l add %v11, 0
-	blit %v0, %v12, 320
-	%v13 =l add %v11, 320
-	blit %v10, %v13, 16
-	ret %v11
+	%eoff0 =l mul %v3, 16
+	%v10 =l add %v5, %eoff0
+	%v11 =l alloc8 16
+	blit %v10, %v11, 16
+	%v12 =l alloc8 336
+	%v13 =l add %v12, 0
+	blit %v0, %v13, 320
+	%v14 =l add %v12, 320
+	blit %v11, %v14, 16
+	ret %v12
 }
 
 export function l $run__m0(:Vm %v0, :Op %v1) {
@@ -130,8 +126,6 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v4 =l alloc8 16
 	%v5 =l alloc8 16
 	blit %v1, %v4, 16
-	%v121 =l alloc8 320
-	%v130 =l alloc8 320
 	jmp @blk1
 @blk1
 	%v7 =l add %v4, 0
@@ -249,7 +243,7 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v78 =w cultl %v74, %v77
 	jnz %v78, @blk19, @blk20
 @blk20
-	%v79 =l copy 105
+	%v79 =l copy 107
 	%v80 =l copy 4
 	call $sooth_oob_trap(l %v79, l %v74, l %v80)
 	jmp @blk19
@@ -280,7 +274,7 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v97 =w cultl %v89, %v96
 	jnz %v97, @blk21, @blk22
 @blk22
-	%v98 =l copy 112
+	%v98 =l copy 114
 	%v99 =l copy 4
 	call $sooth_oob_trap(l %v98, l %v89, l %v99)
 	jmp @blk21
@@ -318,46 +312,44 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v120 =w copy %v117
 	jnz %v120, @blk26, @blk27
 @blk26
-	blit %v108, %v121, 320
-	%v122 =l add %v121, 208
-	storel %v106, %v122
+	%v121 =l add %v108, 208
+	storel %v106, %v121
 	jmp @blk28
 @blk27
-	%v123 =:Vm call $bump.2d.pc__m0(:Vm %v108)
+	%v122 =:Vm call $bump.2d.pc__m0(:Vm %v108)
 	jmp @blk28
 @blk28
-	%v124 =l phi @blk26 %v121, @blk27 %v123
-	%v125 =:Fetched call $fetch__m0(:Vm %v124)
-	%v126 =l add %v125, 0
-	%v127 =l add %v125, 320
-	blit %v126, %v3, 320
-	blit %v127, %v5, 16
+	%v123 =l phi @blk26 %v108, @blk27 %v122
+	%v124 =:Fetched call $fetch__m0(:Vm %v123)
+	%v125 =l add %v124, 0
+	%v126 =l add %v124, 320
+	blit %v125, %v3, 320
+	blit %v126, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk9
-	%v128 =l add %v4, 8
-	%v129 =l loadl %v128
-	blit %v2, %v130, 320
-	%v131 =l add %v130, 208
-	storel %v129, %v131
-	%v132 =:Fetched call $fetch__m0(:Vm %v130)
-	%v133 =l add %v132, 0
-	%v134 =l add %v132, 320
-	blit %v133, %v3, 320
-	blit %v134, %v5, 16
+	%v127 =l add %v4, 8
+	%v128 =l loadl %v127
+	%v129 =l add %v2, 208
+	storel %v128, %v129
+	%v130 =:Fetched call $fetch__m0(:Vm %v2)
+	%v131 =l add %v130, 0
+	%v132 =l add %v130, 320
+	blit %v131, %v3, 320
+	blit %v132, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk10
-	%v135 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
-	%v136 =l add %v135, 0
-	%v137 =l add %v135, 320
-	%v138 =l loadl %v137
+	%v133 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
+	%v134 =l add %v133, 0
+	%v135 =l add %v133, 320
+	%v136 =l loadl %v135
 	jmp @blk18
 @blk18
-	%v139 =l phi @blk10 %v138
-	ret %v139
+	%v137 =l phi @blk10 %v136
+	ret %v137
 }
 
 export function :arr_0 $build__m0() {
@@ -390,7 +382,7 @@ export function :arr_0 $build__m0() {
 	%v16 =w cultl %v14, %v15
 	jnz %v16, @blk4, @blk5
 @blk5
-	%v17 =l copy 150
+	%v17 =l copy 152
 	%v18 =l copy 13
 	call $sooth_oob_trap(l %v17, l %v14, l %v18)
 	jmp @blk4
@@ -413,7 +405,7 @@ export function :arr_0 $build__m0() {
 	%v30 =w cultl %v28, %v29
 	jnz %v30, @blk6, @blk7
 @blk7
-	%v31 =l copy 151
+	%v31 =l copy 153
 	%v32 =l copy 13
 	call $sooth_oob_trap(l %v31, l %v28, l %v32)
 	jmp @blk6
@@ -436,7 +428,7 @@ export function :arr_0 $build__m0() {
 	%v44 =w cultl %v42, %v43
 	jnz %v44, @blk8, @blk9
 @blk9
-	%v45 =l copy 152
+	%v45 =l copy 154
 	%v46 =l copy 13
 	call $sooth_oob_trap(l %v45, l %v42, l %v46)
 	jmp @blk8
@@ -459,7 +451,7 @@ export function :arr_0 $build__m0() {
 	%v58 =w cultl %v56, %v57
 	jnz %v58, @blk10, @blk11
 @blk11
-	%v59 =l copy 153
+	%v59 =l copy 155
 	%v60 =l copy 13
 	call $sooth_oob_trap(l %v59, l %v56, l %v60)
 	jmp @blk10
@@ -482,7 +474,7 @@ export function :arr_0 $build__m0() {
 	%v72 =w cultl %v70, %v71
 	jnz %v72, @blk12, @blk13
 @blk13
-	%v73 =l copy 154
+	%v73 =l copy 156
 	%v74 =l copy 13
 	call $sooth_oob_trap(l %v73, l %v70, l %v74)
 	jmp @blk12
@@ -501,7 +493,7 @@ export function :arr_0 $build__m0() {
 	%v83 =w cultl %v81, %v82
 	jnz %v83, @blk14, @blk15
 @blk15
-	%v84 =l copy 155
+	%v84 =l copy 157
 	%v85 =l copy 13
 	call $sooth_oob_trap(l %v84, l %v81, l %v85)
 	jmp @blk14
@@ -524,7 +516,7 @@ export function :arr_0 $build__m0() {
 	%v97 =w cultl %v95, %v96
 	jnz %v97, @blk16, @blk17
 @blk17
-	%v98 =l copy 156
+	%v98 =l copy 158
 	%v99 =l copy 13
 	call $sooth_oob_trap(l %v98, l %v95, l %v99)
 	jmp @blk16
@@ -547,7 +539,7 @@ export function :arr_0 $build__m0() {
 	%v111 =w cultl %v109, %v110
 	jnz %v111, @blk18, @blk19
 @blk19
-	%v112 =l copy 157
+	%v112 =l copy 159
 	%v113 =l copy 13
 	call $sooth_oob_trap(l %v112, l %v109, l %v113)
 	jmp @blk18
@@ -569,7 +561,7 @@ export function :arr_0 $build__m0() {
 	%v124 =w cultl %v122, %v123
 	jnz %v124, @blk20, @blk21
 @blk21
-	%v125 =l copy 158
+	%v125 =l copy 160
 	%v126 =l copy 13
 	call $sooth_oob_trap(l %v125, l %v122, l %v126)
 	jmp @blk20
@@ -588,7 +580,7 @@ export function :arr_0 $build__m0() {
 	%v135 =w cultl %v133, %v134
 	jnz %v135, @blk22, @blk23
 @blk23
-	%v136 =l copy 159
+	%v136 =l copy 161
 	%v137 =l copy 13
 	call $sooth_oob_trap(l %v136, l %v133, l %v137)
 	jmp @blk22
@@ -611,7 +603,7 @@ export function :arr_0 $build__m0() {
 	%v149 =w cultl %v147, %v148
 	jnz %v149, @blk24, @blk25
 @blk25
-	%v150 =l copy 160
+	%v150 =l copy 162
 	%v151 =l copy 13
 	call $sooth_oob_trap(l %v150, l %v147, l %v151)
 	jmp @blk24
@@ -634,7 +626,7 @@ export function :arr_0 $build__m0() {
 	%v163 =w cultl %v161, %v162
 	jnz %v163, @blk26, @blk27
 @blk27
-	%v164 =l copy 161
+	%v164 =l copy 163
 	%v165 =l copy 13
 	call $sooth_oob_trap(l %v164, l %v161, l %v165)
 	jmp @blk26
@@ -703,7 +695,7 @@ export function $sooth_main() {
 	%v29 =w cultl %v27, %v28
 	jnz %v29, @blk7, @blk8
 @blk8
-	%v30 =l copy 170
+	%v30 =l copy 172
 	%v31 =l copy 4
 	call $sooth_oob_trap(l %v30, l %v27, l %v31)
 	jmp @blk7

@@ -231,10 +231,12 @@ pub(crate) fn check_poly_combinator_repl(
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+    let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
         builtin_overloads: &mut scratch_overloads,
+        resolved_fields: &mut scratch_fields,
         combinators,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
@@ -721,10 +723,10 @@ pub(super) fn poly_call_term(
     // single-signature behaviour this path had before overloading.
     //
     // D3 (slice 8b): this is the poly-body twin of the concrete path's own
-    // call ahead of `check_struct_get_word` -- a generated accessor
-    // (`S>`/`S>field`) is just another `env` candidate here, so the guard
-    // must run before this lookup dispatches one for a drop-overloaded
-    // struct, or a generic word could destructure it and skip the destructor.
+    // call ahead of the ordinary env dispatch -- a generated destructure
+    // (`S>`) is just another `env` candidate here, so the guard must run
+    // before this lookup dispatches one for a drop-overloaded struct, or a
+    // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
@@ -816,10 +818,11 @@ pub(super) fn poly_reference_word(
     let rest = &name[if mutable { 2 } else { 1 }..];
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
 
-    // R-B6: an owning-cell or a struct-field accessor never produces a
-    // variable-referent ref (no generic structs/enums this slice) and is out
-    // of scope for a generic body regardless of mutability -- a located error
-    // now, never a silent fallthrough to an eventual unknown-word one.
+    // R-B6: `&^` never produces a variable-referent ref (no generic
+    // structs/enums this slice) and is out of scope for a generic body
+    // regardless of mutability. Any other `>`-bearing name but `&>` (the array
+    // index) is a retired fused-accessor spelling. Both are located errors
+    // here, never a silent fallthrough to an eventual unknown-word one.
     if rest == "^" || (rest != ">" && rest.contains('>')) {
         return Err(poly_unsupported_accessor_error(ctx, span, name));
     }
@@ -919,6 +922,15 @@ pub(super) fn poly_reference_word(
                 // Never moved or dropped, so the move gate above has nothing
                 // to say about it.
                 PolyType::Concrete(static_ty)
+            } else if receiver_is_aggregate_projection(stack) {
+                // P7 slice 1 (R1): `&f` carries no `>`, so the guard above
+                // cannot see that this is a field projection. Reached only
+                // after both the local and the static lookup miss (a real
+                // local named `f` is unaffected), so a struct/variant on top
+                // of the stack means the name is a projection out of it --
+                // still unsupported in a generic body, but it must say so
+                // rather than claim `f` is not a local.
+                return Err(poly_unsupported_accessor_error(ctx, span, name));
             } else {
                 return Err(poly_borrow_of_non_local_error(ctx, span, name, rest));
             };
@@ -1414,13 +1426,18 @@ pub(super) fn no_combinator_overload_matches_error(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_poly_call(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
+    scope: &Scope,
     arrays: &mut Vec<ArrayDecl>,
     refs: &mut Vec<RefDecl>,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
     let candidates = poly.env.get(name).expect("caller checked membership");
@@ -1483,6 +1500,17 @@ pub(super) fn check_poly_call(
         outputs.push(apply_subst(
             &sig, pty, &subst, name, span, ctx, arrays, refs,
         )?);
+    }
+    // Review fix (P7 slice 1): a polymorphic word consumes its operands
+    // exactly as a concrete one does, so it needs the same guard against
+    // moving a place a live projection still reaches -- `'T` binds to the
+    // receiver's struct type as readily as a declared `Point` does.
+    for i in base..stack.len() {
+        let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
+            .or_else(|| consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at));
+        if let Some(origin) = origin {
+            return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+        }
     }
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
@@ -1863,7 +1891,8 @@ pub(super) fn poly_var_to_concrete_error(
 }
 
 /// Slice 13 (E4/R-B6): an accessor with no poly-body support -- ever
-/// (`&^`, `&Struct>field`), or not yet (e.g. a fully concrete `&![T N]`
+/// (`&^`, a retired fused-accessor spelling), or not yet (e.g. a fully
+/// concrete `&![T N]`
 /// parameter's accessors, folded to `PolyType::Concrete` and unmatched by
 /// any `PolyType::Ref` arm) -- located, never a silent fallthrough to an
 /// unknown-word error.
@@ -1873,6 +1902,23 @@ pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -
     format!(
         "error: `{op}` is not yet supported in a generic body, in `{where_}` (line {})\n  monomorphize this word (or write a concrete wrapper) to use `{op}` today",
         span.line
+    )
+}
+
+/// Whether the receiver a `&f` would project out of is a struct or a variant,
+/// rather than a bare type parameter or a scalar. Reference or owned alike:
+/// both are receivers of a projection under P7 slice 1's D2.
+fn receiver_is_aggregate_projection(stack: &[PolyType]) -> bool {
+    let Some(top) = stack.last() else {
+        return false;
+    };
+    let referent = match top {
+        PolyType::Ref(inner, _) => inner.as_ref(),
+        other => other,
+    };
+    matches!(
+        referent,
+        PolyType::Concrete(Type::Struct(..) | Type::Enum(..) | Type::Variant(..))
     )
 }
 
@@ -2207,13 +2253,13 @@ mod tests {
     }
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
-    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy> drop ;\n";
     /// D3's leaf resource: one field, a `drop` override implemented exactly
-    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>`
     /// inside `drop`'s own body -- exempted, since a word literally named
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
-    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
@@ -2241,7 +2287,7 @@ mod tests {
         // so a generic word could destructure any drop-overloaded type and
         // skip its destructor.
         let err = check_src(&format!(
-            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd> ;\n: main ( -- ) 1 sneak drop drop ;\n"
         ))
         .unwrap_err();
         assert_eq!(
@@ -3057,9 +3103,11 @@ mod tests {
     }
 
     #[test]
-    fn poly_reference_word_rejects_struct_field_accessor_in_a_generic_body() {
-        // R-B6/E4: `&Struct>field` is likewise out of scope -- a concrete
-        // struct field never has a variable referent either.
+    fn poly_reference_word_rejects_a_fused_accessor_spelling_in_a_generic_body() {
+        // R-B6/E4: a leftover `&Struct>field` (retired in P7 slice 1) still
+        // lexes as one `&`-prefixed token, and the `>`-bearing guard keeps it a
+        // located error rather than a bare unknown-word one. The surviving
+        // spelling's case is `projection_on_generic_receiver_body_is_error`.
         let err = check_src(": badfield ( 'T -- 'T )\n  &Point>x\n;\n").unwrap_err();
         assert_eq!(
             err,
@@ -3409,5 +3457,28 @@ mod tests {
             &sig,
         )
         .expect("an already-usize index needs no literal at all");
+    }
+
+    /// P7 slice 1 (R1): a field projection inside a generic body. `&f` carries
+    /// no `>`, so the pre-slice accessor guard (which tested `rest.contains('>')`)
+    /// no longer sees it, and without the receiver check the site falls through
+    /// to the local/static arm and reports "`x` is not a local" -- a wrong
+    /// diagnostic for a construct that is rejected for a different reason.
+    #[test]
+    fn projection_on_generic_receiver_body_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : peek ( 'T -- 'T ) 3 4 Point &x @ . drop ;\n\
+             : main ( -- ) 7 peek . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&x` is not yet supported in a generic body"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("is not a local"),
+            "the local/static arm must not claim this site: {err}"
+        );
     }
 }

@@ -300,6 +300,20 @@ pub(super) fn contains_reference(
     }
 }
 
+/// The shared wording for a declared **output** that transitively contains a
+/// reference: `check_reference_free_signature` (`word_entry.rs`, a `Slot`
+/// signature) and `check_quotation_reference_free_effect` (`captures.rs`, a
+/// `QuotEffect`) both hit this, over two different row representations, so
+/// the message lives once here instead of twice. `location` is empty for the
+/// word-level check (unlocated, matching its sibling calls) and an
+/// `in_word(ctx)` + `(line N)` suffix for the quotation-effect check, which
+/// has no name of its own to cite.
+pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str) -> String {
+    format!(
+        "error: a reference cannot be stored: `{name}` declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

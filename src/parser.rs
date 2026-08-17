@@ -555,6 +555,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         externs: bodies.externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
+        resolved_fields: HashMap::new(),
         modules: vec![ModuleInfo {
             imports: HashMap::new(),
             exports: bodies.exports,
@@ -1540,7 +1541,7 @@ impl<'t> Parser<'t> {
     /// `extern:` declaration (R1): a top-level foreign-call binding. Grammar
     /// mirrors `worddef` except the body is a single explicit C symbol
     /// string rather than terms — a symbol string rather than the word name
-    /// reused, since a Sooth name may use characters C cannot (`&!S>fi`), and
+    /// reused, since a Sooth name may use characters C cannot (`^|>`), and
     /// binding a C name like `open` to a differently-spelled Sooth word must
     /// be possible.
     fn parse_extern_decl(&mut self) -> Result<ExternDecl, String> {
@@ -3594,8 +3595,7 @@ mod tests {
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is, not by
     /// any compiler-known bit.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
     /// The terms of a `WordBody::Terms`; panics on a clause body.
     fn terms_body(word: &WordDef) -> &[Term] {

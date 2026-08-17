@@ -988,22 +988,16 @@ pub(super) fn live_mutable_borrow_of(
     })
 }
 
-/// The region a non-consuming projection out of `parent` denotes, for an
-/// aggregate interior value (a scalar one is loaded into a temporary and denotes
-/// no region). The parent is given a region of its own if it has none: it is
-/// only here, where a second name for its interior can appear, that the
-/// identity starts to matter. Both names are located at the projection, which is
-/// where each of them enters play as an alias of the other.
-pub(super) fn peek_region(
+/// The interior region a non-consuming projection out of `parent` denotes,
+/// minting `parent`'s own region lazily. P7 slice 1's `&f`/`&!f` hands out a
+/// *reference* to the interior, which aliases its parent whatever the
+/// field's width.
+pub(super) fn projected_region(
     parent: &mut Slot,
-    interior: Type,
     segment: &str,
     span: Span,
     prov: &mut Provenance,
-) -> Option<Alias> {
-    if !interior.is_aggregate() {
-        return None;
-    }
+) -> Alias {
     let base = match parent.alias {
         Some(alias) => alias.set,
         None => {
@@ -1013,10 +1007,10 @@ pub(super) fn peek_region(
             set
         }
     };
-    Some(Alias {
+    Alias {
         set: prov.field_alias_set(base, segment),
         span,
-    })
+    }
 }
 
 /// Where a second live name for a region is, when the diagnostic has to
@@ -1361,7 +1355,14 @@ mod tests {
             module: caller,
         };
         let mut stack = vec![Slot::computed(Type::Struct(StructId::from_index(0), "Res"))];
-        check_shuffle("drop", span, &mut stack, &ctx, &arrays, &mut prov)
+        let scope = Scope::default();
+        let live = Liveness {
+            last_use: HashMap::new(),
+            outer_releasable: HashSet::new(),
+        };
+        check_shuffle(
+            "drop", span, &mut stack, &ctx, &arrays, &mut prov, &scope, &live, 0,
+        )
     }
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
@@ -1374,15 +1375,14 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn struct_ty(module: &Module, name: &str) -> Type {
         let idx = module
             .structs
@@ -1413,7 +1413,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,
@@ -1496,9 +1496,16 @@ mod tests {
                 "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
                 _ => vec![quot],
             };
-            let out = check_shuffle(name, span, &mut stack, &ctx, &arrays, &mut prov)
-                .unwrap()
-                .unwrap();
+            let scope = Scope::default();
+            let live = Liveness {
+                last_use: HashMap::new(),
+                outer_releasable: HashSet::new(),
+            };
+            let out = check_shuffle(
+                name, span, &mut stack, &ctx, &arrays, &mut prov, &scope, &live, 0,
+            )
+            .unwrap()
+            .unwrap();
             assert!(
                 out.iter().any(|s| s.quot == marker),
                 "`{name}` dropped the quotation marker"

@@ -17,27 +17,30 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
-**P7.S1 — Accessors as lenses.** Retire the per-field generated accessor words in favour
-of separating the *location* from the *operation*: `q buf &>` instead of `q Queue&>buf`,
-matching how arrays already read (`l 0 &>`). See DESIGN.md's Open / deferred for the full
-case; the short version is that `>` / `<` / `|>` currently conflate which field with what
-ownership transfer happens, lenses separate them, and the generated-word count drops from
-O(fields x operations) to O(fields + operations), which is also what makes the module
-export list stop needing three entries per field.
+**P7.S1 — Accessors as receiver-directed projections.**
+`[ done ]` A field access is a
+mode-carrying projection word (`&hp` / `&!hp`) resolved against the receiver's type:
+`&S -- &A` and `&!S -- &!A` are consuming (chaining, e.g. `u &stats &hp @`), while an
+owned `S -- S &A` is non-consuming, leaving the receiver in place. The field name is
+part of the projection word and is resolved at check time against the receiver on the
+stack, recorded per call site rather than carried as a value, so there is no selector
+value to compose or store. `&>`/`&!>` remain array-only, with no struct/array
+unification: a struct selector is a name, an array selector is a runtime value. This has
+no dependency on static overloading (Phase 4 Slice 8). The per-field generated
+`Get`/`Set`/`Peek` words and the fused `Type>field`/`Type<field`/`Type|>field` spelling
+are deleted, so the generated-word count stops scaling with field count at all: two
+words per type (`Type` and `Type>`) and none per field, with `&f`/`&!f` not env entries
+but a checker arm resolved ahead of env lookup, over the pre-existing `@`/`!` builtins.
+Two implicit disposals go with them: a non-extracted linear field, which no surviving
+operation performs at all now that the whole-value destructure is the only way out and it
+extracts every field, and a value overwritten in place, which is the one `!` itself
+refuses over a linear referent.
 **Ordered first in this phase, before `Vec`/`Map`/`String`**, for exactly the reason modules
 were pulled forward in Phase 4: writing the collections against the old accessors and
-migrating them afterwards is the waste. It cannot land earlier than this phase either,
-since one `&>` accepting both an array and a struct *is* static overloading (Phase 4
-Slice 8).
-**Not a locked design.** The open question is what a selector *is*: a compile-time-only
-marker (the machinery Slice 4 built for quotations, cheap and known, but no composition) or
-a first-class `Lens['S 'A]` value (composable, expressible once type variables exist, but it
-needs unambiguous selector names, which means qualification, which undoes the terseness that
-motivated the change). Its brief has to settle that before anything else, and should size
-the corpus migration honestly: every struct access in `examples/` and the test suite, which
-is 8c-shaped mechanical work on top of a real design decision.
-**Exit:** every struct/array field access in the corpus goes through a lens
-(`&>`/`<`/`|>`); the old per-field generated accessor words are deleted.
+migrating them afterwards is the waste.
+**Exit:** every struct/variant field access in the corpus goes through `&f`/`&!f`; the old
+per-field generated accessor words and fused spelling are deleted; `&>` remains
+array-only.
 
 **P7.S2 — Static storage and global sets, and they land before the allocator work.**
 `[ done ]` Module-level static storage (a *place*, not a value: never owned, moved, or dropped,
@@ -59,7 +62,7 @@ items in this phase need it first:
   to it later means retrofitting the format and re-baselining every diff it has already
   emitted.
 
-Ordered after S1 (no ordering constraint against the lens item either way) and before
+Ordered after S1 (no ordering constraint against the accessor item either way) and before
 everything downstream that needs it. The target-facing half of the embedded story
 (fixed-address MMIO overlays, the volatile aspect, bit-level register layout, ISR symbol
 export) stays in Phase 9, where its consumer is. This is what pushes the phase from `[L]`
@@ -71,7 +74,7 @@ inferred everywhere, declared at the export boundary).
 
 **P7.S3 — The `fixed` layer.** Allocation-free fixed-capacity vec/map/string/ringbuffer,
 built against `core`, needing no allocator at all. No dependency on S2 or S4; can be built
-in parallel with either once S1's lens migration is out of the way.
+in parallel with either once S1's accessor migration is out of the way.
 **Exit:** the `fixed` layer's collections work with no allocator present, and every stdlib
 word in it is tagged with the layer it belongs to.
 

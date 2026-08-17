@@ -7,14 +7,14 @@ import: point | Point | "modules_point.sth" ;
 
 : add ( Point Point -- Point )
   | a b |
-  a Point>x b Point>x +
-  a Point>y b Point>y +
+  &a &x @ &b &x @ +
+  &a &y @ &b &y @ +
   Point ;
 
 : len2 ( Point -- i64 )
   | p |
-  p Point>x p Point>x *
-  p Point>y p Point>y *
+  &p &x @ &p &x @ *
+  &p &y @ &p &y @ *
   + ;
 
 export: add len2 ;

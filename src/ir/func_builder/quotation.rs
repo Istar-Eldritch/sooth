@@ -290,10 +290,10 @@ impl<'a> FuncBuilder<'a> {
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
     /// struct/enum whose `is_linear` is set, or an owning cell) this is a
     /// plain `Call` to the (builtin or synthesized) destructor; a `Copy`
-    /// value is discarded with no runtime effect. Shared by `drop`, `S>fi`'s
-    /// drop-the-rest, `S<fi`'s drop-on-overwrite, and the synthesized
-    /// struct/enum destructors themselves, so "how a value is disposed" lives
-    /// in one place.
+    /// value is discarded with no runtime effect. Shared by `drop`,
+    /// `drop_level_fields`' drop-the-rest, and the synthesized struct/enum
+    /// destructors themselves, so "how a value is disposed" lives in one
+    /// place.
     pub(in crate::ir) fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
             // A cell always frees on drop, regardless of its payload's own
@@ -389,42 +389,6 @@ impl<'a> FuncBuilder<'a> {
                 }
                 self.stack.push(dst);
             }
-            StructWord::Get(id, fi) => {
-                let s = self.stack.pop().expect("getter: struct operand");
-                let fields = self.structs.layouts[id.index()].fields.clone();
-                self.load_field_onto_stack(s, fields[fi]);
-                // R9: on a linear receiver, `S>fi` still consumes the whole
-                // aggregate, so every non-extracted linear field is dropped
-                // here (a no-op drop-the-rest when every other field is
-                // Copy, unchanged from before this slice).
-                for (j, field) in fields.iter().enumerate() {
-                    if j != fi && field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
-                        let v = self.field_value(s, *field);
-                        self.emit_drop(v);
-                    }
-                }
-            }
-            StructWord::Set(id, fi) => {
-                let newval = self.stack.pop().expect("setter: new field value");
-                let s = self.stack.pop().expect("setter: struct operand");
-                let dst = self.alloc_struct(id);
-                let size = self.structs.layouts[id.index()].size;
-                if size > 0 {
-                    self.push_instr(Instr::Blit(s, dst, size));
-                }
-                let field = self.structs.layouts[id.index()].fields[fi];
-                // R11: the old shell's other fields transfer via the blit
-                // above (consumed, never dropped); only the field being
-                // overwritten is read back out and dropped, before the store,
-                // so the order is deterministic.
-                if field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
-                    let old = self.field_value(dst, field);
-                    self.emit_drop(old);
-                }
-                let fptr = self.field_ptr(dst, field.offset);
-                self.store_field(fptr, newval, field);
-                self.stack.push(dst);
-            }
             StructWord::Destructure(id) => {
                 let s = self.stack.pop().expect("destructure: struct operand");
                 let n = self.structs.layouts[id.index()].fields.len();
@@ -432,15 +396,6 @@ impl<'a> FuncBuilder<'a> {
                     let field = self.structs.layouts[id.index()].fields[fi];
                     self.load_field_onto_stack(s, field);
                 }
-            }
-            StructWord::Peek(id, fi) => {
-                // R10: non-consuming, so the aggregate stays on the stack;
-                // only the field's value is pushed on top of it. The checker
-                // already rejected a linear field, so there is no drop glue
-                // to consider here (unlike `Get`).
-                let s = *self.stack.last().expect("peek: struct operand");
-                let field = self.structs.layouts[id.index()].fields[fi];
-                self.load_field_onto_stack(s, field);
             }
         }
     }
@@ -671,8 +626,10 @@ mod tests {
     }
 
     #[test]
-    fn lower_getter_is_single_field_load_no_copy() {
-        let ir = lower_src("type: Vec2 x i64 y i64 ; : gx ( Vec2 -- i64 ) Vec2>x ;");
+    fn lower_projection_read_is_single_field_load_no_copy() {
+        // `&x @`: a field projection lowers to a pointer offset, and reading
+        // it through `@` is a single load -- no aggregate copy, no alloc.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : gx ( Vec2 -- i64 ) &x @ swap drop ;");
         let gx = ir.funcs.iter().find(|f| f.name == "gx").unwrap();
         assert_eq!(count(gx, |i| matches!(i, Instr::FieldLoad(..))), 1);
         assert_eq!(count(gx, |i| matches!(i, Instr::Blit(..))), 0);
@@ -680,13 +637,15 @@ mod tests {
     }
 
     #[test]
-    fn lower_setter_allocs_new_blits_all_and_overwrites_one_field() {
-        // Functional update: alloc a fresh aggregate, blit all bytes, then a
-        // single width-exact store of the replaced field.
-        let ir = lower_src("type: Vec2 x i64 y i64 ; : sx ( Vec2 i64 -- Vec2 ) Vec2<x ;");
+    fn lower_projection_write_mutates_in_place_no_alloc_no_blit() {
+        // `&!x v !`: D3's replacement for the functional setter mutates the
+        // receiver's own storage through the projected pointer -- no fresh
+        // aggregate, no blit of the untouched fields.
+        let ir =
+            lower_src("type: Vec2 x i64 y i64 ; : sx ( Vec2 i64 -- Vec2 ) | v n | &!v &!x n ! v ;");
         let sx = ir.funcs.iter().find(|f| f.name == "sx").unwrap();
-        assert_eq!(count(sx, |i| matches!(i, Instr::Alloc(..))), 1);
-        assert_eq!(count(sx, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::Alloc(..))), 0);
+        assert_eq!(count(sx, |i| matches!(i, Instr::Blit(..))), 0);
         assert_eq!(count(sx, |i| matches!(i, Instr::FieldStore(..))), 1);
     }
 

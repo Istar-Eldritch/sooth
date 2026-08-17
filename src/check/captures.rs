@@ -323,6 +323,17 @@ pub(super) fn materialize_quotation_at_boundary(
         false,
         false,
     )?;
+    // R7 (P7 slice 1 phase 6): a declared quotation effect returning a
+    // reference used to reach `lower_reference_word`'s `referent_of` and
+    // panic ("checked: every reference value records its referent") instead
+    // of being rejected here, where the declared shape is already known.
+    // Second-class references are a DESIGN.md invariant; this is the
+    // quotation-effect twin of `check_reference_free_signature`
+    // (`word_entry.rs`), reusing its wording. Runs after the capture checks
+    // above (D3's own borrow-of-enclosing-place rejection, inside
+    // `check_literal_against_declared_effect`, is the more specific
+    // diagnostic when the returned reference is also a captured borrow).
+    check_quotation_reference_free_effect(eff, ctx, span, arrays)?;
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
     // R22 escape guard read once the identity is gone.
@@ -332,9 +343,70 @@ pub(super) fn materialize_quotation_at_boundary(
     })
 }
 
+/// R7: the quotation-effect twin of `check_reference_free_signature`
+/// (`word_entry.rs`) -- a materialized quotation is itself a callable with
+/// its own frame, so a declared output that transitively contains a
+/// reference borrows a local of that frame, gone by the time whatever calls
+/// the quotation value reads it, reusing `stored_reference_output_error`'s
+/// wording (`builtins.rs`). Unlike the word-level check, there is no input
+/// arm: an *aggregate* input carrying a nested reference is already rejected
+/// at its struct/array declaration (a field or element typed `&T` is a
+/// located error there), which is the only shape this literal boundary sees.
+/// A declared quotation *parameter* whose own effect returns a reference
+/// (`( &!Sprite [ &!Sprite -- &!i64 ] -- i64 )`) never reaches a
+/// materialization boundary and still panics in `referent_of`: an indirect
+/// `call` produces a reference with no recorded referent, so closing it needs
+/// a consumer-side rule, out of scope here.
+fn check_quotation_reference_free_effect(
+    eff: &QuotEffect,
+    ctx: &Ctx,
+    span: Span,
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    for ty in &eff.outputs {
+        if contains_reference(*ty, ctx.structs(), ctx.enums(), arrays) {
+            let location = format!("{} (line {})", in_word(ctx), span.line);
+            return Err(stored_reference_output_error(
+                eff.name_static,
+                *ty,
+                &location,
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+
+    #[test]
+    fn quotation_effect_returning_a_reference_is_a_located_error() {
+        // R7: a materialized quotation whose declared effect returns a
+        // reference used to reach `referent_of`'s `.expect("checked: every
+        // reference value records its referent")` and panic. It must instead
+        // be a located check-time error, reusing `stored_reference_output_error`'s
+        // wording -- and it must never reach `lower`, so this only calls `check`.
+        let err = check_src(
+            "type: Sprite hp i64 ;\n: lens-hp ( -- [ &!Sprite -- &!i64 ] ) [ &!hp ] ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("error: a reference cannot be stored")
+                && err.contains("&!i64")
+                && err.contains("in `lens-hp`")
+                && err.contains("line 2"),
+            "unexpected message: {err}"
+        );
+    }
 
     fn bare_word(name: &str, module: u32) -> WordDef {
         WordDef {

@@ -70,7 +70,7 @@ fn single_file_word_named_like_extern_symbol_does_not_recurse() {
         "extern-collision",
         "extern: close-fd ( i64 -- i64 ) \"close\" ;\n\
          type: Fd n i64 ;\n\
-         : drop ( Fd -- ) | h | 111 . h Fd>n close-fd drop ;\n\
+         : drop ( Fd -- ) | h | 111 . h Fd> close-fd drop ;\n\
          type: File fd Fd ;\n\
          : close ( File -- ) drop ;\n\
          : main ( -- ) 7 Fd File | f | f close ;\n",

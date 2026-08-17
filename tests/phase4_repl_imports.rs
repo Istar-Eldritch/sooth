@@ -139,7 +139,7 @@ fn repl_import_type_accessor_resolves() {
     // Criterion 2: import a type, name `q::T`, construct it, read `q::T>field`.
     let d = LibDir::new("type");
     let lib = d.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
-    let out = repl(&format!("{}\n10 q::T q::T>v\n", import_line("q", &lib)));
+    let out = repl(&format!("{}\n10 q::T &v @\n", import_line("q", &lib)));
     assert!(out.contains("10"), "constructs and reads the field: {out}");
 }
 
@@ -215,7 +215,7 @@ fn repl_imported_nested_struct_ids_remap() {
         "type: Inner a i64 ;\ntype: Outer i Inner ;\nexport: Inner Outer ;\n",
     );
     let out = repl(&format!(
-        "type: Local z i64 ;\n{}\n1 q::Inner q::Outer q::Outer>i q::Inner>a\n",
+        "type: Local z i64 ;\n{}\n1 q::Inner q::Outer &i @ &a @\n",
         import_line("q", &lib)
     ));
     assert!(
@@ -376,7 +376,7 @@ fn repl_reimport_of_type_resolution_does_not_diverge() {
     d.write("lib.sth", "type: T v i64 w i64 ;\nexport: T ;\n");
     r.send(&import_line("q", &lib));
 
-    let out = r.send("1 2 q::T q::T>w");
+    let out = r.send("1 2 q::T &w @");
     assert!(
         out.contains('2'),
         "the post-reload constructor takes the new shape: {out}"
@@ -386,7 +386,7 @@ fn repl_reimport_of_type_resolution_does_not_diverge() {
         out.contains("defined id"),
         "a signature typed after the reload resolves against the same new decl: {out}"
     );
-    let out = r.send("1 2 q::T id q::T>w");
+    let out = r.send("1 2 q::T id &w @");
     assert!(
         out.contains('2'),
         "a value built via the post-reload constructor cross-fed through the post-reload-typed word resolves through one StructId, not a stale one: {out}"
@@ -593,7 +593,7 @@ fn repl_modules_dogfood_session_runs() {
     // (a) a qualified word and a qualified accessor, run to a value.
     let out = r.send(&import_line("q", &lib));
     assert!(out.contains("imported q"), "imports the library: {out}");
-    let out = r.send("1 q::T q::T>v");
+    let out = r.send("1 q::T &v @");
     assert!(
         out.contains('1'),
         "the qualified accessor reads back: {out}"
@@ -666,7 +666,7 @@ fn repl_dispose_of_imported_override_without_selective_import_is_unaffected() {
     let d = LibDir::new("imported-drop-unaffected");
     let lib = d.write(
         "lib.sth",
-        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> . ;\nexport: mk Res ;\n",
     );
     let input = format!("{}\nq::mk\ndrop\n", import_line("q", &lib));
     let out = repl(&input);
