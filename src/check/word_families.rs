@@ -332,9 +332,9 @@ pub(super) fn check_reference_word(
 
 /// P7 slice 1 (D2/R1): `&f` / `&!f`, a field projection resolved against the
 /// receiver on top of the stack rather than against a type name baked into the
-/// word. `None` when the stack top is not a struct (or a reference to one) with
-/// a field `field`, so the caller falls through to the prefix-borrow chain and
-/// an unrelated `&x` keeps its existing meaning.
+/// word. `None` when the stack top is not a struct or variant (or a reference
+/// to one) with a field `field`, so the caller falls through to the
+/// prefix-borrow chain and an unrelated `&x` keeps its existing meaning.
 ///
 /// Two effects, by receiver:
 ///
@@ -344,6 +344,11 @@ pub(super) fn check_reference_word(
 /// - owned `S`: `( S -- S &A )`, **non-consuming**. Consuming the receiver
 ///   would oblige this word to dispose the fields it did not project, which is
 ///   exactly the implicit disposal this slice deletes.
+///
+/// R4: a variant receiver (`Type::Variant`) is resolved the same way, but
+/// checker-only -- there is no `EnumId` shape in `resolved_fields` and no
+/// lowering arm for it, so a variant projection never reaches the insert at
+/// the bottom of this function.
 #[allow(clippy::too_many_arguments)]
 fn check_field_projection(
     name: &str,
@@ -381,20 +386,29 @@ fn check_field_projection(
         Some((referent, recv_mut)) => (referent, Some(recv_mut)),
         None => (top.ty, None),
     };
-    let Type::Struct(id, _) = referent else {
-        return Ok(None);
+    // R4: a variant receiver is resolved by the same rule as a struct one --
+    // the fields and display name just come from a different declaration
+    // table. Checker-only (R4): `resolved_fields` is `StructId`-keyed and has
+    // no `EnumId` shape, and there is no lowering arm for a variant field
+    // reference, so the variant arm below never reaches that insert.
+    let (fields, receiver_name): (&[(String, Type)], &str) = match referent {
+        Type::Struct(id, _) => (
+            &ctx.structs()[id.index()].fields,
+            ctx.structs()[id.index()].name_static,
+        ),
+        Type::Variant(id, vi, _) => {
+            let variant = &ctx.enums()[id.index()].variants[vi];
+            (&variant.fields, variant.display_static)
+        }
+        _ => return Ok(None),
     };
-    let decl = &ctx.structs()[id.index()];
     // `field` arrives as `resolve` left it, which mangles it whenever it
     // matches a static of this module (R2) -- struct field names are never
     // mangled, so the lookup below has to compare against the demangled
     // spelling or a static's mangled name can never be seen to collide with
     // a field of the same source name.
     let field_name = crate::resolve::demangle_call(field);
-    let field_pos = decl
-        .fields
-        .iter()
-        .position(|(f, _)| f == field_name.as_ref());
+    let field_pos = fields.iter().position(|(f, _)| f == field_name.as_ref());
     // R3: the receiver is tried first, but a local/static of the same name
     // still has a say -- present on both sides it is a shadow error, present
     // only there (the receiver lacking the field) it is the fallback that
@@ -407,7 +421,7 @@ fn check_field_projection(
                 ctx,
                 span,
                 name,
-                decl.name_static,
+                receiver_name,
                 field_name.as_ref(),
             ));
         }
@@ -418,12 +432,12 @@ fn check_field_projection(
                 ctx,
                 span,
                 name,
-                decl.name_static,
+                receiver_name,
                 field_name.as_ref(),
             ));
         }
     };
-    let field_ty = decl.fields[fi].1;
+    let field_ty = fields[fi].1;
     match recv_mut {
         Some(recv_mut) => {
             // Full-type equality, the fused accessor's idiom: a wrong
@@ -462,7 +476,9 @@ fn check_field_projection(
             });
         }
     }
-    resolved_fields.insert(span, (id, fi));
+    if let Type::Struct(id, _) = referent {
+        resolved_fields.insert(span, (id, fi));
+    }
     Ok(Some(std::mem::take(stack)))
 }
 
@@ -2665,6 +2681,50 @@ mod tests {
              : main ( -- ) 1 2 Point &!x swap &!y 3 ! swap 4 ! drop ;",
         )
         .is_ok());
+    }
+
+    /// R4: `&r` resolves against an owned `Type::Variant` receiver exactly
+    /// like a struct receiver -- the receiver-directed lookup does not care
+    /// which declaration table the field comes from. Checker-only (R4):
+    /// `resolved_fields` has no `EnumId` shape and no lowering arm exists for
+    /// a variant projection yet, so this only ever asserts acceptance/output
+    /// shape through `check_reference_word` directly, never build or run.
+    #[test]
+    fn projection_on_variant_receiver_ok() {
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut refs = Vec::new();
+        let mut prov = Provenance::default();
+        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        let out = check_reference_word(
+            "&r",
+            Span::default(),
+            &mut stack,
+            &ctx,
+            &Scope::default(),
+            &[],
+            &[],
+            &mut refs,
+            &mut prov,
+            &Liveness::scan(&[], &HashSet::new(), false),
+            0,
+            &mut HashMap::new(),
+        )
+        .unwrap()
+        .expect("the projection arm claims a bare field on a variant receiver");
+        // D2: owned receiver, non-consuming -- the receiver stays and the
+        // projected reference joins it.
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].ty, shape_variant(&module, 0));
+        assert_eq!(out[1].ty, intern_ref_type(&mut refs, Type::I64, false));
+
+        // A reference receiver is consuming, the same as the struct case.
+        let (pushed, _prov, _operand, mut refs) =
+            call_variant_ref_word(&module, "&r", false).unwrap();
+        assert_eq!(pushed.ty, intern_ref_type(&mut refs, Type::I64, false));
     }
 
     /// Review fix: the owned-receiver arm's output has a region
