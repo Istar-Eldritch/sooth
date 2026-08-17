@@ -51,9 +51,9 @@ pub(crate) use self::combinators::{
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
-    check_exported_signatures, check_selective_imports, check_static_decls, check_types,
-    enum_generated_sigs, selective_not_exported_error, struct_generated_sigs,
-    variant_generated_sigs, SelectiveName,
+    check_exported_signatures, check_no_word_shadows_eliminator, check_selective_imports,
+    check_static_decls, check_types, enum_generated_sigs, selective_not_exported_error,
+    struct_generated_sigs, variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
@@ -1644,7 +1644,11 @@ fn annotation_parameter_mismatch_error(
     declared: Type,
     annotated: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 1): `word` here may be an
+    // eliminator's call name, mangled mid-string (`Shape__m0?`) rather than
+    // with a trailing group -- `demangle_word` cannot see through that, only
+    // `demangle_call` can (see its own doc comment).
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: the quotation passed to `{word}` is annotated `{annotated}` but `{word}` declares it `{declared}`{} (line {})",
         in_word(ctx),
@@ -1830,6 +1834,16 @@ fn check_literal_against_declared_effect(
     // surviving state itself (`Moves::join`, generalized to N arms) rather
     // than losing it to a restore that has nothing later to answer to.
     finalize: bool,
+    // Review fix (Phase 6 slice 3, cycle 2): the caller's own slots for the
+    // declared *inputs*, when the boundary hands the literal a value it
+    // already holds rather than a freshly computed one. `None` (every caller
+    // but the eliminator) seeds each declared input as `Slot::computed`, as
+    // before. The eliminator's arm receives the caller's actual scrutinee --
+    // a `&!Shape` is rooted at a caller place, and an arm handed a
+    // provenance-free `&!Shape.Circle` instead borrows nothing, so a
+    // reference projected out of it escaped the call unrooted and a second,
+    // independent `&!` to the same place was accepted alongside it.
+    input_slots: Option<&[Slot]>,
 ) -> Result<Vec<Slot>, String> {
     let body = prov.quotations[id.0].body.clone();
     // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
@@ -1879,7 +1893,15 @@ fn check_literal_against_declared_effect(
         true => row.to_vec(),
         false => row.iter().map(|s| Slot::computed(s.ty)).collect(),
     };
-    fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t)));
+    match input_slots {
+        Some(given) => fresh.extend(
+            given
+                .iter()
+                .zip(&eff.inputs)
+                .map(|(s, t)| Slot { ty: *t, ..*s }),
+        ),
+        None => fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t))),
+    }
     let depth = scope.depth();
     // Slice 10c: an arm occupies the caller's tail position when the call
     // site does. Pinning that `false` made this probe walk a self-recursive
@@ -2213,6 +2235,19 @@ fn check_eliminator_call(
         let Some(eff) = crate::ast::is_quotation_type(declared) else {
             unreachable!("`inline_quotation_type` builds a quotation type")
         };
+        // The arm receives the caller's *own* scrutinee, retyped to the
+        // narrowed variant -- not a fresh provenance-free slot. A reference
+        // scrutinee is rooted at a caller place, and an arm that borrowed
+        // nothing let a reference projected inside it leave the call
+        // unrooted: a second, independent `&!` to that place was then
+        // accepted alongside it, and the place itself could be consumed
+        // inside the arm while a borrow of it was live. The declared effect
+        // stays exactly as built above, so the mode-mismatch comparison is
+        // unaffected.
+        let received = [Slot {
+            ty: narrowed,
+            ..scrutinee
+        }];
         let literal_span = prov.quotations[qid.0].span;
         let mut arm_scope = scope.clone();
         let arm_result = check_literal_against_declared_effect(
@@ -2235,6 +2270,7 @@ fn check_eliminator_call(
             true,
             tail,
             true,
+            Some(&received),
         )?;
         arm_moves.push(arm_scope.moves);
         match &baseline {
@@ -2447,7 +2483,10 @@ fn ordinary_literal_at_inline_param_error(
     word: &str,
     param: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 1): same mid-string mangling as
+    // `annotation_parameter_mismatch_error` above -- an eliminator arm's
+    // literal-flavour check reaches this with the mangled call name.
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: this argument is an ordinary `[ ... ]` quotation but `{word}` declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
         in_word(ctx),
@@ -2487,6 +2526,16 @@ fn combinator_branch_output_mismatch_error(
     expected: &[Type],
     found: &[Type],
 ) -> String {
+    // Phase 6 slice 3 review fix (finding 3): the exact `Vec<Type>` pair, for
+    // tests that must discriminate decision 5's written-vs-declaration
+    // ordering on its own structure -- two types can `Display` identically,
+    // so a test reading the rendered message alone cannot tell `expected` and
+    // `found` apart from a swap between them once that happens. Compiled out
+    // entirely outside `cfg(test)`.
+    #[cfg(test)]
+    tests::LAST_BRANCH_MISMATCH.with(|last| {
+        *last.borrow_mut() = Some((expected.to_vec(), found.to_vec()));
+    });
     // Phase 6 slice 3 review fix (finding 4): shared with `check_eliminator_call`
     // (decision 4), whose `word` is a call name that may carry the `?` suffix
     // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
@@ -2938,6 +2987,18 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+    use std::cell::RefCell;
+
+    // Review fix (Phase 6 slice 3, finding 3): the raw `Vec<Type>` pair
+    // `combinator_branch_output_mismatch_error` was actually called with,
+    // captured for tests that must pin decision 5's arm ordering by
+    // structure rather than by the rendered message (two `Type`s can
+    // `Display` identically, which a rendered-message assertion cannot see
+    // through).
+    thread_local! {
+        pub(super) static LAST_BRANCH_MISMATCH: RefCell<Option<(Vec<Type>, Vec<Type>)>> =
+            const { RefCell::new(None) };
+    }
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
@@ -4042,6 +4103,13 @@ mod tests {
         // written-first arm's shape, `found` = the offending arm's) is what
         // discriminates the two orderings: iterating in declaration order
         // swaps them.
+        //
+        // Review fix (finding 3): pin the exact `Vec<Type>` pair passed to
+        // `combinator_branch_output_mismatch_error`, per the spec's own
+        // requirement, rather than the rendered message alone -- `i64` and
+        // `bool` happen to `Display` distinctly, but that is not what this
+        // assertion should be resting on.
+        LAST_BRANCH_MISMATCH.with(|last| *last.borrow_mut() = None);
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- bool ) ~[ ( Rect ) Rect> < ] ~[ ( Circle ) Circle> ] Shape? ;\n\
@@ -4051,6 +4119,14 @@ mod tests {
         assert!(
             err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
             "the written-first (`Rect`) arm must set the baseline: {err}"
+        );
+        let (expected, found) = LAST_BRANCH_MISMATCH
+            .with(|last| last.borrow_mut().take())
+            .expect("combinator_branch_output_mismatch_error was called");
+        assert_eq!(
+            (expected, found),
+            (vec![Type::BOOL], vec![Type::I64]),
+            "the written-first (`Rect`) arm's shape must be `expected`, not `found`"
         );
     }
 
@@ -4063,6 +4139,9 @@ mod tests {
         // stack, without the reversal back to written order -- makes `A`'s
         // `i64` the baseline instead, which the written-vs-declaration test
         // above cannot catch (there, pop order and declaration order agree).
+        //
+        // Review fix (finding 3): pin the exact `Vec<Type>` pair, as above.
+        LAST_BRANCH_MISMATCH.with(|last| *last.borrow_mut() = None);
         let err = check_src(&format!(
             "{ABC_DECL}\
              : f ( Abc -- bool ) ~[ ( B ) B> 0 < ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
@@ -4072,6 +4151,14 @@ mod tests {
         assert!(
             err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
             "the written-first (`B`) arm must set the baseline: {err}"
+        );
+        let (expected, found) = LAST_BRANCH_MISMATCH
+            .with(|last| last.borrow_mut().take())
+            .expect("combinator_branch_output_mismatch_error was called");
+        assert_eq!(
+            (expected, found),
+            (vec![Type::BOOL], vec![Type::I64]),
+            "the written-first (`B`) arm's shape must be `expected`, not `found`"
         );
     }
 
@@ -4189,6 +4276,46 @@ mod tests {
             err.contains("annotated `~[ &Shape.Circle -- ]`")
                 && err.contains("`Shape?` declares it `~[ &!Shape.Circle -- ]`"),
             "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_diagnostics_demangle_the_call_name_in_a_real_build() {
+        // Phase 6 slice 3 review fix (finding 1): `check_src` skips
+        // `resolve_modules`, so every name is left bare and the two tests
+        // above never exercised the mangled call name `Shape__m0?` that a
+        // real build produces (the native build path force-mangles even a
+        // single module). `demangle_word` only strips a *trailing* `__mN`
+        // group, blind to that mid-string one -- these two diagnostics must
+        // go through `demangle_call` instead, as the eliminator resolution
+        // test above (`eliminator_call_site_mangles_to_match_the_enum_based_key`)
+        // already does for the call site itself.
+        let src = format!(
+            "{SHAPE_DECL}\
+             : first ( &Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            !err.contains("__m") && err.contains("`Shape?` declares it"),
+            "mangled name leaked into the annotation-mismatch diagnostic: {err}"
+        );
+
+        let src = format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) [ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            !err.contains("__m") && err.contains("but `Shape?` declares parameter"),
+            "mangled name leaked into the bracket-flavour diagnostic: {err}"
         );
     }
 
@@ -4313,6 +4440,25 @@ mod tests {
     }
 
     #[test]
+    fn eliminator_arm_tag_separated_from_its_call_is_error() {
+        // The written-adjacency rule stated: `4 drop` is stack-neutral, so
+        // this call's arms are still adjacent on the *stack* and
+        // `check_eliminator_call` would collect both. The literal-side check
+        // is syntactic and cannot see that, so it rejects -- and says why,
+        // rather than claiming the arm reaches no eliminator at all.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] 4 drop ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("arms are written together, immediately before the call"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn eliminator_arm_tag_immediately_preceding_its_call_is_not_flagged() {
         // The control for the rejection above: a correctly-formed eliminator
         // call must not trip the new outside-a-call check.
@@ -4322,5 +4468,60 @@ mod tests {
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .expect("a correctly-formed eliminator call is not flagged as an arm outside a call");
+    }
+
+    #[test]
+    fn check_eliminator_call_reference_arm_keeps_the_scrutinee_borrow_rooted() {
+        // Phase 2 review cycle 2: an arm's *input* is the caller's own
+        // scrutinee slot, not a fresh one. Each arm here projects a reference
+        // out of the `&!Shape` it was handed and leaves it live, so the
+        // caller still knows `s` is exclusively borrowed and the `&!s` after
+        // the call conflicts -- exactly what the spliced-`if` shape
+        // (`&!p true ~[ &!x ] ~[ &!x ] if &!p`) already reports, which the
+        // eliminator used to accept because it routed the scrutinee through
+        // `eff.inputs` (always erased) rather than through the row.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : main ( -- ) 3 Circle | s | &!s\n\
+             \x20 ~[ ( &!Circle ) &!r ] ~[ ( &!Rect ) &!w ] Shape? &!s drop drop s drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`&!s` conflicts with a live borrow of `s`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_cannot_consume_the_borrowed_scrutinee_root() {
+        // The same rooting, seen from the other side: inside an arm holding a
+        // reference projected out of the scrutinee, the place that reference
+        // is rooted at cannot be consumed. With a provenance-free arm input
+        // the borrow pointed at nothing and this was accepted.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : main ( -- ) 3 Circle | s | &!s\n\
+             \x20 ~[ ( &!Circle ) &!r s drop ] ~[ ( &!Rect ) &!w ] Shape? drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("cannot name `s`") && err.contains("a mutable borrow of it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_sibling_arms_may_each_consume_one_outer_local() {
+        // The other half of finding 1's fix: arms are alternatives, so each
+        // is checked against its own clone of the caller `Scope`. Sharing one
+        // scope across the loop makes the second arm see the first arm's
+        // consumption of `f` and wrongly report use-after-move -- the whole
+        // reason `check_branch_join` clones `then_scope`/`else_scope` too.
+        check_src(&format!(
+            "{FILE_RESOURCE}\n{SHAPE_DECL}\
+             : main ( -- ) 1 File | f | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . f drop ] Shape? ;\n"
+        ))
+        .expect("each arm may consume the same outer local: only one arm runs");
     }
 }

@@ -382,7 +382,31 @@ already settles them for `if`, generalized from two arms to N:
   at a time. Erasing to a provenance-free slot instead (the original implementation's
   defect) let an escaped `&!` alias a second, independently-taken one.
 
+**Review fix (Phase 2 code review, cycle 2): the same erasure on the way *in*, which the
+fix above missed by covering only arm outputs.** `check_literal_against_declared_effect`
+seeds a boundary's declared inputs as `Slot::computed`, so an arm built from
+`inline_quotation_type(vec![narrowed], vec![])` received a `&!Shape.Circle` rooted at
+nothing: a reference projected out of it inside the arm left the call unrooted, and two
+live `&!` to the same caller place were accepted (the identically-shaped spliced `if`,
+whose operand rides in `row` and keeps its real slots, rejects it). Step 4 therefore
+hands the arm the caller's **own scrutinee `Slot`, retyped to `narrowed`** — an
+input-slot override on the shared helper (`input_slots`, `None` at every other call
+site), not a change to the declared effect, so the mode-mismatch comparison is
+untouched. This is the linear spine, not a lowering concern: it belongs to this phase,
+not Phase 4.
+
 Unit tests beside `check_eliminator_call` (naming `thing_condition_expected`):
+
+- `check_eliminator_call_reference_arm_keeps_the_scrutinee_borrow_rooted` and
+  `_arm_cannot_consume_the_borrowed_scrutinee_root` — the override above, from both
+  sides: a reference projected out of the scrutinee inside an arm is still rooted at the
+  caller's place after the call (a second `&!` conflicts), and the root cannot be
+  consumed inside an arm that holds such a projection. Both are accepted if the arm's
+  input is seeded provenance-free.
+- `check_eliminator_call_sibling_arms_may_each_consume_one_outer_local` — the per-arm
+  `Scope` clone above, in its *positive* form: two arms may each consume the same outer
+  linear local, because only one arm runs. Fails if the clone is hoisted out of the arm
+  loop (which the move-state join test alone does not catch).
 
 - `check_eliminator_call_missing_arm_names_missing_variant` — an omitted arm names the
   missing variant (mirror `check_clause_word_non_exhaustive_names_missing_variant`).
@@ -738,6 +762,36 @@ Exit criteria (breakable assertions):
   fails if step 4 silently coerces the mismatch instead of building the mode-correct
   expected effect and letting the shared helper reject the disagreement.
 
+**As shipped, deviating from the letter above (all four reviewed and accepted):**
+
+- **Registering `Shape?` is not free after all.** `Shape?` reaches `resolve` as a name
+  whose trailing `?` `split_destructure_suffix` must recognize (so the *type* branch
+  mangles it to the registry's own `Shape__m0?` key). That made every ordinary word whose
+  name ends in `?` (`ok?`, `zero?`) look generated to the four name-table branches that
+  skipped a non-empty suffix, breaking a cross-module call to one that worked before this
+  slice. A generated word is identified by its type prefix naming a real type — that
+  branch returns on its own — so the suffix alone no longer gates the qualified-word,
+  own-word, static-borrow, or selective-import branches
+  (`word_named_with_a_generated_suffix_resolves_in_every_branch` pins all four).
+- **The REPL needs its own rejection, twice.** Eliminator interception runs ahead of the
+  env lookup at a session line too, so `check_no_word_shadows_eliminator` is called from
+  the `Line::Def` fan-out; and because a session declares one thing per line, the reverse
+  ordering (a `type:` line whose eliminator name a session word already holds) is caught
+  in `eval_enum_typedef` against the session's own word names.
+- **A tagged literal must reach its call by *written* adjacency.** The literal-side check
+  that a `( Circle )` tag is actually consumed as an arm is syntactic, so a stack-neutral
+  term written between two arms is rejected even though the stack-based collection would
+  accept it. The looser alternative (scan forward past anything) re-opens the hole the
+  check exists to close, so the rule stands and the diagnostic states it.
+- **An untagged literal and a forwarded quotation share one error class**
+  (`eliminator_untagged_arm_error`) rather than reusing `quotation_argument_required_error`
+  as OQ1 row 7 had it.
+- **`_written_order_sets_baseline` and `_pop_order_does_not_set_baseline` pin the exact
+  `Vec<Type>` pair** passed to `combinator_branch_output_mismatch_error`
+  (`check::tests::LAST_BRANCH_MISMATCH`, a `cfg(test)`-only capture), not just the
+  rendered message — the two baselines (`i64`/`bool`) happen to `Display` distinctly, but
+  the assertion no longer depends on that.
+
 ### Phase 3 — variant-accessor IR lowering
 
 Scope: R6 (re-pointed at P7.S1's receiver-directed projection shape, not the retired
@@ -812,6 +866,11 @@ tripped it first — only the `lower_enum_word` match remains to update here):
   `EnumWord::Eliminate(_) => unreachable!(...)`, sound only because the `calls.rs`
   interception precedes it. Order the interception before `lower_enum_word` deliberately,
   and say so in the arm's message.
+- Between Phase 2 and this one, a *checked* eliminator program panics when built:
+  `Shape?` passes the checker and then reaches the generic call path with no minted
+  symbol (`src/ir/func_builder/calls.rs`, `checked user word exists`). No stopgap guard
+  is added for it — the interception this phase installs is the fix — but the golden
+  below is what proves it gone, so it must build and run, not merely check.
 
 Exit criteria (breakable assertions):
 

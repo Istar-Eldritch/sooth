@@ -916,13 +916,22 @@ fn check_term(
 
 /// Phase 6 slice 3 review fix (finding 3): whether the tagged literal at
 /// `siblings[at]` is actually collected as an eliminator arm. Forward-scans
-/// past every immediately-following tagged quotation literal (arms are
-/// written contiguously, immediately below the scrutinee -- the same
-/// adjacency `check_eliminator_call`'s own stack-based collection requires),
-/// and accepts only if that run ends in a call to a name the eliminator
-/// registry actually holds. Anything else (a typo'd call name, an
-/// intervening non-arm term, or running off the end of the body) means this
-/// literal is never consumed as an arm at all.
+/// past every immediately-following tagged quotation literal and accepts only
+/// if that run ends in a call to a name the eliminator registry actually
+/// holds. Anything else (a typo'd call name, an intervening term, or running
+/// off the end of the body) means this literal is never consumed as an arm.
+///
+/// This is *written adjacency*, deliberately stricter than
+/// `check_eliminator_call`'s own stack-based collection: a stack-neutral term
+/// written between two arms (`~[ ( Circle ) .. ] 4 drop ~[ ( Rect ) .. ]
+/// Shape?`) leaves the arms adjacent on the stack but not in the source, and
+/// is rejected here. Deciding the stack-level question syntactically is not
+/// possible, and the looser rule that would admit it (scan forward past
+/// anything until *some* eliminator call) re-opens the hole this exists to
+/// close: it would accept a tagged literal that is dropped, never checked,
+/// merely because an unrelated eliminator call follows it later in the body.
+/// The error names the adjacency requirement so the rejection is a stated
+/// rule rather than an unexplained one.
 fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly: &PolyCtx) -> bool {
     let mut j = at + 1;
     while let Some(term) = siblings.get(j) {
@@ -943,7 +952,7 @@ fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly:
 /// checker must not silently let through unchecked.
 fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
     format!(
-        "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})",
+        "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})\n  arms are written together, immediately before the call: `~[ ( A ) .. ] ~[ ( B ) .. ] Enum?`",
         in_word(ctx),
         span.line,
     )
@@ -1273,6 +1282,7 @@ fn check_branch_join(
                             false,
                             false,
                             false,
+                            None,
                         )?;
                         check_literal_against_declared_effect(
                             b,
@@ -1294,6 +1304,7 @@ fn check_branch_join(
                             false,
                             false,
                             false,
+                            None,
                         )?;
                         // R23: the merged erased slot's surviving set is
                         // the union of both arms' -- a fresh interned

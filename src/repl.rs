@@ -1448,6 +1448,13 @@ impl Session {
                 // an imported name's internal tag; reject it up front (covers
                 // the drop / def / poly fan-out with one check).
                 reject_double_colon_name("word", &word.name, word_span(&word))?;
+                // Phase 6 slice 3: the session analogue of
+                // `assemble_module`'s own shadowing check. Eliminator
+                // interception runs ahead of the env lookup here too, so a
+                // word named `Shape?` would be accepted and then permanently
+                // unreachable -- every call to it routes to the generated
+                // eliminator instead.
+                check::check_no_word_shadows_eliminator(std::slice::from_ref(&word), &self.enums)?;
                 // R6: `check_globals` runs only in `assemble_module`, so a
                 // `global:` clause here would be accepted and never checked.
                 // A live session declares no statics, so no entry could ever
@@ -1584,6 +1591,22 @@ impl Session {
         let variant_names = parser::enum_variant_names(tokens);
         for (vname, vspan) in &variant_names {
             parser::reject_reserved_name("variant", vname, *vspan)?;
+        }
+        // Phase 6 slice 3: the same collision arrived at from the other side
+        // -- a session word already holds the name this enum's eliminator
+        // would take, which would make that word unreachable from the next
+        // line on. A session declares one thing per line, so each ordering
+        // has to be caught where it happens; `assemble_module` sees both at
+        // once and needs only its whole-module scan.
+        let eliminator_name = format!("{name}?");
+        if self.word_names().contains(&eliminator_name)
+            || self.combinators.contains_key(&eliminator_name)
+        {
+            return Err(check::word_shadows_eliminator_error(
+                &eliminator_name,
+                span,
+                &name,
+            ));
         }
         let variants = variant_names
             .into_iter()
@@ -3733,6 +3756,46 @@ mod tests {
             );
             drop(Box::from_raw(payload));
         }
+    }
+
+    /// Phase 6 slice 3 review (finding 4): the session define path runs the
+    /// same eliminator interception `check_term` does, so a word named
+    /// `Shape?` was accepted ("defined Shape?") and then permanently
+    /// unreachable -- the next call to it routed to the generated eliminator
+    /// and failed on the scrutinee's type. Rejected at the declaration
+    /// instead, both ways round, since a session declares one thing per line
+    /// and never sees the pair at once the way `assemble_module` does.
+    #[test]
+    fn session_rejects_a_word_shadowing_an_eliminator_either_declaration_order() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+
+        let mut session = Session::new();
+        session
+            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+        // The rejected `type:` line leaves the session as it was: the word it
+        // would have shadowed is still callable.
+        out.clear();
+        session.eval_line("5 Shape? .", &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "stack: (empty)\n");
     }
 
     /// F1/F2: everything above (`format_rich_*`) exercises `format_stack_rich`

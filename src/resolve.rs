@@ -559,6 +559,7 @@ mod tests {
         assert_eq!(split_destructure_suffix("Point"), ("Point", ""));
         assert_eq!(split_destructure_suffix("Point>"), ("Point", ">"));
         assert_eq!(split_destructure_suffix(">"), ("", ">"));
+        assert_eq!(split_destructure_suffix("Shape?"), ("Shape", "?"));
     }
 
     #[test]
@@ -851,6 +852,71 @@ mod tests {
              `eliminator_registry`'s own `\"{{EnumName}}?\"` keying, not the \
              ordinary word-suffix form `Shape?__m0`: {:?}",
             call_names(&area.body)
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (cycle 2): teaching `split_destructure_suffix`
+    /// about the eliminator's `?` made every *plain* word whose name ends in
+    /// `?` (`ok?`, `zero?` -- an ordinary spelling) present a non-empty
+    /// suffix to the four name-table branches below, each of which then
+    /// skipped it and left the call unresolved (`unknown word` across
+    /// modules). A generated word is recognized by its *type prefix* naming a
+    /// real type, and that branch returns on its own, so the suffix alone
+    /// must never gate the rest. Each assertion below fails if its branch's
+    /// `suffix.is_empty()` gate comes back, and every one of them is
+    /// reachable from real source (a qualified call, an own-module call, a
+    /// borrowed `static:`, a selective import).
+    #[test]
+    fn word_named_with_a_generated_suffix_resolves_in_every_branch() {
+        let mut types = vec![HashSet::new(), HashSet::new()];
+        types[0].insert("Shape".to_string());
+        let mut words = vec![HashSet::new(), HashSet::new()];
+        words[0].insert("own?".to_string());
+        words[1].insert("ok?".to_string());
+        let mut statics = vec![HashSet::new(), HashSet::new()];
+        statics[0].insert("FLAG?".to_string());
+        let tables = NameTables {
+            types,
+            words,
+            statics,
+        };
+        let mut imports = std::collections::HashMap::new();
+        imports.insert("lib".to_string(), 1u32);
+        let exports = vec![Vec::new(), vec![("ok?".to_string(), Span::default())]];
+        let scope = HashSet::new();
+        let span = Span::default();
+        let none = std::collections::HashMap::new();
+        let mut selective = std::collections::HashMap::new();
+        selective.insert("ok?".to_string(), 1u32);
+        let at = |name: &str, sel: &std::collections::HashMap<String, u32>| {
+            tables.rewrite(name, 0, &imports, sel, &scope, &exports, span)
+        };
+
+        assert_eq!(
+            at("lib::ok?", &none),
+            Ok(Some("ok?__m1".to_string())),
+            "qualified call to another module's word"
+        );
+        assert_eq!(
+            at("own?", &none),
+            Ok(Some("own?__m0".to_string())),
+            "unqualified call to this module's own word"
+        );
+        assert_eq!(
+            at("&!FLAG?", &none),
+            Ok(Some("&!FLAG?__m0".to_string())),
+            "borrow of this module's own static"
+        );
+        assert_eq!(
+            at("ok?", &selective),
+            Ok(Some("ok?__m1".to_string())),
+            "selectively imported word, bare"
+        );
+        assert_eq!(
+            at("Shape?", &none),
+            Ok(Some("Shape__m0?".to_string())),
+            "the eliminator itself still resolves through the type branch, \
+             which is what the suffix is actually for"
         );
     }
 

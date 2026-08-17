@@ -1495,17 +1495,29 @@ pub fn check_no_word_shadows_eliminator(
             w.module == enum_decl.module
                 && crate::resolve::demangle_word(&w.name) == eliminator_name
         }) {
-            let span = word_span(word);
-            return Err(format!(
-                "error: word `{}` (line {}, col {}) has the same name as the generated eliminator for enum `{}`; rename one",
-                eliminator_name,
-                span.line,
-                span.col,
+            return Err(word_shadows_eliminator_error(
+                &eliminator_name,
+                word_span(word),
                 crate::resolve::demangle_word(generic_surface_name(&enum_decl.name)),
             ));
         }
     }
     Ok(())
+}
+
+/// The rejection above, as a message. Shared with the REPL, whose two
+/// declaration paths reach the same collision one line at a time (a `:` line
+/// naming an existing enum's eliminator, and a `type:` line whose eliminator
+/// name a session word already holds) and so cannot use the whole-module scan.
+pub(crate) fn word_shadows_eliminator_error(
+    eliminator_name: &str,
+    span: Span,
+    enum_name: &str,
+) -> String {
+    format!(
+        "error: word `{eliminator_name}` (line {}, col {}) has the same name as the generated eliminator for enum `{enum_name}`; rename one",
+        span.line, span.col,
+    )
 }
 
 #[cfg(test)]

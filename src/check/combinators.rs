@@ -427,6 +427,7 @@ pub(super) fn inline_combinator(
                             tail_slots.contains(&i),
                             tail,
                             false,
+                            None,
                         )?;
                     }
                     // R21: forwarding an abstract quotation parameter. `found`
@@ -713,6 +714,7 @@ fn check_poly_combinator_args(
                 tail_slots.contains(&i),
                 tail,
                 false,
+                None,
             )?
             .iter()
             .map(|s| s.ty)
