@@ -1650,6 +1650,10 @@ pub struct QuotAnnot {
     /// The annotation's opening `(`, where a body/annotation disagreement is
     /// reported.
     pub span: Span,
+    /// Phase 6 slice 3 (R1): the bare variant name a leading `Variant`/
+    /// `&Variant`/`&!Variant` token names, sigil stripped -- an eliminator
+    /// arm's routing tag. `None` for every plain (non-arm) annotation.
+    pub variant_tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]

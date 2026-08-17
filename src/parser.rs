@@ -16,10 +16,10 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
-    PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, EnumId, ExternDecl, GenericTypes,
+    GlobalEntry, GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl,
+    PolySig, PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl,
+    Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -2551,12 +2551,38 @@ impl<'t> Parser<'t> {
     /// tables rather than any enclosing signature's `PolySig` (R2). R6: only
     /// the full four-part form parses, so `( )` and a parenthesized list with
     /// no `--` are both located errors.
+    ///
+    /// Phase 6 slice 3 (R1): a leading token naming a known variant (bare,
+    /// `&`-prefixed, or `&!`-prefixed) is an eliminator arm's routing tag,
+    /// consumed before the ordinary input-list reader sees it and recorded on
+    /// `variant_tag`. The lone-variant-name form (`( Circle )`) is the one
+    /// place the arrow is elidable: reaching `)` immediately after that one
+    /// token is a complete elided arm, not the located `( )` rejection.
     fn parse_quot_annotation(&mut self) -> Result<QuotAnnot, String> {
         let span = self.expect(Token::LParen)?;
         let mut vars = AnnotVars::default();
-        let inputs = self.parse_annot_slots(&mut vars, false, |tok| {
+        let mut variant_tag = None;
+        let leading_variant_input = self.parse_leading_variant_slot(&mut variant_tag)?;
+        if let (Some(ty), Some((Token::RParen, _))) = (leading_variant_input, self.peek()) {
+            self.pos += 1;
+            return Ok(QuotAnnot {
+                inputs: vec![PolyType::Concrete(ty)],
+                outputs: vec![],
+                row_in: None,
+                row_out: None,
+                ty_var_names: vec![],
+                row_var_names: vec![],
+                span,
+                variant_tag,
+            });
+        }
+        let mut inputs = Vec::new();
+        if let Some(ty) = leading_variant_input {
+            inputs.push(PolyType::Concrete(ty));
+        }
+        inputs.extend(self.parse_annot_slots(&mut vars, false, |tok| {
             matches!(tok, Token::RParen) || is_word(tok, "--")
-        })?;
+        })?);
         if let Some((Token::RParen, span)) = self.peek() {
             return Err(annotation_missing_arrow_error(*span));
         }
@@ -2572,6 +2598,59 @@ impl<'t> Parser<'t> {
             ty_var_names: vars.ty_names,
             row_var_names: vars.row_names,
             span,
+            variant_tag,
+        })
+    }
+
+    /// Phase 6 slice 3 (R1): consume a leading `Variant`/`&Variant`/
+    /// `&!Variant` token opening an annotation, if the (sigil-stripped) word
+    /// names a known variant. Sets `variant_tag` to the bare name (never the
+    /// sigil-carrying spelling, since routing matches variant names, which
+    /// never carry a sigil in a `type:` declaration) and returns the token's
+    /// declared type -- owning for a bare name, `&`/`&!` via the same
+    /// `intern_ref_type` an ordinary reference slot resolves through.
+    /// Returns `None`, consuming nothing, when the leading token isn't a
+    /// known variant name at all: an ordinary annotation's first input slot.
+    fn parse_leading_variant_slot(
+        &mut self,
+        variant_tag: &mut Option<String>,
+    ) -> Result<Option<Type>, String> {
+        let word = match self.peek() {
+            Some((Token::Word(w), _)) => w.clone(),
+            _ => return Ok(None),
+        };
+        let sigil_len = if word.starts_with("&!") {
+            2
+        } else if word.starts_with('&') {
+            1
+        } else {
+            0
+        };
+        let bare = &word[sigil_len..];
+        let Some(base) = self.resolve_variant_type(bare) else {
+            return Ok(None);
+        };
+        self.pos += 1;
+        *variant_tag = Some(bare.to_string());
+        Ok(Some(if sigil_len == 0 {
+            base
+        } else {
+            crate::ast::intern_ref_type(self.refs, base, sigil_len == 2)
+        }))
+    }
+
+    /// The concrete `Type::Variant` a bare variant name resolves to, searched
+    /// against every concrete (non-generic) enum's variant list -- the same
+    /// registry `resolve_type_name_in_module` consults for an enum's own
+    /// name, one level down. A generic enum's variant is not resolved here:
+    /// it has no concrete `Type::Variant` until instantiated with type
+    /// arguments, which a bare variant-name token supplies none of.
+    fn resolve_variant_type(&self, name: &str) -> Option<Type> {
+        self.enums.iter().enumerate().find_map(|(idx, e)| {
+            e.variants
+                .iter()
+                .position(|v| v.name == name)
+                .map(|vi| crate::ast::variant_type(self.enums, EnumId::from_index(idx), vi))
         })
     }
 
@@ -3862,6 +3941,70 @@ mod tests {
         let err = parse_src(": w ( -- ) [ ( ) dup ] drop ;").unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
         assert!(err.contains("line 1, col 16"), "unexpected: {err}");
+    }
+
+    /// Phase 6 slice 3 (R1): the lone-variant-name elided form sets
+    /// `variant_tag` and declares an owning `Type::Variant` input, with the
+    /// arrow and outputs both elided.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_owning_ok() {
+        let module = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle ) drop ] drop ;",
+        )
+        .unwrap();
+        let shape_id =
+            EnumId::from_index(module.enums.iter().position(|e| e.name == "Shape").unwrap());
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.variant_tag, Some("Circle".to_string()));
+                assert_eq!(
+                    annot.inputs,
+                    vec![PolyType::Concrete(Type::Variant(
+                        shape_id,
+                        0,
+                        "Shape.Circle"
+                    ))]
+                );
+                assert!(annot.outputs.is_empty());
+                assert_eq!((annot.row_in, annot.row_out), (None, None));
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// Phase 6 slice 3 (R1, decision 6): the `&!`-prefixed elided form sets
+    /// the same bare `variant_tag` (the sigil must not leak into the routing
+    /// name) but declares a mutable-reference input.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_mut_ref_ok() {
+        let module = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( &!Circle ) drop ] drop ;",
+        )
+        .unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.variant_tag, Some("Circle".to_string()));
+                let inner = Type::Variant(EnumId::from_index(0), 0, "Shape.Circle");
+                match annot.inputs.as_slice() {
+                    [PolyType::Concrete(Type::Ref(_, mutable, _))] => assert!(*mutable),
+                    other => panic!("expected a single mutable-ref input, got {other:?}"),
+                }
+                let _ = inner;
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// Phase 6 slice 3 (R1): a partial arm with a second token and no arrow
+    /// is the same located elided-form error as a bare `( )`, not accepted
+    /// as a partial arm.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_extra_token_no_arrow_is_error() {
+        let err = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle bool ) drop ] drop ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
     }
 
     /// R2: a row spelling is admitted and interned into the literal's own row
