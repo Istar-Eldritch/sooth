@@ -47,25 +47,27 @@ type: VmPop vm Vm val i64 ;
 
 : vm-push ( Vm i64 -- Vm )
   | vm x |
-  vm Vm>sp | i |
-  &!vm &!Vm>stack i &!> x !
-  vm vm Vm>sp 1 + Vm<sp ;
+  vm &sp @ swap drop | i |
+  &!vm &!stack i &!> x !
+  vm &sp @ swap drop 1 + | newsp |
+  vm &!sp newsp ! ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  vm Vm>sp 1 - | i |
-  &vm &Vm>stack i &> @ | x |
-  vm i Vm<sp
+  vm &sp @ swap drop 1 - | i |
+  &vm &stack i &> @ | x |
+  vm &!sp i !
   x
   VmPop ;
 
 : bump-pc ( Vm -- Vm )
-  dup Vm>pc 1 + Vm<pc ;
+  &pc @ 1 + | newpc |
+  &!pc newpc ! ;
 
 : fetch ( Vm -- Fetched )
   | vm |
-  vm Vm>pc | i |
-  &vm &Vm>prog i &> @ | op |
+  vm &pc @ swap drop | i |
+  &vm &prog i &> @ | op |
   vm op Fetched ;
 
 \ Nine-clause self-tail-recursive dispatch loop. Every non-`Halt` clause
@@ -102,14 +104,14 @@ type: VmPop vm Vm val i64 ;
     bump-pc
     fetch Fetched> run
 | Load  | vm addr |
-    &vm &Vm>mem addr &> @ | x |
+    &vm &mem addr &> @ | x |
     vm x vm-push
     bump-pc
     fetch Fetched> run
 | Store | vm addr |
     vm vm-pop VmPop>           \ v x
     | v x |
-    &!v &!Vm>mem addr &!> x !
+    &!v &!mem addr &!> x !
     v
     bump-pc
     fetch Fetched> run
@@ -117,13 +119,13 @@ type: VmPop vm Vm val i64 ;
     vm vm-pop VmPop>           \ vm' x
     0 =
     ~[
-      target Vm<pc
+      &!pc target !
     ] ~[
       bump-pc
     ] if
     fetch Fetched> run
 | Jmp   | vm target |
-    vm target Vm<pc
+    vm &!pc target !
     fetch Fetched> run
 | Halt  | vm |
     vm vm-pop VmPop>

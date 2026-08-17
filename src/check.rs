@@ -2396,7 +2396,7 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
     // own declared effect names (`find_drop_overloads` rejects any other
     // input shape before body checking ever starts): its own body is exactly
     // where moving that struct's fields out implements disposal
-    // (`examples/resources.sth`'s `Fd>n` inside `: drop`). `resolve::mangle`
+    // (`examples/resources.sth`'s `Fd>` inside `: drop`). `resolve::mangle`
     // leaves `drop` unmangled program-wide, so a name-only check would wave
     // through *any* word named `drop`, including one overriding a different
     // struct that destructures this one -- compare the struct identity the
@@ -2669,23 +2669,22 @@ mod tests {
     }
 
     /// D3's leaf resource: one field, a `drop` override implemented exactly
-    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>`
     /// inside `drop`'s own body -- exempted, since a word literally named
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
-    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
         let tokens = lex(src).unwrap();
         let terms = match crate::parser::parse_line(&tokens).unwrap() {
@@ -2735,7 +2734,7 @@ mod tests {
     }
     #[test]
     fn field_move_of_drop_overloaded_type_is_error() {
-        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
         assert_eq!(
             err,
             "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
@@ -2751,7 +2750,7 @@ mod tests {
         // skip *that* struct's destructor. `Box`'s own `drop` here
         // destructures `Fd`, not `Box`, so it must still be rejected.
         let err = check_src(&format!(
-            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd>n drop x Box>b drop ;\n: main ( -- ) 1 Box drop ;\n"
+            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd> drop x Box> drop ;\n: main ( -- ) 1 Box drop ;\n"
         ))
         .unwrap_err();
         assert_eq!(
@@ -2766,7 +2765,7 @@ mod tests {
         // on `File`'s. The extracted `Fd` is disposed by an ordinary bare
         // `drop`, unrelated to D3.
         check_src(&format!(
-            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File>fd drop ;\n"
+            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File> drop ;\n"
         ))
         .unwrap();
     }

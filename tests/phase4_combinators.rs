@@ -76,7 +76,7 @@ fn combinators_import(qualifier: &str) -> String {
 /// The linear stand-in: a one-field struct with a `drop` overload, so a
 /// capture of it is a linear (not `Copy`) capture (D3).
 const SPY_DEF: &str = "type: Spy tag i64 ;\n\
-    : drop ( Spy -- )  | s | s Spy>tag . ;\n";
+    : drop ( Spy -- )  | s | s Spy> . ;\n";
 
 /// `lib/combinators.sth`'s `times`, inlined: `check_error`/`check_ok` run the
 /// checker in process, where an `import:` line never resolves, and a REPL
@@ -1339,14 +1339,14 @@ fn poly_combinator_literal_borrowing_enclosing_place_is_error() {
                   | f | | v | v f call drop ;\n\
                 : main ( -- )\n\
                   7 Box | b |\n\
-                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  0 [ | x | x drop &b &v ] applyr\n\
                   b drop ;\n";
     let poly = "type: Box v i64 ;\n\
                 : applyr inline ( 'T [ 'T -- &i64 ] -- )\n\
                   | f | | v | v f call drop ;\n\
                 : main ( -- )\n\
                   7 Box | b |\n\
-                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  0 [ | x | x drop &b &v ] applyr\n\
                   b drop ;\n";
     for (label, src) in [("mono", mono), ("poly", poly)] {
         let err = check_error(src);
@@ -1386,7 +1386,7 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
          arr drop ;\n\
          : main ( -- )\n\
          7 Box | b |\n\
-         0 4 fill [ | x | &b &Box>v ] refout\n\
+         0 4 fill [ | x | &b &v ] refout\n\
          b drop ;\n"
     );
     let err = check_error(&src);
@@ -2366,7 +2366,7 @@ fn combinator_called_from_drop_override_body_lowers_correctly() {
         "drop-override-combinator",
         ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;\n\
          type: Bx v i64 ;\n\
-         : drop ( Bx -- ) Bx>v [ 1 + ] twice . ;\n\
+         : drop ( Bx -- ) Bx> [ 1 + ] twice . ;\n\
          : main ( -- ) 1 Bx drop ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");

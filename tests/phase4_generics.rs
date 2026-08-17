@@ -45,7 +45,7 @@ fn check_error(src: &str) -> String {
 
 /// The linear stand-in (a one-field struct with a `drop` overload). Two lines,
 /// so a source prefixed with it shifts every line number up by 2.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 /// `lib/combinators.sth`'s `times`, inlined: `check_error` runs the checker in
 /// process, where an `import:` line never resolves.
@@ -380,7 +380,7 @@ fn recursive_type_destructor_disposes_right_contents() {
     let (stdout, code) = run_src(
         "listdrop",
         "type: Res n i64 ;\n\
-         : drop ( Res -- ) | r | r Res>n 5000 + . ;\n\
+         : drop ( Res -- ) | r | r Res> 5000 + . ;\n\
          : mkres ( i64 -- Res ) | n | n Res ;\n\
          type: List | Nil | Cons v Res next ^List ;\n\
          : push-front ( List Res -- List ) | rest v | v rest ^ Cons ;\n\
@@ -502,7 +502,7 @@ fn destructor_carried_across_back_edge_disposes_right_contents() {
     let (stdout, code) = run_src(
         "dtoralias",
         "type: Res n i64 ;\n\
-         : drop ( Res -- ) | r | r Res>n 1000 + . ;\n\
+         : drop ( Res -- ) | r | r Res> 1000 + . ;\n\
          : mk ( i64 -- Res ) | n | n Res ;\n\
          : loop ( i64 Res -- Res )\n\
            | n prev |\n\
@@ -751,7 +751,7 @@ fn quotation_stored_through_a_reference_is_error() {
     // not merely wording.
     let err = check_error(
         "type: Box s cstr ;\n\
-         : main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+         : main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
     );
     assert!(
         err.contains("a quotation cannot be stored"),

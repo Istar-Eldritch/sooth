@@ -17,7 +17,7 @@ pub(super) fn lower_src(src: &str) -> IrModule {
 /// A scalar-only resource with a `drop` overload whose body has one
 /// observable effect (a `Print` no synthesized glue ever emits), so "the
 /// override is the destructor" is assertable on instructions.
-pub(super) const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+pub(super) const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
 
 /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
 /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
@@ -26,7 +26,7 @@ pub(super) const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) |
 /// source string that uses it, so every other struct's `StructId` shifts
 /// up by one relative to a spy-free program.
 pub(super) const SPY_DEF: &str =
-    "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 /// Every symbol an `IrFunc` calls, in emission order: what "the override
 /// ran instead of the glue" is asserted on, rather than a substring of the

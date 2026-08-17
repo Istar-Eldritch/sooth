@@ -3877,7 +3877,7 @@ mod tests {
         let mut out = Vec::new();
         session.eval_line("type: Res n i64 ;", &mut out).unwrap();
         session
-            .eval_line(": drop ( Res -- ) | r | r Res>n . ;", &mut out)
+            .eval_line(": drop ( Res -- ) | r | r Res> . ;", &mut out)
             .unwrap();
 
         let id = StructId::from_index(0);
@@ -4319,12 +4319,12 @@ mod tests {
         let mut out = Vec::new();
         session.eval_line("type: Res n i64 ;", &mut out).unwrap();
         session
-            .eval_line(": drop ( Res -- ) | r | r Res>n . ;", &mut out)
+            .eval_line(": drop ( Res -- ) | r | r Res> . ;", &mut out)
             .unwrap();
         let id = StructId::from_index(0);
         let first = destructor_symbols(&session, Some(id));
         session
-            .eval_line(": drop ( Res -- ) | r | r Res>n 100 + . ;", &mut out)
+            .eval_line(": drop ( Res -- ) | r | r Res> 100 + . ;", &mut out)
             .unwrap();
         let second = destructor_symbols(&session, Some(id));
 

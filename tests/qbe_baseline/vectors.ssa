@@ -63,11 +63,9 @@ export function :Vec2 $shift.2d.x__m0(:Vec2 %v0, l %v1) {
 	%v2 =l add %v0, 0
 	%v3 =l loadl %v2
 	%v4 =l add %v3, %v1
-	%v5 =l alloc8 16
-	blit %v0, %v5, 16
-	%v6 =l add %v5, 0
-	storel %v4, %v6
-	ret %v5
+	%v5 =l add %v0, 0
+	storel %v4, %v5
+	ret %v0
 }
 
 export function $sooth_main() {

@@ -1864,7 +1864,7 @@ mod tests {
             ),
             // check_array_index, reached through the `&>` reference word.
             op(
-                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &x [ + ] &> drop drop ;\n",
                 "`&>`",
             ),
             // check_owned_cell_word.
@@ -1880,7 +1880,7 @@ mod tests {
             ),
             // check_access_word's store paths: the value and the receiver.
             w(
-                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
                 "a quotation cannot be stored",
                 "escaping quotations are slice 7",
             ),

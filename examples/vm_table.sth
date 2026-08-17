@@ -36,25 +36,27 @@ type: Decoded vm Vm idx usize ;
 
 : vm-push ( Vm i64 -- Vm )
   | vm x |
-  vm Vm>sp | i |
-  &!vm &!Vm>stack i &!> x !
-  vm vm Vm>sp 1 + Vm<sp ;
+  vm &sp @ swap drop | i |
+  &!vm &!stack i &!> x !
+  vm &sp @ swap drop 1 + | newsp |
+  vm &!sp newsp ! ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  vm Vm>sp 1 - | i |
-  &vm &Vm>stack i &> @ | x |
-  vm i Vm<sp
+  vm &sp @ swap drop 1 - | i |
+  &vm &stack i &> @ | x |
+  vm &!sp i !
   x
   VmPop ;
 
 : bump-pc ( Vm -- Vm )
-  dup Vm>pc 1 + Vm<pc ;
+  &pc @ 1 + | newpc |
+  &!pc newpc ! ;
 
 : fetch ( Vm -- Fetched )
   | vm |
-  vm Vm>pc | i |
-  &vm &Vm>prog i &> @ | op |
+  vm &pc @ swap drop | i |
+  &vm &prog i &> @ | op |
   vm op Fetched ;
 
 \ Opcode indices into the handler table (Q5): the only place these numbers
@@ -140,14 +142,14 @@ type: Decoded vm Vm idx usize ;
 : h-load ( Vm -- Vm )
   vm-pop VmPop> | vm addr64 |
   addr64 >usize | addr |
-  &vm &Vm>mem addr &> @ | x |
+  &vm &mem addr &> @ | x |
   vm x vm-push ;
 
 : h-store ( Vm -- Vm )
   vm-pop VmPop> | vm addr64 |
   addr64 >usize | addr |
   vm vm-pop VmPop> | vm2 x |
-  &!vm2 &!Vm>mem addr &!> x !
+  &!vm2 &!mem addr &!> x !
   vm2 ;
 
 : h-jz ( Vm -- Vm )
@@ -156,7 +158,7 @@ type: Decoded vm Vm idx usize ;
   vm vm-pop VmPop> | vm2 x |
   x 0 =
   ~[
-    vm2 target Vm<pc
+    vm2 &!pc target !
   ] ~[
     vm2
   ] if ;
@@ -164,7 +166,7 @@ type: Decoded vm Vm idx usize ;
 : h-jmp ( Vm -- Vm )
   vm-pop VmPop> | vm target64 |
   target64 >usize | target |
-  vm target Vm<pc ;
+  vm &!pc target ! ;
 
 : h-halt ( Vm -- Vm ) ;
 

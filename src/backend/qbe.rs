@@ -2432,7 +2432,7 @@ mod tests {
 
     #[test]
     fn emit_getter_i8_field_sign_extends_via_loadsb() {
-        let il = emit_src("type: P p i8 q i8 r i64 ; : g ( P -- i8 ) P>p ;");
+        let il = emit_src("type: P p i8 q i8 r i64 ; : g ( P -- i8 ) &p @ swap drop ;");
         assert!(
             il.contains("loadsb"),
             "expected a width-exact i8 load: {il}"
@@ -2680,10 +2680,10 @@ type: Counter n i64 ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b &!Buf>len @ | i |
-  b &!Buf>data &!^ | arr |
+  b &!len @ | i |
+  b &!data &!^ | arr |
   arr i &!> x !
-  b &!Buf>len 1 +! ;
+  b &!len 1 +! ;
 
 : bump-rebuild ( Counter -- Counter )
   | c |

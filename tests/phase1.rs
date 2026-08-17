@@ -19,7 +19,7 @@ fn run_session(lines: &[&str]) -> String {
 /// residual now shows on the REPL stack as the aggregate placeholder
 /// `<Spy>`, not its tag value.
 const SPY_TYPE_LINE: &str = "type: Spy tag i64 ;";
-const SPY_DROP_LINE: &str = ": drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;";
+const SPY_DROP_LINE: &str = ": drop ( Spy -- )  | s | \"drop \" . s Spy> . ;";
 
 /// Run a scripted session with the allocation trace enabled or disabled (R10).
 /// The trace shares the session's stdout, so an allocation-observing session
@@ -237,7 +237,7 @@ fn carried_float_survives_line_boundary_and_displays_as_float() {
 /// `<TypeName>` placeholder (M4) rather than field bytes.
 #[test]
 fn carried_struct_survives_line_boundary() {
-    let out = run_session(&["type: Vec2 x i64 y i64 ;", "5 6 Vec2", "Vec2>x ."]);
+    let out = run_session(&["type: Vec2 x i64 y i64 ;", "5 6 Vec2", "&x @ . drop"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -251,7 +251,11 @@ fn carried_struct_survives_line_boundary() {
 /// readable on the following line after the scalar is dropped.
 #[test]
 fn carried_struct_and_scalar_offsets_stay_correct() {
-    let out = run_session(&["type: Vec2 x i64 y i64 ;", "5 6 Vec2 99", "drop Vec2>y ."]);
+    let out = run_session(&[
+        "type: Vec2 x i64 y i64 ;",
+        "5 6 Vec2 99",
+        "drop &y @ . drop",
+    ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -273,7 +277,7 @@ fn carried_struct_with_non_eight_multiple_size_survives_line_boundary() {
     let out = run_session(&[
         "type: Pair a i8 b i8 ;",
         "1 >i8 2 >i8 Pair",
-        "dup Pair>a . Pair>b .",
+        "Pair> swap . .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -297,7 +301,7 @@ fn struct_declaration_errors_report_and_session_survives() {
         "type: Vec2 x i64 y i64 ;",
         "type: Vec2 a i64 ;",
         "type: Loop next Loop ;",
-        "5 6 Vec2 Vec2>y .",
+        "5 6 Vec2 &y @ . drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines[0], "defined type Vec2");
@@ -326,12 +330,12 @@ fn vectors_dogfood_runs_in_repl() {
     let out = run_session(&[
         "type: Vec2 x i64 y i64 ;",
         "type: Segment from Vec2 to Vec2 ;",
-        ": sub ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x - a Vec2>y b Vec2>y - Vec2 ;",
-        ": len2 ( Vec2 -- i64 ) | v | v Vec2>x v Vec2>x * v Vec2>y v Vec2>y * + ;",
+        ": sub ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop - a &y @ swap drop b &y @ swap drop - Vec2 ;",
+        ": len2 ( Vec2 -- i64 ) | v | v &x @ swap drop v &x @ swap drop * v &y @ swap drop v &y @ swap drop * + ;",
         ": span ( Segment -- Vec2 ) Segment> swap sub ;",
-        ": shift-x ( Vec2 i64 -- Vec2 ) | v dx | v v Vec2>x dx + Vec2<x ;",
+        ": shift-x ( Vec2 i64 -- Vec2 ) | v dx | v &x @ swap drop dx + | newx | v &!x newx ! ;",
         "0 0 Vec2 3 4 Vec2 Segment span len2 .",
-        "5 6 Vec2 1 shift-x Vec2>x .",
+        "5 6 Vec2 1 shift-x &x @ . drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -484,15 +488,15 @@ fn stack_dogfood_runs_in_repl() {
         "type: Stack items [i64 16] top usize ;",
         "type: Popped rest Stack item i64 ;",
         ": empty ( -- Stack ) 0 16 fill 0 >usize Stack ;",
-        ": push ( Stack i64 -- Stack ) | s x | s Stack>top | i | &!s &!Stack>items i &!> x ! s s Stack>top 1 + Stack<top ;",
-        ": pop ( Stack -- Popped ) | s | s Stack>top 1 - | i | &s &Stack>items i &> @ | v | s i Stack<top v Popped ;",
-        ": peek ( Stack -- Popped ) | s | s Stack>top 1 - | i | &s &Stack>items i &> @ | v | s v Popped ;",
+        ": push ( Stack i64 -- Stack ) | s x | s &top @ swap drop | i | &!s &!items i &!> x ! s &top @ swap drop 1 + | newtop | s &!top newtop ! ;",
+        ": pop ( Stack -- Popped ) | s | s &top @ swap drop 1 - | i | &s &items i &> @ | v | s &!top i ! v Popped ;",
+        ": peek ( Stack -- Popped ) | s | s &top @ swap drop 1 - | i | &s &items i &> @ | v | s v Popped ;",
         "empty 1 push 2 push 3 push",
         "peek Popped> .",
         "pop Popped> .",
         "pop Popped> .",
         "peek Popped> .",
-        "Stack>items len .",
+        "&items @ swap drop len .",
         "drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -595,11 +599,11 @@ fn vm_dogfood_runs_in_repl() {
         "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
         "type: Fetched vm Vm op Op ;",
         "type: VmPop vm Vm val i64 ;",
-        ": vm-push ( Vm i64 -- Vm ) | vm x | vm Vm>sp | i | &!vm &!Vm>stack i &!> x ! vm vm Vm>sp 1 + Vm<sp ;",
-        ": vm-pop ( Vm -- VmPop ) | vm | vm Vm>sp 1 - | i | &vm &Vm>stack i &> @ | x | vm i Vm<sp x VmPop ;",
-        ": bump-pc ( Vm -- Vm ) dup Vm>pc 1 + Vm<pc ;",
-        ": fetch ( Vm -- Fetched ) | vm | vm Vm>pc | i | &vm &Vm>prog i &> @ | op | vm op Fetched ;",
-        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &Vm>mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!Vm>mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = ~[ target Vm<pc ] ~[ bump-pc ] if fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
+        ": vm-push ( Vm i64 -- Vm ) | vm x | vm &sp @ swap drop | i | &!vm &!stack i &!> x ! vm &sp @ swap drop 1 + | newsp | vm &!sp newsp ! ;",
+        ": vm-pop ( Vm -- VmPop ) | vm | vm &sp @ swap drop 1 - | i | &vm &stack i &> @ | x | vm &!sp i ! x VmPop ;",
+        ": bump-pc ( Vm -- Vm ) &pc @ 1 + | newpc | &!pc newpc ! ;",
+        ": fetch ( Vm -- Fetched ) | vm | vm &pc @ swap drop | i | &vm &prog i &> @ | op | vm op Fetched ;",
+        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run | Jmp | vm target | vm &!pc target ! fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
         ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
         "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);

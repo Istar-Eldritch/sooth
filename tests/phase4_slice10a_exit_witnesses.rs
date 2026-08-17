@@ -111,7 +111,7 @@ fn row_grounding_accepts_a_borrow_of_an_unrelated_place_of_the_same_type() {
                0 V | a |\n\
                9 V | b |\n\
                &!a &!b ~[ swap drop ] apply-with-v\n\
-               &!V>x @ .\n\
+               &!x @ .\n\
                a drop b drop ;\n";
     let (stdout, code) = run_src("row-borrow-substitution", src);
     assert_eq!(

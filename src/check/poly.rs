@@ -2251,13 +2251,13 @@ mod tests {
     }
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
-    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy> drop ;\n";
     /// D3's leaf resource: one field, a `drop` override implemented exactly
-    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>`
     /// inside `drop`'s own body -- exempted, since a word literally named
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
-    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
@@ -2285,7 +2285,7 @@ mod tests {
         // so a generic word could destructure any drop-overloaded type and
         // skip its destructor.
         let err = check_src(&format!(
-            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd> ;\n: main ( -- ) 1 sneak drop drop ;\n"
         ))
         .unwrap_err();
         assert_eq!(

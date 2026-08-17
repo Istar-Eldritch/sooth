@@ -387,13 +387,13 @@ fn inline_reference_output_pair() {
     // rather than at dead frame storage: `+!` through it, and the caller reads
     // the new value back out of its own struct (7 then 12).
     let src = "type: P n u32 ;\n\
-               : pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n\
+               : pick inline ( &!P -- &!u32 ) | p | p &!n ;\n\
                : main ( -- )\n\
                  7 >u32 P | s |\n\
                  &!s pick | r |\n\
                  r @ >i64 .\n\
                  r 5 >u32 +!\n\
-                 &s &P>n @ >i64 .\n\
+                 &s &n @ >i64 .\n\
                  s drop ;\n";
     let (binary, stdout, code) = build_and_run("slice11-ref-output", src);
     std::fs::remove_file(&binary).ok();
@@ -417,12 +417,12 @@ fn quotation_taking_word_reference_output_is_accepted() {
     // directly. It is also the recon-5 shape, whose reference is derived from
     // an *input* reference and so is rooted in the caller either way.
     let src = "type: P n u32 ;\n\
-               : pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n\
+               : pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!n ;\n\
                : main ( -- )\n\
                  7 >u32 P | s |\n\
                  &!s ~[ 1 . ] pick | r |\n\
                  r 2 >u32 +!\n\
-                 &s &P>n @ >i64 .\n\
+                 &s &n @ >i64 .\n\
                  s drop ;\n";
     let (binary, stdout, code) = build_and_run("slice11-ref-output-quot", src);
     std::fs::remove_file(&binary).ok();
@@ -442,7 +442,7 @@ fn inline_reference_to_linear_local_is_rejected() {
     let src = "type: Buf  data ^[u8 64]  len usize ;\n\
                : fresh inline ( -- &!usize )\n\
                  0 >u8 64 fill ^ 0 >usize Buf | b |\n\
-                 &!b &!Buf>len ;\n";
+                 &!b &!len ;\n";
     let err = check_error(src);
     assert_eq!(
         err,
@@ -462,7 +462,7 @@ fn inline_reference_to_nonlinear_callee_local_is_accepted() {
     // callee frame. `+!` through the reference and reading the new value back
     // out proves it is not dangling.
     let src = "type: P n u32 ;\n\
-               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!P>n ;\n\
+               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!n ;\n\
                : main ( -- ) fresh | r | r @ >i64 . r 5 >u32 +! r @ >i64 . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-ref-callee-local", src);
     std::fs::remove_file(&binary).ok();
@@ -480,7 +480,7 @@ fn transitive_inline_reference_output_is_accepted() {
     // the middle layer and the write in `main` must land in the *same* `P`,
     // which they only do if the two splices resolved to one caller local.
     let src = "type: P n u32 ;\n\
-               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!P>n ;\n\
+               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!n ;\n\
                : bump inline ( -- &!u32 ) fresh | r | r 5 >u32 +! r ;\n\
                : main ( -- ) bump | r | r @ >i64 . r 2 >u32 +! r @ >i64 . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-ref-transitive", src);

@@ -623,7 +623,7 @@ mod tests {
         // This is the check that is red when the gate is missing.
         let ir = lower_src(
             "type: Res n i64 ;\n\
-             : drop ( Res -- ) | r | r Res>n 5000 + . ;\n\
+             : drop ( Res -- ) | r | r Res> 5000 + . ;\n\
              : mkres ( i64 -- Res ) | n | n Res ;\n\
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",

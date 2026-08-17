@@ -163,7 +163,7 @@ fn repl_stack_prints_without_mutating() {
 fn repl_clear_disposes_then_resets() {
     let out = run_session(&[
         "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | r Res>n . ;",
+        ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         ":clear",
         ":stack",
@@ -227,7 +227,7 @@ fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
     let out = run_session(&[
         ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
         "type: Bx v i64 ;",
-        ": drop ( Bx -- ) Bx>v [ 1 + ] twice . ;",
+        ": drop ( Bx -- ) Bx> [ 1 + ] twice . ;",
         ": helper ( i64 -- i64 ) 1 + ;",
         "1 Bx drop",
     ]);

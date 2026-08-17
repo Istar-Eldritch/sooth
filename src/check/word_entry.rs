@@ -660,10 +660,10 @@ mod tests {
     /// still rejected.
     #[test]
     fn check_reference_free_signature_skipped_for_combinator() {
-        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")
+        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!n ;\n")
             .expect("an `inline` word may declare a reference output");
         check_src(
-            "type: P n u32 ;\n: pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n",
+            "type: P n u32 ;\n: pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!n ;\n",
         )
         .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
         // A *poly* combinator takes the same exemption by the same guard: it
@@ -671,11 +671,11 @@ mod tests {
         // `check_poly_combinator_standalone` builds, which carries the quotation
         // parameter (and the flag) across and so is itself `is_combinator`.
         check_src(
-            "type: P n u32 ;\n: pick inline ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
+            "type: P n u32 ;\n: pick inline ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!n ;\n",
         )
         .expect("a poly combinator is exempt through its concrete stand-in");
         let err =
-            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!P>n ;\n").unwrap_err();
+            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!n ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"

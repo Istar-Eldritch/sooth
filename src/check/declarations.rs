@@ -1494,15 +1494,14 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str =
-        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn struct_ty(module: &Module, name: &str) -> Type {
         let idx = module
             .structs

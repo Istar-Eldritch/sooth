@@ -1444,7 +1444,7 @@ type: Box arr [i64 3] ;\n\
 : inner-at ( [[i64 2] 2] usize usize -- i64 )\n\
 | a i j | &a i &> j &> @ ;\n\
 : box-at ( Box usize -- i64 )\n\
-| b i | &b &Box>arr i &> @ ;\n\
+| b i | &b &arr i &> @ ;\n\
 : main ( -- )\n\
   1 2 Vec2 2 fill\n\
   dup 0 vx .\n\
@@ -1661,12 +1661,12 @@ type: VmPop vm Vm val i64 ;\n\
 : vm-push ( Vm i64 -- Vm )\n\
   | vm x |\n\
   vm Vm>sp | i |\n\
-  &!vm &!Vm>stack i &!> x !\n\
+  &!vm &!stack i &!> x !\n\
   vm vm Vm>sp 1 + Vm<sp ;\n\
 : vm-pop ( Vm -- VmPop )\n\
   | vm |\n\
   vm Vm>sp 1 - | i |\n\
-  &vm &Vm>stack i &> @ | x |\n\
+  &vm &stack i &> @ | x |\n\
   vm i Vm<sp\n\
   x\n\
   VmPop ;\n\
@@ -1675,7 +1675,7 @@ type: VmPop vm Vm val i64 ;\n\
 : fetch ( Vm -- Fetched )\n\
   | vm |\n\
   vm Vm>pc | i |\n\
-  &vm &Vm>prog i &> @ | op |\n\
+  &vm &prog i &> @ | op |\n\
   vm op Fetched ;\n\
 : run ( Vm Op -- i64 )\n\
 | Push  | vm v |\n\
@@ -1707,14 +1707,14 @@ type: VmPop vm Vm val i64 ;\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Load  | vm addr |\n\
-    &vm &Vm>mem addr &> @ | x |\n\
+    &vm &mem addr &> @ | x |\n\
     vm x vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Store | vm addr |\n\
     vm vm-pop VmPop>\n\
     | v x |\n\
-    &!v &!Vm>mem addr &!> x !\n\
+    &!v &!mem addr &!> x !\n\
     v\n\
     bump-pc\n\
     fetch Fetched> run\n\
@@ -1822,7 +1822,7 @@ fn linear_check_error(src: &str) -> String {
 /// overload, so it is linear for the same reason any resource is, not by
 /// any compiler-known bit. Two lines, so every line number in a source
 /// string it is prepended to shifts up by 2.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
 #[test]
 fn dup_of_linear_value_is_error() {
@@ -3204,7 +3204,7 @@ drop 1\nfree 8\nfree 24\ndrop 2\nfree 8\nfree 24\ndrop 3\nfree 8\nfree 24\n"
 /// level whichever end the disposal starts from. A-node tags are `n * 10`,
 /// B-node tags `n`, so every node in the chain is distinguishable.
 const MUTUAL_CHAIN_TYPES: &str = "type: Spy tag i64 ;\n\
-: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n\
+: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n\
 type: A | ANil | ACons next ^B tag Spy ;\n\
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \

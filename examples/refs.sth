@@ -5,14 +5,14 @@ type: Buf  data ^[u8 64]  len usize ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b &!Buf>len @ | i |
-  b &!Buf>data &!^ | arr |
+  b &!len @ | i |
+  b &!data &!^ | arr |
   arr i &!> x !
-  b &!Buf>len 1 +! ;
+  b &!len 1 +! ;
 
 : byte-at ( &Buf usize -- u8 )
   | b i |
-  b &Buf>data &^ i &> @ ;
+  b &data &^ i &> @ ;
 
 : copy-byte ( &!Buf &Buf usize -- )
   | dst src i |
@@ -26,7 +26,7 @@ type: Buf  data ^[u8 64]  len usize ;
   &!a &b 0 copy-byte
   &a 0 byte-at .
   &a 1 byte-at .
-  &a &Buf>len @ .
+  &a &len @ .
   a drop
   b drop
 

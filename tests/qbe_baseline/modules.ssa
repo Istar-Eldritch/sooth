@@ -30,13 +30,11 @@ export function $sooth_main() {
 	%v9 =l add %v7, 8
 	storel %v6, %v9
 	%v10 =:Point call $add__m2(:Point %v2, :Point %v7)
-	%v11 =l alloc8 16
-	blit %v10, %v11, 16
-	%v12 =l add %v11, 0
-	%v13 =l loadl %v12
+	%v11 =l add %v10, 0
+	%v12 =l loadl %v11
+	call $printf(l $fmt, l %v12, ...)
+	%v13 =l call $len2__m2(:Point %v10)
 	call $printf(l $fmt, l %v13, ...)
-	%v14 =l call $len2__m2(:Point %v10)
-	call $printf(l $fmt, l %v14, ...)
 	ret
 }
 
