@@ -550,17 +550,19 @@ pub(super) fn build_registries_ww(
     let mut ewords = HashMap::new();
     for (idx, decl) in enums.iter().enumerate() {
         let id = EnumId::from_index(idx);
+        // D7 (adopting the struct registry's dual-key `insert` closure,
+        // R6): each generated word keys under both the mangled and bare
+        // surface spelling, skipping the surface insert when they agree.
+        // Shared by the per-variant constructors/destructures below and the
+        // per-enum eliminator (Phase 6 slice 3, R5).
+        let mut insert = |mangled_key: String, surface_key: String, ew: EnumWord| {
+            if surface_key != mangled_key {
+                ewords.insert(surface_key, ew);
+            }
+            ewords.insert(mangled_key, ew);
+        };
         for (vi, variant) in decl.variants.iter().enumerate() {
             let surface = generic_surface_name(&variant.name);
-            // D7 (adopting the struct registry's dual-key `insert` closure,
-            // R6): each generated word keys under both the mangled and bare
-            // surface spelling, skipping the surface insert when they agree.
-            let mut insert = |mangled_key: String, surface_key: String, ew: EnumWord| {
-                if surface_key != mangled_key {
-                    ewords.insert(surface_key, ew);
-                }
-                ewords.insert(mangled_key, ew);
-            };
             insert(
                 variant.name.clone(),
                 surface.to_string(),
@@ -576,12 +578,11 @@ pub(super) fn build_registries_ww(
         // under the same dual spelling the checker registers it by
         // (`enum_eliminator_sigs`: mangled symbol, bare surface env key).
         let enum_surface = generic_surface_name(&decl.name);
-        let mangled_key = format!("{}?", decl.name);
-        let surface_key = format!("{enum_surface}?");
-        if surface_key != mangled_key {
-            ewords.insert(surface_key, EnumWord::Eliminate(id));
-        }
-        ewords.insert(mangled_key, EnumWord::Eliminate(id));
+        insert(
+            format!("{}?", decl.name),
+            format!("{enum_surface}?"),
+            EnumWord::Eliminate(id),
+        );
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();

@@ -966,6 +966,16 @@ Exit criteria (breakable assertions):
   the call's own tail flag into `lower_clauses` fixes. Slice 4's migration of
   `examples/vm.sth` needs the missing half: `run` is a self-tail clause word whose every
   clause tail-calls `run`, and it would lose its loop on migration.
+- **Reference-mode dispatch over an all-unit-variant enum crashes the backend, not the
+  compiler (pre-existing, not this phase's).** `&Toggle` over `type: Toggle | On | Off ;`
+  reaches QBE and fails there (`invalid type for first operand ... in add`). It reproduces
+  identically through the pre-existing clause-style path (`| On | ... |`), so the
+  eliminator only adds a second door to it, not the bug: `dispatch_on_tag`'s
+  `scrutinee_is_value` correctly loads the tag through the pointer for this case (see the
+  IR-level unit test `lower_eliminator_call_over_a_reference_to_a_scalar_enum_loads_the_tag`),
+  but something downstream in codegen still mistreats the scalar enum's representation.
+  Needs its own fix in whichever future slice next touches scalar-enum codegen or
+  reference-mode dispatch, not this one.
 
 ## Phases (JSON)
 

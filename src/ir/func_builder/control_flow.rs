@@ -265,11 +265,17 @@ impl<'a> FuncBuilder<'a> {
             clause_for_variant[vi] = Some(clause);
         }
 
+        // An eliminator call is a mid-body term, not a whole word body, so
+        // its arms must not wipe the caller's locals (Phase 6 slice 3, R5): a
+        // clause word starts with an empty `self.locals` anyway, so restoring
+        // to the depth captured here is `clear()` for that caller and a
+        // no-op-preserving truncate for an eliminator call's enclosing scope.
+        let locals_depth = self.locals.len();
         let mut clause_ends: Vec<(BlockId, Vec<Value>)> = Vec::with_capacity(n);
         for vi in 0..n {
             let clause = clause_for_variant[vi].expect("checked: exhaustive coverage");
             self.start_block(clause_ids[vi]);
-            self.locals.clear();
+            self.locals.truncate(locals_depth);
             self.stack = stack_below.clone();
             match binding {
                 // Push the variant's payload first-deepest, loading each field
@@ -330,6 +336,11 @@ impl<'a> FuncBuilder<'a> {
                 clause_ends.push((pred, result));
             }
         }
+
+        // Restore the caller's locals: the last arm's bindings are still on
+        // `self.locals` (each arm only cleans up the *previous* one, at loop
+        // entry above).
+        self.locals.truncate(locals_depth);
 
         // Every clause back-edged: the join is unreachable and the word is
         // terminated (no fall-through Ret).
@@ -563,6 +574,28 @@ mod tests {
         assert_eq!(
             field_loads, 4,
             "the discriminant, plus one `@` per field the arms read — nothing loaded on their behalf"
+        );
+    }
+
+    /// Decision 6's mode selection matters even when every arm's own body
+    /// reads no fields: an all-unit-variant enum (`is_scalar`) is a bare
+    /// discriminant by value, but a *reference* to one is still a pointer to
+    /// tagged storage. `scrutinee_ty` threading `Type::Ref` (rather than
+    /// falling back to `Type::Enum` unconditionally) is what makes
+    /// `dispatch_on_tag` load the tag through the pointer instead of treating
+    /// the pointer itself as the discriminant.
+    #[test]
+    fn lower_eliminator_call_over_a_reference_to_a_scalar_enum_loads_the_tag() {
+        let ir = lower_src(
+            "type: Toggle | On | Off ;
+             : pick ( &Toggle -- i64 )
+               ~[ ( &On ) drop 1 ] ~[ ( &Off ) drop 0 ] Toggle? ;",
+        );
+        let pick = ir.funcs.iter().find(|f| f.name == "pick").unwrap();
+        assert_eq!(
+            count(pick, |i| matches!(i, Instr::FieldLoad(..))),
+            1,
+            "a reference scrutinee always loads its tag through the pointer, even for an all-unit-variant enum"
         );
     }
 }
