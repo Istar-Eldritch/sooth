@@ -2045,13 +2045,15 @@ fn nested_struct_is_linear_transitively() {
 
 #[test]
 fn destructure_extracts_a_field_with_no_implicit_disposal() {
-    // P7 slice 1 (D3/R9 deletion guard): the retired `S>fi` getter used to
-    // drop every non-extracted linear field as part of the getter itself.
-    // Its replacement, `S>` destructure, does no such thing -- both fields
-    // move out onto the stack, and disposal happens exactly once, at the
-    // explicit `drop` sites that follow, in the order the program writes
-    // them (here `b` first, since it is destructured deeper but consumed
-    // first). A reinstated sibling-drop would print `b`'s drop twice.
+    // P7 slice 1 (D3/R9 deletion guard): `S>` destructure moves every field
+    // out onto the stack with no implicit disposal of its own, so ordering
+    // is exactly what the program writes (here `b` first, since it is
+    // destructured deeper but consumed first). This golden alone does not
+    // discriminate a reinstated sibling-drop: `S>`'s destructure of a
+    // freshly built struct never had one to reinstate. The guard that does
+    // catch a reinstated implicit disposal is
+    // `projection_read_of_copy_field_keeps_struct`, whose non-consuming `&a`
+    // read is a real sibling-drop hazard: it fails if `b` is dropped early.
     let stdout = run_linear_golden(
         "destructure-no-implicit-drop",
         &format!(
@@ -2075,7 +2077,7 @@ fn store_over_a_linear_field_through_a_reference_is_error() {
 : main ( -- )\n  1 Spy 2 Spy Pair\n  &!a 9 Spy !\n  Pair> drop drop ;\n"
     ));
     assert!(
-        err.contains("cannot access the linear referent") || err.contains("`!`"),
+        err.contains("`!` cannot access the linear referent `Spy`"),
         "unexpected message: {err}"
     );
 }

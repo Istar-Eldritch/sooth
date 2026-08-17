@@ -1406,6 +1406,25 @@ fn over_of_an_aggregate_without_a_mutable_borrow_is_accepted() {
 }
 
 #[test]
+fn mutable_borrow_of_a_place_a_merged_field_projection_may_denote_is_error() {
+    // A field projection out of a merged value must project the field out of
+    // every region the merge could denote. Dropping the merged parent leaves
+    // only the projected field, so nothing but that projection can catch the
+    // borrow.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
+         0 0 > ~[ s ] ~[ t ] if &a | inner |\n  \
+         &!t &!a &!x 99 !\n  inner @ V> . .\n  swap drop ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
+        "a field projection out of a merge must keep every arm's field region: {err}"
+    );
+}
+
+#[test]
 fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
     // Q3/M2: `p` and `v` name one Copy slot; `v`'s only use after the borrow is
     // inside a trailing `if` arm. The conservative-max scan must attribute that

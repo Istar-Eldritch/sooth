@@ -2669,7 +2669,7 @@ mod tests {
         );
     }
 
-    /// The buffer dogfood plus a rebuild-style control word in the same
+    /// The buffer dogfood plus a struct-copy control word in the same
     /// module, so the two structural criteria read the same emitted IL.
     const MUTATION_PROBE: &str = "\
 type: Buf  data ^[u8 64]  len usize ;
@@ -2685,14 +2685,14 @@ type: Counter n i64 ;
   arr i &!> x !
   b &!len 1 +! ;
 
-: bump-rebuild ( Counter -- Counter )
+: struct-copy ( Counter -- Counter )
   dup drop ;
 
 : main ( -- )
   new | a |
   &!a 7 >u8 push-byte
   a drop
-  0 Counter bump-rebuild Counter> . ;
+  0 Counter struct-copy Counter> . ;
 ";
 
     /// Instruction lines (tab-indented) in an emitted function body: the
@@ -2734,13 +2734,13 @@ type: Counter n i64 ;
     }
 
     #[test]
-    fn rebuild_style_equivalent_still_emits_alloc_and_blit() {
+    fn struct_copy_still_emits_alloc_and_blit() {
         // The control: `dup` of a Copy struct in the same module still
         // allocs and blits a fresh shell, so the no-rebuild test's assertion
         // is measuring `push-byte` rather than an emitter that stopped
         // emitting `alloc` altogether.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function :Counter $bump.2d.rebuild(");
+        let body = func_body(&il, "export function :Counter $struct.2d.copy(");
         assert!(
             body.contains("alloc"),
             "a struct copy still allocates its new shell: {body}"
