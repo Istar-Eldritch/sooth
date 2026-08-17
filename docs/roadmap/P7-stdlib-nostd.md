@@ -20,10 +20,10 @@ static-site or markdown thing) written entirely in Sooth.
 **P7.S1 — Accessors as lenses.** A field access is a mode-carrying projection word
 (`&hp` / `&!hp`) resolved against the receiver's type: `&S -- &A` and `&!S -- &!A` are
 consuming (chaining, e.g. `u &stats &hp @`), while an owned `S -- S &A` is
-non-consuming, leaving the receiver in place. The selector is a compile-time-only
-marker, not a first-class `Lens['S 'A]` value; there is no composition or storable
-selector, and none is needed since quotation bodies over a field are always spliced at
-concrete call sites. `&>`/`&!>` remain array-only, with no struct/array unification: a
+non-consuming, leaving the receiver in place. The field name is part of the projection
+word and is resolved at check time against the receiver on the stack, recorded per call
+site rather than carried as a value, so there is no selector value to compose or store.
+`&>`/`&!>` remain array-only, with no struct/array unification: a
 struct selector is a name, an array selector is a runtime value. This has no dependency
 on static overloading (Phase 4 Slice 8). The per-field generated `Get`/`Set`/`Peek` words
 and the fused `Type>field`/`Type<field`/`Type|>field` spelling are deleted, dropping the
