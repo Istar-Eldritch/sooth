@@ -782,7 +782,29 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::check;
     use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    #[test]
+    fn quotation_effect_returning_a_reference_is_a_located_error() {
+        // R7: a materialized quotation whose declared effect returns a
+        // reference used to reach `referent_of`'s `.expect("checked: every
+        // reference value records its referent")` and panic. It must instead
+        // be a located check-time error, reusing `check_reference_free_signature`'s
+        // wording -- and it must never reach `lower`, so this only calls `check`.
+        let tokens = lex(
+            "type: Sprite hp i64 ;\n: lens-hp ( -- [ &!Sprite -- &!i64 ] ) [ &!hp ] ;\n: main ( -- ) ;\n",
+        )
+        .unwrap();
+        let mut module = parse(&tokens).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            err.contains("error: a reference cannot be stored") && err.contains("&!i64"),
+            "unexpected message: {err}"
+        );
+    }
 
     #[test]
     fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {

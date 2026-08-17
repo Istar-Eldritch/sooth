@@ -323,6 +323,17 @@ pub(super) fn materialize_quotation_at_boundary(
         false,
         false,
     )?;
+    // R7 (P7 slice 1 phase 6): a declared quotation effect returning a
+    // reference used to reach `lower_reference_word`'s `referent_of` and
+    // panic ("checked: every reference value records its referent") instead
+    // of being rejected here, where the declared shape is already known.
+    // Second-class references are a DESIGN.md invariant; this is the
+    // quotation-effect twin of `check_reference_free_signature`
+    // (`word_entry.rs`), reusing its wording. Runs after the capture checks
+    // above (D3's own borrow-of-enclosing-place rejection, inside
+    // `check_literal_against_declared_effect`, is the more specific
+    // diagnostic when the returned reference is also a captured borrow).
+    check_quotation_reference_free_effect(eff, ctx, arrays)?;
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
     // R22 escape guard read once the identity is gone.
@@ -330,6 +341,37 @@ pub(super) fn materialize_quotation_at_boundary(
         surviving,
         ..Slot::computed(Type::Quotation(eff))
     })
+}
+
+/// R7: the quotation-effect twin of `check_reference_free_signature`
+/// (`word_entry.rs`) -- a materialized quotation is itself a callable with
+/// its own frame, so a declared output that transitively contains a
+/// reference borrows a local of that frame, gone by the time whatever calls
+/// the quotation value reads it. An input may be a reference at the top
+/// level (the quotation is called *with* the borrow); only a nested one is
+/// rejected, matching the word-level rule exactly.
+fn check_quotation_reference_free_effect(
+    eff: &QuotEffect,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    for ty in &eff.outputs {
+        if contains_reference(*ty, ctx.structs(), ctx.enums(), arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+                eff.name_static, ty
+            ));
+        }
+    }
+    for ty in &eff.inputs {
+        if !ty.is_ref() && contains_reference(*ty, ctx.structs(), ctx.enums(), arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
+                eff.name_static, ty
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
