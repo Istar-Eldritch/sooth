@@ -508,6 +508,7 @@ mod tests {
                 statics: empty_statics(),
             },
         );
+        let payload_offset = enums.layouts[id.index()].payload_offset;
         let receiver = b.fresh_value(IrType::Enum(id));
         b.stack.push(receiver);
         b.lower_enum_word(EnumWord::Destructure(id, 0));
@@ -518,6 +519,21 @@ mod tests {
         assert_eq!(b.stack.len(), fields.len());
         for (v, field) in b.stack.iter().zip(&fields) {
             assert_eq!(b.value_type(*v), field.ty);
+        }
+        // Pin the actual addresses read, not just the value types: a
+        // regression that drops `payload_offset` (reading the tag word as
+        // field 0) leaves the types above unchanged but reads from the
+        // wrong address, so assert every field's `PtrOffset` lands at
+        // `payload_offset + field.offset` off the receiver.
+        for field in &fields {
+            let want_off = (payload_offset + field.offset) as i64;
+            assert!(
+                b.cur_instrs.iter().any(|i| matches!(i,
+                    Instr::PtrOffset(_, base, off) if *base == receiver && *off == want_off
+                )),
+                "expected a PtrOffset at payload_offset + field.offset ({want_off}) for field {field:?}: {:?}",
+                b.cur_instrs
+            );
         }
     }
 
