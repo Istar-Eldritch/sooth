@@ -183,10 +183,10 @@ ISR. Those stay Phase 9, where their consumer is.
 
 ## Sequencing
 
-No gate from Phase 6 or from Slice 1 (lenses) either direction — restated from the phase
-file, still true. Touches `src/parser.rs` (new `static:` dispatch arm alongside `type:`/
-`extern:`/`import:`/`export:`, recon 2; the global clause as its own trailing keyword
-clause read right after the effect's closing `)` — outside the parens, mirroring the
+No gate from Phase 6 or from Slice 1 (field accessors) either direction — restated from
+the phase file, still true. Touches `src/parser.rs` (new `static:` dispatch arm alongside
+`type:`/`extern:`/`import:`/`export:`, recon 2; the global clause as its own trailing
+keyword clause read right after the effect's closing `)` — outside the parens, mirroring the
 `inline` slot, per Decision 4 — with `parse_effect`/`parse_poly_effect` unchanged), `src/ast.rs` (a new top-level static-declaration node; extending
 `rename_local`'s sigil-aware name handling, recon 3), `src/resolve.rs` (extending
 `strip_ref_sigil`'s fallthrough, recon 3), `src/check/engine.rs` (extending `call_local`'s

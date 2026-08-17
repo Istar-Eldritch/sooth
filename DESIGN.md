@@ -259,10 +259,11 @@ same category of invisible behaviour as an auto-drop.
 
 The rule is `Copy`-only by construction, which bounds how bad it ever was: every route to a
 linear aggregate is closed independently, by move tracking, by `@`'s refusal to
-dereference a reference into a linear place, and by the standing ban on linear array elements. So the failure mode
-was a wrong *value*, never a double free or a use-after-free, and the linear spine was never
-at risk. It is still exactly the class of silent failure this language exists to turn into a
-compile error, which is why it is closed rather than documented.
+dereference a reference into a linear place, and by the standing ban on linear array
+elements. So the failure mode was a wrong *value*, never a double free or a
+use-after-free, and the linear spine was never at risk. It is still exactly the class of
+silent failure this language exists to turn into a compile error, which is why it is
+closed rather than documented.
 
 That same `Copy`-only construction has a payoff that only surfaced under Phase 4's
 combinators. A **linear** aggregate threaded through a loop as an accumulator needs no copy
@@ -601,13 +602,16 @@ constructor." It didn't survive contact with what Sooth actually is. Structs are
 data; a violated field invariant is a bug in the *consumer's* program, not unsoundness,
 because there is no UB, indexing traps at the bound, and linearity already prevents
 aliasing a value into two invariant-breaking places at once. And the resource argument
-for opacity has nothing to add: destructuring a type with a `drop` override is rejected
-outright (`type: R tag i64 ;` with a `drop` override, then `r R>tag .`, is a located
-error) by a rule in the ownership checker, independent of modules — so hiding an
-accessor behind export visibility would protect nothing that rule doesn't already
-guarantee. Hiding an accessor behind a visibility rule is the OOP ceremony this
-language is declining to need; a withhold marker on `export:` is an additive feature
-for a real consumer that wants it, not a default this slice should guess at.
+for opacity has nothing to add: moving the fields out of a type with a `drop` override
+is rejected outright (`type: R tag i64 ;` with a `drop` override, then `r R>`, is a
+located error), and the field *read* that remains cannot launder a resource either,
+because `@` refuses a linear referent. So a consumer never obtains ownership of a field
+it did not construct, by two rules in the ownership checker that know nothing about
+modules — and hiding an accessor behind export visibility would protect nothing those
+rules don't already guarantee. Hiding an accessor behind a visibility rule is the OOP
+ceremony this language is declining to need; a withhold marker on `export:` is an
+additive feature for a real consumer that wants it, not a default this slice should
+guess at.
 
 The same rule holds across a file boundary as within one: a library consumer
 destructuring an imported linear type down to `Copy` leaves is rejected exactly as a

@@ -17,19 +17,23 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
-**P7.S1 — Accessors as lenses.** A field access is a mode-carrying projection word
-(`&hp` / `&!hp`) resolved against the receiver's type: `&S -- &A` and `&!S -- &!A` are
-consuming (chaining, e.g. `u &stats &hp @`), while an owned `S -- S &A` is
-non-consuming, leaving the receiver in place. The field name is part of the projection
-word and is resolved at check time against the receiver on the stack, recorded per call
-site rather than carried as a value, so there is no selector value to compose or store.
-`&>`/`&!>` remain array-only, with no struct/array unification: a
-struct selector is a name, an array selector is a runtime value. This has no dependency
-on static overloading (Phase 4 Slice 8). The per-field generated `Get`/`Set`/`Peek` words
-and the fused `Type>field`/`Type<field`/`Type|>field` spelling are deleted, dropping the
-generated-word count from O(fields x operations) to O(fields + operations) and removing
-two implicit disposals (a non-extracted linear field, and a value overwritten in place)
-that `!` itself already refuses.
+**P7.S1 — Accessors as receiver-directed projections.** A field access is a
+mode-carrying projection word (`&hp` / `&!hp`) resolved against the receiver's type:
+`&S -- &A` and `&!S -- &!A` are consuming (chaining, e.g. `u &stats &hp @`), while an
+owned `S -- S &A` is non-consuming, leaving the receiver in place. The field name is
+part of the projection word and is resolved at check time against the receiver on the
+stack, recorded per call site rather than carried as a value, so there is no selector
+value to compose or store. `&>`/`&!>` remain array-only, with no struct/array
+unification: a struct selector is a name, an array selector is a runtime value. This has
+no dependency on static overloading (Phase 4 Slice 8). The per-field generated
+`Get`/`Set`/`Peek` words and the fused `Type>field`/`Type<field`/`Type|>field` spelling
+are deleted, so the generated-word count stops scaling with field count at all: two
+words per type (`Type` and `Type>`) and none per field, with `&f`/`&!f` not env entries
+but a checker arm resolved ahead of env lookup, over the pre-existing `@`/`!` builtins.
+Two implicit disposals go with them: a non-extracted linear field, which no surviving
+operation performs at all now that the whole-value destructure is the only way out and it
+extracts every field, and a value overwritten in place, which is the one `!` itself
+refuses over a linear referent.
 **Ordered first in this phase, before `Vec`/`Map`/`String`**, for exactly the reason modules
 were pulled forward in Phase 4: writing the collections against the old accessors and
 migrating them afterwards is the waste.
@@ -57,7 +61,7 @@ items in this phase need it first:
   to it later means retrofitting the format and re-baselining every diff it has already
   emitted.
 
-Ordered after S1 (no ordering constraint against the lens item either way) and before
+Ordered after S1 (no ordering constraint against the accessor item either way) and before
 everything downstream that needs it. The target-facing half of the embedded story
 (fixed-address MMIO overlays, the volatile aspect, bit-level register layout, ISR symbol
 export) stays in Phase 9, where its consumer is. This is what pushes the phase from `[L]`
@@ -69,7 +73,7 @@ inferred everywhere, declared at the export boundary).
 
 **P7.S3 — The `fixed` layer.** Allocation-free fixed-capacity vec/map/string/ringbuffer,
 built against `core`, needing no allocator at all. No dependency on S2 or S4; can be built
-in parallel with either once S1's lens migration is out of the way.
+in parallel with either once S1's accessor migration is out of the way.
 **Exit:** the `fixed` layer's collections work with no allocator present, and every stdlib
 word in it is tagged with the layer it belongs to.
 
