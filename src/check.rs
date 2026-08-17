@@ -64,6 +64,7 @@ pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
+use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
 pub(crate) use self::word_entry::{
@@ -588,6 +589,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // signature under one name are rejected before either enters `poly_env`
     // below -- unresolvable ambiguity, not a legitimate second overload.
     check_duplicate_poly_signatures(&module.words)?;
+    // Phase 6 slice 3 review fix (smaller point 1): a word sharing a
+    // generated eliminator's name would be silently unreachable -- rejected
+    // here, before the eliminator registry below is built, the same as any
+    // other name collision this module already rejects up front.
+    check_no_word_shadows_eliminator(&module.words, &module.enums)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -1813,7 +1819,18 @@ fn check_literal_against_declared_effect(
     shape_changing: bool,
     is_arm: bool,
     caller_tail: bool,
-) -> Result<Vec<Type>, String> {
+    // Review fix (Phase 6 slice 3, finding 1): an arm-flavoured caller falls
+    // into one of two shapes. A combinator's argument pre-check (`if`,
+    // `check_poly_combinator_args`) is thrown away -- the splice that follows
+    // re-checks whichever arm actually runs, for real, so this probe's own
+    // move-state consumption must leave no trace (`finalize = false`). The
+    // eliminator (`check_eliminator_call`) never splices: this call *is* the
+    // only accounting the checker ever does for that arm, so its consumption
+    // must survive (`finalize = true`), and the caller reconciles every arm's
+    // surviving state itself (`Moves::join`, generalized to N arms) rather
+    // than losing it to a restore that has nothing later to answer to.
+    finalize: bool,
+) -> Result<Vec<Slot>, String> {
     let body = prov.quotations[id.0].body.clone();
     // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
     // must match the boundary's declared flavour, independent of whatever
@@ -1902,23 +1919,25 @@ fn check_literal_against_declared_effect(
     // reconciled at the join into `MaybeMoved`. `is_arm` is the discriminator
     // (the callee `call`s this slot in *tail* position, so it runs at most
     // once per entry), not `is_inline` alone.
-    if is_inline && is_arm {
+    if is_inline && is_arm && !finalize {
         // The probe must also leave no trace: two sibling arms are
         // alternatives, each starting from the same move-state, and the splice
         // re-checks whichever one runs. Without the restore the second arm
         // sees the first arm's consumption and reports use-after-move.
         scope.moves.states = moves_before.clone();
-    } else if let Some(local) =
-        moves_before
-            .iter()
-            .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
-                (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
-                    Some(n.clone())
-                }
-                _ => None,
-            })
-    {
-        return Err(quotation_captures_local_error(ctx, span, word, &local));
+    } else if !(is_inline && is_arm) {
+        if let Some(local) =
+            moves_before
+                .iter()
+                .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
+                    (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+                        Some(n.clone())
+                    }
+                    _ => None,
+                })
+        {
+            return Err(quotation_captures_local_error(ctx, span, word, &local));
+        }
     }
     // R12: a borrow of an enclosing place left live on the literal's exit row.
     // Skipped for a `~` branch arm for the same reason as the linear-capture
@@ -1945,7 +1964,6 @@ fn check_literal_against_declared_effect(
             span,
         },
     )?;
-    let actual: Vec<Type> = result.iter().map(|s| s.ty).collect();
     if shape_changing {
         // R-P2-4: a shape-changing declared quotation has no fixed exit row
         // to check against as a whole; the caller reconciles sibling
@@ -1991,7 +2009,7 @@ fn check_literal_against_declared_effect(
                 actual_effect,
             ));
         }
-        return Ok(actual);
+        return Ok(result);
     }
     // R11: the literal's exit row must equal the grounded declared output row:
     // the same carried region `row` followed by the declared outputs. N=0
@@ -2025,7 +2043,7 @@ fn check_literal_against_declared_effect(
             ctx, span, word, declared, actual,
         ));
     }
-    Ok(actual)
+    Ok(result)
 }
 
 /// Phase 6 slice 3 (R4): check a call to a generated eliminator word
@@ -2166,9 +2184,22 @@ fn check_eliminator_call(
     // R4 steps 4-5: each arm body against its own variant, in written order,
     // with the first arm setting the `..b` baseline every later one must agree
     // with. The row every arm shares is the caller region below the scrutinee.
+    //
+    // Review fix (findings 1/2): each arm is checked against its own clone of
+    // `scope`, exactly as `check_branch_join`'s `then_scope`/`else_scope` are
+    // -- unlike a spliced `if`, nothing later re-checks whichever arm actually
+    // runs, so this pass is the *only* accounting the checker ever does for
+    // it. `finalize = true` disables `check_literal_against_declared_effect`'s
+    // probe-and-restore (that restore's premise, a later splice re-checking
+    // the real body, does not hold here), so each clone ends with its own
+    // arm's real consumed move-state; the loop below joins every arm's
+    // (`Moves::join`, generalized here from two arms to N) into `scope` for
+    // real, and merges every arm's real output `Slot`s (provenance included)
+    // rather than re-deriving the shared exit row from the pre-call `row`.
     let base = stack.len() - 1;
     let row: Vec<Slot> = stack[..base].to_vec();
-    let mut baseline: Option<Vec<Type>> = None;
+    let mut baseline: Option<Vec<Slot>> = None;
+    let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
     for ((qid, _), vi) in arms.iter().zip(&variant_indices) {
         let owned = variant_type(ctx.enums(), id, *vi);
         // Decision 6: the call's one resolved mode, applied uniformly. An arm
@@ -2183,15 +2214,36 @@ fn check_eliminator_call(
             unreachable!("`inline_quotation_type` builds a quotation type")
         };
         let literal_span = prov.quotations[qid.0].span;
-        let actual = check_literal_against_declared_effect(
-            *qid, eff, true, &row, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
-            granted, true, true, tail,
+        let mut arm_scope = scope.clone();
+        let arm_result = check_literal_against_declared_effect(
+            *qid,
+            eff,
+            true,
+            &row,
+            name,
+            span,
+            ctx,
+            env,
+            arrays,
+            cells,
+            refs,
+            prov,
+            &mut arm_scope,
+            poly,
+            granted,
+            true,
+            true,
+            tail,
+            true,
         )?;
+        arm_moves.push(arm_scope.moves);
         match &baseline {
-            None => baseline = Some(actual),
+            None => baseline = Some(arm_result),
             Some(expected) => {
-                let agrees = actual.len() == expected.len()
-                    && actual.iter().zip(expected).all(|(f, w)| {
+                let expected_types: Vec<Type> = expected.iter().map(|s| s.ty).collect();
+                let actual_types: Vec<Type> = arm_result.iter().map(|s| s.ty).collect();
+                let agrees = actual_types.len() == expected_types.len()
+                    && actual_types.iter().zip(&expected_types).all(|(f, w)| {
                         matches!(
                             match_slot(Slot::computed(*f), *w),
                             SlotMatch::Exact | SlotMatch::LiteralSizeType
@@ -2202,29 +2254,75 @@ fn check_eliminator_call(
                         ctx,
                         literal_span,
                         name,
-                        expected,
-                        &actual,
+                        &expected_types,
+                        &actual_types,
                     ));
                 }
+                // Finding 2: type agreement is not evidence the arms leave the
+                // same borrow provenance -- reconcile each position the same
+                // way `check_branch_join`'s merge does, rejecting a
+                // disagreement rather than silently erasing it (which would
+                // let an escaped `&!` alias a second, independently-taken
+                // one).
+                let mut merged = Vec::with_capacity(expected.len());
+                for (a, b) in expected.iter().zip(&arm_result) {
+                    merged.push(merge_arm_output_slot(ctx, literal_span, a, b, prov)?);
+                }
+                baseline = Some(merged);
             }
         }
     }
 
-    // R4 step 6: the call leaves the baseline. An arm may reach into the
-    // shared row, so the row is only carried over verbatim as far as the
-    // baseline still agrees with it slot for slot; past that point the arms
-    // rebuilt the region and the provenance the caller had for it is gone.
-    // (A zero-variant enum has no arms and no constructible value, so its call
-    // is unreachable and simply leaves the row.)
-    let baseline = baseline.unwrap_or_else(|| row.iter().map(|s| s.ty).collect());
-    let carried = row
-        .iter()
-        .zip(&baseline)
-        .take_while(|(slot, ty)| slot.ty == **ty)
-        .count();
-    stack.truncate(carried);
-    stack.extend(baseline[carried..].iter().map(|ty| Slot::computed(*ty)));
-    Ok(stack)
+    // R4 step 6: the call leaves the baseline -- the merged exit region every
+    // arm agreed on, provenance included (finding 2) -- and joins every arm's
+    // real move-state into `scope` (finding 1). A zero-variant enum has no
+    // arms and no constructible value (OQ4), so its call is unreachable:
+    // `arm_moves` stays empty and `scope`/`row` are simply left untouched.
+    if let Some(joined) = arm_moves.into_iter().reduce(Moves::join) {
+        scope.moves = joined;
+    }
+    Ok(baseline.unwrap_or(row))
+}
+
+/// R4 step 6 (review fix, finding 2): reconcile one exit-row position across
+/// two arms that already agree on its *type* -- the borrow-suspension
+/// bookkeeping still has to agree too, the same real content
+/// `check_branch_join`'s merge (`check/terms.rs`) checks for an `if`. One arm
+/// leaving a live borrow the other doesn't (or of a different place) is
+/// rejected here rather than silently erased to a provenance-free slot.
+fn merge_arm_output_slot(
+    ctx: &Ctx,
+    span: Span,
+    a: &Slot,
+    b: &Slot,
+    prov: &mut Provenance,
+) -> Result<Slot, String> {
+    let deriv = match (a.deriv, b.deriv) {
+        (None, None) => None,
+        (Some(x), Some(y)) if prov.deriv(x).suspension() == prov.deriv(y).suspension() => Some(x),
+        _ => {
+            return Err(borrow_join_disagreement_error(
+                ctx,
+                span,
+                a.deriv.map(|did| prov.deriv(did)),
+                b.deriv.map(|did| prov.deriv(did)),
+            ));
+        }
+    };
+    let alias = match (a.alias, b.alias) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(x), Some(y)) => Some(Alias {
+            set: prov.alias_union(x.set, y.set),
+            span: x.span,
+        }),
+    };
+    Ok(Slot {
+        alias,
+        deriv,
+        surviving: prov.union_surviving(a.surviving, b.surviving),
+        ..Slot::computed(a.ty)
+    })
 }
 
 /// R4 step 3: an arm annotated with a variant the eliminated enum does not
@@ -2238,7 +2336,11 @@ fn eliminator_unknown_variant_error(
     variant: &str,
     enum_name: &str,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Finding 4 (Phase 2 review): `word` is a *call* name -- once `resolve`
+    // learns the `?` suffix, it arrives mangled (`Shape__m0?`), which
+    // `demangle_word` alone cannot see through (it only strips a *trailing*
+    // `__mN`, and the suffix sits after it here).
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: unknown variant `{variant}` of enum `{enum_name}` in a call to `{word}`{} (line {})",
         in_word(ctx),
@@ -2256,7 +2358,7 @@ fn eliminator_duplicate_arm_error(
     variant: &str,
     enum_name: &str,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: duplicate arm for variant `{variant}` of enum `{enum_name}` in a call to `{word}`{} (line {})",
         in_word(ctx),
@@ -2274,7 +2376,7 @@ fn eliminator_non_exhaustive_error(
     variant: &str,
     enum_name: &str,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: non-exhaustive call to `{word}`: missing variant `{variant}` of enum `{enum_name}`{} (line {})",
         in_word(ctx),
@@ -2288,7 +2390,7 @@ fn eliminator_non_exhaustive_error(
 /// annotation to carry one. Both are rejected identically: an eliminator arm
 /// must be a literal spelling the variant it handles.
 fn eliminator_untagged_arm_error(ctx: &Ctx, span: Span, word: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: an arm of `{word}` requires a variant tag: annotate the quotation with the variant it handles, as in `~[ ( Circle ) ... ]`{} (line {})\n  a forwarded quotation carries no annotation, so it cannot stand in for an arm",
         in_word(ctx),
@@ -2385,7 +2487,12 @@ fn combinator_branch_output_mismatch_error(
     expected: &[Type],
     found: &[Type],
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 4): shared with `check_eliminator_call`
+    // (decision 4), whose `word` is a call name that may carry the `?` suffix
+    // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
+    // same way it already does for a destructure's `>`; an ordinary word name
+    // (never carrying either suffix) demangles identically either way.
+    let word = crate::resolve::demangle_call(word);
     let render = |types: &[Type]| match types.is_empty() {
         true => "nothing".to_string(),
         false => format!(
@@ -4097,5 +4204,123 @@ mod tests {
             err.contains("`Shape?` expected `Shape`, found `i64`"),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_double_consume_is_use_after_move() {
+        // Phase 2 review, finding 1: an arm that consumes an outer linear
+        // local must be reconciled into the caller's move-state exactly as an
+        // `if` arm's join already reconciles one (`MaybeMoved` where the
+        // arms disagree) -- forgetting it let `f` be dropped once inside the
+        // `Circle` arm and, silently, a second time after the call.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE}\n{SHAPE_DECL}\
+             : main ( -- ) 1 File | f | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . ] Shape? f drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("use after move") && err.contains('f'),
+            "unexpected message (expected a use-after-move on `f`): {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_escaped_borrow_conflicts_with_a_second_borrow() {
+        // Phase 2 review, finding 2: each arm leaves a live `&!p` borrowing a
+        // caller local the scrutinee never touches. The merge
+        // (`merge_arm_output_slot`) must carry that borrow's provenance
+        // through the call, the same way `check_branch_join`'s merge does for
+        // an `if`, so the caller still knows `p` is exclusively borrowed by
+        // the escaped reference and a second, independent `&!p` right after
+        // the call is rejected rather than silently aliasing it.
+        let err = check_src(&format!(
+            "type: P x i64 ;\n\
+             {SHAPE_DECL}\
+             : touch ( &!P -- ) &!x 1 +! ;\n\
+             : main ( -- ) 1 P | p | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> drop &!p ] ~[ ( Rect ) Rect> drop drop &!p ] Shape?\n\
+             \x20 &!p touch touch p P> . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("conflicts with a live borrow of `p`"),
+            "unexpected message (expected a live-borrow conflict on `p`): {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_borrow_disagreement_is_error() {
+        // Finding 2 (targeted at `merge_arm_output_slot` itself): two arms
+        // leave a live borrow of *different* places at the same, agreeing
+        // type (`&!P` either way) -- the type-only baseline comparison alone
+        // cannot see this disagreement, only the deriv/suspension comparison
+        // does, mirroring `check_branch_join`'s own
+        // `borrow_join_disagreement_error`.
+        let err = check_src(&format!(
+            "type: P x i64 ;\n\
+             {SHAPE_DECL}\
+             : first ( Shape P P -- ) | q p |\n\
+             \x20 ~[ ( Circle ) Circle> drop &!p ] ~[ ( Rect ) Rect> drop drop &!q ] Shape? drop ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("borrow state disagrees at the branch join"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_no_word_shadows_eliminator_rejects_a_colliding_word_name() {
+        // Phase 2 review, smaller point 1: `check_term`'s eliminator
+        // interception runs ahead of the ordinary env lookup, so a user word
+        // literally named `Shape?` would be silently unreachable rather than
+        // coexisting as an overload (there is no overload mechanism here to
+        // fall back through, unlike a generated destructure). Rejected by
+        // name instead.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : Shape? ( i64 -- i64 ) 1 + ;\n\
+             : main ( -- ) 5 Shape? . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn eliminator_arm_tag_outside_a_call_is_error() {
+        // Finding 3 (Phase 2 review): `check_literal_against_annotation`'s
+        // blanket skip for *every* tagged literal is only sound for one that
+        // is actually collected as an eliminator arm; a tagged literal that
+        // never reaches an eliminator call was previously never checked at
+        // all, magic (CLAUDE.md) rather than a located error.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : f ( -- ) ~[ ( Circle ) nonexistent_word_xyz ] drop ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "an eliminator-arm tag, but it is not consumed by a call to a generated eliminator"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn eliminator_arm_tag_immediately_preceding_its_call_is_not_flagged() {
+        // The control for the rejection above: a correctly-formed eliminator
+        // call must not trip the new outside-a-call check.
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .expect("a correctly-formed eliminator call is not flagged as an arm outside a call");
     }
 }

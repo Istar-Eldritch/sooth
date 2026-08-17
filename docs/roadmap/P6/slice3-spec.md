@@ -359,6 +359,29 @@ shared helpers. Behaviour, in order:
    No `Subst` is threaded out: the eliminator is not a self-tail combinator, so there is
    no back-edge grounding.
 
+**Review fix (Phase 2 code review): what an arm's exit does to caller move-state and
+borrow provenance, left unspecified above because `if` gets both free from splicing.**
+An eliminator never splices, so step 4's per-arm check is the *only* accounting the
+checker ever does for that arm — unlike a combinator's argument pre-check (`if`,
+`check_poly_combinator_args`), whose own `check_literal_against_declared_effect` probe is
+discardable because the splice that follows re-checks whichever arm actually runs, for
+real. Two consequences, both settled the same way `check_branch_join`'s two-arm join
+already settles them for `if`, generalized from two arms to N:
+
+- **Move-state.** Each arm is checked against its own clone of the caller `Scope`
+  (mirroring `then_scope`/`else_scope`), so one arm consuming an outer linear local does
+  not leak into a sibling arm's check. Every arm's ending move-state is then joined
+  (`Moves::join`, folded pairwise across N arms) into the caller's real `Scope`: a local
+  consumed on every arm stays `Moved`, consumed on none stays `Live`, and consumed on
+  some but not all becomes `MaybeMoved` — exactly `if`'s join, not silently forgotten.
+- **Borrow provenance.** The exit-row baseline (R4 step 5) carries each surviving
+  position's real `Slot` (deriv, alias, surviving set), not a type-only re-derivation from
+  the pre-call row: two arms that leave *type-agreeing* but differently-rooted borrows
+  (or one arm leaving a live borrow the other doesn't) are rejected via the same
+  `borrow_join_disagreement_error` `check_branch_join`'s merge already uses, one position
+  at a time. Erasing to a provenance-free slot instead (the original implementation's
+  defect) let an escaped `&!` alias a second, independently-taken one.
+
 Unit tests beside `check_eliminator_call` (naming `thing_condition_expected`):
 
 - `check_eliminator_call_missing_arm_names_missing_variant` — an omitted arm names the

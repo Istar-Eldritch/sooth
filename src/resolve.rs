@@ -131,21 +131,22 @@ pub(crate) fn demangle_word(name: &str) -> &str {
     &name[..idx]
 }
 
-/// `demangle_word` for a *call* name, which may carry the one remaining
-/// generated-word suffix: a destructure mangles as `P__m0>`, so the `__m0`
-/// sits mid-string and the trailing-suffix strip above cannot see it; the
-/// type prefix has to be demangled and the trailing `>` put back. A
-/// constructor call (`P__m0`) has no suffix and falls straight through to
-/// `demangle_word`.
+/// `demangle_word` for a *call* name, which may carry one remaining
+/// generated-word suffix: a destructure mangles as `P__m0>` and an eliminator
+/// as `Shape__m0?` (Phase 6 slice 3), so in either case the `__m0` sits
+/// mid-string and the trailing-suffix strip above cannot see it; the type
+/// prefix has to be demangled and the trailing sigil put back. A constructor
+/// call (`P__m0`) has no suffix and falls straight through to `demangle_word`.
 pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
-    let Some(head) = name.strip_suffix('>') else {
+    let Some(head) = name.strip_suffix('>').or_else(|| name.strip_suffix('?')) else {
         return std::borrow::Cow::Borrowed(demangle_word(name));
     };
+    let suffix = &name[head.len()..];
     let demangled = demangle_word(head);
     if demangled.len() == head.len() {
         return std::borrow::Cow::Borrowed(name);
     }
-    std::borrow::Cow::Owned(format!("{demangled}>"))
+    std::borrow::Cow::Owned(format!("{demangled}{suffix}"))
 }
 
 /// Split a leading reference sigil (`&!`/`&`) off a call name, so `rewrite`
@@ -165,12 +166,17 @@ fn strip_ref_sigil(name: &str) -> (&str, &str) {
 
 /// Split a call name into its leading type identifier and the one remaining
 /// generated-word suffix: `Point>` -> (`Point`, `>`), `Point` -> (`Point`,
-/// ``). A type name never contains `>`, so a trailing one is unambiguous.
+/// ``). Phase 6 slice 3: an eliminator call (`Shape?`) is a second such
+/// suffix, `Shape?` -> (`Shape`, `?`). A type name never contains `>` or `?`,
+/// so a trailing one is unambiguous.
 pub(crate) fn split_destructure_suffix(name: &str) -> (&str, &str) {
-    match name.strip_suffix('>') {
-        Some(head) => (head, ">"),
-        None => (name, ""),
+    if let Some(head) = name.strip_suffix('>') {
+        return (head, ">");
     }
+    if let Some(head) = name.strip_suffix('?') {
+        return (head, "?");
+    }
+    (name, "")
 }
 
 /// The per-module name tables the rewrite consults: which bare names are this
@@ -264,7 +270,15 @@ impl NameTables {
                     suffix
                 )));
             }
-            if word_ok && suffix.is_empty() && self.words[target as usize].contains(rest) {
+            // Review fix: `suffix` only means "the type branch above already
+            // handled this" if `type_part` actually named a real type, which
+            // that branch's own `return` already guarantees by the time
+            // control reaches here -- gating on `suffix.is_empty()` too
+            // silently dropped a plain word whose bare name happens to end in
+            // `>`/`?` (Phase 6 slice 3's `Shape?`, or any pre-existing `Foo>`)
+            // when no type of that head name exists, which is a real word
+            // this table holds, not a destructure/eliminator collision.
+            if word_ok && self.words[target as usize].contains(rest) {
                 if !is_exported(&exports[target as usize], rest) {
                     return Err(not_exported_error(rest, qualifier, span));
                 }
@@ -285,7 +299,7 @@ impl NameTables {
         // accessor-free, unqualified name declared by the *accessing* module
         // resolves, and only under a sigil: a static is reachable no other
         // way, so a bare `COUNT` stays whatever it means today.
-        if !sigil.is_empty() && suffix.is_empty() && self.statics[module as usize].contains(core) {
+        if !sigil.is_empty() && self.statics[module as usize].contains(core) {
             return Ok(Some(format!("{sigil}{}", mangle_static(core, module))));
         }
         // A bare call to one of `check::builtin_table`'s operator names stays
@@ -298,10 +312,10 @@ impl NameTables {
         // between the builtin and the overload, exactly as it does in a
         // single-module build (where this pass is a no-op and the name is
         // never touched at all).
-        if word_ok
-            && suffix.is_empty()
-            && !is_operator_dispatch_name(core)
-            && self.words[module as usize].contains(core)
+        // Review fix: as in the qualified branch above, `suffix` non-empty
+        // no longer means "skip -- already a destructure/eliminator"; the
+        // type branch's own early `return` already owns that case.
+        if word_ok && !is_operator_dispatch_name(core) && self.words[module as usize].contains(core)
         {
             return Ok(Some(format!("{sigil}{}", mangle(core, module))));
         }
@@ -330,7 +344,7 @@ impl NameTables {
         // the imported overload as a candidate alongside the builtin and any own
         // overload, so `check_operator`'s per-call-site operand-type dispatch
         // still finds it -- this only defers the rewrite to that dispatch.
-        if word_ok && suffix.is_empty() && !is_operator_dispatch_name(core) {
+        if word_ok && !is_operator_dispatch_name(core) {
             if let Some(&target) = selective.get(core) {
                 if self.words[target as usize].contains(core) {
                     return Ok(Some(format!("{sigil}{}", mangle(core, target))));
@@ -803,6 +817,40 @@ mod tests {
             call_names(&main.body),
             vec!["close__m0".to_string()],
             "the call site is rewritten to match the mangled definition"
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (finding 4): a real build mangles the
+    /// enum-based eliminator key (`Shape__m0?`), not the ordinary
+    /// suffix-appended form (`Shape?__m0`) -- `check_src`-style tests never
+    /// exercise this at all, since they skip `resolve_modules` entirely and
+    /// leave every name bare, so the call site's mangled form has to be
+    /// pinned here instead.
+    #[test]
+    fn eliminator_call_site_mangles_to_match_the_enum_based_key() {
+        let tokens = lex("type: Shape | Circle r i64 | Rect w i64 h i64 ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module, true).unwrap();
+        let shape_id = module
+            .enums
+            .iter()
+            .position(|e| e.name == "Shape__m0")
+            .expect("`Shape` is mangled by declaration order, unconditionally");
+        assert_eq!(
+            shape_id,
+            module.enums.len() - 1,
+            "Shape is the last-declared enum"
+        );
+        let area = module.words.iter().find(|w| w.name == "area__m0").unwrap();
+        assert!(
+            call_names(&area.body).contains(&"Shape__m0?".to_string()),
+            "the eliminator call site mangles to the enum-based key, matching \
+             `eliminator_registry`'s own `\"{{EnumName}}?\"` keying, not the \
+             ordinary word-suffix form `Shape?__m0`: {:?}",
+            call_names(&area.body)
         );
     }
 

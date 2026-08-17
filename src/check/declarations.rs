@@ -1397,7 +1397,18 @@ pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> 
 /// Keying follows `struct_generated_sigs`' D7 rule: the env key is the bare
 /// surface name (`Shape?`) every call site writes, the lowering symbol the
 /// mangled registry spelling (`Result[i64 i64]?`), so two instantiations of
-/// one generic enum keep distinct lowering identities.
+/// one generic enum keep distinct **lowering** identities.
+///
+/// Review fix (Phase 2, smaller point 2): that distinctness is this `Sig`'s
+/// alone. `eliminator_registry`, below, keys by `generic_surface_name` too,
+/// so `Result[i64 i64]?` and `Result[bool i64]?` both collapse to the one
+/// checker-side registry entry `"Result?"` -- last one registered wins, and
+/// a call site can only ever reach whichever instantiation that was. This is
+/// unreachable today only because a generic-elimination call site itself
+/// cannot parse (`( Ok )` fails with "unknown type Ok", the standing
+/// generic-enum-elimination blocker); Phase 4, wherever it closes that parse
+/// gap, meets this collision too and needs a registry keyed by the mangled
+/// spelling, not the bare surface name.
 pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)> {
     // The two shared rows, in the signature's own id space.
     const ROW_IN: u32 = 0;
@@ -1438,6 +1449,13 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
 /// before the ordinary env/combinator/poly paths, since an eliminator call is
 /// neither a user word nor an ordinary poly call: its arms are matched to
 /// variants by annotation tag, not by slot position.
+///
+/// Review fix (Phase 2, smaller point 2): unlike `enum_eliminator_sigs`'s
+/// lowering symbol, this key is `generic_surface_name`-only, so two
+/// instantiations of one generic enum collide here (`Result[i64 i64]?` and
+/// `Result[bool i64]?` both key `"Result?"`, last write wins). See that
+/// function's doc for why this is unreachable today and whose problem it is
+/// once it becomes reachable.
 pub fn eliminator_registry(enums: &[EnumDecl]) -> HashMap<String, EnumId> {
     enums
         .iter()
@@ -1449,6 +1467,45 @@ pub fn eliminator_registry(enums: &[EnumDecl]) -> HashMap<String, EnumId> {
             )
         })
         .collect()
+}
+
+/// Phase 6 slice 3 review fix (smaller point 1): a user word whose surface
+/// name equals a generated eliminator's (`"{Enum}?"`) would be silently
+/// unreachable -- `check_term`'s eliminator interception runs ahead of the
+/// ordinary env lookup, so every call to that name always routes to the
+/// eliminator and the user's own declaration can never be reached. An
+/// eliminator has no overload mechanism to fall back through the way a
+/// generated destructure (`P>`) does, so rejecting the declaration, the same
+/// as `check_duplicate_word_names` rejects any other name collision before
+/// either candidate enters an environment, is the only alternative to
+/// shadowing it. Compares demangled surface names, so this holds whether
+/// `words`/`enums` are still raw (`check_src`-style tests) or already
+/// mangled (a real build, where the two collide under different manglings --
+/// `Shape?__m0` vs `Shape__m0?` -- and would otherwise go undetected here).
+pub fn check_no_word_shadows_eliminator(
+    words: &[WordDef],
+    enums: &[EnumDecl],
+) -> Result<(), String> {
+    for enum_decl in enums {
+        let eliminator_name = format!(
+            "{}?",
+            crate::resolve::demangle_word(generic_surface_name(&enum_decl.name))
+        );
+        if let Some(word) = words.iter().find(|w| {
+            w.module == enum_decl.module
+                && crate::resolve::demangle_word(&w.name) == eliminator_name
+        }) {
+            let span = word_span(word);
+            return Err(format!(
+                "error: word `{}` (line {}, col {}) has the same name as the generated eliminator for enum `{}`; rename one",
+                eliminator_name,
+                span.line,
+                span.col,
+                crate::resolve::demangle_word(generic_surface_name(&enum_decl.name)),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

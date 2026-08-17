@@ -426,6 +426,7 @@ pub(super) fn inline_combinator(
                             false,
                             tail_slots.contains(&i),
                             tail,
+                            false,
                         )?;
                     }
                     // R21: forwarding an abstract quotation parameter. `found`
@@ -692,7 +693,7 @@ fn check_poly_combinator_args(
         if let Some(QuotOperand::Literal(id)) = operand {
             let is_inline = matches!(concrete, Type::InlineQuotation(_));
             let literal_span = prov.quotations[id.0].span;
-            let actual = check_literal_against_declared_effect(
+            let actual: Vec<Type> = check_literal_against_declared_effect(
                 id,
                 eff,
                 is_inline,
@@ -711,7 +712,11 @@ fn check_poly_combinator_args(
                 shape_changing,
                 tail_slots.contains(&i),
                 tail,
-            )?;
+                false,
+            )?
+            .iter()
+            .map(|s| s.ty)
+            .collect();
             if let Some(rid) = row_out_id {
                 if let Some(expected) = shape_baseline.get(&rid) {
                     let matches = actual.len() == expected.len()

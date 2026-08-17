@@ -853,6 +853,24 @@ fn check_term(
                             &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov,
                             scope, poly,
                         )?;
+                    } else if !tagged_literal_reaches_an_eliminator_call(siblings, at, poly) {
+                        // Review fix (Phase 6 slice 3, finding 3): the branch
+                        // above skips the standalone annotation check entirely
+                        // for *every* tagged literal, on the premise that
+                        // `check_eliminator_call` checks it instead -- true
+                        // only when this literal is actually collected as an
+                        // arm. A tagged literal that never reaches an
+                        // eliminator call (a typo'd call name, or a tagged
+                        // literal used as an ordinary value) was silently
+                        // never checked at all, magic that this rejects.
+                        return Err(eliminator_arm_outside_call_error(
+                            ctx,
+                            resolved.span,
+                            resolved
+                                .variant_tag
+                                .as_deref()
+                                .expect("the `else` branch only runs when `variant_tag` is `Some`"),
+                        ));
                     }
                     Some(resolved)
                 }
@@ -894,6 +912,41 @@ fn check_term(
             Ok(stack)
         }
     }
+}
+
+/// Phase 6 slice 3 review fix (finding 3): whether the tagged literal at
+/// `siblings[at]` is actually collected as an eliminator arm. Forward-scans
+/// past every immediately-following tagged quotation literal (arms are
+/// written contiguously, immediately below the scrutinee -- the same
+/// adjacency `check_eliminator_call`'s own stack-based collection requires),
+/// and accepts only if that run ends in a call to a name the eliminator
+/// registry actually holds. Anything else (a typo'd call name, an
+/// intervening non-arm term, or running off the end of the body) means this
+/// literal is never consumed as an arm at all.
+fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly: &PolyCtx) -> bool {
+    let mut j = at + 1;
+    while let Some(term) = siblings.get(j) {
+        match &term.kind {
+            TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
+                j += 1;
+            }
+            TermKind::Call(name) => return poly.eliminators.contains_key(name),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Phase 6 slice 3 review fix (finding 3): a variant-tagged quotation literal
+/// that is not consumed as an eliminator arm. The tag is only meaningful as
+/// arm-to-variant routing (R1/R4); anywhere else it is a stray annotation this
+/// checker must not silently let through unchecked.
+fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
+    format!(
+        "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R15 (D8): a linear value live across the self-tail-call back-edge, which the
@@ -1219,6 +1272,7 @@ fn check_branch_join(
                             false,
                             false,
                             false,
+                            false,
                         )?;
                         check_literal_against_declared_effect(
                             b,
@@ -1236,6 +1290,7 @@ fn check_branch_join(
                             scope,
                             poly,
                             &HashSet::new(),
+                            false,
                             false,
                             false,
                             false,
@@ -1461,7 +1516,7 @@ fn back_edge_outs(
 /// *different* place) is rejected rather than silently picking one arm's
 /// answer, since a later hazard check would then reason about the wrong arm's
 /// runtime path.
-fn borrow_join_disagreement_error(
+pub(super) fn borrow_join_disagreement_error(
     ctx: &Ctx,
     span: Span,
     t_then: Option<&Deriv>,
