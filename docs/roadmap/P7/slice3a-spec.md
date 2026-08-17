@@ -109,9 +109,15 @@ recon" sections), with the file:line anchors re-verified against `HEAD`.
   are handed `&mut Vec<ArrayDecl>` / `&mut Vec<RefDecl>` and call
   `intern_array_type` / `intern_ref_type` at the point of use. Named generics
   have no such downstream registry: `GenericTypes` is consumed and dropped at
-  `src/driver.rs:307-309` (`structs.extend(generics.inst_structs); enums.extend(generics.inst_enums);`)
-  before check or lowering runs. After that point nothing can mint a
-  `Result[i64 str]` that parse time did not already materialize.
+  `src/driver.rs:308-309` (`structs.extend(generics.inst_structs); enums.extend(generics.inst_enums);`),
+  its paired construction site being `GenericTypes::with_bases(...)` at
+  `src/driver.rs:242`. After that point nothing can mint a
+  `Result[i64 str]` that parse time did not already materialize. The array/ref
+  arms are *not* a lookup precedent for a generic: at check time they **mint**
+  (`intern_array_type` `src/check/poly.rs:1740`, `intern_ref_type` `:1772`)
+  into a `Module`-persisted `&mut Vec`, and only *lowering* is lookup-only. A
+  named generic has no check-side mint at all until R2, so there is nothing for
+  a pre-R2 lookup to hit.
 - **`GenericTypes` ids are base-relative.** `struct_base`/`enum_base`
   (`src/ast.rs:394-395`, set by `with_bases`, `:519`) mean the id of
   `inst_structs[i]` is `struct_base + i`, which is only true because the
@@ -207,7 +213,7 @@ Each site gets the arm named here, and none gets a `_ =>` catch-all:
 | `contains_poly_reference` (`check/audits.rs:352`) | recurse into `args`: a generic carrying `&'T` must not escape the Copy-containment audit |
 | `audit_poly_input_quotation` (`:371`) | recurse into `args` |
 | `reject_poly_quotation_anywhere` (`:411`) | recurse into `args`, so a quotation smuggled in as a generic argument is still rejected |
-| `collect_poly_concrete` (`check/declarations.rs:346`) | recurse into `args` and additionally contribute the header's own declaration, so export privacy sees the generic being named |
+| `collect_poly_concrete` (`check/declarations.rs:346`) | recurse into `args` only (contributing any concrete `Type`s found inside); it collects into `Vec<Type>` and a variable-bearing generic has no concrete `Type` of its own to contribute (see the export-privacy note below the table) |
 | `poly_op_on_variable_error` (`:1838`) | `"a generic type"`, rendered with the application |
 | `poly_type_str` (`:2201`) | `Name['A 'B]` in the signature's own variable spellings |
 | `remap_poly_type` (`repl.rs:228`) | remap each argument; the header `idx`/`module` pass through unchanged |
@@ -215,21 +221,62 @@ Each site gets the arm named here, and none gets a `_ =>` catch-all:
 Depth > 1 (an argument that is itself `PolyType::Generic`) is rejected at the
 parse fold with one located error naming the outer and inner headers.
 
+**Export-privacy gap (known, must not be silently dropped).** Because
+`collect_poly_concrete` can only carry concrete `Type`s, it cannot carry an
+ungrounded generic *header* named in an exported poly word's signature, and the
+parse-time gate `type_is_exported` (`src/parser.rs:3138`) only fires for
+*qualified* names. So an exported poly word can name a bare, module-private
+generic header with no privacy check anywhere. Closing this needs a dedicated
+generic-header check in `check_exported_signatures` (a separate
+`Vec<(usize, u32)>` header-privacy channel, not the `Vec<Type>` one); fully
+designing that is out of scope for this slice, but the gap is recorded here as a
+required implementation follow-up, not an accident.
+
 ### R2 — `GenericTypes` lives through check and lowering
 
-`src/driver.rs:306-309` stops consuming `generics`. Instead:
+`src/driver.rs:308-309` stops consuming `generics` (its paired construction
+site is `GenericTypes::with_bases(...)` at `src/driver.rs:242`). Instead:
 
 - `GenericTypes` is threaded as `&mut` into check and into lowering, beside
   the `&mut Vec<ArrayDecl>` / `&mut Vec<RefDecl>` registries those paths
-  already carry.
+  already carry. Concretely this exposes a
+  `(is_enum, idx, module, args: Vec<Type>) -> {Struct,Enum}Id` resolver
+  reachable from `apply_subst`, `unify_poly_input`, and `subst_polytype` — the
+  `struct_keys`/`enum_keys` dedup table (`src/ast.rs:392-393`) kept alive
+  rather than dropped.
 - A single mint entry point (`instantiate_struct`/`instantiate_enum`) is used
   from *all* callers, parse-time and downstream, so the dedup keys stay the
   one identity source (D3).
-- The mint keeps the base-relative id invariant (`struct_base + i`): the
-  downstream call pushes the new `StructDecl`/`EnumDecl` into the live
-  `structs`/`enums` registries in the same operation, so an id minted at check
-  time resolves in the same registry at lowering time. A unit test pins this
-  invariant directly.
+- **The id invariant, stated precisely:** at every mint (parse-time or
+  downstream) the returned `StructId`/`EnumId` index equals the position the
+  `StructDecl`/`EnumDecl` occupies in the *final merged* `structs`/`enums`
+  registry, and `instantiate_struct`/`instantiate_enum` is the **sole** writer
+  of `structs`/`enums` beyond `struct_base`/`enum_base`. The naive
+  implementation — keep the one-shot `structs.extend(generics.inst_structs)`
+  at `src/driver.rs:308` *and also* mint downstream — is wrong: `extend`
+  drains `inst_structs` to empty, so a later `instantiate_struct` computes
+  `struct_base + inst_structs.len() = struct_base + 0` and **collides** with
+  the first parse-time instance already sitting at that index, giving two
+  distinct `Type::Struct` values one id with different field layouts (a
+  layout-level miscompile). Once downstream minting exists there is no separate
+  `extend`: the live registry grows only through the mint.
+- **Implementation note (flag, not solved here):** the mint that pushes into
+  the live `structs`/`enums` needs `&mut`, but `instantiate_struct` currently
+  reads `regs.structs` immutably while naming the instantiation
+  (`src/parser.rs:3145`); the same `Vec` cannot be borrowed both ways, so the
+  instantiation name must be computed before the push. Two other consume-drop
+  sites must also be checked at implementation time: `src/parser.rs:544-545`
+  (the single-file `parser::parse` path drops its own `GenericTypes`, so D3's
+  "one id space" is not globally true until it is addressed too) and the REPL
+  (reuses `assemble_module` so inherits the driver fix, but re-bases ids across
+  import epochs at `src/repl.rs:204`/`:1828`; confirm it does not separately
+  offset `generic_structs`, or `remap_poly_type`'s pass-through of
+  `idx`/`module` is unsound there).
+- A unit test pins the invariant: mint a generic monomorph **downstream, after**
+  at least one parse-time instance of the *same header* already exists, and
+  assert the two ids differ and each resolves to its own field layout. A
+  single-mint-in-isolation test passes under both the correct and the colliding
+  implementation, so the guard must be an *interleaved* mint.
 - Nothing else about parse-time instantiation changes; a program with no
   variable-bearing generic mints exactly the same set of monomorphs as before.
 
@@ -259,6 +306,19 @@ polymorphic body.
 - Lowering the constructor at an instantiation goes through R2's mint, so the
   monomorph exists even when no other site in the program materialized it.
 
+Why pulling an undetermined argument from the declared output slot is sound: the
+undetermined argument is *phantom* for the constructed variant (constructing
+`Ok` leaves `E` with no runtime representation — `substitute_generic_field`,
+`src/ast.rs:505-511`, substitutes only fields that exist), so adopting any
+concrete `E` from the output slot cannot create a runtime/static mismatch. The
+real backstop for the *determined* arguments is that `unify_poly_input`'s new
+`Generic` arm unifies the produced value against the enclosing word's declared
+output at word exit: a wrong inferred position surfaces there as a located type
+mismatch, not a silent miscompile. This is what makes inferring from the output
+slot safe rather than a type confusion — and why T-nontail (below) must build a
+body where the constructed value is *not* in 1:1 tail position, so the exit-time
+unification is exercised rather than assumed.
+
 ### R4 — one independent monomorph per instantiation
 
 Two distinct substitutions over the same poly word naming a generic yield two
@@ -286,11 +346,20 @@ Located errors, each asserted on message text:
 
 ## Implementation
 
-Two phases. Phase 1 is signature-side only and is independently green: it
-makes `Result['T 'E]` nameable and unifiable, with construction still
-rejected. Phase 2 makes on-demand minting real and admits construction.
+Two phases. Phase 1 introduces the `PolyType::Generic` variant and the parse
+route and makes a variable-bearing generic *nameable* and *renderable*: it adds
+the arms that need no id resolution and the parse-fold rejections. It does
+**not** ground a generic to a concrete id. There is no check-side mint for a
+named generic until R2 (the array/ref arms mint at check into a persisted
+registry; a generic has no such registry until Phase 2), so Phase 1 does no
+grounding and ships no build+run consumption golden — it would be un-passable in
+isolation. Phase 2 keeps `GenericTypes` alive, adds the grounding arms and
+on-demand minting, admits construction, and carries the build+run goldens.
+The grounding arms and R2 are one unit: none of `apply_subst`,
+`unify_poly_input`, `subst_polytype` can resolve a generic without the live
+table, so they cannot be split from it.
 
-### Phase 1 — the variant and the signature path
+### Phase 1 — the variant, the parse route, and the non-grounding arms
 
 Files: `src/ast.rs`, `src/parser.rs`, `src/check/poly.rs`,
 `src/check/audits.rs`, `src/check/declarations.rs`, `src/ir/driver.rs`,
@@ -300,46 +369,65 @@ Files: `src/ast.rs`, `src/parser.rs`, `src/check/poly.rs`,
 - `src/parser.rs:861-870`: add `RawTy::Generic`.
 - `src/parser.rs:1898-1961`: the new `parse_poly_slot` arm ahead of the
   `parse_type_expr` fallthrough at `:1960`, reusing the header lookup and
-  privacy gate from `resolve_type_or_apply` (`:3130-3143`) and
-  `parse_type_arguments`' arity rule (`:3204-3229`), with arguments parsed as
+  privacy gate from `resolve_type_or_apply` (`:3130-3143`) and *only the arity
+  check* of `parse_type_arguments` (`:3204-3229`) — not its argument parser,
+  which resolves concrete names only; the generic arm parses its arguments as
   poly slots.
 - `src/parser.rs:2184-2199`: the `raw_to_poly_type` fold, mirroring the array
   fold; the depth-2 rejection lands here.
-- The 14 arms of R1's table, at the file:line sites listed there.
-  `apply_subst` (`check/poly.rs:1770`) and `subst_polytype`
-  (`ir/driver.rs:654`) get the *lookup-only* form in this phase: find the
-  already-materialized instantiation and return it, `expect`-style, exactly as
-  the array and ref arms do today. On-demand minting is Phase 2.
+- The **non-grounding** arms of R1's table (no id resolution): `poly_is_copy`,
+  `is_reference_slot`, `poly_copy_gate`, `poly_op_on_variable_error`,
+  `poly_type_str`, `receiver_is_aggregate_projection`, the three audit walks
+  (`contains_poly_reference`, `audit_poly_input_quotation`,
+  `reject_poly_quotation_anywhere`), `collect_poly_concrete`, and
+  `remap_poly_type`.
+- `apply_subst` (`check/poly.rs:1770`), `subst_polytype` (`ir/driver.rs:654`),
+  and `unify_poly_input`'s `Generic` arm (`check/poly.rs:1651`) still need an
+  arm here so the match stays exhaustive, but in Phase 1 that arm is an
+  explicit **not-yet-groundable** case: it cannot resolve a variable-bearing
+  generic to a concrete id (the dedup key table is dropped before check runs),
+  so it errors deliberately rather than pretending to look up a registry that
+  does not exist. Real grounding is Phase 2, together with R2.
 
 Tests: parser unit tests for the accepted signature, the concrete-fold
-no-change guard, the depth-2 rejection, the arity error;
-`unify_poly_input`/`poly_type_str` unit tests; a golden that a poly word
-consuming `Result['T 'E]` type-checks and runs at two asymmetric
-instantiations already materialized elsewhere in the program.
+no-change guard, the depth-2 rejection, the arity error; the `poly_type_str`
+render test; `poly_generic_slot_is_not_copy`; the two audit-arm rejection tests
+(quotation-in-generic-arg; `&'T`-bearing generic in a Copy position); the
+`receiver_is_aggregate_projection` arm test. All green in isolation without any
+id resolution.
 
-Requirements covered: R1, R4 (consumption side), R5 items 1, 4, 5.
+Requirements covered: R1 (parse + non-grounding arms), R5 items 1, 4, 5.
 
-### Phase 2 — registry lifetime and construction
+### Phase 2 — registry lifetime, grounding, and construction
 
 Files: `src/driver.rs`, `src/ast.rs`, `src/check/poly.rs`, `src/ir/driver.rs`
-(and the check/lower call-site plumbing the `&mut` thread touches).
+(and the check/lower call-site plumbing the `&mut` thread touches:
+`src/check.rs:1462`/`:1466`, `src/check/combinators.rs:663`,
+`src/check/poly.rs:168`/`:173`/`:1500`, whose `apply_subst`/`unify_poly_input`
+signatures gain the generic resolver).
 
-- `src/driver.rs:306-309`: stop moving `generics.inst_structs`/`inst_enums`
-  into `structs`/`enums` and dropping `generics`; keep the instantiator alive
-  and thread it `&mut` into check and lowering.
+- `src/driver.rs:308-309`: stop moving `generics.inst_structs`/`inst_enums`
+  into `structs`/`enums` and dropping `generics` (accounting for the paired
+  `with_bases` at `:242`); keep the instantiator alive and thread it `&mut`
+  into check and lowering.
 - `src/ast.rs:560-641`: the mint entry points keep the live `structs`/`enums`
-  registries in sync so `struct_base + i` stays the true id.
-- `src/check/poly.rs:1770` (`apply_subst`) and `src/ir/driver.rs:654`
-  (`subst_polytype`): swap the lookup-only arm for mint-or-find through the
-  live instantiator.
+  registries in sync so the id-index invariant (R2) holds for a downstream
+  mint, `instantiate_*` being the sole writer beyond the base.
+- `src/check/poly.rs:1651` (`unify_poly_input`), `:1770` (`apply_subst`), and
+  `src/ir/driver.rs:654` (`subst_polytype`): the real grounding arms —
+  mint-or-find through the live instantiator, on both the consumption and the
+  output side.
 - `src/check/poly.rs:499-791`: R3's constructor arm ahead of the
   `unknown_word_error` fallthrough at `:791`.
 
-Tests: the R2 id-invariant unit test; the R4 `nm` golden over an asymmetric
-pair where at least one monomorph is materialized *only* by the poly word's
-own construction; R5 items 2 and 3.
+Tests: the R2 interleaved id-invariant unit test;
+`unify_poly_generic_binds_arguments_positionally`; T1 (build+run consumption at
+two asymmetric instantiations); T2 (`nm`, distinct symbols); T3 (a monomorph
+materialized *only* by the poly word's own construction); T-nontail
+(construction off tail position, exercising the exit-time unification backstop);
+R5 items 2 and 3.
 
-Requirements covered: R2, R3, R4, R5 items 2, 3.
+Requirements covered: R2, R3, R4 (consumption *and* production), R5 items 2, 3.
 
 ### Phases (machine-readable)
 
@@ -351,8 +439,8 @@ names requested rather than a repo precedent.
 ```json
 [
   {
-    "name": "Phase 1 - PolyType::Generic and the signature path",
-    "requirements": ["R1", "R4-consumption", "R5.1", "R5.4", "R5.5"],
+    "name": "Phase 1 - PolyType::Generic, the parse route, and the non-grounding arms",
+    "requirements": ["R1-parse", "R1-nongrounding-arms", "R5.1", "R5.4", "R5.5"],
     "files": [
       "src/ast.rs",
       "src/parser.rs",
@@ -365,21 +453,21 @@ names requested rather than a repo precedent.
     "changes": [
       "src/ast.rs:L1054-L1083 - add PolyType::Generic { is_enum: bool, idx: u32, module: u32, args: Vec<PolyType> }",
       "src/parser.rs:L861-L870 - add RawTy::Generic beside RawTy::Array",
-      "src/parser.rs:L1898-L1961 - parse_poly_slot arm for a generic application, ahead of the parse_type_expr fallthrough at L1960, reusing the header lookup/privacy gate of resolve_type_or_apply (L3130-L3143) and the arity rule of parse_type_arguments (L3204-L3229)",
+      "src/parser.rs:L1898-L1961 - parse_poly_slot arm for a generic application, ahead of the parse_type_expr fallthrough at L1960, reusing the header lookup/privacy gate of resolve_type_or_apply (L3130-L3143) and only the arity check of parse_type_arguments (L3204-L3229), not its concrete-only argument parser; arguments parsed as poly slots",
       "src/parser.rs:L2184-L2199 - raw_to_poly_type fold: all-concrete args instantiate to PolyType::Concrete, otherwise stay PolyType::Generic; reject nesting depth > 1 with a located error",
       "src/check/poly.rs:L34 poly_is_copy - false (conservative linearity)",
       "src/check/poly.rs:L115 is_reference_slot - false",
       "src/check/poly.rs:L1065 poly_copy_gate - located cannot-copy diagnostic",
-      "src/check/poly.rs:L1651 unify_poly_input - positional recursion over args; a concrete instantiation of the same header matches",
-      "src/check/poly.rs:L1770 apply_subst - lookup-only grounding in this phase",
+      "src/check/poly.rs:L1651 unify_poly_input - Generic arm present for exhaustiveness but not-yet-groundable (errors; real grounding is Phase 2 with R2)",
+      "src/check/poly.rs:L1770 apply_subst - Generic arm present for exhaustiveness but not-yet-groundable (errors; real grounding is Phase 2 with R2)",
       "src/check/poly.rs:L1852 poly_op_on_variable_error - render as a generic type",
       "src/check/poly.rs:L1916 receiver_is_aggregate_projection - true, matching the concrete struct/enum answer",
       "src/check/poly.rs:L2235 poly_type_str - render Name['A 'B] in the signature's spellings",
       "src/check/audits.rs:L359 contains_poly_reference - recurse into args",
       "src/check/audits.rs:L397 audit_poly_input_quotation - recurse into args",
       "src/check/audits.rs:L420 reject_poly_quotation_anywhere - recurse into args",
-      "src/check/declarations.rs:L353 collect_poly_concrete - recurse into args and contribute the header for export privacy",
-      "src/ir/driver.rs:L654 subst_polytype - lookup-only grounding in this phase",
+      "src/check/declarations.rs:L353 collect_poly_concrete - recurse into args only (Vec<Type>; a variable-bearing generic contributes no concrete Type of its own)",
+      "src/ir/driver.rs:L654 subst_polytype - Generic arm present for exhaustiveness but not-yet-groundable (errors; real grounding is Phase 2 with R2)",
       "src/repl.rs:L260 remap_poly_type - remap args, pass header identity through"
     ],
     "tests": [
@@ -388,35 +476,43 @@ names requested rather than a repo precedent.
       "src/parser.rs: parse_poly_generic_nested_depth_two_is_error",
       "src/parser.rs: parse_poly_generic_arity_mismatch_is_error",
       "src/parser.rs: parse_poly_generic_private_header_is_not_exported_error",
-      "src/check/poly.rs: unify_poly_generic_binds_arguments_positionally",
       "src/check/poly.rs: poly_generic_slot_is_not_copy",
       "src/check/poly.rs: poly_type_str_renders_a_generic_application",
-      "tests/phase7_slice3a.rs: poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantiations"
+      "src/check/poly.rs: poly_generic_receiver_is_aggregate_projection",
+      "src/check/audits.rs: quotation_smuggled_as_generic_arg_is_rejected",
+      "src/check/audits.rs: ref_bearing_generic_in_copy_position_is_rejected"
     ]
   },
   {
-    "name": "Phase 2 - registry lifetime and generic construction in poly bodies",
+    "name": "Phase 2 - registry lifetime, grounding, and generic construction in poly bodies",
     "requirements": ["R2", "R3", "R4", "R5.2", "R5.3"],
     "files": [
       "src/driver.rs",
       "src/ast.rs",
+      "src/check.rs",
       "src/check/poly.rs",
+      "src/check/combinators.rs",
       "src/ir/driver.rs"
     ],
     "changes": [
-      "src/driver.rs:L306-L309 - stop consuming GenericTypes into structs/enums; keep it alive and thread it &mut into check and lowering beside the array/ref registries",
-      "src/ast.rs:L560-L641 - instantiate_struct/instantiate_enum keep the live structs/enums registries in sync so the struct_base + i id invariant holds for a downstream mint",
-      "src/check/poly.rs:L1770 apply_subst - mint-or-find through the live instantiator instead of lookup-only",
+      "src/driver.rs:L308-L309 - stop consuming GenericTypes into structs/enums (and account for the paired with_bases at L242); keep it alive and thread it &mut into check and lowering beside the array/ref registries",
+      "src/ast.rs:L560-L641 - instantiate_struct/instantiate_enum are the sole writer of structs/enums beyond struct_base/enum_base; the returned id index == the decl's position in the final merged registry (no separate one-shot extend once downstream minting exists)",
+      "src/check.rs:L1462,L1466 + src/check/combinators.rs:L663 + src/check/poly.rs:L168,L173,L1500 - thread the (is_enum,idx,module,args)->Id resolver through the apply_subst/unify_poly_input call sites",
+      "src/check/poly.rs:L1651 unify_poly_input - real grounding: positional recursion over args; a concrete instantiation of the same header matches via mint-or-find",
+      "src/check/poly.rs:L1770 apply_subst - mint-or-find through the live instantiator instead of not-yet-groundable",
       "src/ir/driver.rs:L654 subst_polytype - mint-or-find through the same instantiator, never a second id space",
       "src/check/poly.rs:L499-L791 - poly_call_term arm for a generic variant/struct constructor, ahead of the unknown_word_error fallthrough at L791: resolve the header from the base name, determine arguments from the operands and, where undetermined, from the enclosing word's declared output slot; located error when still undetermined; operand/payload mismatch reported at the call site"
     ],
     "tests": [
-      "src/ast.rs: downstream_instantiation_id_matches_the_live_registry_index",
+      "src/ast.rs: interleaved_downstream_mint_id_differs_from_parsetime_instance",
+      "src/check/poly.rs: unify_poly_generic_binds_arguments_positionally",
       "src/check/poly.rs: poly_body_constructor_resolves_arguments_from_the_declared_output",
       "src/check/poly.rs: poly_body_constructor_undetermined_argument_is_error",
       "src/check/poly.rs: poly_body_constructor_operand_mismatch_is_error",
+      "tests/phase7_slice3a.rs: poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantiations",
+      "tests/phase7_slice3a.rs: two_asymmetric_instantiations_mint_distinct_symbols_nm",
       "tests/phase7_slice3a.rs: poly_word_constructs_a_monomorph_no_other_site_materializes",
-      "tests/phase7_slice3a.rs: two_asymmetric_instantiations_mint_distinct_symbols_nm"
+      "tests/phase7_slice3a.rs: poly_body_constructor_off_tail_position_unifies_at_exit"
     ]
   }
 ]
@@ -427,10 +523,11 @@ names requested rather than a repo precedent.
 New golden file `tests/phase7_slice3a.rs`:
 
 - **T1 `poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantiations`**
-  — the brief's probe program: `: reorder ( 'T Result['T 'E] -- Result['T 'E] 'T )`
-  instantiated at `[i64 str]` and `[str i64]`, printing values that are only
-  correct if the two monomorphs are independent and positional. Asymmetric on
-  purpose: `Result[i64 i64]` cannot tell `Ok 'T | Err 'E` from its swap.
+  (Phase 2 — build+run, needs grounding) — the brief's probe program:
+  `: reorder ( 'T Result['T 'E] -- Result['T 'E] 'T )` instantiated at
+  `[i64 str]` and `[str i64]`, printing values that are only correct if the two
+  monomorphs are independent and positional. Asymmetric on purpose:
+  `Result[i64 i64]` cannot tell `Ok 'T | Err 'E` from its swap.
 - **T2 `two_asymmetric_instantiations_mint_distinct_symbols_nm`** — `nm` over
   the built object, asserting both
   `sooth_mono_reorder__m0__t0_i64_t1_str` and `..._t0_str_t1_i64` exist
@@ -440,18 +537,31 @@ New golden file `tests/phase7_slice3a.rs`:
   `Result['T i64]` at an instantiation no other signature in the program
   names, so it can only come from a downstream mint. This is the test that
   does not exist without option B.
+- **T-nontail `poly_body_constructor_off_tail_position_unifies_at_exit`** — a
+  poly body that constructs a generic value and then moves a *different* output
+  into tail position (so the constructed value is not in 1:1 tail position),
+  proving the exit-time `unify_poly_input` backstop actually fires rather than
+  being assumed (R3's soundness argument).
 - **T4-T7, the R5 rejections** — depth-2 nesting; an undetermined constructor
   argument; a constructor operand/payload mismatch; `dup` on a
   variable-bearing generic slot. Each asserts exact message text, never
   `is_err()`.
 
 Unit tests as listed per phase in the `phases` block, beside their stage
-(`src/parser.rs`, `src/check/poly.rs`, `src/ast.rs`).
+(`src/parser.rs`, `src/check/poly.rs`, `src/check/audits.rs`, `src/ast.rs`).
 
-**Mutation-test the guards.** Per the project's standing rule, each of T4-T7
-and the R2 id-invariant test must be proven to fail when the arm it guards is
-deleted; five placebo tests have shipped in this repo without review catching
-them.
+**Mutation-test the guards.** Per the project's standing rule, each of the
+following must be proven to fail when the arm it guards is deleted (a suite that
+stays green after the deletion means the test is a placebo — this repo has
+shipped five): T4-T7; the R2 interleaved id-invariant test
+(`interleaved_downstream_mint_id_differs_from_parsetime_instance`); the two
+audit-arm rejection tests (`quotation_smuggled_as_generic_arg_is_rejected`
+guarding `reject_poly_quotation_anywhere`, and
+`ref_bearing_generic_in_copy_position_is_rejected` guarding
+`contains_poly_reference`); and
+`unify_poly_generic_binds_arguments_positionally` — the anti-placebo arm for
+asymmetric instantiation, whose deletion mutation is "collapse positional order
+/ ignore the argument index", which T1/T2 must then catch.
 
 Regression, must stay green untouched:
 
