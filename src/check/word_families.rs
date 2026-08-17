@@ -375,8 +375,34 @@ fn check_field_projection(
         return Ok(None);
     };
     let decl = &ctx.structs()[id.index()];
-    let Some(fi) = decl.fields.iter().position(|(f, _)| f == field) else {
-        return Ok(None);
+    let field_pos = decl.fields.iter().position(|(f, _)| f == field);
+    // R3: the receiver is tried first, but a local/static of the same name
+    // still has a say -- present on both sides it is a shadow error, present
+    // only there (the receiver lacking the field) it is the fallback that
+    // keeps `&n` meaning what it always meant, and present on neither side
+    // the diagnostic can finally name the receiver type.
+    let existing_place = scope.local_type(field).is_some() || ctx.static_type(field).is_some();
+    let fi = match field_pos {
+        Some(_fi) if existing_place => {
+            return Err(projection_field_shadowed_by_local_error(
+                ctx,
+                span,
+                name,
+                decl.name_static,
+                field,
+            ));
+        }
+        Some(fi) => fi,
+        None if existing_place => return Ok(None),
+        None => {
+            return Err(projection_unknown_field_error(
+                ctx,
+                span,
+                name,
+                decl.name_static,
+                field,
+            ));
+        }
     };
     let field_ty = decl.fields[fi].1;
     match recv_mut {
@@ -1548,6 +1574,45 @@ fn conflicting_projection_error(
     )
 }
 
+/// R3: the receiver resolved to a struct, but it has no field of that name,
+/// and no local or static shares the name either -- there is no fallback
+/// left to try. Named at check-time, where the receiver type is known, so
+/// the diagnostic points at that type rather than saying `unknown word`.
+fn projection_unknown_field_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    receiver: &str,
+    field: &str,
+) -> String {
+    format!(
+        "error: `{receiver}` has no field `{field}`{} (line {}, col {})\n  `{name}` projects a field of the receiver on top of the stack; `{receiver}` declares no field named `{field}`",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
+/// R3: the receiver has a field of this name *and* a local (or static) of the
+/// same name is in scope. `&`-led resolution tries the receiver first, so a
+/// collision here is silent precedence unless it is a located error naming
+/// both candidates -- field and local names are short in this corpus and
+/// collide easily (`arr`, `acc`, `key`, `n`).
+fn projection_field_shadowed_by_local_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    receiver: &str,
+    field: &str,
+) -> String {
+    format!(
+        "error: `{name}` is ambiguous{} (line {}, col {})\n  `{receiver}` has a field `{field}`, and a local (or static) named `{field}` is also in scope\n  rename one of them, or bind the receiver to a local and use `S>` to destructure explicitly",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 /// P7 slice 1 review fix: `drop`, a moving word call, or a moving field
 /// getter discards a place -- named or anonymous -- while a reference the
 /// owned-receiver projection arm took from it is still live. That arm
@@ -2444,6 +2509,39 @@ mod tests {
              : main ( -- ) 1 Point | p | 2 Box &p &x @ . drop ;",
         )
         .is_ok());
+    }
+
+    /// R3: the receiver has no field of that name, and there is no local or
+    /// static to fall back to either -- this is check-time's own error,
+    /// naming the receiver type rather than saying `unknown word`.
+    #[test]
+    fn projection_unknown_field_names_the_receiver_type() {
+        let err = check_src(
+            "type: Buf len usize ;\n\
+             : main ( -- ) 0 >usize Buf &lenn @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`Buf` has no field `lenn`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R3: the receiver has field `hp` *and* a local `hp` is in scope --
+    /// a located error naming both, not silent precedence either way.
+    #[test]
+    fn projection_field_shadowed_by_local_is_error() {
+        let err = check_src(
+            "type: Stats hp i64 ;\n\
+             : main ( -- ) 9 | hp | 1 Stats &hp @ . drop hp drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&hp` is ambiguous")
+                && err.contains("`Stats` has a field `hp`")
+                && err.contains("local"),
+            "unexpected message: {err}"
+        );
     }
 
     /// The point of R1: one spelling, two receivers, two different fields.
