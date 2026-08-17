@@ -118,10 +118,14 @@ elided:
 
 R6's existing rule (`( )` and an arrow-less parenthesized list are located errors) stays;
 `parse_quotation_annotation_elided_is_error` (`src/parser.rs:3670`) must still pass. The
-new grammar only *adds* the leading-variant-name form; it does not relax the arrow rule
-for a non-arm annotation. Unit tests beside the parser: happy path (bare `( Circle )`
-parses with `variant_tag = Some("Circle")`), and an error/edge case (a bare `( )` is
-still the located elided-form error).
+arrow may be omitted **only** for the lone-variant-name form (`( Circle )`, exactly one
+token); any additional token requires the `--` as today, so `( Circle Push )` (two
+tokens, no arrow) is the same located elided-form error as a bare `( )`, not a partial
+arm annotation. The new grammar only *adds* the leading-variant-name form; it does not
+relax the arrow rule for a non-arm annotation. Unit tests beside the parser: happy path
+(bare `( Circle )` parses with `variant_tag = Some("Circle")`), and an error/edge case
+(a bare `( )` is still the located elided-form error, and `( Circle Push )` with no
+arrow is rejected the same way, not accepted as a partial arm).
 
 ### R2 — Eliminator `PolySig` generator (`src/check/declarations.rs`)
 
@@ -449,7 +453,7 @@ here is a defect unless a **Reason** column explains it.
 
 | # | Rule in `check_poly_combinator_args` | Anchor | `check_eliminator_call` | Reason |
 |---|---|---|---|---|
-| 1 | Underflow: `stack.len() < n` → `underflow_error` | `combinators.rs:618` | **Arm-flavoured variant.** Arity is `1 + variant_count`; a missing arm is reported by the exhaustiveness pass (R4.3) by name, a genuine sub-scrutinee shortfall by `underflow_error` | Exhaustiveness gives a better-attributed message than a bare count mismatch |
+| 1 | Underflow: `stack.len() < n` → `underflow_error` | `combinators.rs:618` | **Arm-flavoured variant.** Nominal arity is `1 + variant_count`, but collection is variable-arity (R4.1): a missing arm is reported by the exhaustiveness pass (R4.3) by name, a genuine sub-scrutinee shortfall by `underflow_error` | Exhaustiveness gives a better-attributed message than a bare count mismatch |
 | 2 | Pass 1: unify non-quotation inputs → `θ` (`unify_poly_input`) | `combinators.rs:636` | **Reduced to a scrutinee type check.** The only non-quotation input is the scrutinee; match it against `Type::Enum(id, _)` via the shared type-mismatch path | No per-arm tyvar exists to solve; arm inputs are concrete `Type::Variant` |
 | 3 | Deferred i64-literal coercion (D8: bare `Var` filled by a fresh literal, unified last against `usize`/`isize`) | `combinators.rs:634,645-660` | **Omitted.** | No bare `Var` input parameter exists; the scrutinee is a concrete enum, no literal-coercion slot |
 | 4 | `reject_quotation_argument` for a non-quotation slot given a quotation | `combinators.rs:641` | **Called (shared).** The scrutinee slot must not be a quotation | Same guard applies to the scrutinee |
@@ -606,6 +610,9 @@ Exit criteria (breakable assertions):
   changing, only which values populate the stack before a clause body runs.
 - Reference-mode (`&Enum`/`&!Enum`) surface eliminators — value mode only this slice;
   clause-style reference dispatch stays in `check_clause_word`.
+- Forwarded abstract quotation arms (an eliminator arm must be a quotation *literal*
+  carrying a `variant_tag`; see R4 step 1, OQ1 rows 7/10) — a real capability gap,
+  deferred rather than accepted and left to ICE at lowering.
 
 ## Phases (JSON)
 
