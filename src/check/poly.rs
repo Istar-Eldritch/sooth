@@ -1425,13 +1425,18 @@ pub(super) fn no_combinator_overload_matches_error(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_poly_call(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
+    scope: &Scope,
     arrays: &mut Vec<ArrayDecl>,
     refs: &mut Vec<RefDecl>,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
     let candidates = poly.env.get(name).expect("caller checked membership");
@@ -1494,6 +1499,17 @@ pub(super) fn check_poly_call(
         outputs.push(apply_subst(
             &sig, pty, &subst, name, span, ctx, arrays, refs,
         )?);
+    }
+    // Review fix (P7 slice 1): a polymorphic word consumes its operands
+    // exactly as a concrete one does, so it needs the same guard against
+    // moving a place a live projection still reaches -- `'T` binds to the
+    // receiver's struct type as readily as a declared `Point` does.
+    for i in base..stack.len() {
+        let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
+            .or_else(|| consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at));
+        if let Some(origin) = origin {
+            return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+        }
     }
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).

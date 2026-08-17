@@ -658,7 +658,9 @@ fn check_term(
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
             if poly.env.contains_key(name) && !fall_through_to_env {
-                return check_poly_call(name, span, &mut stack, ctx, arrays, refs, poly);
+                return check_poly_call(
+                    name, span, &mut stack, ctx, scope, arrays, refs, prov, live, at, poly,
+                );
             }
             // R1/R2: one name can carry several candidates. A single one is
             // the ordinary case and resolves by name at lowering exactly as
@@ -794,20 +796,17 @@ fn check_term(
             // projection still reaches (the owned-receiver projection arm's
             // `Slot.alias`, which carries no `Deriv` to be caught by the
             // named-place consume checks) cannot be moved into the call out
-            // from under that reference.
+            // from under that reference. The stranded reference is as often
+            // another operand of this same call (`mk &data &^ eat`) as a value
+            // left below it, so the scan covers the whole stack bar the
+            // operand being consumed itself.
             for i in base..stack.len() {
-                if let Some(alias) = stack[i].alias {
-                    if let Some(origin) = overlapping_projection(
-                        &stack[..base],
-                        scope,
-                        prov,
-                        live,
-                        at,
-                        alias.set,
-                        true,
-                    ) {
-                        return Err(consuming_borrowed_value_error(ctx, span, name, origin));
-                    }
+                let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
+                    .or_else(|| {
+                        consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at)
+                    });
+                if let Some(origin) = origin {
+                    return Err(consuming_borrowed_value_error(ctx, span, name, origin));
                 }
             }
             let carried = (base..stack.len())

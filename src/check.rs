@@ -2468,12 +2468,8 @@ fn check_shuffle(
             // that no longer exists; the anonymous analogue of
             // `consume_of_borrowed_place_error`, keyed by region rather than
             // by a place name.
-            if let Some(alias) = top.alias {
-                if let Some(origin) =
-                    overlapping_projection(stack, scope, prov, live, at, alias.set, true)
-                {
-                    return Err(consuming_borrowed_value_error(ctx, span, "drop", origin));
-                }
+            if let Some(origin) = consumed_place_conflict(top, stack, scope, prov, live, at) {
+                return Err(consuming_borrowed_value_error(ctx, span, "drop", origin));
             }
             // R6 (slice 8b): a side observation only. `drop` still pops one
             // value of any type with no type check, exactly as before; the

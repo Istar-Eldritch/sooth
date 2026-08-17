@@ -426,12 +426,6 @@ fn check_field_projection(
 /// live projection, a new `&` only with a live mutable one). Only
 /// *reference*-typed values are candidates: the receiver and its copies denote
 /// the same regions but hold no borrow, and consuming one is what ends it.
-///
-/// Review fix: also the guard at the point a place with a region --
-/// named or, via the owned-receiver projection arm, anonymous -- is
-/// consumed for good (`drop`, a moving word call, a moving field getter):
-/// called there with `mutable: true` so *any* live reference (shared or
-/// mutable) counts as a conflict, not only a mutable one.
 pub(super) fn overlapping_projection<'a>(
     below: &[Slot],
     scope: &'a Scope,
@@ -459,6 +453,33 @@ pub(super) fn overlapping_projection<'a>(
         .find(|slot| conflicts(slot.ty, slot.alias.map(|a| a.set)))
         .and_then(|slot| slot.alias)
         .map(|alias| AliasOrigin::Stack(alias.span))
+}
+
+/// P7 slice 1 review fix: the live reference that consuming `consumed` would
+/// strand, when one exists. The guard at every point a place with a region --
+/// named or, via the owned-receiver projection arm, anonymous -- is consumed
+/// for good (`drop`, a moving word call, `^`, a moving field getter). That arm
+/// produces a reference with a region (`Slot.alias`) but no `Deriv` (there is
+/// no place name to root one on), so it is invisible to the named-place
+/// consume checks (`consume_of_borrowed_place_error`) and needs this
+/// region-keyed sibling instead. `mutable: true` so *any* live reference
+/// (shared or mutable) counts, not only a mutable one.
+///
+/// A *reference* being consumed is not a place ending: consuming one of two
+/// shared projections of a field is how a borrow ends, and the storage it
+/// pointed into outlives it either way.
+pub(super) fn consumed_place_conflict<'a>(
+    consumed: Slot,
+    others: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+) -> Option<AliasOrigin<'a>> {
+    if matches!(consumed.ty, Type::Ref(..)) {
+        return None;
+    }
+    overlapping_projection(others, scope, prov, live, at, consumed.alias?.set, true)
 }
 
 /// `@` fetches, `!` stores, `+!` adds in place. All three are restricted
@@ -821,12 +842,10 @@ pub(super) fn check_owned_cell_word(
             // Review fix (P7 slice 1): `^` consumes its payload just as
             // `drop` does, so a payload a live projection still reaches
             // cannot be moved into the cell out from under that reference.
-            if let Some(alias) = stack[n - 1].alias {
-                if let Some(origin) =
-                    overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, true)
-                {
-                    return Err(consuming_borrowed_value_error(ctx, span, "^", origin));
-                }
+            if let Some(origin) =
+                consumed_place_conflict(stack[n - 1], &stack[..n - 1], scope, prov, live, at)
+            {
+                return Err(consuming_borrowed_value_error(ctx, span, "^", origin));
             }
             // Review fix: forward the payload's surviving set (R19) onto the
             // cell -- `^` allocating a closure-carrying value must keep it
@@ -1011,12 +1030,8 @@ pub(super) fn check_struct_get_word(
     // Review fix (P7 slice 1): this getter consumes the struct receiver just
     // as `drop` does, so it needs the same guard against discarding a place
     // a live projection still reaches.
-    if let Some(alias) = top.alias {
-        if let Some(origin) =
-            overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, true)
-        {
-            return Err(consuming_borrowed_value_error(ctx, span, name, origin));
-        }
+    if let Some(origin) = consumed_place_conflict(top, &stack[..n - 1], scope, prov, live, at) {
+        return Err(consuming_borrowed_value_error(ctx, span, name, origin));
     }
     let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
     stack.truncate(n - 1);
@@ -1546,6 +1561,7 @@ pub(super) fn consuming_borrowed_value_error(
     name: &str,
     origin: AliasOrigin<'_>,
 ) -> String {
+    let name = crate::resolve::demangle_call(name);
     let held = match origin {
         AliasOrigin::Name(n) => format!("the projection bound as `{n}`"),
         AliasOrigin::Stack(pushed) => format!(
@@ -2546,6 +2562,147 @@ mod tests {
             err.contains("`eat` consumes a value while a reference derived from it is still live"),
             "unexpected message: {err}"
         );
+    }
+
+    /// Review fix: the stranded reference is as often another *operand of the
+    /// same call* as a value left below it -- `mk &data &^ eat` passes the
+    /// receiver and its projection together, and a scan that stops at the
+    /// call's own base sees neither. Both operand orders, since the scan has
+    /// to reach past the consumed operand in both directions.
+    #[test]
+    fn word_call_consuming_a_receiver_its_own_argument_projects_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( Point &i64 -- ) swap drop @ . ;\n\
+             : main ( -- ) 1 2 Point &x eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+        let swapped = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( &i64 Point -- ) drop @ . ;\n\
+             : main ( -- ) 1 2 Point &x swap eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            swapped
+                .contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {swapped}"
+        );
+    }
+
+    /// Review fix: a polymorphic word is intercepted before the concrete `env`
+    /// lookup and so misses the guard on that path entirely -- `'T` binds to
+    /// the receiver's struct type as readily as a declared `Point` does, which
+    /// makes any generic consumer (`drop`-alike, a container `push`) a route to
+    /// the same dangling reference.
+    #[test]
+    fn poly_call_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( 'T -- ) drop ;\n\
+             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+        // And with the receiver and its projection as operands of that same
+        // generic call, the shape the concrete path also has to reach past.
+        let same_call = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( 'T &i64 -- ) drop drop ;\n\
+             : main ( -- ) 1 2 Point &x eat ;",
+        )
+        .unwrap_err();
+        assert!(
+            same_call
+                .contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {same_call}"
+        );
+    }
+
+    /// Review fix: consuming a *reference* is how a borrow ends, not a place
+    /// ending. Two shared projections of one field coexist by design (a new
+    /// `&` conflicts only with a live `&!`), so discarding one while the other
+    /// is live has to stay legal -- the consume guard keys on the value that
+    /// owns the storage, never on a reference into it.
+    #[test]
+    fn dropping_one_of_two_shared_projections_is_allowed() {
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap &x drop swap @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// Review fix: `&>` narrows a reference to one element, and the region it
+    /// forwards is the only thing tying that element back to the receiver the
+    /// storage belongs to. Without the forwarding the consume guard reads the
+    /// receiver as unborrowed and this compiles into a read through a freed
+    /// heap block.
+    #[test]
+    fn array_index_ref_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Buf data ^[u8 4] len usize ;\n\
+             : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
+             : main ( -- ) mk &data &^ 0 >usize &> swap drop @ >i64 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The same forwarding through the *fused* accessor (`&Buf>data`), which
+    /// reaches a field of an already-referenced struct and so is the step a
+    /// chain out of a nested receiver runs through.
+    #[test]
+    fn fused_field_ref_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Buf data ^[u8 4] len usize ;\n\
+             type: Wrap b Buf ;\n\
+             : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
+             : main ( -- ) mk Wrap &b &Buf>data &^ swap drop 0 >usize &> @ >i64 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A real build always mangles (`always_mangle`, `driver.rs`), so the
+    /// consumer reaches this diagnostic as `eat__m0` / `Outer__m0>n` unless it
+    /// demangles, exactly as every sibling error in this file does.
+    #[test]
+    fn consuming_borrowed_value_error_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "type: Wrap n i64 ;\n\
+             : eat ( Wrap -- ) drop ;\n\
+             : main ( -- ) 1 Wrap &n swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("`eat` consumes"), "unexpected message: {err}");
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+        // The generated aggregate-field getter reaches it as a mangled
+        // *accessor* spelling, the case a bare `demangle_word` would miss.
+        let getter = check_src_mangled(
+            "type: Inner v i64 ;\n\
+             type: Outer tag i64 n Inner ;\n\
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer>n drop drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            getter.contains("`Outer>n` consumes"),
+            "unexpected message: {getter}"
+        );
+        assert!(!getter.contains("__m"), "leaked a mangled name: {getter}");
     }
 
     /// And through `^`, which heap-allocates its top-of-stack operand and so
