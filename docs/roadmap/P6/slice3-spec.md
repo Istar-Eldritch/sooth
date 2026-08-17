@@ -343,7 +343,8 @@ eliminator's arms.
     reference mode, `scrutinee` is already the `IrType::Ptr` reference established at
     entry (`control_flow.rs:207-213`); push it unchanged. Either way, the value an arm
     body starts with is the *whole* aggregate/reference the accessor lowering added by R6
-    expects as its receiver — the same pointer `EnumWord::Get`/`Destructure` read
+    expects as its receiver — the same pointer `resolved_variant_fields`-driven
+    projection (owned or reference mode) and `EnumWord::Destructure` read
     `payload_offset + field.offset` from.
   - **Open verification, required before this requirement is considered done, not
     assumed:** confirm no code path calls `ir_type_of(Type::Variant(..))` while lowering
@@ -385,61 +386,108 @@ Unit test beside the lowering: an eliminator IR-lowering test (`lower_src`) that
 the dispatch emits the same tag-dispatch/phi-join shape a clause word does (reuse the
 `lower_clauses` test helpers), proving the synthetic-clause path reaches `lower_clauses`.
 
-### R6 — Variant-accessor IR lowering (`src/ir/layout.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/word_families.rs`)
+### R6 — Variant-accessor IR lowering (`src/ast.rs`, `src/check.rs`, `src/check/word_families.rs`, `src/ir/layout.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/word_families.rs`, `src/ir/driver.rs`)
 
-**New in this correction, not in the prior draft.** Slice 2 shipped the checker side of
-three variant-accessor mechanisms (scalar/whole-destructure via `Sig`, aggregate getter,
-reference-mode getter) but no IR lowering for any of them — `EnumWord`
-(`src/ir/layout.rs:264-266`) has exactly one variant, `Construct`, and its own doc comment
-still says "Enums have no getter/setter/destructure (elimination is clause-style, Phase
-4)", i.e. this gap was explicitly deferred to this slice and the comment was never
-updated. Before this requirement, `Type::Variant` cannot survive to the backend at all
-(`src/ir/types.rs:259`'s `unreachable!`) because nothing constructs a reachable value of
-that type from surface syntax (R2–R5 is what first does). This requirement is the direct
-structural mirror of what already exists for `StructWord`— not a new mechanism:
+**Re-pointed after P7.S1 merged (`3b9bbce`), which retired the fused accessor spelling
+this requirement originally targeted.** The prior draft of R6 planned `EnumWord::Get`
+and `Destructure` as a name-fused mirror of `StructWord::Get`/`Destructure`
+(`Variant>field` → a registry lookup by name). P7.S1 deleted that whole *mechanism* for
+structs — `StructWord::Get`/`Set`/`Peek` are gone (`slice1-spec.md` D3) — and replaced
+field access with a **receiver-directed projection**, `&field`/`&!field`, resolved per
+call site against the receiver's *type*, not a name fused with the aggregate's own name.
+P7.S1 shipped this for structs and *already extended the checker side to variants*
+(`check_field_projection`, `src/check/word_families.rs:268-`, its `Type::Variant` arm at
+`:314-317`) — a variant projection like `&r` on a `Type::Variant` receiver is
+**check-legal today**. P7.S1's own spec explicitly flags this requirement by name: "P6.S3's
+R6 ... must be re-pointed at this shape before implementation, including its own
+`EnumId`-keyed lowering-side table rather than a widened `resolved_fields`"
+(`docs/roadmap/P7/slice1-spec.md`, R4). This is that re-pointing.
 
-- Extend `EnumWord` with `Get(EnumId, usize /* variant */, usize /* field */)` and
-  `Destructure(EnumId, usize /* variant */)`, mirroring `StructWord::Get`/`Destructure`.
-- In the enum-word registry build (`src/ir/layout.rs:564-574`, the `ewords` loop that
-  today only inserts `EnumWord::Construct`), add the variant-word twin: for every variant
-  with fields, insert `"{Variant}>"` → `Destructure(id, vi)` and `"{Variant}>{field}"` →
-  `Get(id, vi, fi)` for each field. **This loop does not currently use the dual-key
-  `insert` closure the struct registry uses** (`layout.rs:526-530`); it inlines a
-  surface-then-mangled pair inline (`layout.rs:568-571`). Adopt the struct registry's
-  closure form here rather than inlining a second copy of the same two-line pattern —
-  same D7 keying discipline (mangled key always inserted, surface key only when it
-  differs), same rationale (an unambiguous single-instantiation call site resolves by
-  surface key; an ambiguous one resolves by the checker's mangled `builtin_overloads`
-  key). This covers **both** of Slice 2's consuming mechanisms (the `Sig`-dispatched
-  scalar getter and whole-destructure, and the checker-direct aggregate getter,
-  `check_variant_get_word`): all three are checked differently but resolve to the
-  identical call term at this point, and IR lowering does not distinguish aggregate from
-  scalar fields any more than `StructWord::Get` already doesn't.
-- Extend `lower_enum_word` (`src/ir/func_builder/quotation.rs`) with `Get`/`Destructure`
-  arms mirroring `lower_struct_word`'s (read `payload_offset + field.offset` instead of
-  the struct's bare `field.offset`, reusing `load_field_onto_stack`).
-- Extend `lower_reference_word` (`src/ir/func_builder/word_families.rs:26+`) with an
-  `EnumWord::Get` arm mirroring the existing `StructWord::Get` arm there (`:54`), reading
-  the same `payload_offset + field.offset` address and pushing a reference, inserted
-  before the locals fallback.
+**What P7.S1 left deliberately unfinished, and what this requirement now closes.**
+`resolved_fields` (`src/ast.rs:82`, `HashMap<Span, (StructId, usize)>`) is the side table
+a struct projection's resolution rides from checker to lowering (P7.S1 R2): the checker
+can't route by name (the name is a bare field like `hp`, ambiguous across every struct
+that has an `hp` field), so it records `span → (StructId, field index)` at the call site
+instead, threaded through `check.rs` → `ast.rs`'s `Module::resolved_fields` →
+`ir/driver.rs` → `FuncBuilder`, and `lower_reference_word`'s `_` arm
+(`word_families.rs:52-70`) reads it back per span rather than consulting a name registry.
+`check_field_projection`'s `Type::Variant` arm already resolves a variant field the same
+way (same function, same fields/name lookup, just a different decl table) — but it
+**never inserts into `resolved_fields`**, because that table is `StructId`-keyed and has
+no shape for an `EnumId`. There is a standing test proving this is deliberate, not an
+oversight (`word_families.rs:2178-2218`, asserting `resolved_fields.is_empty()` after
+checking a variant projection). So today a variant projection **type-checks and then has
+nowhere to lower to** — exactly the representation gap round 1 of this spec's review
+found for the retired `Circle>r` spelling, now relocated to `&r`.
+
+This requirement supplies the missing table and its lowering read, mirroring P7.S1's own
+R2/R6 structurally rather than reusing `resolved_fields` itself (per P7.S1's own
+instruction: "its own `EnumId`-keyed lowering-side table"):
+
+- Add `resolved_variant_fields: HashMap<Span, (EnumId, usize /* variant */, usize /* field */)>`
+  alongside `resolved_fields`: a `Module` field (`src/ast.rs:82`), a `PolyCtx`-riding
+  scratch field in `check.rs` next to `resolved_fields` (`check.rs:140`, same rationale —
+  it must survive an `if`-arm clone), threaded through `ir/driver.rs` and `FuncBuilder`
+  (`ir/func_builder/mod.rs:180` and every call site that threads `resolved_fields`)
+  identically to how `resolved_fields` is threaded, so this is additive plumbing along an
+  existing, proven path, not a new one.
+- In `check_field_projection`'s `Type::Variant` arm (`word_families.rs:314-317`), insert
+  `(span, (id, vi, fi))` into `resolved_variant_fields` — the one line P7.S1 explicitly
+  did not add. **The existing canary test
+  (`word_families.rs:2178-2218`, `resolved_fields.is_empty()`) must be updated, not
+  deleted**: it should now assert the entry lands in `resolved_variant_fields` and that
+  `resolved_fields` (the struct table) stays empty — preserving the real invariant it
+  guards (a variant must never be misrouted into the `StructId`-keyed table) while
+  reflecting that variant projection is no longer checker-only.
+- In `lower_reference_word`'s `_` arm (`word_families.rs:52-70`), add an
+  `else if let Some(&(id, vi, fi)) = self.resolved_variant_fields.get(&span)` branch
+  beside the existing `resolved_fields` lookup, following the identical owned/reference
+  consuming logic already there (`ref_inner.contains_key(&base)` decides whether the
+  receiver is popped, per P7.S1 D2) — the only difference is the addressed field:
+  `self.enums.layouts[id.index()].variants[vi].fields[fi]` at
+  `payload_offset + field.offset`, not the struct arm's bare `field.offset`.
+- The whole-variant destructure (`Circle>`) is unaffected by P7.S1 — it is a globally
+  unique fused name (`variant_generated_sigs` still registers only `"{surface}>"`,
+  `src/check/declarations.rs:1356-1379`, confirmed: the per-field scalar-getter entries
+  that loop used to also emit are gone), so it keeps the original name-registry design:
+  extend `EnumWord` (`src/ir/layout.rs:264-266`) with **`Destructure(EnumId, usize)`
+  only** (no `Get` variant — that mechanism moved to `resolved_variant_fields` above),
+  register `"{Variant}>"` → `Destructure(id, vi)` in the `ewords` loop
+  (`layout.rs:564-574`, adopting the struct registry's dual-key `insert` closure rather
+  than inlining a second copy — `layout.rs:526-530`), and extend `lower_enum_word`
+  (`quotation.rs`) with the one `Destructure` arm, reading every field at
+  `payload_offset + field.offset` in order (mirroring `lower_struct_word::Destructure`).
 
 Unit tests beside each lowering site, against hand-built IR state (this mechanism has no
 surface-syntax caller until R5 exists in the same slice, so these are exercised directly,
-the same way Slice 2 unit-tested its checker side against hand-built checker state before
-an `.sth` golden could reach it): a value-mode `Get` on an aggregate field returns the
-field's loaded value; a `Destructure` on a zero-field variant pushes nothing (fails if it
-panics on an empty field list); a reference-mode `Get` returns a reference at the correct
-`payload_offset`-relative address (fails if it forgets the payload offset and computes a
-bare `field.offset`, which would collide with the struct case's addressing on the same
-byte range).
+the same way P7.S1 and Slice 2 both unit-tested a checker-only mechanism against
+hand-built state before a lowering arm existed):
+
+- A projection lowering test asserting `resolved_variant_fields` is read and produces a
+  reference at `payload_offset + field.offset` for the correct variant — use a test enum
+  whose variants have *different* field layouts at the tested index, so a wrong-variant
+  mutation (reading `variants[vi']` for the wrong `vi'`) is visible rather than masked by
+  identical layouts.
+- Owned-receiver vs reference-receiver consuming behaviour: the owned case leaves the
+  receiver on the stack (per D2), the reference case pops it — asserted by stack-depth
+  after lowering, not merely that a reference is produced.
+- A `Destructure` test on a **multi-field** variant asserting it pushes exactly N values
+  in field order, plus a companion zero-field-variant test asserting it pushes nothing
+  without panicking (the zero-field case alone doesn't catch a mutation that always
+  pushes nothing).
+- The updated canary test (`word_families.rs:2178-2218`): a variant projection populates
+  `resolved_variant_fields` and leaves `resolved_fields` empty — fails if a future change
+  routes a variant into the struct table (the original misdispatch risk P7.S1's version
+  of this test existed to rule out).
 
 ### R7 — Golden (`examples/` + test harness)
 
 A `.sth` golden exercising a multi-variant enum end-to-end (construct a `Type::Variant`
-value via the eliminator, read a field via a Slice-2 accessor inside an arm, produce a
-result). This is the slice's exit witness: unlike Slice 2, the eliminator is the
-mechanism that first makes a `Type::Variant` value reachable from surface syntax, and R6
-is what first gives that value's accessors somewhere to lower to. The golden asserts
+value via the eliminator, read a field via a P7.S1-style `&field`/`&!field` projection
+inside an arm — the spelling P7.S1 retired the fused `Circle>field` form in favour of —
+produce a result). This is the slice's exit witness: unlike Slice 2, the eliminator is
+the mechanism that first makes a `Type::Variant` value reachable from surface syntax, and
+R6 is what first gives that value's projections somewhere to lower to. The golden asserts
 observable program output (source in → expected output), not merely that it compiles.
 Migration of `examples/vm.sth`/`Bool`/`Result`/`Option` is **Slice 4**.
 
@@ -518,50 +566,54 @@ Exit criteria (breakable assertions):
 
 ### Phase 3 — variant-accessor IR lowering
 
-Scope: R6. Add `EnumWord::Get`/`Destructure`, register them in `enums.words` alongside
-`Construct` (mirroring `StructWord`'s registration exactly), and extend
-`lower_enum_word`/`lower_reference_word` with the corresponding arms. Independently
-green and independently testable: these variants are constructed (registration) and
-matched (the new arms) within this phase regardless of whether anything calls them yet
-via surface syntax — not `dead_code`, the same chicken-and-egg Slice 2 already resolved
-on the checker side by unit-testing against hand-built state. This phase adds no surface
-way to reach a variant accessor; that arrives in Phase 4.
+Scope: R6 (re-pointed at P7.S1's receiver-directed projection shape, not the retired
+fused spelling). Add `resolved_variant_fields` and thread it from
+`check_field_projection`'s `Type::Variant` arm through to `FuncBuilder`, mirroring
+`resolved_fields`'s existing threading exactly; extend `lower_reference_word` with the
+read of it; add `EnumWord::Destructure` (the whole-variant fused word only — no `Get`
+variant, that mechanism is the side table) and its `lower_enum_word` arm. Independently
+green and independently testable: `resolved_variant_fields` is populated and read within
+this phase regardless of whether anything calls a variant projection yet via surface
+syntax, the same chicken-and-egg P7.S1 and Slice 2 both already resolved by unit-testing
+against hand-built state. This phase adds no surface way to reach a variant projection;
+that arrives in Phase 4.
 
-**Required in this same phase, not Phase 4 (round-2 review correction, reproduced by two
-independent reviewers building it locally):** `EnumWord` has exactly one variant
-(`Construct`) before this phase. Adding `Get`/`Destructure` here is what first turns it
-into a multi-variant enum, so it is **this** phase, not Phase 4's `Eliminate`, that
-trips `src/ir/func_builder/control_flow.rs:236`'s irrefutable
+**Required in this same phase, not Phase 4** (this attribution held up under round-2
+review, reproduced by two independent reviewers building it locally — re-verify after the
+R6 re-pointing, since `EnumWord` now gains only one new variant instead of two, but the
+underlying mechanism is unchanged): `EnumWord` has exactly one variant (`Construct`)
+before this phase. Adding `Destructure` here is what first turns it into a multi-variant
+enum, so it is **this** phase, not Phase 4's `Eliminate`, that trips
+`src/ir/func_builder/control_flow.rs:236`'s irrefutable
 `let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant];` (E0005: refutable
-pattern). An earlier draft attributed this breakage to Phase 4's `Eliminate` variant;
-that is wrong — *any* second `EnumWord` variant trips it, and `Get`/`Destructure` are
-the second and third. Fix it here: replace the irrefutable `let` with a `let ... else`
-(or `match`) whose non-`Construct` path is `unreachable!("a clause always dispatches to
-a variant constructor")`. `src/ir/func_builder/quotation.rs:453`'s `lower_enum_word`
-match stays exhaustive through this phase (`Get`/`Destructure` get real arms here), so it
-does **not** break in Phase 3 — only in Phase 4, when `Eliminate` is added without a
-corresponding `lower_enum_word` arm (by design, R5).
+pattern) — *any* second `EnumWord` variant trips it, and `Destructure` is the second.
+Fix it here: replace the irrefutable `let` with a `let ... else` (or `match`) whose
+non-`Construct` path is `unreachable!("a clause always dispatches to a variant
+constructor")`. `src/ir/func_builder/quotation.rs:453`'s `lower_enum_word` match stays
+exhaustive through this phase (`Destructure` gets a real arm here), so it does **not**
+break in Phase 3 — only in Phase 4, when `Eliminate` is added without a corresponding
+`lower_enum_word` arm (by design, R5).
 
 Exit criteria (breakable assertions):
 
-- `cargo build`/`cargo clippy -- -D warnings` pass with all three `EnumWord` variants
-  present (`Construct`, `Get`, `Destructure`) — fails if `control_flow.rs:236`'s fix is
-  deferred, per the correction above.
-- A value-mode `Get` lowering test on an aggregate field, asserting **both** the loaded
-  value's address (`payload_offset + field.offset` for the correct variant, not an
-  adjacent variant sharing the same field index) **and** its loaded `IrType`. Use a test
-  enum whose variants have *different* field layouts at the tested index (not two
-  same-shaped variants) — otherwise a wrong-variant mutation (reading `variants[vi']`
-  for the wrong `vi'`) is invisible, and an address-only assertion never catches a
-  wrong load width/signedness.
+- `cargo build`/`cargo clippy -- -D warnings` pass with both `EnumWord` variants present
+  (`Construct`, `Destructure`) — fails if `control_flow.rs:236`'s fix is deferred, per
+  the correction above.
+- A projection lowering test asserting `resolved_variant_fields` is read and the pushed
+  reference's address is `payload_offset + field.offset` for the correct variant **and**
+  the correct `IrType`. Use a test enum whose variants have *different* field layouts at
+  the tested index (not two same-shaped variants) — otherwise a wrong-variant mutation
+  (reading `variants[vi']` for the wrong `vi'`) is invisible, and an address-only
+  assertion never catches a wrong load width/signedness.
+- An owned-vs-reference-receiver consuming test: the owned case leaves the receiver on
+  the stack (asserted by stack depth after lowering, per D2), the reference case pops it.
 - A `Destructure` lowering test on a **multi-field** variant asserting it pushes exactly
   N values in field order, **plus** a companion test on a zero-field variant asserting
   it pushes nothing and does not panic. The zero-field case alone does not catch a
   mutation that always pushes nothing regardless of field count.
-- A reference-mode `Get` lowering test asserting the returned reference's address
-  equals `payload_offset + field.offset` **as an absolute value**, not merely "matches
-  the value-mode case's result" — a relative comparison would pass if both modes shared
-  the same regression (e.g. both dropping `payload_offset`).
+- The updated canary test (`word_families.rs:2178-2218`, see R6): a variant projection
+  populates `resolved_variant_fields` and leaves `resolved_fields` (the struct table)
+  empty — fails if a future change misroutes a variant into the struct-keyed table.
 
 ### Phase 4 — eliminator lowering + golden
 
@@ -573,9 +625,9 @@ and feed `lower_clauses` under `ArmBinding::WholeValue`. Add the end-to-end `.st
 This phase is where an eliminator call first compiles and runs, and where Phase 3's
 accessor lowering is first exercised by a real program.
 
-**Required in this same phase** (corrected in round 2: `control_flow.rs:236` was already
-fixed in Phase 3, since `Get`/`Destructure` tripped it first — only the `lower_enum_word`
-match remains to update here):
+**Required in this same phase** (corrected in round 2, re-verify after the R6
+re-pointing: `control_flow.rs:236` was already fixed in Phase 3, since `Destructure`
+tripped it first — only the `lower_enum_word` match remains to update here):
 
 - `src/ir/func_builder/quotation.rs:453` — E0004: `lower_enum_word` gains
   `EnumWord::Eliminate(_) => unreachable!(...)`, sound only because the `calls.rs`
@@ -592,18 +644,21 @@ Exit criteria (breakable assertions):
   lowering test) is unchanged and still passes — proves `ArmBinding` is additive, not a
   behaviour change to real clause words.
 - The `.sth` golden asserts observable output for a multi-variant enum eliminated
-  end-to-end with a Slice-2 accessor read inside an arm — fails if elimination or
-  field access regresses. This is the first test that exercises Phase 3's accessor
-  lowering through a real surface program rather than hand-built IR state.
+  end-to-end with a `&field`/`&!field` projection read inside an arm — fails if
+  elimination or field access regresses. This is the first test that exercises Phase 3's
+  projection lowering through a real surface program rather than hand-built IR state.
 
 ## Out of scope (restated)
 
 - Migrating `examples/vm.sth`, `Bool`, `Result`/`Option` off clause-style dispatch, or
   deleting `WordBody::Clauses`/`parse_clauses` — Slice 4.
-- Any change to `Type::Variant`, the **checker-side** accessor mechanisms, or their
-  generated `Sig`s — Slice 2's checker is done; this slice only consumes it. (R6 adds
-  their *missing* IR lowering, which is new code, not a change to existing code — Slice 2
-  never shipped an IR side to modify.)
+- Any change to `Type::Variant`, `variant_generated_sigs`, or `check_field_projection`'s
+  existing struct behaviour — Slice 2's checker-side variant work and P7.S1's
+  receiver-directed projection are both done; this slice only consumes them. R6's one
+  addition to checker code (the `resolved_variant_fields` insert in
+  `check_field_projection`'s already-shipped `Type::Variant` arm) is filling in a gap
+  P7.S1 explicitly left as a no-op for this slice to close (P7.S1's own R4), not
+  reopening either slice's design.
 - Any change to `EnumLayout`/`VariantLayout` or `dispatch_on_tag`. `lower_clauses`
   gains an additive `ArmBinding` parameter (R5); every existing caller keeps its current
   behaviour bit-for-bit under `Decompose` — this is not the block/phi dispatch shape
@@ -631,12 +686,12 @@ Exit criteria (breakable assertions):
     },
     {
       "phase": 3,
-      "focus": "variant-accessor IR lowering: EnumWord::Get/Destructure mirroring StructWord, unit-tested against hand-built IR state",
+      "focus": "variant-projection IR lowering: resolved_variant_fields side table mirroring P7.S1's resolved_fields, plus EnumWord::Destructure, unit-tested against hand-built IR state",
       "difficulty": "standard"
     },
     {
       "phase": 4,
-      "focus": "eliminator lowering via a new ArmBinding::WholeValue mode on lower_clauses, EnumWord::Eliminate, plus the end-to-end golden",
+      "focus": "eliminator lowering via a new ArmBinding::WholeValue mode on lower_clauses, EnumWord::Eliminate, plus the end-to-end golden reading a field via &field/&!field",
       "difficulty": "hard"
     }
   ]
