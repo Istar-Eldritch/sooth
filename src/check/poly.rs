@@ -142,11 +142,19 @@ pub(super) fn check_poly_combinator_standalone(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        poly.combinators.tail(),
+    );
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -183,6 +191,7 @@ pub(super) fn check_poly_combinator_standalone(
         declares_inline: word.declares_inline,
         module: word.module,
         span: word.span,
+        declared_globals: word.declared_globals.clone(),
     };
     let mut dropped = Vec::new();
     check_word(
@@ -193,6 +202,7 @@ pub(super) fn check_poly_combinator_standalone(
         cells,
         refs,
         structs,
+        statics,
         modules,
         &mut dropped,
         poly,
@@ -229,8 +239,20 @@ pub(crate) fn check_poly_combinator_repl(
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
+    // A session retains no `static:` declarations either (P7 slice 2 is a
+    // build-path feature), so the static table is empty here.
     check_poly_combinator_standalone(
-        word, sig, enums, env, arrays, cells, refs, structs, None, &mut poly,
+        word,
+        sig,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &[],
+        None,
+        &mut poly,
     )
 }
 
@@ -252,6 +274,7 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
@@ -265,7 +288,14 @@ pub fn check_poly_body(
     // empty index is correct here, not just convenient -- lowering never
     // back-edges a polymorphic instantiation either (`lower_instantiation`
     // hardcodes `self_tail = false`).
-    let ctx = word_ctx(word, structs, enums, modules, &CombinatorIndex::new());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        &CombinatorIndex::new(),
+    );
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {
@@ -844,42 +874,56 @@ pub(super) fn poly_reference_word(
             if rest.is_empty() {
                 return Err(poly_borrow_of_non_place_error(ctx, span, name));
             }
-            let Some(local_pt) = scope.locals.get(rest).cloned() else {
+            // R1's resolution order: a bound local first, then a static of
+            // this module, mirroring the monomorphic `check_reference_word`.
+            let referent_pt = if let Some(local_pt) = scope.locals.get(rest).cloned() {
+                // D5: only an aggregate local is borrowable -- a bare type
+                // variable might instantiate to a scalar, which has no
+                // address, so the conservative rule refuses every
+                // bare-variable local uniformly rather than deferring the
+                // question to instantiation.
+                let is_aggregate = matches!(local_pt, PolyType::Array(..))
+                    || matches!(
+                        local_pt,
+                        PolyType::Concrete(
+                            Type::Struct(..)
+                                | Type::Enum(..)
+                                | Type::Array(..)
+                                | Type::OwnedCell(..)
+                        )
+                    );
+                if !is_aggregate {
+                    let ty_str = poly_type_str(&local_pt, sig);
+                    let is_quotation = matches!(local_pt, PolyType::Quotation(..))
+                        || matches!(local_pt, PolyType::Concrete(t) if crate::ast::is_quotation_type(t).is_some());
+                    return Err(match local_pt {
+                        _ if is_quotation => {
+                            poly_borrow_of_quotation_local_error(ctx, span, rest, &ty_str)
+                        }
+                        PolyType::Var(_) => {
+                            poly_borrow_of_variable_local_error(ctx, span, rest, &ty_str)
+                        }
+                        _ => poly_borrow_of_non_aggregate_local_error(ctx, span, rest, &ty_str),
+                    });
+                }
+                // Borrowing is not a move, but the referent still has to be
+                // there: a local already consumed holds nothing, exactly the
+                // monomorphic `use_after_move_error` reason for the same op.
+                if let Some(site) = scope.moves.moved_site(rest) {
+                    return Err(poly_use_after_move_error(ctx, span, rest, site));
+                }
+                local_pt
+            } else if let Some(static_ty) = ctx.static_type(rest) {
+                // R1: a *scalar* static is borrowable though a scalar local
+                // is not -- a static has a data-symbol address to hand out.
+                // Never moved or dropped, so the move gate above has nothing
+                // to say about it.
+                PolyType::Concrete(static_ty)
+            } else {
                 return Err(poly_borrow_of_non_local_error(ctx, span, name, rest));
             };
-            // D5: only an aggregate local is borrowable -- a bare type
-            // variable might instantiate to a scalar, which has no address,
-            // so the conservative rule refuses every bare-variable local
-            // uniformly rather than deferring the question to instantiation.
-            let is_aggregate = matches!(local_pt, PolyType::Array(..))
-                || matches!(
-                    local_pt,
-                    PolyType::Concrete(
-                        Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
-                    )
-                );
-            if !is_aggregate {
-                let ty_str = poly_type_str(&local_pt, sig);
-                let is_quotation = matches!(local_pt, PolyType::Quotation(..))
-                    || matches!(local_pt, PolyType::Concrete(t) if crate::ast::is_quotation_type(t).is_some());
-                return Err(match local_pt {
-                    _ if is_quotation => {
-                        poly_borrow_of_quotation_local_error(ctx, span, rest, &ty_str)
-                    }
-                    PolyType::Var(_) => {
-                        poly_borrow_of_variable_local_error(ctx, span, rest, &ty_str)
-                    }
-                    _ => poly_borrow_of_non_aggregate_local_error(ctx, span, rest, &ty_str),
-                });
-            }
-            // Borrowing is not a move, but the referent still has to be
-            // there: a local already consumed holds nothing, exactly the
-            // monomorphic `use_after_move_error` reason for the same op.
-            if let Some(site) = scope.moves.moved_site(rest) {
-                return Err(poly_use_after_move_error(ctx, span, rest, site));
-            }
             // Exclusivity (R-B5/OQ1), symmetric and per place: a new mutable
-            // borrow conflicts with any live borrow of this local, a new
+            // borrow conflicts with any live borrow of this place, a new
             // shared one with a live mutable borrow. Two live `&!` rooted at
             // different locals do not conflict. Enforced here, in the poly
             // body, because a plain generic word is checked once and never
@@ -896,7 +940,7 @@ pub(super) fn poly_reference_word(
                 mutable,
                 span,
             });
-            stack.push(PolyType::Ref(Box::new(local_pt), mutable));
+            stack.push(PolyType::Ref(Box::new(referent_pt), mutable));
             lits.push(None);
         }
     }
@@ -1845,6 +1889,8 @@ fn poly_borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str) -> Strin
 
 /// `&x`/`&!x` where `x` is not a local currently in scope.
 fn poly_borrow_of_non_local_error(ctx: &Ctx, span: Span, spelled: &str, local: &str) -> String {
+    let spelled = crate::resolve::demangle_word(spelled);
+    let local = crate::resolve::demangle_word(local);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{spelled}` does not borrow a place in `{where_}` (line {})\n  `{local}` is not a local in scope",
@@ -1924,6 +1970,7 @@ fn poly_conflicting_borrow_error(
     new_mutable: bool,
     live: &PolyBorrow,
 ) -> String {
+    let place = crate::resolve::demangle_word(place);
     let where_ = ctx.word_name().unwrap_or("<line>");
     let sigil = if new_mutable { "&!" } else { "&" };
     let held = if live.mutable { "mutable" } else { "shared" };
@@ -3261,6 +3308,36 @@ mod tests {
         assert_eq!(
             err,
             "error: cannot `@` the type variable `'T` in `g` (line 1)\n  `'T` has no `Copy` bound, and a linear value cannot be duplicated; declare `'T: Copy` if every instantiation is `Copy`"
+        );
+    }
+
+    /// P7 slice 2 review: `poly_reference_word`'s local-only lookup left a
+    /// generic word unable to borrow a module static at all, though R1 has no
+    /// monomorphic-only carve-out. `bump` never names `COUNT` as a local, so
+    /// this only type-checks if the static fallback fires.
+    #[test]
+    fn poly_body_can_borrow_a_module_static() {
+        check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 + &!COUNT swap ! v ;\n\
+             : main ( -- ) 5 bump drop ;",
+        )
+        .unwrap();
+    }
+
+    /// The exclusivity scan applies to a poly-body static borrow exactly as
+    /// it does to a local's: two simultaneously live `&!COUNT` conflict.
+    #[test]
+    fn poly_body_two_live_mutable_static_borrows_conflict() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : bump ( 'T: Copy -- 'T ) &!COUNT &!COUNT drop drop ;\n\
+             : main ( -- ) 5 bump drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
         );
     }
 

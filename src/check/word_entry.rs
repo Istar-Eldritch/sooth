@@ -9,13 +9,21 @@ pub(super) fn check_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
-    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        poly.combinators.tail(),
+    );
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
             reject_variant_local(&ctx, name, "parameter")?;
@@ -39,10 +47,11 @@ pub(super) fn check_word(
     }
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
-            word, enums, terms, env, arrays, cells, refs, structs, modules, dropped, poly,
+            word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
         ),
         WordBody::Clauses(clauses) => check_clause_word(
-            word, enums, clauses, env, arrays, cells, refs, structs, modules, dropped, poly,
+            word, enums, clauses, env, arrays, cells, refs, structs, statics, modules, dropped,
+            poly,
         ),
     }
 }
@@ -188,6 +197,7 @@ fn check_terms_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
@@ -218,7 +228,14 @@ fn check_terms_word(
         .map(|s| Slot::computed(s.ty))
         .collect();
 
-    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        poly.combinators.tail(),
+    );
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
     let mut final_stack = check_terms(
@@ -294,6 +311,7 @@ fn check_clause_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
@@ -398,6 +416,7 @@ fn check_clause_word(
             cells,
             refs,
             structs,
+            statics,
             modules,
             ref_mutable,
             dropped,
@@ -420,12 +439,20 @@ fn check_clause_body(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     ref_mutable: Option<bool>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
-    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        poly.combinators.tail(),
+    );
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&ctx, name, "local")?;

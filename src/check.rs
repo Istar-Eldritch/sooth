@@ -15,7 +15,8 @@ use crate::ast::{
     intern_owned_cell_type, intern_ref_type, variant_type, ArrayDecl, Bound, CallInst, Clause,
     EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo,
     OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect,
-    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl,
+    WordBody, WordDef,
 };
 
 mod audits;
@@ -25,6 +26,7 @@ mod combinators;
 mod declarations;
 mod drop_graph;
 mod engine;
+mod globals;
 mod operators;
 mod poly;
 mod terms;
@@ -49,14 +51,16 @@ pub(crate) use self::combinators::{
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
-    check_exported_signatures, check_selective_imports, check_types, enum_generated_sigs,
-    selective_not_exported_error, struct_generated_sigs, variant_generated_sigs, SelectiveName,
+    check_exported_signatures, check_selective_imports, check_static_decls, check_types,
+    enum_generated_sigs, selective_not_exported_error, struct_generated_sigs,
+    variant_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
     check_drop_overload_reachability, has_self_tail_call, terms_tail_call_self,
 };
 use self::engine::*;
+pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
@@ -612,6 +616,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         instantiations: _,
         builtin_overloads: _,
         modules,
+        statics,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
@@ -681,6 +686,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     owned_cells,
                     refs,
                     structs,
+                    statics,
                     Some(modules),
                     &mut poly,
                 )?;
@@ -695,6 +701,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     structs,
                     enums,
                     arrays,
+                    statics,
                     Some(modules),
                     &mut builtin_overloads,
                 )?;
@@ -714,6 +721,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 owned_cells,
                 refs,
                 structs,
+                statics,
                 Some(modules),
                 &mut sites,
                 &mut poly,
@@ -867,8 +875,20 @@ pub(crate) fn check_def_collecting_drop_sites(
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
+    // A REPL session declares no `static:` storage (P7 slice 2 is a build-path
+    // feature), so the static table is empty here.
     check_word(
-        word, enums, &env, arrays, cells, refs, structs, None, &mut sites, &mut poly,
+        word,
+        enums,
+        &env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &[],
+        None,
+        &mut sites,
+        &mut poly,
     )?;
     Ok((sites, insts, overloads))
 }
@@ -1332,6 +1352,7 @@ fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
 /// what keeps `walk ( &!List -- ) ... walk ;` legal.
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
     let callee = crate::resolve::demangle_call(callee);
+    let place = crate::resolve::demangle_word(place);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
@@ -1357,7 +1378,15 @@ fn check_reference_across_back_edge(
 ) -> Result<(), String> {
     for slot in args {
         if let Some(id) = slot.deriv {
-            if let Some(place) = &prov.deriv(id).owned_root {
+            let deriv = prov.deriv(id);
+            if let Some(place) = &deriv.owned_root {
+                // R3: a static's data-segment storage survives every loop
+                // iteration, unlike a local's slot (rebound at the loop
+                // header); only a genuine local's owned_root crosses the
+                // back-edge unsafely.
+                if deriv.static_root {
+                    continue;
+                }
                 return Err(reference_across_back_edge_error(ctx, span, callee, place));
             }
         }
@@ -2271,6 +2300,7 @@ fn conflicting_borrow_error(
     new_mutable: bool,
     live: &Deriv,
 ) -> String {
+    let place = crate::resolve::demangle_word(place);
     let sigil = if new_mutable { "&!" } else { "&" };
     let held = if live.mutable { "mutable" } else { "shared" };
     let note = if live.projected {
@@ -3422,6 +3452,21 @@ mod tests {
             err.contains("`loopy` expected `str`, found `i64`"),
             "names the callee and both types: {err}"
         );
+    }
+    /// P7 slice 2 (R3) review: a static's data-segment storage survives
+    /// every loop iteration, unlike a local's slot (rebound at the loop
+    /// header), so a fresh `&!COUNT` passed across a self-tail-call
+    /// back-edge must be accepted, not rejected with a message that calls
+    /// `COUNT` "a local of this frame" (false for a static root).
+    #[test]
+    fn static_ref_crosses_self_tail_call_back_edge_ok() {
+        check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : spin ( &!i64 i64 -- )\n  | c n |\n  c 1 +!\n  \
+             n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;\n\
+             : main ( -- ) &!COUNT 3 spin ;",
+        )
+        .expect("a static-rooted reference may cross the back-edge freely");
     }
     /// Slice 10a (R12): `while` -- the symmetric shape whose back-edge produced
     /// the carried input pre-rewrite and produces the ground declared output

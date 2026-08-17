@@ -234,6 +234,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // the six comparison words beside it, from `lib/core.sth`.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
+    let mut statics = Vec::new();
     // Phase 5 slice 1 (D5): shared across the closure, its instantiation ids
     // computed against the concrete registries as the pre-pass left them --
     // every file's `type:` names are registered above before any body parses,
@@ -289,6 +290,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         }
         words.extend(bodies.words);
         externs.extend(bodies.externs);
+        statics.extend(bodies.statics);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -319,6 +321,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
         modules,
+        statics,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
     // module's `export:` list are both still their raw source spellings here,
@@ -327,6 +330,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // R20/R21: validate selective imports (each name exported by its source,
     // no collision) on the raw, pre-mangle module.
     check::check_selective_imports(&module, &selective_by_module)?;
+    // Phase 7 slice 2 (R6): the `static:` declarations and then the per-word
+    // global sets, both pre-mangle for the same reason -- a static's name, a
+    // word's name and a module's `export:` list all still agree here.
+    check::check_static_decls(&module)?;
+    check::check_globals(&module)?;
     resolve::resolve_modules(&mut module, always_mangle)?;
     Ok(module)
 }
@@ -587,6 +595,33 @@ mod tests {
         check::check(&mut module).expect("checks");
         check_no_main_in_closure(&module, &closure, Some(0))
             .expect("module 0's own `main` is allowed");
+    }
+
+    /// P7 slice 2 review fix: an imported inline combinator splices its body
+    /// under its own declaring module (`ctx.with_module`), including the
+    /// caller's own `~[ ... ]` argument, so a caller borrowing its own static
+    /// inside that argument used to fail to check -- `Ctx::static_type`
+    /// filtered on `s.module == ctx.module()`, which the splice sets to the
+    /// *callee's* module, not the caller's. This is exactly the shape every
+    /// `lib/combinators.sth` user (`while`/`each`/`map`/`fold`/`filter`/
+    /// `times`) reaches with a static in play.
+    #[test]
+    fn imported_inline_combinator_sees_callers_own_static() {
+        let s = Sandbox::new("combinator-sees-static");
+        s.write(
+            "lib.sth",
+            ": apply inline ( ~[ -- ] -- ) call ;\nexport: apply ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: c \"lib.sth\" ;\n\
+             static: COUNT i64 = 0 ;\n\
+             : main ( -- ) ~[ &!COUNT 1 +! ] c::apply &COUNT @ drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module)
+            .expect("`main`'s own static is in scope inside the spliced quotation argument");
     }
 
     /// The native build path rejects an *imported* file that also declares

@@ -178,8 +178,8 @@ pub(super) fn check_reference_word(
                     }
                 }
             }
-            // Everything else is a prefix borrow of a local, and only of a
-            // local.
+            // Everything else is a prefix borrow of a place: a bound local,
+            // or (R1) a module static.
             if rest.is_empty() {
                 return Err(borrow_of_non_place_error(
                     ctx,
@@ -188,36 +188,56 @@ pub(super) fn check_reference_word(
                     "it names nothing (a bare sigil cannot borrow whatever happens to be on the stack)",
                 ));
             }
-            let Some(local_ty) = scope.local_type(rest) else {
+            // R1's resolution order: a bound local first, then a static of
+            // this module, then nothing. A local shadowing a static therefore
+            // wins, exactly as it does for every other name.
+            let mut static_root = false;
+            let referent_ty = if let Some(local_ty) = scope.local_type(rest) {
+                // R11: `&q` on a quotation local currently reaches
+                // `borrow_of_scalar_local_error`, whose message lies about the
+                // `Cstr` placeholder; reject with the named-op wording instead.
+                if scope.local(rest).is_some_and(|b| b.quot.is_some()) {
+                    return Err(reject_quotation_operand(ctx, span, name));
+                }
+                if local_ty.is_ref() {
+                    return Err(borrow_of_reference_local_error(ctx, span, rest, local_ty));
+                }
+                if !matches!(
+                    local_ty,
+                    Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
+                ) {
+                    return Err(borrow_of_scalar_local_error(ctx, span, rest, local_ty));
+                }
+                // Borrowing is not a move, but the referent still has to be
+                // there. A local consumed earlier holds nothing, and borrowing
+                // it would read (and project through) storage its owner has
+                // already freed.
+                if let Some(site) = scope.moves.moved_site(rest) {
+                    return Err(use_after_move_error(ctx, span, rest, local_ty, site));
+                }
+                local_ty
+            } else if let Some(static_ty) = ctx.static_type(rest) {
+                // R1: a *scalar* static is borrowable though a scalar local is
+                // not -- a static has a data-symbol address to hand out, a
+                // scalar local has none. Nothing else about the borrow
+                // differs: the exclusivity scans below run verbatim, keyed on
+                // the same `owned_root` an owned local's borrow carries (R3).
+                // A static is never owned, moved or dropped, so the move and
+                // aggregate-only gates above have nothing to say about it.
+                static_root = true;
+                static_ty
+            } else {
+                // `rest` reaches here mangled whenever it named a type
+                // (`&!Point__m0>z`, an accessor whose field does not exist),
+                // so it is demangled like every other rendered name.
+                let shown = crate::resolve::demangle_call(rest);
                 let found = if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                    format!("`{rest}` is a literal, not a local")
+                    format!("`{shown}` is a literal, not a local")
                 } else {
-                    format!("`{rest}` is not a local in scope")
+                    format!("`{shown}` is not a local in scope")
                 };
                 return Err(borrow_of_non_place_error(ctx, span, name, &found));
             };
-            // R11: `&q` on a quotation local currently reaches
-            // `borrow_of_scalar_local_error`, whose message lies about the
-            // `Cstr` placeholder; reject with the named-op wording instead.
-            if scope.local(rest).is_some_and(|b| b.quot.is_some()) {
-                return Err(reject_quotation_operand(ctx, span, name));
-            }
-            if local_ty.is_ref() {
-                return Err(borrow_of_reference_local_error(ctx, span, rest, local_ty));
-            }
-            if !matches!(
-                local_ty,
-                Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
-            ) {
-                return Err(borrow_of_scalar_local_error(ctx, span, rest, local_ty));
-            }
-            // Borrowing is not a move, but the referent still has to be
-            // there. A local consumed earlier holds nothing, and borrowing it
-            // would read (and project through) storage its owner has already
-            // freed.
-            if let Some(site) = scope.moves.moved_site(rest) {
-                return Err(use_after_move_error(ctx, span, rest, local_ty, site));
-            }
             // Exclusivity, symmetric. A new mutable borrow conflicts with
             // any live borrow of the place; a new shared one conflicts with a
             // live mutable borrow. Per place, never a global counter: two live
@@ -252,8 +272,8 @@ pub(super) fn check_reference_word(
                     return Err(aliased_place_borrow_error(ctx, span, rest, &origin));
                 }
             }
-            let out = intern_ref_type(refs, local_ty, mutable);
-            let deriv = prov.borrow(rest, mutable, span);
+            let out = intern_ref_type(refs, referent_ty, mutable);
+            let deriv = prov.borrow(rest, mutable, static_root, span);
             stack.push(Slot::derived(out, Some(deriv)));
         }
     }
@@ -1182,8 +1202,9 @@ fn peek_of_linear_owned_payload_error(
 /// local name and nothing more, so the diagnostic names what was found there
 /// and points at the binding that would make it one.
 fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
+    let spelled = crate::resolve::demangle_call(spelled);
     format!(
-        "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name; bind the value with `| name |` first, then borrow that name",
+        "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name or a module `static:`; bind the value with `| name |` first, then borrow that name",
         in_word(ctx),
         span.line,
         span.col
@@ -1282,6 +1303,7 @@ fn aliased_place_borrow_error(
     place: &str,
     origin: &AliasOrigin<'_>,
 ) -> String {
+    let place = crate::resolve::demangle_word(place);
     let (alias, other, remedy) = match origin {
         AliasOrigin::Name(name) => (
             format!("`{name}`"),
@@ -1314,6 +1336,16 @@ mod tests {
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// `check_src` skips `resolve_modules` entirely, so it never mangles a
+    /// name and cannot catch a diagnostic that forgot to demangle one. Every
+    /// real build mangles (`assemble_module`'s `always_mangle`, `driver.rs`)
+    /// even for a single file, so this helper runs that same pass first.
+    fn check_src_mangled(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
@@ -1765,6 +1797,87 @@ mod tests {
         );
     }
 
+    // --- P7 slice 2, R1/R3: borrowing a module static. ---
+
+    /// R1: a *scalar* static is borrowable and types as `&!T` for its declared
+    /// `T`. The callee's declared `&!i64` parameter is what pins the type: a
+    /// borrow that produced anything else (or a shared `&i64`) fails to match
+    /// it.
+    #[test]
+    fn borrow_of_scalar_static_is_ref_typed() {
+        check_src(
+            "static: LIMIT i64 = 10 ;\n\
+             : peek ( &!i64 -- i64 ) @ ;\n\
+             : main ( -- ) &!LIMIT peek . ;",
+        )
+        .unwrap();
+    }
+
+    /// The twin, and the discriminating half: a scalar *local* still has no
+    /// address to hand out, so the static branch must not have made every
+    /// scalar borrowable.
+    #[test]
+    fn borrow_of_scalar_local_still_error() {
+        let err = check_src(": main ( -- ) 1 | x | &!x @ . ;").unwrap_err();
+        assert!(
+            err.contains("cannot borrow the scalar local `x` of type `i64`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("a scalar has no address"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R3: the exclusivity scan is `owned_root`-keyed and a static-rooted
+    /// borrow carries a real `owned_root`, so two live `&!` to one static
+    /// conflict exactly as two live `&!` to one local aggregate do. Giving a
+    /// static root `owned_root: None` would silently disable this scan for
+    /// permanent shared state.
+    #[test]
+    fn two_live_mutable_static_borrows_conflict() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT &!COUNT @ . @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The shared/mutable half of the same scan.
+    #[test]
+    fn shared_static_borrow_beside_a_live_mutable_one_conflicts() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT &COUNT @ . @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R1's resolution order: a bound local first, then a static. The local
+    /// here is a scalar, which is *not* borrowable, so the scalar-local
+    /// rejection proves the local won -- resolving to the static would have
+    /// type-checked clean.
+    #[test]
+    fn local_shadowing_a_static_resolves_to_the_local() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) 1 | COUNT | &COUNT @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot borrow the scalar local `COUNT`"),
+            "unexpected message: {err}"
+        );
+    }
+
     #[test]
     fn variant_accessor_absent_from_the_operands_enum_falls_through() {
         // R12: a name the operand's own enum does not hold is not established
@@ -1843,7 +1956,7 @@ mod tests {
         };
         let mut refs = Vec::new();
         let mut prov = Provenance::default();
-        let operand = prov.borrow("s", operand_mutable, Span::default());
+        let operand = prov.borrow("s", operand_mutable, false, Span::default());
         let ref_ty = intern_ref_type(&mut refs, shape_variant(module, 0), operand_mutable);
         let mut stack = vec![Slot::derived(ref_ty, Some(operand))];
         let out = check_reference_word(
@@ -1905,5 +2018,101 @@ mod tests {
             err.contains("expected `&Shape.Circle`, found `&!Shape.Circle`"),
             "unexpected message: {err}"
         );
+    }
+
+    /// R3: the no-stored-reference rule is type-keyed (`contains_reference`),
+    /// so it applies to a static-rooted reference unchanged -- the static
+    /// branch must not route around it.
+    #[test]
+    fn storing_a_static_ref_in_a_cell_is_error() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT ^ ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a reference cannot be stored"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("has type `&!i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A sigilled name that is neither a local nor a static of this module
+    /// still reaches the unchanged non-place rejection.
+    #[test]
+    fn borrow_of_neither_local_nor_static_is_error() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &NOPE @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&NOPE` does not borrow a place"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A real build always mangles (`always_mangle`, `driver.rs`), so a
+    /// static reaches this diagnostic as `COUNT__m0`, never as the source
+    /// spelling. `conflicting_borrow_error` must demangle the place before
+    /// rendering it, or the user sees a name they never wrote. Run through
+    /// `check_src_mangled`, not `check_src`: the latter never mangles
+    /// anything and cannot see this class of bug (P7 slice 2 review).
+    #[test]
+    fn conflicting_borrow_error_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT &!COUNT @ . @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    /// R3: the back-edge carve-out belongs to a borrow that actually rooted in
+    /// a static, not to every borrow whose root *name* answers the static
+    /// table. A local shadowing a static (legal, R1) wins the borrow, so its
+    /// reference must still be refused at the back-edge: the local's slot is
+    /// rebound each iteration whatever it is called.
+    #[test]
+    fn local_shadowing_a_static_keeps_the_back_edge_check() {
+        let err = check_src(
+            "static: COUNT i64 = 0 ;\n\
+             type: V x i64 ;\n\
+             : spin ( &!V i64 -- )\n  | r n |\n  n 0 = ~[\n  ] ~[\n    \
+             0 V | COUNT |\n    &!COUNT n 1 - spin\n  ] if ;\n\
+             : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a reference to a local cannot cross a loop")
+                && err.contains("`COUNT`, a local of this frame"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The non-place rejection renders a name too. It is reached with a
+    /// *mangled* one whenever the borrow named a type: `&!Point>z` resolves
+    /// `Point` and mangles it, then falls through here because `z` is not a
+    /// field.
+    #[test]
+    fn borrow_of_unknown_field_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point | p | &!Point>z drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!Point>z` does not borrow a place")
+                && err.contains("`Point>z` is not a local in scope"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
     }
 }

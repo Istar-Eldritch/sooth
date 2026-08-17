@@ -378,6 +378,7 @@ fn remap_imported_combinator(
         declares_inline: w.declares_inline,
         module: module_base + w.module,
         span: w.span,
+        declared_globals: w.declared_globals.clone(),
     }
 }
 
@@ -1443,6 +1444,16 @@ impl Session {
                 // an imported name's internal tag; reject it up front (covers
                 // the drop / def / poly fan-out with one check).
                 reject_double_colon_name("word", &word.name, word_span(&word))?;
+                // R6: `check_globals` runs only in `assemble_module`, so a
+                // `global:` clause here would be accepted and never checked.
+                // A live session declares no statics, so no entry could ever
+                // resolve; reject the clause, as `export:` is rejected above.
+                if let Some(entry) = word.declared_globals.as_ref().and_then(|e| e.first()) {
+                    return Err(format!(
+                        "error: `global:` has no meaning at the REPL (line {}, col {})\n  note: a live session declares no `static:` storage, so a word's global set cannot be checked",
+                        entry.span.line, entry.span.col
+                    ));
+                }
                 if word.name == "drop" {
                     self.eval_drop_overload(word, writer)
                 } else {
@@ -2405,6 +2416,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let funcs = {
             let resolve = resolver_for(&self.env);
@@ -2425,6 +2437,7 @@ impl Session {
             enums: enums.layouts,
             arrays: arrays.layouts,
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
@@ -2462,6 +2475,7 @@ impl Session {
             &self.structs,
             &self.enums,
             &self.arrays,
+            &[],
             None,
             &mut builtin_overloads,
         )?;
@@ -2726,6 +2740,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let mut funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
@@ -2775,6 +2790,7 @@ impl Session {
             enums: enums.layouts,
             arrays: arrays.layouts,
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -2908,6 +2924,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let (func, quot_funcs, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
@@ -2963,6 +2980,7 @@ impl Session {
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
@@ -3817,6 +3835,7 @@ mod tests {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let env = ir_arity_env(&session.typed_env());
         let resolve = resolver_for(&session.env);
@@ -4156,6 +4175,25 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(session.drop_overloads.is_empty());
+    }
+
+    #[test]
+    fn repl_global_clause_is_a_located_rejection() {
+        // R6: the boundary check lives in `assemble_module`, which the REPL
+        // never reaches, so without this gate the clause is accepted and
+        // silently unchecked -- the same line a file build rejects for naming
+        // no such static. The error is located at the offending entry, and the
+        // word does not enter the session.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line(": tick ( -- i64 ) global: NOPE w 1 ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("`global:` has no meaning at the REPL") && err.contains("col 27"),
+            "unexpected message: {err}"
+        );
+        assert!(!session.env.contains_key("tick"));
     }
 
     #[test]

@@ -53,6 +53,33 @@ pub struct IrModule {
     /// that effect; empty for a quotation-value-free module (every module
     /// until a materialization boundary produces one).
     pub quot_sigs: Vec<QuotSigLayout>,
+    /// Phase 7 slice 2 (D1): the module's `static:` storage, one entry per
+    /// declaration in source order. The backend lays each one down as a data
+    /// symbol in the preamble; `Instr::StaticAddr` names the same symbol.
+    /// Empty for a static-free module (every program until this slice).
+    pub statics: Vec<StaticData>,
+}
+
+/// One `static:`'s emitted storage. Backend-neutral: the slot's byte width
+/// and the constant to lay down, never a QBE data class.
+#[derive(Debug)]
+pub struct StaticData {
+    /// The module-mangled static name, which is also its data symbol and the
+    /// string an `Instr::StaticAddr` carries.
+    pub symbol: String,
+    pub size: u32,
+    pub init: StaticValue,
+}
+
+/// D3: a static's constant initialiser, already reduced from `ast::StaticInit`
+/// (an elided one having become its type's zero).
+#[derive(Debug)]
+pub enum StaticValue {
+    /// An integer constant occupying the slot's full width; a `bool` is `0`/`1`.
+    Int(i64),
+    /// A `str`: the slot holds the address of this content's `{ptr, len}`
+    /// descriptor, interned in the same literal pool as an `Instr::StrLit`.
+    Str(String),
 }
 
 #[derive(Debug)]
@@ -294,6 +321,11 @@ pub enum Instr {
     /// a materialization boundary to fill a quotation's `code` slot; realized
     /// on QBE as `%dst =l copy $sym`.
     FuncAddr(Value, String),
+    /// Phase 7 slice 2 (R1): the address of a module static's data symbol as an
+    /// `IrType::Ptr`. The referent shape is not in the type (references never
+    /// carry it); `push_reference` records it, so `@`/`!`/`+!` through the
+    /// resulting borrow dispatch exactly as they do for a struct-field place.
+    StaticAddr(Value, String),
     /// Slice 7a (R4/Q3): an indirect call through a code-handle `Value` (the
     /// quotation's `code` slot, already `Load`ed, `IrType::Code`). Mirrors
     /// `Call` but the callee is a value, not a symbol. `env` is not passed in

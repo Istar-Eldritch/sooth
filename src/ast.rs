@@ -72,6 +72,12 @@ pub struct Module {
     /// this vector; the entry carries that module's qualifier->module import
     /// map and its parsed `export:` list.
     pub modules: Vec<ModuleInfo>,
+    /// Phase 7 slice 2 (D4): one entry per `static:` declaration, in source
+    /// order. A static is never exported or imported (R2): its data symbol is
+    /// module-scoped mangled exactly like a word's, and only the per-word
+    /// `global:` clause on an exported word crosses a module boundary, never
+    /// the static itself.
+    pub statics: Vec<StaticDecl>,
 }
 
 /// Phase 4 slice 5a (R10): per-module resolution context assembled by the
@@ -723,6 +729,7 @@ pub fn bool_print_word_def() -> WordDef {
         declares_inline: false,
         module: 0,
         span: Span::default(),
+        declared_globals: None,
     }
 }
 
@@ -949,6 +956,61 @@ pub struct WordDef {
     /// `: main ( -- ) ;` and every other trivial stub word hit this) so a
     /// located error always has somewhere real to point.
     pub span: Span,
+    /// Phase 7 slice 2 (D2/D4): the word's own trailing `global:` clause,
+    /// sitting right after the effect's closing `)` and before the body --
+    /// `None` when no clause was written (byte-for-byte unchanged parse, the
+    /// additive regression guarantee). `Some(vec![])` is not representable: a
+    /// bare `global:` with no entry is a located parse error.
+    pub declared_globals: Option<Vec<GlobalEntry>>,
+}
+
+/// Phase 7 slice 2 (D1/D4): one `static:` module-level declaration -- a
+/// never-owned, never-moved, never-dropped place reached only through the
+/// existing `&`/`&!` sigil. Scalar types only this slice (`i64`/`u32`/`bool`/
+/// `str`); a struct-typed static is rejected at the declaration (OQ1, deferred
+/// to Phase 9). No `Type` variant is added for this: a static's ref is exactly
+/// `&T`/`&!T` for its declared `T`, interned the same way any other reference
+/// is (D4, decision 3).
+#[derive(Debug, Clone)]
+pub struct StaticDecl {
+    pub name: String,
+    pub ty: Type,
+    pub init: StaticInit,
+    /// Phase 4 slice 5a (R10) twin: the owning module id, mirroring
+    /// `StructDecl::module`. A static is module-private (R2): never exported,
+    /// never imported.
+    pub module: u32,
+    pub span: Span,
+}
+
+/// D1/D3: a static's initialiser, elided or a single literal -- no
+/// arithmetic, no reference to another static, no struct-literal aggregate.
+/// `Zero` is the type's zero value: `0` for an integer, `false` for `bool`,
+/// and the empty string `""` for `str`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StaticInit {
+    Zero,
+    Int(i64),
+    Bool(bool),
+    Str(String),
+}
+
+/// D2: one `NAME mode` entry of a word's `global:` clause.
+#[derive(Debug, Clone)]
+pub struct GlobalEntry {
+    pub name: String,
+    pub mode: GlobalMode,
+    /// The entry's `NAME` token, for the exact-match diagnostic (R6).
+    pub span: Span,
+}
+
+/// D2: a `global:` entry's declared access mode. Decision 5: mode is derived
+/// from the body by the checker, never independently authored -- this is what
+/// the declared clause is checked *against*, not trusted verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GlobalMode {
+    R,
+    W,
 }
 
 /// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.
@@ -1913,6 +1975,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
+            statics: Vec::new(),
         }
     }
 
@@ -2032,6 +2095,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
+            statics: Vec::new(),
         }
     }
 
@@ -2099,6 +2163,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
+            statics: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),
@@ -2501,6 +2566,7 @@ mod tests {
             declares_inline: false,
             module: 0,
             span: Span::default(),
+            declared_globals: None,
         }
     }
 

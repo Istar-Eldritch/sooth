@@ -155,6 +155,11 @@ pub(super) struct FuncBuilder<'a> {
     /// reference-mode clause scrutinee's `EnumId` when the referent itself is
     /// an enum.
     refs: &'a Refs,
+    /// Phase 7 slice 2 (R1): the module's `static:` table, name -> referent
+    /// `IrType`. Consulted by `lower_reference_word` only after a local lookup
+    /// misses, so a local shadowing a static still wins. Empty on the
+    /// REPL/destructor/test paths.
+    pub(super) statics: &'a Statics,
     /// R14: the per-call-site instantiation table. A `Call` term whose span
     /// keys an entry here is a call to a polymorphic word and resolves to that
     /// entry's mangled symbol and per-θ output shape, not the name-keyed
@@ -301,6 +306,7 @@ impl<'a> FuncBuilder<'a> {
             arrays,
             cells,
             refs,
+            statics,
         } = regs;
         FuncBuilder {
             env,
@@ -310,6 +316,7 @@ impl<'a> FuncBuilder<'a> {
             arrays,
             cells,
             refs,
+            statics,
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
             poly_arities: empty_poly_arities(),
@@ -897,6 +904,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                statics: empty_statics(),
             },
             "loop-word".to_string(),
         );

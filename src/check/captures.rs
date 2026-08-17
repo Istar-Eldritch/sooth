@@ -345,6 +345,7 @@ mod tests {
             declares_inline: false,
             module,
             span: Span::default(),
+            declared_globals: None,
         }
     }
     fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
@@ -394,7 +395,7 @@ mod tests {
         // Case 3a: a borrow whose `owned_root` names a current-frame local ->
         // FrameRooted.
         let mut prov = Provenance::default();
-        let d = prov.borrow("arr", false, span);
+        let d = prov.borrow("arr", false, false, span);
         let mut framed = Scope::default();
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let borrow_local = capture_binding("r", ref_ty, Some(d));
@@ -416,6 +417,7 @@ mod tests {
         let d = prov.add(Deriv {
             place: "p".to_string(),
             owned_root: None,
+            static_root: false,
             reborrow: true,
             mutable: false,
             projected: false,
@@ -574,7 +576,7 @@ mod tests {
         // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
         // from a used one.
         let word = bare_word("outer", 0);
-        let word_ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
+        let word_ctx = word_ctx(&word, &structs, &enums, &[], None, &CombinatorIndex::new());
         let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
             .expect_err("a captured `~` local must be rejected");
         assert!(

@@ -56,6 +56,12 @@ pub(super) struct Deriv {
     /// A reborrow of a reference *parameter* has none: its referent lives in an
     /// ancestor frame, so there is no place in this body to protect.
     pub(super) owned_root: Option<String>,
+    /// R3 (P7 slice 2): whether that root is a module `static:` rather than a
+    /// local. Recorded at the borrow, never re-derived by looking `owned_root`
+    /// up in the static table: locals are not mangled and statics are, so a
+    /// local spelled `COUNT__m0` in a module declaring `static: COUNT` answers
+    /// that lookup and would inherit a static's exemptions.
+    pub(super) static_root: bool,
     /// Whether `place` is a reference local this was reborrowed from, which is
     /// what the suspend rule is keyed on. Binding into a local does *not*
     /// clear this: the place stays suspended for as long as the bound
@@ -326,11 +332,18 @@ impl Provenance {
         id
     }
 
-    /// A fresh borrow of an owned aggregate place.
-    pub(super) fn borrow(&mut self, place: &str, mutable: bool, span: Span) -> DerivId {
+    /// A fresh borrow of an owned aggregate place, or (R3) of a module static.
+    pub(super) fn borrow(
+        &mut self,
+        place: &str,
+        mutable: bool,
+        static_root: bool,
+        span: Span,
+    ) -> DerivId {
         self.add(Deriv {
             place: place.to_string(),
             owned_root: Some(place.to_string()),
+            static_root,
             reborrow: false,
             mutable,
             projected: false,
@@ -348,9 +361,11 @@ impl Provenance {
         span: Span,
     ) -> DerivId {
         let owned_root = held.and_then(|id| self.deriv(id).owned_root.clone());
+        let static_root = held.is_some_and(|id| self.deriv(id).static_root);
         self.add(Deriv {
             place: place.to_string(),
             owned_root,
+            static_root,
             reborrow: true,
             mutable,
             projected: false,
@@ -1084,6 +1099,11 @@ pub(super) enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
+        /// R1 (P7 slice 2): the closure's `static:` declarations, which the
+        /// borrow-typing arm consults for the second kind of place a `&`/`&!`
+        /// can name. Scoped to `module` at every lookup: a static is
+        /// module-private.
+        statics: &'a [StaticDecl],
         /// R2 (slice 8b): the owning module of the word being checked, the
         /// caller module D1's `drop` gate and 8a's operator fix scope a name's
         /// visibility against.
@@ -1121,6 +1141,7 @@ pub(super) fn word_ctx<'a>(
     word: &'a WordDef,
     structs: &'a [StructDecl],
     enums: &'a [EnumDecl],
+    statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
     combs: &CombinatorIndex,
 ) -> Ctx<'a> {
@@ -1130,6 +1151,7 @@ pub(super) fn word_ctx<'a>(
         effect: &word.effect,
         structs,
         enums,
+        statics,
         module: word.module,
         modules,
         self_tail_call: has_self_tail_call(word, combs),
@@ -1146,6 +1168,24 @@ impl Ctx<'_> {
     pub(super) fn enums(&self) -> &[EnumDecl] {
         match self {
             Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
+        }
+    }
+
+    /// R1 (P7 slice 2): the declared type of the static `name`, or `None`
+    /// when no static of that name reached this check. `resolve::mangle` is
+    /// unconditional per module (R2), so by the time `check::check` runs,
+    /// `name` already carries its declaring module baked in (`COUNT__m1`) --
+    /// matching on it alone is what module-private lookup means post-mangle.
+    /// An additional `s.module == ctx.module()` filter is not just redundant
+    /// but wrong: a combinator splice checks the caller's own quotation
+    /// arguments under the callee's module (`inline_combinator`'s
+    /// `ctx.with_module`), so `ctx.module()` need not be the module that
+    /// mangled `name` even though the lookup is still correct. A REPL line
+    /// declares no statics.
+    pub(super) fn static_type(&self, name: &str) -> Option<Type> {
+        match self {
+            Ctx::Word { statics, .. } => statics.iter().find(|s| s.name == name).map(|s| s.ty),
+            Ctx::Line { .. } => None,
         }
     }
 
@@ -1236,6 +1276,7 @@ impl<'a> Ctx<'a> {
                 effect,
                 structs,
                 enums,
+                statics,
                 modules,
                 self_tail_call,
                 ..
@@ -1245,6 +1286,7 @@ impl<'a> Ctx<'a> {
                 effect,
                 structs,
                 enums,
+                statics,
                 module,
                 modules,
                 self_tail_call,
@@ -1274,6 +1316,7 @@ mod tests {
             declares_inline: false,
             module,
             span: Span::default(),
+            declared_globals: None,
         }
     }
     /// A `Res` owned by `defining`, mangled as `resolve` would in a multi-module
@@ -1299,7 +1342,14 @@ mod tests {
     ) -> Result<Option<Vec<Slot>>, String> {
         let word = bare_word("main", caller);
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, structs, &enums, modules, &CombinatorIndex::new());
+        let ctx = word_ctx(
+            &word,
+            structs,
+            &enums,
+            &[],
+            modules,
+            &CombinatorIndex::new(),
+        );
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         // The term is written in the caller's own module, so its span says so:
@@ -1466,7 +1516,7 @@ mod tests {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
+        let ctx = word_ctx(&word, &structs, &enums, &[], None, &CombinatorIndex::new());
         assert_eq!(ctx.module(), 3);
         assert!(ctx.modules().is_none());
     }
@@ -1789,6 +1839,51 @@ mod tests {
             "unrelated parents share no ancestry"
         );
     }
+    /// R1/R2 (P7 slice 2 review fix): post-mangle, module-private scoping
+    /// lives in the name itself (`resolve::mangle` bakes `COUNT` declared in
+    /// module 1 as `COUNT__m1`, unconditionally, before `check::check` ever
+    /// runs), so lookup matches on the mangled name alone. A combinator
+    /// splice checks the caller's own quotation arguments under the callee's
+    /// module (`inline_combinator`'s `ctx.with_module`), so `ctx.module()`
+    /// can legitimately differ from the module that mangled `name` --
+    /// filtering on `s.module == ctx.module()` (the prior behavior) rejected
+    /// exactly that case, making every static-touching program that called an
+    /// imported combinator fail to check.
+    #[test]
+    fn static_lookup_matches_by_mangled_name_under_a_splice_rescoped_ctx() {
+        let statics = vec![StaticDecl {
+            name: "COUNT__m1".to_string(),
+            ty: Type::I64,
+            init: crate::ast::StaticInit::Zero,
+            module: 1,
+            span: Span::default(),
+        }];
+        let enums: Vec<EnumDecl> = Vec::new();
+        let structs: Vec<StructDecl> = Vec::new();
+        // `main` declared `COUNT` in module 1, but is checked here under
+        // module 0 -- exactly what `ctx.with_module(comb.word.module)` does
+        // while splicing a module-0 combinator's body around `main`'s own
+        // `~[ ... ]` argument.
+        let owner = bare_word("main", 0);
+        let ctx = word_ctx(
+            &owner,
+            &structs,
+            &enums,
+            &statics,
+            None,
+            &CombinatorIndex::new(),
+        );
+        assert_eq!(
+            ctx.static_type("COUNT__m1"),
+            Some(Type::I64),
+            "a mangled name resolves even under a splice-rescoped ctx"
+        );
+        assert_eq!(
+            ctx.static_type("COUNT__m0"),
+            None,
+            "a different module's mangled name is simply absent, no filter needed"
+        );
+    }
     #[test]
     fn scope_bind_keeps_the_reborrow_and_the_owned_root() {
         // The fix this replaces: a bound reference used to release the place
@@ -1805,7 +1900,7 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let fresh = prov.borrow("v", true, span);
+        let fresh = prov.borrow("v", true, false, span);
         let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
         assert!(prov.deriv(projected).reborrow, "still suspends `r`");
@@ -1894,6 +1989,7 @@ mod tests {
                 declares_inline: false,
                 module: 0,
                 span: Span::default(),
+                declared_globals: None,
             };
             let ctx = Ctx::Line {
                 structs: &[],

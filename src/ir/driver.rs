@@ -153,12 +153,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             .cloned()
             .unwrap_or_else(|| name.to_string())
     };
+    let (statics, static_data) = build_statics(&module.statics, &enums);
     let regs = Registries {
         structs: &structs,
         enums: &enums,
         arrays: &arrays,
         cells: &cells,
         refs: &refs,
+        statics: &statics,
     };
 
     // R1: a recognized `drop` overload is excluded from this generic
@@ -296,6 +298,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         enums: enums.layouts,
         arrays: arrays.layouts,
         quot_sigs,
+        statics: static_data,
     })
 }
 
@@ -804,6 +807,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -833,6 +837,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -911,6 +916,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -947,6 +953,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -986,6 +993,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -1031,6 +1039,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -1079,6 +1088,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -1117,6 +1127,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
@@ -1176,6 +1187,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                statics: empty_statics(),
             },
             empty_instantiations(),
             empty_builtin_overloads(),
