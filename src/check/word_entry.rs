@@ -170,18 +170,12 @@ pub(super) fn check_reference_free_signature(
 ) -> Result<(), String> {
     for slot in &effect.outputs {
         if contains_reference(slot.ty, structs, enums, arrays) {
-            return Err(format!(
-                "error: a reference cannot be stored: `{}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
-                name, slot.ty
-            ));
+            return Err(stored_reference_output_error(name, slot.ty, ""));
         }
     }
     for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
-            return Err(format!(
-                "error: a reference cannot be stored: `{}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
-                name, slot.ty
-            ));
+            return Err(stored_reference_input_error(name, slot.ty, ""));
         }
     }
     Ok(())
