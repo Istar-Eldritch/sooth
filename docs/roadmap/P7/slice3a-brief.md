@@ -36,54 +36,120 @@ only — unification/monomorphization/lowering not yet traced)
    slice's gap only appears the first time a generic is nested inside *another*
    generic word's own signature — a case Phase 5 never needed and never built.
 
-4. **The likely shape of a fix, by analogy to the last time a type had to become
-   nameable-but-abstract.** Phase 4 Slice 6a gave quotations a `Type`/`PolyType`
-   variant, unification, and `apply_subst`, deferring real resolution to
-   monomorphization; Slice 7a then gave it a runtime representation. A generic
-   application over an abstract argument plausibly needs the same shape one level
-   in: a `PolyType` variant carrying "generic X applied to (possibly abstract)
-   arguments," participating in unification and `apply_subst` the same way a bare
-   `PolyType::Var` does today, and resolved to a real, concrete, monomorphized
-   `Type` only once `check_poly_call` (`src/check/poly.rs:1430-`) has a concrete
-   `Subst` for the enclosing word — the same point in the pipeline where
-   everything else about the poly word becomes concrete. **Not yet verified**:
-   this recon has only read the parser's failure point; unification,
-   `apply_subst`, the monomorphization walk, layout, and lowering all need their
-   own pass before this shape is trusted, on this project's own standing rule
-   (verify claims of verification; the last two probes both falsified a brief's
-   "should be free" claim on exactly this kind of reasoning-not-compiling gap).
+4. ~~The likely shape of a fix, by analogy...~~ **Superseded by a compiled probe
+   (worker-verified, full report and reverted diff described below) — the analogy
+   to quotations is where the guess goes wrong.** See "Resolved recon" below.
+
+## Resolved recon (worker-verified: a working end-to-end probe was built, run
+
+`nm`-inspected, and fully reverted — `git status`/`cargo build` confirmed clean
+afterward)
+
+Probe used `Result['T 'E]` (an existing two-variable generic) applied to a poly
+word's own variables (`: reorder ( 'T Result['T 'E] -- Result['T 'E] 'T )`),
+instantiated asymmetrically at `t0=i64,t1=str` and its swap `t0=str,t1=i64` —
+not the same type twice, per the project's own symmetric-instantiation-placebo
+precedent. Both instantiations compiled, ran, and printed independently-correct,
+position-dependent output; `nm` showed two distinct monomorph symbols
+(`sooth_mono_reorder__m0__t0_i64_t1_str`, `..._t0_str_t1_i64`), so nothing was
+silently shared.
+
+- **A new `PolyType::Generic` variant is required (OQ1 answered: yes, new, not
+  reusable) — and it is not cheap.** `PolyType` is matched exhaustively in
+  roughly 13 places across 6 files, and every one needs a deliberate arm, not a
+  mechanical stub: `src/check/audits.rs` (3 walks: Copy-reference containment,
+  poly-quotation rejection), `src/check/declarations.rs` (export-privacy),
+  `src/check/poly.rs` (6: Copy-ness, unification, `apply_subst`, diagnostic
+  rendering), `src/ir/driver.rs` (`subst_polytype`), `src/repl.rs`
+  (`remap_poly_type`). Several require a real decision (e.g. is `Result['T 'E]`
+  `Copy` when its args are? the probe took the conservative "always linear",
+  which a real spec should revisit).
+- **The real cost center is a registry-lifetime asymmetry the brief's analogy
+  missed (OQ2 answered, with a sharp caveat).** Arrays and refs mint monomorphs
+  *on demand, downstream*: `apply_subst`/`subst_polytype` are handed a `&mut
+  Vec<ArrayDecl>`/`&mut Vec<RefDecl>` and call `intern_array_type`/
+  `intern_ref_type` to mint-or-find a shape at the point of use. **Named generic
+  structs/enums have no such downstream registry** — `GenericTypes` (the value
+  that owns the dedup keys and mints monomorphs) is consumed and dropped at
+  `src/driver.rs:308-309` (`structs.extend(generics.inst_structs); ...`) before
+  check or lowering ever runs. After that point nothing in the pipeline can mint
+  a `Result[i64 str]` that wasn't already materialized at parse time. **This is
+  the load-bearing plumbing change** — keeping an instantiator alive and mutable
+  through check and lowering — not "add a variant + a unify arm" as the original
+  recon guessed. Monomorphization identity itself did come out correct in the
+  probe (a grounded `reorder` output type-checked cleanly against an independent
+  concrete eliminator of the same generic), but *only* because the probe
+  deliberately routed grounding through the same parse-time dedup table — that's
+  a design decision this slice must make explicitly, not a free property.
+- **OQ3 answered: no placebo.** The two-type asymmetric run (above) specialized
+  positionally and correctly; `unify_poly_input`'s new arm had to recurse
+  positionally into the generic's args and respect a variable shared between a
+  bare slot and a generic argument, and it did.
+- **New, load-bearing finding not in the original recon: S3a's hard case is
+  currently unreachable through legal source, because it's entangled with a
+  separate, already-known gap.** The probe's "pre-existing monomorph only" wall
+  (the `apply_subst` arm that has nowhere to mint a monomorph) never actually
+  fired in any legal test program, because **generic construction inside a poly
+  body is itself unsupported today** (`: wrap ( 'T -- Result['T i64] ) Ok ;`
+  fails with `` unknown word `Ok` ``, the pre-existing
+  `generic-enum-elimination-blocked` gap, P7.S3b/construction territory). A poly
+  word can never *produce* a generic monomorph that isn't already present as one
+  of its inputs, so S3a's minting wall and S3b's construction gap must be
+  scoped/sequenced together, or S3a needs "instantiation must already exist
+  elsewhere in the program" stated as an explicit hard precondition with its own
+  rejection test.
+
+Full probe report, evidence, and file:line list of every layer touched (parser,
+AST, `poly.rs` unify + `apply_subst`, `src/ir/driver.rs` lowering, `src/driver.rs`
+plumbing) is preserved in the resolving session; all changes were reverted, only
+`.sth` scratch files under `/tmp` were created, and `git status`/`cargo build`
+were confirmed clean/green afterward.
 
 ## Open questions
 
-1. **Does this need a new `PolyType` variant, or can an existing one be
-   repurposed?** Recon 4 assumes a new variant by analogy; not confirmed against
-   `src/ast.rs`'s actual `PolyType` enum and what already exists there.
+1. ~~Does this need a new `PolyType` variant, or can an existing one be
+   repurposed?~~ **Resolved above: yes, a new variant, and it costs ~13 exhaustive-
+   match arms across 6 files**, several requiring real semantic decisions (Copy-ness
+   chief among them) rather than mechanical stubs.
 
-2. **Interaction with monomorphization identity.** A generic struct/enum today is
-   keyed by its concrete instantiation (`Box[i64]` and `Box[usize]` are distinct
-   monomorphs). Once `'T` inside `Box['T]` can vary per outer instantiation, does
-   `Box['T]`'s *own* monomorph get minted once per outer `Subst`, or does it need
-   to unify with an already-existing concrete `Box[Sprite]` monomorph if one
-   exists elsewhere in the program? Get this wrong and two call sites could mint
-   duplicate, incompatible monomorphs of the same concrete generic.
+2. ~~Interaction with monomorphization identity.~~ **Resolved above, with a
+   caveat: no collision in the probe, but only because grounding was deliberately
+   routed through the parse-time dedup table.** The spec must make this routing
+   an explicit design decision, since the alternative (independent downstream
+   interning, the way arrays/refs already work) would *not* preserve identity for
+   free — and downstream, on-demand interning is exactly what's missing for
+   generics today (see the registry-lifetime finding above), so the two
+   questions (identity, and where minting happens) are the same question.
 
-3. **Does this interact with the asymmetric-instantiation hazard already on
-   record** (`workflow_symmetric_instantiation_placebo`)? A generic applied to a
-   poly variable, itself instantiated at two different concrete types, is exactly
-   the shape that hazard warns about — the spec/tests for this slice should
-   deliberately include a multi-type-variable generic (`Map['K 'V]`, not just
-   `Box['T]`) instantiated asymmetrically, not `Box[i64]` proven twice.
+3. ~~Does this interact with the asymmetric-instantiation hazard already on
+   record?~~ **Resolved: no placebo found**, confirmed via a genuine two-variable,
+   asymmetric, `nm`-verified probe (`Result['T 'E]` at `[i64 str]` vs.
+   `[str i64]`).
 
 4. **Scope: does this need to support a generic applied to a *poly variable of
-   a poly variable*, or nesting depth > 1?** (`Box[Box['T]]`). No consumer forces
-   this yet; recommend explicitly scoping to depth 1 unless the S3b/S4 dogfood
-   needs more.
+   a poly variable*, or nesting depth > 1?** (`Box[Box['T]]`). Not exercised by
+   the probe (representable in the new variant since `args: Vec<PolyType>` is
+   recursive, but grounding was never tested at depth 2, where the "must
+   pre-exist" wall would bite on both the inner and outer monomorph). No
+   consumer forces this yet; recommend scoping to depth 1, as before.
 
-5. **Relationship to P7.S3b.** Independent in mechanism (this is a parser/type-
-   system change; S3b is a checker-whitelist-and-lowering change), but S3b's
-   `Map['K 'V]` consumer needs this slice to land first. The array form of `sort`
-   in S3b does not depend on this at all and can proceed regardless of this
-   slice's timeline.
+5. **New (probe): must this slice be sequenced with, or scoped around, the
+   generic-construction gap?** The probe found the two gaps are entangled: S3a's
+   own hardest case (minting a monomorph that isn't already present elsewhere)
+   is unreachable through any program that compiles today, because generic
+   construction inside a poly body (`Ok`/`Err` etc. called on a bare `'T`) is
+   itself blocked. Options: (a) spec S3a with "instantiation must already exist
+   concretely elsewhere in the program" as a stated, tested precondition, and
+   defer true on-demand minting to whenever construction is fixed; or (b) treat
+   the registry-lifetime fix and the construction fix as one combined unit of
+   work, since neither is independently exercisable by real source today. Needs
+   a decision before spec-writing, not discovery mid-implementation.
+
+6. **Relationship to P7.S3b.** Independent in mechanism from the *bounds*
+   half of S3b (checker-whitelist-and-lowering), but entangled with the
+   *construction* gap S3b's own dogfood also hit (see OQ5) — these may need to
+   be the same slice, not two independently-sequenced ones. S3b's array-`sort`
+   consumer remains independent of all of this and can proceed regardless.
 
 ## Out of scope
 
@@ -94,10 +160,20 @@ only — unification/monomorphization/lowering not yet traced)
 
 ## Ready to spec?
 
-Not yet. The parser-side root cause is solid (compiled and confirmed), but nothing
-downstream (unification, `apply_subst`, monomorphization, layout, lowering) has
-been probed. Recommend the same discipline that caught S3b's two false claims:
-before locking a spec, write and compile the smallest real probe — a poly word
-applying an existing generic (`Option['T]`) to its own variable, instantiated
-asymmetrically at two real types — and read what actually happens at each stage,
-rather than reasoning from the parser fix alone.
+**Closer, but not yet — one open decision (OQ5) blocks writing the spec's own
+scope line.** The probe (worker-verified, full evidence above) resolved the
+mechanical unknowns: a new `PolyType::Generic` variant is needed and its cost is
+now itemized by file:line; monomorphization identity is preservable, but only by
+a routing decision the spec must state explicitly; the asymmetric-instantiation
+hazard did not materialize.
+
+What's left is not "probe more," it's **decide**: OQ5 found that this slice's own
+hard case (on-demand minting when a monomorph doesn't already exist elsewhere in
+the program) is inseparable from the pre-existing generic-construction gap
+(`unknown word 'Ok'` on a bare `'T`), because no legal program can exercise one
+without the other. Before writing the spec, pick one of OQ5's two options — scope
+S3a to "instantiation must already exist concretely elsewhere" with a tested
+rejection case, or fold the registry-lifetime fix and the construction fix into
+one combined slice — since the spec's exit criteria read differently depending
+on which is chosen, and choosing after the spec is written is exactly the kind of
+mid-implementation discovery this project's pre-spec discipline exists to avoid.
