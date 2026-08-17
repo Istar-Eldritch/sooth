@@ -2934,15 +2934,17 @@ mod tests {
         );
     }
 
-    /// The forwarding is an over-approximation, so the guard against it is a
-    /// legal chain that must keep compiling: read, write and re-read a nested
-    /// field, each borrow consumed before the next begins.
+    /// The forwarding is an over-approximation, so it needs a canary against
+    /// over-rejection: a chained borrow stays legal across the consumption of
+    /// an unrelated receiver of the same type, which a region coarse enough to
+    /// conflate the two would refuse.
     #[test]
-    fn sequential_chained_projections_are_allowed() {
+    fn chained_projection_does_not_borrow_an_unrelated_receiver() {
         assert!(check_src(
             "type: Inner v i64 ;\n\
              type: Outer s Inner ;\n\
-             : main ( -- ) 1 Inner Outer &s &v @ . &!s &!v 9 ! &s &v @ . drop ;",
+             : main ( -- ) 2 Inner Outer &s &v @ . \
+             &!s &!v 1 Inner Outer drop 9 ! &s &v @ . drop ;",
         )
         .is_ok());
     }
