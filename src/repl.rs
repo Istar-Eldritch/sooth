@@ -283,6 +283,27 @@ fn remap_poly_type(
             *row_in,
             *row_out,
         ),
+        // P7 slice 3a: remap each argument; the header `idx`/`module` pass
+        // through unchanged (Phase 2's implementation note flags whether
+        // that stays sound across import epochs -- out of scope here).
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name,
+        } => PolyType::Generic {
+            is_enum: *is_enum,
+            idx: *idx,
+            module: *module,
+            args: args
+                .iter()
+                .map(|a| {
+                    remap_poly_type(a, struct_base, enum_base, array_base, cell_base, ref_base)
+                })
+                .collect(),
+            name,
+        },
     }
 }
 

@@ -32,6 +32,11 @@ pub(super) fn poly_is_copy(
         // exclusive borrow). The referent's own `Copy`-ness is irrelevant: a
         // `&['T 4]` is `Copy` even where `['T 4]` is linear.
         PolyType::Ref(_, mutable) => !*mutable,
+        // P7 slice 3a (D5): conservatively linear -- `Copy`-ness of a
+        // generic over variables depends on its arguments' bounds, and a
+        // per-argument derivation is a new rule (out of scope for v1); never
+        // `Copy` is the conservative answer consistent with the linear spine.
+        PolyType::Generic { .. } => false,
     }
 }
 
@@ -114,7 +119,11 @@ fn is_reference_slot(pt: &PolyType) -> bool {
     match pt {
         PolyType::Ref(..) => true,
         PolyType::Concrete(t) => t.is_ref(),
-        _ => false,
+        PolyType::Var(_) | PolyType::Array(..) | PolyType::Quotation(..) => false,
+        // P7 slice 3a: a generic application never denotes a reference
+        // itself (a reference nested inside one is D5's out-of-scope depth,
+        // or, if concrete, was already rejected by the audits below).
+        PolyType::Generic { .. } => false,
     }
 }
 
@@ -1068,6 +1077,14 @@ pub(super) fn poly_copy_gate(
             op,
             &poly_type_str(pt, sig),
         )),
+        // P7 slice 3a (D5/R5.4): `poly_is_copy` never returns `true` for a
+        // generic applied to a variable, so this always reaches the error.
+        PolyType::Generic { .. } => Err(poly_copy_generic_error(
+            ctx,
+            span,
+            op,
+            &poly_type_str(pt, sig),
+        )),
     }
 }
 
@@ -1679,8 +1696,41 @@ pub(super) fn unify_poly_input(
                 subst,
             )?;
         }
+        // P7 slice 3a phase 1: grounding a generic application needs the
+        // live `GenericTypes` instantiator to mint-or-find its monomorph
+        // (R2), which check does not yet carry -- that arrives in phase 2
+        // together with the constructor arm it is entangled with (OQ5). This
+        // arm exists only for exhaustiveness: it deliberately errors rather
+        // than pretending to look a registry up that is not there yet.
+        PolyType::Generic { .. } => {
+            return Err(poly_generic_not_yet_groundable_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(pty, sig),
+            ));
+        }
     }
     Ok(())
+}
+
+/// P7 slice 3a phase 1: a call site whose declared input/output names a
+/// generic type applied to a variable (`Result['T 'E]`), which nothing can
+/// yet ground to a concrete monomorph -- that needs the live `GenericTypes`
+/// instantiator threaded through check (R2/phase 2). Distinct from an
+/// ordinary type mismatch: the shape is legal, just not yet actionable.
+pub(super) fn poly_generic_not_yet_groundable_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    ty: &str,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{op}` in `{where_}` (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
+        span.line
+    )
 }
 
 /// Slice 10a (R10): `type_mismatch_error`'s twin for a declared mismatch
@@ -1771,6 +1821,15 @@ pub(super) fn apply_subst(
             let referent = apply_subst(sig, referent, subst, name, span, ctx, arrays, refs)?;
             Ok(crate::ast::intern_ref_type(refs, referent, *mutable))
         }
+        // P7 slice 3a phase 1: real grounding needs the live `GenericTypes`
+        // instantiator (R2/phase 2), which is not threaded here yet -- see
+        // `unify_poly_input`'s twin arm for the same reason.
+        PolyType::Generic { .. } => Err(poly_generic_not_yet_groundable_error(
+            ctx,
+            span,
+            name,
+            &poly_type_str(pty, sig),
+        )),
     }
 }
 
@@ -1826,6 +1885,19 @@ pub(super) fn poly_copy_mutable_ref_error(ctx: &Ctx, span: Span, op: &str, ty: &
     )
 }
 
+/// P7 slice 3a (R5.4): `dup`/`over` on a generic type applied to a variable
+/// (D5's conservative linearity). The same class of fact as
+/// `poly_copy_mutable_ref_error`, naming the type rather than a variable
+/// name since a generic application has no single bound to point at.
+pub(super) fn poly_copy_generic_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot `{op}` a generic type applied to a variable in `{where_}` (line {})\n  `{ty}` is conservatively linear: it may carry a linear argument at some instantiation, so it cannot be duplicated",
+        span.line
+    )
+}
+
 pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
     let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
@@ -1850,6 +1922,10 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::Concrete(t) => format!("`{t}`"),
         PolyType::Quotation(..) => "a quotation".to_string(),
         PolyType::Ref(..) => "a reference".to_string(),
+        // P7 slice 3a: rendered with the application, so the diagnostic
+        // names which generic header and which arguments, not just "a
+        // generic type".
+        PolyType::Generic { .. } => format!("a generic type `{}`", poly_type_str(pt, sig)),
     };
     format!(
         "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
@@ -1919,6 +1995,10 @@ fn receiver_is_aggregate_projection(stack: &[PolyType]) -> bool {
     matches!(
         referent,
         PolyType::Concrete(Type::Struct(..) | Type::Enum(..) | Type::Variant(..))
+            // P7 slice 3a: an ungrounded generic application is a struct or
+            // enum header (never yet a `Type::Struct`/`Type::Enum` to match
+            // above), so it is a projection receiver exactly the same way.
+            | PolyType::Generic { .. }
     )
 }
 
@@ -2237,6 +2317,13 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             if *mutable { "!" } else { "" },
             poly_type_str(referent, sig)
         ),
+        // P7 slice 3a: `Name['A 'B]` in the signature's own variable
+        // spellings -- `name` is cached on the variant for exactly this
+        // (see `PolyType::Generic`'s doc), so no registry lookup is needed.
+        PolyType::Generic { name, args, .. } => {
+            let args: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
+            format!("{name}[{}]", args.join(" "))
+        }
     }
 }
 
@@ -2803,6 +2890,60 @@ mod tests {
         );
         let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
         assert_eq!(poly_type_str(&poly_ref(arr, false), &sig), "&['T 4]");
+    }
+
+    #[test]
+    fn poly_type_str_renders_a_generic_application() {
+        // P7 slice 3a: `Name['A 'B]` in the signature's own variable
+        // spellings -- `name` is cached on the variant, so no registry
+        // lookup is needed to render it.
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string(), "'E".to_string()],
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let result = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0), PolyType::Var(1)],
+            name: "Result",
+        };
+        assert_eq!(poly_type_str(&result, &sig), "Result['T 'E]");
+    }
+
+    #[test]
+    fn poly_generic_receiver_is_aggregate_projection() {
+        // P7 slice 3a: an ungrounded generic application is a struct or enum
+        // header, so it is a projection receiver exactly as a concrete
+        // `Type::Struct`/`Type::Enum` is (R1's table).
+        let stack = vec![PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: Vec::new(),
+            name: "Result",
+        }];
+        assert!(receiver_is_aggregate_projection(&stack));
+    }
+
+    #[test]
+    fn poly_generic_slot_is_not_copy() {
+        // P7 slice 3a (D5): a generic applied to a variable is
+        // conservatively linear -- `dup`/`over` on it is rejected outright,
+        // never derived per-argument.
+        let err =
+            check_src("type: Box 'T val 'T ;\n: dup-box ( Box['T] -- Box['T] Box['T] ) dup ;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `dup` a generic type applied to a variable in `dup-box` (line 2)\n  `Box['T]` is conservatively linear: it may carry a linear argument at some instantiation, so it cannot be duplicated"
+        );
     }
 
     #[test]

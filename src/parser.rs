@@ -876,6 +876,21 @@ enum RawTy {
     /// `Concrete(Type::Ref)` when the referent folds fully concrete -- by
     /// `raw_to_poly_type`.
     Ref(Box<RawTy>, bool),
+    /// P7 slice 3a (R1): a generic type applied to poly slots
+    /// (`Result['T 'E]`), folded to `PolyType::Generic` -- or to a plain
+    /// `Concrete` by instantiating through `GenericTypes`, exactly as the
+    /// concrete path already does -- by `raw_to_poly_type`. `name` is the
+    /// header's own declared spelling, carried through for diagnostics and
+    /// for the depth > 1 rejection (D5), which needs both the outer and the
+    /// inner header's name.
+    Generic {
+        is_enum: bool,
+        idx: usize,
+        module: u32,
+        args: Vec<RawTy>,
+        name: String,
+        span: Span,
+    },
 }
 
 enum RawLen {
@@ -1261,6 +1276,17 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
         span.line,
         span.col,
         vec!["T"; declared].join(" "),
+    )
+}
+
+/// P7 slice 3a (D5): a generic type argument that is itself a generic
+/// application (`Box[Box['T]]`), rejected at nesting depth > 1 -- v1
+/// represents this shape but never grounds it, and no consumer forces it
+/// (the brief's OQ4).
+fn generic_nesting_depth_error(outer: &str, inner: &str, span: Span) -> String {
+    format!(
+        "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth > 1) is not yet supported",
+        span.line, span.col
     )
 }
 
@@ -1850,11 +1876,11 @@ impl<'t> Parser<'t> {
         let inputs = raw_in
             .into_iter()
             .map(|r| self.raw_to_poly_type(r))
-            .collect();
+            .collect::<Result<_, _>>()?;
         let outputs = raw_out
             .into_iter()
             .map(|r| self.raw_to_poly_type(r))
-            .collect();
+            .collect::<Result<_, _>>()?;
         Ok(builder.finish(inputs, outputs))
     }
 
@@ -1957,8 +1983,85 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+        // P7 slice 3a (R1): a generic type applied to poly slots
+        // (`Result['T 'E]`, `Box['T]`), intercepted ahead of the
+        // `parse_type_expr` fallthrough below -- which resolves arguments
+        // concretely only, so `'T` would die there as an unknown type. A
+        // word naming a generic header immediately followed by `[` takes
+        // this arm; a bare header with no following `[`, or a name that
+        // names no generic header at all, falls through unchanged (the
+        // former is `parse_type_expr`'s arity error to report).
+        if let Some((Token::Word(w), span)) = self.peek() {
+            if !w.starts_with('\'') && !w.starts_with('&') && !w.starts_with('^') {
+                let (w, span) = (w.clone(), *span);
+                if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                    if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
+                        self.pos += 1;
+                        return self.parse_poly_generic_application(
+                            builder,
+                            word_is_output,
+                            &w,
+                            is_enum,
+                            idx,
+                            module,
+                            span,
+                        );
+                    }
+                }
+            }
+        }
         let ty = self.parse_type_expr()?;
         Ok(RawTy::Concrete(ty))
+    }
+
+    /// P7 slice 3a (R1): a generic-type application's bracketed argument
+    /// list, each argument a poly slot rather than a concrete type
+    /// expression -- the poly-slot twin of `parse_type_arguments`, reusing
+    /// only its arity check, never its concrete-only argument parser.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_poly_generic_application(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+        name: &str,
+        is_enum: bool,
+        idx: usize,
+        module: u32,
+        span: Span,
+    ) -> Result<RawTy, String> {
+        let arity = if is_enum {
+            self.generics.enums[idx].ty_var_names.len()
+        } else {
+            self.generics.structs[idx].ty_var_names.len()
+        };
+        if !matches!(self.peek(), Some((Token::LBracket, _))) {
+            return Err(generic_arity_error(name, arity, 0, span));
+        }
+        self.pos += 1;
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated generic type application)"));
+                }
+                _ => args.push(self.parse_poly_slot(builder, word_is_output)?),
+            }
+        }
+        if args.len() != arity {
+            return Err(generic_arity_error(name, arity, args.len(), span));
+        }
+        Ok(RawTy::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: name.to_string(),
+            span,
+        })
     }
 
     /// One type-variable slot, already lexed: `'T`, with an optional bound at
@@ -2180,13 +2283,14 @@ impl<'t> Parser<'t> {
     /// Fold a parsed `RawTy` to a `PolyType`, interning any fully-concrete
     /// array shape into the array registry so it becomes a plain
     /// `PolyType::Concrete(Type::Array(..))`; only a variable-bearing array
-    /// stays `PolyType::Array` (R4).
-    fn raw_to_poly_type(&mut self, raw: RawTy) -> PolyType {
-        match raw {
+    /// stays `PolyType::Array` (R4). P7 slice 3a: now fallible -- a nested
+    /// (depth > 1) generic application is a located rejection here (D5).
+    fn raw_to_poly_type(&mut self, raw: RawTy) -> Result<PolyType, String> {
+        Ok(match raw {
             RawTy::Concrete(t) => PolyType::Concrete(t),
             RawTy::Var(id) => PolyType::Var(id),
             RawTy::Array(elem, count) => {
-                let elem = self.raw_to_poly_type(*elem);
+                let elem = self.raw_to_poly_type(*elem)?;
                 let len = match count {
                     RawLen::Concrete(n) => Len::Concrete(n),
                     RawLen::Var(id) => Len::Var(id),
@@ -2198,10 +2302,14 @@ impl<'t> Parser<'t> {
                 }
             }
             RawTy::Quotation(ins, outs, is_inline, row_in, row_out) => {
-                let ins: Vec<PolyType> =
-                    ins.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
-                let outs: Vec<PolyType> =
-                    outs.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
+                let ins: Vec<PolyType> = ins
+                    .into_iter()
+                    .map(|r| self.raw_to_poly_type(r))
+                    .collect::<Result<_, _>>()?;
+                let outs: Vec<PolyType> = outs
+                    .into_iter()
+                    .map(|r| self.raw_to_poly_type(r))
+                    .collect::<Result<_, _>>()?;
                 // Fold a fully-concrete effect to `Concrete(Type::Quotation)`
                 // exactly as an array shape folds; only a variable-bearing
                 // effect stays `PolyType::Quotation` (R5). Slice 10a (R1): a
@@ -2233,14 +2341,72 @@ impl<'t> Parser<'t> {
             // concrete referent interns to a real `Type::Ref`, so only a
             // variable-bearing referent stays `PolyType::Ref`.
             RawTy::Ref(inner, mutable) => {
-                let inner = self.raw_to_poly_type(*inner);
+                let inner = self.raw_to_poly_type(*inner)?;
                 if let PolyType::Concrete(t) = inner {
                     PolyType::Concrete(crate::ast::intern_ref_type(self.refs, t, mutable))
                 } else {
                     PolyType::Ref(Box::new(inner), mutable)
                 }
             }
-        }
+            // P7 slice 3a (R1): the fold mirrors the array fold exactly --
+            // if every argument is `PolyType::Concrete`, instantiate through
+            // `GenericTypes` (byte-for-byte the same as `resolve_type_or_
+            // apply`'s existing concrete path) and yield `Concrete`;
+            // otherwise keep `PolyType::Generic`. D5: an argument that is
+            // itself a generic application (depth > 1, e.g. `Box[Box['T]]`)
+            // is rejected here, naming both headers, rather than silently
+            // accepted as representable-but-unconsumed.
+            RawTy::Generic {
+                is_enum,
+                idx,
+                module,
+                args,
+                name,
+                span,
+            } => {
+                let args: Vec<PolyType> = args
+                    .into_iter()
+                    .map(|r| self.raw_to_poly_type(r))
+                    .collect::<Result<_, _>>()?;
+                if let Some(inner_name) = args.iter().find_map(|a| match a {
+                    PolyType::Generic { name, .. } => Some(*name),
+                    _ => None,
+                }) {
+                    return Err(generic_nesting_depth_error(&name, inner_name, span));
+                }
+                let concrete: Option<Vec<Type>> = args
+                    .iter()
+                    .map(|a| match a {
+                        PolyType::Concrete(t) => Some(*t),
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(concrete) = concrete {
+                    let regs = NameRegistries {
+                        structs: self.structs,
+                        enums: self.enums,
+                        arrays: self.arrays,
+                        cells: self.owned_cells,
+                        refs: self.refs,
+                    };
+                    PolyType::Concrete(if is_enum {
+                        self.generics.instantiate_enum(idx, &concrete, module, regs)
+                    } else {
+                        self.generics
+                            .instantiate_struct(idx, &concrete, module, regs)
+                    })
+                } else {
+                    let name: &'static str = Box::leak(name.into_boxed_str());
+                    PolyType::Generic {
+                        is_enum,
+                        idx: idx as u32,
+                        module,
+                        args,
+                        name,
+                    }
+                }
+            }
+        })
     }
 
     fn parse_slots(&mut self, stop: impl Fn(&Token) -> bool) -> Result<Vec<TypedSlot>, String> {
@@ -3169,6 +3335,40 @@ impl<'t> Parser<'t> {
                 .instantiate_enum(idx, &args, self.module, regs));
         }
         self.resolve_type(name, span)
+    }
+
+    /// P7 slice 3a (R1): the generic-header twin of `resolve_type_or_apply`'s
+    /// name resolution -- the same qualifier split, own-module/selective
+    /// fallback, and privacy gate (`:3130-3143` above) -- but stopping short
+    /// of parsing arguments: `parse_poly_slot`'s new arm parses each argument
+    /// as a poly slot, not through `parse_type_arguments`'s concrete-only
+    /// parser. `Ok(None)` means `name` names no generic header at all (an
+    /// unbound qualifier, or an ordinary concrete/unknown name), so the
+    /// caller falls through to `parse_type_expr` unchanged.
+    fn poly_generic_header(
+        &self,
+        name: &str,
+        span: Span,
+    ) -> Result<Option<(bool, usize, u32)>, String> {
+        let (base, owner, qualifier) = match name.split_once("::") {
+            Some((qualifier, base)) => match self.imports.get(qualifier) {
+                Some(&target) => (base, target, Some(qualifier)),
+                None => return Ok(None),
+            },
+            None => (name, self.bare_generic_owner(name), None),
+        };
+        if let Some(qualifier) = qualifier {
+            if self.generic_is_declared(base, owner) && !self.type_is_exported(qualifier, base) {
+                return Err(not_exported_error(base, qualifier, span));
+            }
+        }
+        if let Some(idx) = self.generics.find_struct(base, owner) {
+            return Ok(Some((false, idx, owner)));
+        }
+        if let Some(idx) = self.generics.find_enum(base, owner) {
+            return Ok(Some((true, idx, owner)));
+        }
+        Ok(None)
     }
 
     /// R15c: the module a bare generic name is declared in -- this one, or,
@@ -5730,6 +5930,105 @@ mod tests {
         assert!(
             err.contains("reference type `&` has no referent type"),
             "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_poly_generic_over_own_type_variable_ok() {
+        // P7 slice 3a (R1): a generic type applied to the enclosing
+        // signature's own variables parses, where it used to die on `'T` as
+        // an unknown type (probed at HEAD before this slice).
+        let module = parse_src(
+            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+             : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(
+            sig.inputs[1],
+            PolyType::Generic { is_enum: true, .. }
+        ));
+        assert!(matches!(
+            sig.outputs[0],
+            PolyType::Generic { is_enum: true, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_poly_generic_all_concrete_args_folds_to_concrete() {
+        // P7 slice 3a (R1): the concrete path is byte-for-byte unchanged --
+        // every argument concrete instantiates through `GenericTypes` exactly
+        // as `resolve_type_or_apply` already does, yielding `Concrete`, never
+        // `PolyType::Generic`. Probed at HEAD: this signature already builds
+        // and runs.
+        let module = parse_src(
+            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+             : wrap ( 'T -- Result[i64 i64] ) drop 1 Ok ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.outputs[0], PolyType::Concrete(Type::Enum(..))));
+    }
+
+    #[test]
+    fn parse_poly_generic_nested_depth_two_is_error() {
+        // D5: a generic type argument that is itself a generic application
+        // is rejected at nesting depth > 1, naming both headers.
+        let err =
+            parse_src("type: Box 'T val 'T ;\n: f ( 'T Box[Box['T]] -- ) drop drop ;").unwrap_err();
+        assert!(
+            err.contains("names `Box[...]` as a type argument"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_poly_generic_arity_mismatch_is_error() {
+        // R1: the poly-slot argument list reuses `generic_arity_error`
+        // exactly as the concrete path does.
+        let err = parse_src("type: Box 'T val 'T ;\n: f ( Box['T 'E] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("declares 1 type variable"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_poly_generic_private_header_is_not_exported_error() {
+        // R1: the new arm reuses `resolve_type_or_apply`'s header lookup and
+        // privacy gate, so a qualified generic application inside a poly
+        // slot is rejected exactly as the concrete path already rejects
+        // `parse_qualified_generic_application_of_unexported_type_is_not_exported`.
+        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let other = lex(": f ( 'T b::Box['T] -- ) drop drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let imports = HashMap::from([("b".to_string(), 0u32)]);
+        let no_exports: Vec<Vec<(String, Span)>> = vec![Vec::new()];
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        let mut run = |tokens: &[(Token, Span)], module: u32, imports: &HashMap<String, u32>| {
+            parse_bodies(
+                tokens,
+                &[],
+                &[],
+                module,
+                imports,
+                &no_exports,
+                &no_imports,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+                &mut generics,
+            )
+            .map(|_| ())
+        };
+        run(&owner, 0, &no_imports).unwrap();
+        let err = run(&other, 1, &imports).unwrap_err();
+        assert!(
+            err.contains("`Box` is not exported from module `b`"),
+            "unexpected: {err}"
         );
     }
 

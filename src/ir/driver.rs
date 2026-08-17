@@ -659,6 +659,14 @@ pub(super) fn subst_polytype(
                 .expect("checked: the concrete reference shape was interned at the call site");
             Type::Ref(RefId::from_index(idx), *mutable, refs[idx].name_static)
         }
+        // P7 slice 3a phase 1: grounding a generic application at lowering
+        // needs the same live `GenericTypes` instantiator check does (R2),
+        // not yet threaded here. Unreachable in phase 1: check's own
+        // `unify_poly_input`/`apply_subst` already reject a variable-bearing
+        // generic before a word carrying one could ever reach lowering.
+        PolyType::Generic { .. } => unreachable!(
+            "check rejects a variable-bearing generic before lowering (P7.S3a phase 1); grounding is phase 2"
+        ),
     }
 }
 

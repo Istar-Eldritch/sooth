@@ -360,6 +360,11 @@ fn contains_poly_reference(
         PolyType::Concrete(ty) => contains_reference(*ty, structs, enums, arrays),
         PolyType::Array(elem, _) => contains_poly_reference(elem, structs, enums, arrays),
         PolyType::Var(_) | PolyType::Quotation(..) => false,
+        // P7 slice 3a: a generic carrying `&'T` (e.g. `Box[&'T]`) must not
+        // escape the Copy-containment audit through an argument.
+        PolyType::Generic { args, .. } => args
+            .iter()
+            .any(|a| contains_poly_reference(a, structs, enums, arrays)),
     }
 }
 
@@ -397,6 +402,14 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
         PolyType::Ref(referent, _) => {
             reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
         }
+        // P7 slice 3a: a quotation smuggled in as a generic argument
+        // (`Box[[ 'T -- ]]`) is still nested inside the parameter.
+        PolyType::Generic { args, .. } => {
+            for a in args {
+                reject_poly_quotation_anywhere(a, sig, "a generic type argument")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -419,6 +432,14 @@ fn reject_poly_quotation_anywhere(
         PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
         PolyType::Ref(referent, _) => {
             reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
+        }
+        // P7 slice 3a: recurse into a generic's arguments, so a quotation
+        // smuggled in as one (`Box[[ 'T -- ]]`) is still rejected.
+        PolyType::Generic { args, .. } => {
+            for a in args {
+                reject_poly_quotation_anywhere(a, sig, "a generic type argument")?;
+            }
+            Ok(())
         }
         PolyType::Quotation(..) => Err(format!(
             "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
@@ -537,6 +558,34 @@ mod tests {
         assert_eq!(
             err,
             "error: a reference cannot be stored: `g` declares the input `[&'T 4]`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
+        );
+    }
+
+    #[test]
+    fn quotation_smuggled_as_generic_arg_is_rejected() {
+        // P7 slice 3a: a quotation type as a generic type argument is still
+        // nested inside the enclosing parameter, exactly as an array element
+        // is -- `reject_poly_quotation_anywhere`'s `Generic` arm recurses
+        // into `args` rather than accepting them unseen.
+        let err =
+            check_src("type: Box 'T val 'T ;\n: f ( Box[[ 'T -- 'T ]] -- ) drop ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a quotation type `[ 'T -- 'T ]` cannot appear as a generic type argument: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+        );
+    }
+
+    #[test]
+    fn ref_bearing_generic_in_copy_position_is_rejected() {
+        // P7 slice 3a: `contains_poly_reference`'s `Generic` arm recurses
+        // into `args`, so a reference carried inside a generic argument
+        // (`Box[&'T]`) still trips the reference-cannot-be-stored audit on
+        // an output, exactly as a bare `&'T` output does.
+        let err = check_src("type: Box 'T val 'T ;\n: f ( &'T -- Box[&'T] ) | r | Box r ;\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `f` declares the output `Box[&'T]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
     }
 

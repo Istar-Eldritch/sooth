@@ -359,6 +359,16 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
                 collect_poly_concrete(t, out);
             }
         }
+        // P7 slice 3a: recurse into args only -- a variable-bearing generic
+        // names no concrete `Type` of its own to contribute (its header is a
+        // separate, currently-unclosed export-privacy gap; see the spec's
+        // "export-privacy gap" note). A concrete argument still needs the
+        // ordinary check, e.g. `Box[PrivateStruct]`.
+        PolyType::Generic { args, .. } => {
+            for a in args {
+                collect_poly_concrete(a, out);
+            }
+        }
     }
 }
 

@@ -1080,6 +1080,25 @@ pub enum PolyType {
     /// the classification bit (`Copy`-ness, store-vs-fetch, exclusivity),
     /// asked at sites that hold no registry.
     Ref(Box<PolyType>, bool),
+    /// P7 slice 3a (R1/D2): a generic type applied to the enclosing
+    /// signature's own variables (`Result['T 'E]`), deferred exactly as
+    /// `Ref` defers its `RefId`: there is no `StructId`/`EnumId` to mint
+    /// until a substitution grounds every argument. `idx` indexes
+    /// `GenericTypes::structs`/`enums` per `is_enum`; `module` is the
+    /// *instantiating* module, the third component of `struct_keys`/
+    /// `enum_keys`, captured at the naming site. `args` is recursive so
+    /// depth > 1 is representable, but v1 rejects it at the parse fold
+    /// (D5). `name` is the header's own declared spelling, cached purely
+    /// for diagnostics -- mirroring `StructDecl::name_static` -- and carries
+    /// no identity of its own: whether two `Generic`s name the same header
+    /// is answered by `is_enum`/`idx`/`module` alone.
+    Generic {
+        is_enum: bool,
+        idx: u32,
+        module: u32,
+        args: Vec<PolyType>,
+        name: &'static str,
+    },
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature
