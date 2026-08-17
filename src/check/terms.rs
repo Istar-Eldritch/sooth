@@ -485,6 +485,26 @@ fn check_term(
             // D3 (slice 8b): ahead of the ordinary env call path below, so it
             // catches a moving destructure (`S>`) of a drop-overloaded struct.
             check_destructure_drop_guard(name, span, ctx)?;
+            // Phase 6 slice 3 (R3): a generated eliminator (`Shape?`) is
+            // routed ahead of the env/combinator/poly paths. It has no body,
+            // so it is not a `Combinator` and must never be spliced; and its
+            // arms are matched to variants by annotation tag rather than by
+            // slot position, so the ordinary poly-call unification it is
+            // registered under is never what checks a call site.
+            if let Some(enum_id) = poly.eliminators.get(name).copied() {
+                let granted = releasable_into(
+                    scope,
+                    base_depth,
+                    outer_releasable,
+                    &siblings[at + 1..],
+                    live,
+                    at,
+                );
+                return check_eliminator_call(
+                    enum_id, name, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    &granted, tail,
+                );
+            }
             // R6-R9: a tail-position call, inside a self-tail combinator
             // body splice, to that same combinator is the loop back-edge, not
             // a re-splice (which would recurse forever). Intercepted before
@@ -820,10 +840,20 @@ fn check_term(
             let annot = match annot {
                 Some(annot) => {
                     let resolved = resolve_annotation(ctx, annot)?;
-                    check_literal_against_annotation(
-                        &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov, scope,
-                        poly,
-                    )?;
+                    // Phase 6 slice 3 (R1): an eliminator arm's annotation
+                    // elides both rows (`( Circle )` is
+                    // `( ..a Shape.Circle -- ..b )`), so it has no standalone
+                    // fixed point to run the body against -- the caller region
+                    // it reaches into and the shape it leaves are both
+                    // supplied by the eliminator call site, where
+                    // `check_eliminator_call` runs the same directional check
+                    // against the real stack.
+                    if resolved.variant_tag.is_none() {
+                        check_literal_against_annotation(
+                            &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov,
+                            scope, poly,
+                        )?;
+                    }
                     Some(resolved)
                 }
                 None => None,
