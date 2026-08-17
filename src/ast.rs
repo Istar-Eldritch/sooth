@@ -1219,7 +1219,7 @@ pub fn overload_symbols(words: &[WordDef]) -> Vec<String> {
 
 /// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
 /// the explicit C symbol string, kept separate from `name` because a Sooth
-/// word name may use characters C cannot (`&!S>fi`), and because binding a
+/// word name may use characters C cannot (`^|>`), and because binding a
 /// C name like `open` to a differently-named Sooth word must be possible.
 #[derive(Debug)]
 pub struct ExternDecl {

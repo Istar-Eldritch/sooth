@@ -818,10 +818,11 @@ pub(super) fn poly_reference_word(
     let rest = &name[if mutable { 2 } else { 1 }..];
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
 
-    // R-B6: an owning-cell or a struct-field accessor never produces a
-    // variable-referent ref (no generic structs/enums this slice) and is out
-    // of scope for a generic body regardless of mutability -- a located error
-    // now, never a silent fallthrough to an eventual unknown-word one.
+    // R-B6: `&^` never produces a variable-referent ref (no generic
+    // structs/enums this slice) and is out of scope for a generic body
+    // regardless of mutability. Any other `>`-bearing name but `&>` (the array
+    // index) is a retired fused-accessor spelling. Both are located errors
+    // here, never a silent fallthrough to an eventual unknown-word one.
     if rest == "^" || (rest != ">" && rest.contains('>')) {
         return Err(poly_unsupported_accessor_error(ctx, span, name));
     }
@@ -1890,7 +1891,8 @@ pub(super) fn poly_var_to_concrete_error(
 }
 
 /// Slice 13 (E4/R-B6): an accessor with no poly-body support -- ever
-/// (`&^`, `&Struct>field`), or not yet (e.g. a fully concrete `&![T N]`
+/// (`&^`, a retired fused-accessor spelling), or not yet (e.g. a fully
+/// concrete `&![T N]`
 /// parameter's accessors, folded to `PolyType::Concrete` and unmatched by
 /// any `PolyType::Ref` arm) -- located, never a silent fallthrough to an
 /// unknown-word error.
@@ -3101,9 +3103,11 @@ mod tests {
     }
 
     #[test]
-    fn poly_reference_word_rejects_struct_field_accessor_in_a_generic_body() {
-        // R-B6/E4: `&Struct>field` is likewise out of scope -- a concrete
-        // struct field never has a variable referent either.
+    fn poly_reference_word_rejects_a_fused_accessor_spelling_in_a_generic_body() {
+        // R-B6/E4: a leftover `&Struct>field` (retired in P7 slice 1) still
+        // lexes as one `&`-prefixed token, and the `>`-bearing guard keeps it a
+        // located error rather than a bare unknown-word one. The surviving
+        // spelling's case is `projection_on_generic_receiver_body_is_error`.
         let err = check_src(": badfield ( 'T -- 'T )\n  &Point>x\n;\n").unwrap_err();
         assert_eq!(
             err,

@@ -764,10 +764,9 @@ fn check_term(
             // through the carrier. The union is `None` for the overwhelming
             // majority of calls (no closure argument), a no-op there.
             //
-            // Review fix: this same generic dispatch also handles a struct
-            // field getter whose field type is `Quotation` (not `is_aggregate`)
-            // -- e.g. `Holder>q`, left to the env path because
-            // `check_struct_get_word` only claims an aggregate-typed field. A
+            // Review fix: this same generic dispatch also handles a
+            // destructure with a `Quotation`-typed field (not `is_aggregate`)
+            // -- e.g. `Holder>` on `type: Holder q [ i64 -- i64 ] ;`. A
             // quotation-typed output legitimately carries the closure onward
             // exactly as an aggregate output does, so it forwards too.
             // Review fix (P7 slice 1): an ordinary word call consumes its

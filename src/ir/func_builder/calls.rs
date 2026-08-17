@@ -633,8 +633,8 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(dst);
                     return;
                 }
-                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi`) lowers to
-                // alloc/blit/field-load-store inline, not a normal call.
+                // A generated struct word (`S`/`S>`) lowers to alloc/blit/
+                // field-load inline, not a normal call.
                 if let Some(&sw) = self.structs.words.get(name) {
                     self.lower_struct_word(sw);
                     return;

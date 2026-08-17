@@ -169,7 +169,7 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 };
                 let mut text = String::new();
                 while let Some(&c) = chars.peek() {
-                    // `S|>fi` peek-word glue: `|` joins the current word only
+                    // `^|>` peek-word glue: `|` joins the current word only
                     // when a word char already precedes it (so `| a |` and a
                     // clause head `| Circle` are untouched, since those hit
                     // `|` as the very first character of a scan) and `>`
@@ -385,8 +385,8 @@ mod tests {
 
     #[test]
     fn lex_peek_word_glues_pipe_gt_into_one_word() {
-        let tokens = lex("Point|>x").unwrap();
-        assert_eq!(words(&tokens), vec![Token::Word("Point|>x".into())]);
+        let tokens = lex("a|>b").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Word("a|>b".into())]);
     }
 
     #[test]
@@ -422,8 +422,8 @@ mod tests {
 
     #[test]
     fn lex_owning_cell_peek_word_glues_into_one_token() {
-        // R12/criterion 20: `^|>` survives the `S|>fi` peek-glue rule as one
-        // token, the same way `Point|>x` does.
+        // R12/criterion 20: the peek-glue rule keeps `^|>` one token, the
+        // spelling that rule now exists for.
         let tokens = lex("^|>").unwrap();
         assert_eq!(words(&tokens), vec![Token::Word("^|>".into())]);
     }

@@ -280,12 +280,12 @@ fn check_field_projection(
     resolved_fields: &mut HashMap<Span, (StructId, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
     // D1's grammar makes a receiver-directed field an ordinary identifier,
-    // never an accessor. A `>` here means `rest.split_once('>')` above already
-    // tried and rejected this token as a fused accessor (unknown struct,
-    // unknown field, or wrong variant); falling through to treat the whole
-    // `Type>field` string as a plain field name would leak that mangled
-    // spelling into `projection_unknown_field_error` instead of reaching the
-    // pre-existing, demangling "not a local in scope" diagnostic below.
+    // never an accessor, and `>` is not a lexer delimiter -- so a leftover
+    // `&!Type>field` arrives here as one token whose whole text would be read
+    // as a field name, answering "`Point` declares no field named `Point>z`"
+    // and implying that spelling could name a field. It cannot: the fused
+    // accessors are retired, so the honest answer is the borrow chain's
+    // "not a place" / "not a local in scope" below.
     if field.contains('>') {
         return Ok(None);
     }
@@ -355,9 +355,8 @@ fn check_field_projection(
     let field_ty = fields[fi].1;
     match recv_mut {
         Some(recv_mut) => {
-            // Full-type equality, the fused accessor's idiom: a wrong
-            // mutability is a type mismatch between the two interned
-            // reference shapes.
+            // Full-type equality: a wrong mutability is a type mismatch
+            // between the two interned reference shapes.
             if recv_mut != mutable {
                 let want = intern_ref_type(refs, referent, mutable);
                 return Err(type_mismatch_error(ctx, span, name, want, top.ty));
@@ -376,14 +375,14 @@ fn check_field_projection(
             });
         }
         None => {
-            // The receiver stays, so this is the `S|>fi` peek's region
-            // machinery: the projection is interned as a child region of the
-            // receiver's own, which is what makes two overlapping projections
-            // off one *anonymous* receiver (`p &!hp swap &!hp`) a checked
-            // conflict rather than an unchecked pair of aliases. Not gated on
-            // `is_copy` the way the peek is: a projection borrows the field
-            // rather than duplicating its value, so a linear field is not
-            // special here (`@`/`!` still refuse to move one through it).
+            // The receiver stays, so this arm needs region machinery: the
+            // projection is interned as a child region of the receiver's own,
+            // which is what makes two overlapping projections off one
+            // *anonymous* receiver (`p &!hp swap &!hp`) a checked conflict
+            // rather than an unchecked pair of aliases. Nothing is gated on
+            // `is_copy`: a projection borrows the field rather than
+            // duplicating its value, so a linear field is not special here
+            // (`@`/`!` still refuse to move one through it).
             let alias = projected_region(&mut stack[n - 1], field, span, prov);
             if let Some(origin) =
                 overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, mutable)
@@ -1698,9 +1697,9 @@ mod tests {
     // No surface syntax mints a `Type::Variant` operand until slice 3's
     // eliminator, so every case here seeds one onto a hand-built stack. Each
     // names the mechanism it guards and asserts a discriminating shape: a
-    // scalar getter driven through `check_variant_get_word` would return
-    // `Ok(None)` and pass vacuously, so scalar cases go through env dispatch
-    // instead, and only the R12 fall-through case asserts on `Ok(None)`.
+    // scalar field driven through the projection path would return `Ok(None)`
+    // and pass vacuously, so scalar cases go through env dispatch instead, and
+    // only the R12 fall-through case asserts on `Ok(None)`.
 
     /// `Circle` carries one scalar (`r`) and one aggregate (`p`) field, `Rect`
     /// an aggregate one, `Dot` none. Parsed and checked from source so each
@@ -2230,8 +2229,7 @@ mod tests {
     /// consume checks. Without a region-keyed guard at the point the
     /// receiver is actually discarded, `drop`ping it while the projection is
     /// still live leaves that reference aimed at storage that no longer
-    /// exists -- a use-after-free the pre-slice fused (`Point&x`) and peek
-    /// (`Point|>x`) spellings both correctly reject.
+    /// exists -- a use-after-free.
     #[test]
     fn drop_of_receiver_while_its_projection_is_live_is_error() {
         let err = check_src(

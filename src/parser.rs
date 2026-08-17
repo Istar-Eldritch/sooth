@@ -1541,7 +1541,7 @@ impl<'t> Parser<'t> {
     /// `extern:` declaration (R1): a top-level foreign-call binding. Grammar
     /// mirrors `worddef` except the body is a single explicit C symbol
     /// string rather than terms — a symbol string rather than the word name
-    /// reused, since a Sooth name may use characters C cannot (`&!S>fi`), and
+    /// reused, since a Sooth name may use characters C cannot (`^|>`), and
     /// binding a C name like `open` to a differently-spelled Sooth word must
     /// be possible.
     fn parse_extern_decl(&mut self) -> Result<ExternDecl, String> {

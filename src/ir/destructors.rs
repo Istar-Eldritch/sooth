@@ -296,8 +296,8 @@ fn prepend(step: PathStep, rest: Vec<PathStep>) -> Vec<PathStep> {
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
 /// that type: drop each linear field, in declaration order. Built via a
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
-/// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
-/// is disposed" stays in one place.
+/// `field_value`/`emit_drop` the `drop` builtin uses, so "how a field is
+/// disposed" stays in one place.
 ///
 /// A struct on a disposal cycle (a `^Self` field, or a longer route back to
 /// itself through other types) is disposed by one fused loop that walks the

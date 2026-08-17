@@ -1998,10 +1998,10 @@ fn copy_loop_still_compiles() {
 }
 
 // Phase 3 Slice 1, Phase 2: struct aggregates via destructure-whole. A struct
-// is linear iff any field is (transitively); `S>fi`/`S<fi`/`drop` on a linear
-// struct run compiler-synthesized field drop glue. Every drop-observing
-// golden compares the *whole* stdout, so drop count and order are proven, not
-// just "it compiled".
+// is linear iff any field is (transitively); `drop` on a linear struct runs
+// compiler-synthesized field drop glue. Every drop-observing golden compares
+// the *whole* stdout, so drop count and order are proven, not just "it
+// compiled".
 
 #[test]
 fn destructure_whole_drops_each_field() {
@@ -2113,8 +2113,9 @@ fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
     assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
 }
 
-// Phase 3 Slice 1, Phase 3: `S|>fi`, the non-consuming peek. Copy fields only;
-// a linear field is a compile error (workaround: `S>`).
+// Phase 3 Slice 1, Phase 3: the non-consuming read, `&f @`. Projecting a
+// linear field is legal; moving one out through `@` is a compile error
+// (workaround: `S>`).
 
 #[test]
 fn projection_read_of_copy_field_keeps_struct() {
@@ -2703,11 +2704,9 @@ fn caret_field_suffix_is_unknown_word() {
     // Criterion 21 (R12b): `^>x` and `^|>x` lex as one word each and match
     // none of the three exact cell-word spellings, so they fall through to
     // the ordinary unknown-word error. This pins the exact-name matching only,
-    // *not* R12b's arm-ordering clause, which turns out to be unobservable:
-    // `check_struct_peek_word` returns `None` for any name whose struct half
-    // misses the registry, and R12a makes a struct named `^` undeclarable, so
-    // swapping the two arms leaves the whole suite green. No test can guard
-    // that ordering because nothing depends on it.
+    // *not* R12b's arm-ordering clause, which no longer has two arms to order:
+    // P7 slice 1 retired the fused struct peek family that clause was written
+    // against, so nothing but the exact cell-word names can claim these.
     let err = linear_check_error(": main ( -- )\n  5 ^ ^>x ;\n");
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("^>x"), "unexpected message: {err}");

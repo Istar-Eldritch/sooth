@@ -220,9 +220,8 @@ impl NameTables {
     /// module reference, which is never gated by export; qualified: absent
     /// from the target module, left for `check.rs`'s unknown-word error).
     /// Returns `Err` when the name resolves to a real decl in the target
-    /// module that is not on its export list (R14/R16): a qualified
-    /// `Type>field`/`Type<field`/`Type|>field`/`Type>` accessor is gated by
-    /// its type's export status, one unit per R15.
+    /// module that is not on its export list (R14/R16): a qualified `Type>`
+    /// destructure is gated by its type's export status, one unit per R15.
     #[allow(clippy::too_many_arguments)]
     fn rewrite(
         &self,
@@ -308,9 +307,9 @@ impl NameTables {
         }
         // R20/R15c: own module first, then a selectively imported name. The
         // map (validated by `check::check_selective_imports`) exposes a bare
-        // `Type` together with its generated words as one unit, so a
-        // `Type>field` call whose `type_part` is selectively imported rewrites
-        // against the target module just like a plain word does.
+        // `Type` together with its generated words as one unit, so a `Type>`
+        // call whose `type_part` is selectively imported rewrites against the
+        // target module just like a plain word does.
         if word_ok {
             if let Some(&target) = selective.get(type_part) {
                 if self.types[target as usize].contains(type_part) {

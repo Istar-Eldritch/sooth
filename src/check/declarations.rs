@@ -406,8 +406,8 @@ fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> St
 /// from the driver's closure assembly with the qualifier and target module it
 /// came from and the span of the name in the `import:` form, for the R20/R21
 /// validation. A type name exposes its generated words as one unit (R15c), so
-/// only the base name appears here; a member (`Type>field`) can only collide
-/// when its base does.
+/// only the base name appears here; a member (`Type>`) can only collide when
+/// its base does.
 pub struct SelectiveName {
     pub name: String,
     pub qualifier: String,
@@ -2357,6 +2357,26 @@ mod tests {
     #[test]
     fn check_struct_zero_field_registers_only_ctor_and_destructure() {
         check_src("type: Unit ; : main ( -- ) Unit Unit> ;").unwrap();
+    }
+    #[test]
+    fn check_struct_per_field_accessor_spellings_are_unknown_words() {
+        // P7 slice 1 (D1/R11 deletion guard): the only struct-generated words
+        // are the constructor and the whole-struct destructure. Reinstating a
+        // per-field row in `struct_generated_sigs` would type-check these
+        // three spellings again with no lowering arm behind them, so this is
+        // what discriminates "retired" from "still registered": a registered
+        // word gets an arity/type diagnostic, a retired one is unknown. The
+        // matching variant-side pin is `variant_accessor_sigs_reach_the_module_env`.
+        for call in ["Vec2>x", "Vec2<x", "Vec2|>x"] {
+            let err = check_src(&format!(
+                "type: Vec2 x i64 y i64 ;\n: main ( -- ) 1 2 Vec2 {call} ;\n"
+            ))
+            .unwrap_err();
+            assert!(
+                err.contains(&format!("unknown word `{call}`")),
+                "{call}: unexpected message: {err}"
+            );
+        }
     }
     #[test]
     fn check_struct_setter_returns_updated_struct_ok() {

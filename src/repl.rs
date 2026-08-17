@@ -1421,7 +1421,7 @@ impl Session {
             &mut self.refs,
             ctx,
         )?;
-        // R8c: rewrite body-position `q::w` / `q::T>field` calls to their
+        // R8c: rewrite body-position `q::w` / `q::T>` calls to their
         // current internal (epoch-tagged) spelling before ordinary checking
         // runs; also raises R15's `not exported` for a private qualified name.
         self.rewrite_line_imports(&mut line)?;
@@ -2122,9 +2122,8 @@ impl Session {
         }
 
         // R15: retain module 0's private names (bare word names, and for a
-        // private type its bare name plus every accessor spelling), so a
-        // `q::x` that misses the aliases can be told `not exported` rather than
-        // unknown.
+        // private type its bare name plus its destructure), so a `q::x` that
+        // misses the aliases can be told `not exported` rather than unknown.
         let mut private: HashSet<String> = HashSet::new();
         for w in &module.words {
             if w.module != 0 || w.poly.is_some() || w.name == "main" || w.name == "drop" {
@@ -2146,11 +2145,6 @@ impl Session {
             let t = s.name_static;
             private.insert(t.to_string());
             private.insert(format!("{t}>"));
-            for (f, _) in &s.fields {
-                private.insert(format!("{t}>{f}"));
-                private.insert(format!("{t}<{f}"));
-                private.insert(format!("{t}|>{f}"));
-            }
         }
         self.import_private.insert(q.clone(), private);
 
@@ -2166,7 +2160,7 @@ impl Session {
     }
 
     /// R8c/R15: rewrite a just-parsed line's body-position calls, translating a
-    /// user-facing `q::w` / `q::T>field` spelling to its current internal
+    /// user-facing `q::w` / `q::T>` spelling to its current internal
     /// (epoch-tagged) one before ordinary checking runs, and raising R15's
     /// `not exported` for a private qualified name. Type-position references
     /// are already resolved by the parser (R8d) and are untouched here.
@@ -4034,6 +4028,43 @@ mod tests {
                 .is_none(),
             "a genuinely absent name falls through to unknown-word"
         );
+    }
+
+    #[test]
+    fn import_private_names_omit_the_retired_accessor_spellings() {
+        // P7 slice 1 (D1/R11 deletion guard): a private type retains its bare
+        // name and its destructure, and nothing else. Retaining `Point>x` and
+        // siblings would answer `not exported` for a spelling no longer in the
+        // language, where a native build says `unknown word` -- the REPL and
+        // the module path disagreeing on a retired feature is exactly R5's
+        // hazard.
+        let d = LibDir::new("p5acc");
+        let lib = d.write(
+            "lib.sth",
+            "type: Point x i64 y i64 ;\n: pub ( -- i64 ) 1 ;\nexport: pub ;\n",
+        );
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("p5acc", &lib), &mut out)
+            .unwrap();
+
+        let private = &session.import_private["p5acc"];
+        assert!(private.contains("Point"), "the bare type name is retained");
+        assert!(private.contains("Point>"), "the destructure is retained");
+        for retired in ["Point>x", "Point<x", "Point|>x"] {
+            assert!(
+                !private.contains(retired),
+                "`{retired}` is retired and must not be retained"
+            );
+            assert!(
+                session
+                    .rewrite_import_call(&format!("p5acc::{retired}"), Span::default())
+                    .unwrap()
+                    .is_none(),
+                "`{retired}` falls through to unknown-word, as in a native build"
+            );
+        }
     }
 
     #[test]

@@ -749,8 +749,8 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
-    /// or the interior pointer as a nested struct/enum/quotation value (the
-    /// getter reads a stored quotation back out as a runtime value).
+    /// or the interior pointer as a nested struct/enum/quotation value (a
+    /// destructure reads a stored quotation back out as a runtime value).
     pub(super) fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
         match field.ty {
             // Slice 9 (R1): a zero-payload-enum field loads as a scalar, not

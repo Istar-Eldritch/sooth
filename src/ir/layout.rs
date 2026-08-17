@@ -166,7 +166,7 @@ pub(super) enum StructWord {
 }
 
 /// The IR's view of a program's structs: the per-`StructId` layout registry and
-/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi` → `StructWord`). Built
+/// the generated-word name map (`S`/`S>` → `StructWord`). Built
 /// once from the module and threaded into lowering; empty for a struct-free
 /// program (the scalar paths never consult it).
 #[derive(Debug, Default)]

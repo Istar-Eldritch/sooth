@@ -290,10 +290,10 @@ impl<'a> FuncBuilder<'a> {
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
     /// struct/enum whose `is_linear` is set, or an owning cell) this is a
     /// plain `Call` to the (builtin or synthesized) destructor; a `Copy`
-    /// value is discarded with no runtime effect. Shared by `drop`, `S>fi`'s
-    /// drop-the-rest, `S<fi`'s drop-on-overwrite, and the synthesized
-    /// struct/enum destructors themselves, so "how a value is disposed" lives
-    /// in one place.
+    /// value is discarded with no runtime effect. Shared by `drop`,
+    /// `drop_level_fields`' drop-the-rest, and the synthesized struct/enum
+    /// destructors themselves, so "how a value is disposed" lives in one
+    /// place.
     pub(in crate::ir) fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
             // A cell always frees on drop, regardless of its payload's own
