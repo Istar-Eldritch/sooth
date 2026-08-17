@@ -133,23 +133,22 @@ were confirmed clean/green afterward.
    pre-exist" wall would bite on both the inner and outer monomorph). No
    consumer forces this yet; recommend scoping to depth 1, as before.
 
-5. **New (probe): must this slice be sequenced with, or scoped around, the
-   generic-construction gap?** The probe found the two gaps are entangled: S3a's
-   own hardest case (minting a monomorph that isn't already present elsewhere)
-   is unreachable through any program that compiles today, because generic
-   construction inside a poly body (`Ok`/`Err` etc. called on a bare `'T`) is
-   itself blocked. Options: (a) spec S3a with "instantiation must already exist
-   concretely elsewhere in the program" as a stated, tested precondition, and
-   defer true on-demand minting to whenever construction is fixed; or (b) treat
-   the registry-lifetime fix and the construction fix as one combined unit of
-   work, since neither is independently exercisable by real source today. Needs
-   a decision before spec-writing, not discovery mid-implementation.
+5. **Decided: option B (combined unit of work).** Generic construction inside poly
+   bodies (`ok 'T Result['T i64]`, `err 'E Result[i64 'E]`) and the on-demand
+   instantiation registry live together in this slice, keeping `GenericTypes`
+   alive and mutable through check and lowering (mirroring the arrays/refs
+   registry pattern, not the current "consume and drop" pattern). On-demand
+   monomorph minting becomes real and testable, and generics in poly signatures
+   can both consume and produce instances freely — nothing left as an
+   "instantiation must already exist" restriction or ruled-out by construction.
 
-6. **Relationship to P7.S3b.** Independent in mechanism from the *bounds*
-   half of S3b (checker-whitelist-and-lowering), but entangled with the
-   *construction* gap S3b's own dogfood also hit (see OQ5) — these may need to
-   be the same slice, not two independently-sequenced ones. S3b's array-`sort`
-   consumer remains independent of all of this and can proceed regardless.
+6. ~~Relationship to P7.S3b in this slice~~. The registry-lifetime and
+   construction fixes across poly bodies and generics required for S3a's on-
+   demand minting look like they might reach further than S3a alone (higher-level
+   generics like `Error`, or non-generic enums that instantiate downstream). Plan
+   to defer that exploration to the spec-writer if it emerges as a separate
+   consumer pressure, not gate the current slice on it. For now, S3b's array
+   `sort` consumer remains entirely independent of this type-system plumbing.
 
 ## Out of scope
 
