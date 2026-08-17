@@ -17,7 +17,8 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
-**P7.S1 — Accessors as receiver-directed projections.** A field access is a
+**P7.S1 — Accessors as receiver-directed projections.**
+`[ done ]` A field access is a
 mode-carrying projection word (`&hp` / `&!hp`) resolved against the receiver's type:
 `&S -- &A` and `&!S -- &!A` are consuming (chaining, e.g. `u &stats &hp @`), while an
 owned `S -- S &A` is non-consuming, leaving the receiver in place. The field name is
