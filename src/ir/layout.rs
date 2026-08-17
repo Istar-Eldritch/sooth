@@ -874,6 +874,35 @@ mod tests {
     }
 
     #[test]
+    fn enum_registry_keys_a_destructure_word_per_variant() {
+        // Phase 6 slice 3 (R6): the only thing connecting a surface name to
+        // the new lowering arm. Asserted through `enums_of` (which builds the
+        // registry from source) rather than by calling `lower_enum_word`
+        // directly, since the two lowering units hand-build their `EnumWord`
+        // and so would stay green if this insert vanished entirely.
+        let enums = enums_of(
+            "type: Shape | Circle r i64 p i64 | Dot ;\n\
+             : main ( -- ) ;\n",
+        );
+        // `bool` is injected as enum 0 ahead of any user enum
+        // (`BOOL_ENUM_ID`), so `Shape` is enum 1.
+        let id = EnumId::from_index(1);
+        for (vi, name) in ["Circle", "Dot"].iter().enumerate() {
+            assert!(
+                matches!(enums.words.get(*name), Some(EnumWord::Construct(got_id, got_vi)) if *got_id == id && *got_vi == vi),
+                "`{name}` should construct variant {vi}: {:?}",
+                enums.words.get(*name)
+            );
+            let destructure = format!("{name}>");
+            assert!(
+                matches!(enums.words.get(&destructure), Some(EnumWord::Destructure(got_id, got_vi)) if *got_id == id && *got_vi == vi),
+                "`{destructure}` should destructure variant {vi}: {:?}",
+                enums.words.get(&destructure)
+            );
+        }
+    }
+
+    #[test]
     fn build_statics_widths_and_zero_values_follow_the_declared_type() {
         // D1/D3: the slot width is the declared type's, and an elided
         // initialiser is that type's zero -- `0`, `false`, and for `str` the

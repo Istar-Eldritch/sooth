@@ -801,10 +801,13 @@ mod tests {
     use crate::ir::test_helpers::*;
 
     /// Phase 6 slice 3 (R6): `Circle`'s field 0 is a scalar `i64`, `Rect`'s
-    /// field 0 is an aggregate `P` -- different layouts at the same index,
-    /// so reading `variants[1]` (`Rect`) for a `Circle` (`vi` 0) projection
-    /// would produce a differently-offset (and differently-typed) address,
-    /// not merely a missing one. No surface syntax reaches this mechanism
+    /// field 0 is an aggregate `P` -- so reading `variants[1]` (`Rect`) for a
+    /// `Circle` (`vi` 0) projection yields a *differently-typed* address, not
+    /// merely a missing one. Both field 0s sit at offset 0, so the address
+    /// assertion cannot see that mutation on its own: the `ref_inner` type
+    /// assertion is the only thing that catches a wrong variant index here,
+    /// and deleting it would leave the wrong-variant case unguarded. No
+    /// surface syntax reaches this mechanism
     /// yet (Phase 4's eliminator is what calls it), so the state is
     /// hand-built, mirroring how P7 slice 1 and Slice 2 each unit-tested a
     /// checker-only mechanism before its lowering arm existed.

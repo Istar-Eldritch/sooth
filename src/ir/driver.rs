@@ -714,6 +714,13 @@ pub(crate) fn lower_word(
 /// line's env, so an unrelated later redefinition of a callee cannot change
 /// this body's meaning. Nested polymorphic calls are out of scope (Slice 1
 /// R14), so the body carries no instantiation table of its own.
+///
+/// Phase 6 slice 3 (R6): the variant-field table is hardcoded empty rather
+/// than taken as a parameter for the same reason the caller passes an empty
+/// `resolved_fields` -- `poly_reference_word` rejects a field projection in a
+/// generic body outright, so a retained polymorphic word records neither
+/// table. Kept as a parameter on the struct side only because the caller
+/// owns that decision there.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_instantiation(
     symbol: &str,
