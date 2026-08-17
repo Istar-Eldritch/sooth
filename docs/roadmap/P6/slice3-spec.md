@@ -91,6 +91,39 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
 5. Mixed-level sibling arms are legal by construction (each arm reconciles against its
    own slot); cross-arm output agreement stays first-wins on **written source order**,
    not enum-declaration order.
+6. **The eliminator's scrutinee may be owning (`Shape`) or a reference (`&Shape`/
+   `&!Shape`); every arm's receiver mode matches the scrutinee's, uniformly across all
+   arms of one call, and the arm's own annotation must spell that mode** (settled with
+   the user, 2026-08-17, after two rounds of narrowing). An owning scrutinee gives every
+   arm an owning `Type::Variant`, exactly as originally specced. A reference scrutinee
+   gives every arm a reference to the narrowed variant (`&Shape.Circle`/`&!Shape.Circle`)
+   — not new machinery: `check_field_projection` already branches this way for ordinary
+   fields (`ref_parts`, P7.S1 R1) and `lower_clauses` already branches this way for
+   real clause-style words (`control_flow.rs:207-222`); the eliminator reuses both
+   branches rather than inventing a third. Mode can never legally vary between sibling
+   arms of one call (one scrutinee, one mode), so it is **not** a per-arm independent
+   choice — but the arm's annotation must still write it correctly, because `( Circle )`
+   is elided sugar for the arm's actual declared effect (R1: `( ..a Shape.Circle -- ..b )`),
+   and an annotation that misstates its own quotation's type is exactly what
+   `check_literal_against_declared_effect` already rejects for every other quotation in
+   the language — no new mismatch-checking logic, this falls out of decision 4's "call,
+   never re-implement" for free. Concretely: `( &Circle )`/`( &!Circle )` for a
+   reference scrutinee, bare `( Circle )` only for an owning one.
+
+   **This reopens two things settled differently earlier.** R4.2 previously ruled
+   reference-mode scrutinees explicitly out of scope ("the surface eliminator is
+   value-mode only"); that carve-out is dropped. And admitting a reference to a
+   narrowed variant means `Type::Variant` now has to be **interned as a real reference
+   referent**, which forces the one thing R5's `WholeValue` correction had flagged as an
+   open verification rather than assumed: `src/ir/layout.rs:556`'s
+   `ir_type_of(d.referent)` runs **unconditionally over every interned reference type at
+   build time**, for the whole program, not lazily — so the moment a program contains a
+   reference to a narrowed variant, `ir_type_of(Type::Variant)`'s current
+   `unreachable!` (`src/ir/types.rs:259`) is a live, forced panic, not a hypothetical
+   one. P7.S1 already hit this exact wall for ordinary variant-field references
+   (`&r` on a `Type::Variant` receiver is check-legal today, per P7.S1's own R4, but
+   "a build/run golden would panic on the missing lowering arm") and deliberately kept
+   its tests check-only to avoid it. This slice can no longer defer it: see R7.
 
 ## Requirements
 
@@ -111,21 +144,38 @@ Arm-annotation grammar is a strict extension of the existing four-part form
 (`parse_quot_annotation`), where a leading bare variant name can stand in for the parts
 elided:
 
-- `( Circle )` — variant only; below-scrutinee inputs, the variant input, and outputs
-  all elided.
-- `( Circle Push -- Vm )` and the fully spelled `( ..a Vm Push -- ..b )` — the variant
-  name (when present as the leading token) sets `variant_tag`, the rest parses as today.
+- `( Circle )` — variant only, owning mode; below-scrutinee inputs, the variant input,
+  and outputs all elided.
+- `( &Circle )` / `( &!Circle )` — same elision, reference mode (decision 6). The
+  leading token lexes as one `Word` starting with `&`/`&!`, exactly like an ordinary
+  reference-typed slot elsewhere in an annotation (`parse_type_expr`,
+  `src/parser.rs:2325`, already branches into `parse_ref_type_expr` on that prefix —
+  this is not new lexing or new grammar, only teaching the elision's leading-token
+  check to recognize the same prefix it already recognizes in the general four-part
+  form's type slots). `variant_tag` stores the **bare** variant name (`"Circle"`, sigil
+  stripped) — routing (R4 step 3) matches variant names, which never carry a sigil in
+  the `type:` declaration — while the elision's *expansion* carries the sigil through
+  into the annotation's declared input type (`&Shape.Circle`/`&!Shape.Circle`, not bare
+  `Shape.Circle`), so `check_literal_against_declared_effect` sees the arm's true
+  declared type and can reject a mode mismatch the ordinary way (decision 6).
+- `( Circle Push -- Vm )` and the fully spelled `( ..a &Vm Push -- ..b )` — the variant
+  name (when present as the leading token, itself optionally `&`/`&!`-prefixed) sets
+  `variant_tag`, the rest parses as today, sigil and all, via the existing
+  `parse_type_expr` path.
 
 R6's existing rule (`( )` and an arrow-less parenthesized list are located errors) stays;
 `parse_quotation_annotation_elided_is_error` (`src/parser.rs:3670`) must still pass. The
-arrow may be omitted **only** for the lone-variant-name form (`( Circle )`, exactly one
-token); any additional token requires the `--` as today, so `( Circle Push )` (two
-tokens, no arrow) is the same located elided-form error as a bare `( )`, not a partial
-arm annotation. The new grammar only *adds* the leading-variant-name form; it does not
-relax the arrow rule for a non-arm annotation. Unit tests beside the parser: happy path
-(bare `( Circle )` parses with `variant_tag = Some("Circle")`), and an error/edge case
-(a bare `( )` is still the located elided-form error, and `( Circle Push )` with no
-arrow is rejected the same way, not accepted as a partial arm).
+arrow may be omitted **only** for the lone-variant-name form (`( Circle )` or its
+`&`/`&!`-prefixed twin, exactly one token); any additional token requires the `--` as
+today, so `( Circle Push )` (two tokens, no arrow) is the same located elided-form error
+as a bare `( )`, not a partial arm annotation. The new grammar only *adds* the
+leading-variant-name form (bare or reference-prefixed); it does not relax the arrow rule
+for a non-arm annotation. Unit tests beside the parser: happy path (bare `( Circle )`
+parses with `variant_tag = Some("Circle")` and an owning declared input type;
+`( &!Circle )` parses with the **same** `variant_tag = Some("Circle")` but a mutable
+reference declared input type — the sigil must not leak into the routing name), and an
+error/edge case (a bare `( )` is still the located elided-form error, and
+`( Circle Push )` with no arrow is rejected the same way, not accepted as a partial arm).
 
 ### R2 — Eliminator `PolySig` generator (`src/check/declarations.rs`)
 
@@ -146,10 +196,27 @@ mangled). The generated `PolySig` uses the **minimal subset** (OQ3, below):
   `is_inline = false` (materializable `[` quotation) input would admit exactly the
   forwarded-abstract-quotation arm R4 step 1's correction rules out, and would let a
   real runtime `(code, env)` value reach `lower_clauses`, which cannot inline-splice a
-  materialized quotation body (the known row-combinator-quotation ICE). `is_inline = true`
-  is also what keeps R5's `ir_type_of(Type::Variant)` non-reachability argument airtight
-  (a materialized arm effect would force a `Type→IrType` conversion at a boundary
-  `is_inline = false` does not have).
+  materialized quotation body (the known row-combinator-quotation ICE).
+
+  **Corrected claim (decision 6 made the old one false): `is_inline = true` no longer
+  keeps `ir_type_of(Type::Variant)` unreachable — nothing does, and nothing needs to.**
+  An earlier draft argued `is_inline = true` was what kept that path airtight (avoiding a
+  `Type→IrType` conversion a materialized effect would force). Decision 6 forces the
+  conversion anyway, through a different route entirely (`intern_ref_type`'s `RefDecl`
+  table, forced by a reference-mode arm's declared type, independent of `is_inline`), so
+  `ir_type_of(Type::Variant)` now has a real implementation regardless (R6). The
+  `is_inline = true` choice above still stands, but only on its own original grounds
+  (matching `if`/`branch`, avoiding the materialized-quotation ICE) — not as a load-bearing
+  reason `Type::Variant` never reaches the backend, which is no longer true.
+
+  **This `PolySig`'s scrutinee slot (`Type::Enum(id, _)`) and its arm inputs
+  (`Type::Variant(id, vi)`, owning) do not encode decision 6's mode choice, and are not
+  meant to.** `check_eliminator_call` (R3) intercepts before this `PolySig` is ever
+  unified against via the ordinary poly-call path — it exists for registration/env
+  presence, not for per-call type-checking. Mode resolution (owning vs `&` vs `&!`) is
+  entirely `check_eliminator_call`'s own job, resolved per call site from the concrete
+  operand on the stack (R4 step 2), the same way `check_field_projection` resolves
+  receiver mode per call site rather than encoding it in a `Sig`.
 - `row_out: Some(b)` — the shared output row `..b`.
 - `outputs: vec![]` (the `..b` row carries outputs).
 - `bounds: vec![]`, `len_var_names: vec![]`, `ty_var_names: vec![]`,
@@ -211,9 +278,10 @@ shared helpers. Behaviour, in order:
    tagged quotation literal at all (untagged literal, forwarded quotation, or
    non-quotation value) or when the stack is exhausted. That stopping operand (or the
    exhausted stack) is the scrutinee slot.
-   - If the scrutinee slot itself doesn't resolve to `Type::Enum(id, _)` for a registered
-     eliminator, `underflow_error` (too few operands below the arms) or the ordinary
-     type-mismatch diagnostic (wrong-typed scrutinee) applies, exactly as today.
+   - If the scrutinee slot itself doesn't resolve to an owning or referenced enum for a
+     registered eliminator (step 2), `underflow_error` (too few operands below the arms)
+     or the ordinary type-mismatch diagnostic (wrong-typed scrutinee) applies, exactly as
+     today.
    - Once the scrutinee is confirmed, exhaustiveness (step 3) runs over the arms
      actually collected and names any variant with no collected arm — regardless of how
      many arms were popped, so `variant_count - 1` popped arms genuinely reaches
@@ -236,11 +304,18 @@ shared helpers. Behaviour, in order:
    whose written order, declaration order, and stack-pop order are pairwise different,
    asserting the baseline is the written-*first* arm — the existing written-vs-declaration
    test does not catch a reversal bug, since it never varies pop order independently.
-2. **Scrutinee type.** The below-top input must be `Type::Enum(id, _)` (value mode) for
-   the registry's `id`. Reject a non-enum scrutinee with the existing type-mismatch
-   diagnostic. (Reference-mode `&Enum`/`&!Enum` scrutinees are **out of scope** this
-   slice: the surface eliminator is value-mode only; clause-style reference dispatch is
-   unchanged and still handled by `check_clause_word`.)
+2. **Scrutinee type and mode (decision 6, replacing the earlier value-mode-only
+   ruling).** The below-arms input must resolve, after stripping any reference, to
+   `Type::Enum(id, _)` for the registry's `id` — the same `ref_parts`-based split
+   `check_field_projection` already does for an ordinary field receiver
+   (`src/check/word_families.rs:300-303`), and the same split `lower_clauses` already
+   makes on its `scrutinee_ty` (`control_flow.rs:211-215`). Three legal shapes:
+   `Type::Enum(id, _)` (owning), `Type::Ref(rid, false, _)` referencing an `Enum(id)`
+   (`&Enum`), `Type::Ref(rid, true, _)` referencing an `Enum(id)` (`&!Enum`). Reject a
+   non-enum (and non-reference-to-enum) scrutinee with the existing type-mismatch
+   diagnostic. The resolved mode (owning / `&` / `&!`) is recorded once per call and
+   used uniformly for every arm in step 4 — it is a property of the call, not of any
+   individual arm.
 3. **Exhaustiveness + duplication pre-pass**, adapted near-verbatim from
    `check_clause_word` (`src/check/word_entry.rs:288-408`): walk arms in **written
    source order**, look each arm up by its `( Variant )` `variant_tag` against the enum's
@@ -250,12 +325,22 @@ shared helpers. Behaviour, in order:
    omitted the variant name entirely) is its own located error.
 4. **Per-arm body check.** For each arm, look up its variant by `variant_tag`, build that
    arm's expected effect directly from the enum's own variant (`variant_type` →
-   `Type::Variant(id, vi)` as the arm's below-row-top input, shared `..a`/`..b` rows),
-   and pass it to `check_literal_against_declared_effect` (`src/check.rs:1703`) unchanged.
+   `Type::Variant(id, vi)`), then apply step 2's resolved scrutinee mode **uniformly**:
+   owning mode uses `Type::Variant(id, vi)` as-is; `&`/`&!` mode wraps it via
+   `intern_ref_type(refs, Type::Variant(id, vi), mutable)` (decision 6) before it becomes
+   the arm's below-row-top input (shared `..a`/`..b` rows either way). Pass the built
+   effect to `check_literal_against_declared_effect` (`src/check.rs:1703`) unchanged.
    That helper already carries the `~`/`[` flavour check, the D3 capture restriction,
-   tail-position handling, and the directional body check. This sidesteps `apply_subst`
-   entirely (decision 4): the arm effects are built from the enum, so no `Type::Variant`
-   survives substitution grounding.
+   tail-position handling, and the directional body check — including comparing the
+   arm's *written* declared type against this built one, which is what rejects an arm
+   whose annotation spells the wrong mode (e.g. bare `( Circle )` under a reference
+   scrutinee): no separate mode-mismatch diagnostic needed, this is the same check every
+   other quotation literal in the language is already held to. This sidesteps
+   `apply_subst` entirely (decision 4): the arm effects are built from the enum, so no
+   `Type::Variant` survives substitution grounding via that path — it now does survive
+   into a different registry (`intern_ref_type`'s `RefDecl` table) when reference mode is
+   in play; see R6's `ir_type_of` requirement, which this is why that requirement is no
+   longer optional.
 5. **Cross-arm output agreement**, following `shape_baseline`'s existing first-wins shape
    (`src/check/combinators.rs:660+`): the first arm **in written order** sets the `..b`
    baseline; a later disagreeing arm is the located error, reported by calling
@@ -310,6 +395,18 @@ Unit tests beside `check_eliminator_call` (naming `thing_condition_expected`):
   in pop order (reverse written order) without the required reversal — the
   written-vs-declaration test above does not catch this, since it never varies pop order
   independently of declaration order.
+- `check_eliminator_call_reference_scrutinee_types_arms_by_reference` — decision 6: a
+  `&Shape` scrutinee (arms annotated `( &Circle )`/`( &!Rect )` matching the caller's own
+  `&`/`&!`) type-checks, with each arm's built expected effect a reference to
+  `Type::Variant`, not owning. Fails if step 2 rejects a reference scrutinee outright (the
+  old value-mode-only ruling) or if step 4 always builds an owning effect regardless of
+  mode.
+- `check_eliminator_call_mode_mismatch_is_error` — a `&Shape` scrutinee with an arm
+  annotated bare `( Circle )` (owning, not `&Circle`) is rejected by
+  `check_literal_against_declared_effect`'s existing declared-vs-expected comparison, the
+  same way any other quotation literal misdeclaring its own type would be. No new
+  diagnostic path; fails if step 4 silently coerces the mismatch instead of building the
+  mode-correct expected effect and letting the shared helper reject the disagreement.
 
 ### R5 — Lowering: `EnumWord::Eliminate` (`src/ir/layout.rs`, `src/ir/func_builder/calls.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/control_flow.rs`)
 
@@ -346,16 +443,21 @@ eliminator's arms.
     expects as its receiver — the same pointer `resolved_variant_fields`-driven
     projection (owned or reference mode) and `EnumWord::Destructure` read
     `payload_offset + field.offset` from.
-  - **Open verification, required before this requirement is considered done, not
-    assumed:** confirm no code path calls `ir_type_of(Type::Variant(..))` while lowering
-    an eliminator call or an arm body under `WholeValue` — the frontend types the arm's
-    receiver as `Type::Variant`, but nothing in the `WholeValue` path above actually
-    converts that type to an `IrType` (the pushed value is `scrutinee`, already an
-    `IrType::Enum`/`IrType::Ptr` from before the call), so this should hold, but it must be
-    checked against the actual lowering call graph, not asserted from this description.
-    Add a lowering test that exercises an eliminator call end-to-end and would panic on
-    `ir_type_of`'s existing `unreachable!("a Type::Variant never reaches the backend")`
-    (`src/ir/types.rs:259`) if this assumption is wrong.
+  - **Superseded by decision 6, no longer merely an open verification: `WholeValue`
+    itself never calls `ir_type_of(Type::Variant(..))`, but reference-mode arms now
+    force it elsewhere, on a different path.** The original claim here was that
+    `WholeValue` pushes an already-computed `IrType` (`scrutinee`'s own
+    `IrType::Enum`/`IrType::Ptr`), never converting `Type::Variant` itself — that part
+    still holds by the same reasoning. But decision 6 admits `&Shape.Circle` as an arm's
+    *declared type*, which the checker interns via `intern_ref_type(refs,
+    Type::Variant(id, vi), mutable)` (a genuinely new `RefDecl` entry, since it differs
+    from the caller's own `&Shape` entry). `src/ir/layout.rs:556`'s
+    `ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect()`
+    runs this conversion **unconditionally over every interned reference type, for the
+    whole program, at build time** — not lazily, and not only for code lowering actually
+    reaches. So a reference-mode eliminator call forces `ir_type_of(Type::Variant)` for
+    real, every time one appears anywhere in the program, whether or not that particular
+    call is ever executed. See R6 for the fix this now requires (no longer optional).
 - Extend `EnumWord` (`src/ir/layout.rs:264`) with `Eliminate(EnumId)`. Register the
   eliminator's surface/mangled name in `enums.words` alongside the `Construct` entries
   (`src/ir/layout.rs:517-519`), mapping `"{EnumName}?"` → `Eliminate(id)`.
@@ -385,6 +487,10 @@ both.
 Unit test beside the lowering: an eliminator IR-lowering test (`lower_src`) that asserts
 the dispatch emits the same tag-dispatch/phi-join shape a clause word does (reuse the
 `lower_clauses` test helpers), proving the synthetic-clause path reaches `lower_clauses`.
+A second test, reference-mode: an eliminator call over `&Shape`/`&!Shape` reaches the
+same dispatch shape and does not panic on `ir_type_of(Type::Variant)` (see R7) — this is
+the test that actually exercises the `ref_referents` build-time conversion decision 6
+now forces, not a hypothetical.
 
 ### R6 — Variant-accessor IR lowering (`src/ast.rs`, `src/check.rs`, `src/check/word_families.rs`, `src/ir/layout.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/word_families.rs`, `src/ir/driver.rs`)
 
@@ -457,6 +563,23 @@ instruction: "its own `EnumId`-keyed lowering-side table"):
   than inlining a second copy — `layout.rs:526-530`), and extend `lower_enum_word`
   (`quotation.rs`) with the one `Destructure` arm, reading every field at
   `payload_offset + field.offset` in order (mirroring `lower_struct_word::Destructure`).
+- **`ir_type_of` gets a real `Type::Variant` case (`src/ir/types.rs:257-259`), replacing
+  the `unreachable!("a Type::Variant never reaches the backend (Slice 3)")`.** This is
+  new and load-bearing per decision 6, not part of the original R6 scope: admitting a
+  reference-mode eliminator scrutinee means an arm's declared input type can be
+  `&Shape.Circle`, interned via `intern_ref_type(refs, Type::Variant(id, vi), mutable)`
+  — a real `RefDecl` entry, not a hypothetical one — and `src/ir/layout.rs:556`'s
+  `ref_referents` computes `ir_type_of` over **every** interned referent unconditionally
+  at build time, whether or not that reference is ever exercised at runtime. Erase
+  `Type::Variant(id, _, _)` to the same `IrType::Enum(id)` its parent enum already gets
+  (`ir_type_of(Type::Enum(id, _))`'s existing arm) — a variant is represented identically
+  to its enum at the backend; only the frontend distinguishes them, which is exactly the
+  erasure R2's own note already assumed ("`Type::Variant` maps to the same
+  `IrType::Enum(id)` at the backend") before this decision made it load-bearing instead
+  of incidental. The retired `#[should_panic]` test at `src/ir/types.rs:504-509`
+  (asserting this exact `unreachable!` fires) must be replaced with a positive assertion
+  that `ir_type_of(Type::Variant(id, vi, name)) == IrType::Enum(id)` for the same `id` a
+  plain `Type::Enum(id, _)` erases to — not merely that it no longer panics.
 
 Unit tests beside each lowering site, against hand-built IR state (this mechanism has no
 surface-syntax caller until R5 exists in the same slice, so these are exercised directly,
@@ -482,14 +605,23 @@ hand-built state before a lowering arm existed):
 
 ### R7 — Golden (`examples/` + test harness)
 
-A `.sth` golden exercising a multi-variant enum end-to-end (construct a `Type::Variant`
-value via the eliminator, read a field via a P7.S1-style `&field`/`&!field` projection
-inside an arm — the spelling P7.S1 retired the fused `Circle>field` form in favour of —
-produce a result). This is the slice's exit witness: unlike Slice 2, the eliminator is
-the mechanism that first makes a `Type::Variant` value reachable from surface syntax, and
-R6 is what first gives that value's projections somewhere to lower to. The golden asserts
-observable program output (source in → expected output), not merely that it compiles.
-Migration of `examples/vm.sth`/`Bool`/`Result`/`Option` is **Slice 4**.
+**Two `.sth` goldens, not one — decision 6 makes both modes exit witnesses, not just one
+owning-mode example.** Neither mode is a strict subset of the other's coverage: owning
+mode exercises `Type::Variant` reachability from surface syntax for the first time ever
+(unlike Slice 2); reference mode exercises the `ir_type_of(Type::Variant)` real
+implementation (R6) and the `intern_ref_type`/`ref_referents` build-time path decision 6
+forces, which the owning-mode golden never touches at all.
+
+- **Owning-mode golden**: construct a `Type::Variant` value via the eliminator, read a
+  field via a P7.S1-style `&field`/`&!field` projection inside an arm (the spelling
+  P7.S1 retired the fused `Circle>field` form in favour of), produce a result.
+- **Reference-mode golden**: call the eliminator over `&Shape`/`&!Shape` (arms annotated
+  `( &Circle )`/`( &!Rect )` accordingly), read/write a field through the narrowed
+  reference inside an arm, and confirm the original `Shape` is still owned by whatever
+  held the reference — nothing was consumed by the call.
+
+Both assert observable program output (source in → expected output), not merely that
+they compile. Migration of `examples/vm.sth`/`Bool`/`Result`/`Option` is **Slice 4**.
 
 ## OQ1 artifact: `check_poly_combinator_args` rule set vs `check_eliminator_call`
 
@@ -614,6 +746,11 @@ Exit criteria (breakable assertions):
 - The updated canary test (`word_families.rs:2178-2218`, see R6): a variant projection
   populates `resolved_variant_fields` and leaves `resolved_fields` (the struct table)
   empty — fails if a future change misroutes a variant into the struct-keyed table.
+- `ir_type_of(Type::Variant(id, vi, name)) == IrType::Enum(id)` (R6) — a positive
+  equality assertion, not "does not panic." Replaces the retired
+  `#[should_panic]` test at `src/ir/types.rs:504-509`. Fails if the erasure regresses to
+  a variant-specific `IrType` instead of collapsing to the same representation as its
+  parent enum.
 
 ### Phase 4 — eliminator lowering + golden
 
@@ -663,8 +800,6 @@ Exit criteria (breakable assertions):
   gains an additive `ArmBinding` parameter (R5); every existing caller keeps its current
   behaviour bit-for-bit under `Decompose` — this is not the block/phi dispatch shape
   changing, only which values populate the stack before a clause body runs.
-- Reference-mode (`&Enum`/`&!Enum`) surface eliminators — value mode only this slice;
-  clause-style reference dispatch stays in `check_clause_word`.
 - Forwarded abstract quotation arms (an eliminator arm must be a quotation *literal*
   carrying a `variant_tag`; see R4 step 1, OQ1 rows 7/10) — a real capability gap,
   deferred rather than accepted and left to ICE at lowering.
@@ -676,22 +811,22 @@ Exit criteria (breakable assertions):
   "phases": [
     {
       "phase": 1,
-      "focus": "arm-annotation grammar: QuotAnnot.variant_tag and the leading-variant-name annotation form",
+      "focus": "arm-annotation grammar: QuotAnnot.variant_tag with owning and &/&! reference-mode leading-variant-name forms",
       "difficulty": "standard"
     },
     {
       "phase": 2,
-      "focus": "frontend eliminator PolySig generator, registry, and check_eliminator_call with variable-arity arm collection and written-order baseline",
+      "focus": "frontend eliminator PolySig generator, registry, and check_eliminator_call with variable-arity arm collection, owning/reference scrutinee mode, and written-order baseline",
       "difficulty": "hard"
     },
     {
       "phase": 3,
-      "focus": "variant-projection IR lowering: resolved_variant_fields side table mirroring P7.S1's resolved_fields, plus EnumWord::Destructure, unit-tested against hand-built IR state",
+      "focus": "variant-projection IR lowering: resolved_variant_fields side table mirroring P7.S1's resolved_fields, EnumWord::Destructure, and a real ir_type_of(Type::Variant) case, unit-tested against hand-built IR state",
       "difficulty": "standard"
     },
     {
       "phase": 4,
-      "focus": "eliminator lowering via a new ArmBinding::WholeValue mode on lower_clauses, EnumWord::Eliminate, plus the end-to-end golden reading a field via &field/&!field",
+      "focus": "eliminator lowering via a new ArmBinding::WholeValue mode on lower_clauses, EnumWord::Eliminate, plus owning- and reference-mode end-to-end goldens",
       "difficulty": "hard"
     }
   ]
