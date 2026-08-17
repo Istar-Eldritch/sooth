@@ -108,7 +108,7 @@ fn core_shuffles_are_polymorphic_over_i64_bool_and_a_struct() {
          : main ( -- )\n\
          5 dup . .\n\
          true false swap . .\n\
-         1 2 Vec2 dup Vec2>x . Vec2>y . ;\n",
+         1 2 Vec2 &x @ . &y @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "5\n5\ntrue\nfalse\n1\n2\n");
@@ -151,7 +151,7 @@ fn three_output_word_with_an_aggregate_output_runs() {
         "three",
         "type: Vec2 x i64 y i64 ;\n\
          : spread ( -- i64 Vec2 bool ) 1 2 3 Vec2 true ;\n\
-         : main ( -- ) spread . Vec2>y . . ;\n",
+         : main ( -- ) spread . &y @ . drop . ;\n",
         false,
     );
     assert_eq!(stdout, "true\n3\n1\n");
@@ -321,12 +321,12 @@ fn two_aggregates_swapped_across_back_edge_stay_correct() {
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box -- Box )\n\
-           | n a b |\n\
-           n 0 = ~[ b ] ~[\n\
-             a Box>n .\n\
-             n 1 - b a loop\n\
+           | k a b |\n\
+           k 0 = ~[ b ] ~[\n\
+             &a &n @ .\n\
+             k 1 - b a loop\n\
            ] if ;\n\
-         : main ( -- ) 4 1 mk 2 mk loop Box>n . ;\n",
+         : main ( -- ) 4 1 mk 2 mk loop &n @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "1\n2\n1\n2\n2\n");
@@ -342,7 +342,7 @@ fn aggregate_carried_loop_runs_in_constant_stack() {
     let src = "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box ) | n b | n 0 = ~[ b ] ~[ n 1 - n mk loop ] if ;\n\
-         : main ( -- ) 1000000 0 mk loop Box>n . ;\n";
+         : main ( -- ) 1000000 0 mk loop &n @ . drop ;\n";
     assert_eq!(
         run_stack_bounded_src("aggloop", src),
         Some(0),
@@ -362,7 +362,7 @@ fn forwarded_aggregate_reads_its_seeded_value() {
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box ) | n prev | n 0 = ~[ prev ] ~[ n 1 - prev loop ] if ;\n\
-         : main ( -- ) 3 42 mk loop Box>n . ;\n",
+         : main ( -- ) 3 42 mk loop &n @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "42\n");
@@ -413,7 +413,7 @@ fn join_phi_over_carried_aggregate_survives() {
              | c |\n\
              n 1 - c loop\n\
            ] if ;\n\
-         : main ( -- ) 5 0 mk loop Box>n . ;\n",
+         : main ( -- ) 5 0 mk loop &n @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "3\n");
@@ -436,10 +436,10 @@ fn struct_carried_across_back_edge_is_not_aliased() {
            | n prev |\n\
            n 0 = ~[ prev ] ~[\n\
              n mk | cur |\n\
-             prev Box>a .\n\
+             &prev &a @ .\n\
              n 1 - cur loop\n\
            ] if ;\n\
-         : main ( -- ) 3 0 mk loop Box>a . ;\n",
+         : main ( -- ) 3 0 mk loop &a @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "0\n3\n2\n1\n");
@@ -520,7 +520,7 @@ fn destructor_carried_across_back_edge_disposes_right_contents() {
 
 #[test]
 fn nested_projection_carried_across_back_edge_is_not_aliased() {
-    // Criterion 7 (R4/D2): the back-edge `Vec2` arg is `s Segment>from`, an
+    // Criterion 7 (R4/D2): the back-edge `Vec2` arg is `&s &from @`, an
     // interior pointer *into* the carried `Segment` stable slot (a distinct
     // `Value` from the slot), which read-before-write staging snapshots before
     // the `Segment` slot is overwritten. Was `99 0 2 1`; correct `99 0 3 2`.
@@ -532,10 +532,10 @@ fn nested_projection_carried_across_back_edge_is_not_aliased() {
          : loop ( i64 Segment Vec2 -- Vec2 )\n\
            | n s v |\n\
            n 0 = ~[ v ] ~[\n\
-             v Vec2>x .\n\
-             n 1 - n mkseg s Segment>from loop\n\
+             &v &x @ .\n\
+             n 1 - n mkseg &s &from @ loop\n\
            ] if ;\n\
-         : main ( -- ) 3 0 mkseg 99 99 Vec2 loop Vec2>x . ;\n",
+         : main ( -- ) 3 0 mkseg 99 99 Vec2 loop &x @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "99\n0\n3\n2\n");
@@ -555,10 +555,10 @@ fn inline_constructed_aggregate_carried_across_back_edge_is_not_aliased() {
            | n prev |\n\
            n 0 = ~[ prev ] ~[\n\
              n n Vec2 | cur |\n\
-             prev Vec2>x .\n\
+             &prev &x @ .\n\
              n 1 - cur loop\n\
            ] if ;\n\
-         : main ( -- ) 3 0 0 Vec2 loop Vec2>x . ;\n",
+         : main ( -- ) 3 0 0 Vec2 loop &x @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "0\n3\n2\n1\n");
@@ -583,18 +583,18 @@ fn back_edges_disagreeing_on_a_carried_slot_stage_independently() {
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box )\n\
-           | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
-             n 2 mod 0 = ~[\n\
-               n mk | cur |\n\
-               prev Box>n .\n\
-               n 1 - cur loop\n\
+           | k prev |\n\
+           k 0 = ~[ prev ] ~[\n\
+             k 2 mod 0 = ~[\n\
+               k mk | cur |\n\
+               &prev &n @ .\n\
+               k 1 - cur loop\n\
              ] ~[\n\
-               prev Box>n .\n\
-               n 1 - prev loop\n\
+               &prev &n @ .\n\
+               k 1 - prev loop\n\
              ] if\n\
            ] if ;\n\
-         : main ( -- ) 4 0 mk loop Box>n . ;\n",
+         : main ( -- ) 4 0 mk loop &n @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "0\n4\n4\n2\n2\n");
@@ -646,12 +646,12 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box Box -- Box )\n\
-           | n a b c |\n\
-           n 0 = ~[ a ] ~[\n\
-             a Box>n . b Box>n . c Box>n .\n\
-             n 1 - c a b loop\n\
+           | k a b c |\n\
+           k 0 = ~[ a ] ~[\n\
+             &a &n @ . &b &n @ . &c &n @ .\n\
+             k 1 - c a b loop\n\
            ] if ;\n\
-         : main ( -- ) 2 1 mk 2 mk 3 mk loop Box>n . ;\n",
+         : main ( -- ) 2 1 mk 2 mk 3 mk loop &n @ . drop ;\n",
         false,
     );
     assert_eq!(stdout, "1\n2\n3\n3\n1\n2\n2\n");
@@ -945,7 +945,7 @@ fn times_body_constructing_aggregate_computes_expected() {
         "times-aggregate",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 Vec2>x + ] times . ;\n",
+             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop + ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -963,7 +963,7 @@ fn times_body_constructing_aggregate_runs_in_constant_stack() {
         "times-aggregate-bounded",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 Vec2>x + ] times . ;\n",
+             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop + ] times . ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -979,7 +979,7 @@ fn times_carrying_an_aggregate_through_the_row_runs() {
         "times-carry-aggregate",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 3 4 Vec2 0 1000000 ~[ drop over Vec2>x + ] times . drop ;\n",
+             : main ( -- ) 3 4 Vec2 0 1000000 ~[ drop over &x @ swap drop + ] times . drop ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -1017,7 +1017,7 @@ fn two_sequential_times_in_one_word_both_run() {
         "times-sequential",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 10 ~[ | i | i + ] times . 5 6 Vec2 Vec2>x . 0 10 ~[ | i | i + ] times . ;\n",
+             : main ( -- ) 0 10 ~[ | i | i + ] times . 5 6 Vec2 &x @ . drop 0 10 ~[ | i | i + ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,

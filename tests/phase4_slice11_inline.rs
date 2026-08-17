@@ -281,7 +281,7 @@ fn inline_on_builtin_operator_overload_is_located_error() {
     // is excluded from. Before the rejection this panicked in
     // `ir/func_builder/calls.rs` ("checked user overload exists").
     let src = "type: A n i64 ;\n\
-               : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n\
+               : + inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n\
                : main ( -- ) 1 A 2 A + . ;\n";
     let err = check_error(src);
     assert_eq!(

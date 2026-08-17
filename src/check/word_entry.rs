@@ -692,7 +692,7 @@ mod tests {
     fn check_inline_builtin_operator_overload_is_error() {
         let err = check_src(
             "type: A n i64 ;\n\
-             : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+             : + inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -703,7 +703,7 @@ mod tests {
         // rejection is keyed on the name, not on the overload.
         check_src(
             "type: A n i64 ;\n\
-             : add inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+             : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .expect("an `inline` word whose name no operator claims is accepted");
     }

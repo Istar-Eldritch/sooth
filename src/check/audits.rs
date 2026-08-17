@@ -637,8 +637,8 @@ mod tests {
         // even if the duplicate-override rejection this test targets were
         // deleted entirely, since `find_drop_overloads` runs and returns
         // before either body is ever checked.
-        let src = "type: T x i64 ; : drop ( T -- ) | a | a T>x drop ; \
-                   : drop ( T -- ) | a | a T>x drop ;";
+        let src = "type: T x i64 ; : drop ( T -- ) | a | a T> drop ; \
+                   : drop ( T -- ) | a | a T> drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("`T` already defines its own `drop`"),
@@ -652,7 +652,7 @@ mod tests {
         // reported (the module checks fine), and the registry carries one
         // entry per struct.
         let src = "type: A x i64 ; type: B y i64 ; \
-                   : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y . ; \
+                   : drop ( A -- ) | a | a A> . ; : drop ( B -- ) | b | b B> . ; \
                    : main ( -- ) 1 A drop 2 B drop ;";
         check_src(src).unwrap();
 

@@ -497,7 +497,7 @@ mod tests {
         // its own struct's destructor symbol with its own body.
         let module = lower_src(
             "type: A x i64 ; type: B y i64 ; \
-             : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y drop ; \
+             : drop ( A -- ) | a | a A> . ; : drop ( B -- ) | b | b B> drop ; \
              : main ( -- ) 1 A drop 2 B drop ;",
         );
         assert!(

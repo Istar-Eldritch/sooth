@@ -946,8 +946,8 @@ fn while_carrying_an_aggregate_state_runs() {
     let src = format!(
         "{}type: Box n i64 ;\n\
          : main ( -- )\n\
-           0 Box ~[ | b | b Box>n dup 5 < ~[ 1 + Box true ] ~[ Box false ] if ] c::while\n\
-           | r | r Box>n . ;\n",
+           0 Box ~[ | b | &b &n @ dup 5 < ~[ 1 + Box true ] ~[ Box false ] if ] c::while\n\
+           | r | &r &n @ . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_aggregate", &src);
@@ -1753,7 +1753,7 @@ fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
     // reliably segfaults when mutated back to an empty map.
     let transcript = repl_error(
         "type: Vec2 x i64 y i64 ;\n\
-         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
          : vsum ( 'T Vec2 Vec2 -- i64 ) + Vec2> + swap drop ;\n\
          42 1 2 Vec2 3 4 Vec2 vsum\n",
     );
@@ -2082,7 +2082,7 @@ fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
         "crit10-private",
         "type: Secret tag i64 ;\n\
          export: run ;\n\
-         : run ( Secret [ i64 -- i64 ] -- ) | q | Secret>tag q call drop ;\n",
+         : run ( Secret [ i64 -- i64 ] -- ) | q | &tag @ swap drop q call drop ;\n",
     );
     let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
     std::fs::remove_file(&path).ok();

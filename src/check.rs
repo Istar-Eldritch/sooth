@@ -3240,9 +3240,9 @@ mod tests {
         // surviving-capture-set (`let surviving = element.surviving;`) onto
         // the array it produces, exactly as a struct/enum constructor's
         // output does -- the array is the closure's carrier now, having
-        // replicated it N times. `Boxed>f` materializes a quotation field
-        // getter's output with its surviving set intact (the R19/R22 comment
-        // on the generic accessor path), so `b Boxed>f` hands `fill` an
+        // replicated it N times. `Boxed>` materializes a quotation field
+        // destructure's output with its surviving set intact (the R19/R22
+        // comment on the generic accessor path), so `b Boxed>` hands `fill` an
         // already-erased closure whose surviving set has one frame-rooted
         // member (`r`, a reference into `mk`'s own local `arr`). If `fill`
         // did not forward that set onto the array, `mk`'s R22 word-output
@@ -3263,7 +3263,7 @@ mod tests {
              0 4 fill | arr |\n\
              &arr | r |\n\
              [ r 0 >usize &> @ ] Boxed | b |\n\
-             b Boxed>f\n\
+             b Boxed>\n\
              4 fill ;\n\
              : main ( -- ) mk drop ;\n",
         )

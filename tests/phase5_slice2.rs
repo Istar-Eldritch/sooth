@@ -104,7 +104,7 @@ fn option_instantiates_over_a_pointer_type() {
         "type: Option 'T | None | Some 'T ;\n\
          type: Node val i64 ;\n\
          : unwrap-or ( i64 Option[^Node] -- i64 )\n\
-         | Some |v| drop v ^> Node>val\n\
+         | Some |v| drop v ^> &val @ swap drop\n\
          | None ;\n\
          : main ( -- )\n\
            0 7 Node ^ Some unwrap-or .\n\
