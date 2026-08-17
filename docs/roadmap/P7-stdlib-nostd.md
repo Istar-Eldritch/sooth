@@ -72,7 +72,7 @@ checker verifies, and an *exported* word's undeclared static access is a located
 error naming the static (a private word's static access is inferred, not declaration-forced:
 inferred everywhere, declared at the export boundary).
 
-**P7.S3a — Generic instantiation over a poly word's own type variable.** Discovered as a
+**P7.S3a — Generic instantiation over a poly word's own type variable.** `[ done ]` Discovered as a
 blocker, not planned: the paper dogfood for S3b (below) found that a polymorphic word
 cannot name a generic type applied to its own type variable in its signature —
 `: unbox ( Box['T] -- 'T )` and `: or-default ( 'T Option['T] -- 'T )` both fail
@@ -99,7 +99,12 @@ plain `sort ( ['T: Copy Order 'N] -- ['T 'N] )` over an array types today with n
 dependency on this).
 **Exit:** a polymorphic word can declare and use a generic type applied to its own
 type variable (`Box['T]`, `Option['T]`, `Map['K 'V]`) in its signature and body,
-resolved correctly per concrete instantiation.
+resolved correctly per concrete instantiation. Landed as a new `PolyType::Generic`
+variant (`src/ast.rs`) threaded through unification, a live `GenericTypes` registry
+carried through check and lowering instead of being dropped after parsing, and
+generic-constructor calls (`Ok`/`Err`-style) admitted inside poly bodies, double-backstopped
+by exit-time structural unification and instantiation-time reverse-mint unification
+(`docs/roadmap/P7/slice3a-spec.md`, `tests/phase7_slice3a.rs`).
 
 **P7.S3b — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
