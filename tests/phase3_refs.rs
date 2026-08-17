@@ -1205,31 +1205,17 @@ fn mutable_borrow_of_name_aliased_place_dead_is_accepted() {
 }
 
 #[test]
-fn mutable_borrow_of_peek_aliased_place_is_error() {
-    // The second route: a non-consuming peek pushes the field's interior
-    // address, so two peeks of one field alias with no naming involved.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S\n  S|>a swap S|>a swap drop\n  | p q |\n  \
-         &!p &!x 1 +!\n  q V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
-        "a peek-aliased place must be rejected too: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
-    // A peeked field is still a name for part of the whole struct, so
-    // borrowing the struct while the peek's binding is live must be rejected
-    // the same as any other aliasing name — region *overlap*, not equality.
+    // D2/R1: a shared field projection off an owned receiver is non-
+    // consuming, so `s` and the projection bound as `peeked` both stay live
+    // and denote overlapping regions -- borrowing `s` mutably while `peeked`
+    // is still live must be rejected the same as any other aliasing name,
+    // region *overlap* rather than equality.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
-         &!s &!a &!x 40 +!\n  peeked V> . . ;\n",
+         : main ( -- )\n  1 2 V 3 S | s |\n  s &a | peeked |\n  \
+         &!s &!a &!x 40 +!\n  peeked @ V> . .\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `peeked`"),
@@ -1238,30 +1224,14 @@ fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
-    // The same overlap from the other end: borrowing the field's own name
-    // while the struct it was peeked from is still live.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
-         &!peeked &!x 40 +!\n  s S>a V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `peeked` mutably") && err.contains("it is aliased by `s`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
-    // The third route: the ordinary, *consuming* getter `S>fi` still pushes
-    // the aggregate field's interior address, so naming its result aliases
-    // the struct it was gotten from just as a peek would.
+    // The same overlap through an aggregate field: a non-consuming `&arr`
+    // off an owned receiver still pushes the field's interior address, so
+    // naming its result aliases the struct it was projected from.
     let err = check_error(
         "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
-         &!s &!arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+         : main ( -- )\n  0 4 fill S | s |\n  s &arr | items |\n  \
+         &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `items`"),
@@ -1270,52 +1240,22 @@ fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_gotten_field_aliased_by_struct_is_error() {
-    // The same overlap from the other end: borrowing the gotten field's own
-    // name while the struct it came from is still live.
-    let err = check_error(
-        "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
-         &!items 0 &!> 9 !\n  &s &arr 0 &> @ . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `items` mutably") && err.contains("it is aliased by `s`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
-}
-
-#[test]
 fn dup_makes_gotten_field_independent_of_struct() {
-    // `dup` is the remedy here too: feeding the getter an independent copy
-    // (dup, swap, drop the original) breaks the alias, and the resulting
-    // field is provably independent of a later mutation through `s`.
+    // `dup` is the remedy here too: feeding the projection an independent
+    // copy (dup, swap, drop the original) breaks the alias, and the
+    // resulting field is provably independent of a later mutation through
+    // `s`.
     let (stdout, code) = run_src(
         "dup-makes-gotten-field-independent",
         "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop S>arr | items |\n  \
-         &!s &!arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+         : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop &arr | items |\n  \
+         &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  drop\n  s drop ;\n",
     );
     assert_eq!(
         stdout, "0\n",
         "the gotten field must stay independent of the struct's later mutation"
     );
     assert_eq!(code, 0);
-}
-
-#[test]
-fn mutable_borrow_of_one_of_two_gotten_fields_from_same_struct_is_error() {
-    // Two getters off the *same* struct value, with no mutation of the
-    // struct itself in between, still alias each other: both denote the
-    // one region the struct's field occupies.
-    let err = check_error(
-        "type: S arr [i64 4] ;\n\
-         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | a |\n  s S>arr | b |\n  \
-         &!a 0 &!> 9 !\n  &b 0 &> @ . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `b`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
 }
 
 #[test]
@@ -1466,24 +1406,6 @@ fn over_of_an_aggregate_without_a_mutable_borrow_is_accepted() {
 }
 
 #[test]
-fn mutable_borrow_of_a_place_a_merged_peek_may_denote_is_error() {
-    // A projection out of a merged value must project the field out of every
-    // region the merge could denote. Dropping the merged parent leaves only the
-    // peeked field, so nothing but that projection can catch the borrow.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
-         0 0 > ~[ s ] ~[ t ] if S|>a swap drop | inner |\n  \
-         &!t &!a &!x 99 !\n  inner V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
-        "a peek out of a merge must keep every arm's field region: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
     // Q3/M2: `p` and `v` name one Copy slot; `v`'s only use after the borrow is
     // inside a trailing `if` arm. The conservative-max scan must attribute that
@@ -1549,25 +1471,6 @@ fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
     assert!(
         err.contains("pushed at line 4"),
         "the error should locate the alias it cannot name: {err}"
-    );
-}
-
-#[test]
-fn mutable_borrow_of_struct_aliased_by_peek_on_the_stack_is_error() {
-    // The peek route with neither end bound. The parent copy `s` leaves behind
-    // is dropped, so the only thing left overlapping is the peeked interior
-    // itself and the diagnostic has to locate the peek rather than the naming.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a swap drop\n  \
-         &!s &!a &!x 40 +!\n  V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `s` mutably")
-            && err.contains("a value on the stack")
-            && err.contains("col 5"),
-        "a peeked interior left on the stack still aliases its parent: {err}"
     );
 }
 

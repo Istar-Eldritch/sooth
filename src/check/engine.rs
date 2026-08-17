@@ -988,31 +988,10 @@ pub(super) fn live_mutable_borrow_of(
     })
 }
 
-/// The region a non-consuming projection out of `parent` denotes, for an
-/// aggregate interior value (a scalar one is loaded into a temporary and denotes
-/// no region). The parent is given a region of its own if it has none: it is
-/// only here, where a second name for its interior can appear, that the
-/// identity starts to matter. Both names are located at the projection, which is
-/// where each of them enters play as an alias of the other.
-pub(super) fn peek_region(
-    parent: &mut Slot,
-    interior: Type,
-    segment: &str,
-    span: Span,
-    prov: &mut Provenance,
-) -> Option<Alias> {
-    if !interior.is_aggregate() {
-        return None;
-    }
-    Some(projected_region(parent, segment, span, prov))
-}
-
-/// `peek_region` without the aggregate gate: the interior region a
-/// non-consuming projection out of `parent` denotes, minting `parent`'s own
-/// region lazily. A peek copies a scalar field's *value* out, so a scalar
-/// interior aliases nothing and needs no region; P7 slice 1's `&f`/`&!f` hands
-/// out a *reference* to the interior instead, which aliases its parent
-/// whatever the field's width.
+/// The interior region a non-consuming projection out of `parent` denotes,
+/// minting `parent`'s own region lazily. P7 slice 1's `&f`/`&!f` hands out a
+/// *reference* to the interior, which aliases its parent whatever the
+/// field's width.
 pub(super) fn projected_region(
     parent: &mut Slot,
     segment: &str,

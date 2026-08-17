@@ -723,10 +723,10 @@ pub(super) fn poly_call_term(
     // single-signature behaviour this path had before overloading.
     //
     // D3 (slice 8b): this is the poly-body twin of the concrete path's own
-    // call ahead of `check_struct_get_word` -- a generated accessor
-    // (`S>`/`S>field`) is just another `env` candidate here, so the guard
-    // must run before this lookup dispatches one for a drop-overloaded
-    // struct, or a generic word could destructure it and skip the destructor.
+    // call ahead of the ordinary env dispatch -- a generated destructure
+    // (`S>`) is just another `env` candidate here, so the guard must run
+    // before this lookup dispatches one for a drop-overloaded struct, or a
+    // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),

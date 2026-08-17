@@ -24,7 +24,7 @@ use crate::editor;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
 use crate::lexer::Token;
-use crate::resolve::split_accessor;
+use crate::resolve::split_destructure_suffix;
 use crate::{backend, lexer, parser};
 
 // RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
@@ -2208,7 +2208,7 @@ impl Session {
     /// leave it (a local or a genuinely absent name falls through to the
     /// ordinary unknown-word path), `Err` for R15's `not exported`.
     fn rewrite_import_call(&self, name: &str, span: Span) -> Result<Option<String>, String> {
-        let (base, suffix) = split_accessor(name);
+        let (base, suffix) = split_destructure_suffix(name);
         if let Some(internal) = self.import_aliases.get(base) {
             return Ok(Some(format!("{internal}{suffix}")));
         }
@@ -2219,7 +2219,7 @@ impl Session {
             if self.import_qualifier_module.contains_key(qualifier) {
                 if let Some(private) = self.import_private.get(qualifier) {
                     if private.contains(rest) {
-                        let (base_name, _) = split_accessor(rest);
+                        let (base_name, _) = split_destructure_suffix(rest);
                         return Err(crate::resolve::not_exported_error(
                             base_name, qualifier, span,
                         ));
@@ -4243,8 +4243,9 @@ mod tests {
     /// a `Type::Variant` operand until slice 3's eliminator, so what
     /// discriminates "registered" from "never wired into `typed_env`" is which
     /// diagnostic a bare call gets: a registered word underflows, an
-    /// unregistered one is an unknown word. `Dot>x` is R7 -- a zero-field
-    /// variant mints the destructure and no getter.
+    /// unregistered one is an unknown word. Per-field access is a
+    /// receiver-directed projection now (R4), not a generated word, so
+    /// `Circle>r`/`Dot>x` are simply unknown.
     #[test]
     fn repl_variant_accessor_sigs_reach_the_session_env() {
         let mut session = Session::new();
@@ -4252,15 +4253,20 @@ mod tests {
         session
             .eval_line("type: Shape | Circle r i64 | Dot ;", &mut out)
             .unwrap();
-        for call in ["Circle>r", "Circle>", "Dot>"] {
+        for call in ["Circle>", "Dot>"] {
             let err = session.eval_type(call, &mut out).unwrap_err();
             assert!(
                 err.contains("stack underflow: needs 1 values"),
                 "{call}: unexpected message: {err}"
             );
         }
-        let err = session.eval_type("Dot>x", &mut out).unwrap_err();
-        assert!(err.contains("unknown word `Dot>x`"), "unexpected: {err}");
+        for call in ["Circle>r", "Dot>x"] {
+            let err = session.eval_type(call, &mut out).unwrap_err();
+            assert!(
+                err.contains(&format!("unknown word `{call}`")),
+                "unexpected: {err}"
+            );
+        }
     }
 
     #[test]

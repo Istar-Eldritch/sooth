@@ -131,33 +131,21 @@ pub(crate) fn demangle_word(name: &str) -> &str {
     &name[..idx]
 }
 
-/// `demangle_word` for a *call* name, which may carry an accessor suffix. A
-/// generated accessor mangles as `P__m0>x`, so the `__m0` sits mid-string and
-/// the trailing-suffix strip above cannot see it; the type prefix has to be
-/// demangled and the `>x` put back.
+/// `demangle_word` for a *call* name, which may carry the one remaining
+/// generated-word suffix: a destructure mangles as `P__m0>`, so the `__m0`
+/// sits mid-string and the trailing-suffix strip above cannot see it; the
+/// type prefix has to be demangled and the trailing `>` put back. A
+/// constructor call (`P__m0`) has no suffix and falls straight through to
+/// `demangle_word`.
 pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
-    let (head, accessor) = split_accessor(name);
-    if accessor.is_empty() {
-        return std::borrow::Cow::Borrowed(demangle_word(head));
-    }
+    let Some(head) = name.strip_suffix('>') else {
+        return std::borrow::Cow::Borrowed(demangle_word(name));
+    };
     let demangled = demangle_word(head);
     if demangled.len() == head.len() {
         return std::borrow::Cow::Borrowed(name);
     }
-    std::borrow::Cow::Owned(format!("{demangled}{accessor}"))
-}
-
-/// Split a call name into its leading identifier and the accessor suffix a
-/// generated word carries: `Point>x` -> (`Point`, `>x`), `Point|>x` ->
-/// (`Point`, `|>x`), `Point` -> (`Point`, ``). The generated-word spellings are
-/// `Type>field` / `Type<field` / `Type|>field` (`check.rs`, `ir.rs`), and a
-/// type name never contains `<`, `>`, or `|`, so the first of those characters
-/// is the boundary.
-pub(crate) fn split_accessor(name: &str) -> (&str, &str) {
-    match name.find(['>', '<', '|']) {
-        Some(i) => name.split_at(i),
-        None => (name, ""),
-    }
+    std::borrow::Cow::Owned(format!("{demangled}>"))
 }
 
 /// Split a leading reference sigil (`&!`/`&`) off a call name, so `rewrite`
@@ -172,6 +160,16 @@ fn strip_ref_sigil(name: &str) -> (&str, &str) {
         ("&", rest)
     } else {
         ("", name)
+    }
+}
+
+/// Split a call name into its leading type identifier and the one remaining
+/// generated-word suffix: `Point>` -> (`Point`, `>`), `Point` -> (`Point`,
+/// ``). A type name never contains `>`, so a trailing one is unambiguous.
+pub(crate) fn split_destructure_suffix(name: &str) -> (&str, &str) {
+    match name.strip_suffix('>') {
+        Some(head) => (head, ">"),
+        None => (name, ""),
     }
 }
 
@@ -236,29 +234,28 @@ impl NameTables {
         exports: &[Vec<(String, Span)>],
         span: Span,
     ) -> Result<Option<String>, String> {
-        // A `&`/`&!` borrow prefix and a qualifier/accessor compose on one
-        // token (`&!q::Point>x`), so the sigil is peeled off first and the
-        // rest resolved against the same tables an unprefixed name would use.
-        // But a sigil is only ever meaningful ahead of the one accessor form
-        // `check.rs`'s struct-projection branch parses back out itself
-        // (`rest.split_once('>')`, i.e. a suffix starting with `>`): a bare
-        // word or a bare/other-accessor type name can never be borrowed, so
-        // under a sigil those must stay un-mangled and fall through to
-        // `Ok(None)`, or a downstream "not a local" diagnostic would name a
-        // mangled decl the surface program never wrote.
+        // A `&`/`&!` borrow prefix and a qualifier compose on one token
+        // (`&!q::COUNT`), so the sigil is peeled off first and the rest
+        // resolved against the same tables an unprefixed name would use. A
+        // sigil is only ever meaningful ahead of a bare place name (a local,
+        // caught above, or a static, below): a type name or a plain word can
+        // never be borrowed, so under a sigil those must stay un-mangled and
+        // fall through to `Ok(None)`, or a downstream "not a local"
+        // diagnostic would name a mangled decl the surface program never
+        // wrote. A field projection (`&f`) carries no type name at all, so it
+        // never reaches the type/word branches below regardless of sigil.
         let (sigil, core) = strip_ref_sigil(name);
         if scope.contains(core) {
             return Ok(None);
         }
-        let type_ok = |suffix: &str| sigil.is_empty() || suffix.starts_with('>');
         let word_ok = sigil.is_empty();
         if let Some((qualifier, rest)) = core.split_once("::") {
             let target = match imports.get(qualifier) {
                 Some(&t) => t,
                 None => return Ok(None),
             };
-            let (type_part, suffix) = split_accessor(rest);
-            if type_ok(suffix) && self.types[target as usize].contains(type_part) {
+            let (type_part, suffix) = split_destructure_suffix(rest);
+            if word_ok && self.types[target as usize].contains(type_part) {
                 if !is_exported(&exports[target as usize], type_part) {
                     return Err(not_exported_error(type_part, qualifier, span));
                 }
@@ -276,8 +273,8 @@ impl NameTables {
             }
             return Ok(None);
         }
-        let (type_part, suffix) = split_accessor(core);
-        if type_ok(suffix) && self.types[module as usize].contains(type_part) {
+        let (type_part, suffix) = split_destructure_suffix(core);
+        if word_ok && self.types[module as usize].contains(type_part) {
             return Ok(Some(format!(
                 "{sigil}{}{}",
                 mangle(type_part, module),
@@ -314,7 +311,7 @@ impl NameTables {
         // `Type` together with its generated words as one unit, so a
         // `Type>field` call whose `type_part` is selectively imported rewrites
         // against the target module just like a plain word does.
-        if type_ok(suffix) {
+        if word_ok {
             if let Some(&target) = selective.get(type_part) {
                 if self.types[target as usize].contains(type_part) {
                     return Ok(Some(format!(
@@ -545,12 +542,10 @@ mod tests {
     use crate::parser::{parse_bodies, scan_imports};
 
     #[test]
-    fn split_accessor_finds_the_type_prefix() {
-        assert_eq!(split_accessor("Point"), ("Point", ""));
-        assert_eq!(split_accessor("Point>x"), ("Point", ">x"));
-        assert_eq!(split_accessor("Point<x"), ("Point", "<x"));
-        assert_eq!(split_accessor("Point|>x"), ("Point", "|>x"));
-        assert_eq!(split_accessor(">"), ("", ">"));
+    fn split_destructure_suffix_finds_the_type_prefix() {
+        assert_eq!(split_destructure_suffix("Point"), ("Point", ""));
+        assert_eq!(split_destructure_suffix("Point>"), ("Point", ">"));
+        assert_eq!(split_destructure_suffix(">"), ("", ">"));
     }
 
     #[test]
@@ -623,12 +618,13 @@ mod tests {
         assert_eq!(absent, Ok(None), "absent name defers to unknown-word");
     }
 
-    /// U6 (R15): naming a type in `export:` exports it and its five generated
-    /// words (constructor, destructure, getter, setter, peek) as one unit,
-    /// gated by the type's own single export entry rather than five separate
-    /// ones.
+    /// U6 (R15): naming a type in `export:` exports it and its two generated
+    /// words (constructor, destructure) as one unit, gated by the type's own
+    /// single export entry rather than two separate ones. Per-field access is
+    /// a receiver-directed projection (`&f`), which carries no type name and
+    /// so has no export entry of its own to gate.
     #[test]
-    fn export_of_type_includes_all_five_generated_words() {
+    fn export_of_type_includes_both_generated_words() {
         let mut types = vec![HashSet::new(), HashSet::new()];
         types[1].insert("Point".to_string());
         let tables = NameTables {
@@ -657,11 +653,8 @@ mod tests {
         };
 
         for spelling in [
-            "geo::Point",    // constructor
-            "geo::Point>",   // destructure
-            "geo::Point>x",  // getter
-            "geo::Point<x",  // setter
-            "geo::Point|>x", // peek
+            "geo::Point",  // constructor
+            "geo::Point>", // destructure
         ] {
             let no_selective = std::collections::HashMap::new();
             let result =
@@ -702,42 +695,11 @@ mod tests {
         );
     }
 
-    /// A `&`/`&!` borrow prefix and a struct field accessor compose on one
-    /// token (`&!Acc>arr`), so the mangling rewrite must see past the sigil
-    /// to the type name underneath it: with only a *second*, unrelated module
-    /// present, an unqualified `&!Acc>arr` in module 0 must still mangle to
-    /// `Acc`'s module-0 name, exactly as the unprefixed `Acc>arr` already
-    /// does.
-    #[test]
-    fn sigiled_struct_field_accessor_mangles_past_the_borrow_prefix() {
-        let mut module = assemble_two_modules(
-            "type: Acc arr [i64 4] ;\n\
-             : main ( -- )\n\
-             0 4 fill Acc | acc |\n\
-             &!acc &!Acc>arr | a |\n\
-             a Acc>arr drop\n\
-             acc drop ;",
-            ": noop ( -- ) ;",
-        );
-        resolve_modules(&mut module, false).unwrap();
-        let main = module.words.iter().find(|w| w.name == "main").unwrap();
-        let calls = call_names(&main.body);
-        assert!(
-            calls.contains(&"&!Acc__m0>arr".to_string()),
-            "sigiled accessor mangled: {calls:?}"
-        );
-        assert!(
-            calls.contains(&"Acc__m0>arr".to_string()),
-            "unprefixed accessor mangled the same way: {calls:?}"
-        );
-    }
-
-    /// The converse: a sigil is only ever meaningful ahead of a `Type>field`
-    /// accessor (the one form `check.rs`'s struct-projection branch parses
-    /// back out), never ahead of a plain word or a bare type name. Those must
-    /// stay unmangled so a "not a local" diagnostic downstream names the
-    /// spelling the author wrote, not a decl the sigil was never resolved
-    /// against.
+    /// A sigil is only ever meaningful ahead of a bare place name (a local
+    /// or a static); a field projection (`&f`) carries no type name at all,
+    /// and a bare word or type name can never be borrowed. Those must stay
+    /// unmangled so a "not a local" diagnostic downstream names the spelling
+    /// the author wrote, not a decl the sigil was never resolved against.
     #[test]
     fn sigiled_plain_word_or_bare_type_is_left_unmangled() {
         let mut module = assemble_two_modules(

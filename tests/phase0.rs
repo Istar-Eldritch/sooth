@@ -2044,35 +2044,40 @@ fn nested_struct_is_linear_transitively() {
 }
 
 #[test]
-fn get_field_drops_the_rest_on_linear_struct() {
-    // Criterion 6: `S>fi` still consumes the whole aggregate on a linear
-    // receiver, so the non-extracted field (`b`, tag 2) is dropped as part of
-    // the getter itself, before the explicit `drop` of the extracted `a`
-    // (tag 1) that follows.
+fn destructure_extracts_a_field_with_no_implicit_disposal() {
+    // P7 slice 1 (D3/R9 deletion guard): the retired `S>fi` getter used to
+    // drop every non-extracted linear field as part of the getter itself.
+    // Its replacement, `S>` destructure, does no such thing -- both fields
+    // move out onto the stack, and disposal happens exactly once, at the
+    // explicit `drop` sites that follow, in the order the program writes
+    // them (here `b` first, since it is destructured deeper but consumed
+    // first). A reinstated sibling-drop would print `b`'s drop twice.
     let stdout = run_linear_golden(
-        "get-drops-rest",
+        "destructure-no-implicit-drop",
         &format!(
             "{SPY_DEF}type: Pair a Spy b Spy ;\n\
-: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair>a drop ;\n"
+: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair> drop drop ;\n"
         ),
     );
     assert_eq!(stdout, "drop 2\ndrop 1\n");
 }
 
 #[test]
-fn set_field_drops_overwritten_linear_field() {
-    // Criterion 8: `S<fi` drops the field it overwrites (old `a`, tag 1)
-    // before storing the new value (tag 9); the other field (`b`, tag 2)
-    // transfers via the blit untouched, and both surface later at the final
-    // destructure+drop.
-    let stdout = run_linear_golden(
-        "set-drops-overwritten",
-        &format!(
-            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
-: main ( -- )\n  1 Spy 2 Spy Pair\n  9 Spy Pair<a\n  Pair> drop drop ;\n"
-        ),
+fn store_over_a_linear_field_through_a_reference_is_error() {
+    // P7 slice 1 (D3/R11 deletion guard): the retired `S<fi` setter used to
+    // drop the field it overwrote. Its replacement, `&!f v !`, has no such
+    // glue to reinstate -- `!` already refuses to store over a linear
+    // referent outright (the value being overwritten would otherwise leak
+    // with nothing to drop it), so this guard is a diagnostic assertion, not
+    // a drop-count golden.
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+: main ( -- )\n  1 Spy 2 Spy Pair\n  &!a 9 Spy !\n  Pair> drop drop ;\n"
+    ));
+    assert!(
+        err.contains("cannot access the linear referent") || err.contains("`!`"),
+        "unexpected message: {err}"
     );
-    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 9\n");
 }
 
 #[test]
@@ -2110,35 +2115,34 @@ fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
 // a linear field is a compile error (workaround: `S>`).
 
 #[test]
-fn peek_copy_field_keeps_struct() {
-    // Criterion 7a: `Pair|>a` peeks the Copy field `a` twice, leaving the
-    // aggregate itself live both times (proven because the final `drop` of
-    // the whole struct still finds its linear field `b` intact and disposes
-    // it exactly once — a consuming `Pair>a` in its place would have dropped
-    // `b` at the first peek, or left nothing for the trailing `drop` to see).
+fn projection_read_of_copy_field_keeps_struct() {
+    // D2: `&a @` (the retired `Pair|>a` peek's replacement) is non-consuming,
+    // leaving the aggregate itself live both times (proven because the final
+    // `drop` of the whole struct still finds its linear field `b` intact and
+    // disposes it exactly once -- a consuming read in its place would have
+    // dropped `b` at the first read, or left nothing for the trailing `drop`
+    // to see).
     let stdout = run_linear_golden(
-        "peek-copy-field",
+        "projection-read-copy-field",
         &format!(
             "{SPY_DEF}type: Pair a i64 b Spy ;\n\
-: main ( -- )\n  5 3 Spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n"
+: main ( -- )\n  5 3 Spy Pair\n  &a @ drop\n  &a @ drop\n  drop ;\n"
         ),
     );
     assert_eq!(stdout, "drop 3\n");
 }
 
 #[test]
-fn peek_linear_field_is_error() {
-    // Criterion 7b: peeking the linear field `b` is a compile error naming
-    // both the peek workaround and the offending field's type.
+fn projection_read_of_linear_field_is_error() {
+    // D2 (verified 2026-08-17): producing `&b` off a linear field is legal --
+    // a projection borrows rather than duplicates. The rejection moves to
+    // `@`, which refuses to read a linear referent, symmetric to `!`'s
+    // refusal to store over one.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  Pair|>b drop drop ;\n"
+        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  &b @ drop drop ;\n"
     ));
-    assert!(
-        err.contains("cannot `Pair|>b`"),
-        "unexpected message: {err}"
-    );
+    assert!(err.contains("`@`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
-    assert!(err.contains("`S>`"), "unexpected message: {err}");
 }
 
 // Phase 3 Slice 1, Phase 4: enums via a synthesized, tag-dispatched

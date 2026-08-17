@@ -122,91 +122,6 @@ pub(super) fn check_reference_word(
             });
         }
         _ => {
-            if let Some((head, field_name)) = rest.split_once('>') {
-                if let Some(idx) = ctx.structs().iter().position(|d| d.name == head) {
-                    let decl = &ctx.structs()[idx];
-                    if let Some(field_ty) = decl
-                        .fields
-                        .iter()
-                        .find(|(f, _)| f == field_name)
-                        .map(|(_, ty)| *ty)
-                    {
-                        let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-                        let want = intern_ref_type(refs, struct_ty, mutable);
-                        let n = stack.len();
-                        if n < 1 {
-                            return Err(need(name, 1, n));
-                        }
-                        if stack[n - 1].quot.is_some() {
-                            return Err(reject_quotation_operand(ctx, span, name));
-                        }
-                        if stack[n - 1].ty != want {
-                            return Err(type_mismatch_error(
-                                ctx,
-                                span,
-                                name,
-                                want,
-                                stack[n - 1].ty,
-                            ));
-                        }
-                        let out = intern_ref_type(refs, field_ty, mutable);
-                        let deriv = prov.project(stack[n - 1].deriv);
-                        // Review fix (P7 slice 1): forward the receiver's
-                        // region, same reasoning as `&>` above.
-                        let alias = stack[n - 1].alias;
-                        stack.truncate(n - 1);
-                        stack.push(Slot {
-                            alias,
-                            ..Slot::derived(out, deriv)
-                        });
-                        return Ok(Some(std::mem::take(stack)));
-                    }
-                }
-                // Phase 6 slice 2 (R9 mechanism 3 / R11): `&Variant>fi` /
-                // `&!Variant>fi`. Shaped like the struct arm above, but the
-                // variant is resolved from the `EnumId` the operand already
-                // carries rather than by a global name scan: variant names
-                // are not unique across enums (only *type* names are deduped),
-                // so a scan would mis-resolve the second enum's variant.
-                let n = stack.len();
-                if n >= 1 {
-                    if let Some((Type::Variant(id, _, _), _)) = ref_parts(stack[n - 1].ty, refs) {
-                        if let Some((spelled_vi, field_ty)) =
-                            variant_accessor_field(ctx.enums(), id, head, field_name)
-                        {
-                            let variant_ty = variant_type(ctx.enums(), id, spelled_vi);
-                            let want = intern_ref_type(refs, variant_ty, mutable);
-                            if stack[n - 1].quot.is_some() {
-                                return Err(reject_quotation_operand(ctx, span, name));
-                            }
-                            // Full-type equality, the struct arm's idiom: it
-                            // catches a wrong variant and a wrong mutability
-                            // in one comparison, since the two interned
-                            // reference types differ either way.
-                            if stack[n - 1].ty != want {
-                                return Err(type_mismatch_error(
-                                    ctx,
-                                    span,
-                                    name,
-                                    want,
-                                    stack[n - 1].ty,
-                                ));
-                            }
-                            let out = intern_ref_type(refs, field_ty, mutable);
-                            let deriv = prov.project(stack[n - 1].deriv);
-                            // Review fix (P7 slice 1): forward the
-                            // receiver's region, same reasoning as `&>` above.
-                            let alias = stack[n - 1].alias;
-                            stack.truncate(n - 1);
-                            stack.push(Slot {
-                                alias,
-                                ..Slot::derived(out, deriv)
-                            });
-                            return Ok(Some(std::mem::take(stack)));
-                        }
-                    }
-                }
-            }
             // P7 slice 1 (D1/R1): a receiver-directed projection. `&hp` names
             // no type, so the field resolves against the type already on the
             // stack; the resolution is recorded per call site for lowering,
@@ -979,225 +894,6 @@ pub(super) fn check_owned_cell_word(
     Ok(Some(std::mem::take(stack)))
 }
 
-/// `S|>fi` (R10): a new non-consuming `( S -- S field )` peek, keyed by the
-/// per-struct-per-field name (unlike `fill`, it is not generic over a
-/// shape, so it is not a fixed entry in `struct_generated_sigs`
-/// either: it is looked up by parsing the `Struct|>field` name against the
-/// struct registry, same as the IR's `structs.words` map). `None` if `name`
-/// doesn't split on `|>` or doesn't resolve to a known struct+field (the
-/// caller falls through to the env lookup, so an unrelated word still gets
-/// the ordinary unknown-word error). A linear field is rejected outright
-/// (R10): the peek would leave a second, unowned reference to a resource the
-/// aggregate still owns, with no reference machinery to make that legal.
-pub(super) fn check_struct_peek_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    arrays: &[ArrayDecl],
-    prov: &mut Provenance,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((struct_name, field_name)) = name.split_once("|>") else {
-        return Ok(None);
-    };
-    let structs = ctx.structs();
-    // D7: `struct_name` is always the bare surface spelling (`[` is a lexer
-    // delimiter, so no source term can ever spell a mangled instantiation
-    // name), but an instantiated `decl.name` is mangled (`Box[i64]`); compare
-    // against the surface name it carries, same as the generated-word
-    // registries this peek's own key lives beside in `layout.rs`.
-    let Some(idx) = structs
-        .iter()
-        .position(|d| generic_surface_name(&d.name) == struct_name)
-    else {
-        return Ok(None);
-    };
-    let decl = &structs[idx];
-    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
-        return Ok(None);
-    };
-    let field_ty = *field_ty;
-    if !is_copy(field_ty, structs, ctx.enums(), arrays) {
-        return Err(peek_of_linear_field_error(ctx, span, name, field_ty));
-    }
-    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-    let n = stack.len();
-    if n < 1 {
-        return Err(underflow_error(ctx, span, name, 1, n));
-    }
-    let top = stack[n - 1];
-    if top.quot.is_some() {
-        return Err(reject_quotation_operand(ctx, span, name));
-    }
-    if top.ty != struct_ty {
-        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
-    }
-    // The peek is non-consuming and pushes the field's *interior address*,
-    // so two peeks of one field of one struct are two names for one region.
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    // Review fix: forward the struct operand's surviving set (R19) onto the
-    // peeked field -- a closure the struct carries stays visible through a
-    // peek exactly as it would through the consuming getter below.
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
-    Ok(Some(std::mem::take(stack)))
-}
-
-/// `S>fi` (R21's third route): the ordinary, consuming field getter, already
-/// registered in `struct_generated_sigs` and otherwise left to the generic
-/// env-based dispatch. That generic path pushes a plain `Slot::computed`
-/// with no alias, but for an aggregate field this getter's IR lowering
-/// pushes the field's *interior address* rather than copying it out (same
-/// device as `S|>fi`'s peek), so the struct operand and the extracted field
-/// alias one region exactly as two peeks would. `None` for a scalar field
-/// (no region to alias) or an unresolved name, so every other call site is
-/// untouched. Consuming, unlike the peek: the struct operand is popped, not
-/// left on the stack, but the aliasing hazard is unaffected by that, since
-/// the operand's own local binding (if it is named) keeps the same region
-/// regardless of what happens to the stack-level copy of its slot.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn check_struct_get_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    prov: &mut Provenance,
-    scope: &Scope,
-    live: &Liveness,
-    at: usize,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((struct_name, field_name)) = name.split_once('>') else {
-        return Ok(None);
-    };
-    let structs = ctx.structs();
-    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
-        return Ok(None);
-    };
-    let decl = &structs[idx];
-    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
-        return Ok(None);
-    };
-    let field_ty = *field_ty;
-    if !field_ty.is_aggregate() {
-        return Ok(None);
-    }
-    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-    let n = stack.len();
-    if n < 1 {
-        return Err(underflow_error(ctx, span, name, 1, n));
-    }
-    let top = stack[n - 1];
-    if top.quot.is_some() {
-        return Err(reject_quotation_operand(ctx, span, name));
-    }
-    if top.ty != struct_ty {
-        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
-    }
-    // Review fix (P7 slice 1): this getter consumes the struct receiver just
-    // as `drop` does, so it needs the same guard against discarding a place
-    // a live projection still reaches.
-    if let Some(origin) = consumed_place_conflict(top, &stack[..n - 1], scope, prov, live, at) {
-        return Err(consuming_borrowed_value_error(ctx, span, name, origin));
-    }
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    stack.truncate(n - 1);
-    // Review fix: forward the struct operand's surviving set (R19) onto the
-    // extracted field -- an aggregate field carrying a closure (a nested
-    // struct/array/cell) must keep that closure visible to R22's return
-    // guard past this getter.
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
-    Ok(Some(std::mem::take(stack)))
-}
-
-/// Phase 6 slice 2 (R11/R12): resolve an accessor's spelled variant name and
-/// field name against the enum the **operand** names -- never a global
-/// variant-name scan, which would mis-resolve, since variant names are not
-/// unique across enums (only *type* names are deduped). `None` if that enum
-/// holds no variant by that name, or that variant no such field; both
-/// accessor mechanisms then fall through rather than invent a diagnostic for
-/// a name they have not established is an accessor at all.
-fn variant_accessor_field(
-    enums: &[EnumDecl],
-    id: EnumId,
-    variant_name: &str,
-    field_name: &str,
-) -> Option<(usize, Type)> {
-    // D7: a source term can only ever spell the bare surface name (`[` is a
-    // lexer delimiter), while an instantiated `variant.name` is mangled.
-    let vi = enums[id.index()]
-        .variants
-        .iter()
-        .position(|v| generic_surface_name(&v.name) == variant_name)?;
-    let field_ty = enums[id.index()].variants[vi]
-        .fields
-        .iter()
-        .find(|(f, _)| f == field_name)
-        .map(|(_, ty)| *ty)?;
-    Some((vi, field_ty))
-}
-
-/// Phase 6 slice 2 (R9 mechanism 2): `Variant>fi` for an **aggregate** field,
-/// the variant twin of `check_struct_get_word`. A scalar field and the whole
-/// `Variant>` destructure never reach here: they are typed entirely by the
-/// `Sig` `variant_generated_sigs` registered, and this returns `Ok(None)` for
-/// them. An aggregate field is claimed here so the getter pushes the field's
-/// *interior address* (the `peek_region` device) rather than copying it out,
-/// exactly as the struct getter does.
-///
-/// R11/R12: the variant is resolved from the `EnumId` the operand already
-/// carries, never by a global variant-name scan -- variant names are not
-/// unique across enums, so a scan would pick the first match arbitrarily.
-/// Every fall-through is `Ok(None)` (not a variant operand, name absent from
-/// the operand's own enum, scalar field), leaving an unrelated word to the
-/// ordinary lookup chain; only a resolved aggregate field with the wrong
-/// variant on top is an error here.
-pub(super) fn check_variant_get_word(
-    name: &str,
-    span: Span,
-    stack: &mut Vec<Slot>,
-    ctx: &Ctx,
-    prov: &mut Provenance,
-) -> Result<Option<Vec<Slot>>, String> {
-    let Some((variant_name, field_name)) = name.split_once('>') else {
-        return Ok(None);
-    };
-    let n = stack.len();
-    if n < 1 {
-        return Ok(None);
-    }
-    let top = stack[n - 1];
-    let Type::Variant(id, vi, _) = top.ty else {
-        return Ok(None);
-    };
-    let enums = ctx.enums();
-    let Some((spelled_vi, field_ty)) = variant_accessor_field(enums, id, variant_name, field_name)
-    else {
-        return Ok(None);
-    };
-    if !field_ty.is_aggregate() {
-        return Ok(None);
-    }
-    let want = variant_type(enums, id, spelled_vi);
-    if spelled_vi != vi {
-        return Err(type_mismatch_error(ctx, span, name, want, top.ty));
-    }
-    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
-    stack.truncate(n - 1);
-    stack.push(Slot {
-        alias,
-        surviving: top.surviving,
-        ..Slot::computed(field_ty)
-    });
-    Ok(Some(std::mem::take(stack)))
-}
-
 /// Apply a stack shuffle if `name` is one, returning `Some(stack)`; `None` if
 /// the name is not a shuffle (the caller then looks it up in the env). Shuffles
 /// move concrete slot types with no fixed signature: `dup` of a `bool` yields
@@ -1442,21 +1138,6 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
         Ctx::Line { .. } => {
             format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
         }
-    }
-}
-/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
-/// the aggregate live, so it can't also transfer ownership of a linear
-/// field's value; the workaround is `S>` (destructure the whole aggregate).
-fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
-            op, name, span.line, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
-        ),
     }
 }
 /// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
@@ -1871,13 +1552,6 @@ mod tests {
             op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
             // check_reference_word's `&q` prefix-borrow-of-a-local form.
             op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
-            // check_struct_peek_word and check_struct_get_word (an aggregate
-            // field, so the getter is intercepted here, not by the env loop).
-            op("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
-            op(
-                "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
-                "`Outer>b`",
-            ),
             // check_access_word's store paths: the value and the receiver.
             w(
                 "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
@@ -2079,39 +1753,6 @@ mod tests {
     }
 
     #[test]
-    fn variant_scalar_getter_types_by_sig_dispatch() {
-        // Mechanism 1: `check_variant_get_word` bails `Ok(None)` on a scalar
-        // field, so the registered `Sig` alone types this. The exact residual
-        // stack is the discriminator.
-        let module = shape_module();
-        let stack = infer_variant_line(&module, &[shape_variant(&module, 0)], "Circle>r").unwrap();
-        assert_eq!(stack, vec![Type::I64]);
-    }
-
-    #[test]
-    fn check_variant_get_word_scalar_field_returns_none() {
-        // Mechanism boundary (R9): a scalar field must never be claimed by
-        // `check_variant_get_word` -- it is typed entirely by mechanism 1
-        // above (`variant_scalar_getter_types_by_sig_dispatch`). Paired with
-        // that test, asserting the direct `Ok(None)` here is not a lone
-        // vacuous case: deleting the `is_aggregate` bail would still leave
-        // the Sig-dispatch test green (mechanism 1 wins env dispatch first),
-        // so only this direct call on the check function catches it.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        assert!(
-            check_variant_get_word("Circle>r", Span::default(), &mut stack, &ctx, &mut prov)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
     fn variant_whole_destructure_types_by_sig_dispatch() {
         // Mechanism 1 (R6): the whole destructure projects every field in
         // declared order, first field deepest, and has no check function at
@@ -2133,57 +1774,6 @@ mod tests {
             .filter(|key| key.starts_with("Dot>"))
             .collect();
         assert_eq!(minted, vec!["Dot>".to_string()]);
-    }
-
-    #[test]
-    fn variant_aggregate_getter_aliases_the_operand_region() {
-        // Mechanism 2 (R-OQ3): an aggregate field is claimed by
-        // `check_variant_get_word`, which pushes the field's *interior
-        // address* rather than a fresh unaliased slot. The pushed alias must
-        // be the operand region's `p` projection, which is what a bare
-        // `Slot::computed(field_ty)` placebo would not produce.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let region = prov.fresh_region();
-        let base = prov.alias_set_of(region);
-        let mut stack = vec![Slot {
-            alias: Some(Alias {
-                set: base,
-                span: Span::default(),
-            }),
-            ..Slot::computed(shape_variant(&module, 0))
-        }];
-        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap()
-            .expect("an aggregate variant field is claimed here");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].ty, struct_ty(&module, "P"));
-        let alias = out[0].alias.expect("the field aliases the operand");
-        assert_eq!(alias.set, prov.field_alias_set(base, "p"));
-    }
-
-    #[test]
-    fn variant_aggregate_getter_of_the_wrong_variant_names_both_spellings() {
-        // Mechanism 2 + R2: the wrong-operand mismatch renders the leaked
-        // `Enum.Variant` names. It must use an aggregate field -- a scalar one
-        // never reaches `check_variant_get_word` at all.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        let err = check_variant_get_word("Rect>q", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap_err();
-        assert!(
-            err.contains("expected `Shape.Rect`, found `Shape.Circle`"),
-            "unexpected message: {err}"
-        );
     }
 
     // --- P7 slice 2, R1/R3: borrowing a module static. ---
@@ -2267,70 +1857,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn variant_accessor_absent_from_the_operands_enum_falls_through() {
-        // R12: a name the operand's own enum does not hold is not established
-        // to be an accessor at all, so both mechanisms return `Ok(None)` and
-        // the call degrades to the ordinary unknown-word error rather than a
-        // variant-specific one. The single case that may assert on `Ok(None)`.
-        let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
-        assert!(
-            check_variant_get_word("Nope>q", Span::default(), &mut stack, &ctx, &mut prov)
-                .unwrap()
-                .is_none()
-        );
-        let err = infer_variant_line(&module, &[shape_variant(&module, 0)], "Nope>q").unwrap_err();
-        assert!(err.contains("unknown word `Nope>q`"), "unexpected: {err}");
-        assert!(
-            !err.contains("Shape"),
-            "invented a variant diagnostic: {err}"
-        );
-    }
-
-    /// Two enums (`A`, `B`) that each spell a `Circle p` variant, with
-    /// different field types (`P`, `Q`). Proves R11/R12's central claim: the
-    /// variant is resolved from the operand's own `EnumId`, never a global
-    /// first-match scan over variant names, since variant names are not
-    /// unique across enums. `bool` occupies enum 0, so `A` is 1 and `B` is 2.
-    const TWO_ENUM_SRC: &str =
-        "type: P a i64 ;\ntype: Q b i64 ;\ntype: A | Circle p P ;\ntype: B | Circle p Q ;\n: main ( -- ) ;\n";
-
-    fn two_enum_module() -> Module {
-        let tokens = lex(TWO_ENUM_SRC).unwrap();
-        let mut module = parse(&tokens).unwrap();
-        check(&mut module).unwrap();
-        module
-    }
-
-    #[test]
-    fn variant_accessor_resolves_the_operand_enum_not_a_global_scan() {
-        // A global first-match scan over `variant_accessor_field` would
-        // resolve `Circle>p` against whichever enum lists a `Circle` first
-        // (`A`), mis-typing `B`'s operand as `P` instead of `Q`.
-        let module = two_enum_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
-        let mut prov = Provenance::default();
-        let b_circle = variant_type(&module.enums, EnumId::from_index(2), 0);
-        let mut stack = vec![Slot::computed(b_circle)];
-        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
-            .unwrap()
-            .expect("Circle>p is claimed for B's own Circle variant");
-        assert_eq!(
-            out[0].ty,
-            struct_ty(&module, "Q"),
-            "resolved in the wrong enum"
-        );
-    }
-
     /// Mechanism 3 (R11): `check_reference_word` raw, since no source line can
     /// produce a `&Variant` operand this slice. Returns the pushed slot plus
     /// the operand's own derivation, so the caller can assert the projection.
@@ -2365,49 +1891,6 @@ mod tests {
         .expect("the variant reference arm claims this word");
         assert_eq!(out.len(), 1);
         Ok((out[0], prov, operand, refs))
-    }
-
-    #[test]
-    fn variant_reference_getter_projects_through_the_operand() {
-        // Mechanism 3: pushes `&field`/`&!field` and a *projected* derivation
-        // that keeps the operand's chain. `project` mints a fresh `DerivId`,
-        // so the discriminator is the derivation's contents: `projected` set,
-        // place and owned root inherited. A placebo forwarding the parent id
-        // unchanged leaves `projected` false.
-        for mutable in [false, true] {
-            let module = shape_module();
-            let word = if mutable { "&!Circle>r" } else { "&Circle>r" };
-            let (pushed, prov, operand, mut refs) =
-                call_variant_ref_word(&module, word, mutable).unwrap();
-            assert_eq!(
-                pushed.ty,
-                intern_ref_type(&mut refs, Type::I64, mutable),
-                "{word}"
-            );
-            let deriv = prov.deriv(pushed.deriv.expect("a reference carries provenance"));
-            assert!(deriv.projected, "{word}: not a projection");
-            assert_eq!(deriv.place, prov.deriv(operand).place, "{word}");
-            assert_eq!(deriv.owned_root, prov.deriv(operand).owned_root, "{word}");
-        }
-    }
-
-    #[test]
-    fn variant_reference_getter_rejects_a_mutability_mismatch() {
-        // Mechanism 3 (R11): caught on the `want`-equality path -- the two
-        // interned reference types differ -- not by a `recv_mut != mutable`
-        // test, which belongs only to the `&>`/`&^` arms. The message spells
-        // both interned reference names, which is what R1's leaked name buys.
-        let module = shape_module();
-        let err = call_variant_ref_word(&module, "&!Circle>r", false).unwrap_err();
-        assert!(
-            err.contains("expected `&!Shape.Circle`, found `&Shape.Circle`"),
-            "unexpected message: {err}"
-        );
-        let err = call_variant_ref_word(&module, "&Circle>r", true).unwrap_err();
-        assert!(
-            err.contains("expected `&Shape.Circle`, found `&!Shape.Circle`"),
-            "unexpected message: {err}"
-        );
     }
 
     /// R3: the no-stored-reference rule is type-keyed (`contains_reference`),
@@ -2897,16 +2380,16 @@ mod tests {
         );
     }
 
-    /// The same forwarding through the *fused* accessor (`&Buf>data`), which
-    /// reaches a field of an already-referenced struct and so is the step a
-    /// chain out of a nested receiver runs through.
+    /// The same forwarding through a projection off an already-referenced
+    /// struct (`&b &data`), the step a chain out of a nested receiver runs
+    /// through.
     #[test]
-    fn fused_field_ref_forwards_its_receivers_region() {
+    fn nested_field_ref_forwards_its_receivers_region() {
         let err = check_src(
             "type: Buf data ^[u8 4] len usize ;\n\
              type: Wrap b Buf ;\n\
              : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
-             : main ( -- ) mk Wrap &b &Buf>data &^ swap drop 0 >usize &> @ >i64 . ;",
+             : main ( -- ) mk Wrap &b &data &^ swap drop 0 >usize &> @ >i64 . ;",
         )
         .unwrap_err();
         assert!(
@@ -2962,16 +2445,16 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("`eat` consumes"), "unexpected message: {err}");
         assert!(!err.contains("__m"), "leaked a mangled name: {err}");
-        // The generated aggregate-field getter reaches it as a mangled
-        // *accessor* spelling, the case a bare `demangle_word` would miss.
+        // The generated destructure reaches it as a mangled *accessor*
+        // spelling, the case a bare `demangle_word` would miss.
         let getter = check_src_mangled(
             "type: Inner v i64 ;\n\
              type: Outer tag i64 n Inner ;\n\
-             : main ( -- ) 0 0 Inner Outer &tag swap Outer>n drop drop @ . ;",
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
         )
         .unwrap_err();
         assert!(
-            getter.contains("`Outer>n` consumes"),
+            getter.contains("`Outer>` consumes"),
             "unexpected message: {getter}"
         );
         assert!(!getter.contains("__m"), "leaked a mangled name: {getter}");
@@ -2992,19 +2475,19 @@ mod tests {
         );
     }
 
-    /// And through the consuming aggregate-field getter (`Outer>n`), which
-    /// pops its struct receiver exactly as `drop` does.
+    /// And through the whole-struct destructure (`Outer>`), which pops its
+    /// struct receiver exactly as `drop` does.
     #[test]
     fn struct_get_consuming_receiver_while_its_projection_is_live_is_error() {
         let err = check_src(
             "type: Inner v i64 ;\n\
              type: Outer tag i64 n Inner ;\n\
-             : main ( -- ) 0 0 Inner Outer &tag swap Outer>n drop drop @ . ;",
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
         )
         .unwrap_err();
         assert!(
             err.contains(
-                "`Outer>n` consumes a value while a reference derived from it is still live"
+                "`Outer>` consumes a value while a reference derived from it is still live"
             ),
             "unexpected message: {err}"
         );

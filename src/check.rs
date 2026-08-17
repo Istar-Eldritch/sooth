@@ -2367,18 +2367,14 @@ fn constructed_reference_error(ctx: &Ctx, span: Span, position: &str, ty: Type) 
     )
 }
 
-/// D3 (slice 8b): a struct's destructure (`S>`) or field getter (`S>f`) moves
-/// fields out of `S`, bypassing whatever `drop` override `S` owns -- the value
-/// never reaches a bare `drop` call site for D1's gate to see. `name` is
-/// checked as-parsed (mangled in a >=2-module build, matching
-/// `struct_generated_sigs`'s own keys), so this runs ahead of both
-/// `check_struct_get_word` (which alone claims an aggregate-typed field) and
-/// the ordinary `env` call path (every other field type, and the full
-/// destructure), catching the accessor before either applies its signature.
-/// The functional setter (`S<f`) has no `>` in its name and never matches
-/// here; it returns the struct itself, so the value stays live.
+/// D3 (slice 8b): a struct's destructure (`S>`) moves every field out of
+/// `S`, bypassing whatever `drop` override `S` owns -- the value never
+/// reaches a bare `drop` call site for D1's gate to see. `name` is checked
+/// as-parsed (mangled in a >=2-module build, matching `struct_generated_sigs`'s
+/// own keys), so this runs ahead of the ordinary `env` call path that would
+/// otherwise apply the destructure's `Sig`.
 fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(), String> {
-    let Some((struct_name, field_name)) = name.split_once('>') else {
+    let Some(struct_name) = name.strip_suffix('>') else {
         return Ok(());
     };
     let Some((struct_idx, decl)) = ctx
@@ -2408,12 +2404,7 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
     if is_own_drop_body {
         return Ok(());
     }
-    let is_destructure = field_name.is_empty();
-    let is_field_move = decl.fields.iter().any(|(f, _)| f == field_name);
-    if is_destructure || is_field_move {
-        return Err(destructure_drop_overloaded_error(ctx, span, decl));
-    }
-    Ok(())
+    Err(destructure_drop_overloaded_error(ctx, span, decl))
 }
 
 /// R11 (slice 8b, D3): the located diagnostic for destructuring a type whose
@@ -2733,14 +2724,6 @@ mod tests {
         );
     }
     #[test]
-    fn field_move_of_drop_overloaded_type_is_error() {
-        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
-        assert_eq!(
-            err,
-            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
-        );
-    }
-    #[test]
     fn own_drop_body_may_not_destructure_a_different_drop_overloaded_struct() {
         // Bug 1 (round-1 review): the exemption for a word literally named
         // `drop` must be scoped to the *one* struct its own declared effect
@@ -2770,10 +2753,11 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn setter_on_drop_overloaded_type_is_not_guarded() {
-        // The functional setter returns `Fd` itself (the value stays live),
-        // and its name has no `>`, so it never matches the guard.
-        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd 8 Fd<n drop ;\n")).unwrap();
+    fn borrow_projection_on_drop_overloaded_type_is_not_guarded() {
+        // D3: a field projection (`&!n`) never moves the aggregate out --
+        // `Fd` stays live and reaches the ordinary `drop` call, so the
+        // destructure-drop guard has nothing to say about it.
+        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd &!n 8 ! drop ;\n")).unwrap();
     }
     /// Phase 6 slice 1: the poly quotation parameter the R4 tests turn on.
     /// `inline` is not decoration: `check_inline_quotation_requires_inline`

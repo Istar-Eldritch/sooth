@@ -2296,8 +2296,8 @@ fn everyday_diagnostics_show_the_unmangled_enclosing_word() {
 #[test]
 fn cycle_and_accessor_diagnostics_show_unmangled_names() {
     // Two shapes the first sweep missed. The cycle renders a chain of `WordDef`
-    // names, which never passed through the rendering boundary; the accessor
-    // mangles as `P__m0>x`, so `__m0` sits mid-string and a trailing-suffix
+    // names, which never passed through the rendering boundary; the destructure
+    // mangles as `P__m0>`, so `__m0` sits mid-string and a trailing-suffix
     // strip cannot see it.
     let cycle = build_error_with_import(
         "m0-cycle",
@@ -2314,15 +2314,15 @@ fn cycle_and_accessor_diagnostics_show_unmangled_names() {
 
     let accessor = build_error_with_import(
         "m0-accessor",
-        "type: P x i64 y i64 ;\n: main ( -- ) 1 P>x ;\n",
+        "type: P x i64 y i64 ;\n: main ( -- ) 1 P> drop ;\n",
     );
     assert!(
-        accessor.contains("`P>x` expected `P`"),
-        "the accessor should render as written: {accessor}"
+        accessor.contains("`P>` expected `P`"),
+        "the destructure should render as written: {accessor}"
     );
     assert!(
         !accessor.contains("__m"),
-        "accessor leaked a mangled name: {accessor}"
+        "destructure leaked a mangled name: {accessor}"
     );
 }
 

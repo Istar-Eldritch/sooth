@@ -71,13 +71,6 @@ impl<'a> FuncBuilder<'a> {
                     self.push_reference(addr, field.ty);
                     return;
                 }
-                if let Some(&StructWord::Get(id, fi)) = self.structs.words.get(rest) {
-                    let base = self.stack.pop().expect("field projection: receiver");
-                    let field = self.structs.layouts[id.index()].fields[fi];
-                    let addr = self.field_ptr(base, field.offset);
-                    self.push_reference(addr, field.ty);
-                    return;
-                }
                 let local = self.locals.iter().find(|(n, _)| n == rest).map(|(_, v)| *v);
                 match local {
                     Some(value) => self.lower_borrow(value),

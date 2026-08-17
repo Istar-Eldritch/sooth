@@ -144,23 +144,6 @@ fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
     assert_eq!(code, 0);
 }
 
-/// Review fix (R5, D7): `check_struct_peek_word` matched a peek term's
-/// struct name against the mangled `decl.name` directly, so `Box|>val`
-/// resolved against a hand-written `Box` but not `Box[i64]` -- the `[`
-/// makes the peek word unspellable any other way, so this is the only
-/// call-site spelling a real program can use, same as the getter's shared-
-/// surface-name test above.
-#[test]
-fn generic_instantiation_peek_word_dispatches_by_surface_name() {
-    let (stdout, code) = build_and_run(
-        "phase5-slice1-peek-instantiation",
-        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\n\
-         : main ( -- )\n  42 Box Box|>val .\n  Box>val drop\n;\n",
-    );
-    assert_eq!(stdout, "42\n");
-    assert_eq!(code, 0);
-}
-
 /// R5, destructor half: a monomorphized instantiation's destructor is
 /// synthesized and actually runs, not merely constructed and read back
 /// (the case above). `Box>` (the generated destructure) is called from a

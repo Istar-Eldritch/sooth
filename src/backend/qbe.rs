@@ -2686,8 +2686,7 @@ type: Counter n i64 ;
   b &!len 1 +! ;
 
 : bump-rebuild ( Counter -- Counter )
-  | c |
-  c c Counter>n 1 + Counter<n ;
+  dup drop ;
 
 : main ( -- )
   new | a |
@@ -2736,18 +2735,19 @@ type: Counter n i64 ;
 
     #[test]
     fn rebuild_style_equivalent_still_emits_alloc_and_blit() {
-        // The control: the functional setter in the same module keeps the
-        // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
-        // `push-byte` rather than an emitter that stopped emitting `alloc`.
+        // The control: `dup` of a Copy struct in the same module still
+        // allocs and blits a fresh shell, so the no-rebuild test's assertion
+        // is measuring `push-byte` rather than an emitter that stopped
+        // emitting `alloc` altogether.
         let il = emit_src(MUTATION_PROBE);
         let body = func_body(&il, "export function :Counter $bump.2d.rebuild(");
         assert!(
             body.contains("alloc"),
-            "a functional setter still allocates its new shell: {body}"
+            "a struct copy still allocates its new shell: {body}"
         );
         assert!(
             body.contains("blit"),
-            "a functional setter still copies the old shell: {body}"
+            "a struct copy still copies the old shell: {body}"
         );
     }
 

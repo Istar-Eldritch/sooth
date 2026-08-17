@@ -482,30 +482,9 @@ fn check_term(
             )? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays, prov)?
-            {
-                return Ok(stack);
-            }
-            // D3 (slice 8b): ahead of both the aggregate-field getter below
-            // and the ordinary env call path further down, so it catches a
-            // moving accessor of a drop-overloaded struct regardless of the
-            // extracted field's own type.
+            // D3 (slice 8b): ahead of the ordinary env call path below, so it
+            // catches a moving destructure (`S>`) of a drop-overloaded struct.
             check_destructure_drop_guard(name, span, ctx)?;
-            if let Some(stack) =
-                check_struct_get_word(name, span, &mut stack, ctx, prov, scope, live, at)?
-            {
-                return Ok(stack);
-            }
-            // Phase 6 slice 2 (R9 mechanism 2): the variant twin, claiming an
-            // aggregate variant field for the same interior-address device. A
-            // scalar field and the whole `Variant>` destructure fall through
-            // to the env call path below, typed by their generated `Sig`.
-            // Nothing reachable from source claims a term here until slice 3's
-            // eliminator binds an arm: no surface syntax puts a `Type::Variant`
-            // on the stack, so every name still falls through today.
-            if let Some(stack) = check_variant_get_word(name, span, &mut stack, ctx, prov)? {
-                return Ok(stack);
-            }
             // R6-R9: a tail-position call, inside a self-tail combinator
             // body splice, to that same combinator is the loop back-edge, not
             // a re-splice (which would recurse forever). Intercepted before
