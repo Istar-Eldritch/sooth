@@ -355,6 +355,20 @@ shared helpers. Behaviour, in order:
    slice; adding it would mean forking or extending a helper the live `if`/combinator
    path also depends on, which is its own item with its own test, not a free extension of
    decision 4. **"First" is written source order, not enum-declaration order.**
+
+   **Step 5b — no `Type::Variant` on an arm's exit row** (the Phase 4 ruling; see that
+   phase's entry for the alternative it rejects). A second rejection on the same row,
+   run per arm before the agreement walk above. An arm that does not consume its
+   variant leaves it on the caller's stack; reject that, and a reference to it, at the
+   arm's literal span. Only a single-variant enum reaches the check — with two or more
+   variants the arms leave different variant types and the agreement walk fires first
+   — but it is soundness, not tidiness: `is_copy` (`src/check/builtins.rs:233`) is
+   written over `Type::Enum` and falls through to `true` for a `Type::Variant`, so an
+   escaped variant of a *linear* enum passes `dup`'s `Copy` gate that its own parent
+   enum fails, and its payload's `drop` runs twice. Slice 2's R8 ("a `Type::Variant`
+   value has no legal destination outside the arm that bound it") is otherwise
+   enforced only by unspellability, which stops the value crossing a word boundary
+   (`( W -- W.One )` is `unknown type W.One`) but not sitting on `main`'s stack.
 6. **Outputs.** On success the call produces the shared `..b` outputs (the baseline).
    No `Subst` is threaded out: the eliminator is not a self-tail combinator, so there is
    no back-edge grounding.
@@ -905,23 +919,29 @@ tripped it first — only the `lower_enum_word` match remains to update here):
   (see its `as shipped` notes): a stack-neutral term written *between* two arms is
   rejected, even though the stack-based arm collection would accept it. A golden needing
   the looser form would be asking for a rule change, not exercising this phase.
-- **Open question this phase must rule on: may a `Type::Variant` leave the call?** An arm
-  whose body does not consume its variant leaves it on the caller's stack, and
-  `check_eliminator_call` accepts that today — verified at Phase 2's HEAD with
-  `type: W | One a i64 ;` and `: main ( -- ) 3 One ~[ ( One ) ] W? drop ;`, which checks
-  clean. It is only reachable for a **single-variant** enum: with two or more variants the
-  arms leave different variant types and R4 step 5's cross-arm agreement rejects the call
-  already. Nothing enforces Slice 2's R8 ("a `Type::Variant` value has no legal
-  destination outside the arm that bound it") here; R8 is enforced by unspellability
-  instead, so the value cannot cross a word boundary (`( W -- W.One )` is `unknown type
-  W.One`) but can sit on `main`'s stack and be `drop`ped. Two coherent rulings: reject a
-  `Type::Variant` (or a reference to one) on an arm's exit row in
-  `check_eliminator_call`, per R8's letter; or allow it, since this phase's R6 erasure
-  gives `Type::Variant` the same `IrType` as its parent enum
-  (`src/ir/types.rs:286`'s `unreachable!` becomes a real case) and the value is
-  representationally just the enum. Deliberately not settled in Phase 2: the frontend
-  rule and the lowering that would have to honour it belong to the same decision, and
-  Phase 2 has no way to test the second half.
+- **Ruled: a `Type::Variant` may not leave the call** (R4 step 5b). The open alternative
+  was to allow it, on the grounds that R6's erasure gives `Type::Variant` the same
+  `IrType` as its parent enum (`src/ir/types.rs:286`'s `unreachable!` is a real case
+  since Phase 3) and the value is representationally just the enum. That is false as a
+  frontend argument: representational identity is not *type-rule* identity, and every
+  type-directed predicate outside the eliminator is written over `Type::Enum` with a
+  fall-through default. `is_copy` is the one that bites — it reads a `Type::Variant` as
+  trivially `Copy`, so `1 R One ~[ ( One ) ] W? dup drop drop` (over a linear
+  `type: W | One a R ;`) built and ran `R`'s `drop` twice, while the identical `dup` on
+  `W` itself is rejected as linear. Allowing the escape would therefore mean auditing
+  every such predicate for a `Type::Variant` arm and making the type first-class, which
+  is the opposite of what Slice 2 declared it to be. Rejecting is the smaller rule and
+  the one R8 already states; it costs only the degenerate no-op arm on a single-variant
+  enum.
+- **Phase 2 leaked the mangled enum name into three diagnostics** (found in Phase 4's
+  review, fixed there since no later phase owns it). `check_eliminator_call` reads the
+  enum's name from `EnumDecl::name`, which `resolve` mangles — unlike `name_static`,
+  which every `Type::Enum` render already uses — so a real build named the missing
+  variant's enum `Shape__m0`. Phase 2's own unit tests could not see it: `check_src`
+  skips `resolve_modules`, so the name is bare there whatever the renderer does. Fixed
+  at the single read rather than the three render sites, and guarded by a
+  `resolve_modules`-then-`check` test beside the sibling one that already covers the
+  *call* name.
 
 Exit criteria (breakable assertions):
 
@@ -932,6 +952,10 @@ Exit criteria (breakable assertions):
 - A `Decompose`-mode existing clause-style test (e.g. an existing `Bool`/`Result` clause
   lowering test) is unchanged and still passes — proves `ArmBinding` is additive, not a
   behaviour change to real clause words.
+- Checker tests that a single-variant enum's arm may not leave its variant, nor a
+  reference to it, plus one pinning *why*: the same program's parent enum fails `dup`'s
+  linearity gate that the escaped variant would have passed — so the rejection cannot be
+  weakened back to a tidiness rule without a failing test.
 - The `.sth` golden asserts observable output for a multi-variant enum eliminated
   end-to-end with a `&field`/`&!field` projection read inside an arm — fails if
   elimination or field access regresses. This is the first test that exercises Phase 3's

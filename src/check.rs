@@ -2167,7 +2167,12 @@ fn check_eliminator_call(
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let enum_decl = &ctx.enums()[id.index()];
-    let enum_name = generic_surface_name(&enum_decl.name);
+    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
+    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
+    // built from the mangled base) -- unlike `name_static`, which every
+    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
+    // would still leave `Shape__m0` in a diagnostic.
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
     let held = stack.len();
     // R4 step 1: arm collection is variable-arity, not a fixed
     // `1 + variant_count` pop. A fixed pop cannot tell "an arm is missing"
@@ -2339,6 +2344,27 @@ fn check_eliminator_call(
             },
             Some(&received),
         )?;
+        // R4 step 5b: a `Type::Variant` may not leave the call. Slice 2 made
+        // the type reachable only as an arm's input and the value inside that
+        // arm; this phase is the first that can construct one from surface
+        // syntax, so it is the first that could let one out. Only a
+        // single-variant enum gets this far -- with two or more variants the
+        // arms leave different variant types and the cross-arm agreement below
+        // rejects the call first -- but letting it out is unsound, not merely
+        // untidy: every type-directed predicate outside the eliminator is
+        // written over `Type::Enum`, so `is_copy` reads a variant as trivially
+        // `Copy` and `dup` on an escaped one double-drops a linear payload.
+        for slot in &arm_result {
+            let referent = ref_parts(slot.ty, refs).map(|(referent, _)| referent);
+            if matches!(slot.ty, Type::Variant(..)) || matches!(referent, Some(Type::Variant(..))) {
+                return Err(eliminator_variant_escape_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    slot.ty,
+                ));
+            }
+        }
         arm_moves.push(arm_scope.moves);
         match &baseline {
             None => baseline = Some(arm_result),
@@ -2500,6 +2526,20 @@ fn eliminator_non_exhaustive_error(
     let word = crate::resolve::demangle_call(word);
     format!(
         "error: non-exhaustive call to `{word}`: missing variant `{variant}` of enum `{enum_name}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4 step 5b: an arm leaving its variant (or a reference to it) on the exit
+/// row. The remedy is phrased in terms of what the arm can leave instead,
+/// since the type it is holding cannot be written down: `W.One` is not a
+/// spellable type name, which is what already stops it crossing a word
+/// boundary.
+fn eliminator_variant_escape_error(ctx: &Ctx, span: Span, word: &str, found: Type) -> String {
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: an arm of `{word}` leaves `{found}` on the stack{} (line {})\n  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead",
         in_word(ctx),
         span.line,
     )
@@ -4380,6 +4420,96 @@ mod tests {
         assert!(
             !err.contains("__m") && err.contains("but `Shape?` declares parameter"),
             "mangled name leaked into the bracket-flavour diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_diagnostics_demangle_the_enum_name_in_a_real_build() {
+        // The sibling above covers the *call* name; the enum name reaches the
+        // same three diagnostics from `EnumDecl::name`, which `resolve`
+        // mangles (unlike `name_static`, the spelling every `Type::Enum`
+        // render uses). The `check_src` tests for these messages cannot see
+        // it: they skip `resolve_modules`, so the name is already bare there
+        // and they pass with the demangle removed.
+        let src = format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            err.contains("missing variant `Rect` of enum `Shape`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("__m"),
+            "mangled enum name leaked into the non-exhaustiveness diagnostic: {err}"
+        );
+    }
+
+    /// R4 step 5b: the ruling on whether a `Type::Variant` may leave the call.
+    /// It may not -- and the enforcement has to be here, because the type is
+    /// unspellable rather than banned: `( W -- W.One )` is `unknown type
+    /// W.One`, so nothing stops the value sitting on the caller's own stack.
+    #[test]
+    fn check_eliminator_call_arm_leaving_its_variant_is_error() {
+        let err = check_src(
+            "type: W | One a i64 ;\n\
+             : main ( -- ) 3 One ~[ ( One ) ] W? drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `W?` leaves `W.One` on the stack"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The reference-mode half: an arm that leaves the `&W.One` it was handed
+    /// escapes the same value by another spelling.
+    #[test]
+    fn check_eliminator_call_arm_leaving_a_reference_to_its_variant_is_error() {
+        let err = check_src(
+            "type: W | One a i64 ;\n\
+             : main ( -- ) 3 One | w | &w ~[ ( &One ) ] W? drop w drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `W?` leaves `&W.One` on the stack"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Why the rejection above is soundness, not tidiness: `is_copy` is
+    /// written over `Type::Enum` and reads a `Type::Variant` as trivially
+    /// `Copy`, so an escaped variant of a linear enum could be `dup`ed and its
+    /// payload's `drop` run twice. The parent enum's own `dup` is rejected --
+    /// asserted here so this stays a statement about the *variant* escaping
+    /// rather than about `W` being linear at all.
+    #[test]
+    fn check_eliminator_call_escaped_variant_would_bypass_the_dup_linearity_gate() {
+        const DECL: &str = "type: R n i64 ;\n\
+             : drop ( R -- ) | h | h R> . ;\n\
+             type: W | One a R ;\n";
+        let escaped = check_src(&format!(
+            "{DECL}\
+             : main ( -- ) 1 R One ~[ ( One ) ] W? dup drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            escaped.contains("an arm of `W?` leaves `W.One` on the stack"),
+            "unexpected message: {escaped}"
+        );
+        let parent = check_src(&format!(
+            "{DECL}\
+             : main ( -- ) 1 R One dup drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            parent.contains("cannot `dup` a value of type `W`"),
+            "unexpected message: {parent}"
         );
     }
 
