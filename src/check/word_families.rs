@@ -1620,7 +1620,6 @@ fn projection_unknown_field_error(
     receiver: &str,
     field: &str,
 ) -> String {
-    let name = crate::resolve::demangle_call(name);
     format!(
         "error: `{receiver}` has no field `{field}`{} (line {}, col {})\n  `{name}` projects a field of the receiver on top of the stack; `{receiver}` declares no field named `{field}`",
         in_word(ctx),
