@@ -2433,6 +2433,7 @@ fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_shuffle(
     name: &str,
     span: Span,
@@ -2440,6 +2441,9 @@ fn check_shuffle(
     ctx: &Ctx,
     arrays: &[ArrayDecl],
     prov: &mut Provenance,
+    scope: &Scope,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -2459,6 +2463,18 @@ fn check_shuffle(
         }
         "drop" => {
             let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
+            // Review fix (P7 slice 1): dropping a place a live projection
+            // still reaches would leave that reference aimed at storage
+            // that no longer exists; the anonymous analogue of
+            // `consume_of_borrowed_place_error`, keyed by region rather than
+            // by a place name.
+            if let Some(alias) = top.alias {
+                if let Some(origin) =
+                    overlapping_projection(stack, scope, prov, live, at, alias.set, true)
+                {
+                    return Err(consuming_borrowed_value_error(ctx, span, "drop", origin));
+                }
+            }
             // R6 (slice 8b): a side observation only. `drop` still pops one
             // value of any type with no type check, exactly as before; the
             // recorded type is what lets `check`'s post-pass resolve which

@@ -153,3 +153,25 @@ fn repl_session_projects_struct_fields() {
         .collect();
     assert_eq!(printed, vec!["2", "9", "1", "2"], "session output: {out}");
 }
+
+/// Review fix: the owned-receiver arm's output has a region (`Slot.alias`)
+/// but no `Deriv`, so nothing protected its receiver from being consumed
+/// while the projection was still live -- reachable even through a chain of
+/// reference-narrowing words (here `&^`, unwrapping the owning cell `data`
+/// projects into) that don't otherwise touch region tracking. Left
+/// unguarded, this compiles and reads through a dangling reference into a
+/// freed heap block.
+#[test]
+fn drop_of_owned_receiver_through_a_reference_chain_while_projected_is_diagnostic() {
+    let src = "type: Buf data ^[u8 4] len usize ;\n\
+               : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
+               : main ( -- ) mk &data &^ swap drop 0 >usize &> @ >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-p7s1-uaf-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("`drop` consumes a value while a reference derived from it is still live"),
+        "unexpected message: {err}"
+    );
+}

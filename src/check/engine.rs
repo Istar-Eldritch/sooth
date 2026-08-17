@@ -1376,7 +1376,14 @@ mod tests {
             module: caller,
         };
         let mut stack = vec![Slot::computed(Type::Struct(StructId::from_index(0), "Res"))];
-        check_shuffle("drop", span, &mut stack, &ctx, &arrays, &mut prov)
+        let scope = Scope::default();
+        let live = Liveness {
+            last_use: HashMap::new(),
+            outer_releasable: HashSet::new(),
+        };
+        check_shuffle(
+            "drop", span, &mut stack, &ctx, &arrays, &mut prov, &scope, &live, 0,
+        )
     }
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
@@ -1511,9 +1518,16 @@ mod tests {
                 "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
                 _ => vec![quot],
             };
-            let out = check_shuffle(name, span, &mut stack, &ctx, &arrays, &mut prov)
-                .unwrap()
-                .unwrap();
+            let scope = Scope::default();
+            let live = Liveness {
+                last_use: HashMap::new(),
+                outer_releasable: HashSet::new(),
+            };
+            let out = check_shuffle(
+                name, span, &mut stack, &ctx, &arrays, &mut prov, &scope, &live, 0,
+            )
+            .unwrap()
+            .unwrap();
             assert!(
                 out.iter().any(|s| s.quot == marker),
                 "`{name}` dropped the quotation marker"

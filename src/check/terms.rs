@@ -439,7 +439,9 @@ fn check_term(
             {
                 return Ok(stack);
             }
-            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
+            if let Some(stack) =
+                check_shuffle(name, span, &mut stack, ctx, arrays, prov, scope, live, at)?
+            {
                 return Ok(stack);
             }
             // R12 (slice 8b, 8a): a bare operator resolves against the
@@ -475,8 +477,9 @@ fn check_term(
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
-            {
+            if let Some(stack) = check_owned_cell_word(
+                name, span, &mut stack, ctx, arrays, cells, prov, scope, live, at,
+            )? {
                 return Ok(stack);
             }
             if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays, prov)?
@@ -488,7 +491,9 @@ fn check_term(
             // moving accessor of a drop-overloaded struct regardless of the
             // extracted field's own type.
             check_destructure_drop_guard(name, span, ctx)?;
-            if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
+            if let Some(stack) =
+                check_struct_get_word(name, span, &mut stack, ctx, prov, scope, live, at)?
+            {
                 return Ok(stack);
             }
             // Phase 6 slice 2 (R9 mechanism 2): the variant twin, claiming an
@@ -784,6 +789,27 @@ fn check_term(
             // `check_struct_get_word` only claims an aggregate-typed field. A
             // quotation-typed output legitimately carries the closure onward
             // exactly as an aggregate output does, so it forwards too.
+            // Review fix (P7 slice 1): an ordinary word call consumes its
+            // operands just as `drop` does, so a struct operand a live
+            // projection still reaches (the owned-receiver projection arm's
+            // `Slot.alias`, which carries no `Deriv` to be caught by the
+            // named-place consume checks) cannot be moved into the call out
+            // from under that reference.
+            for i in base..stack.len() {
+                if let Some(alias) = stack[i].alias {
+                    if let Some(origin) = overlapping_projection(
+                        &stack[..base],
+                        scope,
+                        prov,
+                        live,
+                        at,
+                        alias.set,
+                        true,
+                    ) {
+                        return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+                    }
+                }
+            }
             let carried = (base..stack.len())
                 .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
             stack.truncate(base);

@@ -66,8 +66,18 @@ pub(super) fn check_reference_word(
             check_array_index(index, count, ctx, span, name)?;
             let out = intern_ref_type(refs, elem, mutable);
             let deriv = prov.project(stack[n - 2].deriv);
+            // Review fix (P7 slice 1): forward the receiver's region
+            // unchanged onto the narrowed reference -- an over-approximation
+            // (every index looks like it aliases the whole array), but
+            // without it a receiver whose only live reference chains through
+            // this word would look unborrowed to the consume-time check
+            // below.
+            let alias = stack[n - 2].alias;
             stack.truncate(n - 2);
-            stack.push(Slot::derived(out, deriv));
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
         }
         "^" => {
             let n = stack.len();
@@ -102,8 +112,14 @@ pub(super) fn check_reference_word(
             let payload = cells[cell_id.index()].payload;
             let out = intern_ref_type(refs, payload, mutable);
             let deriv = prov.project(stack[n - 1].deriv);
+            // Review fix (P7 slice 1): forward the receiver's region, same
+            // reasoning as `&>` above.
+            let alias = stack[n - 1].alias;
             stack.truncate(n - 1);
-            stack.push(Slot::derived(out, deriv));
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
         }
         _ => {
             if let Some((head, field_name)) = rest.split_once('>') {
@@ -135,8 +151,14 @@ pub(super) fn check_reference_word(
                         }
                         let out = intern_ref_type(refs, field_ty, mutable);
                         let deriv = prov.project(stack[n - 1].deriv);
+                        // Review fix (P7 slice 1): forward the receiver's
+                        // region, same reasoning as `&>` above.
+                        let alias = stack[n - 1].alias;
                         stack.truncate(n - 1);
-                        stack.push(Slot::derived(out, deriv));
+                        stack.push(Slot {
+                            alias,
+                            ..Slot::derived(out, deriv)
+                        });
                         return Ok(Some(std::mem::take(stack)));
                     }
                 }
@@ -172,8 +194,14 @@ pub(super) fn check_reference_word(
                             }
                             let out = intern_ref_type(refs, field_ty, mutable);
                             let deriv = prov.project(stack[n - 1].deriv);
+                            // Review fix (P7 slice 1): forward the
+                            // receiver's region, same reasoning as `&>` above.
+                            let alias = stack[n - 1].alias;
                             stack.truncate(n - 1);
-                            stack.push(Slot::derived(out, deriv));
+                            stack.push(Slot {
+                                alias,
+                                ..Slot::derived(out, deriv)
+                            });
                             return Ok(Some(std::mem::take(stack)));
                         }
                     }
@@ -398,7 +426,13 @@ fn check_field_projection(
 /// live projection, a new `&` only with a live mutable one). Only
 /// *reference*-typed values are candidates: the receiver and its copies denote
 /// the same regions but hold no borrow, and consuming one is what ends it.
-fn overlapping_projection<'a>(
+///
+/// Review fix: also the guard at the point a place with a region --
+/// named or, via the owned-receiver projection arm, anonymous -- is
+/// consumed for good (`drop`, a moving word call, a moving field getter):
+/// called there with `mutable: true` so *any* live reference (shared or
+/// mutable) counts as a conflict, not only a mutable one.
+pub(super) fn overlapping_projection<'a>(
     below: &[Slot],
     scope: &'a Scope,
     prov: &Provenance,
@@ -749,6 +783,7 @@ pub(super) fn check_array_word(
 /// `^> ( ^T -- T )` consumes it and yields the payload, `^|> ( ^T -- ^T T )`
 /// is a non-consuming peek restricted to a `Copy` payload. Matched by exact
 /// name only, so `^>x`/`^|>x` fall through to the ordinary unknown-word error.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_owned_cell_word(
     name: &str,
     span: Span,
@@ -756,6 +791,10 @@ pub(super) fn check_owned_cell_word(
     ctx: &Ctx,
     arrays: &[ArrayDecl],
     cells: &mut Vec<OwnedCellDecl>,
+    prov: &Provenance,
+    scope: &Scope,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     // R11: `^`/`^>`/`^|>` each inspect the top operand's `ty`.
     if matches!(name, "^" | "^>" | "^|>") && stack.last().is_some_and(|s| s.quot.is_some()) {
@@ -778,6 +817,16 @@ pub(super) fn check_owned_cell_word(
                     "the payload `^` would store",
                     payload,
                 ));
+            }
+            // Review fix (P7 slice 1): `^` consumes its payload just as
+            // `drop` does, so a payload a live projection still reaches
+            // cannot be moved into the cell out from under that reference.
+            if let Some(alias) = stack[n - 1].alias {
+                if let Some(origin) =
+                    overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, true)
+                {
+                    return Err(consuming_borrowed_value_error(ctx, span, "^", origin));
+                }
             }
             // Review fix: forward the payload's surviving set (R19) onto the
             // cell -- `^` allocating a closure-carrying value must keep it
@@ -921,12 +970,16 @@ pub(super) fn check_struct_peek_word(
 /// left on the stack, but the aliasing hazard is unaffected by that, since
 /// the operand's own local binding (if it is named) keeps the same region
 /// regardless of what happens to the stack-level copy of its slot.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_struct_get_word(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     prov: &mut Provenance,
+    scope: &Scope,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     let Some((struct_name, field_name)) = name.split_once('>') else {
         return Ok(None);
@@ -954,6 +1007,16 @@ pub(super) fn check_struct_get_word(
     }
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
+    }
+    // Review fix (P7 slice 1): this getter consumes the struct receiver just
+    // as `drop` does, so it needs the same guard against discarding a place
+    // a live projection still reaches.
+    if let Some(alias) = top.alias {
+        if let Some(origin) =
+            overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, true)
+        {
+            return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+        }
     }
     let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
     stack.truncate(n - 1);
@@ -1464,6 +1527,34 @@ fn conflicting_projection_error(
     let taken = if mutable { "mutable" } else { "shared" };
     format!(
         "error: `{name}` conflicts with a live projection of the same field{} (line {}, col {})\n  {held} is still live, and this one is {taken}\n  at most one `&!` into a field, and never a `&` alongside a `&!`; consume the earlier projection first",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
+/// P7 slice 1 review fix: `drop`, a moving word call, or a moving field
+/// getter discards a place -- named or anonymous -- while a reference the
+/// owned-receiver projection arm took from it is still live. That arm
+/// produces a reference with a region (`Slot.alias`) but no `Deriv` (there is
+/// no place name to root one on), so it is invisible to the named-place
+/// consume checks (`consume_of_borrowed_place_error`) and needs this region-
+/// keyed sibling instead.
+pub(super) fn consuming_borrowed_value_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    origin: AliasOrigin<'_>,
+) -> String {
+    let held = match origin {
+        AliasOrigin::Name(n) => format!("the projection bound as `{n}`"),
+        AliasOrigin::Stack(pushed) => format!(
+            "the projection taken at line {}, col {}",
+            pushed.line, pushed.col
+        ),
+    };
+    format!(
+        "error: `{name}` consumes a value while a reference derived from it is still live{} (line {}, col {})\n  {held} is still live\n  a place stays borrowed until every reference derived from it is consumed",
         in_word(ctx),
         span.line,
         span.col,
@@ -2395,5 +2486,98 @@ mod tests {
              : main ( -- ) 1 2 Point &!x swap &!y 3 ! swap 4 ! drop ;",
         )
         .is_ok());
+    }
+
+    /// Review fix: the owned-receiver arm's output has a region
+    /// (`Slot.alias`) but no `Deriv`, so it is invisible to the named-place
+    /// consume checks. Without a region-keyed guard at the point the
+    /// receiver is actually discarded, `drop`ping it while the projection is
+    /// still live leaves that reference aimed at storage that no longer
+    /// exists -- a use-after-free the pre-slice fused (`Point&x`) and peek
+    /// (`Point|>x`) spellings both correctly reject.
+    #[test]
+    fn drop_of_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live")
+                && err.contains("the projection taken at line 2, col 25 is still live"),
+            "unexpected message: {err}"
+        );
+        // Binding the receiver to a name first does not launder the hazard:
+        // the alias set rides the binding (`Scope::bind`) exactly as it
+        // rides an anonymous stack slot.
+        let bound = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x swap | p | p drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            bound.contains(
+                "`drop` consumes a value while a reference derived from it is still live"
+            ),
+            "unexpected message: {bound}"
+        );
+        // Consuming the *projection* first, then the receiver, is the sound
+        // order and stays legal.
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// The same hazard, reached through an ordinary word call rather than
+    /// `drop`: any word consuming the receiver by value is an equally live
+    /// route to the dangling reference, so the guard belongs on the generic
+    /// dispatch path too, not only on the `drop` builtin.
+    #[test]
+    fn word_call_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : eat ( Point -- ) drop ;\n\
+             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`eat` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// And through `^`, which heap-allocates its top-of-stack operand and so
+    /// pops the receiver exactly as `drop` does.
+    #[test]
+    fn owned_cell_alloc_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Wrap n i64 ;\n\
+             : main ( -- ) 1 Wrap &n swap ^ drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`^` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// And through the consuming aggregate-field getter (`Outer>n`), which
+    /// pops its struct receiver exactly as `drop` does.
+    #[test]
+    fn struct_get_consuming_receiver_while_its_projection_is_live_is_error() {
+        let err = check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer tag i64 n Inner ;\n\
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer>n drop drop @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "`Outer>n` consumes a value while a reference derived from it is still live"
+            ),
+            "unexpected message: {err}"
+        );
     }
 }
