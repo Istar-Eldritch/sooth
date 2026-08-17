@@ -355,7 +355,18 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
-                name, span, &mut stack, ctx, scope, arrays, cells, refs, prov, live, at,
+                name,
+                span,
+                &mut stack,
+                ctx,
+                scope,
+                arrays,
+                cells,
+                refs,
+                prov,
+                live,
+                at,
+                poly.resolved_fields,
             )? {
                 return Ok(stack);
             }

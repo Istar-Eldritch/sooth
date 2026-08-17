@@ -555,6 +555,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         externs: bodies.externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
+        resolved_fields: HashMap::new(),
         modules: vec![ModuleInfo {
             imports: HashMap::new(),
             exports: bodies.exports,

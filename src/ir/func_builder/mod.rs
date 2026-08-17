@@ -172,6 +172,12 @@ pub(super) struct FuncBuilder<'a> {
     /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
     /// checker records nothing there), so their lowering is byte-for-byte.
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
+    /// P7 slice 1 (R2): the receiver-directed field projections the checker
+    /// resolved, span -> `(StructId, field index)`. `lower_reference_word`
+    /// reads a `&hp` site's receiver type back from here: the name alone does
+    /// not say which struct it projects out of, and lowering has no checker
+    /// stack to re-derive it from.
+    pub(super) resolved_fields: &'a HashMap<Span, (StructId, usize)>,
     /// R14: the fixed input arity of each polymorphic word, name-keyed. How
     /// many args a polymorphic call pops (the `CallInst` carries the output
     /// shape, but the input count is name-constant across θ, so it lives here).
@@ -319,6 +325,7 @@ impl<'a> FuncBuilder<'a> {
             statics,
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
+            resolved_fields: empty_resolved_fields(),
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
@@ -672,6 +679,7 @@ pub(super) fn lower_word_parts(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
     env_plan: EnvPlan,
@@ -690,6 +698,7 @@ pub(super) fn lower_word_parts(
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
     b.instantiations = instantiations;
     b.builtin_overloads = builtin_overloads;
+    b.resolved_fields = resolved_fields;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
@@ -821,6 +830,7 @@ pub(super) fn lower_word_parts(
         regs,
         instantiations,
         builtin_overloads,
+        resolved_fields,
         poly_arities,
         combinators,
     ));
@@ -840,6 +850,7 @@ pub(super) fn lower_materialized(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
@@ -870,6 +881,7 @@ pub(super) fn lower_materialized(
             regs,
             instantiations,
             builtin_overloads,
+            resolved_fields,
             poly_arities,
             combinators,
             EnvPlan::Env(m.captures),

@@ -39,6 +39,7 @@ pub fn synthesize_aggregate_destructors(
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     let Registries {
@@ -67,6 +68,7 @@ pub fn synthesize_aggregate_destructors(
                     env,
                     resolve,
                     regs,
+                    resolved_fields,
                     combinators,
                 )),
                 Some(DropOverride::AlreadyLoaded) => None,
@@ -360,6 +362,7 @@ fn synthesize_struct_destructor_override(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    resolved_fields: &HashMap<Span, (StructId, usize)>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     // R9: element 0 is the override body itself, renamed to the destructor
@@ -375,6 +378,7 @@ fn synthesize_struct_destructor_override(
         regs,
         empty_instantiations(),
         empty_builtin_overloads(),
+        resolved_fields,
         empty_poly_arities(),
         combinators,
         EnvPlan::None,

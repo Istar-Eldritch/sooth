@@ -1187,7 +1187,7 @@ impl Session {
         // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
         // inference sees the session's inline view like any bare line.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, _insts, _overloads) = check::infer_line(
+        let (net_stack, _insts, _overloads, _fields) = check::infer_line(
             &terms,
             &self.types,
             &env,
@@ -1333,6 +1333,10 @@ impl Session {
                 &inst.symbol,
                 sig,
                 &entry.builtin_overloads,
+                // A generic body rejects a field projection outright
+                // (`poly_reference_word`), so a retained polymorphic word
+                // records none.
+                ir::empty_resolved_fields(),
                 &inst.subst,
                 &entry.word.body,
                 &entry.ir_lower_env,
@@ -2366,8 +2370,10 @@ impl Session {
         // Item 3: a `drop` override body's own resolved-overload sites are
         // discarded here, same as `_insts` -- `synthesize_aggregate_destructors`
         // below has no threading for them yet (a narrower, pre-existing gap
-        // than the crash item 3 fixes; see its call site).
-        let (sites, _insts, _overloads) = check::check_def_collecting_drop_sites(
+        // than the crash item 3 fixes; see its call site). Its field
+        // projections (R2) are *not* discarded: this is the only place the
+        // override's body is lowered (R11.3), so they reach that lowering.
+        let (sites, _insts, _overloads, fields) = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
             &env,
@@ -2425,6 +2431,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(Some(id)),
+                &fields,
                 &combinator_bodies(&self.combinators),
             )
         };
@@ -2694,7 +2701,7 @@ impl Session {
         // call sites, threaded into `ir::lower_word` below so it dispatches an
         // overloaded call exactly as a native word body does, rather than
         // silently mis-lowering through the name-directed builtin arm.
-        let (insts, overloads) = check::check_def(
+        let (insts, overloads, fields) = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -2756,6 +2763,7 @@ impl Session {
                 regs,
                 &insts,
                 &overloads,
+                &fields,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
@@ -2774,6 +2782,10 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                // Every override here is `AlreadyLoaded` (lowered at its own
+                // defining line), so no body reaches this call and no
+                // projection needs resolving.
+                ir::empty_resolved_fields(),
                 &combinator_bodies(&self.combinators),
             ));
             funcs
@@ -2887,7 +2899,7 @@ impl Session {
         // R4 (Slice 6c): a bare line may call a retained combinator; thread the
         // session's inline view so it inlines like native's `module.words` one.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, insts, line_overloads) = check::infer_line(
+        let (net_stack, insts, line_overloads, line_fields) = check::infer_line(
             terms,
             &self.types,
             &env,
@@ -2938,6 +2950,7 @@ impl Session {
                 regs,
                 &insts,
                 &line_overloads,
+                &line_fields,
                 &poly_arities,
                 &bodies,
             );
@@ -2949,6 +2962,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                ir::empty_resolved_fields(),
                 &bodies,
             );
             (func, quot_funcs, m, out_bytes, aggregate_destructors)
@@ -3844,6 +3858,7 @@ mod tests {
             &resolve,
             regs,
             &session.drop_override_bodies(declaring),
+            ir::empty_resolved_fields(),
             &combinator_bodies(&session.combinators),
         )
         .into_iter()

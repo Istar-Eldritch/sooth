@@ -21,6 +21,7 @@ pub(super) fn check_reference_word(
     prov: &mut Provenance,
     live: &Liveness,
     at: usize,
+    resolved_fields: &mut HashMap<Span, (StructId, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -178,6 +179,27 @@ pub(super) fn check_reference_word(
                     }
                 }
             }
+            // P7 slice 1 (D1/R1): a receiver-directed projection. `&hp` names
+            // no type, so the field resolves against the type already on the
+            // stack; the resolution is recorded per call site for lowering,
+            // which has no checker stack to re-derive it from (R2). Tried
+            // ahead of the local/static borrow below: the receiver wins (R3).
+            if let Some(out) = check_field_projection(
+                name,
+                rest,
+                mutable,
+                span,
+                stack,
+                ctx,
+                scope,
+                refs,
+                prov,
+                live,
+                at,
+                resolved_fields,
+            )? {
+                return Ok(Some(out));
+            }
             // Everything else is a prefix borrow of a place: a bound local,
             // or (R1) a module static.
             if rest.is_empty() {
@@ -278,6 +300,131 @@ pub(super) fn check_reference_word(
         }
     }
     Ok(Some(std::mem::take(stack)))
+}
+
+/// P7 slice 1 (D2/R1): `&f` / `&!f`, a field projection resolved against the
+/// receiver on top of the stack rather than against a type name baked into the
+/// word. `None` when the stack top is not a struct (or a reference to one) with
+/// a field `field`, so the caller falls through to the prefix-borrow chain and
+/// an unrelated `&x` keeps its existing meaning.
+///
+/// Two effects, by receiver:
+///
+/// - `( &S -- &A )` / `( &!S -- &!A )`, **consuming**. A reference left on the
+///   stack is a surplus value, so a non-consuming chain would strand an
+///   intermediate at every step of `u &stats &hp @`.
+/// - owned `S`: `( S -- S &A )`, **non-consuming**. Consuming the receiver
+///   would oblige this word to dispose the fields it did not project, which is
+///   exactly the implicit disposal this slice deletes.
+#[allow(clippy::too_many_arguments)]
+fn check_field_projection(
+    name: &str,
+    field: &str,
+    mutable: bool,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    scope: &Scope,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    live: &Liveness,
+    at: usize,
+    resolved_fields: &mut HashMap<Span, (StructId, usize)>,
+) -> Result<Option<Vec<Slot>>, String> {
+    let n = stack.len();
+    if n < 1 {
+        return Ok(None);
+    }
+    let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Ok(None);
+    }
+    let (referent, recv_mut) = match ref_parts(top.ty, refs) {
+        Some((referent, recv_mut)) => (referent, Some(recv_mut)),
+        None => (top.ty, None),
+    };
+    let Type::Struct(id, _) = referent else {
+        return Ok(None);
+    };
+    let decl = &ctx.structs()[id.index()];
+    let Some(fi) = decl.fields.iter().position(|(f, _)| f == field) else {
+        return Ok(None);
+    };
+    let field_ty = decl.fields[fi].1;
+    match recv_mut {
+        Some(recv_mut) => {
+            // Full-type equality, the fused accessor's idiom: a wrong
+            // mutability is a type mismatch between the two interned
+            // reference shapes.
+            if recv_mut != mutable {
+                let want = intern_ref_type(refs, referent, mutable);
+                return Err(type_mismatch_error(ctx, span, name, want, top.ty));
+            }
+            let out = intern_ref_type(refs, field_ty, mutable);
+            let deriv = prov.project(top.deriv);
+            stack.truncate(n - 1);
+            stack.push(Slot::derived(out, deriv));
+        }
+        None => {
+            // The receiver stays, so this is the `S|>fi` peek's region
+            // machinery: the projection is interned as a child region of the
+            // receiver's own, which is what makes two overlapping projections
+            // off one *anonymous* receiver (`p &!hp swap &!hp`) a checked
+            // conflict rather than an unchecked pair of aliases. Not gated on
+            // `is_copy` the way the peek is: a projection borrows the field
+            // rather than duplicating its value, so a linear field is not
+            // special here (`@`/`!` still refuse to move one through it).
+            let alias = projected_region(&mut stack[n - 1], field, span, prov);
+            if let Some(origin) =
+                overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, mutable)
+            {
+                return Err(conflicting_projection_error(
+                    ctx, span, name, mutable, origin,
+                ));
+            }
+            let out = intern_ref_type(refs, field_ty, mutable);
+            stack.push(Slot {
+                alias: Some(alias),
+                ..Slot::computed(out)
+            });
+        }
+    }
+    resolved_fields.insert(span, (id, fi));
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// Where a live reference denoting a region overlapping a new projection's is,
+/// when one exists and the pair cannot coexist (a new `&!` conflicts with any
+/// live projection, a new `&` only with a live mutable one). Only
+/// *reference*-typed values are candidates: the receiver and its copies denote
+/// the same regions but hold no borrow, and consuming one is what ends it.
+fn overlapping_projection<'a>(
+    below: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    set: AliasSetId,
+    mutable: bool,
+) -> Option<AliasOrigin<'a>> {
+    let conflicts = |ty: Type, alias: Option<AliasSetId>| {
+        let Type::Ref(_, other_mutable, _) = ty else {
+            return false;
+        };
+        (mutable || other_mutable) && alias.is_some_and(|other| prov.alias_sets_overlap(set, other))
+    };
+    if let Some(b) = scope
+        .bound
+        .iter()
+        .find(|b| !live.dead(&b.name, at) && conflicts(b.ty, b.aliases))
+    {
+        return Some(AliasOrigin::Name(&b.name));
+    }
+    below
+        .iter()
+        .find(|slot| conflicts(slot.ty, slot.alias.map(|a| a.set)))
+        .and_then(|slot| slot.alias)
+        .map(|alias| AliasOrigin::Stack(alias.span))
 }
 
 /// `@` fetches, `!` stores, `+!` adds in place. All three are restricted
@@ -1297,6 +1444,32 @@ fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Ty
 /// the virtual stack — can denote one region; mutating through one would then be
 /// silently observable through the other, which is exactly the class of silent
 /// failure the language exists to reject.
+/// P7 slice 1 (R1/OQ3): two projections into one region off an owned receiver
+/// that has no name to key the place-based `conflicting_borrow_error` on. The
+/// remedy is the same one that error gives, phrased for a projection.
+fn conflicting_projection_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    mutable: bool,
+    origin: AliasOrigin<'_>,
+) -> String {
+    let held = match origin {
+        AliasOrigin::Name(name) => format!("the projection bound as `{name}`"),
+        AliasOrigin::Stack(pushed) => format!(
+            "the projection taken at line {}, col {}",
+            pushed.line, pushed.col
+        ),
+    };
+    let taken = if mutable { "mutable" } else { "shared" };
+    format!(
+        "error: `{name}` conflicts with a live projection of the same field{} (line {}, col {})\n  {held} is still live, and this one is {taken}\n  at most one `&!` into a field, and never a `&` alongside a `&!`; consume the earlier projection first",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 fn aliased_place_borrow_error(
     ctx: &Ctx,
     span: Span,
@@ -1370,7 +1543,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
 
@@ -1686,7 +1859,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
 
     #[test]
@@ -1971,6 +2144,7 @@ mod tests {
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
+            &mut HashMap::new(),
         )?
         .expect("the variant reference arm claims this word");
         assert_eq!(out.len(), 1);
@@ -2114,5 +2288,112 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
+    // --- P7 slice 1, D2/R1: receiver-directed field projections. ---
+
+    /// R1: the field resolves against the type on the stack, not against a
+    /// type name in the word. Both modes, and the chain D2 exists for.
+    #[test]
+    fn projection_resolves_field_against_receiver_type() {
+        assert!(check_src(
+            "type: Stats hp i64 ;\n\
+             type: Unit stats Stats ;\n\
+             : main ( -- ) 1 Stats Unit | u | &u &stats &hp @ . &!u &!stats &!hp 2 ! u drop ;",
+        )
+        .is_ok());
+    }
+
+    /// A receiver with no field of that name at all is not a projection, so
+    /// the borrow chain still gets it and a non-place still says so.
+    #[test]
+    fn projection_on_non_struct_receiver_is_error() {
+        let err = check_src("type: Point x i64 ;\n: main ( -- ) 7 &x @ . ;").unwrap_err();
+        assert!(
+            err.contains("`&x` does not borrow a place"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The sigil carries the mode; it is never inherited from the receiver.
+    #[test]
+    fn projection_mode_mismatch_is_error() {
+        let err = check_src("type: Point x i64 ;\n: main ( -- ) 1 Point | p | &p &!x 2 ! p drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("`&!x` expected `&!Point`, found `&Point`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R3: a receiver lacking the field leaves `&n` meaning what it always
+    /// meant. Guards the fall-through, which a projection arm that claimed
+    /// every `&`-led name would break.
+    #[test]
+    fn projection_falls_back_to_local_borrow_when_receiver_lacks_field() {
+        assert!(check_src(
+            "type: Point x i64 ;\n\
+             type: Box w i64 ;\n\
+             : main ( -- ) 1 Point | p | 2 Box &p &x @ . drop ;",
+        )
+        .is_ok());
+    }
+
+    /// The point of R1: one spelling, two receivers, two different fields.
+    /// A resolution keyed on the name alone could not tell these apart.
+    #[test]
+    fn projection_same_field_name_on_two_structs_resolves_by_receiver() {
+        assert!(check_src(
+            "type: A n i64 ;\n\
+             type: B tag i64 n bool ;\n\
+             : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;",
+        )
+        .is_ok());
+        // ... and the field's *type* is the receiver's, not the other's:
+        // `B`'s `n` is a `bool`, so printing it as an `i64` must not resolve.
+        let err = check_src(
+            "type: A n i64 ;\n\
+             type: B tag i64 n bool ;\n\
+             : sum ( i64 i64 -- i64 ) + ;\n\
+             : main ( -- ) 2 true B &n @ 1 sum . drop ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("`sum`"), "unexpected message: {err}");
+    }
+
+    /// OQ3's actual hazard: two live mutable projections of one field off an
+    /// *anonymous* owned receiver, which has no place name for the ordinary
+    /// borrow-conflict scan to key on. Rejected through the region overlap
+    /// the projection interns off the receiver.
+    #[test]
+    fn two_mutable_projections_off_one_anonymous_receiver_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!x swap &!x 3 ! swap 4 ! drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!x` conflicts with a live projection of the same field")
+                && err.contains("the projection taken at line 2, col 25 is still live"),
+            "unexpected message: {err}"
+        );
+        // A shared projection alongside a mutable one is the same conflict,
+        // and a projection bound to a local is found by name.
+        let bound = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &x | a | &!x 3 ! a @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            bound.contains("the projection bound as `a` is still live"),
+            "unexpected message: {bound}"
+        );
+        // Two *disjoint* fields off one receiver stay legal: the conflict is
+        // region overlap, not "any second projection".
+        assert!(check_src(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!x swap &!y 3 ! swap 4 ! drop ;",
+        )
+        .is_ok());
     }
 }

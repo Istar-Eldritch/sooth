@@ -218,7 +218,6 @@ impl<'a> FuncBuilder<'a> {
     }
 
     pub(in crate::ir) fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
-        let line = span.line;
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
@@ -615,7 +614,7 @@ impl<'a> FuncBuilder<'a> {
                 // Every `&`-led word: the two prefix borrow operators and the
                 // reference-mode accessor family.
                 if name.starts_with('&') {
-                    self.lower_reference_word(name, line);
+                    self.lower_reference_word(name, span);
                     return;
                 }
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`

@@ -1004,6 +1004,21 @@ pub(super) fn peek_region(
     if !interior.is_aggregate() {
         return None;
     }
+    Some(projected_region(parent, segment, span, prov))
+}
+
+/// `peek_region` without the aggregate gate: the interior region a
+/// non-consuming projection out of `parent` denotes, minting `parent`'s own
+/// region lazily. A peek copies a scalar field's *value* out, so a scalar
+/// interior aliases nothing and needs no region; P7 slice 1's `&f`/`&!f` hands
+/// out a *reference* to the interior instead, which aliases its parent
+/// whatever the field's width.
+pub(super) fn projected_region(
+    parent: &mut Slot,
+    segment: &str,
+    span: Span,
+    prov: &mut Provenance,
+) -> Alias {
     let base = match parent.alias {
         Some(alias) => alias.set,
         None => {
@@ -1013,10 +1028,10 @@ pub(super) fn peek_region(
             set
         }
     };
-    Some(Alias {
+    Alias {
         set: prov.field_alias_set(base, segment),
         span,
-    })
+    }
 }
 
 /// Where a second live name for a region is, when the diagnostic has to
@@ -1413,7 +1428,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,

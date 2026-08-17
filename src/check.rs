@@ -84,10 +84,21 @@ use self::word_families::*;
 /// The per-call-site records a body walk fills: `CallInst` per polymorphic
 /// instantiation (R14) and, since slice 8a, the resolved candidate's lowering
 /// symbol per overloaded call (R7). Lowering reads both keyed by `Span`.
-type ResolvedCalls = (HashMap<Span, CallInst>, HashMap<Span, String>);
+type ResolvedCalls = (
+    HashMap<Span, CallInst>,
+    HashMap<Span, String>,
+    HashMap<Span, (StructId, usize)>,
+);
 
-/// `ResolvedCalls` plus the residual stack a REPL line leaves behind.
-type InferredLine = (Vec<Type>, HashMap<Span, CallInst>, HashMap<Span, String>);
+/// `ResolvedCalls` plus the residual stack a REPL line leaves behind and the
+/// field projections it resolved (R2), which the session's own lowering path
+/// needs exactly as the module path does.
+type InferredLine = (
+    Vec<Type>,
+    HashMap<Span, CallInst>,
+    HashMap<Span, String>,
+    HashMap<Span, (StructId, usize)>,
+);
 
 /// R5/R14: every candidate registered under one polymorphic-word name, its
 /// `PolySig` paired with the REPL generation it was retained at (`None` on
@@ -119,6 +130,14 @@ struct PolyCtx<'a> {
     /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
     /// not lower a builtin overload (out of scope this slice).
     builtin_overloads: &'a mut HashMap<Span, String>,
+    /// P7 slice 1 (R2): the receiver-directed field projections this walk
+    /// resolved (`&hp` against a `&Sprite` on the stack), span -> the struct
+    /// and field index, relayed onto `Module::resolved_fields` so lowering can
+    /// read back a resolution it cannot re-derive without a checker stack.
+    /// Rides `PolyCtx` rather than `Scope` for the same reason
+    /// `builtin_overloads` does: an `if` arm clones the scope, and a record
+    /// made in one arm must outlive it.
+    resolved_fields: &'a mut HashMap<Span, (StructId, usize)>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
@@ -615,6 +634,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         externs: _,
         instantiations: _,
         builtin_overloads: _,
+        resolved_fields: _,
         modules,
         statics,
     } = module;
@@ -657,6 +677,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // module for lowering (empty for the whole corpus, so its lowering is
     // untouched byte-for-byte).
     let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
+    // P7 slice 1 (R2): the receiver-directed field projections, filled as each
+    // monomorphic body resolves one against its stack, then relayed to the
+    // module for lowering.
+    let mut resolved_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -671,10 +695,12 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // instantiation records it produces here are scratch.
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+                let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
                     builtin_overloads: &mut scratch_overloads,
+                    resolved_fields: &mut scratch_fields,
                     combinators: &combinators,
                 };
                 check_poly_combinator_standalone(
@@ -711,6 +737,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 env: &poly_env,
                 insts: &mut insts,
                 builtin_overloads: &mut builtin_overloads,
+                resolved_fields: &mut resolved_fields,
                 combinators: &combinators,
             };
             check_word(
@@ -765,6 +792,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     }
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
+    module.resolved_fields = resolved_fields;
     Ok(())
 }
 
@@ -802,7 +830,7 @@ pub(crate) fn check_def(
     poly_env: &PolyEnv,
     combinators: &CombinatorEnv,
 ) -> Result<ResolvedCalls, String> {
-    let (_sites, insts, overloads) = check_def_collecting_drop_sites(
+    let (_sites, insts, overloads, fields) = check_def_collecting_drop_sites(
         word,
         enums,
         env,
@@ -813,7 +841,7 @@ pub(crate) fn check_def(
         poly_env,
         combinators,
     )?;
-    Ok((insts, overloads))
+    Ok((insts, overloads, fields))
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -863,6 +891,9 @@ pub(crate) fn check_def_collecting_drop_sites(
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
     let mut overloads: HashMap<Span, String> = HashMap::new();
+    // R2 (P7 slice 1): this body's receiver-directed field projections,
+    // relayed to the caller so the session lowers them like a native build.
+    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
@@ -871,6 +902,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
+        resolved_fields: &mut fields,
         combinators,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
@@ -890,7 +922,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         &mut sites,
         &mut poly,
     )?;
-    Ok((sites, insts, overloads))
+    Ok((sites, insts, overloads, fields))
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -925,6 +957,9 @@ pub(crate) fn infer_line(
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
     let mut overloads: HashMap<Span, String> = HashMap::new();
+    // R2 (P7 slice 1): this line's receiver-directed field projections,
+    // relayed to the caller so the session lowers them like a native build.
+    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
@@ -932,6 +967,7 @@ pub(crate) fn infer_line(
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
+        resolved_fields: &mut fields,
         combinators,
     };
     let final_stack = check_terms(
@@ -964,6 +1000,7 @@ pub(crate) fn infer_line(
         final_stack.into_iter().map(|s| s.ty).collect(),
         insts,
         overloads,
+        fields,
     ))
 }
 
@@ -2674,7 +2711,7 @@ mod tests {
             &HashMap::new(),
             &combinators,
         )
-        .map(|(stack, _insts, _overloads)| stack)
+        .map(|(stack, _insts, _overloads, _fields)| stack)
     }
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {
@@ -3477,5 +3514,40 @@ mod tests {
             ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n",
         )
         .expect("`while` still type-checks after the back-edge rewrite");
+    }
+
+    /// P7 slice 1 (R2): the side table lowering reads back. One entry per
+    /// projection call site, each carrying the receiver `StructId` and the
+    /// field index -- neither of which the projection's own name states.
+    #[test]
+    fn resolved_fields_records_one_entry_per_call_site() {
+        let tokens = lex("type: A n i64 ;\n\
+                          type: B tag i64 n bool ;\n\
+                          : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;")
+        .unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).expect("both projections resolve");
+        let a = module
+            .structs
+            .iter()
+            .position(|d| d.name == "A")
+            .expect("`A` is registered");
+        let b = module
+            .structs
+            .iter()
+            .position(|d| d.name == "B")
+            .expect("`B` is registered");
+        let mut recorded: Vec<(usize, usize)> = module
+            .resolved_fields
+            .values()
+            .map(|(id, fi)| (id.index(), *fi))
+            .collect();
+        recorded.sort_unstable();
+        let mut want = vec![(a, 0), (b, 1)];
+        want.sort_unstable();
+        assert_eq!(
+            recorded, want,
+            "one entry per site, resolved against each site's own receiver"
+        );
     }
 }

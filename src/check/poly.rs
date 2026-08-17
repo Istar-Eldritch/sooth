@@ -231,10 +231,12 @@ pub(crate) fn check_poly_combinator_repl(
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+    let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
         builtin_overloads: &mut scratch_overloads,
+        resolved_fields: &mut scratch_fields,
         combinators,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
@@ -919,6 +921,15 @@ pub(super) fn poly_reference_word(
                 // Never moved or dropped, so the move gate above has nothing
                 // to say about it.
                 PolyType::Concrete(static_ty)
+            } else if receiver_is_aggregate_projection(stack) {
+                // P7 slice 1 (R1): `&f` carries no `>`, so the guard above
+                // cannot see that this is a field projection. Reached only
+                // after both the local and the static lookup miss (a real
+                // local named `f` is unaffected), so a struct/variant on top
+                // of the stack means the name is a projection out of it --
+                // still unsupported in a generic body, but it must say so
+                // rather than claim `f` is not a local.
+                return Err(poly_unsupported_accessor_error(ctx, span, name));
             } else {
                 return Err(poly_borrow_of_non_local_error(ctx, span, name, rest));
             };
@@ -1873,6 +1884,23 @@ pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -
     format!(
         "error: `{op}` is not yet supported in a generic body, in `{where_}` (line {})\n  monomorphize this word (or write a concrete wrapper) to use `{op}` today",
         span.line
+    )
+}
+
+/// Whether the receiver a `&f` would project out of is a struct or a variant,
+/// rather than a bare type parameter or a scalar. Reference or owned alike:
+/// both are receivers of a projection under P7 slice 1's D2.
+fn receiver_is_aggregate_projection(stack: &[PolyType]) -> bool {
+    let Some(top) = stack.last() else {
+        return false;
+    };
+    let referent = match top {
+        PolyType::Ref(inner, _) => inner.as_ref(),
+        other => other,
+    };
+    matches!(
+        referent,
+        PolyType::Concrete(Type::Struct(..) | Type::Enum(..) | Type::Variant(..))
     )
 }
 
@@ -3409,5 +3437,28 @@ mod tests {
             &sig,
         )
         .expect("an already-usize index needs no literal at all");
+    }
+
+    /// P7 slice 1 (R1): a field projection inside a generic body. `&f` carries
+    /// no `>`, so the pre-slice accessor guard (which tested `rest.contains('>')`)
+    /// no longer sees it, and without the receiver check the site falls through
+    /// to the local/static arm and reports "`x` is not a local" -- a wrong
+    /// diagnostic for a construct that is rejected for a different reason.
+    #[test]
+    fn projection_on_generic_receiver_body_is_error() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             : peek ( 'T -- 'T ) 3 4 Point &x @ . drop ;\n\
+             : main ( -- ) 7 peek . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&x` is not yet supported in a generic body"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("is not a local"),
+            "the local/static arm must not claim this site: {err}"
+        );
     }
 }

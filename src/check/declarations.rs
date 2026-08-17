@@ -1554,6 +1554,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
+            resolved_fields: HashMap::new(),
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
@@ -1617,6 +1618,7 @@ mod tests {
                 externs: Vec::new(),
                 instantiations: HashMap::new(),
                 builtin_overloads: HashMap::new(),
+                resolved_fields: HashMap::new(),
                 modules,
                 statics: Vec::new(),
             }
