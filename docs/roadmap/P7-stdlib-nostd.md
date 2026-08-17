@@ -52,12 +52,12 @@ beside `Copy`'s, and why this is a closed monomorphic list rather than the effec
 type system declines. **It looks like a Phase 9 feature and isn't**, because two later
 items in this phase need it first:
 
-- The **allocator rework** (S4 below). A user-supplied allocator has state: a bump
+- The **allocator rework** (S5 below). A user-supplied allocator has state: a bump
   pointer, a free list. Today that state hides inside libc's `malloc`; the moment the
   allocator is ordinary Sooth code bound as foreign words, it needs somewhere in the
   program to live. Statics are a prerequisite of the explicit-allocator item, not a
   sibling of it.
-- The **API description** (S6 below). A global clause on an exported word is part of that
+- The **API description** (S7 below). A global clause on an exported word is part of that
   word's exported signature. Building the serialisable API format first and adding globals
   to it later means retrofitting the format and re-baselining every diff it has already
   emitted.
@@ -72,13 +72,82 @@ checker verifies, and an *exported* word's undeclared static access is a located
 error naming the static (a private word's static access is inferred, not declaration-forced:
 inferred everywhere, declared at the export boundary).
 
-**P7.S3 — The `fixed` layer.** Allocation-free fixed-capacity vec/map/string/ringbuffer,
-built against `core`, needing no allocator at all. No dependency on S2 or S4; can be built
-in parallel with either once S1's accessor migration is out of the way.
-**Exit:** the `fixed` layer's collections work with no allocator present, and every stdlib
-word in it is tagged with the layer it belongs to.
+**P7.S3a — Generic instantiation over a poly word's own type variable.** Discovered as a
+blocker, not planned: the paper dogfood for S3b (below) found that a polymorphic word
+cannot name a generic type applied to its own type variable in its signature —
+`: unbox ( Box['T] -- 'T )` and `: or-default ( 'T Option['T] -- 'T )` both fail
+`` error: unknown type 'T `` today, confirmed by compiling
+(`docs/roadmap/P7/slice3-dogfood.md`, finding #5), while an *array* carrying a type
+variable in a poly signature already works. Traced to `resolve_type_or_apply`
+(`src/parser.rs:3129`): a generic name's type arguments are resolved through
+`parse_type_arguments` → `instantiate_struct`/`instantiate_enum`, both of which
+monomorphize *immediately, at parse time*, against a concrete `Type` — there is no
+representation for "a generic applied to an argument that is still abstract." Every
+existing use of `Result[i64 str]`-style generics is a concrete argument to a
+*monomorphic* word; this is the first time anything has needed a generic applied to a
+*poly* word's own `'T`.
+This is Phase-5-shaped, not P7.S3b-shaped: it is a type-system extension (a new
+`PolyType` variant for a symbolic/deferred generic application, threaded through
+unification, `apply_subst`, and resolved to a real monomorphized type only once
+`check_poly_call` has a concrete `Subst` — the same shape Phase 4 Slice 6a/7a's
+quotation-type variant took), not a checker whitelist extension. Needs its own recon
+and brief before implementation; only the parser-side root cause has been traced so
+far, not unification, monomorphization, or lowering.
+Blocks S3b's own forcing consumer (`Map['K 'V]`) and, transitively, S4's generic
+collections; does not block S3b's *bounds* mechanism itself, which is orthogonal (a
+plain `sort ( ['T: Copy Order 'N] -- ['T 'N] )` over an array types today with no
+dependency on this).
+**Exit:** a polymorphic word can declare and use a generic type applied to its own
+type variable (`Box['T]`, `Option['T]`, `Map['K 'V]`) in its signature and body,
+resolved correctly per concrete instantiation.
 
-**P7.S4 — The `alloc` layer: allocator rework and generic collections.** Phase 5's generic
+**P7.S3b — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
+two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
+(`is_copy`/`is_numeric`); the comment on it says "Kitten-style, with no trait objects,"
+and this slice is the intended next step it left open, not a new idea. Forced here,
+before S4 and S5, because both need it and retrofitting is the exact mistake S4 already
+names for allocators: `Map['K 'V]` needs an equality (or ordering) bound on `'K` that
+today's `Ord` cannot express (`is_ord` is `is_numeric` and nothing else), so a map keyed
+on a string or a struct is unwritable with the bounds that exist, and a sortable `Vec['T]`
+hits the same wall. Adding a bound to a collection's signature after it ships changes
+every signature that mentions it — S4's own words, about allocators, apply verbatim to
+bounds: "retrofitting it onto collections specified without it is the mistake Rust's
+`allocator_api` is still paying for, and this is the only moment it is cheap." S1 made
+the same argument about itself, for the same reason: writing the collections against the
+old mechanism and migrating afterwards is the waste. It is also a hard dependency of S7
+(the API description), for the reason S7 already gives about globals: a trait bound on
+an exported word's signature is part of that exported signature, so building the
+diffable API format before bounds exist means re-baselining every diff it has already
+emitted.
+Stays compile-time-only and out of trait *objects* on purpose: `'T: Show` is satisfied by
+an ordinary word (`show`) resolving for the concrete type at monomorphization, the same
+static overload resolution Phase 4 Slice 8 already performs, so a satisfied bound needs
+no runtime representation, no vtable, no erasure, no allocation. **The lowering/IR
+budget is not zero, however** — probe-verified against the built compiler (brief's
+"Resolved recon"): `builtin_overloads: HashMap<Span, String>` records one symbol per
+call site shared across every monomorphization, which cannot express a trait method
+needing a *different* concrete symbol per instantiation, so this slice needs either a
+per-instantiation-aware overload record or lowering re-resolving against `Subst` (the
+second option touches an explicitly stated "lowering never re-runs resolution"
+invariant and needs that invariant's owner to weigh in). The other real work is on the
+body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
+bounded type variable — required members take `&'T`, per the dogfood) may be used for
+has to grow one case, calling a word required by a variable's declared bound.
+**Depends on S3a**: its own dogfood (`Map['K 'V]`) is unwritable without S3a; the
+array-`sort` consumer does not need S3a and can proceed independently if S3a slips.
+**Open questions the spec must settle, not this entry** (full detail in
+`docs/roadmap/P7/slice3b-brief.md`): nominal vs. structural satisfaction; whether a
+user trait can be named `Copy`/`Ord` (today it can't, without a parser change); a
+multi-bound member-name-collision rule.
+**Exit:** a user can declare a bound naming required word signatures, a polymorphic word
+can declare `'T: TraitName` and call a bounded word inside its body, and
+monomorphization rejects an instantiation whose concrete type has no matching word with
+a located error naming the missing word and the trait.
+
+**P7.S4 — The `fixed` layer.** Allocation-free fixed-capacity vec/map/string/ringbuffer, built against `core`, needing no allocator at all. No dependency on S2 or S5; can be built in parallel with either once S1's accessor migration is out of the way.
+**Exit:** the `fixed` layer's collections work with no allocator present, and every stdlib word in it is tagged with the layer it belongs to.
+
+**P7.S5 — The `alloc` layer: allocator rework and generic collections.** Phase 5's generic
 `type:` declarations give `Vec['T]` and `Map['K 'V]` somewhere to be named; what's left
 here is the piece only a growable, allocating collection needs, not the declaration
 mechanism itself. **Explicit allocators ride on this item and belong in its brief, not
@@ -94,21 +163,23 @@ compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since a
 user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
 is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
 rather than the allocation site, which converts a compile error into a runtime one in the
-language whose point is the opposite. Needs S2 (statics, for the allocator's own state).
+language whose point is the opposite. Needs S2 (statics, for the allocator's own state),
+S3a (generic instantiation, for naming `Map['K 'V]`/`Vec['T]` at all), and S3b (bounds,
+for `Map`'s key type).
 **Exit:** the compiler-emitted `malloc`/`free` shim is gone, replaced by ordinary Sooth code
 bound as foreign words; `Vec`/`Map`/`String` take an explicit, defaulted allocator type
 parameter; `Box`, opt-in `Rc`/`Arc`, and bignum are built against it; a nested resource
 field's derived disposal correctly threads a non-default allocator down to it.
 
-**P7.S5 — The `hosted` layer.** Files, stdio, time, FFI-to-libc via safe wrappers. Needs
-`alloc` (S4) for anything that allocates (buffered I/O, path strings) and benefits from
-`fixed` (S3) for anything that doesn't. This is where the phase's dogfood program actually
+**P7.S6 — The `hosted` layer.** Files, stdio, time, FFI-to-libc via safe wrappers. Needs
+`alloc` (S5) for anything that allocates (buffered I/O, path strings) and benefits from
+`fixed` (S4) for anything that doesn't. This is where the phase's dogfood program actually
 runs.
 **Exit:** real hosted programs use libc via safe wrappers.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
-**P7.S6 — Modules: the serialisable API description.** Phase 4 Slice 5 already pulled the
+**P7.S7 — Modules: the serialisable API description.** Phase 4 Slice 5 already pulled the
 whole compilation-unit story forward: a file is a compilation unit, and an import brings a
 word or a struct/enum declaration across a file boundary by qualified name, landed once
 writing a reusable component — usually a type plus its operations — needed somewhere to
@@ -123,22 +194,23 @@ walks the checked AST, filters to the exported declarations Slice 5 already dist
 and emits a file listing every exported signature for the API diff to compare between
 versions. That is the remaining prerequisite in `docs/dependency-management.md`, and it is a
 packaging/publishing concern (letting other people depend on you with enforced semver)
-rather than a personal-reuse one, which is why it waited. Needs S2 (statics), since a
+rather than a personal-reuse one, which is why it waited. Needs S2 (statics) and S3b
+(bounds), since a
 global clause on an exported word is part of that word's exported signature.
 **Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump
 across a two-file change.
 **Dogfood:** `sooth publish --check` on a two-version bump of a small library, one that adds
 a word (MINOR) and one that removes one (MAJOR).
 
-**P7.S7 — Worklist-based disposal for branching structures (moved from Phase 3 Slice 4;
+**P7.S8 — Worklist-based disposal for branching structures (moved from Phase 3 Slice 4;
 optional, no forcing dependency).** A multi-child recursive type's synthesized destructor
 loops only its *last* recursive field and recurses the rest, so a left-leaning tree still
 disposes in O(depth); a worklist would let every child dispose iteratively instead. Waits
 for here because it needs a growable pending-pointer structure to hold onto siblings while
-descending, which is exactly `alloc`'s (S4) job, and because a fallible push wants an
+descending, which is exactly `alloc`'s (S5) job, and because a fallible push wants an
 optional to report through, which only exists once Phase 5's generic `type:` declarations
 land. Building a private version of either inside a Phase 3 destructor would be guessing at
-both. If the fixed-size bound turns out to be enough, `fixed`'s (S3) ringbuffer covers it
+both. If the fixed-size bound turns out to be enough, `fixed`'s (S4) ringbuffer covers it
 without waiting for `alloc`. **No dogfood forces this earlier than the rest of the phase**:
 the first real pressure is Phase 10's self-hosted AST, a genuinely deep branching
 structure, so this slice can slip past the phase's own exit if nothing else needs it yet.
