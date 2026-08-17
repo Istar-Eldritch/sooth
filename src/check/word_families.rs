@@ -359,6 +359,16 @@ fn check_field_projection(
     at: usize,
     resolved_fields: &mut HashMap<Span, (StructId, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // D1's grammar makes a receiver-directed field an ordinary identifier,
+    // never an accessor. A `>` here means `rest.split_once('>')` above already
+    // tried and rejected this token as a fused accessor (unknown struct,
+    // unknown field, or wrong variant); falling through to treat the whole
+    // `Type>field` string as a plain field name would leak that mangled
+    // spelling into `projection_unknown_field_error` instead of reaching the
+    // pre-existing, demangling "not a local in scope" diagnostic below.
+    if field.contains('>') {
+        return Ok(None);
+    }
     let n = stack.len();
     if n < 1 {
         return Ok(None);
@@ -375,7 +385,16 @@ fn check_field_projection(
         return Ok(None);
     };
     let decl = &ctx.structs()[id.index()];
-    let field_pos = decl.fields.iter().position(|(f, _)| f == field);
+    // `field` arrives as `resolve` left it, which mangles it whenever it
+    // matches a static of this module (R2) -- struct field names are never
+    // mangled, so the lookup below has to compare against the demangled
+    // spelling or a static's mangled name can never be seen to collide with
+    // a field of the same source name.
+    let field_name = crate::resolve::demangle_call(field);
+    let field_pos = decl
+        .fields
+        .iter()
+        .position(|(f, _)| f == field_name.as_ref());
     // R3: the receiver is tried first, but a local/static of the same name
     // still has a say -- present on both sides it is a shadow error, present
     // only there (the receiver lacking the field) it is the fallback that
@@ -389,7 +408,7 @@ fn check_field_projection(
                 span,
                 name,
                 decl.name_static,
-                field,
+                field_name.as_ref(),
             ));
         }
         Some(fi) => fi,
@@ -400,7 +419,7 @@ fn check_field_projection(
                 span,
                 name,
                 decl.name_static,
-                field,
+                field_name.as_ref(),
             ));
         }
     };
@@ -1585,6 +1604,7 @@ fn projection_unknown_field_error(
     receiver: &str,
     field: &str,
 ) -> String {
+    let name = crate::resolve::demangle_call(name);
     format!(
         "error: `{receiver}` has no field `{field}`{} (line {}, col {})\n  `{name}` projects a field of the receiver on top of the stack; `{receiver}` declares no field named `{field}`",
         in_word(ctx),
@@ -1605,8 +1625,9 @@ fn projection_field_shadowed_by_local_error(
     receiver: &str,
     field: &str,
 ) -> String {
+    let name = crate::resolve::demangle_call(name);
     format!(
-        "error: `{name}` is ambiguous{} (line {}, col {})\n  `{receiver}` has a field `{field}`, and a local (or static) named `{field}` is also in scope\n  rename one of them, or bind the receiver to a local and use `S>` to destructure explicitly",
+        "error: `{name}` is ambiguous{} (line {}, col {})\n  `{receiver}` has a field `{field}`, and a local (or static) named `{field}` is also in scope\n  rename one of them",
         in_word(ctx),
         span.line,
         span.col,
@@ -2462,6 +2483,27 @@ mod tests {
         assert!(!err.contains("__m"), "leaked a mangled name: {err}");
     }
 
+    /// Review fix (P7 slice 1, D1): the sibling of the test above with the
+    /// receiver *on the stack* rather than bound to a local first --
+    /// `check_field_projection` (D2's receiver-directed arm) sees this same
+    /// `Point>z` token before the prefix-borrow chain does, and used to treat
+    /// the whole mangled `Point>z` string as a plain field name instead of
+    /// falling through, leaking it into `projection_unknown_field_error`.
+    #[test]
+    fn borrow_of_unknown_field_names_the_source_spelling_with_receiver_on_stack() {
+        let err = check_src_mangled(
+            "type: Point x i64 y i64 ;\n\
+             : main ( -- ) 1 2 Point &!Point>z drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!Point>z` does not borrow a place")
+                && err.contains("`Point>z` is not a local in scope"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
+    }
+
     // --- P7 slice 1, D2/R1: receiver-directed field projections. ---
 
     /// R1: the field resolves against the type on the stack, not against a
@@ -2542,6 +2584,29 @@ mod tests {
                 && err.contains("local"),
             "unexpected message: {err}"
         );
+    }
+
+    /// Review fix (P7 slice 1, D2): the same shadow, but with a *static*
+    /// rather than a local. `resolve` mangles `&n` to `&n__m0` before the
+    /// checker runs (R2's static mangle is unconditional), so the field
+    /// lookup here has to demangle before comparing against the struct's own
+    /// field names -- otherwise the static wins silently, with no ambiguity
+    /// error at all, and the field becomes unreachable through `&n`.
+    #[test]
+    fn projection_field_shadowed_by_static_is_error() {
+        let err = check_src_mangled(
+            "static: n i64 = 0 ;\n\
+             type: Cnt n i64 ;\n\
+             : main ( -- ) 1 Cnt &n @ . drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&n` is ambiguous")
+                && err.contains("`Cnt` has a field `n`")
+                && err.contains("local (or static)"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
     }
 
     /// The point of R1: one spelling, two receivers, two different fields.
