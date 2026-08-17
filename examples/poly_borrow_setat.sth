@@ -18,6 +18,6 @@ type: Vec2 x i64 y i64 ;
   0 0 Vec2 4 fill | c |
   &!c 0 &!> 11 12 Vec2 !  &!c 1 &!> 21 22 Vec2 !  &!c 2 &!> 31 32 Vec2 !  &!c 3 &!> 41 42 Vec2 !
   c 91 92 Vec2 setat | d |
-  &d 2 &> @ | e | e &x @ swap drop . e &y @ swap drop .
-  &d 1 &> @ | e2 | e2 &x @ swap drop . e2 &y @ swap drop .
+  &d 2 &> @ | e | &e &x @ . &e &y @ .
+  &d 1 &> @ | e2 | &e2 &x @ . &e2 &y @ .
   d drop ;

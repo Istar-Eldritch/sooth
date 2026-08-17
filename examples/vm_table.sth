@@ -36,14 +36,14 @@ type: Decoded vm Vm idx usize ;
 
 : vm-push ( Vm i64 -- Vm )
   | vm x |
-  vm &sp @ swap drop | i |
+  &vm &sp @ | i |
   &!vm &!stack i &!> x !
-  vm &sp @ swap drop 1 + | newsp |
+  &vm &sp @ 1 + | newsp |
   vm &!sp newsp ! ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  vm &sp @ swap drop 1 - | i |
+  &vm &sp @ 1 - | i |
   &vm &stack i &> @ | x |
   vm &!sp i !
   x
@@ -55,7 +55,7 @@ type: Decoded vm Vm idx usize ;
 
 : fetch ( Vm -- Fetched )
   | vm |
-  vm &pc @ swap drop | i |
+  &vm &pc @ | i |
   &vm &prog i &> @ | op |
   vm op Fetched ;
 

@@ -24,59 +24,62 @@ type :Decoded = { :Vm, l }
 
 export function :Vm $vm.2d.push__m0(:Vm %v0, l %v1) {
 @start
-	%v2 =l add %v0, 280
-	%v3 =l loadl %v2
-	%v4 =l add %v0, 0
-	%v5 =l add %v4, 216
-	%v6 =l copy 8
-	%v7 =w cultl %v3, %v6
-	jnz %v7, @blk1, @blk2
-@blk2
-	%v8 =l copy 40
-	%v9 =l copy 8
-	call $sooth_oob_trap(l %v8, l %v3, l %v9)
-	jmp @blk1
-@blk1
-	%eoff0 =l mul %v3, 8
-	%v10 =l add %v5, %eoff0
-	storel %v1, %v10
-	%v11 =l add %v0, 280
-	%v12 =l loadl %v11
-	%v13 =l copy 1
-	%v14 =l add %v12, %v13
-	%v15 =l add %v0, 280
-	storel %v14, %v15
-	ret %v0
-}
-
-export function :VmPop $vm.2d.pop__m0(:Vm %v0) {
-@start
-	%v1 =l add %v0, 280
-	%v2 =l loadl %v1
-	%v3 =l copy 1
-	%v4 =l sub %v2, %v3
+	%v2 =l add %v0, 0
+	%v3 =l add %v2, 280
+	%v4 =l loadl %v3
 	%v5 =l add %v0, 0
 	%v6 =l add %v5, 216
 	%v7 =l copy 8
 	%v8 =w cultl %v4, %v7
 	jnz %v8, @blk1, @blk2
 @blk2
-	%v9 =l copy 47
+	%v9 =l copy 40
 	%v10 =l copy 8
 	call $sooth_oob_trap(l %v9, l %v4, l %v10)
 	jmp @blk1
 @blk1
 	%eoff0 =l mul %v4, 8
 	%v11 =l add %v6, %eoff0
-	%v12 =l loadl %v11
-	%v13 =l add %v0, 280
-	storel %v4, %v13
-	%v14 =l alloc8 328
-	%v15 =l add %v14, 0
-	blit %v0, %v15, 320
-	%v16 =l add %v14, 320
-	storel %v12, %v16
-	ret %v14
+	storel %v1, %v11
+	%v12 =l add %v0, 0
+	%v13 =l add %v12, 280
+	%v14 =l loadl %v13
+	%v15 =l copy 1
+	%v16 =l add %v14, %v15
+	%v17 =l add %v0, 280
+	storel %v16, %v17
+	ret %v0
+}
+
+export function :VmPop $vm.2d.pop__m0(:Vm %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 280
+	%v3 =l loadl %v2
+	%v4 =l copy 1
+	%v5 =l sub %v3, %v4
+	%v6 =l add %v0, 0
+	%v7 =l add %v6, 216
+	%v8 =l copy 8
+	%v9 =w cultl %v5, %v8
+	jnz %v9, @blk1, @blk2
+@blk2
+	%v10 =l copy 47
+	%v11 =l copy 8
+	call $sooth_oob_trap(l %v10, l %v5, l %v11)
+	jmp @blk1
+@blk1
+	%eoff0 =l mul %v5, 8
+	%v12 =l add %v7, %eoff0
+	%v13 =l loadl %v12
+	%v14 =l add %v0, 280
+	storel %v5, %v14
+	%v15 =l alloc8 328
+	%v16 =l add %v15, 0
+	blit %v0, %v16, 320
+	%v17 =l add %v15, 320
+	storel %v13, %v17
+	ret %v15
 }
 
 export function :Vm $bump.2d.pc__m0(:Vm %v0) {
@@ -92,29 +95,30 @@ export function :Vm $bump.2d.pc__m0(:Vm %v0) {
 
 export function :Fetched $fetch__m0(:Vm %v0) {
 @start
-	%v1 =l add %v0, 208
-	%v2 =l loadl %v1
-	%v3 =l add %v0, 0
-	%v4 =l add %v3, 0
-	%v5 =l copy 13
-	%v6 =w cultl %v2, %v5
-	jnz %v6, @blk1, @blk2
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 208
+	%v3 =l loadl %v2
+	%v4 =l add %v0, 0
+	%v5 =l add %v4, 0
+	%v6 =l copy 13
+	%v7 =w cultl %v3, %v6
+	jnz %v7, @blk1, @blk2
 @blk2
-	%v7 =l copy 59
-	%v8 =l copy 13
-	call $sooth_oob_trap(l %v7, l %v2, l %v8)
+	%v8 =l copy 59
+	%v9 =l copy 13
+	call $sooth_oob_trap(l %v8, l %v3, l %v9)
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v2, 16
-	%v9 =l add %v4, %eoff0
-	%v10 =l alloc8 16
-	blit %v9, %v10, 16
-	%v11 =l alloc8 336
-	%v12 =l add %v11, 0
-	blit %v0, %v12, 320
-	%v13 =l add %v11, 320
-	blit %v10, %v13, 16
-	ret %v11
+	%eoff0 =l mul %v3, 16
+	%v10 =l add %v5, %eoff0
+	%v11 =l alloc8 16
+	blit %v10, %v11, 16
+	%v12 =l alloc8 336
+	%v13 =l add %v12, 0
+	blit %v0, %v13, 320
+	%v14 =l add %v12, 320
+	blit %v11, %v14, 16
+	ret %v12
 }
 
 export function :Decoded $decode__m0(:Vm %v0, :Op %v1) {

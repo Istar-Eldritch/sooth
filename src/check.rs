@@ -2734,7 +2734,7 @@ mod tests {
     }
     #[test]
     fn field_move_of_drop_overloaded_type_is_error() {
-        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
         assert_eq!(
             err,
             "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"

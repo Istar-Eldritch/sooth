@@ -47,87 +47,91 @@ export function :Stack $empty__m0() {
 
 export function :Stack $push__m0(:Stack %v0, l %v1) {
 @start
-	%v2 =l add %v0, 128
-	%v3 =l loadl %v2
-	%v4 =l add %v0, 0
-	%v5 =l add %v4, 0
-	%v6 =l copy 16
-	%v7 =w cultl %v3, %v6
-	jnz %v7, @blk1, @blk2
+	%v2 =l add %v0, 0
+	%v3 =l add %v2, 128
+	%v4 =l loadl %v3
+	%v5 =l add %v0, 0
+	%v6 =l add %v5, 0
+	%v7 =l copy 16
+	%v8 =w cultl %v4, %v7
+	jnz %v8, @blk1, @blk2
 @blk2
-	%v8 =l copy 22
-	%v9 =l copy 16
-	call $sooth_oob_trap(l %v8, l %v3, l %v9)
+	%v9 =l copy 22
+	%v10 =l copy 16
+	call $sooth_oob_trap(l %v9, l %v4, l %v10)
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v3, 8
-	%v10 =l add %v5, %eoff0
-	storel %v1, %v10
-	%v11 =l add %v0, 128
-	%v12 =l loadl %v11
-	%v13 =l copy 1
-	%v14 =l add %v12, %v13
-	%v15 =l add %v0, 128
-	storel %v14, %v15
+	%eoff0 =l mul %v4, 8
+	%v11 =l add %v6, %eoff0
+	storel %v1, %v11
+	%v12 =l add %v0, 0
+	%v13 =l add %v12, 128
+	%v14 =l loadl %v13
+	%v15 =l copy 1
+	%v16 =l add %v14, %v15
+	%v17 =l add %v0, 128
+	storel %v16, %v17
 	ret %v0
 }
 
 export function :__ret_1 $pop__m0(:Stack %v0) {
 @start
-	%v1 =l add %v0, 128
-	%v2 =l loadl %v1
-	%v3 =l copy 1
-	%v4 =l sub %v2, %v3
-	%v5 =l add %v0, 0
-	%v6 =l add %v5, 0
-	%v7 =l copy 16
-	%v8 =w cultl %v4, %v7
-	jnz %v8, @blk1, @blk2
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 128
+	%v3 =l loadl %v2
+	%v4 =l copy 1
+	%v5 =l sub %v3, %v4
+	%v6 =l add %v0, 0
+	%v7 =l add %v6, 0
+	%v8 =l copy 16
+	%v9 =w cultl %v5, %v8
+	jnz %v9, @blk1, @blk2
 @blk2
-	%v9 =l copy 29
-	%v10 =l copy 16
-	call $sooth_oob_trap(l %v9, l %v4, l %v10)
+	%v10 =l copy 29
+	%v11 =l copy 16
+	call $sooth_oob_trap(l %v10, l %v5, l %v11)
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v4, 8
-	%v11 =l add %v6, %eoff0
-	%v12 =l loadl %v11
-	%v13 =l add %v0, 128
-	storel %v4, %v13
-	%v14 =l alloc8 144
-	%v15 =l add %v14, 0
-	blit %v0, %v15, 136
-	%v16 =l add %v14, 136
-	storel %v12, %v16
-	ret %v14
+	%eoff0 =l mul %v5, 8
+	%v12 =l add %v7, %eoff0
+	%v13 =l loadl %v12
+	%v14 =l add %v0, 128
+	storel %v5, %v14
+	%v15 =l alloc8 144
+	%v16 =l add %v15, 0
+	blit %v0, %v16, 136
+	%v17 =l add %v15, 136
+	storel %v13, %v17
+	ret %v15
 }
 
 export function :__ret_1 $peek__m0(:Stack %v0) {
 @start
-	%v1 =l add %v0, 128
-	%v2 =l loadl %v1
-	%v3 =l copy 1
-	%v4 =l sub %v2, %v3
-	%v5 =l add %v0, 0
-	%v6 =l add %v5, 0
-	%v7 =l copy 16
-	%v8 =w cultl %v4, %v7
-	jnz %v8, @blk1, @blk2
+	%v1 =l add %v0, 0
+	%v2 =l add %v1, 128
+	%v3 =l loadl %v2
+	%v4 =l copy 1
+	%v5 =l sub %v3, %v4
+	%v6 =l add %v0, 0
+	%v7 =l add %v6, 0
+	%v8 =l copy 16
+	%v9 =w cultl %v5, %v8
+	jnz %v9, @blk1, @blk2
 @blk2
-	%v9 =l copy 35
-	%v10 =l copy 16
-	call $sooth_oob_trap(l %v9, l %v4, l %v10)
+	%v10 =l copy 35
+	%v11 =l copy 16
+	call $sooth_oob_trap(l %v10, l %v5, l %v11)
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v4, 8
-	%v11 =l add %v6, %eoff0
-	%v12 =l loadl %v11
-	%v13 =l alloc8 144
-	%v14 =l add %v13, 0
-	blit %v0, %v14, 136
-	%v15 =l add %v13, 136
-	storel %v12, %v15
-	ret %v13
+	%eoff0 =l mul %v5, 8
+	%v12 =l add %v7, %eoff0
+	%v13 =l loadl %v12
+	%v14 =l alloc8 144
+	%v15 =l add %v14, 0
+	blit %v0, %v15, 136
+	%v16 =l add %v14, 136
+	storel %v13, %v16
+	ret %v14
 }
 
 export function $sooth_main() {

@@ -98,15 +98,17 @@ export function :__ret_1 $struct_last__m0() {
 	%v22 =l alloc8 16
 	blit %v21, %v22, 16
 	%v23 =l add %v22, 0
-	%v24 =l loadl %v23
-	%v25 =l add %v22, 8
-	%v26 =l loadl %v25
-	%v27 =l alloc8 16
-	%v28 =l add %v27, 0
-	storel %v24, %v28
-	%v29 =l add %v27, 8
-	storel %v26, %v29
-	ret %v27
+	%v24 =l add %v23, 0
+	%v25 =l loadl %v24
+	%v26 =l add %v22, 0
+	%v27 =l add %v26, 8
+	%v28 =l loadl %v27
+	%v29 =l alloc8 16
+	%v30 =l add %v29, 0
+	storel %v25, %v30
+	%v31 =l add %v29, 8
+	storel %v28, %v31
+	ret %v29
 }
 
 export function $countdown__m0(l %v0) {

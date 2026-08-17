@@ -277,7 +277,7 @@ fn carried_struct_with_non_eight_multiple_size_survives_line_boundary() {
     let out = run_session(&[
         "type: Pair a i8 b i8 ;",
         "1 >i8 2 >i8 Pair",
-        "Pair> swap . .",
+        "&a @ . &b @ . drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
