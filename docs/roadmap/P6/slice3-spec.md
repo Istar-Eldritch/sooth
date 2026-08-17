@@ -1,6 +1,7 @@
 # Phase 6 Slice 3: the eliminator word (spec)
 
-Anchors verified against `main` at `3993f18` (HEAD at spec time). Every `path:line`
+Anchors re-verified against `main` at `7186a19` (current HEAD, post-P7.S1-merge and
+post-decision-6; supersedes the original `3993f18` baseline). Every `path:line`
 below was read at this HEAD; re-confirm before editing if HEAD has moved.
 
 ## Summary
@@ -27,7 +28,7 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
   `poly_word` helper; `src/check/poly.rs:2562,2659,2682` are all under `#[cfg(test)]`.
   The parser sites (`src/parser.rs:985` `finish`, `parse_poly_effect`) build a `PolySig`
   from surface syntax, not programmatically from an enum. `enum_generated_sigs`
-  (`src/check/declarations.rs:1273`) and `variant_generated_sigs`
+  (`src/check/declarations.rs:1323`) and `variant_generated_sigs`
   (`src/check/declarations.rs:1300+`) emit concrete monomorphic `Sig`s only. So this
   slice writes the **first declaration-time `PolySig` generator**.
 
@@ -41,14 +42,14 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
   synthetic `Clause` **must** carry `locals: vec![]` (Slice 2 accessors read fields by
   name inside the arm body, so no positional binding is needed) and its `variant` field
   must be the registry key `enums.words` holds (the mangled registry spelling, same key
-  `EnumWord::Construct` is registered under at `src/ir/layout.rs:517-519`). With those,
+  `EnumWord::Construct` is registered under at `src/ir/layout.rs:548-550`). With those,
   `lower_clauses`'s **body** is reused unchanged.
 
   **Correction (verified by compiling it, not by reading; re-corrected again in round 2
   after two independent reviewers reproduced this by building it locally).** This spec
   first claimed the `EnumWord::Construct` destructure at `control_flow.rs:236` "is fine"
   and that nothing outside `lower_clauses` moves. That is wrong. `EnumWord`
-  (`src/ir/layout.rs:264-266`) has exactly **one** variant today, so *any* second
+  (`src/ir/layout.rs:259-261`) has exactly **one** variant today, so *any* second
   variant — whether decision 3's `Eliminate(EnumId)` or R6's `Get`/`Destructure` — is a
   breaking change to every site that assumed exactly one. Two hard errors result, and
   **they land in different phases**, because R6's `Get`/`Destructure` is what actually
@@ -62,7 +63,7 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
     Phase 4, as an earlier draft of this correction wrongly attributed it. It needs a
     `let ... else` (or `match`) whose non-`Construct` path is `unreachable!`, since a
     synthetic clause's `.variant` always keys a constructor entry.
-  - `src/ir/func_builder/quotation.rs:453` — **E0004, non-exhaustive match** in
+  - `src/ir/func_builder/quotation.rs:407-443` — **E0004, non-exhaustive match** in
     `lower_enum_word`. Fixed in **Phase 4** (R5), because R6 (Phase 3) adds real
     `Get`/`Destructure` arms there and keeps the match exhaustive; only `Eliminate`
     (Phase 4) is deliberately left unhandled. This one is a *semantic* ruling, not a
@@ -119,7 +120,7 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
    `ir_type_of(d.referent)` runs **unconditionally over every interned reference type at
    build time**, for the whole program, not lazily — so the moment a program contains a
    reference to a narrowed variant, `ir_type_of(Type::Variant)`'s current
-   `unreachable!` (`src/ir/types.rs:259`) is a live, forced panic, not a hypothetical
+   `unreachable!` (`src/ir/types.rs:286`) is a live, forced panic, not a hypothetical
    one. P7.S1 already hit this exact wall for ordinary variant-field references
    (`&r` on a `Type::Variant` receiver is check-legal today, per P7.S1's own R4, but
    "a build/run golden would panic on the missing lowering arm") and deliberately kept
@@ -180,7 +181,7 @@ error/edge case (a bare `( )` is still the located elided-form error, and
 ### R2 — Eliminator `PolySig` generator (`src/check/declarations.rs`)
 
 Add `enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)>`
-alongside `enum_generated_sigs` (`src/check/declarations.rs:1273`). For each enum, emit
+alongside `enum_generated_sigs` (`src/check/declarations.rs:1323`). For each enum, emit
 one entry keyed by surface name `"{EnumName}?"` (lowering symbol = the mangled registry
 spelling, following `enum_generated_sigs`' D7 keying: env key is bare surface, symbol is
 mangled). The generated `PolySig` uses the **minimal subset** (OQ3, below):
@@ -259,7 +260,7 @@ shared helpers. Behaviour, in order:
    **Correction: an earlier draft of this step tried to let a forwarded abstract
    quotation stand in for a tagged arm ("or is a forwarded abstract quotation — see
    step 4"). That is self-contradictory and is dropped.** A forwarded operand, by
-   `resolve_quotation_operand`'s own definition (`combinators.rs:~825`, the
+   `resolve_quotation_operand`'s own definition (`combinators.rs:348`, the
    non-`Literal` branch), carries no `variant_tag` — tags live on a quotation
    *literal's* annotation. So "stop collecting at the first untagged operand" (needed to
    find the scrutinee) and "a forwarded operand is accepted as an arm" (needed for R4
@@ -329,7 +330,7 @@ shared helpers. Behaviour, in order:
    owning mode uses `Type::Variant(id, vi)` as-is; `&`/`&!` mode wraps it via
    `intern_ref_type(refs, Type::Variant(id, vi), mutable)` (decision 6) before it becomes
    the arm's below-row-top input (shared `..a`/`..b` rows either way). Pass the built
-   effect to `check_literal_against_declared_effect` (`src/check.rs:1703`) unchanged.
+   effect to `check_literal_against_declared_effect` (`src/check.rs:1769`) unchanged.
    That helper already carries the `~`/`[` flavour check, the D3 capture restriction,
    tail-position handling, and the directional body check — including comparing the
    arm's *written* declared type against this built one, which is what rejects an arm
@@ -344,7 +345,7 @@ shared helpers. Behaviour, in order:
 5. **Cross-arm output agreement**, following `shape_baseline`'s existing first-wins shape
    (`src/check/combinators.rs:660+`): the first arm **in written order** sets the `..b`
    baseline; a later disagreeing arm is the located error, reported by calling
-   `combinator_branch_output_mismatch_error` (`src/check.rs:2019`) **unchanged** — that
+   `combinator_branch_output_mismatch_error` (`src/check.rs:2085`) **unchanged** — that
    helper's signature is `(ctx, span, word, expected: &[Type], found: &[Type])` and its
    message names the two shapes and a source line, **not an arm or variant**. `expected`
    is the written-first arm's shape, `found` is the offending arm's; that pairing is what
@@ -458,9 +459,9 @@ eliminator's arms.
     reaches. So a reference-mode eliminator call forces `ir_type_of(Type::Variant)` for
     real, every time one appears anywhere in the program, whether or not that particular
     call is ever executed. See R6 for the fix this now requires (no longer optional).
-- Extend `EnumWord` (`src/ir/layout.rs:264`) with `Eliminate(EnumId)`. Register the
+- Extend `EnumWord` (`src/ir/layout.rs:259-261`) with `Eliminate(EnumId)`. Register the
   eliminator's surface/mangled name in `enums.words` alongside the `Construct` entries
-  (`src/ir/layout.rs:517-519`), mapping `"{EnumName}?"` → `Eliminate(id)`.
+  (`src/ir/layout.rs:548-550`), mapping `"{EnumName}?"` → `Eliminate(id)`.
 - In the call-lowering dispatch (`src/ir/func_builder/calls.rs`, both the sym-name path
   around `:250` and the name path around `:645`, mirroring the existing
   `enums.words.get(name)` → `lower_enum_word` interception), an `EnumWord::Eliminate`
@@ -470,7 +471,7 @@ eliminator's arms.
   `Clause { variant: <registry key for that variant>, locals: vec![], body, .. }`, and
   calls `lower_clauses(&clauses, params, Type::Enum(id, _), ArmBinding::WholeValue)`. The
   scrutinee is the params' last value.
-- `EnumWord::Eliminate` in `lower_enum_word` (`src/ir/func_builder/quotation.rs:452`) is
+- `EnumWord::Eliminate` in `lower_enum_word` (`src/ir/func_builder/quotation.rs:407`) is
   not reachable there (it is intercepted in `calls.rs`, not the inline
   alloc/tag-store path); the match arm should `unreachable!` with a note, or the
   interception should be structured so `lower_enum_word` never sees `Eliminate`. Prefer
@@ -521,7 +522,7 @@ instead, threaded through `check.rs` → `ast.rs`'s `Module::resolved_fields` �
 way (same function, same fields/name lookup, just a different decl table) — but it
 **never inserts into `resolved_fields`**, because that table is `StructId`-keyed and has
 no shape for an `EnumId`. There is a standing test proving this is deliberate, not an
-oversight (`word_families.rs:2178-2218`, asserting `resolved_fields.is_empty()` after
+oversight (`word_families.rs:2181-2222`, asserting `resolved_fields.is_empty()` after
 checking a variant projection). So today a variant projection **type-checks and then has
 nowhere to lower to** — exactly the representation gap round 1 of this spec's review
 found for the retired `Circle>r` spelling, now relocated to `&r`.
@@ -540,7 +541,7 @@ instruction: "its own `EnumId`-keyed lowering-side table"):
 - In `check_field_projection`'s `Type::Variant` arm (`word_families.rs:314-317`), insert
   `(span, (id, vi, fi))` into `resolved_variant_fields` — the one line P7.S1 explicitly
   did not add. **The existing canary test
-  (`word_families.rs:2178-2218`, `resolved_fields.is_empty()`) must be updated, not
+  (`word_families.rs:2181-2222`, `resolved_fields.is_empty()`) must be updated, not
   deleted**: it should now assert the entry lands in `resolved_variant_fields` and that
   `resolved_fields` (the struct table) stays empty — preserving the real invariant it
   guards (a variant must never be misrouted into the `StructId`-keyed table) while
@@ -556,14 +557,14 @@ instruction: "its own `EnumId`-keyed lowering-side table"):
   unique fused name (`variant_generated_sigs` still registers only `"{surface}>"`,
   `src/check/declarations.rs:1356-1379`, confirmed: the per-field scalar-getter entries
   that loop used to also emit are gone), so it keeps the original name-registry design:
-  extend `EnumWord` (`src/ir/layout.rs:264-266`) with **`Destructure(EnumId, usize)`
+  extend `EnumWord` (`src/ir/layout.rs:259-261`) with **`Destructure(EnumId, usize)`
   only** (no `Get` variant — that mechanism moved to `resolved_variant_fields` above),
   register `"{Variant}>"` → `Destructure(id, vi)` in the `ewords` loop
   (`layout.rs:564-574`, adopting the struct registry's dual-key `insert` closure rather
   than inlining a second copy — `layout.rs:526-530`), and extend `lower_enum_word`
   (`quotation.rs`) with the one `Destructure` arm, reading every field at
   `payload_offset + field.offset` in order (mirroring `lower_struct_word::Destructure`).
-- **`ir_type_of` gets a real `Type::Variant` case (`src/ir/types.rs:257-259`), replacing
+- **`ir_type_of` gets a real `Type::Variant` case (`src/ir/types.rs:286`), replacing
   the `unreachable!("a Type::Variant never reaches the backend (Slice 3)")`.** This is
   new and load-bearing per decision 6, not part of the original R6 scope: admitting a
   reference-mode eliminator scrutinee means an arm's declared input type can be
@@ -576,7 +577,7 @@ instruction: "its own `EnumId`-keyed lowering-side table"):
   to its enum at the backend; only the frontend distinguishes them, which is exactly the
   erasure R2's own note already assumed ("`Type::Variant` maps to the same
   `IrType::Enum(id)` at the backend") before this decision made it load-bearing instead
-  of incidental. The retired `#[should_panic]` test at `src/ir/types.rs:504-509`
+  of incidental. The retired `#[should_panic]` test at `src/ir/types.rs:536-541`
   (asserting this exact `unreachable!` fires) must be replaced with a positive assertion
   that `ir_type_of(Type::Variant(id, vi, name)) == IrType::Enum(id)` for the same `id` a
   plain `Type::Enum(id, _)` erases to — not merely that it no longer panics.
@@ -598,7 +599,7 @@ hand-built state before a lowering arm existed):
   in field order, plus a companion zero-field-variant test asserting it pushes nothing
   without panicking (the zero-field case alone doesn't catch a mutation that always
   pushes nothing).
-- The updated canary test (`word_families.rs:2178-2218`): a variant projection populates
+- The updated canary test (`word_families.rs:2181-2222`): a variant projection populates
   `resolved_variant_fields` and leaves `resolved_fields` empty — fails if a future change
   routes a variant into the struct table (the original misdispatch risk P7.S1's version
   of this test existed to rule out).
@@ -695,6 +696,24 @@ Exit criteria (breakable assertions):
 - A `PolySig`-shape test for `enum_eliminator_sigs`: two row vars, no bounds/len/ty
   vars, arm inputs are the two distinct `Type::Variant`s. Fails if the generator
   regresses to `Type::Enum` arm inputs or drops a row.
+- `check_eliminator_call_missing_arm_is_error_not_underflow` and
+  `_forwarded_arm_is_error` — the variable-arity collection design (R4 step 1): a
+  correctly-tagged short stack reaches exhaustiveness and names the missing variant
+  rather than tripping `underflow_error`, and a forwarded abstract quotation is rejected
+  the same way an untagged literal is, not silently accepted.
+- `check_eliminator_call_pop_order_does_not_set_baseline` — three arms whose written,
+  declaration, and stack-pop order are pairwise different; the baseline must be the
+  written-*first* arm. Fails if the collected-arms vector is used without the
+  required written-order reversal.
+- **Decision 6, least-reviewed, both required here:**
+  `check_eliminator_call_reference_scrutinee_types_arms_by_reference` — a `&Shape`
+  scrutinee types every arm's built expected effect as a *reference* to `Type::Variant`,
+  not owning; fails if step 2 rejects a reference scrutinee outright or step 4 always
+  builds an owning effect regardless of mode. `check_eliminator_call_mode_mismatch_is_error`
+  — a `&Shape` scrutinee with a bare `( Circle )` arm (wrong mode) is rejected by
+  `check_literal_against_declared_effect`'s existing declared-vs-expected comparison;
+  fails if step 4 silently coerces the mismatch instead of building the mode-correct
+  expected effect and letting the shared helper reject the disagreement.
 
 ### Phase 3 — variant-accessor IR lowering
 
@@ -721,7 +740,7 @@ enum, so it is **this** phase, not Phase 4's `Eliminate`, that trips
 pattern) — *any* second `EnumWord` variant trips it, and `Destructure` is the second.
 Fix it here: replace the irrefutable `let` with a `let ... else` (or `match`) whose
 non-`Construct` path is `unreachable!("a clause always dispatches to a variant
-constructor")`. `src/ir/func_builder/quotation.rs:453`'s `lower_enum_word` match stays
+constructor")`. `src/ir/func_builder/quotation.rs:407-443`'s `lower_enum_word` match stays
 exhaustive through this phase (`Destructure` gets a real arm here), so it does **not**
 break in Phase 3 — only in Phase 4, when `Eliminate` is added without a corresponding
 `lower_enum_word` arm (by design, R5).
@@ -743,12 +762,12 @@ Exit criteria (breakable assertions):
   N values in field order, **plus** a companion test on a zero-field variant asserting
   it pushes nothing and does not panic. The zero-field case alone does not catch a
   mutation that always pushes nothing regardless of field count.
-- The updated canary test (`word_families.rs:2178-2218`, see R6): a variant projection
+- The updated canary test (`word_families.rs:2181-2222`, see R6): a variant projection
   populates `resolved_variant_fields` and leaves `resolved_fields` (the struct table)
   empty — fails if a future change misroutes a variant into the struct-keyed table.
 - `ir_type_of(Type::Variant(id, vi, name)) == IrType::Enum(id)` (R6) — a positive
   equality assertion, not "does not panic." Replaces the retired
-  `#[should_panic]` test at `src/ir/types.rs:504-509`. Fails if the erasure regresses to
+  `#[should_panic]` test at `src/ir/types.rs:536-541`. Fails if the erasure regresses to
   a variant-specific `IrType` instead of collapsing to the same representation as its
   parent enum.
 
@@ -766,7 +785,7 @@ accessor lowering is first exercised by a real program.
 re-pointing: `control_flow.rs:236` was already fixed in Phase 3, since `Destructure`
 tripped it first — only the `lower_enum_word` match remains to update here):
 
-- `src/ir/func_builder/quotation.rs:453` — E0004: `lower_enum_word` gains
+- `src/ir/func_builder/quotation.rs:407-443` — E0004: `lower_enum_word` gains
   `EnumWord::Eliminate(_) => unreachable!(...)`, sound only because the `calls.rs`
   interception precedes it. Order the interception before `lower_enum_word` deliberately,
   and say so in the arm's message.
