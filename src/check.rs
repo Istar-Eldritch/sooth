@@ -8,6 +8,7 @@
 //! on both depth and per-slot type: the `then` and `else` arms must leave the
 //! same stack shape.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
@@ -637,7 +638,16 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         resolved_fields: _,
         modules,
         statics,
+        generics,
     } = module;
+    // P7 slice 3a phase 2 (R2): the live instantiator, wrapped so a poly
+    // body's own construction (`poly_call_term`'s new arm) and the grounding
+    // arms (`unify_poly_input`/`apply_subst`) can mint through `Ctx` despite
+    // `Ctx` otherwise only ever borrowing immutably -- see `Ctx::generics`.
+    // Taken out of the field (not just re-borrowed) because `structs`/`enums`
+    // above are already `&mut Vec<_>` split off the same `&mut Module`; a
+    // `RefCell` around a *separate* value sidesteps aliasing either.
+    let generics_cell = RefCell::new(std::mem::take(generics));
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
     // knows which body each site sits in.
@@ -720,6 +730,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // R7: a polymorphic body is checked over a `PolyType` stack by
                 // a dedicated pass, deliberately separate from the concrete
                 // walk.
+                //
+                // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself
+                // at entry (to the live registries' current length); flushed
+                // right after it returns, so a mint this body triggers lands
+                // at an id the very next word's own check can already see --
+                // `Ctx`'s structs/enums borrow is scoped to this one call, so
+                // the flush's `&mut` never conflicts with it.
                 check_poly_body(
                     word,
                     sig,
@@ -730,7 +747,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     statics,
                     Some(modules),
                     &mut builtin_overloads,
+                    Some(&generics_cell),
                 )?;
+                let mut g = generics_cell.borrow_mut();
+                g.flush_structs_into(structs);
+                g.flush_enums_into(enums);
             }
         } else {
             let mut poly = PolyCtx {
@@ -740,6 +761,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 resolved_fields: &mut resolved_fields,
                 combinators: &combinators,
             };
+            // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
+            // poly word can ground a variable-bearing generic for the first
+            // time too (`apply_subst`'s `Generic` arm), so this call gets the
+            // same rebase/flush bracket as the poly-body one above.
+            generics_cell
+                .borrow_mut()
+                .rebase(structs.len(), enums.len());
             check_word(
                 word,
                 enums,
@@ -752,10 +780,18 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 Some(modules),
                 &mut sites,
                 &mut poly,
+                Some(&generics_cell),
             )?;
+            let mut g = generics_cell.borrow_mut();
+            g.flush_structs_into(structs);
+            g.flush_enums_into(enums);
         }
         dropped.push(sites);
     }
+    // P7 slice 3a phase 2 (R2): restored onto the module once nothing is
+    // still minting, so it survives into `ir::lower` (which reads it
+    // read-only, `subst_polytype`'s find-only lookup).
+    *generics = generics_cell.into_inner();
 
     // R6: only now, with every `drop` call site's operand type known, can the
     // `drop`-reachability graph be built.
@@ -909,6 +945,9 @@ pub(crate) fn check_def_collecting_drop_sites(
     // `drop` import-visibility gate never fires on the session path.
     // A REPL session declares no `static:` storage (P7 slice 2 is a build-path
     // feature), so the static table is empty here.
+    // P7 slice 3a: the REPL never declares its own generic `type:` (D2), so
+    // no session poly word's signature can carry a `PolyType::Generic`; `None`
+    // here is correct, not a gap.
     check_word(
         word,
         enums,
@@ -921,6 +960,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         None,
         &mut sites,
         &mut poly,
+        None,
     )?;
     Ok((sites, insts, overloads, fields))
 }

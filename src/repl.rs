@@ -1329,6 +1329,11 @@ impl Session {
         // so it lowers against the session's combinator-bodies view like any
         // other REPL lowering entry point.
         let bodies = combinator_bodies(&self.combinators);
+        // P7 slice 3a: a session-retained poly word's signature can never
+        // carry a `PolyType::Generic` (the REPL has no way to declare a
+        // generic `type:`, D2), so an empty, never-touched instantiator
+        // suffices here.
+        let empty_generics = crate::ast::GenericTypes::default();
         let mut funcs = Vec::new();
         let mut newly: Vec<String> = Vec::new();
         for inst in pending {
@@ -1365,6 +1370,7 @@ impl Session {
                 regs,
                 &self.arrays,
                 &self.refs,
+                &empty_generics,
                 &bodies,
             ));
             newly.push(inst.symbol.clone());
@@ -2490,6 +2496,9 @@ impl Session {
         // later instantiation's lowering dispatches through them instead of
         // an empty map.
         let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
+        // P7 slice 3a: a session-defined poly word can never name a generic
+        // `type:` (the REPL has no way to declare one, D2), so `None` here
+        // is correct, not a gap.
         check::check_poly_body(
             &word,
             &sig,
@@ -2500,6 +2509,7 @@ impl Session {
             &[],
             None,
             &mut builtin_overloads,
+            None,
         )?;
 
         // R3/R7/X3: a body resolving to two or more concrete outputs, or an

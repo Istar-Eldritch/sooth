@@ -6,6 +6,10 @@
 //! `BlockEnd`). Engine-independent clusters do not touch these types; every
 //! `engine`-dependent cluster imports them via `super::*`.
 
+use std::cell::RefCell;
+
+use crate::ast::GenericTypes;
+
 use super::*;
 
 /// Which region of memory an aggregate value denotes. Two slots carrying
@@ -1118,6 +1122,15 @@ pub(super) enum Ctx<'a> {
         /// and there lowering emits an ordinary `Instr::Call` with no back
         /// edge to guard.
         self_tail_call: bool,
+        /// P7 slice 3a phase 2 (R2): the live generic instantiator, `Some`
+        /// on the native build path (`check::check`), `None` everywhere else
+        /// (the REPL never declares its own generic `type:`, so no session
+        /// poly word's signature can ever carry a `PolyType::Generic` -- see
+        /// `GenericTypes`'s own doc). A `RefCell` because `Ctx` otherwise only
+        /// ever borrows immutably, but grounding a generic mid-body-walk
+        /// (`unify_poly_input`/`apply_subst`'s `Generic` arms, and
+        /// `poly_call_term`'s construction arm) needs to mint through it.
+        generics: Option<&'a RefCell<GenericTypes>>,
     },
     Line {
         structs: &'a [StructDecl],
@@ -1138,6 +1151,7 @@ pub(super) fn word_ctx<'a>(
     statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
     combs: &CombinatorIndex,
+    generics: Option<&'a RefCell<GenericTypes>>,
 ) -> Ctx<'a> {
     Ctx::Word {
         name: crate::resolve::demangle_word(&word.name),
@@ -1149,6 +1163,7 @@ pub(super) fn word_ctx<'a>(
         module: word.module,
         modules,
         self_tail_call: has_self_tail_call(word, combs),
+        generics,
     }
 }
 
@@ -1273,6 +1288,7 @@ impl<'a> Ctx<'a> {
                 statics,
                 modules,
                 self_tail_call,
+                generics,
                 ..
             } => Ctx::Word {
                 name,
@@ -1284,8 +1300,23 @@ impl<'a> Ctx<'a> {
                 module,
                 modules,
                 self_tail_call,
+                generics,
             },
             Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
+        }
+    }
+
+    /// P7 slice 3a phase 2 (R2): the live generic instantiator, or `None` on
+    /// a path that can never carry a `PolyType::Generic` in the first place
+    /// (a bare REPL line, or a session-defined poly word). A grounding arm
+    /// (`unify_poly_input`/`apply_subst`) that sees `None` here has reached a
+    /// `PolyType::Generic` some path never grounds, and stays the Phase 1
+    /// not-yet-groundable error rather than mint through a table that is not
+    /// there.
+    pub(super) fn generics(&self) -> Option<&'a RefCell<GenericTypes>> {
+        match self {
+            Ctx::Word { generics, .. } => *generics,
+            Ctx::Line { .. } => None,
         }
     }
 }
@@ -1343,6 +1374,7 @@ mod tests {
             &[],
             modules,
             &CombinatorIndex::new(),
+            None,
         );
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
@@ -1523,7 +1555,15 @@ mod tests {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, &structs, &enums, &[], None, &CombinatorIndex::new());
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         assert_eq!(ctx.module(), 3);
         assert!(ctx.modules().is_none());
     }
@@ -1879,6 +1919,7 @@ mod tests {
             &statics,
             None,
             &CombinatorIndex::new(),
+            None,
         );
         assert_eq!(
             ctx.static_type("COUNT__m1"),

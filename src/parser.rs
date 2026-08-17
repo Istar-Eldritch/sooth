@@ -541,8 +541,14 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     // registries, after the pre-pass entries its `StructId`/`EnumId` was
     // computed against, so the layout/accessor/destructor machinery walks it
     // like any hand-written concrete `type:`.
-    structs.extend(generics.inst_structs);
-    enums.extend(generics.inst_enums);
+    //
+    // P7 slice 3a phase 2 (R2): flushed and rebased, not dropped -- this
+    // single-file path is a real check/lower entry too (used directly by
+    // tests and by `lib/core.sth`'s own parse), so it keeps `generics` alive
+    // the same way `driver::assemble_module` does.
+    generics.flush_structs_into(&mut structs);
+    generics.flush_enums_into(&mut enums);
+    generics.rebase(structs.len(), enums.len());
     Ok(Module {
         words: bodies.words,
         structs,
@@ -550,12 +556,13 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         arrays,
         owned_cells,
         refs,
-        generic_structs: generics.structs,
-        generic_enums: generics.enums,
+        generic_structs: generics.structs.clone(),
+        generic_enums: generics.enums.clone(),
         externs: bodies.externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
+        generics,
         modules: vec![ModuleInfo {
             imports: HashMap::new(),
             exports: bodies.exports,

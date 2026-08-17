@@ -911,6 +911,7 @@ mod tests {
             refs,
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
+            generics: crate::ast::GenericTypes::default(),
             externs: Vec::new(),
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),

@@ -305,8 +305,17 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
 
     // R4/D5: the minted instantiations join the ordinary registries, after
     // every pre-pass entry their ids were computed against.
-    structs.extend(generics.inst_structs);
-    enums.extend(generics.inst_enums);
+    //
+    // P7 slice 3a phase 2 (R2): `generics` is flushed onto the live
+    // registries, then *rebased* to their new length, rather than consumed
+    // and dropped -- check and lowering keep it alive and mutable so a poly
+    // word's own construction can mint a monomorph on demand. The naive
+    // `structs.extend(generics.inst_structs)` alone (no rebase) is the
+    // id-collision trap: a later downstream mint would count from the same
+    // stale base and land on an id a parse-time instance already occupies.
+    generics.flush_structs_into(&mut structs);
+    generics.flush_enums_into(&mut enums);
+    generics.rebase(structs.len(), enums.len());
 
     let mut module = Module {
         words,
@@ -315,14 +324,15 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         arrays,
         owned_cells,
         refs,
-        generic_structs: generics.structs,
-        generic_enums: generics.enums,
+        generic_structs: generics.structs.clone(),
+        generic_enums: generics.enums.clone(),
         externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         modules,
         statics,
+        generics,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
     // module's `export:` list are both still their raw source spellings here,

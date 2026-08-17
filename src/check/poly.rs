@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+
+use crate::ast::GenericTypes;
+
 use super::*;
 
 /// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
@@ -156,6 +160,10 @@ pub(super) fn check_poly_combinator_standalone(
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
+    // P7 slice 3a: construction (R3) is scoped to an ordinary poly word's
+    // own body, not a combinator's standalone stand-in check -- `None` here,
+    // never threaded in from a caller, keeps that scope decision in one
+    // place rather than relying on every caller to also decline it.
     let ctx = word_ctx(
         word,
         structs,
@@ -163,6 +171,7 @@ pub(super) fn check_poly_combinator_standalone(
         statics,
         modules,
         poly.combinators.tail(),
+        None,
     );
     let span = word_span(word);
     let mut subst = Subst::default();
@@ -215,6 +224,7 @@ pub(super) fn check_poly_combinator_standalone(
         modules,
         &mut dropped,
         poly,
+        None,
     )
 }
 
@@ -288,6 +298,7 @@ pub fn check_poly_body(
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // R12 (slice 8b, 8a): the caller module's operator visibility rides on
     // `ctx`, so a bare operator in a poly body resolves against the same
@@ -299,6 +310,16 @@ pub fn check_poly_body(
     // empty index is correct here, not just convenient -- lowering never
     // back-edges a polymorphic instantiation either (`lower_instantiation`
     // hardcodes `self_tail = false`).
+    //
+    // P7 slice 3a phase 2 (R2): rebased here, at the top of this one body's
+    // check, to the live registries' *current* length -- this function's
+    // caller (`check::check`) flushes right after it returns, so every mint
+    // this body's own construction/grounding triggers counts from the
+    // correct, current base regardless of how many earlier words already
+    // minted.
+    if let Some(cell) = generics {
+        cell.borrow_mut().rebase(structs.len(), enums.len());
+    }
     let ctx = word_ctx(
         word,
         structs,
@@ -306,6 +327,7 @@ pub fn check_poly_body(
         statics,
         modules,
         &CombinatorIndex::new(),
+        generics,
     );
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
@@ -737,6 +759,23 @@ pub(super) fn poly_call_term(
     // before this lookup dispatches one for a drop-overloaded struct, or a
     // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
+    // P7 slice 3a (R3): a call naming a variant of a generic enum header (or
+    // a generic struct's own constructor) is legal in a polymorphic body,
+    // tried *before* the ordinary `env` dispatch below: a fully-concrete
+    // instantiation (`Result[i64 i64]`'s `Ok`, minted at parse time) folds to
+    // `PolyType::Concrete` in the enclosing word's declared output (R1), so
+    // `poly_construction_target`'s search for an ungrounded `PolyType::Generic`
+    // finds nothing there and this arm is a no-op for that case -- the
+    // already-working concrete case is unaffected, exactly as today. Ordered
+    // ahead of `env` because a *single* registered concrete candidate under
+    // this bare name (e.g. some unrelated `Result[bool i64]` elsewhere in the
+    // program) commits unconditionally below and errors on a `'T` operand
+    // mismatch rather than falling through.
+    if let Some(next) = poly_construct_generic(
+        name, span, &mut stack, lits, sig, ctx, env, structs, enums, arrays,
+    )? {
+        return Ok(next);
+    }
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
         _ => candidates.iter().find(|o| {
@@ -798,6 +837,296 @@ pub(super) fn poly_call_term(
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P7 slice 3a (R3): the generic header `called` names as a constructor --
+/// a struct whose bare name is `called`, or an enum with a variant of that
+/// name -- searched over every generic header this module has declared
+/// (not scoped to the enclosing word's own signature): the *identity* of
+/// what `called` constructs does not depend on whether this particular word
+/// happens to declare a matching output, only the argument *values* do (see
+/// `poly_construction_fallback`). A module's own headers are preferred over
+/// an imported one of the same bare name, mirroring the clause-checker's
+/// own name resolution; ties beyond that take the first declared.
+fn poly_construction_header(
+    generics: &GenericTypes,
+    called: &str,
+    module: u32,
+) -> Option<(bool, usize, usize)> {
+    let enum_hit = generics.enums.iter().enumerate().find_map(|(idx, d)| {
+        d.variants
+            .iter()
+            .position(|v| v.name == called)
+            .map(|vi| (idx, vi, d.module == module))
+    });
+    let struct_hit = generics
+        .structs
+        .iter()
+        .position(|d| d.name == called)
+        .map(|idx| (idx, 0usize, generics.structs[idx].module == module));
+    match (enum_hit, struct_hit) {
+        (Some((idx, vi, true)), _) => Some((true, idx, vi)),
+        (_, Some((idx, _, true))) => Some((false, idx, 0)),
+        (Some((idx, vi, false)), _) => Some((true, idx, vi)),
+        (_, Some((idx, _, false))) => Some((false, idx, 0)),
+        (None, None) => None,
+    }
+}
+
+/// P7 slice 3a (R3): the enclosing word's own declared *output* naming this
+/// exact generic header, if any -- the phantom-argument fallback source
+/// (see the module doc) and the module identity a fresh instantiation is
+/// minted under. Absent when this word's output does not name the header at
+/// all (a value constructed and consumed entirely within the body, never
+/// returned): the naming-site module then falls back to the enclosing word's
+/// own module (`ctx.module()`), and every argument must come from the
+/// operands alone.
+fn poly_construction_fallback(
+    sig: &PolySig,
+    is_enum: bool,
+    idx: usize,
+) -> Option<(u32, &[PolyType], &'static str)> {
+    sig.outputs.iter().find_map(|pty| match pty {
+        PolyType::Generic {
+            is_enum: oe,
+            idx: oidx,
+            module,
+            args,
+            name,
+        } if *oe == is_enum && *oidx as usize == idx => Some((*module, args.as_slice(), *name)),
+        _ => None,
+    })
+}
+
+/// P7 slice 3a (R3): bind one constructor payload field's declared `PolyType`
+/// against the operand `PolyType` on the stack, recording the header
+/// variable it determines. `substitute_generic_field`'s own doc: a generic
+/// `type:` field is always exactly one of these two shapes.
+fn poly_bind_construction_arg(
+    field_pty: &PolyType,
+    operand: &PolyType,
+    args: &mut [Option<PolyType>],
+    sig: &PolySig,
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+) -> Result<(), String> {
+    match field_pty {
+        PolyType::Var(v) => {
+            let slot = &mut args[*v as usize];
+            match slot {
+                Some(existing) if existing != operand => Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(existing, sig),
+                    &poly_type_str(operand, sig),
+                )),
+                _ => {
+                    *slot = Some(operand.clone());
+                    Ok(())
+                }
+            }
+        }
+        PolyType::Concrete(t) => {
+            if operand == &PolyType::Concrete(*t) {
+                Ok(())
+            } else {
+                Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(field_pty, sig),
+                    &poly_type_str(operand, sig),
+                ))
+            }
+        }
+        other => unreachable!("a generic `type:` field is never {other:?}"),
+    }
+}
+
+/// P7 slice 3a (R3): whether `name` already resolves through the ordinary
+/// concrete `env` for these exact operand types -- the already-working
+/// concrete case (a fully-concrete generic instantiation minted at parse
+/// time, R1's fold), which must reach the pre-existing dispatch below
+/// unaffected rather than this arm's own resolution (which has no source
+/// for a phantom argument once the enclosing output has already folded to
+/// `Concrete` and so carries no `PolyType::Generic` to fall back on).
+fn poly_env_exact_match(
+    env: &HashMap<String, Vec<Overload>>,
+    name: &str,
+    stack: &[PolyType],
+) -> bool {
+    env.get(name).is_some_and(|candidates| {
+        candidates.iter().any(|o| {
+            let n = o.sig.inputs.len();
+            stack.len() >= n
+                && stack[stack.len() - n..]
+                    .iter()
+                    .zip(&o.sig.inputs)
+                    .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp))
+        })
+    })
+}
+
+/// P7 slice 3a (R3): a call to `name` naming a generic struct's constructor
+/// or a generic enum's variant, in a polymorphic body. `Ok(None)` if `name`
+/// names no generic header at all, or if an exact concrete `env` candidate
+/// already covers this call (`poly_env_exact_match`) -- either way the
+/// caller's existing dispatch handles it unchanged.
+#[allow(clippy::too_many_arguments)]
+fn poly_construct_generic(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<Option<Vec<PolyType>>, String> {
+    let Some(cell) = ctx.generics() else {
+        return Ok(None);
+    };
+    if poly_env_exact_match(env, name, stack) {
+        return Ok(None);
+    }
+    let generics = cell.borrow();
+    let Some((is_enum, idx, variant)) = poly_construction_header(&generics, name, ctx.module())
+    else {
+        return Ok(None);
+    };
+    let fallback = poly_construction_fallback(sig, is_enum, idx);
+    // Leaked regardless of whether a fallback exists: operand-only
+    // determination can still leave a symbolic result (a header variable
+    // bound to the enclosing word's own `'T`, never grounded to a `Type`
+    // here), which needs this name too, not only the output-fallback path.
+    let header_name: &'static str = if is_enum {
+        Box::leak(generics.enums[idx].name.clone().into_boxed_str())
+    } else {
+        Box::leak(generics.structs[idx].name.clone().into_boxed_str())
+    };
+    let (module, output_args) = match fallback {
+        Some((module, args, _)) => (module, args.to_vec()),
+        None => (ctx.module(), Vec::new()),
+    };
+    let field_ptys: Vec<PolyType> = if is_enum {
+        generics.enums[idx].variants[variant]
+            .fields
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect()
+    } else {
+        generics.structs[idx]
+            .fields
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect()
+    };
+    let arity = if is_enum {
+        generics.enums[idx].ty_var_names.len()
+    } else {
+        generics.structs[idx].ty_var_names.len()
+    };
+    drop(generics);
+
+    let n = stack.len();
+    if n < field_ptys.len() {
+        return Err(underflow_error(ctx, span, name, field_ptys.len(), n));
+    }
+    let base = n - field_ptys.len();
+    let mut args: Vec<Option<PolyType>> = vec![None; arity];
+    for (i, field_pty) in field_ptys.iter().enumerate() {
+        let operand = stack[base + i].clone();
+        poly_bind_construction_arg(field_pty, &operand, &mut args, sig, ctx, span, name)?;
+    }
+    // R3: an argument the operands leave undetermined (a phantom for this
+    // variant, e.g. `Err`'s payload never mentions `Result`'s `'T`) is taken
+    // from the enclosing word's own declared output naming this header, when
+    // there is one -- sound because it is phantom for the value just
+    // constructed (`substitute_generic_field` only ever substitutes a field
+    // that actually exists), and the *determined* arguments still get
+    // unified against this same declared output at word exit
+    // (`unify_poly_input`'s `Generic` arm), so a wrong inferred position
+    // surfaces there, located, rather than silently miscompiling.
+    for (v, slot) in args.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = output_args.get(v).cloned();
+        }
+    }
+    let mut resolved = Vec::with_capacity(arity);
+    for (v, slot) in args.into_iter().enumerate() {
+        match slot {
+            Some(pt) => resolved.push(pt),
+            None => {
+                let generics = cell.borrow();
+                let var_name = if is_enum {
+                    generics.enums[idx].ty_var_names[v].clone()
+                } else {
+                    generics.structs[idx].ty_var_names[v].clone()
+                };
+                return Err(poly_generic_constructor_undetermined_error(
+                    ctx, span, name, &var_name,
+                ));
+            }
+        }
+    }
+
+    stack.truncate(base);
+    lits.truncate(base);
+    let all_concrete: Option<Vec<Type>> = resolved
+        .iter()
+        .map(|p| match p {
+            PolyType::Concrete(t) => Some(*t),
+            _ => None,
+        })
+        .collect();
+    let result_pt = if let Some(concrete_args) = all_concrete {
+        let regs = crate::ast::NameRegistries {
+            structs,
+            enums,
+            arrays,
+            cells: &[],
+            refs: &[],
+        };
+        let mut g = cell.borrow_mut();
+        let ty = if is_enum {
+            g.instantiate_enum(idx, &concrete_args, module, regs)
+        } else {
+            g.instantiate_struct(idx, &concrete_args, module, regs)
+        };
+        PolyType::Concrete(ty)
+    } else {
+        PolyType::Generic {
+            is_enum,
+            idx: idx as u32,
+            module,
+            args: resolved,
+            name: header_name,
+        }
+    };
+    stack.push(result_pt);
+    lits.push(None);
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// P7 slice 3a (R5.2): a generic constructor call whose header type variable
+/// is determined by neither its operands nor the enclosing word's declared
+/// output -- a located error, not a latent failure at monomorphization.
+fn poly_generic_constructor_undetermined_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    var: &str,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{op}` in `{where_}` (line {}) leaves the type variable `{var}` undetermined\n  neither the operands nor the declared output fix `{var}`; a generic constructor needs every argument determined",
+        span.line
+    )
 }
 
 /// Slice 13 (R-B1): every `&`-led word reaching a polymorphic body -- the
@@ -1696,19 +2025,66 @@ pub(super) fn unify_poly_input(
                 subst,
             )?;
         }
-        // P7 slice 3a phase 1: grounding a generic application needs the
-        // live `GenericTypes` instantiator to mint-or-find its monomorph
-        // (R2), which check does not yet carry -- that arrives in phase 2
-        // together with the constructor arm it is entangled with (OQ5). This
-        // arm exists only for exhaustiveness: it deliberately errors rather
-        // than pretending to look a registry up that is not there yet.
-        PolyType::Generic { .. } => {
-            return Err(poly_generic_not_yet_groundable_error(
-                ctx,
-                span,
-                name,
-                &poly_type_str(pty, sig),
-            ));
+        // P7 slice 3a phase 2 (R2): a concrete `Type::Struct`/`Type::Enum`
+        // slot unifies against a declared `Result['T 'E]`-shaped input by
+        // reversing the mint: `struct_instantiation_of`/`enum_instantiation_of`
+        // recover the `(header idx, module, concrete args)` the slot's own id
+        // was minted from, and each declared argument then unifies
+        // positionally against the recovered concrete one (binding `'T`/`'E`
+        // the same way an ordinary `Var` arm does). A slot whose id is not any
+        // instantiation of this exact header (wrong id, wrong header, or a
+        // hand-written concrete type sharing no dedup key at all) is a
+        // rendered mismatch, never a panic.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: _,
+        } => {
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                ));
+            };
+            let mismatch = || {
+                poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    &slot_ty.to_string(),
+                )
+            };
+            let generics = cell.borrow();
+            let found = if *is_enum {
+                let Type::Enum(id, _) = slot_ty else {
+                    return Err(mismatch());
+                };
+                generics.enum_instantiation_of(id)
+            } else {
+                let Type::Struct(id, _) = slot_ty else {
+                    return Err(mismatch());
+                };
+                generics.struct_instantiation_of(id)
+            };
+            let Some((found_idx, found_module, found_args)) = found else {
+                return Err(mismatch());
+            };
+            if found_idx != *idx as usize
+                || found_module != *module
+                || found_args.len() != args.len()
+            {
+                return Err(mismatch());
+            }
+            let found_args = found_args.to_vec();
+            drop(generics);
+            for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
+                unify_poly_input(sig, arg_pty, *arg_ty, name, span, ctx, arrays, refs, subst)?;
+            }
         }
     }
     Ok(())
@@ -1821,15 +2197,44 @@ pub(super) fn apply_subst(
             let referent = apply_subst(sig, referent, subst, name, span, ctx, arrays, refs)?;
             Ok(crate::ast::intern_ref_type(refs, referent, *mutable))
         }
-        // P7 slice 3a phase 1: real grounding needs the live `GenericTypes`
-        // instantiator (R2/phase 2), which is not threaded here yet -- see
-        // `unify_poly_input`'s twin arm for the same reason.
-        PolyType::Generic { .. } => Err(poly_generic_not_yet_groundable_error(
-            ctx,
-            span,
-            name,
-            &poly_type_str(pty, sig),
-        )),
+        // P7 slice 3a phase 2 (R2): mint (or find) the ground monomorph
+        // through the live instantiator -- the write side of the pair
+        // `unify_poly_input`'s `Generic` arm reads. Substituting every
+        // argument first (recursively) means a nested variable-bearing
+        // argument grounds bottom-up, exactly as `Array`'s element does.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: _,
+        } => {
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                ));
+            };
+            let mut concrete_args = Vec::with_capacity(args.len());
+            for a in args {
+                concrete_args.push(apply_subst(sig, a, subst, name, span, ctx, arrays, refs)?);
+            }
+            let regs = crate::ast::NameRegistries {
+                structs: ctx.structs(),
+                enums: ctx.enums(),
+                arrays,
+                cells: &[],
+                refs,
+            };
+            let mut g = cell.borrow_mut();
+            Ok(if *is_enum {
+                g.instantiate_enum(*idx as usize, &concrete_args, *module, regs)
+            } else {
+                g.instantiate_struct(*idx as usize, &concrete_args, *module, regs)
+            })
+        }
     }
 }
 
@@ -2355,6 +2760,85 @@ mod tests {
         check(&mut module).unwrap();
         module
     }
+    /// P7 slice 3a phase 2 (R2/R4): the anti-placebo test for asymmetric
+    /// instantiation -- `unify_poly_input`'s `Generic` arm must bind each
+    /// header argument *positionally*, not just check that some binding
+    /// exists. A poly word consuming `Result['T 'E]` is called at both
+    /// `Result[i64 str]` and its swap `Result[str i64]`; if the arm collapsed
+    /// positional order (bound `'T`/`'E` from the wrong slot, or from a
+    /// symmetric key that cannot tell the two apart), one of the two calls
+    /// would bind `'T`/`'E` to the wrong concrete type, and this checks the
+    /// whole program still type-checks and runs.
+    #[test]
+    fn unify_poly_generic_binds_arguments_positionally() {
+        // `show_is`/`show_si`'s own fully-concrete signatures mint
+        // `Result[i64 str]`/`Result[str i64]` at parse time (R1's fold), the
+        // same route `Err`'s two calls below resolve their constructor
+        // through -- this test is about `reorder`'s own `unify_poly_input`
+        // arm binding each swapped instantiation's arguments correctly, not
+        // about R3 construction.
+        let module = checked_module(
+            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+             : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;\n\
+             : show_is ( Result[i64 str] -- ) drop ;\n\
+             : show_si ( Result[str i64] -- ) drop ;\n\
+             : main ( -- )\n\
+               1 \"boom\" Err reorder drop show_is\n\
+               \"one\" 2 Err reorder drop show_si ;\n",
+        );
+        assert!(module
+            .words
+            .iter()
+            .any(|w| w.name == "reorder" && w.poly.is_some()));
+    }
+
+    /// P7 slice 3a (R3): a poly word constructs a generic value whose header
+    /// argument the operand alone does not determine (`Err`'s payload never
+    /// mentions `Result`'s `'T`) -- the load-bearing case for the phantom-
+    /// argument backstop: the missing argument is recovered from the
+    /// enclosing word's own declared output naming the same header.
+    #[test]
+    fn poly_body_constructor_resolves_arguments_from_the_declared_output() {
+        check_src(
+            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+             : wrap ( 'T -- Result['T i64] ) Ok ;\n\
+             : main ( -- ) true wrap drop ;\n",
+        )
+        .expect("a phantom argument recovers from the declared output");
+    }
+
+    /// P7 slice 3a (R5.2): a generic constructor call whose header variable
+    /// is determined by neither its operands nor the enclosing word's
+    /// declared output (which does not name the header at all here) is a
+    /// located error, not a latent monomorphization failure.
+    #[test]
+    fn poly_body_constructor_undetermined_argument_is_error() {
+        let err = check_src(
+            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+             : bad ( 'T i64 -- 'T ) Err drop ;\n\
+             : main ( -- ) 1 2 bad drop ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("leaves the type variable"), "{err}");
+        assert!(err.contains("'T"), "{err}");
+    }
+
+    /// P7 slice 3a (R5.3): a generic constructor call whose operands
+    /// disagree with each other over the header argument they both bind
+    /// (two fields sharing one type variable, called with two different
+    /// concrete types) is reported at the constructor call, during body
+    /// check, never deferred into a later synthesis/monomorphization step.
+    #[test]
+    fn poly_body_constructor_operand_mismatch_is_error() {
+        let err = check_src(
+            "type: Pair 'T val1 'T val2 'T ;\n\
+             : mk ( 'T -- Pair['T] ) 1 swap Pair ;\n\
+             : main ( -- ) \"oops\" mk drop ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch in `mk`"), "{err}");
+    }
+
     /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
     /// which the routing predicate must recognize -- else the word is not a
     /// combinator, is lowered as an ordinary call, and reaches `ir_type_of`'s

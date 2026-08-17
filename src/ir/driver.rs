@@ -242,7 +242,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             .poly
             .as_ref()
             .expect("a recorded callee is polymorphic");
-        let effect = concrete_effect(sig, &inst.subst, &module.arrays, &module.refs);
+        let effect = concrete_effect(
+            sig,
+            &inst.subst,
+            &module.arrays,
+            &module.refs,
+            &module.generics,
+        );
         // R7/R14: a self-recursive polymorphic word is a nested polymorphic
         // call (the body calling the very word being instantiated), out of
         // scope this slice; `self_tail` stays `false` here rather than
@@ -599,10 +605,11 @@ fn concrete_effect(
     subst: &Subst,
     arrays: &[ArrayDecl],
     refs: &[RefDecl],
+    generics: &GenericTypes,
 ) -> StackEffect {
     let slot = |pt: &PolyType| TypedSlot {
         name: None,
-        ty: subst_polytype(pt, subst, arrays, refs),
+        ty: subst_polytype(pt, subst, arrays, refs, generics),
     };
     StackEffect {
         inputs: sig.inputs.iter().map(&slot).collect(),
@@ -619,6 +626,7 @@ pub(super) fn subst_polytype(
     subst: &Subst,
     arrays: &[ArrayDecl],
     refs: &[RefDecl],
+    generics: &GenericTypes,
 ) -> Type {
     match pt {
         PolyType::Concrete(t) => *t,
@@ -626,7 +634,7 @@ pub(super) fn subst_polytype(
             .ty_of(*v)
             .expect("checked: unification bound every input type variable"),
         PolyType::Array(elem, len) => {
-            let element = subst_polytype(elem, subst, arrays, refs);
+            let element = subst_polytype(elem, subst, arrays, refs, generics);
             let count = match len {
                 Len::Concrete(k) => *k,
                 Len::Var(ln) => subst
@@ -652,21 +660,40 @@ pub(super) fn subst_polytype(
         // produce by the time lowering runs, so a miss here is a gap in that
         // coverage, not a reason to intern from the lowering side.
         PolyType::Ref(referent, mutable) => {
-            let referent = subst_polytype(referent, subst, arrays, refs);
+            let referent = subst_polytype(referent, subst, arrays, refs, generics);
             let idx = refs
                 .iter()
                 .position(|d| d.referent == referent && d.mutable == *mutable)
                 .expect("checked: the concrete reference shape was interned at the call site");
             Type::Ref(RefId::from_index(idx), *mutable, refs[idx].name_static)
         }
-        // P7 slice 3a phase 1: grounding a generic application at lowering
-        // needs the same live `GenericTypes` instantiator check does (R2),
-        // not yet threaded here. Unreachable in phase 1: check's own
-        // `unify_poly_input`/`apply_subst` already reject a variable-bearing
-        // generic before a word carrying one could ever reach lowering.
-        PolyType::Generic { .. } => unreachable!(
-            "check rejects a variable-bearing generic before lowering (P7.S3a phase 1); grounding is phase 2"
-        ),
+        // P7 slice 3a phase 2 (R2): lowering only *looks up* an
+        // already-minted instantiation, exactly as the array/ref arms above
+        // -- check's own `apply_subst` has minted every generic monomorph
+        // this word's instantiations can produce by the time lowering runs
+        // (the same registry, kept alive rather than dropped), so a miss
+        // here is a gap in that coverage, not a reason to mint from the
+        // lowering side.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: _,
+        } => {
+            let concrete_args: Vec<Type> = args
+                .iter()
+                .map(|a| subst_polytype(a, subst, arrays, refs, generics))
+                .collect();
+            let found = if *is_enum {
+                generics.lookup_enum(*idx as usize, *module, &concrete_args)
+            } else {
+                generics.lookup_struct(*idx as usize, *module, &concrete_args)
+            };
+            found.expect(
+                "checked: apply_subst already minted this generic instantiation at check time",
+            )
+        }
     }
 }
 
@@ -724,9 +751,10 @@ pub(crate) fn lower_instantiation(
     regs: Registries,
     arrays: &[ArrayDecl],
     refs: &[RefDecl],
+    generics: &GenericTypes,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
-    let effect = concrete_effect(sig, subst, arrays, refs);
+    let effect = concrete_effect(sig, subst, arrays, refs, generics);
     lower_word_parts(
         symbol,
         &effect,
@@ -1248,8 +1276,10 @@ mod tests {
             None,
         );
         let subst = Subst::default();
+        let generics = GenericTypes::default();
         assert!(
-            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[], &[])).is_err(),
+            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[], &[], &generics))
+                .is_err(),
             "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
     }

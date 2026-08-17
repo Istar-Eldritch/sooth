@@ -11,10 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ast::{
-    generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module,
-    OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span, StackEffect,
-    StaticDecl, StaticInit, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody,
-    WordDef,
+    generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, GenericTypes,
+    Len, Module, OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span,
+    StackEffect, StaticDecl, StaticInit, StructDecl, StructId, Subst, Term, TermKind, Type,
+    TypedSlot, WordBody, WordDef,
 };
 
 mod destructors;

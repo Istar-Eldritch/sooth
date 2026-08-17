@@ -93,6 +93,14 @@ pub struct Module {
     /// `global:` clause on an exported word crosses a module boundary, never
     /// the static itself.
     pub statics: Vec<StaticDecl>,
+    /// P7 slice 3a phase 2 (R2): the live generic instantiator, kept alive
+    /// through check and lowering (rather than consumed at parse time, R4/D5's
+    /// old behaviour) so a poly word's own construction can mint a monomorph
+    /// on demand -- see `GenericTypes`'s own doc for the dedup-key invariant
+    /// this depends on. `generic_structs`/`generic_enums` above stay as a
+    /// read-only header snapshot for existing readers; this is the mutable
+    /// instantiator those headers were drawn from.
+    pub generics: GenericTypes,
 }
 
 /// Phase 4 slice 5a (R10): per-module resolution context assembled by the
@@ -391,8 +399,27 @@ pub struct GenericTypes {
     /// a hand-written concrete `type:` (R5).
     struct_keys: Vec<(usize, u32, Vec<Type>)>,
     enum_keys: Vec<(usize, u32, Vec<Type>)>,
+    /// P7 slice 3a phase 2 (R2): the resolved `Type` each `struct_keys` entry
+    /// minted, parallel by index. Reading `id`/`name` back from here (rather
+    /// than recomputing `struct_base + i`) is what makes a downstream mint
+    /// (after `struct_base` has been rebased past a parse-time batch) safe:
+    /// an entry's real id is whatever was true the moment it was minted, not
+    /// a function of the *current* base.
+    struct_resolved: Vec<Type>,
+    /// The enum twin of `struct_resolved`.
+    enum_resolved: Vec<Type>,
     struct_base: usize,
     enum_base: usize,
+}
+
+impl Default for GenericTypes {
+    /// R2: an empty instantiator based at `(0, 0)`. Only correct for a
+    /// `Module` that itself has no pre-existing structs/enums (a fresh test
+    /// fixture); the real driver/parser paths always call `with_bases`
+    /// explicitly instead, matching `with_bases`'s own doc.
+    fn default() -> GenericTypes {
+        GenericTypes::with_bases(0, 0)
+    }
 }
 
 /// The concrete type registries an instantiation name is rendered against.
@@ -524,9 +551,88 @@ impl GenericTypes {
             inst_enums: Vec::new(),
             struct_keys: Vec::new(),
             enum_keys: Vec::new(),
+            struct_resolved: Vec::new(),
+            enum_resolved: Vec::new(),
             struct_base,
             enum_base,
         }
+    }
+
+    /// P7 slice 3a phase 2 (R2): re-point the base a *fresh* mint counts
+    /// from, to the live registries' current length. Called right before a
+    /// downstream (check/lowering-time) mint, after every earlier batch
+    /// (parse-time or a prior downstream one) has already been flushed --
+    /// otherwise a fresh mint's id would land inside the space an
+    /// unflushed earlier batch still occupies (the id-collision trap R2
+    /// documents). Never invalidates an *already-minted* entry's id: those
+    /// are read back from `struct_resolved`/`enum_resolved`, never
+    /// recomputed from the (now-advanced) base.
+    pub fn rebase(&mut self, struct_len: usize, enum_len: usize) {
+        self.struct_base = struct_len;
+        self.enum_base = enum_len;
+    }
+
+    /// Move this batch's staged parse-time instantiations onto the live
+    /// registry, in place (`mem::take` rather than draining by value), so
+    /// `self` stays a fully valid, movable `GenericTypes` afterward -- the
+    /// whole point of keeping it alive into check/lowering (R2).
+    pub fn flush_structs_into(&mut self, live: &mut Vec<StructDecl>) {
+        live.extend(std::mem::take(&mut self.inst_structs));
+    }
+
+    /// The enum twin of `flush_structs_into`.
+    pub fn flush_enums_into(&mut self, live: &mut Vec<EnumDecl>) {
+        live.extend(std::mem::take(&mut self.inst_enums));
+    }
+
+    /// Read-only mint lookup: the already-resolved `Type` for one
+    /// application of generic struct `idx`, if this exact `(idx, module,
+    /// args)` key has ever been minted (parse-time or downstream). Used by
+    /// lowering (`subst_polytype`), which only ever looks up an
+    /// instantiation check has already minted, never mints one itself (the
+    /// same division the array/ref arms already draw).
+    pub fn lookup_struct(&self, idx: usize, module: u32, args: &[Type]) -> Option<Type> {
+        self.struct_keys
+            .iter()
+            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
+            .map(|i| self.struct_resolved[i])
+    }
+
+    /// The enum twin of `lookup_struct`.
+    pub fn lookup_enum(&self, idx: usize, module: u32, args: &[Type]) -> Option<Type> {
+        self.enum_keys
+            .iter()
+            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
+            .map(|i| self.enum_resolved[i])
+    }
+
+    /// R2: the reverse of `instantiate_struct`'s dedup lookup -- given a
+    /// `StructId` some earlier mint (parse-time or downstream) already
+    /// produced, the `(generic decl idx, instantiating module, concrete
+    /// arguments)` it was minted from, if `id` names an instantiation at
+    /// all (a hand-written concrete struct is never in `struct_resolved`,
+    /// so this correctly answers `None` for one). `unify_poly_input`'s
+    /// `Generic` arm uses this to unify a concrete stack operand against a
+    /// declared `Result['T 'E]`-shaped input: it needs to recover the *args*
+    /// a concrete `Result[i64 str]` was built from, to bind `'T`/`'E`
+    /// against them.
+    pub fn struct_instantiation_of(&self, id: StructId) -> Option<(usize, u32, &[Type])> {
+        let i = self
+            .struct_resolved
+            .iter()
+            .position(|t| matches!(t, Type::Struct(sid, _) if *sid == id))?;
+        let (gi, m, args) = &self.struct_keys[i];
+        Some((*gi, *m, args))
+    }
+
+    /// The enum twin of `struct_instantiation_of`.
+    pub fn enum_instantiation_of(&self, id: EnumId) -> Option<(usize, u32, &[Type])> {
+        let i = self
+            .enum_resolved
+            .iter()
+            .position(|t| matches!(t, Type::Enum(eid, _) if *eid == id))?;
+        let (gi, m, args) = &self.enum_keys[i];
+        Some((*gi, *m, args))
     }
 
     /// The generic struct declaration `name` names in `module`, if any.
@@ -564,13 +670,8 @@ impl GenericTypes {
         module: u32,
         regs: NameRegistries,
     ) -> Type {
-        if let Some(i) = self
-            .struct_keys
-            .iter()
-            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
-        {
-            let id = StructId::from_index(self.struct_base + i);
-            return Type::Struct(id, self.inst_structs[i].name_static);
+        if let Some(ty) = self.lookup_struct(idx, module, args) {
+            return ty;
         }
         let name = type_instantiation_name(&self.structs[idx].name, args, regs);
         let decl = &self.structs[idx];
@@ -582,7 +683,9 @@ impl GenericTypes {
         let span = decl.span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = StructId::from_index(self.struct_base + self.inst_structs.len());
+        let ty = Type::Struct(id, name_static);
         self.struct_keys.push((idx, module, args.to_vec()));
+        self.struct_resolved.push(ty);
         self.inst_structs.push(StructDecl {
             name,
             name_static,
@@ -592,7 +695,7 @@ impl GenericTypes {
             is_bundle: false,
             module,
         });
-        Type::Struct(id, name_static)
+        ty
     }
 
     /// The enum twin of `instantiate_struct`. A variant's name carries the
@@ -607,13 +710,8 @@ impl GenericTypes {
         module: u32,
         regs: NameRegistries,
     ) -> Type {
-        if let Some(i) = self
-            .enum_keys
-            .iter()
-            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
-        {
-            let id = EnumId::from_index(self.enum_base + i);
-            return Type::Enum(id, self.inst_enums[i].name_static);
+        if let Some(ty) = self.lookup_enum(idx, module, args) {
+            return ty;
         }
         let name = type_instantiation_name(&self.enums[idx].name, args, regs);
         let decl = &self.enums[idx];
@@ -639,7 +737,9 @@ impl GenericTypes {
         let span = decl.span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
+        let ty = Type::Enum(id, name_static);
         self.enum_keys.push((idx, module, args.to_vec()));
+        self.enum_resolved.push(ty);
         self.inst_enums.push(EnumDecl {
             name,
             name_static,
@@ -647,7 +747,7 @@ impl GenericTypes {
             span,
             module,
         });
-        Type::Enum(id, name_static)
+        ty
     }
 }
 
@@ -2005,6 +2105,7 @@ mod tests {
             refs: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
+            generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
@@ -2126,6 +2227,7 @@ mod tests {
             refs: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
+            generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
@@ -2195,6 +2297,7 @@ mod tests {
             refs: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
+            generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
@@ -2278,6 +2381,61 @@ mod tests {
         assert_eq!(
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// P7 slice 3a phase 2 (R2): the id-collision trap the spec's own review
+    /// caught, pinned as a mutation-testable guard. Mint one parse-time
+    /// instance the ordinary way (into a live `structs` vec via `flush_
+    /// structs_into`/`rebase`, exactly as `driver::assemble_module` does),
+    /// then mint a *second, distinct* instantiation of the same header
+    /// downstream (after the flush+rebase, as check/lowering would): the
+    /// naive bug -- reusing the stale `struct_base` without rebasing, or
+    /// minting into a `inst_structs` nobody flushes -- makes the second id
+    /// collide with the first's, silently sharing one `StructId` for two
+    /// distinct field layouts. A single mint in isolation cannot catch
+    /// this: only an *interleaved* sequence (mint, flush, mint again) can.
+    #[test]
+    fn interleaved_downstream_mint_id_differs_from_parsetime_instance() {
+        let decl = GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut structs: Vec<StructDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), 0);
+        generics.structs.push(decl);
+
+        // Parse-time: one instance, flushed onto the live registry exactly as
+        // `assemble_module` does after the whole closure has parsed.
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
+        generics.flush_structs_into(&mut structs);
+        generics.rebase(structs.len(), 0);
+
+        // Downstream (check/lowering-time): a *different* argument list mints
+        // a fresh entry, whose id must count from the post-flush length, not
+        // from the stale base `a` was minted against.
+        let b = generics.instantiate_struct(0, &[Type::BOOL], 0, EMPTY_REGS);
+        generics.flush_structs_into(&mut structs);
+
+        assert_ne!(a, b, "a downstream mint of a distinct instantiation must not collide with the earlier parse-time one");
+        let Type::Struct(a_id, _) = a else {
+            panic!("expected a Type::Struct")
+        };
+        let Type::Struct(b_id, _) = b else {
+            panic!("expected a Type::Struct")
+        };
+        assert_ne!(a_id, b_id);
+        assert_eq!(structs.len(), 2);
+        assert_eq!(
+            structs[a_id.index()].fields,
+            vec![("val".to_string(), Type::I64)]
+        );
+        assert_eq!(
+            structs[b_id.index()].fields,
+            vec![("val".to_string(), Type::BOOL)]
         );
     }
 

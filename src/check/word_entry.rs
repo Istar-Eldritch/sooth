@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+
+use crate::ast::GenericTypes;
+
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
@@ -13,6 +17,7 @@ pub(super) fn check_word(
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -23,6 +28,7 @@ pub(super) fn check_word(
         statics,
         modules,
         poly.combinators.tail(),
+        generics,
     );
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
@@ -48,10 +54,11 @@ pub(super) fn check_word(
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
             word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
+            generics,
         ),
         WordBody::Clauses(clauses) => check_clause_word(
             word, enums, clauses, env, arrays, cells, refs, structs, statics, modules, dropped,
-            poly,
+            poly, generics,
         ),
     }
 }
@@ -198,6 +205,7 @@ fn check_terms_word(
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // R3: a binding is an ordinary term, but the *entry* one keeps its own
     // diagnostic. Only there is the declared effect the frame, so only there
@@ -232,6 +240,7 @@ fn check_terms_word(
         statics,
         modules,
         poly.combinators.tail(),
+        generics,
     );
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
@@ -312,6 +321,7 @@ fn check_clause_word(
     modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // The top input may be a plain enum (value mode) or a reference to
     // one (reference mode, `&Enum`/`&!Enum`) — the mode follows the declared
@@ -418,6 +428,7 @@ fn check_clause_word(
             ref_mutable,
             dropped,
             poly,
+            generics,
         )?;
     }
     Ok(())
@@ -441,6 +452,7 @@ fn check_clause_body(
     ref_mutable: Option<bool>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     let ctx = word_ctx(
         word,
@@ -449,6 +461,7 @@ fn check_clause_body(
         statics,
         modules,
         poly.combinators.tail(),
+        generics,
     );
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
