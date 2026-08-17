@@ -13,6 +13,7 @@ mod quotation;
 mod word_families;
 
 use super::*;
+pub(in crate::ir) use control_flow::ArmBinding;
 
 /// R10: the `IrType` a word returns — its one output, or the synthesized
 /// bundle struct for two or more. The single derivation both the lowering env's
@@ -286,6 +287,13 @@ pub(super) struct FuncBuilder<'a> {
     /// interned here and spliced in place at `call`/`times` (D5 fusion), never
     /// emitted as a runtime code value.
     pub(super) quot_defs: Vec<Vec<Term>>,
+    /// Phase 6 slice 3 (R5): the eliminator-arm routing each interned
+    /// quotation literal carries, in lockstep with `quot_defs` — the annotation's
+    /// variant tag (which is also the `enums.words` key of that variant's
+    /// constructor) and the arm's declared receiver type, whose owning-vs-
+    /// reference shape is the whole call's scrutinee mode. `None` for every
+    /// ordinary (non-arm) literal.
+    pub(super) quot_arm_tags: Vec<Option<(String, Type)>>,
     /// R12: the phantom quotation `Value` -> its `QuotId`. A shuffle/bind moves
     /// the phantom verbatim (`self.locals`/`self.stack` carry `Value` ids), so
     /// no `Binding` analogue is needed here (D2); `call`/`times` resolve the
@@ -354,6 +362,7 @@ impl<'a> FuncBuilder<'a> {
             const_vals: HashMap::new(),
             ref_inner: HashMap::new(),
             quot_defs: Vec::new(),
+            quot_arm_tags: Vec::new(),
             quot_bodies: HashMap::new(),
             inline_uid: 0,
             materialized: Vec::new(),
@@ -786,7 +795,13 @@ pub(super) fn lower_word_parts(
                 .last()
                 .expect("clause word has a scrutinee input")
                 .ty;
-            b.lower_clauses(clauses, &stack_inputs, scrutinee_ty)
+            b.lower_clauses(
+                clauses,
+                &stack_inputs,
+                scrutinee_ty,
+                ArmBinding::Decompose,
+                self_tail,
+            )
         }
     }
 

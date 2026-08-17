@@ -955,6 +955,17 @@ Exit criteria (breakable assertions):
 - Forwarded abstract quotation arms (an eliminator arm must be a quotation *literal*
   carrying a `variant_tag`; see R4 step 1, OQ1 rows 7/10) — a real capability gap,
   deferred rather than accepted and left to ICE at lowering.
+- **Self-tail recursion *through* an eliminator arm (found in Phase 4, and a Slice 4
+  blocker).** A clause word whose every clause ends in a self-call becomes a loop (R6/R7);
+  the same recursion written as eliminator arms does not, because the self-tail analysis
+  that opens the loop header does not look inside an arm's quotation literal. The arm's
+  self-call lowers to a real call, which is *correct* but not a loop, so deep recursion
+  exhausts the C stack (measured: a 2,000,000-deep count segfaults). Phase 4 only
+  guarantees the arms of a **non**-tail eliminator call never back-edge — they must not,
+  or the arm would skip every term after the call, which is the miscompile that threading
+  the call's own tail flag into `lower_clauses` fixes. Slice 4's migration of
+  `examples/vm.sth` needs the missing half: `run` is a self-tail clause word whose every
+  clause tail-calls `run`, and it would lose its loop on migration.
 
 ## Phases (JSON)
 

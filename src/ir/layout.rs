@@ -256,10 +256,16 @@ pub struct Arrays {
 /// the variant's declaration index, or a whole-variant destructure (Phase 6
 /// slice 3, R6). Per-field access is a receiver-directed projection
 /// (`resolved_variant_fields`), not a name-fused word here.
+///
+/// `Eliminate` is the odd one out (Phase 6 slice 3, R5): it names the enum
+/// rather than a variant, and it is the only entry `lower_enum_word` never
+/// handles -- the call dispatch intercepts it first, since its lowering needs
+/// the call's quotation operands, not just the enum's layout.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum EnumWord {
     Construct(EnumId, usize),
     Destructure(EnumId, usize),
+    Eliminate(EnumId),
 }
 
 /// The IR's view of a program's enums: the per-`EnumId` tagged-layout registry
@@ -566,6 +572,16 @@ pub(super) fn build_registries_ww(
                 EnumWord::Destructure(id, vi),
             );
         }
+        // Phase 6 slice 3 (R5): the eliminator, keyed on the *enum*'s own name
+        // under the same dual spelling the checker registers it by
+        // (`enum_eliminator_sigs`: mangled symbol, bare surface env key).
+        let enum_surface = generic_surface_name(&decl.name);
+        let mangled_key = format!("{}?", decl.name);
+        let surface_key = format!("{enum_surface}?");
+        if surface_key != mangled_key {
+            ewords.insert(surface_key, EnumWord::Eliminate(id));
+        }
+        ewords.insert(mangled_key, EnumWord::Eliminate(id));
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();

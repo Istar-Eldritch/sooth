@@ -462,6 +462,16 @@ impl<'a> FuncBuilder<'a> {
                     self.load_field_onto_stack(s, adjusted);
                 }
             }
+            // Phase 6 slice 3 (R5): the eliminator lowers to a tag dispatch
+            // over the call's quotation operands, which this function has no
+            // access to, so `lower_enum_call` intercepts it at the call site
+            // ahead of every call into here. That ordering is what makes this
+            // arm unreachable rather than merely unimplemented.
+            EnumWord::Eliminate(_) => {
+                unreachable!(
+                    "an eliminator is intercepted by `lower_enum_call`, never lowered here"
+                )
+            }
         }
     }
 }

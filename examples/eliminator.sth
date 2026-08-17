@@ -1,0 +1,18 @@
+\ The generated eliminator word `Shape?`: one quotation arm per variant, each
+\ annotated with the variant it handles, matched by name rather than position.
+\ An owning scrutinee hands each arm the whole narrowed variant, which the arm
+\ reads through `&field` projections and then consumes.
+
+type: Shape
+| Circle r i64
+| Rect   w i64 h i64
+;
+
+: area ( Shape -- i64 )
+  ~[ ( Rect )   &w @ swap &h @ swap drop * ]
+  ~[ ( Circle ) &r @ swap drop dup * 3 * ]
+  Shape? ;
+
+: main ( -- )
+  5 Circle area .     \ 75
+  3 4 Rect area . ;   \ 12

@@ -4,6 +4,20 @@
 
 use super::*;
 
+/// What an arm's block starts with once the tag dispatch has landed on it
+/// (Phase 6 slice 3, R5).
+///
+/// A clause-style word's clause binds the matched variant's *fields* (`| r |`),
+/// so the payload is decomposed onto the stack before the body runs. An
+/// eliminator arm binds nothing: it receives the whole narrowed value and reads
+/// what it needs through a `&field` projection, which addresses the aggregate
+/// itself rather than its scattered fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::ir) enum ArmBinding {
+    Decompose,
+    WholeValue,
+}
+
 impl<'a> FuncBuilder<'a> {
     /// A two-block compare-and-select (`max`/`max-total`'s shared shape,
     /// R12/R13): branch on `cond`, run each closure in its own block to
@@ -196,10 +210,16 @@ impl<'a> FuncBuilder<'a> {
         clauses: &[Clause],
         params: &[Value],
         scrutinee_ty: Type,
+        binding: ArmBinding,
+        tail: bool,
     ) {
         // A clause word is self-tail-recursive iff a header was opened (R6);
-        // its clause bodies then carry tail position (D7).
-        let tail = self.header.is_some();
+        // its clause bodies then carry tail position (D7). An eliminator call
+        // is a *term*, though, so its arms inherit tail position only when the
+        // call itself sits in it: an arm of a mid-body call that ends in a
+        // self-call must emit a real call, or it would back-edge past the rest
+        // of the enclosing word (Phase 6 slice 3, R5).
+        let tail = tail && self.header.is_some();
         let scrutinee = *params.last().expect("clause word has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
         // Threaded from the already-checked frontend `Type` rather than
@@ -251,27 +271,43 @@ impl<'a> FuncBuilder<'a> {
             self.start_block(clause_ids[vi]);
             self.locals.clear();
             self.stack = stack_below.clone();
-            // Push the variant's payload first-deepest, loading each field from
-            // `payload_offset + field.offset`. In reference mode every
-            // field is pushed as a reference to its own storage inside the
-            // scrutinee (its address, never its value), registered in
-            // `ref_inner` so a later access/projection through it resolves the
-            // right shape — the same `IrType::Ptr` any other reference lowers
-            // to.
-            let fields = self.enums.layouts[scrut_id.index()].variants[vi]
-                .fields
-                .clone();
-            for field in &fields {
-                let adjusted = FieldLayout {
-                    offset: payload_offset + field.offset,
-                    ..*field
-                };
-                match ref_mutable {
-                    Some(_) => {
-                        let fptr = self.field_ptr(scrutinee, adjusted.offset);
-                        self.push_reference(fptr, adjusted.ty);
+            match binding {
+                // Push the variant's payload first-deepest, loading each field
+                // from `payload_offset + field.offset`. In reference mode every
+                // field is pushed as a reference to its own storage inside the
+                // scrutinee (its address, never its value), registered in
+                // `ref_inner` so a later access/projection through it resolves
+                // the right shape — the same `IrType::Ptr` any other reference
+                // lowers to.
+                ArmBinding::Decompose => {
+                    let fields = self.enums.layouts[scrut_id.index()].variants[vi]
+                        .fields
+                        .clone();
+                    for field in &fields {
+                        let adjusted = FieldLayout {
+                            offset: payload_offset + field.offset,
+                            ..*field
+                        };
+                        match ref_mutable {
+                            Some(_) => {
+                                let fptr = self.field_ptr(scrutinee, adjusted.offset);
+                                self.push_reference(fptr, adjusted.ty);
+                            }
+                            None => self.load_field_onto_stack(scrutinee, adjusted),
+                        }
                     }
-                    None => self.load_field_onto_stack(scrutinee, adjusted),
+                }
+                // Phase 6 slice 3 (R5): an eliminator arm receives the whole
+                // narrowed value — the aggregate in owning mode, the reference
+                // established at entry in reference mode — because its body
+                // reads fields through `&field` projections, which address the
+                // aggregate rather than consuming pre-decomposed values.
+                ArmBinding::WholeValue => {
+                    debug_assert!(
+                        clause.locals.is_empty(),
+                        "an eliminator arm binds no clause locals"
+                    );
+                    self.stack.push(scrutinee);
                 }
             }
             // Bind clause-body `| names |` locals (top N, leftmost deepest).
@@ -425,5 +461,108 @@ mod tests {
         let ir = lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) | Wrap ;");
         let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
         assert_eq!(count(unwrap, |i| matches!(i, Instr::Cmp(..))), 0);
+    }
+
+    /// Phase 6 slice 3 (R5): an eliminator call reaches this same lowering —
+    /// the synthetic clauses it builds from the call's quotation operands emit
+    /// the tag compare-chain and the one-predecessor-per-arm join a real
+    /// clause word does. Same enum shape as
+    /// `lower_clause_word_builds_nway_dispatch_and_join_phi` two variants down,
+    /// so a divergence is a divergence in the synthetic clauses, not in the
+    /// program.
+    #[test]
+    fn lower_eliminator_call_builds_the_clause_dispatch_and_join() {
+        let ir = lower_src(
+            "type: Shape | Circle r i64 | Rect w i64 h i64 ;
+             : area ( Shape -- i64 )
+               ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;",
+        );
+        let area = ir.funcs.iter().find(|f| f.name == "area").unwrap();
+        assert_eq!(
+            count(area, |i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
+            1,
+            "two variants dispatch through one compare, the second falling through"
+        );
+        let phi_arms: Vec<usize> = area
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::Phi(_, arms) => Some(arms.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phi_arms, vec![2], "one join, one predecessor per arm");
+    }
+
+    /// R5's `ArmBinding::WholeValue`: an arm's block starts with the *whole*
+    /// narrowed value, never the variant's decomposed fields. A one-variant,
+    /// one-field enum makes the difference countable: the arm's own `Wrap>`
+    /// is the single field read, and a dispatch that decomposed first would
+    /// double it.
+    #[test]
+    fn lower_eliminator_arm_receives_the_whole_value_not_its_fields() {
+        let ir = lower_src(
+            "type: Id | Wrap v i64 ;
+             : unwrap ( Id -- i64 ) ~[ ( Wrap ) Wrap> ] Id? ;",
+        );
+        let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
+        assert_eq!(
+            count(unwrap, |i| matches!(i, Instr::FieldLoad(..))),
+            1,
+            "only the arm body's own destructure reads the payload"
+        );
+    }
+
+    /// R5: an eliminator call is a *term*, so its arms inherit tail position
+    /// only when the call itself sits in it. The word below is self-tail
+    /// recursive (its closing `if` arm back-edges), so a `tail` derived from
+    /// `self.header` alone — as a clause word, whose clauses *are* its body,
+    /// may derive it — back-edges from the eliminator's arm too, skipping
+    /// every term after the call. It printed 10 instead of 11 before the
+    /// call's own tail flag was threaded in.
+    ///
+    /// The other direction (an arm of a *tail* call back-edging, so recursion
+    /// through arms becomes a loop) is not implemented: the self-tail analysis
+    /// does not see into an arm's quotation literal, so no header is opened
+    /// for it at all. See the spec's out-of-scope note — it is a Slice 4
+    /// blocker, not a correctness bug here.
+    #[test]
+    fn lower_eliminator_arm_of_a_non_tail_call_does_not_back_edge() {
+        let ir = lower_src(
+            "type: N | Zero | Succ v i64 ;
+             : g ( i64 N -- i64 )
+               ~[ ( Zero ) Zero> ] ~[ ( Succ ) Succ> drop 1 + Zero g ]
+               N? 1 + dup 10 < ~[ Zero g ] ~[ ] if ;",
+        );
+        let g = ir.funcs.iter().find(|f| f.name == "g").unwrap();
+        assert!(
+            call_symbols(g).contains(&"g"),
+            "the arm returns into the rest of the word: {:?}",
+            call_symbols(g)
+        );
+    }
+
+    /// Decision 6: a reference-mode call resolves its enum through the arm's
+    /// declared `&Shape.Circle` referent (which erases to the enum's own
+    /// `IrType::Enum`), dispatches the same way, and reads fields through the
+    /// scrutinee pointer rather than loading them into the arm.
+    #[test]
+    fn lower_eliminator_call_over_a_reference_dispatches_without_loading_the_payload() {
+        let ir = lower_src(
+            "type: Shape | Circle r i64 | Rect w i64 h i64 ;
+             : area ( &Shape -- i64 )
+               ~[ ( &Circle ) &r @ ] ~[ ( &Rect ) dup &w @ swap &h @ * ] Shape? ;",
+        );
+        let area = ir.funcs.iter().find(|f| f.name == "area").unwrap();
+        assert_eq!(
+            count(area, |i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
+            1
+        );
+        let field_loads = count(area, |i| matches!(i, Instr::FieldLoad(..)));
+        assert_eq!(
+            field_loads, 4,
+            "the discriminant, plus one `@` per field the arms read — nothing loaded on their behalf"
+        );
     }
 }
