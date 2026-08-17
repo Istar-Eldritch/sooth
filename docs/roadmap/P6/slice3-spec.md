@@ -78,7 +78,8 @@ change them. It leaves every existing clause-style path (`WordBody::Clauses`,
 2. `QuotAnnot` gains a variant-tag field; no parallel annotation type.
 3. No new IR term/instruction kind; extend call-lowering dispatch with
    `EnumWord::Eliminate(EnumId)`, feeding `lower_clauses` synthetic empty-`locals`
-   clauses.
+   clauses under a new `ArmBinding::WholeValue` mode (R5's correction: existing
+   clause-style callers are unaffected, still `Decompose`).
 4. A dedicated `check_eliminator_call`, **not** a permutation into
    `check_poly_combinator_args`. See the rule-set table below (OQ1 artifact).
 5. Mixed-level sibling arms are legal by construction (each arm reconciles against its
@@ -129,7 +130,7 @@ mangled). The generated `PolySig` uses the **minimal subset** (OQ3, below):
   then N per-arm quotation inputs. Each arm input is
   `PolyType::Quotation(inputs = [Type::Variant(id, vi)], outputs = [], is_inline = false,
   row_in = Some(a), row_out = Some(b))`, built through Slice 2's `variant_type`
-  (`src/check/declarations.rs`) so the leaked `Enum.Variant` display name has one origin.
+  (`src/ast.rs:297`) so the leaked `Enum.Variant` display name has one origin.
 - `row_out: Some(b)` — the shared output row `..b`.
 - `outputs: vec![]` (the `..b` row carries outputs).
 - `bounds: vec![]`, `len_var_names: vec![]`, `ty_var_names: vec![]`,
@@ -159,10 +160,27 @@ paths, and route it to `check_eliminator_call`. The eliminator word is not a use
 A dedicated checker for the eliminator call. It **calls, never re-implements**, the
 shared helpers. Behaviour, in order:
 
-1. **Underflow / arity.** The call needs the scrutinee plus one arm per variant. If the
-   stack is too shallow, the exhaustiveness pass (step 3) reports the missing arm by
-   name; a genuine operand shortfall below the scrutinee is `underflow_error`. State the
-   arity as `1 + variant_count`.
+1. **Arm collection is variable-arity, not a fixed `n = 1 + variant_count` pop.**
+   `check_poly_combinator_args`'s underflow guard (`combinators.rs:599`) pops a fixed
+   arity and cannot distinguish "an arm is missing" from "the stack is short below the
+   scrutinee" — with a fixed pop, a missing arm always presents as underflow before the
+   exhaustiveness pass (step 3) ever runs, so R4.1's original promise ("the missing arm
+   is named by the exhaustiveness pass") is unimplementable and its test would collapse
+   to asserting `underflow_error`'s generic text, a placebo against a deleted
+   exhaustiveness scan. Instead: pop quotation-literal operands off the top of the stack
+   while each one carries a `variant_tag` (or is a forwarded abstract quotation — see
+   step 4), stopping at the first non-quotation-literal, non-tagged operand or when the
+   stack is exhausted. That operand (or the exhausted stack) is the scrutinee slot. Then:
+   - If the scrutinee slot itself doesn't resolve to `Type::Enum(id, _)` for a registered
+     eliminator, `underflow_error` (too few operands below the arms) or the ordinary
+     type-mismatch diagnostic (wrong-typed scrutinee) applies, exactly as today.
+   - Once the scrutinee is confirmed, exhaustiveness (step 3) runs over the arms
+     actually collected and names any variant with no collected arm — regardless of how
+     many arms were popped, so `variant_count - 1` popped arms genuinely reaches
+     exhaustiveness and names the missing one.
+   A quotation literal collected here that has no `variant_tag` at all (bare `~[ ... ]`
+   with no leading variant name) is not an arm and is a located error before
+   exhaustiveness runs ("eliminator arm requires a variant tag").
 2. **Scrutinee type.** The below-top input must be `Type::Enum(id, _)` (value mode) for
    the registry's `id`. Reject a non-enum scrutinee with the existing type-mismatch
    diagnostic. (Reference-mode `&Enum`/`&!Enum` scrutinees are **out of scope** this
@@ -185,9 +203,17 @@ shared helpers. Behaviour, in order:
    survives substitution grounding.
 5. **Cross-arm output agreement**, following `shape_baseline`'s existing first-wins shape
    (`src/check/combinators.rs:660+`): the first arm **in written order** sets the `..b`
-   baseline; a later disagreeing arm is the located error, naming both shapes via
-   `combinator_branch_output_mismatch_error`, arm-attributed (`arm ( Rect ) disagrees
-   with arm ( Circle )`). **"First" is written source order, not enum-declaration order.**
+   baseline; a later disagreeing arm is the located error, reported by calling
+   `combinator_branch_output_mismatch_error` (`src/check.rs:2019`) **unchanged** — that
+   helper's signature is `(ctx, span, word, expected: &[Type], found: &[Type])` and its
+   message names the two shapes and a source line, **not an arm or variant**. `expected`
+   is the written-first arm's shape, `found` is the offending arm's; that pairing is what
+   discriminates written order from declaration order (flipping iteration order swaps
+   which shape is `expected`), and it is what decision 4's "call, never re-implement"
+   actually buys here — arm-name attribution in the message text is **not** part of this
+   slice; adding it would mean forking or extending a helper the live `if`/combinator
+   path also depends on, which is its own item with its own test, not a free extension of
+   decision 4. **"First" is written source order, not enum-declaration order.**
 6. **Outputs.** On success the call produces the shared `..b` outputs (the baseline).
    No `Subst` is threaded out: the eliminator is not a self-tail combinator, so there is
    no back-edge grounding.
@@ -204,15 +230,63 @@ Unit tests beside `check_eliminator_call` (naming `thing_condition_expected`):
   exit shapes trip `combinator_branch_output_mismatch_error`.
 - `check_eliminator_call_written_order_sets_baseline` — **decision 5's mandatory test**:
   an enum whose declaration order and arm order differ, where the written-first arm sets
-  a baseline the declaration-first arm contradicts. The assertion must pin the error to
-  the declaration-first arm as the *offender* (baseline = written-first). This test
-  **fails under declaration-order iteration** (which would flip which arm is the
-  baseline, changing the offender named in the message). Assert on the specific offending
-  variant named in the message, not merely that an error occurs — a test that passes
-  under both orderings is worthless here.
+  a baseline the declaration-first arm contradicts. The assertion must pin the *exact*
+  `expected`/`found` shape pair passed to `combinator_branch_output_mismatch_error`
+  (`expected` = written-first arm's shape, `found` = declaration-first arm's shape) —
+  not "a variant named in the message" (the helper never names one, see step 5). This
+  test **fails under declaration-order iteration**, which would swap `expected` and
+  `found`. A bare "an error occurred" assertion is worthless here.
+- `check_eliminator_call_missing_arm_is_error_not_underflow` — a stack with
+  `variant_count - 1` correctly-tagged arms below the scrutinee reaches exhaustiveness
+  and names the missing variant, rather than tripping `underflow_error`. This is the
+  breakable form of step 1's variable-arity design: fixing the arm collection back to a
+  fixed-arity pop makes this test fail (it would report underflow's generic text
+  instead of the missing variant's name).
 
-### R5 — Lowering: `EnumWord::Eliminate` (`src/ir/layout.rs`, `src/ir/func_builder/calls.rs`, `src/ir/func_builder/quotation.rs`)
+### R5 — Lowering: `EnumWord::Eliminate` (`src/ir/layout.rs`, `src/ir/func_builder/calls.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/control_flow.rs`)
 
+**Correction (found by an independent scope reviewer, then reproduced by reading, not
+trusted at face value): the earlier wording of this requirement was unbuildable.** It fed
+synthetic empty-`locals` clauses into `lower_clauses` **unchanged** on the premise that an
+arm body reads its payload via a Slice-2 accessor (R6, below — renumbered from the prior
+draft's R6 Golden, now R7). But `lower_clauses` (`control_flow.rs:194-274`)
+unconditionally **decomposes** the matched variant's fields onto the IR stack before
+running any clause body (`control_flow.rs:253-269`, `load_field_onto_stack`/
+`push_reference` per field) — `clause.locals.len()` only controls how many of the
+*already-decomposed* values get bound to names; with `locals: vec![]` the decomposed
+fields are left stranded, and no `Type::Variant` handle for an accessor to operate on ever
+exists. An accessor call inside such an arm body has nothing to lower to: it hits the
+generic call path with an unminted symbol. This is now fixed by giving `lower_clauses` a
+second, narrowly-scoped arm-population mode rather than by decomposing at all for the
+eliminator's arms.
+
+- **`lower_clauses` gains an `ArmBinding` parameter** (`Decompose` | `WholeValue`),
+  threaded through its existing signature (`clauses`, `params`, `scrutinee_ty`, plus this
+  new arg). Every existing call site (real clause-style words — `Bool`, `Result`,
+  `Option`, `examples/vm.sth`) passes `Decompose` and hits the exact code path that exists
+  today, byte-for-byte: this is an additive parameter, not a behaviour change to any
+  existing caller, so it carries none of Slice 4's migration blast radius. Only the
+  eliminator's call passes `WholeValue`.
+  - `Decompose` (existing code, unchanged): the per-field loop at `control_flow.rs:253-269`
+    runs as today.
+  - `WholeValue` (new): skip the per-field loop entirely. In value mode, push `scrutinee`
+    itself back onto `self.stack` (no decomposition, no local binding — `clause.locals`
+    is asserted empty for this mode, matching the eliminator's `locals: vec![]`). In
+    reference mode, `scrutinee` is already the `IrType::Ptr` reference established at
+    entry (`control_flow.rs:207-213`); push it unchanged. Either way, the value an arm
+    body starts with is the *whole* aggregate/reference the accessor lowering added by R6
+    expects as its receiver — the same pointer `EnumWord::Get`/`Destructure` read
+    `payload_offset + field.offset` from.
+  - **Open verification, required before this requirement is considered done, not
+    assumed:** confirm no code path calls `ir_type_of(Type::Variant(..))` while lowering
+    an eliminator call or an arm body under `WholeValue` — the frontend types the arm's
+    receiver as `Type::Variant`, but nothing in the `WholeValue` path above actually
+    converts that type to an `IrType` (the pushed value is `scrutinee`, already an
+    `IrType::Enum`/`IrType::Ptr` from before the call), so this should hold, but it must be
+    checked against the actual lowering call graph, not asserted from this description.
+    Add a lowering test that exercises an eliminator call end-to-end and would panic on
+    `ir_type_of`'s existing `unreachable!("a Type::Variant never reaches the backend")`
+    (`src/ir/types.rs:259`) if this assumption is wrong.
 - Extend `EnumWord` (`src/ir/layout.rs:264`) with `Eliminate(EnumId)`. Register the
   eliminator's surface/mangled name in `enums.words` alongside the `Construct` entries
   (`src/ir/layout.rs:517-519`), mapping `"{EnumName}?"` → `Eliminate(id)`.
@@ -223,8 +297,8 @@ Unit tests beside `check_eliminator_call` (naming `thing_condition_expected`):
   machinery that `branch` already uses at `calls.rs:520`), maps each to its variant by
   the arm's `variant_tag`, wraps each arm body into a synthetic
   `Clause { variant: <registry key for that variant>, locals: vec![], body, .. }`, and
-  calls `lower_clauses(&clauses, params, Type::Enum(id, _))`. The scrutinee is the
-  params' last value.
+  calls `lower_clauses(&clauses, params, Type::Enum(id, _), ArmBinding::WholeValue)`. The
+  scrutinee is the params' last value.
 - `EnumWord::Eliminate` in `lower_enum_word` (`src/ir/func_builder/quotation.rs:452`) is
   not reachable there (it is intercepted in `calls.rs`, not the inline
   alloc/tag-store path); the match arm should `unreachable!` with a note, or the
@@ -243,14 +317,58 @@ Unit test beside the lowering: an eliminator IR-lowering test (`lower_src`) that
 the dispatch emits the same tag-dispatch/phi-join shape a clause word does (reuse the
 `lower_clauses` test helpers), proving the synthetic-clause path reaches `lower_clauses`.
 
-### R6 — Golden (`examples/` + test harness)
+### R6 — Variant-accessor IR lowering (`src/ir/layout.rs`, `src/ir/func_builder/quotation.rs`, `src/ir/func_builder/word_families.rs`)
+
+**New in this correction, not in the prior draft.** Slice 2 shipped the checker side of
+three variant-accessor mechanisms (scalar/whole-destructure via `Sig`, aggregate getter,
+reference-mode getter) but no IR lowering for any of them — `EnumWord`
+(`src/ir/layout.rs:264-266`) has exactly one variant, `Construct`, and its own doc comment
+still says "Enums have no getter/setter/destructure (elimination is clause-style, Phase
+4)", i.e. this gap was explicitly deferred to this slice and the comment was never
+updated. Before this requirement, `Type::Variant` cannot survive to the backend at all
+(`src/ir/types.rs:259`'s `unreachable!`) because nothing constructs a reachable value of
+that type from surface syntax (R2–R5 is what first does). This requirement is the direct
+structural mirror of what already exists for `StructWord`— not a new mechanism:
+
+- Extend `EnumWord` with `Get(EnumId, usize /* variant */, usize /* field */)` and
+  `Destructure(EnumId, usize /* variant */)`, mirroring `StructWord::Get`/`Destructure`.
+- In the registry build (`src/ir/layout.rs`, the loop around `:517-549` that inserts
+  struct words), add the variant-word twin: for every variant with fields, insert
+  `"{Variant}>"` → `Destructure(id, vi)` and `"{Variant}>{field}"` → `Get(id, vi, fi)` for
+  each field, both surface and mangled keys, following the same `insert` closure and D7
+  keying discipline structs already use. This covers **both** of Slice 2's consuming
+  mechanisms (the `Sig`-dispatched scalar getter and whole-destructure, and the
+  checker-direct aggregate getter, `check_variant_get_word`): all three are checked
+  differently but resolve to the identical call term at this point, and IR lowering does
+  not distinguish aggregate from scalar fields any more than `StructWord::Get` already
+  doesn't.
+- Extend `lower_enum_word` (`src/ir/func_builder/quotation.rs`) with `Get`/`Destructure`
+  arms mirroring `lower_struct_word`'s (read `payload_offset + field.offset` instead of
+  the struct's bare `field.offset`, reusing `load_field_onto_stack`).
+- Extend `lower_reference_word` (`src/ir/func_builder/word_families.rs:26+`) with an
+  `EnumWord::Get` arm mirroring the existing `StructWord::Get` arm there (`:54`), reading
+  the same `payload_offset + field.offset` address and pushing a reference, inserted
+  before the locals fallback.
+
+Unit tests beside each lowering site, against hand-built IR state (this mechanism has no
+surface-syntax caller until R5 exists in the same slice, so these are exercised directly,
+the same way Slice 2 unit-tested its checker side against hand-built checker state before
+an `.sth` golden could reach it): a value-mode `Get` on an aggregate field returns the
+field's loaded value; a `Destructure` on a zero-field variant pushes nothing (fails if it
+panics on an empty field list); a reference-mode `Get` returns a reference at the correct
+`payload_offset`-relative address (fails if it forgets the payload offset and computes a
+bare `field.offset`, which would collide with the struct case's addressing on the same
+byte range).
+
+### R7 — Golden (`examples/` + test harness)
 
 A `.sth` golden exercising a multi-variant enum end-to-end (construct a `Type::Variant`
 value via the eliminator, read a field via a Slice-2 accessor inside an arm, produce a
 result). This is the slice's exit witness: unlike Slice 2, the eliminator is the
-mechanism that first makes a `Type::Variant` value reachable from surface syntax. The
-golden asserts observable program output (source in → expected output), not merely that
-it compiles. Migration of `examples/vm.sth`/`Bool`/`Result`/`Option` is **Slice 4**.
+mechanism that first makes a `Type::Variant` value reachable from surface syntax, and R6
+is what first gives that value's accessors somewhere to lower to. The golden asserts
+observable program output (source in → expected output), not merely that it compiles.
+Migration of `examples/vm.sth`/`Bool`/`Result`/`Option` is **Slice 4**.
 
 ## OQ1 artifact: `check_poly_combinator_args` rule set vs `check_eliminator_call`
 
@@ -270,7 +388,7 @@ here is a defect unless a **Reason** column explains it.
 | 6 | Row reconstruction (`row = stack[..base]` for a row-bearing param) | `combinators.rs:680` | **Arm-flavoured variant.** The shared `..a` grounds to the below-scrutinee region for every arm, computed once | Same grounding, one shared prefix across all arms |
 | 7 | `resolve_quotation_operand`: Literal vs Forwarded vs None | `combinators.rs:692,741,746` | **Called (shared).** Literal is the arm's normal case; a forwarded abstract quotation arm is accepted the same way; `None` → `quotation_argument_required_error` | Identical operand resolution |
 | 8 | `check_literal_against_declared_effect` (flavour `~`/`[`, D3 capture, tail handling, directional body check) | `combinators.rs:695` | **Called (shared), unchanged.** Per arm, against the effect built in rule 5's replacement | The point of decision 4's "call, never re-implement" |
-| 9 | Cross-sibling output agreement via `shape_baseline` (first-wins per shared row id) → `combinator_branch_output_mismatch_error` | `combinators.rs:716-733` | **Arm-flavoured variant.** One shared `..b` row, so one baseline; first **written** arm sets it; message is arm-attributed | Decision 5: keeps first-wins, adds arm-name attribution; **must** iterate in written order (R4.5) |
+| 9 | Cross-sibling output agreement via `shape_baseline` (first-wins per shared row id) → `combinator_branch_output_mismatch_error` | `combinators.rs:716-733` | **Called (shared), unchanged.** One shared `..b` row, so one baseline; first **written** arm sets it; the helper's message names shapes and a line, not an arm — no arm-attribution is added this slice | Decision 5: keeps first-wins verbatim; the only change is iterating arms in written order (R4.5), not the message |
 | 10 | Forwarded abstract quotation acceptance (`found.ty == concrete`) | `combinators.rs:735-745` | **Called (shared).** | Same acceptance for a forwarded arm |
 | 11 | `quotation_argument_required_error` for a non-quotation operand | `combinators.rs:746` | **Called (shared).** An arm slot given a non-quotation | Same guard |
 | 12 | Returns `Subst` (`θ`) for the caller's back-edge grounding | `combinators.rs:754` | **Omitted.** Returns unit/outputs; the eliminator is not a self-tail combinator | No back-edge to ground |
@@ -325,15 +443,41 @@ Exit criteria (breakable assertions):
   vars, arm inputs are the two distinct `Type::Variant`s. Fails if the generator
   regresses to `Type::Enum` arm inputs or drops a row.
 
-### Phase 3 — lowering + golden
+### Phase 3 — variant-accessor IR lowering
 
-Scope: R5, R6. Add `EnumWord::Eliminate(EnumId)`, register it in `enums.words`, intercept
-it in the `calls.rs` dispatch (before `lower_enum_word`), build synthetic empty-`locals`
-clauses from the N quotation operands, and feed `lower_clauses` (body unchanged). Add the
-end-to-end `.sth` golden. This phase is where an eliminator call first compiles and runs.
+Scope: R6. Add `EnumWord::Get`/`Destructure`, register them in `enums.words` alongside
+`Construct` (mirroring `StructWord`'s registration exactly), and extend
+`lower_enum_word`/`lower_reference_word` with the corresponding arms. Independently
+green and independently testable: these variants are constructed (registration) and
+matched (the new arms) within this phase regardless of whether anything calls them yet
+via surface syntax — not `dead_code`, the same chicken-and-egg Slice 2 already resolved
+on the checker side by unit-testing against hand-built state. This phase adds no surface
+way to reach a variant accessor; that arrives in Phase 4.
 
-**Required in this same phase** (see the recon-5 correction above; verified by compiling
-the variant addition, not by reading): adding `EnumWord::Eliminate` breaks two existing
+Exit criteria (breakable assertions):
+
+- A value-mode `Get` lowering test on an aggregate field, asserting the loaded value's
+  address is `payload_offset + field.offset` for the correct variant — fails if the
+  payload offset is dropped (collides with a struct's field addressing) or the wrong
+  variant's field list is read.
+- A `Destructure` lowering test on a zero-field variant asserting it pushes nothing and
+  does not panic — fails on an off-by-one or an unchecked field-list index.
+- A reference-mode `Get` lowering test asserting the returned reference's address
+  matches the value-mode case's address (same payload offset, no divergent addressing
+  between the two modes).
+
+### Phase 4 — eliminator lowering + golden
+
+Scope: R5, R7. Add the `ArmBinding` parameter to `lower_clauses` (`Decompose` default,
+unchanged for every existing caller; `WholeValue` new), `EnumWord::Eliminate(EnumId)`,
+register it in `enums.words`, intercept it in the `calls.rs` dispatch (before
+`lower_enum_word`), build synthetic empty-`locals` clauses from the N quotation operands,
+and feed `lower_clauses` under `ArmBinding::WholeValue`. Add the end-to-end `.sth` golden.
+This phase is where an eliminator call first compiles and runs, and where Phase 3's
+accessor lowering is first exercised by a real program.
+
+**Required in this same phase** (see the recon-5 correction; verified by compiling the
+variant addition, not by reading): adding `EnumWord::Eliminate` breaks two existing
 sites, and the phase is not green until both move.
 
 - `src/ir/func_builder/control_flow.rs:236` — E0005: the irrefutable
@@ -350,18 +494,26 @@ Exit criteria (breakable assertions):
   `lower_clauses` and emits the tag-dispatch/phi-join shape (one join predecessor per
   non-tail arm) — fails if the synthetic-clause construction is wrong (e.g. non-empty
   `locals` mis-binds, or the variant key mismatches `enums.words`).
+- A `Decompose`-mode existing clause-style test (e.g. an existing `Bool`/`Result` clause
+  lowering test) is unchanged and still passes — proves `ArmBinding` is additive, not a
+  behaviour change to real clause words.
 - The `.sth` golden asserts observable output for a multi-variant enum eliminated
   end-to-end with a Slice-2 accessor read inside an arm — fails if elimination or
-  field access regresses.
+  field access regresses. This is the first test that exercises Phase 3's accessor
+  lowering through a real surface program rather than hand-built IR state.
 
 ## Out of scope (restated)
 
 - Migrating `examples/vm.sth`, `Bool`, `Result`/`Option` off clause-style dispatch, or
   deleting `WordBody::Clauses`/`parse_clauses` — Slice 4.
-- Any change to `Type::Variant`, the accessor mechanisms, or their generated `Sig`s —
-  Slice 2 is done; this slice only consumes them.
-- Any change to `EnumLayout`/`VariantLayout`, `dispatch_on_tag`, or `lower_clauses`'
-  block/phi shape — recon 5 finds no lowering gap beyond the new call-site entry point.
+- Any change to `Type::Variant`, the **checker-side** accessor mechanisms, or their
+  generated `Sig`s — Slice 2's checker is done; this slice only consumes it. (R6 adds
+  their *missing* IR lowering, which is new code, not a change to existing code — Slice 2
+  never shipped an IR side to modify.)
+- Any change to `EnumLayout`/`VariantLayout` or `dispatch_on_tag`. `lower_clauses`
+  gains an additive `ArmBinding` parameter (R5); every existing caller keeps its current
+  behaviour bit-for-bit under `Decompose` — this is not the block/phi dispatch shape
+  changing, only which values populate the stack before a clause body runs.
 - Reference-mode (`&Enum`/`&!Enum`) surface eliminators — value mode only this slice;
   clause-style reference dispatch stays in `check_clause_word`.
 
@@ -377,13 +529,18 @@ Exit criteria (breakable assertions):
     },
     {
       "phase": 2,
-      "focus": "frontend eliminator PolySig generator, registry, and check_eliminator_call with written-order baseline",
+      "focus": "frontend eliminator PolySig generator, registry, and check_eliminator_call with variable-arity arm collection and written-order baseline",
       "difficulty": "hard"
     },
     {
       "phase": 3,
-      "focus": "lowering EnumWord::Eliminate through synthetic clauses into lower_clauses plus the end-to-end golden",
+      "focus": "variant-accessor IR lowering: EnumWord::Get/Destructure mirroring StructWord, unit-tested against hand-built IR state",
       "difficulty": "standard"
+    },
+    {
+      "phase": 4,
+      "focus": "eliminator lowering via a new ArmBinding::WholeValue mode on lower_clauses, EnumWord::Eliminate, plus the end-to-end golden",
+      "difficulty": "hard"
     }
   ]
 }
