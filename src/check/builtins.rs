@@ -314,15 +314,6 @@ pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str
     )
 }
 
-/// The input twin of [`stored_reference_output_error`]: a declared input may
-/// *be* a reference at the top level, but not carry one nested inside an
-/// aggregate.
-pub(super) fn stored_reference_input_error(name: &str, ty: Type, location: &str) -> String {
-    format!(
-        "error: a reference cannot be stored: `{name}` declares the input `{ty}`, which contains a reference{location}\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

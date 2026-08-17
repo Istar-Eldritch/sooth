@@ -349,11 +349,14 @@ pub(super) fn materialize_quotation_at_boundary(
 /// reference borrows a local of that frame, gone by the time whatever calls
 /// the quotation value reads it, reusing `stored_reference_output_error`'s
 /// wording (`builtins.rs`). Unlike the word-level check, there is no input
-/// arm: a quotation input that transitively contains a reference is already
-/// rejected at its struct/array *declaration* (a field or element typed `&T`
-/// is a located error there), so the analogous arm on `eff.inputs` can never
-/// fire -- confirmed by removing it and finding no golden or unit test
-/// depends on it.
+/// arm: an *aggregate* input carrying a nested reference is already rejected
+/// at its struct/array declaration (a field or element typed `&T` is a
+/// located error there), which is the only shape this literal boundary sees.
+/// A declared quotation *parameter* whose own effect returns a reference
+/// (`( &!Sprite [ &!Sprite -- &!i64 ] -- i64 )`) never reaches a
+/// materialization boundary and still panics in `referent_of`: an indirect
+/// `call` produces a reference with no recorded referent, so closing it needs
+/// a consumer-side rule, out of scope here.
 fn check_quotation_reference_free_effect(
     eff: &QuotEffect,
     ctx: &Ctx,

@@ -175,7 +175,10 @@ pub(super) fn check_reference_free_signature(
     }
     for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
-            return Err(stored_reference_input_error(name, slot.ty, ""));
+            let ty = slot.ty;
+            return Err(format!(
+                "error: a reference cannot be stored: `{name}` declares the input `{ty}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
+            ));
         }
     }
     Ok(())
