@@ -4,13 +4,13 @@ A Tree-sitter grammar for Sooth, for editor syntax highlighting only — it is
 not a semantic parser and doesn't try to be one. `src/lexer.rs` already
 emits almost everything as a generic `Word` token and leaves sigil/case
 conventions (`^Type`, `&!x`, `Foo>bar`, `mod::word`, capitalised type names,
-`if`/`else`/`end`, clause-head patterns like `| Cons`) to the real parser and
+`if`/`branch`, clause-head patterns like `| Cons`) to the real parser and
 checker, which carry a symbol table this grammar doesn't have. Some of those
 (clause heads with no matching close-pipe) are genuinely undecidable from
 tokens alone. So `grammar.js` mirrors the same split: only the unambiguous
 structure — top-level `: ... ;` / `type: ... ;` / `extern:` / `import:` /
-`export:` forms, and the always-paired `(...)`/`[...]` delimiters — gets a
-grammar rule. Everything else is a flat `word` token that `queries/highlights.scm`
+`export:` / `static:` forms, and the always-paired `(...)`/`[...]` delimiters —
+gets a grammar rule. Everything else is a flat `word` token that `queries/highlights.scm`
 classifies by shape (regex/exact-set predicates over the token text).
 
 ## Rebuilding

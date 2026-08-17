@@ -32,6 +32,10 @@
         {
           "type": "SYMBOL",
           "name": "export_definition"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "static_definition"
         }
       ]
     },
@@ -153,6 +157,34 @@
         {
           "type": "STRING",
           "value": "export:"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "_atom"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "static_definition": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "static:"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "word"
+          }
         },
         {
           "type": "REPEAT",

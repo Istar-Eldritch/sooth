@@ -21,6 +21,7 @@
 "extern:" @keyword
 "import:" @keyword
 "export:" @keyword
+"static:" @keyword
 ";" @punctuation.delimiter
 "|" @punctuation.special
 ["(" ")"] @punctuation.bracket
@@ -31,6 +32,7 @@
 (type_definition name: (word) @type)
 (extern_definition name: (word) @function)
 (import_definition alias: (word) @module)
+(static_definition name: (word) @variable)
 
 ; --- fallback classification of plain `word` tokens by shape ---
 

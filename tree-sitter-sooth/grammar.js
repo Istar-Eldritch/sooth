@@ -28,10 +28,10 @@ module.exports = grammar({
 				$.extern_definition,
 				$.import_definition,
 				$.export_definition,
+				$.static_definition,
 			),
 
-		word_definition: ($) =>
-			seq(":", field("name", $.word), repeat($._atom), ";"),
+		word_definition: ($) => seq(":", field("name", $.word), repeat($._atom), ";"),
 		type_definition: ($) =>
 			seq("type:", field("name", $.word), repeat($._atom), ";"),
 		extern_definition: ($) =>
@@ -39,6 +39,8 @@ module.exports = grammar({
 		import_definition: ($) =>
 			seq("import:", field("alias", $.word), repeat($._atom), ";"),
 		export_definition: ($) => seq("export:", repeat($._atom), ";"),
+		static_definition: ($) =>
+			seq("static:", field("name", $.word), repeat($._atom), ";"),
 
 		// A stack effect `( ... )` and a quotation/array-type `[ ... ]` are the
 		// only genuinely unambiguous, always-paired delimiters in the language;
@@ -62,10 +64,7 @@ module.exports = grammar({
 		// ordinary char, so a leading `|` always stays the standalone delimiter.
 		word: ($) =>
 			token(
-				prec(
-					1,
-					seq(/[^\s;()|\x5b\]"]/, repeat(choice(/[^\s;()|\x5b\]"]/, "|>"))),
-				),
+				prec(1, seq(/[^\s;()|\x5b\]"]/, repeat(choice(/[^\s;()|\x5b\]"]/, "|>")))),
 			),
 
 		int: ($) => token(prec(2, /-?[0-9]+/)),

@@ -218,11 +218,61 @@
           "named": true
         },
         {
+          "type": "static_definition",
+          "named": true
+        },
+        {
           "type": "type_definition",
           "named": true
         },
         {
           "type": "word_definition",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "static_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "word",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "bracket_group",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "int",
+          "named": true
+        },
+        {
+          "type": "paren_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "word",
           "named": true
         }
       ]
@@ -368,6 +418,10 @@
   {
     "type": "int",
     "named": true
+  },
+  {
+    "type": "static:",
+    "named": false
   },
   {
     "type": "string",
