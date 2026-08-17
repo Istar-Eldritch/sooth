@@ -40,7 +40,7 @@ is 8c-shaped mechanical work on top of a real design decision.
 (`&>`/`<`/`|>`); the old per-field generated accessor words are deleted.
 
 **P7.S2 — Static storage and global sets, and they land before the allocator work.**
-Module-level static storage (a *place*, not a value: never owned, moved, or dropped,
+`[ done ]` Module-level static storage (a *place*, not a value: never owned, moved, or dropped,
 reached only through a second-class ref, constant-initialised) plus the per-word
 **global set** that keeps it honest, the statics a word touches and in what mode, inferred
 within a module and declared on exported words. DESIGN.md's *Embedded* section carries the
