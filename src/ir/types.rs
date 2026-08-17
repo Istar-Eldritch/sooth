@@ -281,9 +281,13 @@ pub fn ir_type_of(ty: Type) -> IrType {
                 "a `~` inline quotation never reaches the backend (it cannot be materialized)"
             )
         }
-        // Phase 6 slice 2 (R3): a `Type::Variant` never reaches the backend
-        // this slice -- only the not-yet-built eliminator (Slice 3) mints one.
-        Type::Variant(..) => unreachable!("a Type::Variant never reaches the backend (Slice 3)"),
+        // Phase 6 slice 3 (R6): a variant is represented identically to its
+        // enum at the backend -- only the frontend distinguishes them, so a
+        // `Type::Variant` erases to the same `IrType::Enum(id)` its parent
+        // enum already gets. Load-bearing since decision 6: an eliminator's
+        // reference-mode arm can declare `&Shape.Circle`, which interns a real
+        // `RefDecl` and forces `ir_type_of` over it at build time.
+        Type::Variant(id, _, _) => IrType::Enum(id),
     }
 }
 
@@ -533,12 +537,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a Type::Variant never reaches the backend")]
-    fn ir_type_of_variant_is_unreachable() {
-        // Phase 6 slice 2 (R3): a `Type::Variant` never reaches the backend
-        // this slice (only Slice 3's eliminator mints one), mirroring the
-        // `InlineQuotation` arm.
-        let _ = ir_type_of(Type::Variant(EnumId::from_index(0), 0, "Shape.Circle"));
+    fn ir_type_of_variant_erases_to_its_parent_enum() {
+        // Phase 6 slice 3 (R6): a `Type::Variant` erases to the same
+        // `IrType::Enum(id)` a plain `Type::Enum(id, _)` of the same id does
+        // -- a positive equality assertion, not merely "does not panic".
+        let id = EnumId::from_index(0);
+        assert_eq!(
+            ir_type_of(Type::Variant(id, 0, "Shape.Circle")),
+            IrType::Enum(id)
+        );
+        assert_eq!(
+            ir_type_of(Type::Variant(id, 0, "Shape.Circle")),
+            ir_type_of(Type::Enum(id, "Shape"))
+        );
     }
 
     #[test]

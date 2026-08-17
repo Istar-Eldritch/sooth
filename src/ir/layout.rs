@@ -253,11 +253,13 @@ pub struct Arrays {
 
 /// How a generated enum-word name lowers, keyed off the enum registry
 /// (parallel to `StructWord`, D10): a variant constructor naming its enum and
-/// the variant's declaration index. Enums have no getter/setter/destructure
-/// (D2: elimination is clause-style, Phase 4).
+/// the variant's declaration index, or a whole-variant destructure (Phase 6
+/// slice 3, R6). Per-field access is a receiver-directed projection
+/// (`resolved_variant_fields`), not a name-fused word here.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum EnumWord {
     Construct(EnumId, usize),
+    Destructure(EnumId, usize),
 }
 
 /// The IR's view of a program's enums: the per-`EnumId` tagged-layout registry
@@ -544,10 +546,25 @@ pub(super) fn build_registries_ww(
         let id = EnumId::from_index(idx);
         for (vi, variant) in decl.variants.iter().enumerate() {
             let surface = generic_surface_name(&variant.name);
-            if surface != variant.name {
-                ewords.insert(surface.to_string(), EnumWord::Construct(id, vi));
-            }
-            ewords.insert(variant.name.clone(), EnumWord::Construct(id, vi));
+            // D7 (adopting the struct registry's dual-key `insert` closure,
+            // R6): each generated word keys under both the mangled and bare
+            // surface spelling, skipping the surface insert when they agree.
+            let mut insert = |mangled_key: String, surface_key: String, ew: EnumWord| {
+                if surface_key != mangled_key {
+                    ewords.insert(surface_key, ew);
+                }
+                ewords.insert(mangled_key, ew);
+            };
+            insert(
+                variant.name.clone(),
+                surface.to_string(),
+                EnumWord::Construct(id, vi),
+            );
+            insert(
+                format!("{}>", variant.name),
+                format!("{surface}>"),
+                EnumWord::Destructure(id, vi),
+            );
         }
     }
 

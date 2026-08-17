@@ -1121,6 +1121,7 @@ mod tests {
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
+            resolved_variant_fields: HashMap::new(),
             modules: vec![
                 ModuleInfo {
                     imports: imports0,

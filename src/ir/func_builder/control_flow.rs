@@ -233,7 +233,15 @@ impl<'a> FuncBuilder<'a> {
         let join_id = self.fresh_block();
         let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
         for clause in clauses {
-            let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant];
+            // Phase 6 slice 3 (R6): `EnumWord` gained a second variant
+            // (`Destructure`) once this word's `let` stopped being the only
+            // reader of the registry, so the irrefutable `let` no longer
+            // compiles. A synthetic clause's `.variant` always keys a
+            // constructor entry (checker-guaranteed), so the non-`Construct`
+            // path is unreachable, not a real case.
+            let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant] else {
+                unreachable!("a clause always dispatches to a variant constructor")
+            };
             clause_for_variant[vi] = Some(clause);
         }
 

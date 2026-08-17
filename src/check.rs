@@ -89,6 +89,7 @@ type ResolvedCalls = (
     HashMap<Span, CallInst>,
     HashMap<Span, String>,
     HashMap<Span, (StructId, usize)>,
+    HashMap<Span, (EnumId, usize, usize)>,
 );
 
 /// `ResolvedCalls` plus the residual stack a REPL line leaves behind and the
@@ -99,6 +100,7 @@ type InferredLine = (
     HashMap<Span, CallInst>,
     HashMap<Span, String>,
     HashMap<Span, (StructId, usize)>,
+    HashMap<Span, (EnumId, usize, usize)>,
 );
 
 /// R5/R14: every candidate registered under one polymorphic-word name, its
@@ -139,6 +141,13 @@ struct PolyCtx<'a> {
     /// `builtin_overloads` does: an `if` arm clones the scope, and a record
     /// made in one arm must outlive it.
     resolved_fields: &'a mut HashMap<Span, (StructId, usize)>,
+    /// Phase 6 slice 3 (R6): the receiver-directed variant-field projections
+    /// this walk resolved (`&r` against a `Type::Variant` on the stack), span
+    /// -> `(EnumId, variant index, field index)`, relayed onto
+    /// `Module::resolved_variant_fields`. Mirrors `resolved_fields` for the
+    /// same reason: an `if` arm clones the scope, and a record made in one
+    /// arm must outlive it.
+    resolved_variant_fields: &'a mut HashMap<Span, (EnumId, usize, usize)>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
@@ -669,6 +678,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         instantiations: _,
         builtin_overloads: _,
         resolved_fields: _,
+        resolved_variant_fields: _,
         modules,
         statics,
     } = module;
@@ -715,6 +725,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // monomorphic body resolves one against its stack, then relayed to the
     // module for lowering.
     let mut resolved_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // Phase 6 slice 3 (R6): the receiver-directed variant-field projections,
+    // filled as each monomorphic body resolves one against its stack, then
+    // relayed to the module for lowering.
+    let mut resolved_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -730,11 +744,14 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+                let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
+                    HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
                     builtin_overloads: &mut scratch_overloads,
                     resolved_fields: &mut scratch_fields,
+                    resolved_variant_fields: &mut scratch_variant_fields,
                     combinators: &combinators,
                     eliminators: &eliminators,
                 };
@@ -773,6 +790,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 insts: &mut insts,
                 builtin_overloads: &mut builtin_overloads,
                 resolved_fields: &mut resolved_fields,
+                resolved_variant_fields: &mut resolved_variant_fields,
                 combinators: &combinators,
                 eliminators: &eliminators,
             };
@@ -829,6 +847,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
+    module.resolved_variant_fields = resolved_variant_fields;
     Ok(())
 }
 
@@ -866,7 +885,7 @@ pub(crate) fn check_def(
     poly_env: &PolyEnv,
     combinators: &CombinatorEnv,
 ) -> Result<ResolvedCalls, String> {
-    let (_sites, insts, overloads, fields) = check_def_collecting_drop_sites(
+    let (_sites, insts, overloads, fields, variant_fields) = check_def_collecting_drop_sites(
         word,
         enums,
         env,
@@ -877,7 +896,7 @@ pub(crate) fn check_def(
         poly_env,
         combinators,
     )?;
-    Ok((insts, overloads, fields))
+    Ok((insts, overloads, fields, variant_fields))
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -930,6 +949,10 @@ pub(crate) fn check_def_collecting_drop_sites(
     // R2 (P7 slice 1): this body's receiver-directed field projections,
     // relayed to the caller so the session lowers them like a native build.
     let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // R6 (Phase 6 slice 3): this body's receiver-directed variant-field
+    // projections, relayed to the caller so the session lowers them like a
+    // native build.
+    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
@@ -943,6 +966,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         insts: &mut insts,
         builtin_overloads: &mut overloads,
         resolved_fields: &mut fields,
+        resolved_variant_fields: &mut variant_fields,
         combinators,
         eliminators: &eliminators,
     };
@@ -963,7 +987,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         &mut sites,
         &mut poly,
     )?;
-    Ok((sites, insts, overloads, fields))
+    Ok((sites, insts, overloads, fields, variant_fields))
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -1001,6 +1025,10 @@ pub(crate) fn infer_line(
     // R2 (P7 slice 1): this line's receiver-directed field projections,
     // relayed to the caller so the session lowers them like a native build.
     let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // R6 (Phase 6 slice 3): this line's receiver-directed variant-field
+    // projections, relayed to the caller so the session lowers them like a
+    // native build.
+    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
@@ -1010,6 +1038,7 @@ pub(crate) fn infer_line(
         insts: &mut insts,
         builtin_overloads: &mut overloads,
         resolved_fields: &mut fields,
+        resolved_variant_fields: &mut variant_fields,
         combinators,
         eliminators: &eliminators,
     };
@@ -1044,6 +1073,7 @@ pub(crate) fn infer_line(
         insts,
         overloads,
         fields,
+        variant_fields,
     ))
 }
 
@@ -3210,7 +3240,7 @@ mod tests {
             &HashMap::new(),
             &combinators,
         )
-        .map(|(stack, _insts, _overloads, _fields)| stack)
+        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
     }
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {

@@ -367,6 +367,7 @@ fn check_term(
                 live,
                 at,
                 poly.resolved_fields,
+                poly.resolved_variant_fields,
             )? {
                 return Ok(stack);
             }

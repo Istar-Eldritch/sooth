@@ -440,6 +440,28 @@ impl<'a> FuncBuilder<'a> {
                 }
                 self.stack.push(dst);
             }
+            // Phase 6 slice 3 (R6): the whole-variant destructure, unaffected
+            // by P7 slice 1's retirement of the fused struct accessors (it is
+            // a globally unique name, `variant_generated_sigs`). Reads every
+            // field at `payload_offset + field.offset`, first field deepest,
+            // mirroring `StructWord::Destructure`.
+            EnumWord::Destructure(id, variant_idx) => {
+                let s = self.stack.pop().expect("destructure: variant operand");
+                let (payload_offset, fields) = {
+                    let layout = &self.enums.layouts[id.index()];
+                    (
+                        layout.payload_offset,
+                        layout.variants[variant_idx].fields.clone(),
+                    )
+                };
+                for field in fields {
+                    let adjusted = FieldLayout {
+                        offset: payload_offset + field.offset,
+                        ..field
+                    };
+                    self.load_field_onto_stack(s, adjusted);
+                }
+            }
         }
     }
 }
@@ -449,6 +471,91 @@ mod tests {
     use super::*;
     use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
+
+    /// `bool` is injected as enum 0 ahead of any user enum (`BOOL_ENUM_ID`),
+    /// so `Shape` is enum 1. `Circle` (vi 0) carries two fields, `Rect` (vi
+    /// 1) one, `Dot` (vi 2) none.
+    fn shape_enums() -> Enums {
+        enums_of(
+            "type: P a i64 b i64 ;\n\
+             type: Shape | Circle r i64 p P | Rect q P | Dot ;\n\
+             : main ( -- ) ;\n",
+        )
+    }
+
+    #[test]
+    fn destructure_multi_field_variant_pushes_every_field_in_order() {
+        // Phase 6 slice 3 (R6): the whole-variant destructure, exercised
+        // directly against hand-built state (no surface syntax reaches
+        // `EnumWord::Destructure` until Phase 4's eliminator calls it).
+        let enums = shape_enums();
+        let id = EnumId::from_index(1);
+        let structs = Structs::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                statics: empty_statics(),
+            },
+        );
+        let receiver = b.fresh_value(IrType::Enum(id));
+        b.stack.push(receiver);
+        b.lower_enum_word(EnumWord::Destructure(id, 0));
+        // `Circle` has two fields (`r i64`, `p P`): both land on the stack,
+        // first field deepest.
+        let fields = enums.layouts[id.index()].variants[0].fields.clone();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(b.stack.len(), fields.len());
+        for (v, field) in b.stack.iter().zip(&fields) {
+            assert_eq!(b.value_type(*v), field.ty);
+        }
+    }
+
+    #[test]
+    fn destructure_zero_field_variant_pushes_nothing_and_does_not_panic() {
+        // The companion to the multi-field case: a zero-field variant alone
+        // would not catch a mutation that always pushes nothing regardless
+        // of field count, so both are asserted.
+        let enums = shape_enums();
+        let id = EnumId::from_index(1);
+        let structs = Structs::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                statics: empty_statics(),
+            },
+        );
+        let receiver = b.fresh_value(IrType::Enum(id));
+        b.stack.push(receiver);
+        // `Dot` is variant 2 (the third), declared with no fields.
+        b.lower_enum_word(EnumWord::Destructure(id, 2));
+        assert!(
+            b.stack.is_empty(),
+            "a zero-field variant's destructure pushes nothing: {:?}",
+            b.stack
+        );
+    }
 
     #[test]
     fn lower_two_output_word_returns_one_bundle_holding_both() {

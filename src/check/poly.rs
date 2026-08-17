@@ -232,12 +232,14 @@ pub(crate) fn check_poly_combinator_repl(
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     let eliminators = eliminator_registry(enums);
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
         builtin_overloads: &mut scratch_overloads,
         resolved_fields: &mut scratch_fields,
+        resolved_variant_fields: &mut scratch_variant_fields,
         combinators,
         eliminators: &eliminators,
     };

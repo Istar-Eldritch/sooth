@@ -1187,7 +1187,7 @@ impl Session {
         // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
         // inference sees the session's inline view like any bare line.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, _insts, _overloads, _fields) = check::infer_line(
+        let (net_stack, _insts, _overloads, _fields, _variant_fields) = check::infer_line(
             &terms,
             &self.types,
             &env,
@@ -2408,17 +2408,18 @@ impl Session {
         // than the crash item 3 fixes; see its call site). Its field
         // projections (R2) are *not* discarded: this is the only place the
         // override's body is lowered (R11.3), so they reach that lowering.
-        let (sites, _insts, _overloads, fields) = check::check_def_collecting_drop_sites(
-            &self.drop_overloads[&id].1,
-            &self.enums,
-            &env,
-            &mut self.arrays,
-            &mut self.owned_cells,
-            &mut self.refs,
-            &self.structs,
-            &HashMap::new(),
-            &combinators,
-        )?;
+        let (sites, _insts, _overloads, fields, variant_fields) =
+            check::check_def_collecting_drop_sites(
+                &self.drop_overloads[&id].1,
+                &self.enums,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &HashMap::new(),
+                &combinators,
+            )?;
         self.drop_dropped_sites.insert(id, sites);
 
         // R6 at the REPL: checking this override's body in isolation cannot
@@ -2467,6 +2468,7 @@ impl Session {
                 regs,
                 &self.drop_override_bodies(Some(id)),
                 &fields,
+                &variant_fields,
                 &combinator_bodies(&self.combinators),
             )
         };
@@ -2736,7 +2738,7 @@ impl Session {
         // call sites, threaded into `ir::lower_word` below so it dispatches an
         // overloaded call exactly as a native word body does, rather than
         // silently mis-lowering through the name-directed builtin arm.
-        let (insts, overloads, fields) = check::check_def(
+        let (insts, overloads, fields, variant_fields) = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -2799,6 +2801,7 @@ impl Session {
                 &insts,
                 &overloads,
                 &fields,
+                &variant_fields,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
@@ -2821,6 +2824,7 @@ impl Session {
                 // defining line), so no body reaches this call and no
                 // projection needs resolving.
                 ir::empty_resolved_fields(),
+                ir::empty_resolved_variant_fields(),
                 &combinator_bodies(&self.combinators),
             ));
             funcs
@@ -2934,18 +2938,19 @@ impl Session {
         // R4 (Slice 6c): a bare line may call a retained combinator; thread the
         // session's inline view so it inlines like native's `module.words` one.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, insts, line_overloads, line_fields) = check::infer_line(
-            terms,
-            &self.types,
-            &env,
-            &mut self.arrays,
-            &mut self.owned_cells,
-            &mut self.refs,
-            &self.structs,
-            &self.enums,
-            &poly_env,
-            &combinators,
-        )?;
+        let (net_stack, insts, line_overloads, line_fields, line_variant_fields) =
+            check::infer_line(
+                terms,
+                &self.types,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &self.enums,
+                &poly_env,
+                &combinators,
+            )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
@@ -2986,6 +2991,7 @@ impl Session {
                 &insts,
                 &line_overloads,
                 &line_fields,
+                &line_variant_fields,
                 &poly_arities,
                 &bodies,
             );
@@ -2998,6 +3004,7 @@ impl Session {
                 regs,
                 &self.drop_override_bodies(None),
                 ir::empty_resolved_fields(),
+                ir::empty_resolved_variant_fields(),
                 &bodies,
             );
             (func, quot_funcs, m, out_bytes, aggregate_destructors)
@@ -3934,6 +3941,7 @@ mod tests {
             regs,
             &session.drop_override_bodies(declaring),
             ir::empty_resolved_fields(),
+            ir::empty_resolved_variant_fields(),
             &combinator_bodies(&session.combinators),
         )
         .into_iter()

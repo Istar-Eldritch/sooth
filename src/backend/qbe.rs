@@ -1380,6 +1380,7 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -1742,6 +1743,7 @@ mod tests {
                 refs: &Refs::default(),
                 statics: empty_statics(),
             },
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
