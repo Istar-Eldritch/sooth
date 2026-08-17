@@ -449,8 +449,16 @@ fn check_field_projection(
             }
             let out = intern_ref_type(refs, field_ty, mutable);
             let deriv = prov.project(top.deriv);
+            // Review fix (P7 slice 1): forward the receiver's region, same
+            // reasoning as `&>` above -- a receiver reached only through a
+            // chain of projections (`&!s &!v`) would otherwise look
+            // unborrowed to the consume-time check.
+            let alias = top.alias;
             stack.truncate(n - 1);
-            stack.push(Slot::derived(out, deriv));
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
         }
         None => {
             // The receiver stays, so this is the `S|>fi` peek's region
@@ -2698,6 +2706,7 @@ mod tests {
         let mut refs = Vec::new();
         let mut prov = Provenance::default();
         let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        let mut resolved_fields = HashMap::new();
         let out = check_reference_word(
             "&r",
             Span::default(),
@@ -2710,7 +2719,7 @@ mod tests {
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
-            &mut HashMap::new(),
+            &mut resolved_fields,
         )
         .unwrap()
         .expect("the projection arm claims a bare field on a variant receiver");
@@ -2719,6 +2728,13 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].ty, shape_variant(&module, 0));
         assert_eq!(out[1].ty, intern_ref_type(&mut refs, Type::I64, false));
+        // R4 is checker-only: `resolved_fields` is `StructId`-keyed, so a
+        // variant projection recording one there would hand lowering an index
+        // into the wrong declaration table.
+        assert!(
+            resolved_fields.is_empty(),
+            "a variant projection must not be routed through `resolved_fields`"
+        );
 
         // A reference receiver is consuming, the same as the struct case.
         let (pushed, _prov, _operand, mut refs) =
@@ -2897,6 +2913,38 @@ mod tests {
             err.contains("`drop` consumes a value while a reference derived from it is still live"),
             "unexpected message: {err}"
         );
+    }
+
+    /// The projection's *reference*-receiver arm needs the same forwarding as
+    /// its fused sibling above. A single hop is caught by the receiver's own
+    /// region, so only a two-hop chain (`&!s &!v`) discriminates: without the
+    /// forwarding the second hop drops the region and the store lands in
+    /// storage `drop` already consumed.
+    #[test]
+    fn chained_projection_forwards_its_receivers_region() {
+        let err = check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer s Inner ;\n\
+             : main ( -- ) 1 Inner Outer &!s &!v swap drop 7 ! ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`drop` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The forwarding is an over-approximation, so the guard against it is a
+    /// legal chain that must keep compiling: read, write and re-read a nested
+    /// field, each borrow consumed before the next begins.
+    #[test]
+    fn sequential_chained_projections_are_allowed() {
+        assert!(check_src(
+            "type: Inner v i64 ;\n\
+             type: Outer s Inner ;\n\
+             : main ( -- ) 1 Inner Outer &s &v @ . &!s &!v 9 ! &s &v @ . drop ;",
+        )
+        .is_ok());
     }
 
     /// A real build always mangles (`always_mangle`, `driver.rs`), so the
