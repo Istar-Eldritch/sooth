@@ -423,10 +423,12 @@ pub(super) fn inline_combinator(
                             scope,
                             poly,
                             granted,
-                            false,
-                            tail_slots.contains(&i),
-                            tail,
-                            false,
+                            LiteralBoundary {
+                                shape_changing: false,
+                                is_arm: tail_slots.contains(&i),
+                                caller_tail: tail,
+                                finalize: false,
+                            },
                             None,
                         )?;
                     }
@@ -710,10 +712,12 @@ fn check_poly_combinator_args(
                 scope,
                 poly,
                 granted,
-                shape_changing,
-                tail_slots.contains(&i),
-                tail,
-                false,
+                LiteralBoundary {
+                    shape_changing,
+                    is_arm: tail_slots.contains(&i),
+                    caller_tail: tail,
+                    finalize: false,
+                },
                 None,
             )?
             .iter()

@@ -762,7 +762,7 @@ Exit criteria (breakable assertions):
   fails if step 4 silently coerces the mismatch instead of building the mode-correct
   expected effect and letting the shared helper reject the disagreement.
 
-**As shipped, deviating from the letter above (all four reviewed and accepted):**
+**As shipped, deviating from the letter above (all reviewed and accepted):**
 
 - **Registering `Shape?` is not free after all.** `Shape?` reaches `resolve` as a name
   whose trailing `?` `split_destructure_suffix` must recognize (so the *type* branch
@@ -773,6 +773,21 @@ Exit criteria (breakable assertions):
   branch returns on its own — so the suffix alone no longer gates the qualified-word,
   own-word, static-borrow, or selective-import branches
   (`word_named_with_a_generated_suffix_resolves_in_every_branch` pins all four).
+  **Eligibility is per suffix, not per "names a type at all"** (cycle 3): each generated
+  suffix comes from exactly one kind of type — `>` is the struct destructure, `?` the enum
+  eliminator — so `NameTables` keeps structs and enums in separate sets and the type
+  branch asks `names_a_type(module, head, suffix)`. Under the looser gate a plain word
+  called `P?` beside a *struct* `P` was mangled to `P__m0?`, a generated name nothing
+  generates, and the call became `unknown word`; the mirror hole (`E>` beside an *enum*
+  `E`) predates this slice and closes with it
+  (`word_named_for_another_kinds_generated_suffix_stays_a_word`).
+  The REPL's import rewrite (`rewrite_import_call`) had the same regression from the same
+  cause: it split the suffix before consulting `import_aliases`, so an imported word named
+  `ok?` missed the alias installed under its whole name. It now tries the whole spelling
+  first and splits only if that misses — and R15's `not exported` wording follows the same
+  rule, naming the *type* for a generated word (`q::P>` → `P`, gated as one unit) and the
+  word itself for a suffix-spelled one (`q::ok?` → `ok?`)
+  (`import_call_to_a_word_named_like_a_generated_one_resolves`).
 - **The REPL needs its own rejection, twice.** Eliminator interception runs ahead of the
   env lookup at a session line too, so `check_no_word_shadows_eliminator` is called from
   the `Line::Def` fan-out; and because a session declares one thing per line, the reverse
@@ -786,11 +801,25 @@ Exit criteria (breakable assertions):
 - **An untagged literal and a forwarded quotation share one error class**
   (`eliminator_untagged_arm_error`) rather than reusing `quotation_argument_required_error`
   as OQ1 row 7 had it.
-- **`_written_order_sets_baseline` and `_pop_order_does_not_set_baseline` pin the exact
-  `Vec<Type>` pair** passed to `combinator_branch_output_mismatch_error`
-  (`check::tests::LAST_BRANCH_MISMATCH`, a `cfg(test)`-only capture), not just the
-  rendered message — the two baselines (`i64`/`bool`) happen to `Display` distinctly, but
-  the assertion no longer depends on that.
+- **Decision 5's pairing is pinned by a pure function, not a test-only side channel.**
+  The cross-arm comparison is `arm_exit_row_mismatch(baseline, arm) -> Option<(Vec<Type>,
+  Vec<Type>)>`, whose unit test
+  (`arm_exit_row_mismatch_pairs_baseline_first`) asserts the returned pair by structure:
+  the baseline is `expected`, the arm under check is `found`. `_written_order_sets_baseline`
+  and `_pop_order_does_not_set_baseline` then assert the rendered message only, which is a
+  sound ordering discriminator because their two baselines (`bool`/`i64`) `Display`
+  distinctly. (Cycle 2 shipped a `cfg(test)` thread-local capture written from inside the
+  production error helper for this; cycle 3 removed it — a global mutable side channel in a
+  helper the live `if` path also calls, for an assertion a pure split gets directly.)
+- **The eliminator's `PolySig` is registered in `poly_env`, and nothing reads it this
+  phase.** `check_term`'s interception precedes every env/poly lookup unconditionally, and
+  a colliding user word is rejected outright by `check_no_word_shadows_eliminator`, so the
+  registration changes no dispatch and no diagnostic: removing it leaves the whole suite
+  green. It stays because it is the generator's only production consumer in this phase
+  (removing it makes R2's `enum_eliminator_sigs` dead code, which is clippy-fatal under
+  `-D warnings`), and the signature's paired lowering symbol becomes load-bearing in Phase
+  4. Note the asymmetry for whoever touches env assembly: the three other assembly sites
+  (the REPL's, and the two poly entry points) build only `eliminator_registry`.
 
 ### Phase 3 — variant-accessor IR lowering
 
@@ -870,7 +899,29 @@ tripped it first — only the `lower_enum_word` match remains to update here):
   `Shape?` passes the checker and then reaches the generic call path with no minted
   symbol (`src/ir/func_builder/calls.rs`, `checked user word exists`). No stopgap guard
   is added for it — the interception this phase installs is the fix — but the golden
-  below is what proves it gone, so it must build and run, not merely check.
+  below is what proves it gone, so it must build and run, not merely check. The same
+  panic hits at the REPL, where it kills the session rather than printing an error.
+- **Write the golden's arms adjacently.** Phase 2's tag-consumption check is syntactic
+  (see its `as shipped` notes): a stack-neutral term written *between* two arms is
+  rejected, even though the stack-based arm collection would accept it. A golden needing
+  the looser form would be asking for a rule change, not exercising this phase.
+- **Open question this phase must rule on: may a `Type::Variant` leave the call?** An arm
+  whose body does not consume its variant leaves it on the caller's stack, and
+  `check_eliminator_call` accepts that today — verified at Phase 2's HEAD with
+  `type: W | One a i64 ;` and `: main ( -- ) 3 One ~[ ( One ) ] W? drop ;`, which checks
+  clean. It is only reachable for a **single-variant** enum: with two or more variants the
+  arms leave different variant types and R4 step 5's cross-arm agreement rejects the call
+  already. Nothing enforces Slice 2's R8 ("a `Type::Variant` value has no legal
+  destination outside the arm that bound it") here; R8 is enforced by unspellability
+  instead, so the value cannot cross a word boundary (`( W -- W.One )` is `unknown type
+  W.One`) but can sit on `main`'s stack and be `drop`ped. Two coherent rulings: reject a
+  `Type::Variant` (or a reference to one) on an arm's exit row in
+  `check_eliminator_call`, per R8's letter; or allow it, since this phase's R6 erasure
+  gives `Type::Variant` the same `IrType` as its parent enum
+  (`src/ir/types.rs:286`'s `unreachable!` becomes a real case) and the value is
+  representationally just the enum. Deliberately not settled in Phase 2: the frontend
+  rule and the lowering that would have to honour it belong to the same decision, and
+  Phase 2 has no way to test the second half.
 
 Exit criteria (breakable assertions):
 

@@ -1278,10 +1278,12 @@ fn check_branch_join(
                             scope,
                             poly,
                             &HashSet::new(),
-                            false,
-                            false,
-                            false,
-                            false,
+                            LiteralBoundary {
+                                shape_changing: false,
+                                is_arm: false,
+                                caller_tail: false,
+                                finalize: false,
+                            },
                             None,
                         )?;
                         check_literal_against_declared_effect(
@@ -1300,10 +1302,12 @@ fn check_branch_join(
                             scope,
                             poly,
                             &HashSet::new(),
-                            false,
-                            false,
-                            false,
-                            false,
+                            LiteralBoundary {
+                                shape_changing: false,
+                                is_arm: false,
+                                caller_tail: false,
+                                finalize: false,
+                            },
                             None,
                         )?;
                         // R23: the merged erased slot's surviving set is

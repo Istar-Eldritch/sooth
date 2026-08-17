@@ -2225,6 +2225,16 @@ impl Session {
     /// leave it (a local or a genuinely absent name falls through to the
     /// ordinary unknown-word path), `Err` for R15's `not exported`.
     fn rewrite_import_call(&self, name: &str, span: Span) -> Result<Option<String>, String> {
+        // Phase 6 slice 3 review fix (cycle 3): the *whole* spelling first. A
+        // word may itself be named `ok?` or `foo>` -- an ordinary spelling,
+        // aliased whole -- and teaching `split_destructure_suffix` about the
+        // eliminator's `?` made every such imported word miss its alias and
+        // report `unknown word` (a call that resolved before this slice).
+        // Only when no alias holds the whole name is a trailing sigil a
+        // *generated* word's suffix on an aliased type (`q::P>`).
+        if let Some(internal) = self.import_aliases.get(name) {
+            return Ok(Some(internal.clone()));
+        }
         let (base, suffix) = split_destructure_suffix(name);
         if let Some(internal) = self.import_aliases.get(base) {
             return Ok(Some(format!("{internal}{suffix}")));
@@ -2236,10 +2246,18 @@ impl Session {
             if self.import_qualifier_module.contains_key(qualifier) {
                 if let Some(private) = self.import_private.get(qualifier) {
                     if private.contains(rest) {
-                        let (base_name, _) = split_destructure_suffix(rest);
-                        return Err(crate::resolve::not_exported_error(
-                            base_name, qualifier, span,
-                        ));
+                        // R15 gates a generated word by its *type*'s export
+                        // status, so the message names the type (`q::P>` ->
+                        // `P`). A private type is retained under its bare name
+                        // beside its generated one, which is what tells that
+                        // case from a word whose own name ends in `>`/`?`
+                        // (`ok?`, which names itself).
+                        let (head, _) = split_destructure_suffix(rest);
+                        let named = match private.contains(head) {
+                            true => head,
+                            false => rest,
+                        };
+                        return Err(crate::resolve::not_exported_error(named, qualifier, span));
                     }
                 }
             }
@@ -4054,6 +4072,54 @@ mod tests {
         assert!(
             session.env["ordinary"].symbol.contains("__gen"),
             "an ordinary word still mints `__gen`"
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (cycle 3): teaching
+    /// `split_destructure_suffix` about the eliminator's `?` made an imported
+    /// word whose own name ends in `?` (`ok?`, an ordinary spelling) split to
+    /// a base the import event never aliased, so a `q::ok?` call that resolved
+    /// before this slice reported `unknown word`. The whole spelling is tried
+    /// first, and the split still serves a genuinely generated name (`q::P>`).
+    /// The `not exported` wording follows the same rule: a generated word is
+    /// gated by its type, a suffix-spelled word by itself.
+    #[test]
+    fn import_call_to_a_word_named_like_a_generated_one_resolves() {
+        let d = LibDir::new("suffix-word");
+        let lib = d.write(
+            "lib.sth",
+            "type: P x i64 ;\n\
+             type: H y i64 ;\n\
+             : ok? ( i64 -- bool ) 0 > ;\n\
+             : hidden? ( i64 -- bool ) 0 > ;\n\
+             export: ok? P ;\n",
+        );
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+        let at = |name: &str| session.rewrite_import_call(name, Span::default());
+
+        assert_eq!(
+            at("q::ok?").unwrap(),
+            Some("q::ok?__import0".to_string()),
+            "an exported word whose name ends in `?` resolves whole"
+        );
+        assert_eq!(
+            at("q::P>").unwrap(),
+            Some("q::P__import0>".to_string()),
+            "a generated destructure still resolves through the split base"
+        );
+        let hidden = at("q::hidden?").unwrap_err();
+        assert!(
+            hidden.contains("`hidden?` is not exported"),
+            "a private word names itself, suffix included: {hidden}"
+        );
+        let private_type = at("q::H>").unwrap_err();
+        assert!(
+            private_type.contains("`H` is not exported"),
+            "a generated word is gated by its type, and names it: {private_type}"
         );
     }
 

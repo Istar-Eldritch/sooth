@@ -611,6 +611,16 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // generated word; the registry beside it is what a call site is actually
     // routed by, since an eliminator's arms are matched to variants by
     // annotation tag rather than unified slot by slot.
+    //
+    // Review fix (cycle 3): so this registration changes no diagnostic and no
+    // dispatch -- `check_term`'s interception precedes every env/poly lookup
+    // unconditionally, and a user word colliding with the name is rejected
+    // outright by `check_no_word_shadows_eliminator` above. It is the
+    // generator's only consumer in this phase (the REPL's own env assembly
+    // builds the registry without it), and the `PolySig` becomes load-bearing
+    // in Phase 4, where the lowering symbol beside it mints `EnumWord::
+    // Eliminate`. Deleted, nothing observable changes and the generator R2
+    // exists to add becomes dead code.
     for (name, _symbol, sig) in enum_eliminator_sigs(&module.enums) {
         poly_env.entry(name).or_default().push((sig, None));
     }
@@ -1803,6 +1813,38 @@ fn reconcile_annotation_with_parameter(
 /// compares one sibling literal's actual exit types against another's,
 /// erroring at whichever literal disagrees (R-P2-4: no row unification,
 /// `..o` is discovered by forward checking, never solved for).
+/// The four boundary properties `check_literal_against_declared_effect` reads,
+/// bundled (Phase 6 slice 3 review fix, cycle 3): four consecutive bare `bool`s
+/// at a call site say nothing about which is which, and this function already
+/// takes more arguments than a reader can hold in their head.
+#[derive(Clone, Copy)]
+struct LiteralBoundary {
+    /// Slice 10c (R-P2-3/R-P2-4): true for a declared quotation whose input
+    /// and output rows differ (`..i -- ..o`, `..i != ..o`). There the exit row
+    /// has no fixed point to check against -- the whole point of the shape
+    /// change -- so only the declared fixed trailing outputs are checked and
+    /// the literal's actual exit types are handed back unjudged.
+    shape_changing: bool,
+    /// Slice 10c: the literal fills a parameter slot the callee `call`s in
+    /// *tail* position -- a branch arm of `if`/`unless`, as opposed to `times`'
+    /// body. Such a literal runs at most once per entry.
+    is_arm: bool,
+    /// Whether the *call site* is itself in tail position, which an `is_arm`
+    /// literal inherits.
+    caller_tail: bool,
+    /// Review fix (Phase 6 slice 3, finding 1): an arm-flavoured caller falls
+    /// into one of two shapes. A combinator's argument pre-check (`if`,
+    /// `check_poly_combinator_args`) is thrown away -- the splice that follows
+    /// re-checks whichever arm actually runs, for real, so this probe's own
+    /// move-state consumption must leave no trace (`finalize = false`). The
+    /// eliminator (`check_eliminator_call`) never splices: this call *is* the
+    /// only accounting the checker ever does for that arm, so its consumption
+    /// must survive (`finalize = true`), and the caller reconciles every arm's
+    /// surviving state itself (`Moves::join`, generalized to N arms) rather
+    /// than losing it to a restore that has nothing later to answer to.
+    finalize: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_literal_against_declared_effect(
     id: QuotId,
@@ -1820,20 +1862,7 @@ fn check_literal_against_declared_effect(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
-    shape_changing: bool,
-    is_arm: bool,
-    caller_tail: bool,
-    // Review fix (Phase 6 slice 3, finding 1): an arm-flavoured caller falls
-    // into one of two shapes. A combinator's argument pre-check (`if`,
-    // `check_poly_combinator_args`) is thrown away -- the splice that follows
-    // re-checks whichever arm actually runs, for real, so this probe's own
-    // move-state consumption must leave no trace (`finalize = false`). The
-    // eliminator (`check_eliminator_call`) never splices: this call *is* the
-    // only accounting the checker ever does for that arm, so its consumption
-    // must survive (`finalize = true`), and the caller reconciles every arm's
-    // surviving state itself (`Moves::join`, generalized to N arms) rather
-    // than losing it to a restore that has nothing later to answer to.
-    finalize: bool,
+    boundary: LiteralBoundary,
     // Review fix (Phase 6 slice 3, cycle 2): the caller's own slots for the
     // declared *inputs*, when the boundary hands the literal a value it
     // already holds rather than a freshly computed one. `None` (every caller
@@ -1845,6 +1874,12 @@ fn check_literal_against_declared_effect(
     // independent `&!` to the same place was accepted alongside it.
     input_slots: Option<&[Slot]>,
 ) -> Result<Vec<Slot>, String> {
+    let LiteralBoundary {
+        shape_changing,
+        is_arm,
+        caller_tail,
+        finalize,
+    } = boundary;
     let body = prov.quotations[id.0].body.clone();
     // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
     // must match the boundary's declared flavour, independent of whatever
@@ -2266,32 +2301,27 @@ fn check_eliminator_call(
             &mut arm_scope,
             poly,
             granted,
-            true,
-            true,
-            tail,
-            true,
+            LiteralBoundary {
+                shape_changing: true,
+                is_arm: true,
+                caller_tail: tail,
+                finalize: true,
+            },
             Some(&received),
         )?;
         arm_moves.push(arm_scope.moves);
         match &baseline {
             None => baseline = Some(arm_result),
             Some(expected) => {
-                let expected_types: Vec<Type> = expected.iter().map(|s| s.ty).collect();
-                let actual_types: Vec<Type> = arm_result.iter().map(|s| s.ty).collect();
-                let agrees = actual_types.len() == expected_types.len()
-                    && actual_types.iter().zip(&expected_types).all(|(f, w)| {
-                        matches!(
-                            match_slot(Slot::computed(*f), *w),
-                            SlotMatch::Exact | SlotMatch::LiteralSizeType
-                        )
-                    });
-                if !agrees {
+                if let Some((baseline_types, arm_types)) =
+                    arm_exit_row_mismatch(expected, &arm_result)
+                {
                     return Err(combinator_branch_output_mismatch_error(
                         ctx,
                         literal_span,
                         name,
-                        &expected_types,
-                        &actual_types,
+                        &baseline_types,
+                        &arm_types,
                     ));
                 }
                 // Finding 2: type agreement is not evidence the arms leave the
@@ -2318,6 +2348,31 @@ fn check_eliminator_call(
         scope.moves = joined;
     }
     Ok(baseline.unwrap_or(row))
+}
+
+/// R4 step 5: whether the running baseline exit row and one later arm's
+/// disagree on types, and if so the pair the diagnostic names -- the baseline
+/// (the written-*first* arm's shape, decision 5) as `expected`, the arm being
+/// checked as `found`, in that order.
+///
+/// Split out of `check_eliminator_call` as a pure function so a unit test pins
+/// that pairing by structure: two `Type`s can `Display` identically, so a
+/// rendered-message assertion alone cannot tell the two apart from a swap
+/// between them.
+fn arm_exit_row_mismatch(baseline: &[Slot], arm: &[Slot]) -> Option<(Vec<Type>, Vec<Type>)> {
+    let expected: Vec<Type> = baseline.iter().map(|s| s.ty).collect();
+    let found: Vec<Type> = arm.iter().map(|s| s.ty).collect();
+    let agrees = found.len() == expected.len()
+        && found.iter().zip(&expected).all(|(f, w)| {
+            matches!(
+                match_slot(Slot::computed(*f), *w),
+                SlotMatch::Exact | SlotMatch::LiteralSizeType
+            )
+        });
+    match agrees {
+        true => None,
+        false => Some((expected, found)),
+    }
 }
 
 /// R4 step 6 (review fix, finding 2): reconcile one exit-row position across
@@ -2526,16 +2581,6 @@ fn combinator_branch_output_mismatch_error(
     expected: &[Type],
     found: &[Type],
 ) -> String {
-    // Phase 6 slice 3 review fix (finding 3): the exact `Vec<Type>` pair, for
-    // tests that must discriminate decision 5's written-vs-declaration
-    // ordering on its own structure -- two types can `Display` identically,
-    // so a test reading the rendered message alone cannot tell `expected` and
-    // `found` apart from a swap between them once that happens. Compiled out
-    // entirely outside `cfg(test)`.
-    #[cfg(test)]
-    tests::LAST_BRANCH_MISMATCH.with(|last| {
-        *last.borrow_mut() = Some((expected.to_vec(), found.to_vec()));
-    });
     // Phase 6 slice 3 review fix (finding 4): shared with `check_eliminator_call`
     // (decision 4), whose `word` is a call name that may carry the `?` suffix
     // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
@@ -2987,18 +3032,6 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
-    use std::cell::RefCell;
-
-    // Review fix (Phase 6 slice 3, finding 3): the raw `Vec<Type>` pair
-    // `combinator_branch_output_mismatch_error` was actually called with,
-    // captured for tests that must pin decision 5's arm ordering by
-    // structure rather than by the rendered message (two `Type`s can
-    // `Display` identically, which a rendered-message assertion cannot see
-    // through).
-    thread_local! {
-        pub(super) static LAST_BRANCH_MISMATCH: RefCell<Option<(Vec<Type>, Vec<Type>)>> =
-            const { RefCell::new(None) };
-    }
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
@@ -4104,12 +4137,10 @@ mod tests {
         // discriminates the two orderings: iterating in declaration order
         // swaps them.
         //
-        // Review fix (finding 3): pin the exact `Vec<Type>` pair passed to
-        // `combinator_branch_output_mismatch_error`, per the spec's own
-        // requirement, rather than the rendered message alone -- `i64` and
-        // `bool` happen to `Display` distinctly, but that is not what this
-        // assertion should be resting on.
-        LAST_BRANCH_MISMATCH.with(|last| *last.borrow_mut() = None);
+        // The pairing itself (baseline as `expected`, offender as `found`) is
+        // pinned by structure in `arm_exit_row_mismatch_pairs_baseline_first`;
+        // here `bool` and `i64` `Display` distinctly, so the rendered message
+        // discriminates the ordering too.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- bool ) ~[ ( Rect ) Rect> < ] ~[ ( Circle ) Circle> ] Shape? ;\n\
@@ -4120,13 +4151,27 @@ mod tests {
             err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
             "the written-first (`Rect`) arm must set the baseline: {err}"
         );
-        let (expected, found) = LAST_BRANCH_MISMATCH
-            .with(|last| last.borrow_mut().take())
-            .expect("combinator_branch_output_mismatch_error was called");
+    }
+
+    /// Decision 5's pairing, by structure rather than by rendered message: the
+    /// running baseline (the written-first arm) is `expected`, the arm under
+    /// check is `found`. A swap between them is invisible to a message
+    /// assertion whenever two shapes `Display` identically.
+    #[test]
+    fn arm_exit_row_mismatch_pairs_baseline_first() {
+        let baseline = [Slot::computed(Type::BOOL)];
+        let agreeing = [Slot::computed(Type::BOOL)];
+        let disagreeing = [Slot::computed(Type::I64)];
+        assert_eq!(arm_exit_row_mismatch(&baseline, &agreeing), None);
         assert_eq!(
-            (expected, found),
-            (vec![Type::BOOL], vec![Type::I64]),
-            "the written-first (`Rect`) arm's shape must be `expected`, not `found`"
+            arm_exit_row_mismatch(&baseline, &disagreeing),
+            Some((vec![Type::BOOL], vec![Type::I64])),
+            "the baseline's shape is `expected`, the arm's is `found`"
+        );
+        assert_eq!(
+            arm_exit_row_mismatch(&baseline, &[]),
+            Some((vec![Type::BOOL], vec![])),
+            "a differing row *length* is a disagreement, not a prefix match"
         );
     }
 
@@ -4139,9 +4184,6 @@ mod tests {
         // stack, without the reversal back to written order -- makes `A`'s
         // `i64` the baseline instead, which the written-vs-declaration test
         // above cannot catch (there, pop order and declaration order agree).
-        //
-        // Review fix (finding 3): pin the exact `Vec<Type>` pair, as above.
-        LAST_BRANCH_MISMATCH.with(|last| *last.borrow_mut() = None);
         let err = check_src(&format!(
             "{ABC_DECL}\
              : f ( Abc -- bool ) ~[ ( B ) B> 0 < ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
@@ -4151,14 +4193,6 @@ mod tests {
         assert!(
             err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
             "the written-first (`B`) arm must set the baseline: {err}"
-        );
-        let (expected, found) = LAST_BRANCH_MISMATCH
-            .with(|last| last.borrow_mut().take())
-            .expect("combinator_branch_output_mismatch_error was called");
-        assert_eq!(
-            (expected, found),
-            (vec![Type::BOOL], vec![Type::I64]),
-            "the written-first (`B`) arm's shape must be `expected`, not `found`"
         );
     }
 
