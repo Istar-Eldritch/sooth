@@ -110,11 +110,14 @@ by exit-time structural unification and instantiation-time reverse-mint unificat
 **P7.S3b — Quotations in a polymorphic body.** A quotation in a non-inline polymorphic
 body is rejected outright: `` error: a quotation in the polymorphic body of `w` is not yet
 supported `` (`src/check/poly.rs:505-513`). It fires for *any* quotation — a bare `~[ ]`,
-an `if`, a declared comparator parameter — and it is a deliberate structural rejection,
-not a stub: `poly_term`'s stack is `Vec<PolyType>` rather than `Vec<Slot>`, so there is
-nowhere to hang the quotation marker, and Slice 10a's D1 forbids a `PolyType` variant for
-it. The inline path is unaffected, because splicing into a concrete caller exposes that
-caller's full `Slot` stack.
+an `if`, a declared comparator parameter. The inline path is unaffected, because splicing
+into a concrete caller exposes that caller's full `Slot` stack.
+The brief (`docs/roadmap/P7/slice3b-brief.md`) carries worker-verified recon, and it
+corrects the rejection's own stated reason: the claim that there is "nowhere to hang the
+quotation marker" on a `Vec<PolyType>` stack is false, refuted by the parallel per-slot
+`lits` vector the same function already threads. The true constraints are narrower — the
+identity must not live in the *type* (two bodies with one effect are one `PolyType`), and
+the side state must be positional rather than name-keyed.
 **This is what makes every interesting polymorphic word `inline` today**, and `inline`
 words mint no monomorph symbol at all — their bodies are spliced, so nothing per-type is
 emitted. Probe-verified: a non-inline poly word over an array *does* work and mints
@@ -122,9 +125,18 @@ emitted. Probe-verified: a non-inline poly word over an array *does* work and mi
 hits this wall. Since `if` is itself a library word over quotations (Slice 10c), any
 polymorphic word that *branches* is forced inline, which is why it is a prerequisite of
 S3d rather than a nicety: a bounded `sort` needs compare-then-conditionally-swap.
-**Exit:** a non-inline polymorphic word's body may contain a quotation (and therefore
-`if`), checked abstractly and lowered per instantiation, with the quotation's identity
-surviving unification, `Subst`, and mangling.
+Three check-side layers, and **zero lowering work** — probe-verified by stubbing the
+rejection open and running the result: the concrete lowering path already splices
+quotation bodies, grounds `'T` structurally per instantiation, and picks the correct
+per-type destructor for a linear `'T` dropped inside a spliced quotation. The layers are a
+`PolySlot { pt, quot }` representation change (~54 sites), a combinator dispatch family
+(`call`/`branch`/`if`, absent from `poly_call_term` entirely — the bulk), and an abstract
+branch-join, which does not exist in any form today (`poly_walk` is a linear fold and
+`Moves::join` is never called from `poly.rs`).
+**Exit:** a non-inline polymorphic word's body may contain a quotation and therefore
+branch via `if`, with the quotation's identity surviving a shuffle, arms merged over an
+abstract stack with type variables rigid, and a materialised (non-spliced) quotation
+rejected with a located error.
 
 **P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
 types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
