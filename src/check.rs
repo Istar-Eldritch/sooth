@@ -2191,7 +2191,7 @@ fn check_literal_against_declared_effect(
 /// declared-vs-written comparison rather than by a mode-specific diagnostic.
 #[allow(clippy::too_many_arguments)]
 fn check_eliminator_call(
-    id: EnumId,
+    gate_id: EnumId,
     name: &str,
     span: Span,
     mut stack: Vec<Slot>,
@@ -2206,13 +2206,14 @@ fn check_eliminator_call(
     granted: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
-    let enum_decl = &ctx.enums()[id.index()];
-    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
-    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
-    // built from the mangled base) -- unlike `name_static`, which every
-    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
-    // would still leave `Shape__m0` in a diagnostic.
-    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    // R5 (Slice 3b phase 2): `gate_id` is the registry's entry for this call
+    // name -- a base-family key, since two instantiations of one generic
+    // enum share one registry entry (last write wins). It is used below only
+    // to gate that this call is an eliminator of the right family and for
+    // the arity of the underflow diagnostic (a variant count every
+    // instantiation of the family shares); the operative `EnumId` this call
+    // actually eliminates is read off the scrutinee's own type once found.
+    let gate_decl = &ctx.enums()[gate_id.index()];
     let held = stack.len();
     // R4 step 1: arm collection is variable-arity, not a fixed
     // `1 + variant_count` pop. A fixed pop cannot tell "an arm is missing"
@@ -2246,7 +2247,7 @@ fn check_eliminator_call(
             ctx,
             span,
             name,
-            enum_decl.variants.len() + 1,
+            gate_decl.variants.len() + 1,
             held,
         ));
     };
@@ -2260,15 +2261,39 @@ fn check_eliminator_call(
         Some((referent, mutable)) => (referent, Some(mutable)),
         None => (scrutinee.ty, None),
     };
-    if referent != Type::Enum(id, enum_decl.name_static) {
+    // R5: the operative `EnumId` is the scrutinee's own -- not `gate_id` --
+    // so two asymmetric instantiations of one generic enum eliminate
+    // independently in the same word: the registry's one entry is only
+    // consulted above to reach this call at all, never to decide which
+    // instantiation it narrows to. A non-enum scrutinee, or one whose enum is
+    // not a member of this call name's base family, is the same
+    // `type_mismatch_error` as before.
+    let Type::Enum(id, _) = referent else {
         return Err(type_mismatch_error(
             ctx,
             span,
             name,
-            Type::Enum(id, enum_decl.name_static),
+            Type::Enum(gate_id, gate_decl.name_static),
+            scrutinee.ty,
+        ));
+    };
+    if generic_surface_name(&ctx.enums()[id.index()].name) != generic_surface_name(&gate_decl.name)
+    {
+        return Err(type_mismatch_error(
+            ctx,
+            span,
+            name,
+            Type::Enum(gate_id, gate_decl.name_static),
             scrutinee.ty,
         ));
     }
+    let enum_decl = &ctx.enums()[id.index()];
+    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
+    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
+    // built from the mangled base) -- unlike `name_static`, which every
+    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
+    // would still leave `Shape__m0` in a diagnostic.
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
 
     // R4 step 3: exhaustiveness and duplication, in written source order and
     // before any arm body is checked -- adapted from `check_clause_word`,
