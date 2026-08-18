@@ -7,9 +7,10 @@ not a schedule.
 
 Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-5 are
 complete and merged to `main` — see each phase file's own header for its exit criteria
-and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-2
-(quotation effect annotations; variant types and accessors) are done and merged; see
-[P6](./P6-enum-elimination.md) for the full slice breakdown. **Phase 7 (stdlib and
+and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-3
+(quotation effect annotations; variant types and accessors; the mode-polymorphic
+eliminator word) are done and merged; see [P6](./P6-enum-elimination.md) for the full
+slice breakdown. **Phase 7 (stdlib and
 `no_std` layering) is in progress**: Slice 1 (accessors as receiver-directed
 projections) and Slice 2 (static storage and global sets) are done and merged; see
 [P7](./P7-stdlib-nostd.md) for the full slice breakdown. Per-phase completion history
@@ -48,7 +49,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P3** | [The linear spine](./P3-linear-spine.md) | `[XL]`  ✅ done — the point of the language |
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
-| **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 2) |
+| **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
 | **P7** | [Stdlib and `no_std` layering](./P7-stdlib-nostd.md) | `[L]` — in progress (Slices 1-2) |
 | **P8** | [Concurrency (library)](./P8-concurrency.md) | `[M]` |
 | **P9** | [Bare metal](./P9-bare-metal.md) | `[M]` — the craft milestone |

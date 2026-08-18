@@ -83,11 +83,24 @@ by name. Verified by unit tests against hand-built checker state, not an `.sth` 
 since no program can construct a `Type::Variant` until Slice 3 ships; `examples/vm.sth` is
 untouched this slice.
 
-**P6.S3 — Phase 6 Slice 3 — the eliminator word.** The generated per-enum eliminator, arms
-matched by declared variant, exhaustiveness and duplication as named errors, arm-position
-effect elision. Lowers to the existing N-way dispatch (`lower_clauses`).
+**P6.S3 — Phase 6 Slice 3 — the eliminator word.** `[ done ]` The generated per-enum
+eliminator (`Shape?`), arms matched by declared variant via a leading `( Circle )`/
+`( &Circle )`/`( &!Circle )` tag, exhaustiveness and duplication as named errors,
+arm-position effect elision. Lowers to the existing N-way dispatch (`lower_clauses`) via
+a new additive `ArmBinding::WholeValue`. The scrutinee is **mode-polymorphic**: owning,
+`&`, or `&!`, resolved from the eliminator call's own operand type, with every arm's mode
+matching that call's mode uniformly (not a per-arm independent choice). This reuses
+`check_field_projection`'s and `lower_clauses`'s existing value-vs-reference branching
+rather than inventing a third mechanism, and forces `ir_type_of(Type::Variant)` to stop
+being an `unreachable!` and erase to its parent enum's `IrType::Enum(id)` (a reference to
+a variant is now a real interned referent, not merely a hypothetical one). See
+`docs/roadmap/P6/slice3-spec.md` for the full design and its review history (decision 6,
+the mode-polymorphism, was added post-hoc after the first three review rounds and
+re-reviewed on its own before implementation).
 **Exit:** a match is a term usable mid-body and inside a quotation; reordering a `type:`
-declaration's variants leaves every call site correct.
+declaration's variants leaves every call site correct. Two goldens
+(`examples/eliminator.sth`, `examples/eliminator_ref.sth`) cover owning- and
+reference-mode dispatch.
 
 **P6.S4 — Phase 6 Slice 4 — migration.** Every clause-dispatch site moves to the eliminator, and
 `WordBody::Clauses`/`parse_clauses` are deleted, including the `Bool` declaration
