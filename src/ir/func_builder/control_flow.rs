@@ -1,22 +1,8 @@
 //! `FuncBuilder` control-flow method group: `emit_select`, `total_order_key`,
-//! `lower_if`, `seal_arm`, and `lower_clauses` — the if/select/clause lowering
-//! primitives that build and merge SSA blocks.
+//! `lower_if`, `seal_arm`, and `lower_clauses` — the if/select/dispatch
+//! lowering primitives that build and merge SSA blocks.
 
 use super::*;
-
-/// What an arm's block starts with once the tag dispatch has landed on it
-/// (Phase 6 slice 3, R5).
-///
-/// A clause-style word's clause binds the matched variant's *fields* (`| r |`),
-/// so the payload is decomposed onto the stack before the body runs. An
-/// eliminator arm binds nothing: it receives the whole narrowed value and reads
-/// what it needs through a `&field` projection, which addresses the aggregate
-/// itself rather than its scattered fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::ir) enum ArmBinding {
-    Decompose,
-    WholeValue,
-}
 
 impl<'a> FuncBuilder<'a> {
     /// A two-block compare-and-select (`max`/`max-total`'s shared shape,
@@ -197,60 +183,35 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// The enum a clause word dispatches on, and its scrutinee reference's
-    /// mutability (`None` when the scrutinee is owning). Read from the
-    /// already-checked frontend `Type` rather than re-derived from the lowered
-    /// scrutinee's `IrType` — because a `&!Enum` scrutinee lowers to the opaque
-    /// `IrType::Ptr`, not `IrType::Enum(id)`, so reading `self.value_type` here
-    /// would make the enum arm below a reachable panic in reference mode.
-    pub(in crate::ir) fn clause_scrutinee_parts(
-        &self,
-        scrutinee_ty: Type,
-    ) -> (EnumId, Option<bool>) {
-        match scrutinee_ty {
-            Type::Enum(id, _) => (id, None),
-            Type::Ref(rid, mutable, _) => match self.refs.referent[rid.index()] {
-                IrType::Enum(id) => (id, Some(mutable)),
-                _ => unreachable!("checked: reference-mode clause scrutinee's referent is an enum"),
-            },
-            _ => unreachable!("checked: a clause word's top input is an enum"),
-        }
-    }
-
-    /// Lower a clause-style word (R16): load the scrutinee's discriminant into
-    /// a temp, dispatch N-way (a `Cmp(Eq)`-tag compare-chain to each variant's
-    /// clause block, the last variant the terminal fall-through since coverage
-    /// is exhaustive), and merge every clause's outputs at a single join block
-    /// with one `Phi` per declared output over all N clause predecessors.
+    /// Lower a tag dispatch (R16): load the scrutinee's discriminant into a
+    /// temp, dispatch N-way (a `Cmp(Eq)`-tag compare-chain to each variant's
+    /// arm block, the last variant the terminal fall-through since coverage
+    /// is exhaustive), and merge every arm's outputs at a single join block
+    /// with one `Phi` per declared output over all N arm predecessors.
     ///
     /// This is deliberately *not* the 2-predecessor `lower_if` shape: the join
     /// has N predecessors and M outputs.
     ///
     /// `scrutinee_parts` is the enum being dispatched on and, for a reference
-    /// scrutinee, that reference's mutability (`None` for an owning one). A
-    /// clause word derives the pair from its declared scrutinee type
-    /// (`clause_scrutinee_parts`); an eliminator call has both in hand already
-    /// (slice 3b, R7), the enum from the call it resolved to and the mode from
-    /// its arms' tags.
+    /// scrutinee, that reference's mutability (`None` for an owning one). An
+    /// eliminator call has both in hand already (slice 3b, R7), the enum from
+    /// the call it resolved to and the mode from its arms' tags.
     pub(in crate::ir) fn lower_clauses(
         &mut self,
         clauses: &[Clause],
         params: &[Value],
         scrutinee_parts: (EnumId, Option<bool>),
-        binding: ArmBinding,
         tail: bool,
     ) {
-        // A clause word is self-tail-recursive iff a header was opened (R6);
-        // its clause bodies then carry tail position (D7). An eliminator call
-        // is a *term*, though, so its arms inherit tail position only when the
-        // call itself sits in it: an arm of a mid-body call that ends in a
-        // self-call must emit a real call, or it would back-edge past the rest
-        // of the enclosing word (Phase 6 slice 3, R5).
+        // A dispatch back-edges only where a header was opened (R6). An
+        // eliminator call is a *term*, so its arms inherit tail position only
+        // when the call itself sits in it: an arm of a mid-body call that ends
+        // in a self-call must emit a real call, or it would back-edge past the
+        // rest of the enclosing word (Phase 6 slice 3, R5).
         let tail = tail && self.header.is_some();
-        let scrutinee = *params.last().expect("clause word has a scrutinee input");
+        let scrutinee = *params.last().expect("a dispatch has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
         let (scrut_id, ref_mutable) = scrutinee_parts;
-        let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
         let n = self.enums.layouts[scrut_id.index()].variants.len();
 
         // Slice 9 (R1/R5): a non-reference scrutinee of a zero-payload enum
@@ -261,9 +222,9 @@ impl<'a> FuncBuilder<'a> {
         let scrutinee_is_value =
             ref_mutable.is_none() && self.enums.layouts[scrut_id.index()].is_scalar;
 
-        // Map each variant index to the clause handling it (checker-guaranteed
+        // Map each variant index to the arm handling it (checker-guaranteed
         // exact coverage), so dispatch on tag == variant_index lands correctly
-        // regardless of clause source order.
+        // regardless of the order the arms were written in.
         let clause_ids = self.dispatch_on_tag(scrutinee, scrut_id, scrutinee_is_value);
         let join_id = self.fresh_block();
         let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
@@ -275,16 +236,15 @@ impl<'a> FuncBuilder<'a> {
             // constructor entry (checker-guaranteed), so the non-`Construct`
             // path is unreachable, not a real case.
             let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant] else {
-                unreachable!("a clause always dispatches to a variant constructor")
+                unreachable!("an arm always dispatches to a variant constructor")
             };
             clause_for_variant[vi] = Some(clause);
         }
 
         // An eliminator call is a mid-body term, not a whole word body, so
-        // its arms must not wipe the caller's locals (Phase 6 slice 3, R5): a
-        // clause word starts with an empty `self.locals` anyway, so restoring
-        // to the depth captured here is `clear()` for that caller and a
-        // no-op-preserving truncate for an eliminator call's enclosing scope.
+        // its arms must not wipe the caller's locals (Phase 6 slice 3, R5):
+        // restoring to the depth captured here is a no-op-preserving truncate
+        // of the enclosing scope.
         let locals_depth = self.locals.len();
         let mut clause_ends: Vec<(BlockId, Vec<Value>)> = Vec::with_capacity(n);
         for vi in 0..n {
@@ -292,56 +252,17 @@ impl<'a> FuncBuilder<'a> {
             self.start_block(clause_ids[vi]);
             self.locals.truncate(locals_depth);
             self.stack = stack_below.clone();
-            match binding {
-                // Push the variant's payload first-deepest, loading each field
-                // from `payload_offset + field.offset`. In reference mode every
-                // field is pushed as a reference to its own storage inside the
-                // scrutinee (its address, never its value), registered in
-                // `ref_inner` so a later access/projection through it resolves
-                // the right shape — the same `IrType::Ptr` any other reference
-                // lowers to.
-                ArmBinding::Decompose => {
-                    let fields = self.enums.layouts[scrut_id.index()].variants[vi]
-                        .fields
-                        .clone();
-                    for field in &fields {
-                        let adjusted = FieldLayout {
-                            offset: payload_offset + field.offset,
-                            ..*field
-                        };
-                        match ref_mutable {
-                            Some(_) => {
-                                let fptr = self.field_ptr(scrutinee, adjusted.offset);
-                                self.push_reference(fptr, adjusted.ty);
-                            }
-                            None => self.load_field_onto_stack(scrutinee, adjusted),
-                        }
-                    }
-                }
-                // Phase 6 slice 3 (R5): an eliminator arm receives the whole
-                // narrowed value — the aggregate in owning mode, the reference
-                // established at entry in reference mode — because its body
-                // reads fields through `&field` projections, which address the
-                // aggregate rather than consuming pre-decomposed values.
-                ArmBinding::WholeValue => {
-                    debug_assert!(
-                        clause.locals.is_empty(),
-                        "an eliminator arm binds no clause locals"
-                    );
-                    self.stack.push(scrutinee);
-                }
-            }
-            // Bind clause-body `| names |` locals (top N, leftmost deepest).
-            let take = clause.locals.len();
-            let bound = self.stack.split_off(self.stack.len() - take);
-            for (name, value) in clause.locals.iter().zip(bound) {
-                self.locals.push((name.clone(), value));
-            }
-            // R7/R9: a clause whose body ends in a tail self-call back-edges to
+            // Phase 6 slice 3 (R5): an arm receives the whole narrowed value —
+            // the aggregate in owning mode, the reference established at entry
+            // in reference mode — because its body reads fields through
+            // `&field` projections, which address the aggregate rather than
+            // consuming pre-decomposed values.
+            self.stack.push(scrutinee);
+            // R7/R9: an arm whose body ends in a tail self-call back-edges to
             // the shared loop header and contributes no join predecessor;
             // `tail` is true iff this word is self-tail-recursive. The header
-            // phi preds (entry + tail clause ends) and the dispatch-join phi
-            // preds (non-tail clause ends) therefore stay disjoint.
+            // phi preds (entry + tail arm ends) and the dispatch-join phi
+            // preds (non-tail arm ends) therefore stay disjoint.
             self.terminated = false;
             self.lower_terms(&clause.body, tail);
             if !self.terminated {
@@ -357,7 +278,7 @@ impl<'a> FuncBuilder<'a> {
         // entry above).
         self.locals.truncate(locals_depth);
 
-        // Every clause back-edged: the join is unreachable and the word is
+        // Every arm back-edged: the join is unreachable and the word is
         // terminated (no fall-through Ret).
         if clause_ends.is_empty() {
             self.terminated = true;
@@ -365,7 +286,7 @@ impl<'a> FuncBuilder<'a> {
         }
 
         // Single join block: one phi per declared output, merging the
-        // fall-through clause predecessors.
+        // fall-through arm predecessors.
         self.start_block(join_id);
         self.terminated = false;
         let m = clause_ends[0].1.len();
@@ -451,15 +372,17 @@ mod tests {
     }
 
     #[test]
-    fn lower_clause_word_builds_nway_dispatch_and_join_phi() {
-        // R16: a clause word loads the discriminant (one FieldLoad on the
+    fn lower_nway_dispatch_builds_the_compare_chain_and_join_phi() {
+        // R16: the dispatch loads the discriminant (one FieldLoad on the
         // scrutinee tag), builds an N-way `Cmp(Eq)` compare-chain (N-1
         // compares for N variants, the last variant a fall-through), and
-        // merges the clauses at a single join with one Phi per declared
+        // merges the arms at a single join with one Phi per declared
         // output. A 4-variant enum: 3 Cmp(Eq), one Phi.
         let ir = lower_src(
             "type: Cmd | Halt | Push v i64 | Add | Dbl ;
-             : run ( i64 Cmd -- i64 ) | Halt drop 0 | Push swap drop | Add 1 + | Dbl 2 * ;",
+             : run ( i64 Cmd -- i64 )
+               ~[ ( Halt ) drop drop 0 ] ~[ ( Push ) Push> swap drop ]
+               ~[ ( Add ) drop 1 + ] ~[ ( Dbl ) drop 2 * ] Cmd? ;",
         );
         let run = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         // Three `Cmp(Eq)` compares for four variants (the last falls through).
@@ -467,7 +390,7 @@ mod tests {
             count(run, |i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
             3
         );
-        // Exactly one Phi (single declared output) merging all four clauses.
+        // Exactly one Phi (single declared output) merging all four arms.
         let phi_arms: Vec<usize> = run
             .blocks
             .iter()
@@ -481,23 +404,21 @@ mod tests {
     }
 
     #[test]
-    fn lower_single_variant_clause_word_jumps_without_compare() {
+    fn lower_single_variant_dispatch_jumps_without_compare() {
         // R16: a single-variant (newtype) enum needs no compare — the sole
-        // clause is the terminal fall-through, reached by a direct jump.
-        let ir = lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) | Wrap ;");
+        // arm is the terminal fall-through, reached by a direct jump.
+        let ir =
+            lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) ~[ ( Wrap ) Wrap> ] Id? ;");
         let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
         assert_eq!(count(unwrap, |i| matches!(i, Instr::Cmp(..))), 0);
     }
 
-    /// Phase 6 slice 3 (R5): an eliminator call reaches this same lowering —
-    /// the synthetic clauses it builds from the call's quotation operands emit
-    /// the tag compare-chain and the one-predecessor-per-arm join a real
-    /// clause word does. Same enum shape as
-    /// `lower_clause_word_builds_nway_dispatch_and_join_phi` two variants down,
-    /// so a divergence is a divergence in the synthetic clauses, not in the
-    /// program.
+    /// The two-variant boundary of the compare-chain above: with N = 2 there
+    /// is exactly one compare and the second variant is the fall-through, so
+    /// an off-by-one in the chain shows up here as a compare the shorter chain
+    /// should not have emitted.
     #[test]
-    fn lower_eliminator_call_builds_the_clause_dispatch_and_join() {
+    fn lower_two_variant_eliminator_dispatches_through_one_compare() {
         let ir = lower_src(
             "type: Shape | Circle r i64 | Rect w i64 h i64 ;
              : area ( Shape -- i64 )
@@ -521,11 +442,10 @@ mod tests {
         assert_eq!(phi_arms, vec![2], "one join, one predecessor per arm");
     }
 
-    /// R5's `ArmBinding::WholeValue`: an arm's block starts with the *whole*
-    /// narrowed value, never the variant's decomposed fields. A one-variant,
-    /// one-field enum makes the difference countable: the arm's own `Wrap>`
-    /// is the single field read, and a dispatch that decomposed first would
-    /// double it.
+    /// An arm's block starts with the *whole* narrowed value, never the
+    /// variant's decomposed fields. A one-variant, one-field enum makes the
+    /// difference countable: the arm's own `Wrap>` is the single field read,
+    /// and a dispatch that decomposed first would double it.
     #[test]
     fn lower_eliminator_arm_receives_the_whole_value_not_its_fields() {
         let ir = lower_src(
@@ -543,16 +463,13 @@ mod tests {
     /// R5: an eliminator call is a *term*, so its arms inherit tail position
     /// only when the call itself sits in it. The word below is self-tail
     /// recursive (its closing `if` arm back-edges), so a `tail` derived from
-    /// `self.header` alone — as a clause word, whose clauses *are* its body,
-    /// may derive it — back-edges from the eliminator's arm too, skipping
-    /// every term after the call. It printed 10 instead of 11 before the
-    /// call's own tail flag was threaded in.
+    /// `self.header` alone would back-edge from the eliminator's arm too,
+    /// skipping every term after the call. It printed 10 instead of 11 before
+    /// the call's own tail flag was threaded in.
     ///
-    /// The other direction (an arm of a *tail* call back-edging, so recursion
-    /// through arms becomes a loop) is not implemented: the self-tail analysis
-    /// does not see into an arm's quotation literal, so no header is opened
-    /// for it at all. See the spec's out-of-scope note — it is a Slice 4
-    /// blocker, not a correctness bug here.
+    /// The other direction — an arm of a call that *is* in tail position,
+    /// which does back-edge — is `eliminator_multi_tail_runs_in_constant_stack_native`
+    /// in `tests/phase0.rs`.
     #[test]
     fn lower_eliminator_arm_of_a_non_tail_call_does_not_back_edge() {
         let ir = lower_src(

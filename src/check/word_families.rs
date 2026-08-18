@@ -990,8 +990,8 @@ pub(super) fn check_drop_import_visibility(
 /// a module the caller imported qualified-only. Names the demangled type under
 /// the qualifier the caller binds it (the qualifier whose import maps to the
 /// declaring module) and the remedy: import the type by name. The `Ctx::Line`
-/// arm drops the enclosing-word clause, though the REPL path never reaches the
-/// gate (`ctx.modules()` is `None` there, R8).
+/// arm names no enclosing word, though the REPL path never reaches the gate
+/// (`ctx.modules()` is `None` there, R8).
 fn drop_import_visibility_error(
     ctx: &Ctx,
     span: Span,

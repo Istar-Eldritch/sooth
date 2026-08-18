@@ -51,27 +51,20 @@ pub(super) fn check_word(
     if !is_combinator(word) {
         check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
     }
-    match &word.body {
-        WordBody::Terms { terms } => check_terms_word(
-            word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
-            generics,
-        ),
-        WordBody::Clauses(clauses) => check_clause_word(
-            word, enums, clauses, env, arrays, cells, refs, structs, statics, modules, dropped,
-            poly, generics,
-        ),
-    }
+    let WordBody::Terms { terms } = &word.body;
+    check_terms_word(
+        word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
+        generics,
+    )
 }
 
 /// Slice 11 (R3): the shapes a declared `inline` cannot deliver on. The
 /// guarantee is unconditional (D2), so each is a located error at the
-/// definition rather than a silent fall-back to a real call: a clause-bodied
-/// word is not a combinator (`is_combinator` requires `WordBody::Terms`) and
-/// would lower as an ordinary clause word; `main` is an entry point, not a
-/// combinator, so splicing it away leaves the runtime shim's call to it
-/// unresolved at link time; a builtin-operator name is claimed by
-/// `check_operator` before the splice is reached, and the two then disagree;
-/// and a variable-bearing signature is excluded by Decision 3.
+/// definition rather than a silent fall-back to a real call: `main` is an
+/// entry point, not a combinator, so splicing it away leaves the runtime
+/// shim's call to it unresolved at link time; and a builtin-operator name is
+/// claimed by `check_operator` before the splice is reached, and the two then
+/// disagree.
 ///
 /// Slice 10c (R-P3-3b): a polymorphic signature is **no longer** excluded. The
 /// rule that excluded it was a policy one, not a soundness one -- the splice
@@ -94,12 +87,6 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     if word.name == "main" {
         return Err(format!(
             "error: `inline` on `main`, which is the program entry point; the entry point is called by the runtime shim and cannot be spliced (line {}, col {})",
-            span.line, span.col
-        ));
-    }
-    if matches!(word.body, WordBody::Clauses(_)) {
-        return Err(format!(
-            "error: `inline` on `{name}`, which has a clause body; `inline` requires a term body (line {}, col {})",
             span.line, span.col
         ));
     }
@@ -303,235 +290,6 @@ fn check_terms_word(
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
 
-/// Check a clause-style word (D4, D5, D7, M6, R11): the top input must be an
-/// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
-/// and every clause body must leave the word's single declared output effect
-/// (X8).
-#[allow(clippy::too_many_arguments)]
-fn check_clause_word(
-    word: &WordDef,
-    enums: &[EnumDecl],
-    clauses: &[Clause],
-    env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    structs: &[StructDecl],
-    statics: &[StaticDecl],
-    modules: Option<&[ModuleInfo]>,
-    dropped: &mut Vec<Type>,
-    poly: &mut PolyCtx,
-    generics: Option<&RefCell<GenericTypes>>,
-) -> Result<(), String> {
-    // The top input may be a plain enum (value mode) or a reference to
-    // one (reference mode, `&Enum`/`&!Enum`) — the mode follows the declared
-    // type, never inferred. `ref_mutable` is `None` in value mode, `Some`
-    // (carrying the reference's mutability) in reference mode.
-    let (enum_id, ref_mutable) = match word.effect.inputs.last().map(|s| s.ty) {
-        Some(Type::Enum(id, _)) => (id, None),
-        Some(Type::Ref(rid, mutable, _)) => match refs[rid.index()].referent {
-            Type::Enum(id, _) => (id, Some(mutable)),
-            _ => {
-                return Err(format!(
-                    "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
-                    crate::resolve::demangle_word(&word.name),
-                    effect_str(&word.effect),
-                ));
-            }
-        },
-        _ => {
-            return Err(format!(
-                "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
-                crate::resolve::demangle_word(&word.name),
-                effect_str(&word.effect),
-            ));
-        }
-    };
-    let enum_decl = &enums[enum_id.index()];
-    // Surface name for diagnostics and clause matching: a monomorphized
-    // generic enum stores mangled names (`Result[i64 i64]__m0`, `Ok[i64 i64]`)
-    // so its per-instantiation constructor `Sig`s and variant word map do not
-    // collide, but a clause names the bare surface variant (`Ok`). For a
-    // concrete enum `generic_surface_name` is the identity.
-    let enum_name = crate::ast::generic_surface_name(enum_decl.name.as_str());
-
-    let n_inputs = word.effect.inputs.len();
-    let below: Vec<Type> = word.effect.inputs[..n_inputs - 1]
-        .iter()
-        .map(|s| s.ty)
-        .collect();
-    let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
-
-    // Validate every clause's variant identity and uniqueness before checking
-    // any body (R8): a clause-body binding that leads with a registered
-    // variant name is silently reparsed as the next clause, and if that
-    // reparse produces an unknown-variant or duplicate-clause problem, it
-    // must be reported before a downstream sibling body is checked against
-    // the terms the reparse ate out from under it.
-    let mut seen: HashMap<&str, ()> = HashMap::new();
-    let mut variant_indices = Vec::with_capacity(clauses.len());
-    for clause in clauses {
-        let Some(vi) = enum_decl
-            .variants
-            .iter()
-            .position(|v| crate::ast::generic_surface_name(&v.name) == clause.variant)
-        else {
-            return Err(format!(
-                "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {}){}",
-                clause.variant,
-                enum_name,
-                crate::resolve::demangle_word(&word.name),
-                clause.span.line,
-                clause_variant_ambiguity_note(&clause.variant),
-            ));
-        };
-        if seen.insert(clause.variant.as_str(), ()).is_some() {
-            return Err(format!(
-                "error: duplicate clause for variant `{}` of enum `{}` in `{}` (line {}){}",
-                clause.variant,
-                enum_name,
-                crate::resolve::demangle_word(&word.name),
-                clause.span.line,
-                clause_variant_ambiguity_note(&clause.variant),
-            ));
-        }
-        variant_indices.push(vi);
-    }
-    // Exhaustiveness is part of that same pre-pass: a clause body that ate a
-    // sibling's terms (a misspelt variant name reads as a binding, D8) leaves
-    // that sibling missing, and "missing variant `B`" names the real fault
-    // where the swollen body's own arity failure would misattribute it.
-    for variant in &enum_decl.variants {
-        let variant_surface = crate::ast::generic_surface_name(&variant.name);
-        if !seen.contains_key(variant_surface) {
-            return Err(format!(
-                "error: non-exhaustive clause-style `{}`: missing variant `{}` of enum `{}`",
-                word.name, variant_surface, enum_name
-            ));
-        }
-    }
-    for (clause, &vi) in clauses.iter().zip(&variant_indices) {
-        check_clause_body(
-            word,
-            enums,
-            clause,
-            &below,
-            &enum_decl.variants[vi],
-            &declared,
-            env,
-            arrays,
-            cells,
-            refs,
-            structs,
-            statics,
-            modules,
-            ref_mutable,
-            dropped,
-            poly,
-            generics,
-        )?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn check_clause_body(
-    word: &WordDef,
-    enums: &[EnumDecl],
-    clause: &Clause,
-    below: &[Type],
-    variant: &VariantDecl,
-    declared: &[Type],
-    env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    structs: &[StructDecl],
-    statics: &[StaticDecl],
-    modules: Option<&[ModuleInfo]>,
-    ref_mutable: Option<bool>,
-    dropped: &mut Vec<Type>,
-    poly: &mut PolyCtx,
-    generics: Option<&RefCell<GenericTypes>>,
-) -> Result<(), String> {
-    let ctx = word_ctx(
-        word,
-        structs,
-        enums,
-        statics,
-        modules,
-        poly.combinators.tail(),
-        generics,
-    );
-    let mut seen_locals = HashSet::new();
-    for name in &clause.locals {
-        reject_variant_local(&ctx, name, "local")?;
-        reject_duplicate_local(&ctx, name, clause.span, &mut seen_locals)?;
-    }
-
-    // The clause consumes the scrutinee and pushes the variant's fields
-    // (first field deepest) atop any inputs below it. In reference mode
-    // every field arrives as a reference inheriting the scrutinee's
-    // mutability, projecting through it exactly as a struct-field projection
-    // would — the payload is never owned, so it is never moved or freed.
-    let mut initial = below.to_vec();
-    initial.extend(variant_field_projection(variant, ref_mutable, refs));
-
-    // Clause-body `| names |` bind the top N (payload then below), leftmost
-    // deepest, reusing the word-entry local-binding shape.
-    let n = clause.locals.len();
-    if n > initial.len() {
-        return Err(format!(
-            "error: stack effect mismatch in `{}` (line {})\n  clause `{}` binds {} value(s), but only {} are available\n  note: declared {}",
-            word.name, clause.span.line, clause.variant, n, initial.len(), effect_str(&word.effect),
-        ));
-    }
-    let split = initial.len() - n;
-    let mut scope = Scope::default();
-    let mut prov = Provenance::default();
-    for (name, ty) in clause.locals.iter().zip(&initial[split..]) {
-        let linear = is_linear(*ty, structs, enums, arrays);
-        scope.bind(name, Slot::computed(*ty), linear, &mut prov);
-    }
-    let stack_after_bind: Vec<Slot> = initial[..split]
-        .iter()
-        .map(|ty| Slot::computed(*ty))
-        .collect();
-
-    let final_stack = check_terms(
-        &clause.body,
-        stack_after_bind,
-        &ctx,
-        env,
-        arrays,
-        cells,
-        refs,
-        &mut prov,
-        &mut scope,
-        true,
-        poly,
-    )?;
-    dropped.append(&mut prov.dropped);
-    let line = clause
-        .body
-        .last()
-        .map(|t| t.span.line)
-        .unwrap_or(clause.span.line);
-    check_outputs(word, &final_stack, declared, line, structs, enums, arrays)?;
-    leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
-}
-
-/// D8's clause-vs-binding disambiguation is global (`is_variant_name` scans
-/// every enum in scope), so a `|` followed by a registered variant always
-/// opens the next clause and is never read as a binding (R8). Every clause
-/// the parser produces leads with a registered name, so this note states the
-/// rule that was applied wherever a clause's variant is rejected.
-fn clause_variant_ambiguity_note(name: &str) -> String {
-    format!(
-        "\n  note: `| {name}` is read as a clause because `{name}` is a variant name; a binding may not lead with one"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,8 +303,6 @@ mod tests {
     }
     #[test]
     fn check_term_word_with_entry_locals_still_ok() {
-        // Regression: a plain term word with `| ... |` entry locals is
-        // unaffected by the clause-body path (no enum in scope).
         check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
     }
 
@@ -588,36 +344,6 @@ mod tests {
         // real call (part D's territory), so this gate must not fire on it.
         check_src(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: main ( -- ) ;\n")
             .expect("an ordinary `[ ... ]` parameter is exempt from this gate");
-    }
-
-    /// Slice 11 (R3): a clause-bodied `inline` word is `is_combinator == false`
-    /// (the predicate requires `WordBody::Terms`), so accepting it would lower
-    /// it as an ordinary clause word -- the silent fall-back to a real call D2
-    /// forbids. It is a located error instead.
-    #[test]
-    fn check_inline_clause_body_is_error() {
-        let err = check_src(
-            "type: E | A | B ;\n\
-             : pick inline ( E -- i64 )\n\
-             | A  1\n\
-             | B  2\n\
-             ;\n",
-        )
-        .unwrap_err();
-        assert_eq!(
-            err,
-            "error: `inline` on `pick`, which has a clause body; `inline` requires a term body (line 2, col 3)"
-        );
-        // The same clause body without `inline` is accepted, so the rejection is
-        // the keyword's, not the body's.
-        check_src(
-            "type: E | A | B ;\n\
-             : pick ( E -- i64 )\n\
-             | A  1\n\
-             | B  2\n\
-             ;\n",
-        )
-        .expect("an ordinary clause word is unaffected");
     }
 
     /// Slice 10c (E-P3-7): **retargeted, not deleted.** Slice 11's rejection

@@ -399,16 +399,16 @@ fn enum_constructs_and_displays_placeholder_across_lines() {
     );
 }
 
-/// Criterion 7: an enum is declared on one line, then a clause-style word is
-/// defined over it on a *later* line (R18's D8 variant-set seeding from
-/// `Session.enums`, since the parser pre-pass alone only scans the current
-/// unit). A value constructs and displays `<Shape>`, then a further line
-/// eliminates it through the clause word.
+/// Criterion 7: an enum is declared on one line, then a word eliminating it is
+/// defined on a *later* line (R18's variant-set seeding from `Session.enums`,
+/// since the parser pre-pass alone only scans the current unit). A value
+/// constructs and displays `<Shape>`, then a further line eliminates it
+/// through that word.
 #[test]
-fn enum_declared_then_clause_word_defined_and_eliminated_on_later_lines() {
+fn enum_declared_then_eliminating_word_defined_on_later_lines() {
     let out = run_session(&[
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
-        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
+        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup * 3.14159 * ] ~[ ( Rect ) Rect> | w h | w h * ] Shape? ;",
         "2.0 Circle",
         "area .",
     ]);
@@ -427,16 +427,16 @@ fn enum_declared_then_clause_word_defined_and_eliminated_on_later_lines() {
 
 /// Criterion 8: `examples/shapes.sth` runs correctly end-to-end *in the REPL*,
 /// not just natively. Each definition collapses to one REPL line (multi-line
-/// input isn't the point of this golden; exercising every clause arm from the
-/// dogfood file is), and all four `main` operations run, hitting the exact
+/// input isn't the point of this golden; exercising every eliminator arm from
+/// the dogfood file is), and all four `main` operations run, hitting the exact
 /// native golden's output (`12.5664 / 12 / 5 / 7`) through the REPL path.
 #[test]
 fn shapes_dogfood_runs_full_program_in_repl() {
     let out = run_session(&[
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
         "type: MaybeInt | None | Some v i64 ;",
-        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
-        ": unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup * 3.14159 * ] ~[ ( Rect ) Rect> | w h | w h * ] Shape? ;",
+        ": unwrap-or ( i64 MaybeInt -- i64 ) ~[ ( None ) drop ] ~[ ( Some ) Some> swap drop ] MaybeInt? ;",
         "2.0 Circle area .",
         "3.0 4.0 Rect area .",
         "5 None unwrap-or .",
@@ -603,7 +603,7 @@ fn vm_dogfood_runs_in_repl() {
         ": vm-pop ( Vm -- VmPop ) | vm | vm &sp @ swap drop 1 - | i | &vm &stack i &> @ | x | vm &!sp i ! x VmPop ;",
         ": bump-pc ( Vm -- Vm ) &pc @ 1 + | newpc | &!pc newpc ! ;",
         ": fetch ( Vm -- Fetched ) | vm | vm &pc @ swap drop | i | &vm &prog i &> @ | op | vm op Fetched ;",
-        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run | Jmp | vm target | vm &!pc target ! fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
+        ": run ( Vm Op -- i64 ) ~[ ( Push ) Push> | vm v | vm v vm-push bump-pc fetch Fetched> run ] ~[ ( Add ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b + vm-push bump-pc fetch Fetched> run ] ~[ ( Sub ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b - vm-push bump-pc fetch Fetched> run ] ~[ ( Mul ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b * vm-push bump-pc fetch Fetched> run ] ~[ ( Load ) Load> | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run ] ~[ ( Store ) Store> | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run ] ~[ ( Jz ) Jz> | vm target | vm vm-pop VmPop> 0 = ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run ] ~[ ( Jmp ) Jmp> | vm target | vm &!pc target ! fetch Fetched> run ] ~[ ( Halt ) drop | vm | vm vm-pop VmPop> swap drop ] Op? ;",
         ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
         "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);

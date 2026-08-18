@@ -170,9 +170,9 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 let mut text = String::new();
                 while let Some(&c) = chars.peek() {
                     // `^|>` peek-word glue: `|` joins the current word only
-                    // when a word char already precedes it (so `| a |` and a
-                    // clause head `| Circle` are untouched, since those hit
-                    // `|` as the very first character of a scan) and `>`
+                    // when a word char already precedes it (so a `| a |`
+                    // binding is untouched, since its `|` is the very first
+                    // character of a scan) and `>`
                     // immediately follows (so a bare trailing `|` still
                     // delimits normally).
                     if c == '|' && !text.is_empty() {
@@ -412,11 +412,11 @@ mod tests {
     }
 
     #[test]
-    fn lex_clause_head_pipe_stays_separate_token() {
-        let tokens = lex("| Circle").unwrap();
+    fn lex_leading_pipe_stays_separate_token() {
+        let tokens = lex("| name").unwrap();
         assert_eq!(
             words(&tokens),
-            vec![Token::Pipe, Token::Word("Circle".into())]
+            vec![Token::Pipe, Token::Word("name".into())]
         );
     }
 

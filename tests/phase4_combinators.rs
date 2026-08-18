@@ -559,27 +559,6 @@ fn recursive_quotation_taking_word_is_located_error() {
 }
 
 #[test]
-fn clause_bodied_quotation_taking_word_is_located_rejection() {
-    // R18/R7a: a clause body cannot be term-spliced, so a monomorphic word
-    // taking a quotation with a clause body is rejected here rather than left
-    // to panic at lowering (`ir_type_of` on the quotation parameter). Without
-    // this guard the program below is a compiler panic, the exact failure R7a
-    // exists to prevent.
-    let err = check_error(
-        "type: Opt | None | Some ;\n\
-         : pick ( [ i64 -- i64 ] Opt -- i64 )\n\
-         | None drop 0\n\
-         | Some drop 1\n\
-         ;\n\
-         : main ( -- ) ;\n",
-    );
-    assert!(
-        err.contains("`pick`") && err.contains("clause body") && err.contains("slice 7"),
-        "a clause-bodied quotation-taking word should be a located rejection, got: {err}"
-    );
-}
-
-#[test]
 fn quotation_taking_word_cycle_names_members() {
     // A two-word cycle (non-tail, so it is the splice-forever rejection, not
     // mutual tail recursion) names both members.

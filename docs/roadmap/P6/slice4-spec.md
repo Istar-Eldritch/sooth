@@ -229,6 +229,54 @@ migrates in the same slice, so a deprecation window buys nothing.
   (`globals.rs:480-491`) retires with the mechanism (it is deleted, not "fixed"), and the
   parser clause tests (C2) are deleted with `parse_clauses`.
 
+## Corrections from phase 2 (implementation)
+
+- **C5 — R6's inventory was `.sth`-only; the Rust test suite carried the bulk of the
+  migration.** R6 grepped `examples/` and `lib/` and found five files. It did not
+  inventory test *sources*: 64 tests embedded clause-bodied programs, across
+  `tests/{phase0,phase1,phase3_locals,phase3_refs,phase4_combinators,phase4_generics,
+  phase4_quotations,phase4_slice11_inline,phase5_generic_enum_elimination,phase5_slice2,
+  phase7_slice3a}.rs` and `src/{lexer,parser,check/declarations,check/globals,
+  check/word_entry,check/drop_graph,ir/func_builder/calls,
+  ir/func_builder/control_flow}.rs`. 25 were deleted and 39 migrated or retitled. Each was classified by **test subject**, not by grep count: a
+  test whose subject *is* the clause path (the D8 clause-vs-locals disambiguation, its
+  misspelt-variant notes, the clause exhaustiveness pre-pass ordering, the
+  `inline`/quotation-parameter clause-body rejections) is deleted with the mechanism; a
+  test whose subject is something else and merely used a clause body as its vehicle
+  (N-way dispatch routing, nested-aggregate field sizing, the single-variant
+  no-compare path, `if` inside an arm, self-tail-call back-edges, linear-payload
+  disposal, generic monomorphization, cross-module generic resolution) is migrated to
+  eliminator form and keeps its assertions. Migrating first, against the *still-live*
+  clause path, is what proves each migration output-preserving before the deletion lands.
+- **C6 — the clause form's simultaneously-live payload references have no eliminator
+  equivalent.** A clause binding every field of one variant at once held two `&!` field
+  references live together (a named exemption from the disjointness rule, since one
+  clause's fields are statically disjoint). An arm cannot: `| c | c &!a c &!b` is
+  rejected with "cannot reborrow `c` while a reference derived from it is live". The
+  arm-authoring pattern is sequential (`c &!b 2 +! c &!a 1 +!`), which R7 already
+  states; what R7 does not say is that the *simultaneous* shape is gone. No in-tree
+  program needed it (the one test asserting it,
+  `reference_mode_clause_payload_bindings_are_simultaneously_live`, is migrated to the
+  sequential form under a name that claims only what it now proves), so this is a
+  recorded capability narrowing, not a blocker.
+- **C7 — a cross-module eliminator needs the variant names exported and selectively
+  imported.** The clause path's discriminator was the global `is_variant_name` (any
+  enum, any module), so `| Ok` worked on an imported generic with no export of `Ok`
+  itself. An arm tag resolves through `variant_name_is_visible`, which is own-module
+  or *selectively imported* only. `lib/result.sth` and `lib/option.sth` therefore
+  gained `export:` lines for their variants, and their importers name them in a
+  selective list (`import: r | Ok Err | "..." ;`). The dispatch call is the
+  unqualified `Result?` for a generic (keyed by surface name) but the qualified
+  `q::Sh?` for a concrete imported enum; that asymmetry is pre-existing and untouched.
+- **C8 — X12's stated rationale is now stale (not changed here).** `reject_variant_local`
+  rejects a parameter or binding name equal to a registered variant name, and its
+  documented reason was that it "would make the clause-vs-locals `|` disambiguation
+  ambiguous" -- a disambiguation that no longer exists. The rule still has an
+  independent justification (binding a variant name shadows the constructor call of
+  that name inside the body) and is left in force, reworded to that reason. Whether it
+  should survive at all is a rule question for its own slice, not a deletion this one
+  is licensed to make.
+
 ## Guards (tests the phase adds or must keep green)
 
 - **R5 golden.** `bool_print_word_prints_false_and_true` (or the migrated Slice 9 `bool`

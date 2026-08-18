@@ -1366,8 +1366,8 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
 pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
     let mut sigs = Vec::new();
     // Value-mode projection interns nothing, so this scratch registry stays
-    // empty; the helper is shared with the clause path so a destructure's
-    // outputs and a clause's bindings project by one rule (R4).
+    // empty; the helper is shared with the accessor path so a destructure's
+    // outputs and a field projection follow one rule (R4).
     let mut no_refs = Vec::new();
     for (idx, decl) in enums.iter().enumerate() {
         let id = EnumId::from_index(idx);
@@ -2432,15 +2432,6 @@ mod tests {
             "unexpected message: {err}"
         );
     }
-    #[test]
-    fn check_clause_body_duplicate_local_is_error() {
-        let src = "type: Shape | Circle r f64 s f64 ;
-             : area ( Shape -- f64 ) | Circle | a a | a ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("duplicate local"), "unexpected message: {err}");
-        assert!(err.contains("`a`"), "unexpected message: {err}");
-        assert!(err.contains("`area`"), "unexpected message: {err}");
-    }
     // Slice 6h phase 2: D2's shared gate plus the constructor's own D3
     // zero-validity predicate.
 
@@ -2968,82 +2959,6 @@ mod tests {
              : main ( -- Vec2 Shape ) 1 2 Vec2 3.0 Circle ;",
         )
         .unwrap();
-    }
-    #[test]
-    fn check_clause_word_multi_and_zero_field_ok() {
-        // R11: a clause per variant, each leaving the single declared output;
-        // a clause-body `| w h |` binds the payload, a zero-field clause with
-        // a value flowing underneath the scrutinee type-checks.
-        check_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             type: MaybeInt | None | Some v i64 ;
-             : area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;
-             : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
-        )
-        .unwrap();
-    }
-    #[test]
-    fn check_clause_word_non_exhaustive_names_missing_variant() {
-        // X4: a clause word missing a variant names the missing one.
-        let err = check_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("non-exhaustive"), "unexpected message: {err}");
-        assert!(err.contains("Rect"), "unexpected message: {err}");
-        assert!(err.contains("Shape"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_clause_word_duplicate_clause_names_variant() {
-        // X5: two clauses for the same variant names it.
-        let err = check_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Circle dup * | Rect | w h | w h * ;",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("duplicate clause"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("Circle"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_clause_word_unknown_variant_names_it_and_enum() {
-        // X6: a clause naming a non-variant of the scrutinee enum.
-        let err = check_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             type: Other | Blob b i64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * | Blob 0.0 ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("unknown variant"), "unexpected message: {err}");
-        assert!(err.contains("Blob"), "unexpected message: {err}");
-        assert!(err.contains("Shape"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_clause_word_on_non_enum_top_input_is_error() {
-        // X7: a clause body whose top input is a scalar (not an enum).
-        let err = check_src(
-            "type: Circle | C r f64 ;
-             : bad ( i64 -- i64 ) | C 0 ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("not an enum"), "unexpected message: {err}");
-        assert!(err.contains("bad"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_clause_body_violating_declared_output_is_error() {
-        // X8/M6: a clause whose body leaves a type other than the single
-        // declared output effect.
-        let err = check_src(
-            "type: MaybeInt | None | Some v i64 ;
-             : bad ( MaybeInt -- i64 ) | None true | Some ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("type mismatch"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
-        assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
     #[test]
     fn check_enum_print_is_error() {

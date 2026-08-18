@@ -46,8 +46,8 @@ fn eliminator_reference_mode_borrows_without_consuming_the_scrutinee() {
 /// An eliminator call is a mid-body term: a local bound before it (`| k |`)
 /// must survive both inside an arm and past the call, not be wiped by the
 /// dispatch's per-arm block setup (`lower_clauses` previously `clear()`ed
-/// `self.locals` unconditionally, which is only sound for a clause-style
-/// word's whole-body clauses, not a call sitting mid-word).
+/// `self.locals` unconditionally, which is only sound for a dispatch that is
+/// a whole word body, not a call sitting mid-word).
 #[test]
 fn eliminator_call_does_not_clobber_the_enclosing_words_locals() {
     assert_eq!(

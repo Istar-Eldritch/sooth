@@ -59,9 +59,8 @@ pub(super) fn check_main_effect(
 /// R1 (D2, D7): the callee names of every tail-position call in a word body.
 ///
 /// Tail position is a purely *syntactic* property: a call is in tail position
-/// iff it is the final term of a terms body or the final term of a clause
-/// body. Any term after a call, arithmetic, a shuffle, a consumer, or another
-/// call, breaks tail position. Output-equality with the declared outputs is a
+/// iff it is the final term of a word body. Any term after a call,
+/// arithmetic, a shuffle, a consumer, or another call, breaks tail position. Output-equality with the declared outputs is a
 /// *consequence* of this rule for a well-typed final call, not a second check.
 ///
 /// Slice 10c (R-P1-1) adds the second way a term inherits tail position: a
@@ -84,20 +83,9 @@ pub(super) fn check_main_effect(
 pub(super) fn tail_position_calls<'a>(word: &'a WordDef, combs: &CombinatorIndex) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut walk = TailWalk::new(combs);
-    match &word.body {
-        WordBody::Terms { terms, .. } => {
-            let binds = param_binds(terms, declared_input_count(word));
-            walk.collect(terms, &binds, &mut out);
-        }
-        WordBody::Clauses(clauses) => {
-            // A clause body's leading binds pop the dispatched variant's
-            // payload, not the declared inputs, and a clause-bodied word is
-            // never a combinator, so it has no parameter slots to forward.
-            for clause in clauses {
-                walk.collect(&clause.body, &HashMap::new(), &mut out);
-            }
-        }
-    }
+    let WordBody::Terms { terms } = &word.body;
+    let binds = param_binds(terms, declared_input_count(word));
+    walk.collect(terms, &binds, &mut out);
     out
 }
 
@@ -723,7 +711,8 @@ pub(super) fn collect_drop_targets(
 
 /// R6: every callee name a body mentions, in any position -- the whole-body
 /// sibling of `tail_position_calls`, which only ever reads `terms.last()`.
-/// Both `if` arms and every clause body are visited.
+/// Every nested quotation body is visited, `if`'s two arms and an eliminator
+/// call's arms included.
 ///
 /// A local's own name reads as a `Call` term too, so a local sharing a word's
 /// name contributes an edge that no call justifies. That over-approximation
@@ -731,14 +720,8 @@ pub(super) fn collect_drop_targets(
 /// `check_tail_call_cycles` already lives with.
 pub(super) fn all_calls(body: &WordBody) -> Vec<&str> {
     let mut out = Vec::new();
-    match body {
-        WordBody::Terms { terms } => collect_all_calls(terms, &mut out),
-        WordBody::Clauses(clauses) => {
-            for clause in clauses {
-                collect_all_calls(&clause.body, &mut out);
-            }
-        }
-    }
+    let WordBody::Terms { terms } = body;
+    collect_all_calls(terms, &mut out);
     out
 }
 
@@ -1135,15 +1118,6 @@ mod tests {
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
         assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
-    #[test]
-    fn tail_position_clause_body_final_self_call_is_tail() {
-        let w = first_word("type: E | A | B ; : w ( E -- E ) | A w | B w ;");
-        assert_eq!(
-            tail_position_calls(&w, &CombinatorIndex::new()),
-            vec!["w", "w"]
-        );
-        assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
-    }
 
     // -- Phase 6 slice 4: eliminator-arm tail splice --------------------------
 
@@ -1305,9 +1279,7 @@ mod tests {
         for (words, expected) in [(recon2, true), (recon4, false)] {
             let combs = combinator_index(&words);
             let word = named(&words, "walk");
-            let WordBody::Terms { terms } = &word.body else {
-                unreachable!("`walk` is a terms body")
-            };
+            let WordBody::Terms { terms } = &word.body;
             let checker = is_combinator(word) && has_self_tail_call(word, &combs);
             let lowering = terms_tail_call_self(terms, &word.name, &combs);
             assert_eq!(checker, expected, "the checker's `splice_tail`");
@@ -1344,9 +1316,7 @@ mod tests {
             // appends the `lib/core.sth` prelude, which now defines `<` too,
             // so both `last()` and a name lookup can find the wrong one.
             let word = words.first().expect("the builtin-named word");
-            let WordBody::Terms { terms } = &word.body else {
-                unreachable!("a terms body")
-            };
+            let WordBody::Terms { terms } = &word.body;
             let combs = combinator_index(&words);
             assert!(
                 !has_self_tail_call(word, &combs),

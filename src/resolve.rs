@@ -15,7 +15,7 @@
 //! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
 //! so today's symbols and output are unchanged.
 
-use crate::ast::{Clause, Module, Span, Term, TermKind, WordBody};
+use crate::ast::{Module, Span, Term, TermKind, WordBody};
 use std::collections::HashSet;
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
@@ -420,32 +420,16 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
         let imports = &import_maps[word.module as usize];
         let selective = &selectives[word.module as usize];
         let mut scope = HashSet::new();
-        match &mut word.body {
-            WordBody::Terms { terms } => {
-                rewrite_terms(
-                    terms,
-                    word.module,
-                    imports,
-                    selective,
-                    &tables,
-                    &mut scope,
-                    &exports,
-                )?;
-            }
-            WordBody::Clauses(clauses) => {
-                for clause in clauses {
-                    rewrite_clause(
-                        clause,
-                        word.module,
-                        imports,
-                        selective,
-                        &tables,
-                        &mut scope,
-                        &exports,
-                    )?;
-                }
-            }
-        }
+        let WordBody::Terms { terms } = &mut word.body;
+        rewrite_terms(
+            terms,
+            word.module,
+            imports,
+            selective,
+            &tables,
+            &mut scope,
+            &exports,
+        )?;
     }
 
     for s in &mut module.structs {
@@ -483,34 +467,6 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     for s in &mut module.statics {
         s.name = mangle_static(&s.name, s.module);
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn rewrite_clause(
-    clause: &mut Clause,
-    module: u32,
-    imports: &std::collections::HashMap<String, u32>,
-    selective: &std::collections::HashMap<String, u32>,
-    tables: &NameTables,
-    scope: &mut HashSet<String>,
-    exports: &[Vec<(String, Span)>],
-) -> Result<(), String> {
-    let base = scope.len();
-    let added: Vec<String> = clause.locals.clone();
-    for name in &added {
-        scope.insert(name.clone());
-    }
-    rewrite_terms(
-        &mut clause.body,
-        module,
-        imports,
-        selective,
-        tables,
-        scope,
-        exports,
-    )?;
-    truncate_scope(scope, base, &added);
     Ok(())
 }
 
@@ -1036,9 +992,8 @@ mod tests {
 
     fn call_names(body: &WordBody) -> Vec<String> {
         let mut out = Vec::new();
-        if let WordBody::Terms { terms } = body {
-            collect_calls(terms, &mut out);
-        }
+        let WordBody::Terms { terms } = body;
+        collect_calls(terms, &mut out);
         out
     }
 

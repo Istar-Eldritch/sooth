@@ -83,9 +83,7 @@ pub fn combinator_index<'w>(words: impl IntoIterator<Item = &'w WordDef>) -> Com
         if !is_combinator(word) {
             continue;
         }
-        let WordBody::Terms { terms } = &word.body else {
-            continue;
-        };
+        let WordBody::Terms { terms } = &word.body;
         let inputs = match word.poly.as_ref() {
             Some(sig) => sig.inputs.len(),
             None => word.effect.inputs.len(),
@@ -125,11 +123,10 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
         if !is_combinator(word) {
             continue;
         }
-        if let WordBody::Terms { terms } = &word.body {
-            map.entry(word.name.clone())
-                .or_default()
-                .push(Combinator { word, terms });
-        }
+        let WordBody::Terms { terms } = &word.body;
+        map.entry(word.name.clone())
+            .or_default()
+            .push(Combinator { word, terms });
     }
     map.into_iter().collect()
 }
@@ -137,40 +134,30 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
 /// R2 (Slice 6c): the checker's inline view for one retained combinator, the
 /// per-`WordDef` analogue of `collect_combinators`, so the REPL can project its
 /// session store into the `HashMap<String, Combinator>` the inline path reads
-/// without reaching into `Combinator`'s private fields. `None` for a
-/// clause-bodied word (never a combinator: `is_combinator` requires
-/// `WordBody::Terms`).
-pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
-    match &word.body {
-        WordBody::Terms { terms } => Some(Combinator { word, terms }),
-        WordBody::Clauses(_) => None,
-    }
+/// without reaching into `Combinator`'s private fields.
+pub(crate) fn combinator_of(word: &WordDef) -> Combinator<'_> {
+    let WordBody::Terms { terms } = &word.body;
+    Combinator { word, terms }
 }
 
-/// R18/R20: a combinator is a `WordBody::Terms` word declaring `inline`
-/// (recognition is **declared, not inferred**, R-A1). The checker inlines a
-/// call to one (splicing its body) and lowering mints no `IrFunc` for it, so
-/// `check` and `ir::lower` must agree on the predicate exactly; it lives here
-/// as the single source.
+/// R18/R20: a combinator is a word declaring `inline` (recognition is
+/// **declared, not inferred**, R-A1). The checker inlines a call to one
+/// (splicing its body) and lowering mints no `IrFunc` for it, so `check` and
+/// `ir::lower` must agree on the predicate exactly; it lives here as the
+/// single source.
 ///
 /// A word that takes a `~[ ... ]` (`Type::InlineQuotation`) parameter cannot
 /// be anything *but* a combinator (a `~` quotation has no runtime
 /// representation), so it must declare `inline` too
 /// (`check_inline_declaration`'s R-B1 neighbour rejects it otherwise); a word
 /// taking only an ordinary `[ ... ]` (`Type::Quotation`) parameter and no
-/// `inline` is an ordinary real call (part D lowers that shape). The
-/// `WordBody::Terms` conjunct means a clause-bodied word is never a
-/// combinator regardless of the flag; a clause-bodied `inline` word is
-/// rejected at its definition (`check_inline_declaration`) rather than
-/// silently lowered as an ordinary clause word, so the two never disagree in a
-/// way that reaches codegen.
+/// `inline` is an ordinary real call (part D lowers that shape).
 pub fn is_combinator(word: &WordDef) -> bool {
-    matches!(word.body, WordBody::Terms { .. }) && word.declares_inline
+    word.declares_inline
 }
 
 /// R23 (D7): whether a word's declared effect names a quotation parameter,
-/// regardless of body kind and of flavour (a clause body is rejected
-/// separately by `clause_bodied_quotation_word_error`). This is *not* the
+/// regardless of flavour. This is *not* the
 /// "does this word splice?" question -- `is_combinator` answers that, from the
 /// declaration alone -- but the coarser "is this slot a quotation?" one its
 /// callers across `check/{poly,terms,audits,captures}.rs` ask, and the one the
@@ -831,7 +818,7 @@ mod tests {
 
     /// Slice 11 (R2): the declared flag alone makes a word always-spliced, with
     /// no quotation parameter anywhere in its effect. Constructed directly (an
-    /// e2e build cannot discriminate the flag from the quotation clause) and
+    /// e2e build cannot discriminate the flag from a quotation parameter) and
     /// asserted both ways round, so the `|| word.declares_inline` disjunct is
     /// what the `true` rests on.
     #[test]

@@ -36,21 +36,22 @@ pub use self::types::{
 
 pub(crate) use self::layout::{
     build_registries, build_statics, carried_slot_bytes, empty_statics, ArrayLayout, Arrays, Cells,
-    DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Refs, Registries, Statics,
-    StructLayout, Structs,
+    DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Statics, StructLayout,
+    Structs,
 };
-// `VariantLayout` has no non-test caller anywhere in the crate today (only a
-// `repl.rs` test constructs one); it is still part of the historical `ir::*`
-// re-export contract (spec surface list), so it stays reachable for tests
+// `VariantLayout` and `Refs` have no non-test caller anywhere in the crate
+// today (only a `repl.rs` test constructs a `VariantLayout`; every `Refs` is a
+// unit test's empty stand-in); both are still part of the historical `ir::*`
+// re-export contract (spec surface list), so they stay reachable for tests
 // without tripping `unused_imports` on a plain (non-test) build.
 pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
 pub use self::driver::{lower, lower_line};
-#[cfg(test)]
-pub(crate) use self::layout::VariantLayout;
 use self::layout::{
     cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align, struct_drop_symbol,
     EnumWord, StructWord,
 };
+#[cfg(test)]
+pub(crate) use self::layout::{Refs, VariantLayout};
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
 /// call sites (the REPL, D2; destructor synthesis; unit tests), so

@@ -478,7 +478,7 @@ fn enum_carried_across_back_edge_is_not_aliased() {
         "enumalias",
         "type: E | Wrap v i64 ;\n\
          : mk ( i64 -- E ) | n | n Wrap ;\n\
-         : get ( E -- i64 ) | Wrap ;\n\
+         : get ( E -- i64 ) ~[ ( Wrap ) Wrap> ] E? ;\n\
          : loop ( i64 E -- E )\n\
            | n prev |\n\
            n 0 = ~[ prev ] ~[\n\

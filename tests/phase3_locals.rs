@@ -247,115 +247,17 @@ fn empty_binding_with_no_names_is_error() {
 }
 
 #[test]
-fn mid_body_binding_in_clause_body_binds() {
-    // Criterion 15: a clause body may bind partway through, not only at its
+fn mid_body_binding_in_eliminator_arm_binds() {
+    // Criterion 15: an arm body may bind partway through, not only at its
     // leading `|`. `Circle`'s arm binds `r` after a `dup`, mid-body.
     let (stdout, code) = run_src(
-        "mid-body-binding-in-clause-body",
+        "mid-body-binding-in-eliminator-arm",
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
-: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * ;\n\n\
+: area ( Shape -- f64 )\n  ~[ ( Circle )\n  Circle>\n  dup\n  | r |\n  r * ]\n  ~[ ( Rect )\n  Rect>\n  | w h |\n  w h * ]\n  Shape? ;\n\n\
 : main ( -- )\n  2.0 Circle area .\n  3.0 4.0 Rect area . ;\n",
     );
     assert_eq!(stdout, "4\n12\n");
     assert_eq!(code, 0);
-}
-
-#[test]
-fn clause_body_binding_named_for_a_variant_is_error() {
-    // Criterion 16 (R8): a mid-clause-body `|` whose leading name is a
-    // registered variant of some enum is always read as the next clause, since
-    // the disambiguation is global (D8). Here `Blob` names no variant of
-    // `Shape`, so the misread clause fails with the existing, located
-    // unknown-variant diagnostic, now with a note naming the ambiguity rather
-    // than silently binding.
-    let err = check_error(
-        "type: Shape | Circle r f64 | Rect w f64 h f64 ;\ntype: Other | Blob b i64 ;\n\
-: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * | Blob bogus ;\n",
-    );
-    assert!(err.contains("unknown variant"), "unexpected message: {err}");
-    assert!(err.contains("`Blob`"), "unexpected message: {err}");
-    assert!(err.contains("`Shape`"), "unexpected message: {err}");
-    assert!(
-        err.contains("is read as a clause because")
-            && err.contains("a binding may not lead with one"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn clause_body_binding_named_for_a_variant_of_the_same_enum_is_error() {
-    // Same failure as above, but `Circle` names a variant of the scrutinee
-    // enum itself, so the reparse produces a second `Circle` clause: a
-    // duplicate, not an unknown variant. Without hoisting the duplicate-clause
-    // check ahead of body-checking, `Rect`'s truncated body (the reparse ate
-    // its `| Blob bogus` tail as a bogus fourth clause) would fail its own
-    // arity check first, misattributing the error to the wrong clause.
-    let err = check_error(
-        "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
-: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * | Circle bogus ;\n",
-    );
-    assert!(
-        err.contains("duplicate clause"),
-        "unexpected message: {err}"
-    );
-    assert!(err.contains("`Circle`"), "unexpected message: {err}");
-    assert!(
-        err.contains("is read as a clause because")
-            && err.contains("a binding may not lead with one"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn misspelt_variant_in_clause_list_notes_the_binding_read() {
-    // The reverse of criterion 16, and the commoner typo: a misspelt variant
-    // name is registered nowhere, so D8 reads its `|` as a binding and the
-    // failure surfaces as a binding parse error. The note must say which read
-    // was applied, or the message points at the wrong construct entirely.
-    let err = parse_error(
-        "type: E | A a i64 | B b i64 ;\n\
-: f ( E -- i64 )\n  | A | x | x\n  | Blobby 1\n  | B | y | y ;\n",
-    );
-    assert!(err.contains("line 4"), "unexpected message: {err}");
-    assert!(
-        err.contains("`| Blobby` opens a binding here, not a clause"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant() {
-    // Same typo, but the misread parses cleanly: `| Blobby` binds a local and
-    // the remaining clauses become body terms of the `A` clause, `B` included.
-    // Exhaustiveness runs before the bodies precisely so this reads as a
-    // missing `B`, not as an arity failure inside the swollen `A` body.
-    let err = check_error(
-        "type: E | A a i64 | B b i64 ;\n\
-: f ( E -- i64 )\n  | A | x | x\n  | Blobby\n  | B | y | y ;\n",
-    );
-    assert!(
-        err.contains("non-exhaustive clause-style `f`") && err.contains("missing variant `B`"),
-        "unexpected message: {err}"
-    );
-}
-
-#[test]
-fn check_clause_word_reports_non_exhaustive_before_body_type_error() {
-    // Undeclared deviation (Phase 3 Slice 5 review, B6): exhaustiveness was
-    // hoisted ahead of body checking (required so a misspelt variant
-    // swallowed as a binding still reports its missing sibling, see
-    // misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant),
-    // and that reorders diagnostic priority for every clause-style word, not
-    // only the misspelling case: `C` is missing and `A`'s body leaves the
-    // wrong output type, and non-exhaustive must win.
-    let err = check_error(
-        "type: E | A | B | C ;\n\
-: w ( E -- i64 )\n  | A\n  true\n  | B\n  3\n;\n",
-    );
-    assert!(
-        err.contains("non-exhaustive clause-style `w`") && err.contains("missing variant `C`"),
-        "unexpected message: {err}"
-    );
 }
 
 #[test]
@@ -456,7 +358,7 @@ fn mid_body_binding_in_self_tail_recursive_word_loops_correctly() {
 fn vm_with_mid_body_binding_matches_previous_output() {
     // Criterion 23: `examples/vm.sth`'s `run` word (Phase 3 Slice 5) names
     // the first `vm-pop` result mid-body in its `Add`/`Sub`/`Mul`/`Store`
-    // clauses instead of shuffling it into position with `swap`/`over`/
+    // arms instead of shuffling it into position with `swap`/`over`/
     // `rot`. The rewrite must be output-preserving: same sum-1..100_000
     // bytecode program, same `5000050000` result as before the rewrite.
     let source = std::fs::read_to_string("examples/vm.sth").expect("read vm.sth");
@@ -468,11 +370,11 @@ fn vm_with_mid_body_binding_matches_previous_output() {
     assert_eq!(
         code.matches("| b |").count(),
         3,
-        "the Add/Sub/Mul clauses should each still bind the popped operand"
+        "the Add/Sub/Mul arms should each still bind the popped operand"
     );
     assert!(
         code.contains("| v x |"),
-        "the Store clause should still bind both operands"
+        "the Store arm should still bind both operands"
     );
     let binary = common::build_example("examples/vm.sth");
     let output = std::process::Command::new(&binary)

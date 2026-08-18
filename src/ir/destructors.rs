@@ -394,8 +394,8 @@ fn synthesize_struct_destructor_override(
 /// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
 /// value of that type. Unlike the struct case (a fixed field list), an enum's
 /// active variant is a runtime fact, so the destructor tag-dispatches (its
-/// own `Jnz` chain, the same compare-chain shape `lower_clauses` uses for a
-/// clause-style word's scrutinee) and then drops only the dispatched variant's
+/// own `Jnz` chain, the same compare-chain shape `lower_clauses` uses for an
+/// eliminator's scrutinee) and then drops only the dispatched variant's
 /// linear payload fields. Every variant gets its own block even if none of its
 /// fields are linear (an empty block that just returns), so the dispatch
 /// shape stays uniform regardless of which variants happen to carry a linear

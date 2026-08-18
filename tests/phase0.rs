@@ -1062,8 +1062,8 @@ fn enum_crosses_word_call_boundary_with_scalar_underneath_native() {
     // aggregate slot in the ABI classification would clobber that scalar, so
     // recovering `42` intact proves the by-value enum ABI. A three-`i64`
     // large-payload variant (exceeding one 8-byte cell) makes the boundary
-    // non-trivial. The enum itself can't be read back until the clause
-    // eliminator lands (Phase 4), so it is dropped after the round-trip.
+    // non-trivial. The enum itself can't be read back until the eliminator
+    // lands (Phase 4), so it is dropped after the round-trip.
     let src = "type: Big | B a i64 b i64 c i64 ;\n\
 : id ( Big -- Big ) ;\n\
 : main ( -- )\n  42 1 2 3 B id drop . ;\n";
@@ -1092,32 +1092,33 @@ fn vectors_dogfood_compiles_and_runs() {
 
 #[test]
 fn shapes_dogfood_compiles_and_runs() {
-    // Slice 4 (criteria 3, 6): the clause-style eliminator end-to-end.
-    // `area` dispatches over a multi-field-variant `Shape` (a `Rect | w h |`
-    // clause-body-locals arm and a `Circle` arm reading its payload
-    // first-deepest); `unwrap-or` dispatches over a zero-field `None` (an
-    // empty clause yielding the default flowing *underneath* the scrutinee)
-    // and a one-field `Some`. All run in one native binary.
+    // Slice 4 (criteria 3, 6): enum elimination end-to-end. `area`
+    // dispatches over a multi-field-variant `Shape` (a `Rect` arm binding its
+    // destructured payload with `| w h |` and a `Circle` arm reading its
+    // single field); `unwrap-or` dispatches over a zero-field `None` (whose
+    // arm drops the narrowed variant, yielding the default flowing
+    // *underneath* the scrutinee) and a one-field `Some`. All run in one
+    // native binary.
     let (stdout, code) = run_and_capture_stdout("examples/shapes.sth");
     assert_eq!(stdout, "12.5664\n12\n5\n7\n");
     assert_eq!(code, 0);
 }
 
 #[test]
-fn clause_word_over_three_plus_variant_enum_dispatches_correctly() {
+fn eliminator_over_three_plus_variant_enum_dispatches_correctly() {
     // R16 key risk: an N-way (here 4-way) `Cmp(Eq)`-tag compare-chain must
-    // land on each variant's own clause, not a two-way miscompile. Each of
+    // land on each variant's own arm, not a two-way miscompile. Each of
     // the four commands drives a distinct arm; verified at runtime, not by
     // reading IL.
     let src = "type: Cmd | Halt | Push v i64 | Add | Dbl ;\n\
 : run ( i64 Cmd -- i64 )\n\
-| Halt   drop 0\n\
-| Push   swap drop\n\
-| Add    1 +\n\
-| Dbl    2 *\n\
-;\n\
+  ~[ ( Halt ) drop drop 0 ]\n\
+  ~[ ( Push ) Push> swap drop ]\n\
+  ~[ ( Add )  drop 1 + ]\n\
+  ~[ ( Dbl )  drop 2 * ]\n\
+  Cmd? ;\n\
 : main ( -- )\n  99 Halt run .\n  1 20 Push run .\n  10 Add run .\n  10 Dbl run . ;\n";
-    let path = std::env::temp_dir().join(format!("sooth-nway-clause-{}.sth", std::process::id()));
+    let path = std::env::temp_dir().join(format!("sooth-nway-elim-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
@@ -1127,21 +1128,21 @@ fn clause_word_over_three_plus_variant_enum_dispatches_correctly() {
 }
 
 #[test]
-fn nested_aggregate_clause_word_reads_back_through_registries_native() {
+fn nested_aggregate_eliminator_reads_back_through_registries_native() {
     // Slice 4 (criterion 3, D9): a variant carrying a struct payload (`Dot p
-    // Vec2`) constructs, passes through a clause word, and its nested field
-    // reads back; and an enum used as a struct field (`Wrap s Shape`) is
-    // unwrapped through the destructure into the same clause word — guarding the
+    // Vec2`) constructs, passes through an eliminating word, and its nested
+    // field reads back; and an enum used as a struct field (`Wrap s Shape`) is
+    // unwrapped through the destructure into the same word — guarding the
     // combined-registry field sizing in both directions.
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Shape | Dot p Vec2 | Nothing ;\n\
 type: Wrap s Shape ;\n\
 : px ( Shape -- i64 )\n\
-| Dot      &x @ swap drop\n\
-| Nothing  0\n\
-;\n\
+  ~[ ( Dot )     Dot> &x @ swap drop ]\n\
+  ~[ ( Nothing ) drop 0 ]\n\
+  Shape? ;\n\
 : main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap> px . ;\n";
-    let path = std::env::temp_dir().join(format!("sooth-nested-clause-{}.sth", std::process::id()));
+    let path = std::env::temp_dir().join(format!("sooth-nested-elim-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
@@ -1151,15 +1152,15 @@ type: Wrap s Shape ;\n\
 }
 
 #[test]
-fn single_variant_clause_word_returns_payload_native() {
+fn single_variant_eliminator_returns_payload_native() {
     // 9ed63d9 discriminant-skip: a single-variant enum has nothing to
-    // disambiguate, so its clause word jumps straight to the sole clause with
+    // disambiguate, so the dispatch jumps straight to the sole arm with
     // no `Cmp`/`Jnz`. The IR-shape test asserts zero compares; this proves the
     // no-compare path still returns the right payload value at runtime.
     let src = "type: Id | Wrap v i64 ;\n\
 : unwrap ( Id -- i64 )\n\
-| Wrap\n\
-;\n\
+  ~[ ( Wrap ) Wrap> ]\n\
+  Id? ;\n\
 : main ( -- )\n  42 Wrap unwrap . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-single-variant-{}.sth", std::process::id()));
@@ -1172,21 +1173,20 @@ fn single_variant_clause_word_returns_payload_native() {
 }
 
 #[test]
-fn clause_body_containing_if_else_end_joins_correctly() {
-    // M6: a clause body may itself use `if/else/end`. The clause-dispatch
-    // join's phi predecessor must be the *if's* merged block (captured via
-    // `cur_id` after lowering the clause body), not the clause's dispatch
-    // block — otherwise the join would read a stale/wrong value. `Zero`
-    // exercises a plain clause alongside `NonZero`'s internal branch, so the
-    // two clause styles share one dispatch and one join correctly.
+fn eliminator_arm_containing_if_joins_correctly() {
+    // M6: an arm body may itself use `if`. The dispatch join's phi predecessor
+    // must be the *if's* merged block (captured via `cur_id` after lowering
+    // the arm body), not the arm's dispatch block — otherwise the join would
+    // read a stale/wrong value. `Zero` exercises a plain arm alongside
+    // `NonZero`'s internal branch, so the two arm shapes share one dispatch
+    // and one join correctly.
     let src = "type: Item | Zero | NonZero v i64 ;\n\
 : classify ( Item -- i64 )\n\
-| Zero       0\n\
-| NonZero    0 > ~[ 1 ] ~[ -1 ] if\n\
-;\n\
+  ~[ ( Zero )    drop 0 ]\n\
+  ~[ ( NonZero ) NonZero> 0 > ~[ 1 ] ~[ -1 ] if ]\n\
+  Item? ;\n\
 : main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
-    let path =
-        std::env::temp_dir().join(format!("sooth-clause-if-else-{}.sth", std::process::id()));
+    let path = std::env::temp_dir().join(format!("sooth-arm-if-else-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
@@ -1511,7 +1511,7 @@ fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
     // Criterion 4's both-arms-tail golden: a self-tail-call in each arm of a
     // terminal `if` produces two back-edges from the `if` path into one
     // header (R8 multi-arm back-patch through `lower_if`, distinct from the
-    // clause back-edge path of criterion 3). Both arms happen to do the same
+    // tag-dispatch back-edge path of criterion 3). Both arms happen to do the same
     // arithmetic; what matters is that they are two distinct call sites that
     // both eliminate, at N large enough to overflow if either didn't.
     let src = ": both-tail ( i64 i64 -- i64 )\n\
@@ -1537,20 +1537,18 @@ fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
 }
 
 #[test]
-fn clause_multi_tail_runs_in_constant_stack_native() {
-    // Criterion 3: a `|`-clause self-tail-recursive word where *both*
-    // clauses tail-recurse into one shared header, alternating tags each
-    // iteration (each clause contributes its own back-edge).
+fn eliminator_multi_tail_runs_in_constant_stack_native() {
+    // Criterion 3: a self-tail-recursive word where *both* arms tail-recurse
+    // into one shared header, alternating tags each iteration (each arm
+    // contributes its own back-edge).
     let src = "type: Parity | Even | Odd ;\n\
 : sum-parity ( i64 i64 Parity -- i64 )\n\
-  | Even | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Odd sum-parity ] if\n\
-  | Odd  | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Even sum-parity ] if\n\
-;\n\
+  ~[ ( Even ) drop | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Odd sum-parity ] if ]\n\
+  ~[ ( Odd )  drop | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Even sum-parity ] if ]\n\
+  Parity? ;\n\
 : main ( -- ) 0 1000000 Even sum-parity . ;\n";
-    let path = std::env::temp_dir().join(format!(
-        "sooth-clause-multi-tail-{}.sth",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("sooth-elim-multi-tail-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
@@ -1560,25 +1558,22 @@ fn clause_multi_tail_runs_in_constant_stack_native() {
 }
 
 #[test]
-fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
-    // Criterion 3's mixed-clause golden (R9 / risk 5): both of the `Go`
-    // clause's `if` arms are self-tail-calls, so both back-edge to the loop
-    // header (one recurses with the `Go` tag, one recurses with the `Halt`
-    // tag; neither arm itself `Ret`s). The only genuine base case is the
-    // separate `Halt` clause, which `Ret`s with no self-call at all. The loop
-    // header's predecessors (entry + `Go`'s two back-edges) and the Slice-4
-    // dispatch-join's predecessors must stay disjoint for this to compile and
-    // run correctly.
+fn mixed_eliminator_back_edge_and_base_case_runs_in_constant_stack_native() {
+    // Criterion 3's mixed-arm golden (R9 / risk 5): both of the `Go` arm's
+    // `if` arms are self-tail-calls, so both back-edge to the loop header (one
+    // recurses with the `Go` tag, one recurses with the `Halt` tag; neither
+    // itself `Ret`s). The only genuine base case is the separate `Halt` arm,
+    // which `Ret`s with no self-call at all. The loop header's predecessors
+    // (entry + `Go`'s two back-edges) and the Slice-4 dispatch-join's
+    // predecessors must stay disjoint for this to compile and run correctly.
     let src = "type: Step | Go | Halt ;\n\
 : run-mix ( i64 i64 Step -- i64 )\n\
-  | Go   | acc n | n 0 = ~[ acc n Halt run-mix ] ~[ acc n + n 1 - Go run-mix ] if\n\
-  | Halt | acc n | acc\n\
-;\n\
+  ~[ ( Go )   drop | acc n | n 0 = ~[ acc n Halt run-mix ] ~[ acc n + n 1 - Go run-mix ] if ]\n\
+  ~[ ( Halt ) drop | acc n | acc ]\n\
+  Step? ;\n\
 : main ( -- ) 0 1000000 Go run-mix . ;\n";
-    let path = std::env::temp_dir().join(format!(
-        "sooth-mixed-clause-tail-{}.sth",
-        std::process::id()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("sooth-mixed-elim-tail-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
@@ -1588,11 +1583,11 @@ fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
 }
 
 #[test]
-fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
+fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
     // Slice 7 criterion 8 (the crux): read an `Op` out of the *carried*
-    // program array, clause-match it, and tail-recurse. The array-across-the
+    // program array, dispatch on it, and tail-recurse. The array-across-the
     // -back-edge half was proven by a prior spike; the residual unproven
-    // composition is enum-`get`-from-carried-array + clause dispatch in
+    // composition is enum-`get`-from-carried-array + tag dispatch in
     // constant stack. 1_000_000 back-edges each read the enum out of the
     // carried `[Op 2]`, dispatch, and self-tail-call; naive recursion at that
     // depth overflows the default 8MB host stack, which `run_and_capture_stdout`
@@ -1604,14 +1599,14 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
 : idx ( i64 -- usize ) | count | count 0 = ~[ 1 ] ~[ 0 ] if >usize ;\n\
 : fetch ( [Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
 : run ( [Op 2] i64 i64 Op -- i64 )\n\
-  | Step | prog count acc |\n\
+  ~[ ( Step ) drop | prog count acc |\n\
       prog\n\
       count 1 -\n\
       acc 1 +\n\
       prog count 1 - idx fetch\n\
-      run\n\
-  | Stop | prog count acc | acc\n\
-;\n\
+      run ]\n\
+  ~[ ( Stop ) drop | prog count acc | acc ]\n\
+  Op? ;\n\
 : build ( -- [Op 2] ) Step 2 fill | prog | &!prog 1 &!> Stop ! prog ;\n\
 : start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
 : main ( -- ) build start . ;\n";
@@ -1627,12 +1622,12 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
 #[test]
 fn vm_dogfood_compiles_and_runs() {
     // Phase 3 of Slice 7 (criteria 1, 2, 4, 5, 6): the VM's real dispatch
-    // loop (`fetch` + the nine-clause self-tail-recursive `run`) interprets
+    // loop (`fetch` + the nine-arm self-tail-recursive `run`) interprets
     // the sum-1..N bytecode program (built via `fill` and a reference into
     // a named local, no array literal) at N = 10, exercising every opcode
     // the sum program needs
     // (`Push`/`Add`/`Sub`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the `Jz`/`Jmp`
-    // backward branch. `Mul` dispatches too (its clause is identical in shape
+    // backward branch. `Mul` dispatches too (its arm is identical in shape
     // to `Add`/`Sub`) but sum-1..N never multiplies, so this golden doesn't
     // exercise it. This is an inline temp-source copy of `examples/vm.sth`
     // at a small N: Phase 4 scales the committed example to N = 100_000 for
@@ -1680,47 +1675,60 @@ type: VmPop vm Vm val i64 ;\n\
   &vm &prog i &> @ | op |\n\
   vm op Fetched ;\n\
 : run ( Vm Op -- i64 )\n\
-| Push  | vm v |\n\
+  ~[ ( Push )\n\
+    Push> | vm v |\n\
     vm v vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Add   | vm |\n\
+  ]\n\
+  ~[ ( Add )\n\
+    drop | vm |\n\
     vm vm-pop VmPop>\n\
-    swap vm-pop VmPop>\n\
-    rot\n\
-    +\n\
+    | b |\n\
+    vm-pop VmPop>\n\
+    b +\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Sub   | vm |\n\
+  ]\n\
+  ~[ ( Sub )\n\
+    drop | vm |\n\
     vm vm-pop VmPop>\n\
-    swap vm-pop VmPop>\n\
-    rot\n\
-    -\n\
+    | b |\n\
+    vm-pop VmPop>\n\
+    b -\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Mul   | vm |\n\
+  ]\n\
+  ~[ ( Mul )\n\
+    drop | vm |\n\
     vm vm-pop VmPop>\n\
-    swap vm-pop VmPop>\n\
-    rot\n\
-    *\n\
+    | b |\n\
+    vm-pop VmPop>\n\
+    b *\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Load  | vm addr |\n\
+  ]\n\
+  ~[ ( Load )\n\
+    Load> | vm addr |\n\
     &vm &mem addr &> @ | x |\n\
     vm x vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Store | vm addr |\n\
+  ]\n\
+  ~[ ( Store )\n\
+    Store> | vm addr |\n\
     vm vm-pop VmPop>\n\
     | v x |\n\
     &!v &!mem addr &!> x !\n\
     v\n\
     bump-pc\n\
     fetch Fetched> run\n\
-| Jz    | vm target |\n\
+  ]\n\
+  ~[ ( Jz )\n\
+    Jz> | vm target |\n\
     vm vm-pop VmPop>\n\
     0 =\n\
     ~[\n\
@@ -1729,13 +1737,18 @@ type: VmPop vm Vm val i64 ;\n\
       bump-pc\n\
     ] if\n\
     fetch Fetched> run\n\
-| Jmp   | vm target |\n\
+  ]\n\
+  ~[ ( Jmp )\n\
+    Jmp> | vm target |\n\
     vm &!pc target !\n\
     fetch Fetched> run\n\
-| Halt  | vm |\n\
+  ]\n\
+  ~[ ( Halt )\n\
+    drop | vm |\n\
     vm vm-pop VmPop>\n\
     swap drop\n\
-;\n\
+  ]\n\
+  Op? ;\n\
 : build ( -- [Op 13] )\n\
   Halt 13 fill | prog |\n\
   &!prog 0  >usize &!> 0  >usize Load  !\n\
@@ -2212,18 +2225,18 @@ fn drop_of_linear_enum_dispatches_on_tag() {
 }
 
 #[test]
-fn clause_body_disposes_linear_payload() {
-    // Criterion 9b: a clause-style word matching on the enum exposes the
-    // active variant's payload on the stack; the matched clause is
-    // responsible for disposing it like any other linear value (here via a
-    // bare `drop`, no local name needed). The `Empty` clause runs no glue at
-    // all (zero fields), proving the drop in the `Full` clause is the clause
-    // body's own doing, not compiler-inserted compensation.
+fn eliminator_arm_disposes_linear_payload() {
+    // Criterion 9b: destructuring the narrowed variant exposes its payload on
+    // the stack; the arm is responsible for disposing it like any other linear
+    // value (here via a bare `drop`, no local name needed). The `Empty` arm
+    // disposes only its own payload-free receiver, proving the second `drop`
+    // in the `Full` arm is the arm body's own doing, not compiler-inserted
+    // compensation.
     let stdout = run_linear_golden(
-        "clause-disposes-payload",
+        "eliminator-disposes-payload",
         &format!(
             "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
-: handle ( Item -- )\n| Empty   99 .\n| Full    drop\n;\n\
+: handle ( Item -- )\n  ~[ ( Empty ) drop 99 . ]\n  ~[ ( Full ) Full> drop ]\n  Item? ;\n\
 : main ( -- )\n  Empty handle\n  7 Spy Full handle ;\n"
         ),
     );
@@ -2231,15 +2244,15 @@ fn clause_body_disposes_linear_payload() {
 }
 
 #[test]
-fn unconsumed_linear_clause_payload_is_error() {
-    // The clause-body half of criterion 9b: a payload bound to a clause local
+fn unconsumed_linear_eliminator_payload_is_error() {
+    // The arm-body half of criterion 9b: a payload bound to an arm-body local
     // is subject to the same scope-end rule as any other linear local, so
     // forgetting it is a compile error naming the local and the word. This is
-    // the branch Phase 1 left unreachable (a linear clause payload needed the
+    // the branch Phase 1 left unreachable (a linear variant payload needed the
     // enum linearity this phase adds).
     let err = linear_check_error(&format!(
         "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
-: handle ( Item -- )\n| Empty   99 .\n| Full | s |   1 .\n;\n"
+: handle ( Item -- )\n  ~[ ( Empty ) drop 99 . ]\n  ~[ ( Full ) Full> | s | 1 . ]\n  Item? ;\n"
     ));
     assert!(err.contains("never consumed"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -2274,12 +2287,12 @@ fn duplicate_word_entry_local_is_error() {
 }
 
 #[test]
-fn duplicate_clause_body_local_is_error() {
-    // The clause-body twin of `duplicate_word_entry_local_is_error`: the
-    // same last-wins hazard exists in the `| Variant | s s |` binding path.
+fn duplicate_eliminator_arm_local_is_error() {
+    // The arm-body twin of `duplicate_word_entry_local_is_error`: the same
+    // last-wins hazard exists in an arm's own `| s s |` binding path.
     let err = linear_check_error(&format!(
         "{SPY_DEF}type: R | Two a Spy b Spy ;\n\
-: use ( R -- ) | Two | s s | s drop ;\n\
+: use ( R -- ) ~[ ( Two ) Two> | s s | s drop ] R? ;\n\
 : main ( -- ) 1 Spy 2 Spy Two use ;\n"
     ));
     assert!(err.contains("duplicate local"), "unexpected message: {err}");
@@ -2783,9 +2796,9 @@ fn recursive_list_disposes_in_expected_order() {
   | rest v |\n  \
   v v Spy rest ^ Cons ;\n\
 : step ( List -- List )\n\
-| Nil    Nil\n\
-| Cons   | v t n |  v . t drop n ^>\n\
-;\n\
+  ~[ ( Nil )  drop Nil ]\n\
+  ~[ ( Cons ) Cons> | v t n | v . t drop n ^> ]\n\
+  List? ;\n\
 : main ( -- )\n  \
   Nil 3 push-front 2 push-front 1 push-front\n  \
   step drop ;\n"

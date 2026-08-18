@@ -1811,10 +1811,8 @@ mod tests {
     }
     #[test]
     fn check_parameter_named_after_variant_is_error() {
-        // X12 (D8 backstop): a binding name equal to a registered variant
-        // name is rejected. A parameter name is the reachable case — a `|`
-        // local named after a variant is instead read as a clause by D8, so
-        // the parameter slot is where the collision actually surfaces.
+        // X12: a binding name equal to a registered variant name is
+        // rejected, parameter slots included.
         let err = check_src(
             "type: Shape | Circle r f64 ;
              : bad ( Circle : i64 -- i64 ) drop 0 ;",

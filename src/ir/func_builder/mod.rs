@@ -13,7 +13,6 @@ mod quotation;
 mod word_families;
 
 use super::*;
-pub(in crate::ir) use control_flow::ArmBinding;
 
 /// R10: the `IrType` a word returns — its one output, or the synthesized
 /// bundle struct for two or more. The single derivation both the lowering env's
@@ -152,10 +151,6 @@ pub(super) struct FuncBuilder<'a> {
     pub(super) enums: &'a Enums,
     pub(super) arrays: &'a Arrays,
     cells: &'a Cells,
-    /// The per-`RefId` referent `IrType`: needed to resolve a
-    /// reference-mode clause scrutinee's `EnumId` when the referent itself is
-    /// an enum.
-    refs: &'a Refs,
     /// Phase 7 slice 2 (R1): the module's `static:` table, name -> referent
     /// `IrType`. Consulted by `lower_reference_word` only after a local lookup
     /// misses, so a local shadowing a static still wins. Empty on the
@@ -230,7 +225,7 @@ pub(super) struct FuncBuilder<'a> {
     /// looping is hoisted here (R6 constant-stack corollary): QBE's `alloc*`
     /// bumps the frame pointer on every execution and never reclaims it
     /// within a function, so an aggregate constructed on the back-edge (e.g.
-    /// a clause's variant re-scrutinee) would otherwise grow the frame by one
+    /// an arm's variant re-scrutinee) would otherwise grow the frame by one
     /// slot per iteration and blow the stack well before the loop's constant-
     /// stack guarantee is exercised. Hoisting reserves one fixed slot per
     /// static alloc site, reused (overwritten) every iteration instead. This is
@@ -324,7 +319,7 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
-            refs,
+            refs: _,
             statics,
         } = regs;
         FuncBuilder {
@@ -334,7 +329,6 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
-            refs,
             statics,
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
@@ -781,30 +775,12 @@ pub(super) fn lower_word_parts(
         }
     }
 
-    match body {
-        WordBody::Terms { terms } => {
-            // Every input starts on the stack (D6: the header phi outputs when
-            // looping); an entry `| ... |` binding pops from it like any other
-            // binding term.
-            b.stack = stack_inputs;
-            b.lower_terms(terms, self_tail);
-        }
-        WordBody::Clauses(clauses) => {
-            let scrutinee_ty = effect
-                .inputs
-                .last()
-                .expect("clause word has a scrutinee input")
-                .ty;
-            let scrutinee_parts = b.clause_scrutinee_parts(scrutinee_ty);
-            b.lower_clauses(
-                clauses,
-                &stack_inputs,
-                scrutinee_parts,
-                ArmBinding::Decompose,
-                self_tail,
-            )
-        }
-    }
+    // Every input starts on the stack (D6: the header phi outputs when
+    // looping); an entry `| ... |` binding pops from it like any other
+    // binding term.
+    let WordBody::Terms { terms } = body;
+    b.stack = stack_inputs;
+    b.lower_terms(terms, self_tail);
 
     // R8: back-patch the header phis with the collected back-edge operands.
     if self_tail {

@@ -70,8 +70,8 @@ const RESULT_AND_REORDER: &str = "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
 fn poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantiations() {
     let src = format!(
         "{RESULT_AND_REORDER}\
-         : show_is ( Result[i64 str] -- ) | Ok |v| v . | Err |e| e . ;\n\
-         : show_si ( Result[str i64] -- ) | Ok |v| v . | Err |e| e . ;\n\
+         : show_is ( Result[i64 str] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
+         : show_si ( Result[str i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
          : main ( -- )\n\
            1 \"boom\" Err reorder . show_is\n\
            \"one\" 2 Err reorder . show_si ;\n"
@@ -132,7 +132,7 @@ fn poly_word_constructs_a_monomorph_no_other_site_materializes() {
     let src = format!(
         "{RESULT_AND_REORDER}\
          : wrap ( 'T -- Result['T i64] ) Ok ;\n\
-         : show ( Result[bool i64] -- ) | Ok |v| v . | Err |e| e . ;\n\
+         : show ( Result[bool i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
          : main ( -- ) true wrap show ;\n"
     );
     let prog = Scratch::write("t3", &src);
@@ -153,7 +153,7 @@ fn poly_body_constructor_off_tail_position_unifies_at_exit() {
     let src = format!(
         "{RESULT_AND_REORDER}\
          : mk ( 'T -- i64 Result['T i64] ) Ok 42 swap ;\n\
-         : show ( i64 Result[bool i64] -- ) | Ok |v| v . drop | Err |e| e . drop ;\n\
+         : show ( i64 Result[bool i64] -- ) ~[ ( Ok ) Ok> . drop ] ~[ ( Err ) Err> . drop ] Result? ;\n\
          : main ( -- ) true mk show ;\n"
     );
     let prog = Scratch::write("t-nontail", &src);

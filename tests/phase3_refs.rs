@@ -1826,7 +1826,8 @@ type: List | Nil | Cons v i64 next ^List ;
 : build ( i64 List -- List )\n  | n acc |\n  n 0 = ~[\n    acc\n  ] ~[\n    \
 n 1 - acc n push-front build\n  ] if ;
 \
-: walk ( &!List -- )\n  | Nil\n  | Cons | v next |\n      v 1 +!\n      next &!^ walk\n  ;
+: walk ( &!List -- )\n  ~[ ( &!Nil ) drop ]\n  \
+~[ ( &!Cons ) | c |\n      c &!v 1 +!\n      c &!next &!^ walk ]\n  List? ;
 ";
 
 #[test]
@@ -1840,7 +1841,8 @@ fn reference_parameter_crosses_back_edge_in_constant_stack() {
     let src = format!(
         "{BIG_LIST}\
          type: Popped rest List val i64 ;\n\
-         : pop ( List -- Popped )\n  | Nil   Nil 0 Popped\n  | Cons  | v next | next ^> v Popped\n  ;\n\
+         : pop ( List -- Popped )\n  ~[ ( Nil )  drop Nil 0 Popped ]\n  \
+~[ ( Cons ) Cons> | v next | next ^> v Popped ]\n  List? ;\n\
          : main ( -- )\n  1000000 Nil build\n  | l |\n  &!l walk\n  l pop Popped>\n  . drop ;\n",
     );
     let (stdout, code) = run_src("ref-param-crosses-back-edge", &src);
@@ -2013,17 +2015,17 @@ fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
 // --- reference-mode enum elimination
 
 #[test]
-fn reference_mode_clause_binds_payload_as_reference() {
-    // A word whose declared top input is `&Enum` dispatches clause-style in
-    // reference mode: `v`'s payload binding is a `&i64`, fetched with `@`
-    // rather than moved, and the recursion projects a fresh `&List` through
-    // the cell each iteration — the same shape as `walk`, shared instead of
-    // mutable.
+fn reference_mode_arm_projects_payload_as_reference() {
+    // A word whose declared top input is `&Enum` eliminates in reference
+    // mode: the arm receives a `&List.Cons`, projects `&v` off it as a `&i64`
+    // fetched with `@` rather than moved, and the recursion projects a fresh
+    // `&List` through the cell each iteration — the same shape as `walk`,
+    // shared instead of mutable.
     let (stdout, code) = run_src(
-        "reference-mode-clause-binds-payload",
+        "reference-mode-arm-projects-payload",
         "type: List | Nil | Cons v i64 next ^List ;\n\
-         : sum ( i64 &List -- i64 )\n  | Nil | acc | acc\n  | Cons | acc v next |\n      \
-         acc v @ +\n      next &^ sum\n  ;\n\
+         : sum ( i64 &List -- i64 )\n  ~[ ( &Nil ) drop ]\n  \
+         ~[ ( &Cons ) | acc c |\n      acc c &v @ +\n      c &next &^ sum ]\n  List? ;\n\
          : push-front ( List i64 -- List )\n  | rest v |\n  v rest ^ Cons ;\n\
          : build ( i64 List -- List )\n  | n acc |\n  n 0 = ~[\n    acc\n  ] ~[\n    \
          n 1 - acc n push-front build\n  ] if ;\n\
@@ -2034,16 +2036,19 @@ fn reference_mode_clause_binds_payload_as_reference() {
 }
 
 #[test]
-fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
-    // The clause form's named exemption: a clause binds every field of one variant
-    // at once, with no root local to reborrow from, and the fields are
-    // statically disjoint — so both payload references may be live together,
-    // which the general disjointness rule would reject for two projections of one place.
+fn reference_mode_arm_mutates_each_payload_field_through_its_own_reference() {
+    // Two fields of one variant, each mutated in place through its own `&!`
+    // projection off the narrowed receiver. The projections are taken in
+    // sequence, not held together: a mutable reborrow suspends its place until
+    // every reference derived from it is consumed, so `c &!b ... c &!a ...` is
+    // the arm-authoring pattern and `c &!a c &!b` is a located rejection.
     let (stdout, code) = run_src(
-        "reference-mode-clause-disjoint-payloads",
+        "reference-mode-arm-disjoint-payloads",
         "type: P | Zero | Both a i64 b i64 ;\n\
-         : bump ( &!P -- )\n  | Zero\n  | Both | a b |\n      a b\n      2 +!\n      1 +! ;\n\
-         : show ( P -- )\n  | Zero\n  | Both | a b | a . b .\n  ;\n\
+         : bump ( &!P -- )\n  ~[ ( &!Zero ) drop ]\n  \
+         ~[ ( &!Both ) | c | c &!b 2 +! c &!a 1 +! ]\n  P? ;\n\
+         : show ( P -- )\n  ~[ ( Zero ) drop ]\n  \
+         ~[ ( Both ) Both> | a b | a . b . ]\n  P? ;\n\
          : main ( -- )\n  1 2 Both | p |\n  &!p bump\n  p show ;\n",
     );
     assert_eq!(
@@ -2054,13 +2059,14 @@ fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
 }
 
 #[test]
-fn reference_mode_clause_fetching_linear_payload_is_error() {
-    // No clause may consume a payload binding: fetching `next`'s referent
+fn reference_mode_arm_fetching_linear_payload_is_error() {
+    // No arm may consume what it borrows: fetching `next`'s referent
     // (`^List`, always linear) is the same rejection a fetched/stored
     // linear `T` gets anywhere else, not a special reference-mode rule.
     let err = check_error(
         "type: List | Nil | Cons v i64 next ^List ;\n\
-         : bad ( &!List -- )\n  | Nil\n  | Cons | v next |\n      next @\n      v drop\n  ;\n\
+         : bad ( &!List -- )\n  ~[ ( &!Nil ) drop ]\n  \
+         ~[ ( &!Cons ) | c |\n      c &!next @\n      drop ]\n  List? ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
