@@ -681,7 +681,7 @@ fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value
 pub(super) fn lower_word_parts(
     name: &str,
     effect: &StackEffect,
-    body: &WordBody,
+    body: &[Term],
     self_tail: bool,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -778,9 +778,8 @@ pub(super) fn lower_word_parts(
     // Every input starts on the stack (D6: the header phi outputs when
     // looping); an entry `| ... |` binding pops from it like any other
     // binding term.
-    let WordBody::Terms { terms } = body;
     b.stack = stack_inputs;
-    b.lower_terms(terms, self_tail);
+    b.lower_terms(body, self_tail);
 
     // R8: back-patch the header phis with the collected back-edge operands.
     if self_tail {
@@ -872,11 +871,10 @@ pub(super) fn lower_materialized(
                 .map(|&ty| TypedSlot { name: None, ty })
                 .collect(),
         };
-        let body = WordBody::Terms { terms: m.body };
         out.extend(lower_word_parts(
             &m.symbol,
             &effect,
-            &body,
+            &m.body,
             false,
             env,
             resolve,

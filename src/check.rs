@@ -17,7 +17,7 @@ use crate::ast::{
     EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
     PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StaticDecl, StructDecl,
     StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
-    WordBody, WordDef,
+    WordDef,
 };
 
 mod audits;
@@ -706,8 +706,8 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // R18: the monomorphic quotation-taking words, gathered once so a call to
     // one is intercepted and inlined (term-splice) rather than lowered to a
     // call. A polymorphic combinator's body is checked by the poly pass, so it
-    // is not registered here; only a `WordBody::Terms` monomorphic word with a
-    // `Type::Quotation` input qualifies.
+    // is not registered here; only a monomorphic word with a `Type::Quotation`
+    // input qualifies.
     let combinators = collect_combinators(words);
     // R22 (D5): reject a cycle in the quotation-taking-word call subgraph
     // before any body is checked, so the splice below may assume acyclicity.

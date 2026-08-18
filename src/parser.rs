@@ -19,7 +19,7 @@ use crate::ast::{
     intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
     GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
     PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordBody, WordDef,
+    TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -1469,8 +1469,7 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
-        let terms = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
-        let body = WordBody::Terms { terms };
+        let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
         Ok(WordDef {
             name,
@@ -3791,7 +3790,7 @@ mod tests {
 
     /// The terms of a word body.
     fn terms_body(word: &WordDef) -> &[Term] {
-        let WordBody::Terms { terms } = &word.body;
+        let terms = &word.body;
         terms
     }
 

@@ -15,7 +15,7 @@
 //! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
 //! so today's symbols and output are unchanged.
 
-use crate::ast::{Module, Span, Term, TermKind, WordBody};
+use crate::ast::{Module, Span, Term, TermKind};
 use std::collections::HashSet;
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
@@ -420,7 +420,7 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
         let imports = &import_maps[word.module as usize];
         let selective = &selectives[word.module as usize];
         let mut scope = HashSet::new();
-        let WordBody::Terms { terms } = &mut word.body;
+        let terms = &mut word.body;
         rewrite_terms(
             terms,
             word.module,
@@ -990,10 +990,9 @@ mod tests {
         );
     }
 
-    fn call_names(body: &WordBody) -> Vec<String> {
+    fn call_names(body: &[Term]) -> Vec<String> {
         let mut out = Vec::new();
-        let WordBody::Terms { terms } = body;
-        collect_calls(terms, &mut out);
+        collect_calls(body, &mut out);
         out
     }
 

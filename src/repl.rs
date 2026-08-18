@@ -16,7 +16,7 @@ use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, Import, Line, OwnedCellDecl, OwnedCellId,
     PolySig, PolyType, RefDecl, RefId, Span, StackEffect, StructDecl, StructId, Term, TermKind,
-    Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    Type, TypedSlot, VariantDecl, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -386,13 +386,11 @@ fn remap_imported_combinator(
             .collect();
         Box::new(sig)
     });
-    let WordBody::Terms { terms } = &w.body;
+    let terms = &w.body;
     WordDef {
         name: internal.to_string(),
         effect,
-        body: WordBody::Terms {
-            terms: rewrite_combinator_body_calls(terms, body_rename),
-        },
+        body: rewrite_combinator_body_calls(terms, body_rename),
         poly,
         declares_inline: w.declares_inline,
         module: module_base + w.module,
@@ -2219,8 +2217,8 @@ impl Session {
         }
     }
 
-    fn rewrite_wordbody_imports(&self, body: &mut WordBody) -> Result<(), String> {
-        let WordBody::Terms { terms } = body;
+    fn rewrite_wordbody_imports(&self, body: &mut Vec<Term>) -> Result<(), String> {
+        let terms = body;
         self.rewrite_terms_imports(terms)
     }
 

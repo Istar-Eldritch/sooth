@@ -865,16 +865,14 @@ pub fn bool_print_word_def() -> WordDef {
             }],
             outputs: Vec::new(),
         },
-        body: WordBody::Terms {
-            terms: vec![
-                arm("False", "false\n"),
-                arm("True", "true\n"),
-                Term {
-                    kind: TermKind::Call("bool?".to_string()),
-                    span: Span::default(),
-                },
-            ],
-        },
+        body: vec![
+            arm("False", "false\n"),
+            arm("True", "true\n"),
+            Term {
+                kind: TermKind::Call("bool?".to_string()),
+                span: Span::default(),
+            },
+        ],
         poly: None,
         declares_inline: false,
         module: 0,
@@ -1080,7 +1078,10 @@ pub struct WordDef {
     /// bundle interning) skips such a word, so no variable is ever forced into
     /// a concrete `Type` slot (R4/S1).
     pub effect: StackEffect,
-    pub body: WordBody,
+    /// A word's body: a term sequence. Entry locals are not a field here: a
+    /// `| names |` binding is a `TermKind::Bind` term like any other, and the
+    /// entry position is just the first one (R1).
+    pub body: Vec<Term>,
     /// R4 (phase 4 slice 1): the polymorphic signature, present only when the
     /// declared effect mentions a type variable `'T`, a length variable `'N`,
     /// or the row variable `..s`. `None` for a monomorphic word, whose whole
@@ -1385,14 +1386,6 @@ pub struct ExternDecl {
     pub module: u32,
 }
 
-/// A word's body: a term sequence. Entry locals are not a field here: a
-/// `| names |` binding is a `TermKind::Bind` term like any other, and the
-/// entry position is just the first one (R1).
-#[derive(Debug)]
-pub enum WordBody {
-    Terms { terms: Vec<Term> },
-}
-
 /// One arm of a tag dispatch: the variant it handles, its body terms, and the
 /// span of the call it belongs to. Built by `lower_eliminator` from an
 /// eliminator call's variant-tagged quotation operands; it is a lowering
@@ -1434,11 +1427,13 @@ pub enum Type {
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     /// Phase 6 slice 2 (R1): one variant of an enum, standalone -- the type
-    /// Slice 3's eliminator narrows a scrutinee to inside an arm. Carries the owning `EnumId`, the variant's
-    /// index into `EnumDecl.variants`, and a leaked `Enum.Variant` display
-    /// name sourced once from `VariantDecl::display_static` (never a per-site
-    /// `format!`+`Box::leak`, see `variant_type`), so two `Type::Variant`s for
-    /// the same `(EnumId, vi)` are always byte-identical and compare equal.
+    /// Slice 3's eliminator narrows a scrutinee to inside an arm. Carries the
+    /// owning `EnumId`, the variant's index into `EnumDecl.variants`, and a
+    /// leaked `Enum.Variant` display
+    /// name sourced once from `VariantDecl::display_static` (never a
+    /// per-site `format!`+`Box::leak`, see `variant_type`), so two
+    /// `Type::Variant`s for the same `(EnumId, vi)` are always byte-identical
+    /// and compare equal.
     Variant(EnumId, usize, &'static str),
     Array(ArrayId, &'static str),
     /// A single-value owning heap cell: a compiler-known type constructor,
@@ -2817,7 +2812,7 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: Vec::new(),
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module: 0,
