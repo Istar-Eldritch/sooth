@@ -138,12 +138,19 @@ invariant and needs that invariant's owner to weigh in). The other real work is 
 body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
 bounded type variable — required members take `&'T`, per the dogfood) may be used for
 has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a**: its own dogfood (`Map['K 'V]`) is unwritable without S3a; the
-array-`sort` consumer does not need S3a and can proceed independently if S3a slips.
-**Open questions the spec must settle, not this entry** (full detail in
-`docs/roadmap/P7/slice3b-brief.md`): nominal vs. structural satisfaction; whether a
-user trait can be named `Copy`/`Ord` (today it can't, without a parser change); a
-multi-bound member-name-collision rule.
+**Depends on S3a**, which has landed, so both consumers are in scope: the array form
+of `sort` and `Map['K 'V]`, the latter being the forcing case for multi-method bounds
+(`'K: Eq Hash`).
+**Design decisions settled in the brief** (`docs/roadmap/P7/slice3b-brief.md`):
+satisfaction is **nominal**, via an `impl: Trait for Type ;` block confined by an
+orphan rule to the trait's or the type's own defining module; `Copy`/`Ord` become
+pre-seeded **predicate-kind** entries in the trait table (satisfaction still runs
+`is_copy`/`is_ord`) so a colliding user `trait:` fails as an ordinary duplicate
+declaration; a member name colliding across one variable's bound set is a located
+rejection. **Left for the spec:** which of the two lowering mechanisms the slice
+commits to — a per-instantiation overload record, or lowering re-resolving against
+`Subst`, the latter requiring R7's "lowering never re-runs resolution" invariant to be
+renegotiated with its owner.
 **Exit:** a user can declare a bound naming required word signatures, a polymorphic word
 can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with

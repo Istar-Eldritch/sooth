@@ -134,19 +134,18 @@ the paper dogfood) and kept for their history, not left open.
    second option require renegotiating R7's "lowering never re-runs resolution"
    invariant with whatever else depends on it?
 
-2. **Nominal or structural satisfaction?** Still open. Changes Recon 6/7's answers,
-   not just a downstream detail:
-   - **Structural** (Go-style): `'T` satisfies `Show` iff `show` resolves for it with
-     a matching `Sig`. No `impl` block, no declaration surface beyond `trait:` itself,
-     `env` is already the source of truth. Cheapest, but a type can satisfy a trait
-     by accident — a `show` written for an unrelated reason silently qualifies.
-   - **Nominal**: `impl: Show for Sprite ;` (or bundled into `type:`), an explicit
-     opt-in checked against the trait's required list at declaration time rather than
-     at every call site. Costs one more declaration form and an orphan/coherence rule
-     (can `impl: Show for Vec['T]` be written outside `Vec`'s own file?). Buys "the
-     author meant this," this project's usual bias (see the accessor auto-drops
-     P7.S1 just deleted, and `dup`'s explicitness generally).
-   Recommend resolving this **before** writing Recon 6/7 concretely.
+2. ~~Nominal or structural satisfaction?~~ **Resolved: nominal.** `impl: Show for
+   Sprite ; : show ( &Sprite -- ) ... ; ;` is an explicit opt-in, checked against
+   the trait's required member list at `impl:` declaration time. Orphan rule: an
+   `impl:` block must live in either the trait's own defining module or the
+   implementing type's own defining module, never a third module — the same
+   restriction a module-scoped structural design would have needed anyway, but
+   caught as a located error at the `impl:` site (naming the trait, the type, and
+   both legal modules) instead of surfacing later as a silent "doesn't satisfy"
+   at an unrelated call site with no declaration-level evidence trail. Two worked
+   examples (structural-module-scoped vs. nominal, including each one's orphan-
+   violation case) are kept in the resolving session, not reproduced here; the
+   nominal shape is what Recon 6/7 must now be written concretely against.
 
 3. ~~What is the required-member list allowed to mention?~~ **Resolved by the
    dogfood: single-type-variable traits only, and it is enough** — `Eq`/`Hash`/
@@ -161,9 +160,11 @@ the paper dogfood) and kept for their history, not left open.
 
 4. **New (dogfood): multi-bound member-name collisions.** If two bounds on one
    variable (`'K: Eq Hash`) each declared a same-named required member, nothing
-   disambiguates it today. Needs a located "member name must be unique across a
-   variable's bound set" rule before the spec, not discovered during
-   implementation.
+   disambiguates it today. **Live, not hypothetical, now that `Map` is in scope**
+   (`'K: Eq Hash` is exactly this shape). **Ruling for the spec to state explicitly:**
+   a located rejection — a member name must be unique across a variable's whole bound
+   set, reported where the bound set is declared, naming both contributing traits and
+   the colliding member. Not left free: an unruled open question ships permissive.
 
 5. ~~Does a bound need to compose?~~ **Resolved by the dogfood: yes, and it already
    works** — `sort`'s `'T: Copy Order` is a real, working confirmation; compose is
@@ -184,13 +185,19 @@ the paper dogfood) and kept for their history, not left open.
    `Show`" — diagnostics are behaviour on this project, and "which method is
    missing" is the actionable half of the message.
 
-8. **New (dogfood): can a user trait be named `Copy` or `Ord`?** Verified: no, not
-   without a parser change. `parse_capabilities` (`src/parser.rs:2158-2183`) matches
-   the literal strings `"Copy"`/`"Ord"` before any trait-table lookup could run, so
-   a user trait sharing either name is permanently shadowed. Either reserve both
-   names from user traits with a located error at `trait:` declaration time, or
-   demote the two builtins into the same lookup table the Recon 6 parser change
-   introduces — decide which before Recon 6 is written concretely.
+8. ~~Can a user trait be named `Copy` or `Ord`?~~ **Resolved: split namespace from
+   satisfaction.** Neither "reserve the names" nor "demote the builtins into
+   ordinary `trait:` declarations" — the second is not expressible, because `Copy`
+   and `Ord` are not method-set traits (`is_copy` is a structural property of a
+   type's shape; `is_ord` is `is_numeric`), so they cannot carry a required-member
+   list. Instead: pre-seed the trait table with `Copy` and `Ord` as **predicate-kind**
+   entries whose satisfaction still runs `is_copy`/`is_ord` unchanged, and make
+   `parse_capabilities` (`src/parser.rs:2158-2183`) do a single table lookup rather
+   than two hardcoded string compares. A user `trait: Copy ... ;` then fails with the
+   ordinary **duplicate-declaration** error against the builtin, not a bespoke
+   reserved-word check. This also removes the hardcoded-name path OQ5 warns about
+   regressing bound composition. **Spec must state:** `Copy`/`Ord` are prelude-global
+   names, while every user `trait:` is module-scoped and exportable per OQ6.
 
 ## Resolved: paper dogfood (worker-verified, `docs/roadmap/P7/slice3-dogfood.md`)
 
@@ -269,8 +276,22 @@ confirmations.**
   and exit criteria both need to price this in before implementation starts, not
   discover it mid-slice.
 
-Next step: resolve OQ2 (nominal vs. structural) and OQ8 (the `Copy`/`Ord`
-name-collision) explicitly, since both are prerequisites to writing Recon 6's parser
-sketch concretely, then spec against the reduced consumer scope this recon actually
-supports (`sort`'s array form; `Map` deferred) rather than the brief's original
-two-consumer plan.
+**Now ready to spec.** All three pre-spec prerequisites are resolved:
+
+- **OQ2 — nominal satisfaction** via `impl: Trait for Type ; ... ;`, with an orphan
+  rule confining an `impl:` block to the trait's or the type's own defining module.
+- **OQ8 — predicate-kind trait-table entries** for `Copy`/`Ord`, one lookup path in
+  `parse_capabilities`, duplicate-declaration error on collision.
+- **OQ4 — located rejection** of a member name colliding across a variable's bound set.
+
+**Consumer scope: both `sort` and `Map`.** P7.S3a landed, so `Map['K 'V]` is
+unblocked and comes back in as a first-class consumer rather than a deferred
+follow-up — it is the forcing case for multi-method bounds (`'K: Eq Hash`), so
+specing against `sort`'s array form alone would validate the design only against its
+easy consumer.
+
+Still to be settled **inside** the spec, not before it: which of OQ1's two mechanisms
+(per-instantiation overload record, or lowering re-resolving against `Subst`) the
+slice commits to, and — if the second — renegotiating R7's "lowering never re-runs
+resolution" invariant with its owner. The spec must price the IR/lowering budget in
+rather than inheriting the brief's original zero-cost claim.
