@@ -18,5 +18,5 @@ type: MaybeInt | None | Some v i64 ;
 : main ( -- )
   2.0 Circle area .          \ ~12.56636
   3.0 4.0 Rect area .        \ 12
-  5 None unwrap-or .         \ 5   (empty None arm yields the default underneath)
+  5 None unwrap-or .         \ 5   (the None arm drops its receiver, yielding the default)
   5 7 Some unwrap-or . ;     \ 7

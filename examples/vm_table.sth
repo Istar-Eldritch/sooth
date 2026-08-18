@@ -4,9 +4,10 @@
 \ `Op` still needs one eliminator (sum types are eliminated by tag only,
 \ slice 7a Q5), but that eliminator arm is now a pure *decoder*: it reads the
 \ tag and any immediate operand, pushes the operand onto the `Vm`'s operand
-\ stack, and yields an opcode index. The nine opcode *handlers* are uniform, match-free
-\ `[ Vm -- Vm ]` quotations living in one array (a materialization boundary,
-\ 7a): dispatch indexes the table and `call`s the selected entry indirectly.
+\ stack, and yields an opcode index. The nine opcode *handlers* are uniform,
+\ match-free `[ Vm -- Vm ]` quotations living in one array (a materialization
+\ boundary, 7a): dispatch indexes the table and `call`s the selected entry
+\ indirectly.
 \ `decode` always advances `pc` by one; `h-jz`/`h-jmp` overwrite it afterward,
 \ so no handler needs to know whether it is straight-line or a branch.
 

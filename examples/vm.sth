@@ -15,10 +15,10 @@
 \ `VmPop>` word. `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same
 \ way.
 \
-\ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the first
+\ `run`'s `Add`/`Sub`/`Mul`/`Store` arms (Phase 3 Slice 5) name the first
 \ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
 \ into position with `swap`/`over`/`rot`. `vm-push`/`vm-pop`/`fetch` and
-\ `run`'s `Load`/`Store` clauses (Phase 3 Slice 6) read and write the
+\ `run`'s `Load`/`Store` arms (Phase 3 Slice 6) read and write the
 \ operand stack and memory arrays through a borrowed element reference
 \ (`&>`/`&!>` then `@`/`!`).
 

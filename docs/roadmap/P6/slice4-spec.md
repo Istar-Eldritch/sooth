@@ -156,9 +156,26 @@ migrates in the same slice, so a deprecation window buys nothing.
     `None` arm must `drop` its receiver (C4): `~[ ( None ) drop ] ~[ ( Some ) Some> swap drop ] MaybeInt?`.
   - `examples/vm.sth` (`run`, nine mixed-payload arms) and `examples/vm_table.sth`
     (`decode`, same shape): each arm ends in a self-tail-call back-edge to the word.
-    **Probed:** an eliminator arm's tail call still takes the Slice 6 self-tail-call
-    back-edge (a `~[ ( Step ) Step> | n acc | ... Step run ] Cmd?`-shaped loop runs to
-    completion), so the one mechanism this migration could plausibly break does not.
+    **Correction (post-implementation review): the original probe claim here was
+    false.** It asserted an eliminator arm's tail call already takes the Slice 6
+    self-tail-call back-edge with no checker change needed. It does not: `TailWalk`
+    (`src/check/drop_graph.rs`, the syntactic pass both `has_self_tail_call` and the
+    tail-call cycle graph read) had fallen out of lockstep with `lower_eliminator`,
+    which has threaded `tail` into arms since Slice 3 (`calls.rs:740`) -- `walk` had
+    no case for an eliminator dispatch call, so it never saw `run`'s/`decode`'s tail
+    call inside an arm as inheriting tail position. Confirmed by reverting the fix in
+    isolation: `vm_dispatch_loop_runs_in_constant_stack` fails. The fix, in scope for
+    this phase since the migration is what made the gap reachable, extends `walk` to
+    recognize the run of tagged quotation-literal arms immediately preceding an
+    eliminator dispatch call the same way it already recognizes `call`'s/`branch`'s
+    quotation operands (`src/check/drop_graph.rs`, with unit coverage:
+    `tail_position_eliminator_arm_self_call_is_tail`,
+    `tail_position_eliminator_arm_run_stops_at_untagged_operand`). One consequence:
+    a *mutual* tail-recursion cycle routed entirely through eliminator arms, previously
+    invisible to `check_tail_call_cycles`, is now correctly rejected the same way an
+    `if`-arm mutual cycle already is (`tail_mutual_recursion_through_eliminator_arms_
+    is_error`) -- a new user-visible rejection, not a behavior change to any program
+    that compiled before.
   - `examples/list.sth` (`pop`) and `examples/refs.sth` (`pop`, `walk`): a recursive,
     boxed enum `List | Nil | Cons v i64 next ^List`, in both owning and `&!` mode.
     **Migrated and run this session; output matches the clause form byte-for-byte** (R7).
@@ -225,6 +242,13 @@ migrates in the same slice, so a deprecation window buys nothing.
 - **R8 golden.** `forward_declared_generic_type_eliminates_after_the_matching_word`
   (`tests/phase6_slice3b.rs`), asserting `"42\n107\n"`, added **before**
   `tests/phase5_generic_enum_elimination.rs` is deleted.
+- **`TailWalk` eliminator-arm unit coverage.** `src/check/drop_graph.rs` gets a unit
+  test per this phase's new tail rule, mirroring the existing splice-recognition tests:
+  `tail_position_eliminator_arm_self_call_is_tail` (a self-tail-call inside a tagged arm
+  is recognized) and `tail_position_eliminator_arm_run_stops_at_untagged_operand` (the
+  reverse scan for the tagged-arm run halts at the first non-tagged operand, so a
+  self-tail-call sitting beyond it is not reached). `tail_mutual_recursion_through_
+  eliminator_arms_is_error` covers the new-rejection consequence noted above.
 - **Deletion is proved by absence, not by a new test.** The exit criterion "no
   `WordBody::Clauses` anywhere in `src/`" is checked mechanically (grep) and by the tree
   building green; there is no located "clause body rejected" diagnostic to test, because

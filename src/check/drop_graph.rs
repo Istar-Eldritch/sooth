@@ -70,8 +70,12 @@ pub(super) fn check_main_effect(
 /// `call`s in tail position is spliced there too. `[ ... ] call` at a tail is
 /// the same thing one step shorter. A trailing `~[ t ] ~[ e ] if` hands tail
 /// position to both arms through that rule rather than as a form of its own:
-/// `if` splices, and `branch` tail-calls both quotation parameters. See
-/// `TailWalk`.
+/// `if` splices, and `branch` tail-calls both quotation parameters.
+///
+/// Phase 6 slice 4 adds a third way: an eliminator dispatch call (`Shape?`)
+/// splices the same way, so a tail call inside one of the tagged arm
+/// quotations written immediately before it is the caller's tail call too.
+/// See `TailWalk`.
 ///
 /// Shared by the checker (R2 predicate, R3 tail-call graph); the lowerer
 /// re-encodes the same syntactic rule via positional `tail` threading in
@@ -1139,6 +1143,55 @@ mod tests {
             vec!["w", "w"]
         );
         assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    // -- Phase 6 slice 4: eliminator-arm tail splice --------------------------
+
+    #[test]
+    fn tail_position_eliminator_arm_self_call_is_tail() {
+        // The run of tagged quotation-literal arms directly preceding the
+        // dispatch call splices exactly like `call`/`branch` does, so a
+        // self-tail-call inside one arm inherits the call's own tail
+        // position.
+        let w = first_word("type: E | A | B ; : w ( E -- E ) ~[ ( A ) w ] ~[ ( B ) drop 0 ] E? ;");
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["E?", "w"]
+        );
+        assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    #[test]
+    fn tail_position_eliminator_arm_run_stops_at_untagged_operand() {
+        // The reverse scan for the tagged-arm run halts at the first operand
+        // that isn't itself a tagged quotation literal. `~[ ( B ) w ]` holds
+        // the only self-tail-call, but an untagged `[ 5 ]` sits between it and
+        // the dispatch call, so the run collects only `~[ ( A ) .. ]` and
+        // never reaches `B`'s arm: a scan that failed to stop at the untagged
+        // operand would wrongly see `w` and report a self-tail-call.
+        let w = first_word(
+            "type: E | A | B ; : w ( E -- E ) ~[ ( B ) w ] [ 5 ] ~[ ( A ) drop 0 ] E? ;",
+        );
+        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["E?"]);
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    #[test]
+    fn tail_mutual_recursion_through_eliminator_arms_is_error() {
+        // Phase 6 slice 4 review: the eliminator-arm splice is a new source
+        // of tail edges, so a mutual cycle routed entirely through arms is
+        // now reachable and must be rejected the same way an ordinary or an
+        // `if`-arm mutual tail cycle already is.
+        let err = check_src(
+            "type: E | A | B ;\n\
+             : a ( E -- E ) ~[ ( A ) b ] ~[ ( B ) b ] E? ;\n\
+             : b ( E -- E ) ~[ ( A ) a ] ~[ ( B ) a ] E? ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("mutual tail recursion"),
+            "unexpected message: {err}"
+        );
     }
 
     // -- Slice 10c (R-P1): tail-splice recognition ---------------------------
