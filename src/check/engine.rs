@@ -1445,7 +1445,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads, _fields)| stack)
+        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
     }
     /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,

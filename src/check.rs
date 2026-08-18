@@ -52,9 +52,9 @@ pub(crate) use self::combinators::{
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
-    check_exported_signatures, check_selective_imports, check_static_decls, check_types,
-    enum_generated_sigs, selective_not_exported_error, struct_generated_sigs,
-    variant_generated_sigs, SelectiveName,
+    check_exported_signatures, check_no_word_shadows_eliminator, check_selective_imports,
+    check_static_decls, check_types, enum_generated_sigs, selective_not_exported_error,
+    struct_generated_sigs, variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
@@ -65,6 +65,7 @@ pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
+use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
 pub(crate) use self::word_entry::{
@@ -89,6 +90,7 @@ type ResolvedCalls = (
     HashMap<Span, CallInst>,
     HashMap<Span, String>,
     HashMap<Span, (StructId, usize)>,
+    HashMap<Span, (EnumId, usize, usize)>,
 );
 
 /// `ResolvedCalls` plus the residual stack a REPL line leaves behind and the
@@ -99,6 +101,7 @@ type InferredLine = (
     HashMap<Span, CallInst>,
     HashMap<Span, String>,
     HashMap<Span, (StructId, usize)>,
+    HashMap<Span, (EnumId, usize, usize)>,
 );
 
 /// R5/R14: every candidate registered under one polymorphic-word name, its
@@ -139,12 +142,25 @@ struct PolyCtx<'a> {
     /// `builtin_overloads` does: an `if` arm clones the scope, and a record
     /// made in one arm must outlive it.
     resolved_fields: &'a mut HashMap<Span, (StructId, usize)>,
+    /// Phase 6 slice 3 (R6): the receiver-directed variant-field projections
+    /// this walk resolved (`&r` against a `Type::Variant` on the stack), span
+    /// -> `(EnumId, variant index, field index)`, relayed onto
+    /// `Module::resolved_variant_fields`. Mirrors `resolved_fields` for the
+    /// same reason: an `if` arm clones the scope, and a record made in one
+    /// arm must outlive it.
+    resolved_variant_fields: &'a mut HashMap<Span, (EnumId, usize, usize)>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
     /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the REPL
     /// paths, where defining such a word is rejected up front (R23).
     combinators: &'a CombinatorEnv<'a>,
+    /// Phase 6 slice 3 (R3): the generated eliminator words, bare surface name
+    /// (`Shape?`) -> the enum they eliminate, so a call to one is routed to
+    /// `check_eliminator_call` ahead of the env/combinator/poly paths. An
+    /// eliminator has no body, so it is not a `Combinator` and must never be
+    /// spliced.
+    eliminators: &'a HashMap<String, EnumId>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -235,6 +251,9 @@ struct AnnotEffect {
     outputs: Vec<Type>,
     /// The annotation's opening `(`, where both its diagnostics locate.
     span: Span,
+    /// Phase 6 slice 3 (R1/R4): the variant an eliminator arm handles, carried
+    /// through from `QuotAnnot::variant_tag`. `None` for every plain literal.
+    variant_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,6 +599,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // signature under one name are rejected before either enters `poly_env`
     // below -- unresolvable ambiguity, not a legitimate second overload.
     check_duplicate_poly_signatures(&module.words)?;
+    // Phase 6 slice 3 review fix (smaller point 1): a word sharing a
+    // generated eliminator's name would be silently unreachable -- rejected
+    // here, before the eliminator registry below is built, the same as any
+    // other name collision this module already rejects up front.
+    check_no_word_shadows_eliminator(&module.words, &module.enums)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -592,6 +616,25 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // site is intercepted there before the concrete lookup, where its
     // `PolySig` is unified against the concrete stack.
     let mut poly_env: PolyEnv = HashMap::new();
+    // Phase 6 slice 3 (R2/R3): the generated eliminator words. The signature
+    // registers so the name is present in the environment like any other
+    // generated word; the registry beside it is what a call site is actually
+    // routed by, since an eliminator's arms are matched to variants by
+    // annotation tag rather than unified slot by slot.
+    //
+    // Review fix (cycle 3): so this registration changes no diagnostic and no
+    // dispatch -- `check_term`'s interception precedes every env/poly lookup
+    // unconditionally, and a user word colliding with the name is rejected
+    // outright by `check_no_word_shadows_eliminator` above. It is the
+    // generator's only consumer in this phase (the REPL's own env assembly
+    // builds the registry without it), and the `PolySig` becomes load-bearing
+    // in Phase 4, where the lowering symbol beside it mints `EnumWord::
+    // Eliminate`. Deleted, nothing observable changes and the generator R2
+    // exists to add becomes dead code.
+    for (name, _symbol, sig) in enum_eliminator_sigs(&module.enums) {
+        poly_env.entry(name).or_default().push((sig, None));
+    }
+    let eliminators = eliminator_registry(&module.enums);
     // Slice 8a fix 1 (R1): each word's distinct lowering symbol, aligned by
     // index -- equal to its own name unless it shares that name with another
     // word in this module (an overload set), in which case each candidate's
@@ -636,6 +679,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         instantiations: _,
         builtin_overloads: _,
         resolved_fields: _,
+        resolved_variant_fields: _,
         modules,
         statics,
         generics,
@@ -691,6 +735,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // monomorphic body resolves one against its stack, then relayed to the
     // module for lowering.
     let mut resolved_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // Phase 6 slice 3 (R6): the receiver-directed variant-field projections,
+    // filled as each monomorphic body resolves one against its stack, then
+    // relayed to the module for lowering.
+    let mut resolved_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -706,12 +754,16 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+                let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
+                    HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
                     builtin_overloads: &mut scratch_overloads,
                     resolved_fields: &mut scratch_fields,
+                    resolved_variant_fields: &mut scratch_variant_fields,
                     combinators: &combinators,
+                    eliminators: &eliminators,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -759,7 +811,9 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 insts: &mut insts,
                 builtin_overloads: &mut builtin_overloads,
                 resolved_fields: &mut resolved_fields,
+                resolved_variant_fields: &mut resolved_variant_fields,
                 combinators: &combinators,
+                eliminators: &eliminators,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -829,6 +883,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
+    module.resolved_variant_fields = resolved_variant_fields;
     Ok(())
 }
 
@@ -866,7 +921,7 @@ pub(crate) fn check_def(
     poly_env: &PolyEnv,
     combinators: &CombinatorEnv,
 ) -> Result<ResolvedCalls, String> {
-    let (_sites, insts, overloads, fields) = check_def_collecting_drop_sites(
+    let (_sites, insts, overloads, fields, variant_fields) = check_def_collecting_drop_sites(
         word,
         enums,
         env,
@@ -877,7 +932,7 @@ pub(crate) fn check_def(
         poly_env,
         combinators,
     )?;
-    Ok((insts, overloads, fields))
+    Ok((insts, overloads, fields, variant_fields))
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -930,16 +985,26 @@ pub(crate) fn check_def_collecting_drop_sites(
     // R2 (P7 slice 1): this body's receiver-directed field projections,
     // relayed to the caller so the session lowers them like a native build.
     let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // R6 (Phase 6 slice 3): this body's receiver-directed variant-field
+    // projections, relayed to the caller so the session lowers them like a
+    // native build.
+    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
     // pass the empty map, keeping the concrete path byte-identical.
+    // Phase 6 slice 3 (R3): the eliminator registry is derived from the
+    // session's own enums, so a session-defined word eliminates a retained
+    // enum exactly as a native one does.
+    let eliminators = eliminator_registry(enums);
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
         resolved_fields: &mut fields,
+        resolved_variant_fields: &mut variant_fields,
         combinators,
+        eliminators: &eliminators,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -962,7 +1027,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         &mut poly,
         None,
     )?;
-    Ok((sites, insts, overloads, fields))
+    Ok((sites, insts, overloads, fields, variant_fields))
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -1000,15 +1065,22 @@ pub(crate) fn infer_line(
     // R2 (P7 slice 1): this line's receiver-directed field projections,
     // relayed to the caller so the session lowers them like a native build.
     let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
+    // R6 (Phase 6 slice 3): this line's receiver-directed variant-field
+    // projections, relayed to the caller so the session lowers them like a
+    // native build.
+    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
+    let eliminators = eliminator_registry(enums);
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
         builtin_overloads: &mut overloads,
         resolved_fields: &mut fields,
+        resolved_variant_fields: &mut variant_fields,
         combinators,
+        eliminators: &eliminators,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, false, &mut poly,
@@ -1041,6 +1113,7 @@ pub(crate) fn infer_line(
         insts,
         overloads,
         fields,
+        variant_fields,
     ))
 }
 
@@ -1557,6 +1630,7 @@ fn resolve_annotation(ctx: &Ctx, annot: &QuotAnnot) -> Result<AnnotEffect, Strin
         inputs: resolve_annot_slots(ctx, annot, &annot.inputs)?,
         outputs: resolve_annot_slots(ctx, annot, &annot.outputs)?,
         span: annot.span,
+        variant_tag: annot.variant_tag.clone(),
     })
 }
 
@@ -1650,7 +1724,11 @@ fn annotation_parameter_mismatch_error(
     declared: Type,
     annotated: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 1): `word` here may be an
+    // eliminator's call name, mangled mid-string (`Shape__m0?`) rather than
+    // with a trailing group -- `demangle_word` cannot see through that, only
+    // `demangle_call` can (see its own doc comment).
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: the quotation passed to `{word}` is annotated `{annotated}` but `{word}` declares it `{declared}`{} (line {})",
         in_word(ctx),
@@ -1805,6 +1883,38 @@ fn reconcile_annotation_with_parameter(
 /// compares one sibling literal's actual exit types against another's,
 /// erroring at whichever literal disagrees (R-P2-4: no row unification,
 /// `..o` is discovered by forward checking, never solved for).
+/// The four boundary properties `check_literal_against_declared_effect` reads,
+/// bundled (Phase 6 slice 3 review fix, cycle 3): four consecutive bare `bool`s
+/// at a call site say nothing about which is which, and this function already
+/// takes more arguments than a reader can hold in their head.
+#[derive(Clone, Copy)]
+struct LiteralBoundary {
+    /// Slice 10c (R-P2-3/R-P2-4): true for a declared quotation whose input
+    /// and output rows differ (`..i -- ..o`, `..i != ..o`). There the exit row
+    /// has no fixed point to check against -- the whole point of the shape
+    /// change -- so only the declared fixed trailing outputs are checked and
+    /// the literal's actual exit types are handed back unjudged.
+    shape_changing: bool,
+    /// Slice 10c: the literal fills a parameter slot the callee `call`s in
+    /// *tail* position -- a branch arm of `if`/`unless`, as opposed to `times`'
+    /// body. Such a literal runs at most once per entry.
+    is_arm: bool,
+    /// Whether the *call site* is itself in tail position, which an `is_arm`
+    /// literal inherits.
+    caller_tail: bool,
+    /// Review fix (Phase 6 slice 3, finding 1): an arm-flavoured caller falls
+    /// into one of two shapes. A combinator's argument pre-check (`if`,
+    /// `check_poly_combinator_args`) is thrown away -- the splice that follows
+    /// re-checks whichever arm actually runs, for real, so this probe's own
+    /// move-state consumption must leave no trace (`finalize = false`). The
+    /// eliminator (`check_eliminator_call`) never splices: this call *is* the
+    /// only accounting the checker ever does for that arm, so its consumption
+    /// must survive (`finalize = true`), and the caller reconciles every arm's
+    /// surviving state itself (`Moves::join`, generalized to N arms) rather
+    /// than losing it to a restore that has nothing later to answer to.
+    finalize: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_literal_against_declared_effect(
     id: QuotId,
@@ -1822,10 +1932,24 @@ fn check_literal_against_declared_effect(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
-    shape_changing: bool,
-    is_arm: bool,
-    caller_tail: bool,
-) -> Result<Vec<Type>, String> {
+    boundary: LiteralBoundary,
+    // Review fix (Phase 6 slice 3, cycle 2): the caller's own slots for the
+    // declared *inputs*, when the boundary hands the literal a value it
+    // already holds rather than a freshly computed one. `None` (every caller
+    // but the eliminator) seeds each declared input as `Slot::computed`, as
+    // before. The eliminator's arm receives the caller's actual scrutinee --
+    // a `&!Shape` is rooted at a caller place, and an arm handed a
+    // provenance-free `&!Shape.Circle` instead borrows nothing, so a
+    // reference projected out of it escaped the call unrooted and a second,
+    // independent `&!` to the same place was accepted alongside it.
+    input_slots: Option<&[Slot]>,
+) -> Result<Vec<Slot>, String> {
+    let LiteralBoundary {
+        shape_changing,
+        is_arm,
+        caller_tail,
+        finalize,
+    } = boundary;
     let body = prov.quotations[id.0].body.clone();
     // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
     // must match the boundary's declared flavour, independent of whatever
@@ -1874,7 +1998,15 @@ fn check_literal_against_declared_effect(
         true => row.to_vec(),
         false => row.iter().map(|s| Slot::computed(s.ty)).collect(),
     };
-    fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t)));
+    match input_slots {
+        Some(given) => fresh.extend(
+            given
+                .iter()
+                .zip(&eff.inputs)
+                .map(|(s, t)| Slot { ty: *t, ..*s }),
+        ),
+        None => fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t))),
+    }
     let depth = scope.depth();
     // Slice 10c: an arm occupies the caller's tail position when the call
     // site does. Pinning that `false` made this probe walk a self-recursive
@@ -1914,23 +2046,25 @@ fn check_literal_against_declared_effect(
     // reconciled at the join into `MaybeMoved`. `is_arm` is the discriminator
     // (the callee `call`s this slot in *tail* position, so it runs at most
     // once per entry), not `is_inline` alone.
-    if is_inline && is_arm {
+    if is_inline && is_arm && !finalize {
         // The probe must also leave no trace: two sibling arms are
         // alternatives, each starting from the same move-state, and the splice
         // re-checks whichever one runs. Without the restore the second arm
         // sees the first arm's consumption and reports use-after-move.
         scope.moves.states = moves_before.clone();
-    } else if let Some(local) =
-        moves_before
-            .iter()
-            .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
-                (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
-                    Some(n.clone())
-                }
-                _ => None,
-            })
-    {
-        return Err(quotation_captures_local_error(ctx, span, word, &local));
+    } else if !(is_inline && is_arm) {
+        if let Some(local) =
+            moves_before
+                .iter()
+                .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
+                    (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+                        Some(n.clone())
+                    }
+                    _ => None,
+                })
+        {
+            return Err(quotation_captures_local_error(ctx, span, word, &local));
+        }
     }
     // R12: a borrow of an enclosing place left live on the literal's exit row.
     // Skipped for a `~` branch arm for the same reason as the linear-capture
@@ -1957,7 +2091,6 @@ fn check_literal_against_declared_effect(
             span,
         },
     )?;
-    let actual: Vec<Type> = result.iter().map(|s| s.ty).collect();
     if shape_changing {
         // R-P2-4: a shape-changing declared quotation has no fixed exit row
         // to check against as a whole; the caller reconciles sibling
@@ -2003,7 +2136,7 @@ fn check_literal_against_declared_effect(
                 actual_effect,
             ));
         }
-        return Ok(actual);
+        return Ok(result);
     }
     // R11: the literal's exit row must equal the grounded declared output row:
     // the same carried region `row` followed by the declared outputs. N=0
@@ -2037,7 +2170,433 @@ fn check_literal_against_declared_effect(
             ctx, span, word, declared, actual,
         ));
     }
-    Ok(actual)
+    Ok(result)
+}
+
+/// Phase 6 slice 3 (R4): check a call to a generated eliminator word
+/// (`Shape?`). Deliberately *not* a permutation of `check_poly_combinator_args`
+/// (decision 4): an eliminator's arms are routed to variants by their
+/// annotation tag rather than by slot position, and nothing per-arm unifies
+/// (each arm's input is a concrete `Type::Variant` read straight off the enum),
+/// so there is no substitution to solve and no `Subst` to hand back. What it
+/// does share it *calls*: `check_literal_against_declared_effect` for every arm
+/// body and `combinator_branch_output_mismatch_error` for the cross-arm
+/// disagreement, so an arm is held to exactly the rules every other quotation
+/// literal in the language is held to.
+///
+/// Decision 6: the scrutinee may be owning (`Shape`) or a reference
+/// (`&Shape`/`&!Shape`). The mode is a property of the *call* -- one scrutinee,
+/// one mode -- and every arm's expected input is built in it, so an arm
+/// annotation that spells the wrong mode is rejected by the shared
+/// declared-vs-written comparison rather than by a mode-specific diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn check_eliminator_call(
+    id: EnumId,
+    name: &str,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+    granted: &HashSet<String>,
+    tail: bool,
+) -> Result<Vec<Slot>, String> {
+    let enum_decl = &ctx.enums()[id.index()];
+    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
+    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
+    // built from the mangled base) -- unlike `name_static`, which every
+    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
+    // would still leave `Shape__m0` in a diagnostic.
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    let held = stack.len();
+    // R4 step 1: arm collection is variable-arity, not a fixed
+    // `1 + variant_count` pop. A fixed pop cannot tell "an arm is missing"
+    // from "the stack is short below the scrutinee", so a missing arm would
+    // always present as underflow and the exhaustiveness pass below could
+    // never name it. Collection stops at the first operand that is not a
+    // tagged quotation literal; that operand is the scrutinee slot.
+    let mut arms: Vec<(QuotId, String)> = Vec::new();
+    while let Some(top) = stack.last().copied() {
+        let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
+            break;
+        };
+        let Some(tag) = prov.quotations[qid.0]
+            .annot
+            .as_ref()
+            .and_then(|a| a.variant_tag.clone())
+        else {
+            break;
+        };
+        arms.push((qid, tag));
+        stack.pop();
+    }
+    // The checker pushes operands in written source order, so popping off the
+    // top yielded the arms reversed. Both passes below walk arms in *written*
+    // order (decision 5), so the reversal is undone here, once.
+    arms.reverse();
+
+    // R4 step 2: the scrutinee, owning or referenced.
+    let Some(scrutinee) = stack.last().copied() else {
+        return Err(underflow_error(
+            ctx,
+            span,
+            name,
+            enum_decl.variants.len() + 1,
+            held,
+        ));
+    };
+    if resolve_quotation_operand(scrutinee).is_some() {
+        // The operand that stopped collection is a quotation, so it was meant
+        // as an arm: either an untagged literal or a forwarded abstract
+        // quotation, which carries no annotation to tag at all.
+        return Err(eliminator_untagged_arm_error(ctx, span, name));
+    }
+    let (referent, ref_mutable) = match ref_parts(scrutinee.ty, refs) {
+        Some((referent, mutable)) => (referent, Some(mutable)),
+        None => (scrutinee.ty, None),
+    };
+    if referent != Type::Enum(id, enum_decl.name_static) {
+        return Err(type_mismatch_error(
+            ctx,
+            span,
+            name,
+            Type::Enum(id, enum_decl.name_static),
+            scrutinee.ty,
+        ));
+    }
+
+    // R4 step 3: exhaustiveness and duplication, in written source order and
+    // before any arm body is checked -- adapted from `check_clause_word`,
+    // whose clauses are the same value shape by another spelling.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut variant_indices = Vec::with_capacity(arms.len());
+    for (qid, tag) in &arms {
+        let Some(vi) = enum_decl
+            .variants
+            .iter()
+            .position(|v| generic_surface_name(&v.name) == tag)
+        else {
+            return Err(eliminator_unknown_variant_error(
+                ctx,
+                prov.quotations[qid.0].span,
+                name,
+                tag,
+                enum_name,
+            ));
+        };
+        if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
+            return Err(eliminator_duplicate_arm_error(
+                ctx,
+                prov.quotations[qid.0].span,
+                name,
+                tag,
+                enum_name,
+            ));
+        }
+        variant_indices.push(vi);
+    }
+    for variant in &enum_decl.variants {
+        let variant_surface = generic_surface_name(&variant.name);
+        if !seen.contains(variant_surface) {
+            return Err(eliminator_non_exhaustive_error(
+                ctx,
+                span,
+                name,
+                variant_surface,
+                enum_name,
+            ));
+        }
+    }
+
+    // R4 steps 4-5: each arm body against its own variant, in written order,
+    // with the first arm setting the `..b` baseline every later one must agree
+    // with. The row every arm shares is the caller region below the scrutinee.
+    //
+    // Review fix (findings 1/2): each arm is checked against its own clone of
+    // `scope`, exactly as `check_branch_join`'s `then_scope`/`else_scope` are
+    // -- unlike a spliced `if`, nothing later re-checks whichever arm actually
+    // runs, so this pass is the *only* accounting the checker ever does for
+    // it. `finalize = true` disables `check_literal_against_declared_effect`'s
+    // probe-and-restore (that restore's premise, a later splice re-checking
+    // the real body, does not hold here), so each clone ends with its own
+    // arm's real consumed move-state; the loop below joins every arm's
+    // (`Moves::join`, generalized here from two arms to N) into `scope` for
+    // real, and merges every arm's real output `Slot`s (provenance included)
+    // rather than re-deriving the shared exit row from the pre-call `row`.
+    let base = stack.len() - 1;
+    let row: Vec<Slot> = stack[..base].to_vec();
+    let mut baseline: Option<Vec<Slot>> = None;
+    let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
+    for ((qid, _), vi) in arms.iter().zip(&variant_indices) {
+        let owned = variant_type(ctx.enums(), id, *vi);
+        // Decision 6: the call's one resolved mode, applied uniformly. An arm
+        // whose annotation spells the other mode disagrees with this built
+        // effect and is rejected by the shared literal check below.
+        let narrowed = match ref_mutable {
+            Some(mutable) => intern_ref_type(refs, owned, mutable),
+            None => owned,
+        };
+        let declared = crate::ast::inline_quotation_type(vec![narrowed], vec![]);
+        let Some(eff) = crate::ast::is_quotation_type(declared) else {
+            unreachable!("`inline_quotation_type` builds a quotation type")
+        };
+        // The arm receives the caller's *own* scrutinee, retyped to the
+        // narrowed variant -- not a fresh provenance-free slot. A reference
+        // scrutinee is rooted at a caller place, and an arm that borrowed
+        // nothing let a reference projected inside it leave the call
+        // unrooted: a second, independent `&!` to that place was then
+        // accepted alongside it, and the place itself could be consumed
+        // inside the arm while a borrow of it was live. The declared effect
+        // stays exactly as built above, so the mode-mismatch comparison is
+        // unaffected.
+        let received = [Slot {
+            ty: narrowed,
+            ..scrutinee
+        }];
+        let literal_span = prov.quotations[qid.0].span;
+        let mut arm_scope = scope.clone();
+        let arm_result = check_literal_against_declared_effect(
+            *qid,
+            eff,
+            true,
+            &row,
+            name,
+            span,
+            ctx,
+            env,
+            arrays,
+            cells,
+            refs,
+            prov,
+            &mut arm_scope,
+            poly,
+            granted,
+            LiteralBoundary {
+                shape_changing: true,
+                is_arm: true,
+                caller_tail: tail,
+                finalize: true,
+            },
+            Some(&received),
+        )?;
+        // R4 step 5b: a `Type::Variant` may not leave the call. Slice 2 made
+        // the type reachable only as an arm's input and the value inside that
+        // arm; this phase is the first that can construct one from surface
+        // syntax, so it is the first that could let one out. Only a
+        // single-variant enum gets this far -- with two or more variants the
+        // arms leave different variant types and the cross-arm agreement below
+        // rejects the call first -- but letting it out is unsound, not merely
+        // untidy: every type-directed predicate outside the eliminator is
+        // written over `Type::Enum`, so `is_copy` reads a variant as trivially
+        // `Copy` and `dup` on an escaped one double-drops a linear payload.
+        for slot in &arm_result {
+            let referent = ref_parts(slot.ty, refs).map(|(referent, _)| referent);
+            if matches!(slot.ty, Type::Variant(..)) || matches!(referent, Some(Type::Variant(..))) {
+                return Err(eliminator_variant_escape_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    slot.ty,
+                ));
+            }
+        }
+        arm_moves.push(arm_scope.moves);
+        match &baseline {
+            None => baseline = Some(arm_result),
+            Some(expected) => {
+                if let Some((baseline_types, arm_types)) =
+                    arm_exit_row_mismatch(expected, &arm_result)
+                {
+                    return Err(combinator_branch_output_mismatch_error(
+                        ctx,
+                        literal_span,
+                        name,
+                        &baseline_types,
+                        &arm_types,
+                    ));
+                }
+                // Finding 2: type agreement is not evidence the arms leave the
+                // same borrow provenance -- reconcile each position the same
+                // way `check_branch_join`'s merge does, rejecting a
+                // disagreement rather than silently erasing it (which would
+                // let an escaped `&!` alias a second, independently-taken
+                // one).
+                let mut merged = Vec::with_capacity(expected.len());
+                for (a, b) in expected.iter().zip(&arm_result) {
+                    merged.push(merge_arm_output_slot(ctx, literal_span, a, b, prov)?);
+                }
+                baseline = Some(merged);
+            }
+        }
+    }
+
+    // R4 step 6: the call leaves the baseline -- the merged exit region every
+    // arm agreed on, provenance included (finding 2) -- and joins every arm's
+    // real move-state into `scope` (finding 1). A zero-variant enum has no
+    // arms and no constructible value (OQ4), so its call is unreachable:
+    // `arm_moves` stays empty and `scope`/`row` are simply left untouched.
+    if let Some(joined) = arm_moves.into_iter().reduce(Moves::join) {
+        scope.moves = joined;
+    }
+    Ok(baseline.unwrap_or(row))
+}
+
+/// R4 step 5: whether the running baseline exit row and one later arm's
+/// disagree on types, and if so the pair the diagnostic names -- the baseline
+/// (the written-*first* arm's shape, decision 5) as `expected`, the arm being
+/// checked as `found`, in that order.
+///
+/// Split out of `check_eliminator_call` as a pure function so a unit test pins
+/// that pairing by structure: two `Type`s can `Display` identically, so a
+/// rendered-message assertion alone cannot tell the two apart from a swap
+/// between them.
+fn arm_exit_row_mismatch(baseline: &[Slot], arm: &[Slot]) -> Option<(Vec<Type>, Vec<Type>)> {
+    let expected: Vec<Type> = baseline.iter().map(|s| s.ty).collect();
+    let found: Vec<Type> = arm.iter().map(|s| s.ty).collect();
+    let agrees = found.len() == expected.len()
+        && found.iter().zip(&expected).all(|(f, w)| {
+            matches!(
+                match_slot(Slot::computed(*f), *w),
+                SlotMatch::Exact | SlotMatch::LiteralSizeType
+            )
+        });
+    match agrees {
+        true => None,
+        false => Some((expected, found)),
+    }
+}
+
+/// R4 step 6 (review fix, finding 2): reconcile one exit-row position across
+/// two arms that already agree on its *type* -- the borrow-suspension
+/// bookkeeping still has to agree too, the same real content
+/// `check_branch_join`'s merge (`check/terms.rs`) checks for an `if`. One arm
+/// leaving a live borrow the other doesn't (or of a different place) is
+/// rejected here rather than silently erased to a provenance-free slot.
+fn merge_arm_output_slot(
+    ctx: &Ctx,
+    span: Span,
+    a: &Slot,
+    b: &Slot,
+    prov: &mut Provenance,
+) -> Result<Slot, String> {
+    let deriv = match (a.deriv, b.deriv) {
+        (None, None) => None,
+        (Some(x), Some(y)) if prov.deriv(x).suspension() == prov.deriv(y).suspension() => Some(x),
+        _ => {
+            return Err(borrow_join_disagreement_error(
+                ctx,
+                span,
+                a.deriv.map(|did| prov.deriv(did)),
+                b.deriv.map(|did| prov.deriv(did)),
+            ));
+        }
+    };
+    let alias = match (a.alias, b.alias) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(x), Some(y)) => Some(Alias {
+            set: prov.alias_union(x.set, y.set),
+            span: x.span,
+        }),
+    };
+    Ok(Slot {
+        alias,
+        deriv,
+        surviving: prov.union_surviving(a.surviving, b.surviving),
+        ..Slot::computed(a.ty)
+    })
+}
+
+/// R4 step 3: an arm annotated with a variant the eliminated enum does not
+/// declare. Names both, mirroring `check_clause_word`'s unknown-variant
+/// message -- a tag naming *another* enum's variant is the shape this catches
+/// (an unknown bare name never parses as a tag at all).
+fn eliminator_unknown_variant_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    variant: &str,
+    enum_name: &str,
+) -> String {
+    // Finding 4 (Phase 2 review): `word` is a *call* name -- once `resolve`
+    // learns the `?` suffix, it arrives mangled (`Shape__m0?`), which
+    // `demangle_word` alone cannot see through (it only strips a *trailing*
+    // `__mN`, and the suffix sits after it here).
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: unknown variant `{variant}` of enum `{enum_name}` in a call to `{word}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4 step 3: two arms handling the same variant. The arms are matched by tag,
+/// not by position, so a duplicate leaves some other variant unhandled -- named
+/// here rather than as the non-exhaustiveness it also is.
+fn eliminator_duplicate_arm_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    variant: &str,
+    enum_name: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: duplicate arm for variant `{variant}` of enum `{enum_name}` in a call to `{word}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4 step 3: a variant with no arm. Reported by name, which is the whole point
+/// of the variable-arity arm collection: a fixed-arity pop would have failed as
+/// underflow before this pass could run.
+fn eliminator_non_exhaustive_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    variant: &str,
+    enum_name: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: non-exhaustive call to `{word}`: missing variant `{variant}` of enum `{enum_name}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4 step 5b: an arm leaving its variant (or a reference to it) on the exit
+/// row. The remedy is phrased in terms of what the arm can leave instead,
+/// since the type it is holding cannot be written down: `W.One` is not a
+/// spellable type name, which is what already stops it crossing a word
+/// boundary.
+fn eliminator_variant_escape_error(ctx: &Ctx, span: Span, word: &str, found: Type) -> String {
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: an arm of `{word}` leaves `{found}` on the stack{} (line {})\n  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R4 step 1: a quotation operand standing where the scrutinee should be. It
+/// was meant as an arm, but carries no variant tag -- either an unannotated (or
+/// plainly annotated) literal, or a forwarded abstract quotation, which has no
+/// annotation to carry one. Both are rejected identically: an eliminator arm
+/// must be a literal spelling the variant it handles.
+fn eliminator_untagged_arm_error(ctx: &Ctx, span: Span, word: &str) -> String {
+    let word = crate::resolve::demangle_call(word);
+    format!(
+        "error: an arm of `{word}` requires a variant tag: annotate the quotation with the variant it handles, as in `~[ ( Circle ) ... ]`{} (line {})\n  a forwarded quotation carries no annotation, so it cannot stand in for an arm",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R10/R21: a quotation parameter position whose argument is not a quotation
@@ -2089,7 +2648,10 @@ fn ordinary_literal_at_inline_param_error(
     word: &str,
     param: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 1): same mid-string mangling as
+    // `annotation_parameter_mismatch_error` above -- an eliminator arm's
+    // literal-flavour check reaches this with the mangled call name.
+    let word = crate::resolve::demangle_call(word);
     format!(
         "error: this argument is an ordinary `[ ... ]` quotation but `{word}` declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
         in_word(ctx),
@@ -2129,7 +2691,12 @@ fn combinator_branch_output_mismatch_error(
     expected: &[Type],
     found: &[Type],
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    // Phase 6 slice 3 review fix (finding 4): shared with `check_eliminator_call`
+    // (decision 4), whose `word` is a call name that may carry the `?` suffix
+    // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
+    // same way it already does for a destructure's `>`; an ordinary word name
+    // (never carrying either suffix) demangles identically either way.
+    let word = crate::resolve::demangle_call(word);
     let render = |types: &[Type]| match types.is_empty() {
         true => "nothing".to_string(),
         false => format!(
@@ -2753,7 +3320,7 @@ mod tests {
             &HashMap::new(),
             &combinators,
         )
-        .map(|(stack, _insts, _overloads, _fields)| stack)
+        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
     }
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {
@@ -3584,5 +4151,611 @@ mod tests {
             recorded, want,
             "one entry per site, resolved against each site's own receiver"
         );
+    }
+
+    /// Phase 6 slice 3 (R4): the sources every eliminator test below is built
+    /// from. Declaration order is `Circle`, `Rect`, which several of these
+    /// deliberately disagree with.
+    const SHAPE_DECL: &str = "type: Shape | Circle r i64 | Rect w i64 h i64 ;\n";
+    const ABC_DECL: &str = "type: Abc | A a i64 | B b i64 | C c i64 ;\n";
+
+    #[test]
+    fn check_eliminator_call_accepts_an_exhaustive_owning_call() {
+        // The control every rejection test below rests on: with both arms
+        // present and correctly tagged, the call type-checks and leaves the
+        // arms' shared exit shape. Without this, a checker that rejected
+        // *every* eliminator call would pass all the error tests.
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .expect("an exhaustive owning-mode eliminator call type-checks");
+    }
+
+    #[test]
+    fn check_eliminator_call_missing_arm_names_missing_variant() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("non-exhaustive call to `Shape?`")
+                && err.contains("missing variant `Rect` of enum `Shape`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_duplicate_arm_is_error() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("duplicate arm for variant `Circle` of enum `Shape`")
+                && err.contains("`Shape?`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_unknown_variant_names_it_and_enum() {
+        // A bare unknown name never parses as a tag at all (the parser only
+        // reads a leading token that names a *declared* variant), so the shape
+        // this catches is a tag naming another enum's variant.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             type: Other | Squircle s i64 ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Squircle ) Squircle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("unknown variant `Squircle` of enum `Shape`") && err.contains("`Shape?`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_output_disagreement_is_error() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> < ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("the quotations passed to `Shape?` leave different stack shapes")
+                && err.contains("an earlier one leaves `i64`, this one leaves `bool`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_written_order_sets_baseline() {
+        // Decision 5: the written-*first* arm sets the `..b` baseline, not the
+        // declaration-first one. `Shape` declares `Circle` first; this call
+        // writes the `Rect` arm first, and the two arms leave genuinely
+        // distinct concrete types, so the pairing passed to
+        // `combinator_branch_output_mismatch_error` (`expected` = the
+        // written-first arm's shape, `found` = the offending arm's) is what
+        // discriminates the two orderings: iterating in declaration order
+        // swaps them.
+        //
+        // The pairing itself (baseline as `expected`, offender as `found`) is
+        // pinned by structure in `arm_exit_row_mismatch_pairs_baseline_first`;
+        // here `bool` and `i64` `Display` distinctly, so the rendered message
+        // discriminates the ordering too.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- bool ) ~[ ( Rect ) Rect> < ] ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
+            "the written-first (`Rect`) arm must set the baseline: {err}"
+        );
+    }
+
+    /// Decision 5's pairing, by structure rather than by rendered message: the
+    /// running baseline (the written-first arm) is `expected`, the arm under
+    /// check is `found`. A swap between them is invisible to a message
+    /// assertion whenever two shapes `Display` identically.
+    #[test]
+    fn arm_exit_row_mismatch_pairs_baseline_first() {
+        let baseline = [Slot::computed(Type::BOOL)];
+        let agreeing = [Slot::computed(Type::BOOL)];
+        let disagreeing = [Slot::computed(Type::I64)];
+        assert_eq!(arm_exit_row_mismatch(&baseline, &agreeing), None);
+        assert_eq!(
+            arm_exit_row_mismatch(&baseline, &disagreeing),
+            Some((vec![Type::BOOL], vec![Type::I64])),
+            "the baseline's shape is `expected`, the arm's is `found`"
+        );
+        assert_eq!(
+            arm_exit_row_mismatch(&baseline, &[]),
+            Some((vec![Type::BOOL], vec![])),
+            "a differing row *length* is a disagreement, not a prefix match"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_pop_order_does_not_set_baseline() {
+        // Three arms whose written order (B, C, A), declaration order
+        // (A, B, C) and stack-pop order (A, C, B) are pairwise different. The
+        // baseline must be the written-*first* arm (`B`, leaving `bool`).
+        // Using the collected arms in pop order -- the order they come off the
+        // stack, without the reversal back to written order -- makes `A`'s
+        // `i64` the baseline instead, which the written-vs-declaration test
+        // above cannot catch (there, pop order and declaration order agree).
+        let err = check_src(&format!(
+            "{ABC_DECL}\
+             : f ( Abc -- bool ) ~[ ( B ) B> 0 < ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
+             : main ( -- ) 3 A f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
+            "the written-first (`B`) arm must set the baseline: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_missing_arm_is_error_not_underflow() {
+        // R4 step 1: arm collection is variable-arity. With `variant_count - 1`
+        // correctly tagged arms above a good scrutinee, the exhaustiveness pass
+        // runs and names the missing variant. A fixed-arity pop of
+        // `1 + variant_count` would report underflow's generic count mismatch
+        // instead, and could never reach the pass that names `C`.
+        let err = check_src(&format!(
+            "{ABC_DECL}\
+             : f ( Abc -- i64 ) ~[ ( A ) A> ] ~[ ( B ) B> ] Abc? ;\n\
+             : main ( -- ) 3 A f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("missing variant `C` of enum `Abc`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("needs") && !err.contains("the stack holds"),
+            "a missing arm is not an underflow: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_forwarded_arm_is_error() {
+        // R4 step 1: an arm must be a quotation *literal* carrying a tag. A
+        // forwarded abstract quotation parameter carries no annotation, so it
+        // can never be routed to a variant; it is rejected exactly as an
+        // untagged literal is, rather than silently accepted and left to ICE at
+        // lowering. `use` is never called, so the only operand reaching the
+        // arm slot is the forwarded parameter itself.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `Shape?` requires a variant tag"),
+            "unexpected message: {err}"
+        );
+        // The same body with the forwarded quotation consumed before the call
+        // (and both arms written out) is legal, so the rejection above is
+        // about the forwarded operand, not about the rest of the word.
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) drop ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .expect("the same word with the forwarded quotation consumed first is legal");
+    }
+
+    #[test]
+    fn check_eliminator_call_untagged_literal_arm_is_error() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : f ( Shape -- i64 ) ~[ 1 ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `Shape?` requires a variant tag"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_reference_scrutinee_types_arms_by_reference() {
+        // Decision 6: a reference scrutinee gives every arm a reference to the
+        // narrowed variant. Both arms read a field through that reference, and
+        // the caller still owns its `Shape` afterwards -- nothing was consumed.
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : first ( &Shape -- i64 ) ~[ ( &Circle ) &r @ ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+        ))
+        .expect("a `&Shape` scrutinee types every arm as a reference to its variant");
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : bump ( &!Shape -- ) ~[ ( &!Circle ) &!r 1 +! ] ~[ ( &!Rect ) &!w 1 +! ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &!s bump s drop ;\n"
+        ))
+        .expect("a `&!Shape` scrutinee types every arm as a mutable reference");
+    }
+
+    #[test]
+    fn check_eliminator_call_mode_mismatch_is_error() {
+        // Decision 6: the arm's annotation must spell the scrutinee's own mode.
+        // Nothing coerces -- the expected effect is built in the call's
+        // resolved mode and the disagreement is caught by the same
+        // declared-vs-written comparison every other annotated literal faces.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : first ( &Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("annotated `~[ Shape.Circle -- ]`")
+                && err.contains("`Shape?` declares it `~[ &Shape.Circle -- ]`"),
+            "unexpected message: {err}"
+        );
+        // Mode is a property of the call, not of an individual arm: a `&` arm
+        // among `&!` siblings is the same rejection.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : bump ( &!Shape -- ) ~[ ( &Circle ) &r @ drop ] ~[ ( &!Rect ) &!w 1 +! ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &!s bump s drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("annotated `~[ &Shape.Circle -- ]`")
+                && err.contains("`Shape?` declares it `~[ &!Shape.Circle -- ]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_diagnostics_demangle_the_call_name_in_a_real_build() {
+        // Phase 6 slice 3 review fix (finding 1): `check_src` skips
+        // `resolve_modules`, so every name is left bare and the two tests
+        // above never exercised the mangled call name `Shape__m0?` that a
+        // real build produces (the native build path force-mangles even a
+        // single module). `demangle_word` only strips a *trailing* `__mN`
+        // group, blind to that mid-string one -- these two diagnostics must
+        // go through `demangle_call` instead, as the eliminator resolution
+        // test above (`eliminator_call_site_mangles_to_match_the_enum_based_key`)
+        // already does for the call site itself.
+        let src = format!(
+            "{SHAPE_DECL}\
+             : first ( &Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
+             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            !err.contains("__m") && err.contains("`Shape?` declares it"),
+            "mangled name leaked into the annotation-mismatch diagnostic: {err}"
+        );
+
+        let src = format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) [ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            !err.contains("__m") && err.contains("but `Shape?` declares parameter"),
+            "mangled name leaked into the bracket-flavour diagnostic: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_diagnostics_demangle_the_enum_name_in_a_real_build() {
+        // The sibling above covers the *call* name; the enum name reaches the
+        // same three diagnostics from `EnumDecl::name`, which `resolve`
+        // mangles (unlike `name_static`, the spelling every `Type::Enum`
+        // render uses). The `check_src` tests for these messages cannot see
+        // it: they skip `resolve_modules`, so the name is already bare there
+        // and they pass with the demangle removed.
+        let src = format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        );
+        let tokens = crate::lexer::lex(&src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert!(
+            err.contains("missing variant `Rect` of enum `Shape`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("__m"),
+            "mangled enum name leaked into the non-exhaustiveness diagnostic: {err}"
+        );
+    }
+
+    /// R4 step 5b: the ruling on whether a `Type::Variant` may leave the call.
+    /// It may not -- and the enforcement has to be here, because the type is
+    /// unspellable rather than banned: `( W -- W.One )` is `unknown type
+    /// W.One`, so nothing stops the value sitting on the caller's own stack.
+    #[test]
+    fn check_eliminator_call_arm_leaving_its_variant_is_error() {
+        let err = check_src(
+            "type: W | One a i64 ;\n\
+             : main ( -- ) 3 One ~[ ( One ) ] W? drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `W?` leaves `W.One` on the stack"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The reference-mode half: an arm that leaves the `&W.One` it was handed
+    /// escapes the same value by another spelling.
+    #[test]
+    fn check_eliminator_call_arm_leaving_a_reference_to_its_variant_is_error() {
+        let err = check_src(
+            "type: W | One a i64 ;\n\
+             : main ( -- ) 3 One | w | &w ~[ ( &One ) ] W? drop w drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("an arm of `W?` leaves `&W.One` on the stack"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Why the rejection above is soundness, not tidiness: `is_copy` is
+    /// written over `Type::Enum` and reads a `Type::Variant` as trivially
+    /// `Copy`, so an escaped variant of a linear enum could be `dup`ed and its
+    /// payload's `drop` run twice. The parent enum's own `dup` is rejected --
+    /// asserted here so this stays a statement about the *variant* escaping
+    /// rather than about `W` being linear at all.
+    #[test]
+    fn check_eliminator_call_escaped_variant_would_bypass_the_dup_linearity_gate() {
+        const DECL: &str = "type: R n i64 ;\n\
+             : drop ( R -- ) | h | h R> . ;\n\
+             type: W | One a R ;\n";
+        let escaped = check_src(&format!(
+            "{DECL}\
+             : main ( -- ) 1 R One ~[ ( One ) ] W? dup drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            escaped.contains("an arm of `W?` leaves `W.One` on the stack"),
+            "unexpected message: {escaped}"
+        );
+        let parent = check_src(&format!(
+            "{DECL}\
+             : main ( -- ) 1 R One dup drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            parent.contains("cannot `dup` a value of type `W`"),
+            "unexpected message: {parent}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_non_enum_scrutinee_is_a_type_mismatch() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : f ( i64 -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`Shape?` expected `Shape`, found `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_double_consume_is_use_after_move() {
+        // Phase 2 review, finding 1: an arm that consumes an outer linear
+        // local must be reconciled into the caller's move-state exactly as an
+        // `if` arm's join already reconciles one (`MaybeMoved` where the
+        // arms disagree) -- forgetting it let `f` be dropped once inside the
+        // `Circle` arm and, silently, a second time after the call.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE}\n{SHAPE_DECL}\
+             : main ( -- ) 1 File | f | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . ] Shape? f drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("use after move") && err.contains('f'),
+            "unexpected message (expected a use-after-move on `f`): {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_escaped_borrow_conflicts_with_a_second_borrow() {
+        // Phase 2 review, finding 2: each arm leaves a live `&!p` borrowing a
+        // caller local the scrutinee never touches. The merge
+        // (`merge_arm_output_slot`) must carry that borrow's provenance
+        // through the call, the same way `check_branch_join`'s merge does for
+        // an `if`, so the caller still knows `p` is exclusively borrowed by
+        // the escaped reference and a second, independent `&!p` right after
+        // the call is rejected rather than silently aliasing it.
+        let err = check_src(&format!(
+            "type: P x i64 ;\n\
+             {SHAPE_DECL}\
+             : touch ( &!P -- ) &!x 1 +! ;\n\
+             : main ( -- ) 1 P | p | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> drop &!p ] ~[ ( Rect ) Rect> drop drop &!p ] Shape?\n\
+             \x20 &!p touch touch p P> . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("conflicts with a live borrow of `p`"),
+            "unexpected message (expected a live-borrow conflict on `p`): {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_borrow_disagreement_is_error() {
+        // Finding 2 (targeted at `merge_arm_output_slot` itself): two arms
+        // leave a live borrow of *different* places at the same, agreeing
+        // type (`&!P` either way) -- the type-only baseline comparison alone
+        // cannot see this disagreement, only the deriv/suspension comparison
+        // does, mirroring `check_branch_join`'s own
+        // `borrow_join_disagreement_error`.
+        let err = check_src(&format!(
+            "type: P x i64 ;\n\
+             {SHAPE_DECL}\
+             : first ( Shape P P -- ) | q p |\n\
+             \x20 ~[ ( Circle ) Circle> drop &!p ] ~[ ( Rect ) Rect> drop drop &!q ] Shape? drop ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("borrow state disagrees at the branch join"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_no_word_shadows_eliminator_rejects_a_colliding_word_name() {
+        // Phase 2 review, smaller point 1: `check_term`'s eliminator
+        // interception runs ahead of the ordinary env lookup, so a user word
+        // literally named `Shape?` would be silently unreachable rather than
+        // coexisting as an overload (there is no overload mechanism here to
+        // fall back through, unlike a generated destructure). Rejected by
+        // name instead.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : Shape? ( i64 -- i64 ) 1 + ;\n\
+             : main ( -- ) 5 Shape? . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn eliminator_arm_tag_outside_a_call_is_error() {
+        // Finding 3 (Phase 2 review): `check_literal_against_annotation`'s
+        // blanket skip for *every* tagged literal is only sound for one that
+        // is actually collected as an eliminator arm; a tagged literal that
+        // never reaches an eliminator call was previously never checked at
+        // all, magic (CLAUDE.md) rather than a located error.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : f ( -- ) ~[ ( Circle ) nonexistent_word_xyz ] drop ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "an eliminator-arm tag, but it is not consumed by a call to a generated eliminator"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn eliminator_arm_tag_separated_from_its_call_is_error() {
+        // The written-adjacency rule stated: `4 drop` is stack-neutral, so
+        // this call's arms are still adjacent on the *stack* and
+        // `check_eliminator_call` would collect both. The literal-side check
+        // is syntactic and cannot see that, so it rejects -- and says why,
+        // rather than claiming the arm reaches no eliminator at all.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] 4 drop ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("arms are written together, immediately before the call"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn eliminator_arm_tag_immediately_preceding_its_call_is_not_flagged() {
+        // The control for the rejection above: a correctly-formed eliminator
+        // call must not trip the new outside-a-call check.
+        check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .expect("a correctly-formed eliminator call is not flagged as an arm outside a call");
+    }
+
+    #[test]
+    fn check_eliminator_call_reference_arm_keeps_the_scrutinee_borrow_rooted() {
+        // Phase 2 review cycle 2: an arm's *input* is the caller's own
+        // scrutinee slot, not a fresh one. Each arm here projects a reference
+        // out of the `&!Shape` it was handed and leaves it live, so the
+        // caller still knows `s` is exclusively borrowed and the `&!s` after
+        // the call conflicts -- exactly what the spliced-`if` shape
+        // (`&!p true ~[ &!x ] ~[ &!x ] if &!p`) already reports, which the
+        // eliminator used to accept because it routed the scrutinee through
+        // `eff.inputs` (always erased) rather than through the row.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : main ( -- ) 3 Circle | s | &!s\n\
+             \x20 ~[ ( &!Circle ) &!r ] ~[ ( &!Rect ) &!w ] Shape? &!s drop drop s drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`&!s` conflicts with a live borrow of `s`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_cannot_consume_the_borrowed_scrutinee_root() {
+        // The same rooting, seen from the other side: inside an arm holding a
+        // reference projected out of the scrutinee, the place that reference
+        // is rooted at cannot be consumed. With a provenance-free arm input
+        // the borrow pointed at nothing and this was accepted.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : main ( -- ) 3 Circle | s | &!s\n\
+             \x20 ~[ ( &!Circle ) &!r s drop ] ~[ ( &!Rect ) &!w ] Shape? drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("cannot name `s`") && err.contains("a mutable borrow of it is still live"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_sibling_arms_may_each_consume_one_outer_local() {
+        // The other half of finding 1's fix: arms are alternatives, so each
+        // is checked against its own clone of the caller `Scope`. Sharing one
+        // scope across the loop makes the second arm see the first arm's
+        // consumption of `f` and wrongly report use-after-move -- the whole
+        // reason `check_branch_join` clones `then_scope`/`else_scope` too.
+        check_src(&format!(
+            "{FILE_RESOURCE}\n{SHAPE_DECL}\
+             : main ( -- ) 1 File | f | 3 Circle\n\
+             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . f drop ] Shape? ;\n"
+        ))
+        .expect("each arm may consume the same outer local: only one arm runs");
     }
 }

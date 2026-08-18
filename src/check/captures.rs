@@ -319,9 +319,13 @@ pub(super) fn materialize_quotation_at_boundary(
         scope,
         poly,
         &HashSet::new(),
-        false,
-        false,
-        false,
+        LiteralBoundary {
+            shape_changing: false,
+            is_arm: false,
+            caller_tail: false,
+            finalize: false,
+        },
+        None,
     )?;
     // R7 (P7 slice 1 phase 6): a declared quotation effect returning a
     // reference used to reach `lower_reference_word`'s `referent_of` and

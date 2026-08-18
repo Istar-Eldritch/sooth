@@ -1,0 +1,32 @@
+\ The eliminator over a *reference* scrutinee: each arm is annotated with the
+\ mode the call was made in (`( &Circle )`, `( &!Rect )`) and receives a
+\ reference to the narrowed variant, so nothing is consumed by the call --
+\ `main`'s own `Shape` is still there to be measured again, grown, and finally
+\ eliminated by value.
+
+type: Shape
+| Circle r i64
+| Rect   w i64 h i64
+;
+
+: area ( &Shape -- i64 )
+  ~[ ( &Circle ) &r @ ]
+  ~[ ( &Rect )   dup &w @ swap &h @ * ]
+  Shape? ;
+
+: grow ( &!Shape -- )
+  ~[ ( &!Circle ) &!r 1 +! ]
+  ~[ ( &!Rect )   &!w 1 +! ]
+  Shape? ;
+
+: discard ( Shape -- )
+  ~[ ( Circle ) Circle> drop ]
+  ~[ ( Rect )   Rect> drop drop ]
+  Shape? ;
+
+: main ( -- )
+  3 4 Rect | s |
+  &s area .         \ 12
+  &!s grow
+  &s area .         \ 16, the same Shape, widened in place
+  s discard ;

@@ -13,6 +13,7 @@ mod quotation;
 mod word_families;
 
 use super::*;
+pub(in crate::ir) use control_flow::ArmBinding;
 
 /// R10: the `IrType` a word returns — its one output, or the synthesized
 /// bundle struct for two or more. The single derivation both the lowering env's
@@ -178,6 +179,11 @@ pub(super) struct FuncBuilder<'a> {
     /// not say which struct it projects out of, and lowering has no checker
     /// stack to re-derive it from.
     pub(super) resolved_fields: &'a HashMap<Span, (StructId, usize)>,
+    /// Phase 6 slice 3 (R6): the receiver-directed variant-field projections
+    /// the checker resolved, span -> `(EnumId, variant index, field index)`.
+    /// `lower_reference_word` reads a variant-receiver `&r` site's resolution
+    /// back from here, mirroring `resolved_fields`.
+    pub(super) resolved_variant_fields: &'a HashMap<Span, (EnumId, usize, usize)>,
     /// R14: the fixed input arity of each polymorphic word, name-keyed. How
     /// many args a polymorphic call pops (the `CallInst` carries the output
     /// shape, but the input count is name-constant across θ, so it lives here).
@@ -281,6 +287,13 @@ pub(super) struct FuncBuilder<'a> {
     /// interned here and spliced in place at `call`/`times` (D5 fusion), never
     /// emitted as a runtime code value.
     pub(super) quot_defs: Vec<Vec<Term>>,
+    /// Phase 6 slice 3 (R5): the eliminator-arm routing each interned
+    /// quotation literal carries, in lockstep with `quot_defs` — the annotation's
+    /// variant tag (which is also the `enums.words` key of that variant's
+    /// constructor) and the arm's declared receiver type, whose owning-vs-
+    /// reference shape is the whole call's scrutinee mode. `None` for every
+    /// ordinary (non-arm) literal.
+    pub(super) quot_arm_tags: Vec<Option<(String, Type)>>,
     /// R12: the phantom quotation `Value` -> its `QuotId`. A shuffle/bind moves
     /// the phantom verbatim (`self.locals`/`self.stack` carry `Value` ids), so
     /// no `Binding` analogue is needed here (D2); `call`/`times` resolve the
@@ -326,6 +339,7 @@ impl<'a> FuncBuilder<'a> {
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
             resolved_fields: empty_resolved_fields(),
+            resolved_variant_fields: empty_resolved_variant_fields(),
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
@@ -348,6 +362,7 @@ impl<'a> FuncBuilder<'a> {
             const_vals: HashMap::new(),
             ref_inner: HashMap::new(),
             quot_defs: Vec::new(),
+            quot_arm_tags: Vec::new(),
             quot_bodies: HashMap::new(),
             inline_uid: 0,
             materialized: Vec::new(),
@@ -680,6 +695,7 @@ pub(super) fn lower_word_parts(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
+    resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
     env_plan: EnvPlan,
@@ -699,6 +715,7 @@ pub(super) fn lower_word_parts(
     b.instantiations = instantiations;
     b.builtin_overloads = builtin_overloads;
     b.resolved_fields = resolved_fields;
+    b.resolved_variant_fields = resolved_variant_fields;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
@@ -778,7 +795,13 @@ pub(super) fn lower_word_parts(
                 .last()
                 .expect("clause word has a scrutinee input")
                 .ty;
-            b.lower_clauses(clauses, &stack_inputs, scrutinee_ty)
+            b.lower_clauses(
+                clauses,
+                &stack_inputs,
+                scrutinee_ty,
+                ArmBinding::Decompose,
+                self_tail,
+            )
         }
     }
 
@@ -831,6 +854,7 @@ pub(super) fn lower_word_parts(
         instantiations,
         builtin_overloads,
         resolved_fields,
+        resolved_variant_fields,
         poly_arities,
         combinators,
     ));
@@ -851,6 +875,7 @@ pub(super) fn lower_materialized(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
+    resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
@@ -882,6 +907,7 @@ pub(super) fn lower_materialized(
             instantiations,
             builtin_overloads,
             resolved_fields,
+            resolved_variant_fields,
             poly_arities,
             combinators,
             EnvPlan::Env(m.captures),

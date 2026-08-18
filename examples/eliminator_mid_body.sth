@@ -1,0 +1,18 @@
+\ An eliminator call is a mid-body term, not a whole word body: `k` is bound
+\ before the call and must survive it, both past the call (read in `main`'s
+\ tail) and from inside an arm.
+
+type: Shape
+| Circle r i64
+| Rect   w i64 h i64
+;
+
+: area ( i64 Shape -- i64 )
+  swap | k |
+  ~[ ( Circle ) &r @ swap drop k + ]
+  ~[ ( Rect )   &w @ swap &h @ swap drop * k + ]
+  Shape? ;
+
+: main ( -- )
+  100 5 Circle area .     \ 105
+  100 3 4 Rect area . ;   \ 112

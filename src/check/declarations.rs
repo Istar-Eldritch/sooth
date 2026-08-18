@@ -1388,11 +1388,219 @@ pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> 
     sigs
 }
 
+/// Phase 6 slice 3 (R2): per enum, the eliminator word `Enum?`'s `PolySig`:
+/// `( ..a Enum ~[ ..a Enum.V1 -- ..b ] … ~[ ..a Enum.Vn -- ..b ] -- ..b )`.
+/// One arm parameter per declared variant, in declaration order, each a `~`
+/// (inline) quotation whose single fixed input is that variant and whose rows
+/// are the two shared ones -- the arm reaches into the caller's region below
+/// the scrutinee (`..a`) and leaves whatever the call leaves (`..b`).
+///
+/// The only free variables are those two rows: every arm input is a concrete
+/// `Type::Variant` built through `variant_type`, so nothing per-arm unifies
+/// and the signature carries no bounds, length variables, or type variables.
+///
+/// This signature is registration, not the call-site rule: `check_eliminator_call`
+/// intercepts an eliminator call before the ordinary poly-call path ever
+/// unifies against it, and resolves the scrutinee's mode (owning / `&` / `&!`)
+/// per call site, which is why the arm inputs here are owning.
+///
+/// Keying follows `struct_generated_sigs`' D7 rule: the env key is the bare
+/// surface name (`Shape?`) every call site writes, the lowering symbol the
+/// mangled registry spelling (`Result[i64 i64]?`), so two instantiations of
+/// one generic enum keep distinct **lowering** identities.
+///
+/// Review fix (Phase 2, smaller point 2): that distinctness is this `Sig`'s
+/// alone. `eliminator_registry`, below, keys by `generic_surface_name` too,
+/// so `Result[i64 i64]?` and `Result[bool i64]?` both collapse to the one
+/// checker-side registry entry `"Result?"` -- last one registered wins, and
+/// a call site can only ever reach whichever instantiation that was. This is
+/// unreachable today only because a generic-elimination call site itself
+/// cannot parse (`( Ok )` fails with "unknown type Ok", the standing
+/// generic-enum-elimination blocker); Phase 4, wherever it closes that parse
+/// gap, meets this collision too and needs a registry keyed by the mangled
+/// spelling, not the bare surface name.
+pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)> {
+    // The two shared rows, in the signature's own id space.
+    const ROW_IN: u32 = 0;
+    const ROW_OUT: u32 = 1;
+    let mut sigs = Vec::new();
+    for (idx, decl) in enums.iter().enumerate() {
+        let id = EnumId::from_index(idx);
+        let mut inputs = vec![PolyType::Concrete(Type::Enum(id, decl.name_static))];
+        for vi in 0..decl.variants.len() {
+            inputs.push(PolyType::Quotation(
+                vec![PolyType::Concrete(variant_type(enums, id, vi))],
+                vec![],
+                true,
+                Some(ROW_IN),
+                Some(ROW_OUT),
+            ));
+        }
+        sigs.push((
+            format!("{}?", generic_surface_name(&decl.name)),
+            format!("{}?", decl.name),
+            PolySig {
+                row_in: Some(ROW_IN),
+                inputs,
+                outputs: vec![],
+                row_out: Some(ROW_OUT),
+                bounds: vec![],
+                ty_var_names: vec![],
+                len_var_names: vec![],
+                row_var_names: vec!["..a".to_string(), "..b".to_string()],
+            },
+        ));
+    }
+    sigs
+}
+
+/// Phase 6 slice 3 (R3): the checker-side eliminator registry, bare surface
+/// name (`Shape?`) -> the enum it eliminates. `check_term` consults this
+/// before the ordinary env/combinator/poly paths, since an eliminator call is
+/// neither a user word nor an ordinary poly call: its arms are matched to
+/// variants by annotation tag, not by slot position.
+///
+/// Review fix (Phase 2, smaller point 2): unlike `enum_eliminator_sigs`'s
+/// lowering symbol, this key is `generic_surface_name`-only, so two
+/// instantiations of one generic enum collide here (`Result[i64 i64]?` and
+/// `Result[bool i64]?` both key `"Result?"`, last write wins). See that
+/// function's doc for why this is unreachable today and whose problem it is
+/// once it becomes reachable.
+pub fn eliminator_registry(enums: &[EnumDecl]) -> HashMap<String, EnumId> {
+    enums
+        .iter()
+        .enumerate()
+        .map(|(idx, decl)| {
+            (
+                format!("{}?", generic_surface_name(&decl.name)),
+                EnumId::from_index(idx),
+            )
+        })
+        .collect()
+}
+
+/// Phase 6 slice 3 review fix (smaller point 1): a user word whose surface
+/// name equals a generated eliminator's (`"{Enum}?"`) would be silently
+/// unreachable -- `check_term`'s eliminator interception runs ahead of the
+/// ordinary env lookup, so every call to that name always routes to the
+/// eliminator and the user's own declaration can never be reached. An
+/// eliminator has no overload mechanism to fall back through the way a
+/// generated destructure (`P>`) does, so rejecting the declaration, the same
+/// as `check_duplicate_word_names` rejects any other name collision before
+/// either candidate enters an environment, is the only alternative to
+/// shadowing it. Compares demangled surface names, so this holds whether
+/// `words`/`enums` are still raw (`check_src`-style tests) or already
+/// mangled (a real build, where the two collide under different manglings --
+/// `Shape?__m0` vs `Shape__m0?` -- and would otherwise go undetected here).
+pub fn check_no_word_shadows_eliminator(
+    words: &[WordDef],
+    enums: &[EnumDecl],
+) -> Result<(), String> {
+    for enum_decl in enums {
+        let eliminator_name = format!(
+            "{}?",
+            crate::resolve::demangle_word(generic_surface_name(&enum_decl.name))
+        );
+        if let Some(word) = words.iter().find(|w| {
+            w.module == enum_decl.module
+                && crate::resolve::demangle_word(&w.name) == eliminator_name
+        }) {
+            return Err(word_shadows_eliminator_error(
+                &eliminator_name,
+                word_span(word),
+                crate::resolve::demangle_word(generic_surface_name(&enum_decl.name)),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The rejection above, as a message. Shared with the REPL, whose two
+/// declaration paths reach the same collision one line at a time (a `:` line
+/// naming an existing enum's eliminator, and a `type:` line whose eliminator
+/// name a session word already holds) and so cannot use the whole-module scan.
+pub(crate) fn word_shadows_eliminator_error(
+    eliminator_name: &str,
+    span: Span,
+    enum_name: &str,
+) -> String {
+    format!(
+        "error: word `{eliminator_name}` (line {}, col {}) has the same name as the generated eliminator for enum `{enum_name}`; rename one",
+        span.line, span.col,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    #[test]
+    fn enum_eliminator_sig_is_two_rows_over_concrete_variant_arms() {
+        // R2/OQ3: the generated signature's only free variables are the two
+        // shared rows -- no bounds, no length variables, no type variables --
+        // and each arm input is the *variant*, not the enum, in declaration
+        // order. A regression to `Type::Enum` arm inputs (or a dropped row)
+        // would make every arm interchangeable and lose the narrowing the
+        // eliminator exists for.
+        let src = "type: Shape | Circle r i64 | Rect w i64 h i64 ;\n: main ( -- ) ;\n";
+        let module = parse(&lex(src).unwrap()).unwrap();
+        let (key, symbol, sig) = enum_eliminator_sigs(&module.enums)
+            .into_iter()
+            .find(|(k, _, _)| k == "Shape?")
+            .expect("every enum generates an eliminator");
+        assert_eq!(symbol, "Shape?");
+        assert_eq!(key, "Shape?");
+        assert_eq!(sig.row_var_names.len(), 2);
+        assert!(sig.bounds.is_empty());
+        assert!(sig.len_var_names.is_empty());
+        assert!(sig.ty_var_names.is_empty());
+        assert!(sig.outputs.is_empty());
+        assert_ne!(sig.row_in, sig.row_out);
+        assert!(sig.row_in.is_some() && sig.row_out.is_some());
+
+        let id = module
+            .enums
+            .iter()
+            .position(|e| e.name == "Shape")
+            .map(EnumId::from_index)
+            .unwrap();
+        assert_eq!(
+            sig.inputs[0],
+            PolyType::Concrete(Type::Enum(id, module.enums[id.index()].name_static))
+        );
+        let arms: Vec<&PolyType> = sig.inputs[1..].iter().collect();
+        assert_eq!(arms.len(), 2);
+        for (vi, arm) in arms.iter().enumerate() {
+            let PolyType::Quotation(ins, outs, is_inline, row_in, row_out) = arm else {
+                panic!("an arm parameter is a quotation: {arm:?}")
+            };
+            assert_eq!(
+                ins,
+                &vec![PolyType::Concrete(variant_type(&module.enums, id, vi))]
+            );
+            assert!(outs.is_empty());
+            assert!(*is_inline, "an arm is a `~` quotation");
+            assert_eq!(*row_in, sig.row_in);
+            assert_eq!(*row_out, sig.row_out);
+        }
+        assert_ne!(arms[0], arms[1], "the two arms narrow to distinct variants");
+    }
+
+    #[test]
+    fn eliminator_registry_keys_the_bare_surface_name() {
+        let src = "type: Shape | Circle r i64 | Rect w i64 h i64 ;\n: main ( -- ) ;\n";
+        let module = parse(&lex(src).unwrap()).unwrap();
+        let registry = eliminator_registry(&module.enums);
+        let id = module
+            .enums
+            .iter()
+            .position(|e| e.name == "Shape")
+            .map(EnumId::from_index)
+            .unwrap();
+        assert_eq!(registry.get("Shape?"), Some(&id));
+    }
 
     #[test]
     fn variant_accessor_sigs_reach_the_module_env() {
@@ -1540,6 +1748,7 @@ mod tests {
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
+            resolved_variant_fields: HashMap::new(),
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
@@ -1605,6 +1814,7 @@ mod tests {
                 instantiations: HashMap::new(),
                 builtin_overloads: HashMap::new(),
                 resolved_fields: HashMap::new(),
+                resolved_variant_fields: HashMap::new(),
                 modules,
                 statics: Vec::new(),
             }

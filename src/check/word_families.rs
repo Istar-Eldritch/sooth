@@ -22,6 +22,7 @@ pub(super) fn check_reference_word(
     live: &Liveness,
     at: usize,
     resolved_fields: &mut HashMap<Span, (StructId, usize)>,
+    resolved_variant_fields: &mut HashMap<Span, (EnumId, usize, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -140,6 +141,7 @@ pub(super) fn check_reference_word(
                 live,
                 at,
                 resolved_fields,
+                resolved_variant_fields,
             )? {
                 return Ok(Some(out));
             }
@@ -260,10 +262,10 @@ pub(super) fn check_reference_word(
 ///   would oblige this word to dispose the fields it did not project, which is
 ///   exactly the implicit disposal this slice deletes.
 ///
-/// R4: a variant receiver (`Type::Variant`) is resolved the same way, but
-/// checker-only -- there is no `EnumId` shape in `resolved_fields` and no
-/// lowering arm for it, so a variant projection never reaches the insert at
-/// the bottom of this function.
+/// R4/Phase 6 slice 3 (R6): a variant receiver (`Type::Variant`) is resolved
+/// the same way, and records its resolution into `resolved_variant_fields`
+/// (`EnumId`-keyed, mirroring `resolved_fields`), which `lower_reference_word`
+/// reads back.
 #[allow(clippy::too_many_arguments)]
 fn check_field_projection(
     name: &str,
@@ -278,6 +280,7 @@ fn check_field_projection(
     live: &Liveness,
     at: usize,
     resolved_fields: &mut HashMap<Span, (StructId, usize)>,
+    resolved_variant_fields: &mut HashMap<Span, (EnumId, usize, usize)>,
 ) -> Result<Option<Vec<Slot>>, String> {
     // D1's grammar makes a receiver-directed field an ordinary identifier,
     // never an accessor, and `>` is not a lexer delimiter -- so a leftover
@@ -303,9 +306,8 @@ fn check_field_projection(
     };
     // R4: a variant receiver is resolved by the same rule as a struct one --
     // the fields and display name just come from a different declaration
-    // table. Checker-only (R4): `resolved_fields` is `StructId`-keyed and has
-    // no `EnumId` shape, and there is no lowering arm for a variant field
-    // reference, so the variant arm below never reaches that insert.
+    // table. Its resolution lands in `resolved_variant_fields`
+    // (`EnumId`-keyed) below, not `resolved_fields` (`StructId`-keyed).
     let (fields, receiver_name): (&[(String, Type)], &str) = match referent {
         Type::Struct(id, _) => (
             &ctx.structs()[id.index()].fields,
@@ -398,8 +400,14 @@ fn check_field_projection(
             });
         }
     }
-    if let Type::Struct(id, _) = referent {
-        resolved_fields.insert(span, (id, fi));
+    match referent {
+        Type::Struct(id, _) => {
+            resolved_fields.insert(span, (id, fi));
+        }
+        Type::Variant(id, vi, _) => {
+            resolved_variant_fields.insert(span, (id, vi, fi));
+        }
+        _ => {}
     }
     Ok(Some(std::mem::take(stack)))
 }
@@ -1439,7 +1447,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads, _fields)| stack)
+        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
     }
     // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
 
@@ -1748,7 +1756,7 @@ mod tests {
             &HashMap::new(),
             &CombinatorEnv::default(),
         )
-        .map(|(stack, _insts, _overloads, _fields)| stack)
+        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
     }
 
     #[test]
@@ -1885,6 +1893,7 @@ mod tests {
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
+            &mut HashMap::new(),
             &mut HashMap::new(),
         )?
         .expect("the variant reference arm claims this word");
@@ -2174,10 +2183,11 @@ mod tests {
 
     /// R4: `&r` resolves against an owned `Type::Variant` receiver exactly
     /// like a struct receiver -- the receiver-directed lookup does not care
-    /// which declaration table the field comes from. Checker-only (R4):
-    /// `resolved_fields` has no `EnumId` shape and no lowering arm exists for
-    /// a variant projection yet, so this only ever asserts acceptance/output
-    /// shape through `check_reference_word` directly, never build or run.
+    /// which declaration table the field comes from. Phase 6 slice 3 (R6):
+    /// this is the canary asserting the resolution lands in
+    /// `resolved_variant_fields` (`EnumId`-keyed) and never in `resolved_fields`
+    /// (`StructId`-keyed) -- a future misroute of a variant into the struct
+    /// table would flip this assertion.
     #[test]
     fn projection_on_variant_receiver_ok() {
         let module = shape_module();
@@ -2189,9 +2199,11 @@ mod tests {
         let mut prov = Provenance::default();
         let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
         let mut resolved_fields = HashMap::new();
+        let mut resolved_variant_fields = HashMap::new();
+        let span = Span::default();
         let out = check_reference_word(
             "&r",
-            Span::default(),
+            span,
             &mut stack,
             &ctx,
             &Scope::default(),
@@ -2202,6 +2214,7 @@ mod tests {
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
             &mut resolved_fields,
+            &mut resolved_variant_fields,
         )
         .unwrap()
         .expect("the projection arm claims a bare field on a variant receiver");
@@ -2210,9 +2223,14 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].ty, shape_variant(&module, 0));
         assert_eq!(out[1].ty, intern_ref_type(&mut refs, Type::I64, false));
-        // R4 is checker-only: `resolved_fields` is `StructId`-keyed, so a
-        // variant projection recording one there would hand lowering an index
-        // into the wrong declaration table.
+        // R6: a variant projection must land in `resolved_variant_fields`
+        // (`EnumId`-keyed), never `resolved_fields` (`StructId`-keyed) -- that
+        // would hand lowering an index into the wrong declaration table.
+        assert_eq!(
+            resolved_variant_fields.get(&span),
+            Some(&(EnumId::from_index(1), 0, 0)),
+            "a variant projection must record (EnumId, variant, field) in resolved_variant_fields"
+        );
         assert!(
             resolved_fields.is_empty(),
             "a variant projection must not be routed through `resolved_fields`"

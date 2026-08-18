@@ -253,11 +253,19 @@ pub struct Arrays {
 
 /// How a generated enum-word name lowers, keyed off the enum registry
 /// (parallel to `StructWord`, D10): a variant constructor naming its enum and
-/// the variant's declaration index. Enums have no getter/setter/destructure
-/// (D2: elimination is clause-style, Phase 4).
+/// the variant's declaration index, or a whole-variant destructure (Phase 6
+/// slice 3, R6). Per-field access is a receiver-directed projection
+/// (`resolved_variant_fields`), not a name-fused word here.
+///
+/// `Eliminate` is the odd one out (Phase 6 slice 3, R5): it names the enum
+/// rather than a variant, and it is the only entry `lower_enum_word` never
+/// handles -- the call dispatch intercepts it first, since its lowering needs
+/// the call's quotation operands, not just the enum's layout.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum EnumWord {
     Construct(EnumId, usize),
+    Destructure(EnumId, usize),
+    Eliminate(EnumId),
 }
 
 /// The IR's view of a program's enums: the per-`EnumId` tagged-layout registry
@@ -542,13 +550,39 @@ pub(super) fn build_registries_ww(
     let mut ewords = HashMap::new();
     for (idx, decl) in enums.iter().enumerate() {
         let id = EnumId::from_index(idx);
+        // D7 (adopting the struct registry's dual-key `insert` closure,
+        // R6): each generated word keys under both the mangled and bare
+        // surface spelling, skipping the surface insert when they agree.
+        // Shared by the per-variant constructors/destructures below and the
+        // per-enum eliminator (Phase 6 slice 3, R5).
+        let mut insert = |mangled_key: String, surface_key: String, ew: EnumWord| {
+            if surface_key != mangled_key {
+                ewords.insert(surface_key, ew);
+            }
+            ewords.insert(mangled_key, ew);
+        };
         for (vi, variant) in decl.variants.iter().enumerate() {
             let surface = generic_surface_name(&variant.name);
-            if surface != variant.name {
-                ewords.insert(surface.to_string(), EnumWord::Construct(id, vi));
-            }
-            ewords.insert(variant.name.clone(), EnumWord::Construct(id, vi));
+            insert(
+                variant.name.clone(),
+                surface.to_string(),
+                EnumWord::Construct(id, vi),
+            );
+            insert(
+                format!("{}>", variant.name),
+                format!("{surface}>"),
+                EnumWord::Destructure(id, vi),
+            );
         }
+        // Phase 6 slice 3 (R5): the eliminator, keyed on the *enum*'s own name
+        // under the same dual spelling the checker registers it by
+        // (`enum_eliminator_sigs`: mangled symbol, bare surface env key).
+        let enum_surface = generic_surface_name(&decl.name);
+        insert(
+            format!("{}?", decl.name),
+            format!("{enum_surface}?"),
+            EnumWord::Eliminate(id),
+        );
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();
@@ -854,6 +888,35 @@ mod tests {
 
         let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
         assert!(!layout(&plain, "File").is_linear);
+    }
+
+    #[test]
+    fn enum_registry_keys_a_destructure_word_per_variant() {
+        // Phase 6 slice 3 (R6): the only thing connecting a surface name to
+        // the new lowering arm. Asserted through `enums_of` (which builds the
+        // registry from source) rather than by calling `lower_enum_word`
+        // directly, since the two lowering units hand-build their `EnumWord`
+        // and so would stay green if this insert vanished entirely.
+        let enums = enums_of(
+            "type: Shape | Circle r i64 p i64 | Dot ;\n\
+             : main ( -- ) ;\n",
+        );
+        // `bool` is injected as enum 0 ahead of any user enum
+        // (`BOOL_ENUM_ID`), so `Shape` is enum 1.
+        let id = EnumId::from_index(1);
+        for (vi, name) in ["Circle", "Dot"].iter().enumerate() {
+            assert!(
+                matches!(enums.words.get(*name), Some(EnumWord::Construct(got_id, got_vi)) if *got_id == id && *got_vi == vi),
+                "`{name}` should construct variant {vi}: {:?}",
+                enums.words.get(*name)
+            );
+            let destructure = format!("{name}>");
+            assert!(
+                matches!(enums.words.get(&destructure), Some(EnumWord::Destructure(got_id, got_vi)) if *got_id == id && *got_vi == vi),
+                "`{destructure}` should destructure variant {vi}: {:?}",
+                enums.words.get(&destructure)
+            );
+        }
     }
 
     #[test]

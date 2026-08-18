@@ -80,6 +80,14 @@ pub struct Module {
     /// breaks that, and two instantiations of one call site would then share
     /// (and silently misdispatch through) a single entry.
     pub resolved_fields: std::collections::HashMap<Span, (StructId, usize)>,
+    /// Phase 6 slice 3 (R6): the receiver-directed variant-field projections
+    /// (`&r`/`&!r` against a `Type::Variant` receiver), keyed by the call
+    /// site's `Span`, valued by the enum id, variant index and field index the
+    /// checker resolved it against. Mirrors `resolved_fields` structurally
+    /// (P7 slice 1's own instruction: "its own `EnumId`-keyed lowering-side
+    /// table rather than a widened `resolved_fields`") rather than reusing it,
+    /// since a variant field has no `StructId` to key under.
+    pub resolved_variant_fields: std::collections::HashMap<Span, (EnumId, usize, usize)>,
     /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
     /// topological order, module 0 being the entry file. A single-file program
     /// (and every REPL session) has exactly one entry. Every `StructDecl`/
@@ -1769,6 +1777,10 @@ pub struct QuotAnnot {
     /// The annotation's opening `(`, where a body/annotation disagreement is
     /// reported.
     pub span: Span,
+    /// Phase 6 slice 3 (R1): the bare variant name a leading `Variant`/
+    /// `&Variant`/`&!Variant` token names, sigil stripped -- an eliminator
+    /// arm's routing tag. `None` for every plain (non-arm) annotation.
+    pub variant_tag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2110,6 +2122,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
+            resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         }
@@ -2232,6 +2245,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
+            resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         }
@@ -2302,6 +2316,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
+            resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
         };

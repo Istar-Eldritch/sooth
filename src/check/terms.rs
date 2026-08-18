@@ -367,6 +367,7 @@ fn check_term(
                 live,
                 at,
                 poly.resolved_fields,
+                poly.resolved_variant_fields,
             )? {
                 return Ok(stack);
             }
@@ -485,6 +486,26 @@ fn check_term(
             // D3 (slice 8b): ahead of the ordinary env call path below, so it
             // catches a moving destructure (`S>`) of a drop-overloaded struct.
             check_destructure_drop_guard(name, span, ctx)?;
+            // Phase 6 slice 3 (R3): a generated eliminator (`Shape?`) is
+            // routed ahead of the env/combinator/poly paths. It has no body,
+            // so it is not a `Combinator` and must never be spliced; and its
+            // arms are matched to variants by annotation tag rather than by
+            // slot position, so the ordinary poly-call unification it is
+            // registered under is never what checks a call site.
+            if let Some(enum_id) = poly.eliminators.get(name).copied() {
+                let granted = releasable_into(
+                    scope,
+                    base_depth,
+                    outer_releasable,
+                    &siblings[at + 1..],
+                    live,
+                    at,
+                );
+                return check_eliminator_call(
+                    enum_id, name, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    &granted, tail,
+                );
+            }
             // R6-R9: a tail-position call, inside a self-tail combinator
             // body splice, to that same combinator is the loop back-edge, not
             // a re-splice (which would recurse forever). Intercepted before
@@ -820,10 +841,38 @@ fn check_term(
             let annot = match annot {
                 Some(annot) => {
                     let resolved = resolve_annotation(ctx, annot)?;
-                    check_literal_against_annotation(
-                        &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov, scope,
-                        poly,
-                    )?;
+                    // Phase 6 slice 3 (R1): an eliminator arm's annotation
+                    // elides both rows (`( Circle )` is
+                    // `( ..a Shape.Circle -- ..b )`), so it has no standalone
+                    // fixed point to run the body against -- the caller region
+                    // it reaches into and the shape it leaves are both
+                    // supplied by the eliminator call site, where
+                    // `check_eliminator_call` runs the same directional check
+                    // against the real stack.
+                    if resolved.variant_tag.is_none() {
+                        check_literal_against_annotation(
+                            &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov,
+                            scope, poly,
+                        )?;
+                    } else if !tagged_literal_reaches_an_eliminator_call(siblings, at, poly) {
+                        // Review fix (Phase 6 slice 3, finding 3): the branch
+                        // above skips the standalone annotation check entirely
+                        // for *every* tagged literal, on the premise that
+                        // `check_eliminator_call` checks it instead -- true
+                        // only when this literal is actually collected as an
+                        // arm. A tagged literal that never reaches an
+                        // eliminator call (a typo'd call name, or a tagged
+                        // literal used as an ordinary value) was silently
+                        // never checked at all, magic that this rejects.
+                        return Err(eliminator_arm_outside_call_error(
+                            ctx,
+                            resolved.span,
+                            resolved
+                                .variant_tag
+                                .as_deref()
+                                .expect("the `else` branch only runs when `variant_tag` is `Some`"),
+                        ));
+                    }
                     Some(resolved)
                 }
                 None => None,
@@ -864,6 +913,50 @@ fn check_term(
             Ok(stack)
         }
     }
+}
+
+/// Phase 6 slice 3 review fix (finding 3): whether the tagged literal at
+/// `siblings[at]` is actually collected as an eliminator arm. Forward-scans
+/// past every immediately-following tagged quotation literal and accepts only
+/// if that run ends in a call to a name the eliminator registry actually
+/// holds. Anything else (a typo'd call name, an intervening term, or running
+/// off the end of the body) means this literal is never consumed as an arm.
+///
+/// This is *written adjacency*, deliberately stricter than
+/// `check_eliminator_call`'s own stack-based collection: a stack-neutral term
+/// written between two arms (`~[ ( Circle ) .. ] 4 drop ~[ ( Rect ) .. ]
+/// Shape?`) leaves the arms adjacent on the stack but not in the source, and
+/// is rejected here. Deciding the stack-level question syntactically is not
+/// possible, and the looser rule that would admit it (scan forward past
+/// anything until *some* eliminator call) re-opens the hole this exists to
+/// close: it would accept a tagged literal that is dropped, never checked,
+/// merely because an unrelated eliminator call follows it later in the body.
+/// The error names the adjacency requirement so the rejection is a stated
+/// rule rather than an unexplained one.
+fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly: &PolyCtx) -> bool {
+    let mut j = at + 1;
+    while let Some(term) = siblings.get(j) {
+        match &term.kind {
+            TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
+                j += 1;
+            }
+            TermKind::Call(name) => return poly.eliminators.contains_key(name),
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Phase 6 slice 3 review fix (finding 3): a variant-tagged quotation literal
+/// that is not consumed as an eliminator arm. The tag is only meaningful as
+/// arm-to-variant routing (R1/R4); anywhere else it is a stray annotation this
+/// checker must not silently let through unchecked.
+fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
+    format!(
+        "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})\n  arms are written together, immediately before the call: `~[ ( A ) .. ] ~[ ( B ) .. ] Enum?`",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R15 (D8): a linear value live across the self-tail-call back-edge, which the
@@ -1186,9 +1279,13 @@ fn check_branch_join(
                             scope,
                             poly,
                             &HashSet::new(),
-                            false,
-                            false,
-                            false,
+                            LiteralBoundary {
+                                shape_changing: false,
+                                is_arm: false,
+                                caller_tail: false,
+                                finalize: false,
+                            },
+                            None,
                         )?;
                         check_literal_against_declared_effect(
                             b,
@@ -1206,9 +1303,13 @@ fn check_branch_join(
                             scope,
                             poly,
                             &HashSet::new(),
-                            false,
-                            false,
-                            false,
+                            LiteralBoundary {
+                                shape_changing: false,
+                                is_arm: false,
+                                caller_tail: false,
+                                finalize: false,
+                            },
+                            None,
                         )?;
                         // R23: the merged erased slot's surviving set is
                         // the union of both arms' -- a fresh interned
@@ -1431,7 +1532,7 @@ fn back_edge_outs(
 /// *different* place) is rejected rather than silently picking one arm's
 /// answer, since a later hazard check would then reason about the wrong arm's
 /// runtime path.
-fn borrow_join_disagreement_error(
+pub(super) fn borrow_join_disagreement_error(
     ctx: &Ctx,
     span: Span,
     t_then: Option<&Deriv>,

@@ -2,6 +2,7 @@
 //! (`lower_terms`, `lower_term`, `lower_self_tail_combinator`, `lower_call`).
 
 use super::*;
+use crate::ast::QuotAnnot;
 
 impl<'a> FuncBuilder<'a> {
     pub(in crate::ir) fn lower_terms(&mut self, terms: &[Term], tail: bool) {
@@ -52,9 +53,14 @@ impl<'a> FuncBuilder<'a> {
             // is the plainest non-aggregate placeholder (the IR side has no
             // `if`-condition concern, so the checker's `Cstr` choice does not
             // bind here).
-            TermKind::Quotation(body, _, _) => {
+            TermKind::Quotation(body, _, annot) => {
                 let id = QuotId(self.quot_defs.len());
                 self.quot_defs.push(body.clone());
+                // Phase 6 slice 3 (R5): an eliminator arm's tag rides with its
+                // body, since the phantom `Value` the arm is pushed as carries
+                // no annotation of its own and the eliminator's interception
+                // below routes arms to variants by tag, not by position.
+                self.quot_arm_tags.push(arm_tag(annot.as_ref()));
                 let v = self.fresh_value(IrType::I64);
                 self.quot_bodies.insert(v, id);
                 self.stack.push(v);
@@ -247,7 +253,7 @@ impl<'a> FuncBuilder<'a> {
                 return;
             }
             if let Some(&ew) = self.enums.words.get(&sym_name) {
-                self.lower_enum_word(ew);
+                self.lower_enum_call(ew, span, tail);
                 return;
             }
             let (in_arity, out_arity, ret_ty) = {
@@ -642,7 +648,7 @@ impl<'a> FuncBuilder<'a> {
                 // A variant constructor lowers to alloc + tag store + field
                 // stores inline, parallel to a struct constructor (R14/R15).
                 if let Some(&ew) = self.enums.words.get(name) {
-                    self.lower_enum_word(ew);
+                    self.lower_enum_call(ew, span, tail);
                     return;
                 }
                 // R7: a tail-position self-call is a back-edge to the loop
@@ -711,6 +717,75 @@ impl<'a> FuncBuilder<'a> {
             }
         }
     }
+
+    /// The call-site dispatch over a generated enum word (Phase 6 slice 3,
+    /// R5). `Eliminate` is intercepted *here*, ahead of `lower_enum_word`,
+    /// because it lowers to a tag dispatch over the call's own quotation
+    /// operands rather than to the inline alloc/tag/field shapes that function
+    /// covers; that ordering is what makes its `lower_enum_word` arm
+    /// unreachable.
+    fn lower_enum_call(&mut self, ew: EnumWord, span: Span, tail: bool) {
+        match ew {
+            EnumWord::Eliminate(id) => self.lower_eliminator(id, span, tail),
+            EnumWord::Construct(..) | EnumWord::Destructure(..) => self.lower_enum_word(ew),
+        }
+    }
+
+    /// Lower a call to a generated eliminator (`Shape?`, R5): pop the one
+    /// quotation operand per variant, turn each into a synthetic `Clause`
+    /// routed by its annotation's variant tag, and run the existing N-way tag
+    /// dispatch over them. The arms bind no clause locals -- each receives the
+    /// whole narrowed value (`ArmBinding::WholeValue`) and reads fields through
+    /// `&field` projections.
+    fn lower_eliminator(&mut self, id: EnumId, span: Span, tail: bool) {
+        let n = self.enums.layouts[id.index()].variants.len();
+        let split = self.stack.len() - n;
+        let arm_values = self.stack.split_off(split);
+        let mut clauses = Vec::with_capacity(n);
+        let mut receiver = None;
+        for value in arm_values {
+            let qid = self.quot_bodies[&value];
+            let (tag, declared) = self.quot_arm_tags[qid.0]
+                .clone()
+                .expect("checked: an eliminator arm is a variant-tagged quotation literal");
+            receiver.get_or_insert(declared);
+            clauses.push(Clause {
+                variant: tag,
+                locals: Vec::new(),
+                body: self.quot_defs[qid.0].clone(),
+                span,
+            });
+        }
+        // Decision 6: the call's scrutinee mode. Every arm declares the same
+        // one (the checker builds each arm's expected effect from it), so the
+        // first arm's receiver type carries it: a reference arm's referent is
+        // the narrowed variant, which erases to the same `IrType::Enum(id)` as
+        // the enum itself, so `lower_clauses` resolves through it unchanged.
+        let scrutinee_ty = match receiver {
+            Some(reference @ Type::Ref(..)) => reference,
+            _ => Type::Enum(id, self.enums.layouts[id.index()].name),
+        };
+        let params = mem::take(&mut self.stack);
+        self.lower_clauses(
+            &clauses,
+            &params,
+            scrutinee_ty,
+            ArmBinding::WholeValue,
+            tail,
+        );
+    }
+}
+
+/// Phase 6 slice 3 (R5): the eliminator-arm routing an annotation carries --
+/// its variant tag and the concrete receiver slot the tag expanded to. `None`
+/// for an untagged (ordinary) literal, which is every literal but an arm.
+fn arm_tag(annot: Option<&QuotAnnot>) -> Option<(String, Type)> {
+    let annot = annot?;
+    let tag = annot.variant_tag.clone()?;
+    let Some(PolyType::Concrete(receiver)) = annot.inputs.first() else {
+        unreachable!("a tagged annotation opens with its concrete receiver slot (parser, R1)")
+    };
+    Some((tag, *receiver))
 }
 
 #[cfg(test)]

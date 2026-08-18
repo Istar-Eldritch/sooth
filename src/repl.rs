@@ -1208,7 +1208,7 @@ impl Session {
         // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
         // inference sees the session's inline view like any bare line.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, _insts, _overloads, _fields) = check::infer_line(
+        let (net_stack, _insts, _overloads, _fields, _variant_fields) = check::infer_line(
             &terms,
             &self.types,
             &env,
@@ -1475,6 +1475,13 @@ impl Session {
                 // an imported name's internal tag; reject it up front (covers
                 // the drop / def / poly fan-out with one check).
                 reject_double_colon_name("word", &word.name, word_span(&word))?;
+                // Phase 6 slice 3: the session analogue of
+                // `assemble_module`'s own shadowing check. Eliminator
+                // interception runs ahead of the env lookup here too, so a
+                // word named `Shape?` would be accepted and then permanently
+                // unreachable -- every call to it routes to the generated
+                // eliminator instead.
+                check::check_no_word_shadows_eliminator(std::slice::from_ref(&word), &self.enums)?;
                 // R6: `check_globals` runs only in `assemble_module`, so a
                 // `global:` clause here would be accepted and never checked.
                 // A live session declares no statics, so no entry could ever
@@ -1611,6 +1618,22 @@ impl Session {
         let variant_names = parser::enum_variant_names(tokens);
         for (vname, vspan) in &variant_names {
             parser::reject_reserved_name("variant", vname, *vspan)?;
+        }
+        // Phase 6 slice 3: the same collision arrived at from the other side
+        // -- a session word already holds the name this enum's eliminator
+        // would take, which would make that word unreachable from the next
+        // line on. A session declares one thing per line, so each ordering
+        // has to be caught where it happens; `assemble_module` sees both at
+        // once and needs only its whole-module scan.
+        let eliminator_name = format!("{name}?");
+        if self.word_names().contains(&eliminator_name)
+            || self.combinators.contains_key(&eliminator_name)
+        {
+            return Err(check::word_shadows_eliminator_error(
+                &eliminator_name,
+                span,
+                &name,
+            ));
         }
         let variants = variant_names
             .into_iter()
@@ -2229,6 +2252,16 @@ impl Session {
     /// leave it (a local or a genuinely absent name falls through to the
     /// ordinary unknown-word path), `Err` for R15's `not exported`.
     fn rewrite_import_call(&self, name: &str, span: Span) -> Result<Option<String>, String> {
+        // Phase 6 slice 3 review fix (cycle 3): the *whole* spelling first. A
+        // word may itself be named `ok?` or `foo>` -- an ordinary spelling,
+        // aliased whole -- and teaching `split_destructure_suffix` about the
+        // eliminator's `?` made every such imported word miss its alias and
+        // report `unknown word` (a call that resolved before this slice).
+        // Only when no alias holds the whole name is a trailing sigil a
+        // *generated* word's suffix on an aliased type (`q::P>`).
+        if let Some(internal) = self.import_aliases.get(name) {
+            return Ok(Some(internal.clone()));
+        }
         let (base, suffix) = split_destructure_suffix(name);
         if let Some(internal) = self.import_aliases.get(base) {
             return Ok(Some(format!("{internal}{suffix}")));
@@ -2240,10 +2273,18 @@ impl Session {
             if self.import_qualifier_module.contains_key(qualifier) {
                 if let Some(private) = self.import_private.get(qualifier) {
                     if private.contains(rest) {
-                        let (base_name, _) = split_destructure_suffix(rest);
-                        return Err(crate::resolve::not_exported_error(
-                            base_name, qualifier, span,
-                        ));
+                        // R15 gates a generated word by its *type*'s export
+                        // status, so the message names the type (`q::P>` ->
+                        // `P`). A private type is retained under its bare name
+                        // beside its generated one, which is what tells that
+                        // case from a word whose own name ends in `>`/`?`
+                        // (`ok?`, which names itself).
+                        let (head, _) = split_destructure_suffix(rest);
+                        let named = match private.contains(head) {
+                            true => head,
+                            false => rest,
+                        };
+                        return Err(crate::resolve::not_exported_error(named, qualifier, span));
                     }
                 }
             }
@@ -2394,17 +2435,18 @@ impl Session {
         // than the crash item 3 fixes; see its call site). Its field
         // projections (R2) are *not* discarded: this is the only place the
         // override's body is lowered (R11.3), so they reach that lowering.
-        let (sites, _insts, _overloads, fields) = check::check_def_collecting_drop_sites(
-            &self.drop_overloads[&id].1,
-            &self.enums,
-            &env,
-            &mut self.arrays,
-            &mut self.owned_cells,
-            &mut self.refs,
-            &self.structs,
-            &HashMap::new(),
-            &combinators,
-        )?;
+        let (sites, _insts, _overloads, fields, variant_fields) =
+            check::check_def_collecting_drop_sites(
+                &self.drop_overloads[&id].1,
+                &self.enums,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &HashMap::new(),
+                &combinators,
+            )?;
         self.drop_dropped_sites.insert(id, sites);
 
         // R6 at the REPL: checking this override's body in isolation cannot
@@ -2453,6 +2495,7 @@ impl Session {
                 regs,
                 &self.drop_override_bodies(Some(id)),
                 &fields,
+                &variant_fields,
                 &combinator_bodies(&self.combinators),
             )
         };
@@ -2726,7 +2769,7 @@ impl Session {
         // call sites, threaded into `ir::lower_word` below so it dispatches an
         // overloaded call exactly as a native word body does, rather than
         // silently mis-lowering through the name-directed builtin arm.
-        let (insts, overloads, fields) = check::check_def(
+        let (insts, overloads, fields, variant_fields) = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -2789,6 +2832,7 @@ impl Session {
                 &insts,
                 &overloads,
                 &fields,
+                &variant_fields,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
@@ -2811,6 +2855,7 @@ impl Session {
                 // defining line), so no body reaches this call and no
                 // projection needs resolving.
                 ir::empty_resolved_fields(),
+                ir::empty_resolved_variant_fields(),
                 &combinator_bodies(&self.combinators),
             ));
             funcs
@@ -2924,18 +2969,19 @@ impl Session {
         // R4 (Slice 6c): a bare line may call a retained combinator; thread the
         // session's inline view so it inlines like native's `module.words` one.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, insts, line_overloads, line_fields) = check::infer_line(
-            terms,
-            &self.types,
-            &env,
-            &mut self.arrays,
-            &mut self.owned_cells,
-            &mut self.refs,
-            &self.structs,
-            &self.enums,
-            &poly_env,
-            &combinators,
-        )?;
+        let (net_stack, insts, line_overloads, line_fields, line_variant_fields) =
+            check::infer_line(
+                terms,
+                &self.types,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &self.enums,
+                &poly_env,
+                &combinators,
+            )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
@@ -2976,6 +3022,7 @@ impl Session {
                 &insts,
                 &line_overloads,
                 &line_fields,
+                &line_variant_fields,
                 &poly_arities,
                 &bodies,
             );
@@ -2988,6 +3035,7 @@ impl Session {
                 regs,
                 &self.drop_override_bodies(None),
                 ir::empty_resolved_fields(),
+                ir::empty_resolved_variant_fields(),
                 &bodies,
             );
             (func, quot_funcs, m, out_bytes, aggregate_destructors)
@@ -3766,6 +3814,46 @@ mod tests {
         }
     }
 
+    /// Phase 6 slice 3 review (finding 4): the session define path runs the
+    /// same eliminator interception `check_term` does, so a word named
+    /// `Shape?` was accepted ("defined Shape?") and then permanently
+    /// unreachable -- the next call to it routed to the generated eliminator
+    /// and failed on the scrutinee's type. Rejected at the declaration
+    /// instead, both ways round, since a session declares one thing per line
+    /// and never sees the pair at once the way `assemble_module` does.
+    #[test]
+    fn session_rejects_a_word_shadowing_an_eliminator_either_declaration_order() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+
+        let mut session = Session::new();
+        session
+            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("has the same name as the generated eliminator for enum `Shape`"),
+            "unexpected message: {err}"
+        );
+        // The rejected `type:` line leaves the session as it was: the word it
+        // would have shadowed is still callable.
+        out.clear();
+        session.eval_line("5 Shape? .", &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "stack: (empty)\n");
+    }
+
     /// F1/F2: everything above (`format_rich_*`) exercises `format_stack_rich`
     /// directly with hand-built layout structs; `enable_rich_stack_rendering`,
     /// `render_stack`'s rich branch, and `eval_expr`'s rich branch
@@ -3884,6 +3972,7 @@ mod tests {
             regs,
             &session.drop_override_bodies(declaring),
             ir::empty_resolved_fields(),
+            ir::empty_resolved_variant_fields(),
             &combinator_bodies(&session.combinators),
         )
         .into_iter()
@@ -4022,6 +4111,54 @@ mod tests {
         assert!(
             session.env["ordinary"].symbol.contains("__gen"),
             "an ordinary word still mints `__gen`"
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (cycle 3): teaching
+    /// `split_destructure_suffix` about the eliminator's `?` made an imported
+    /// word whose own name ends in `?` (`ok?`, an ordinary spelling) split to
+    /// a base the import event never aliased, so a `q::ok?` call that resolved
+    /// before this slice reported `unknown word`. The whole spelling is tried
+    /// first, and the split still serves a genuinely generated name (`q::P>`).
+    /// The `not exported` wording follows the same rule: a generated word is
+    /// gated by its type, a suffix-spelled word by itself.
+    #[test]
+    fn import_call_to_a_word_named_like_a_generated_one_resolves() {
+        let d = LibDir::new("suffix-word");
+        let lib = d.write(
+            "lib.sth",
+            "type: P x i64 ;\n\
+             type: H y i64 ;\n\
+             : ok? ( i64 -- bool ) 0 > ;\n\
+             : hidden? ( i64 -- bool ) 0 > ;\n\
+             export: ok? P ;\n",
+        );
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+        let at = |name: &str| session.rewrite_import_call(name, Span::default());
+
+        assert_eq!(
+            at("q::ok?").unwrap(),
+            Some("q::ok?__import0".to_string()),
+            "an exported word whose name ends in `?` resolves whole"
+        );
+        assert_eq!(
+            at("q::P>").unwrap(),
+            Some("q::P__import0>".to_string()),
+            "a generated destructure still resolves through the split base"
+        );
+        let hidden = at("q::hidden?").unwrap_err();
+        assert!(
+            hidden.contains("`hidden?` is not exported"),
+            "a private word names itself, suffix included: {hidden}"
+        );
+        let private_type = at("q::H>").unwrap_err();
+        assert!(
+            private_type.contains("`H` is not exported"),
+            "a generated word is gated by its type, and names it: {private_type}"
         );
     }
 

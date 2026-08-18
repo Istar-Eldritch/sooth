@@ -71,6 +71,22 @@ impl<'a> FuncBuilder<'a> {
                     self.push_reference(addr, field.ty);
                     return;
                 }
+                // Phase 6 slice 3 (R6): the variant twin, keyed by `EnumId`
+                // rather than `StructId` (the field lives inside the
+                // variant's own payload region, at `payload_offset +
+                // field.offset`, unlike a bare struct's field which starts at
+                // offset 0).
+                if let Some(&(id, vi, fi)) = self.resolved_variant_fields.get(&span) {
+                    let base = *self.stack.last().expect("projection: receiver");
+                    if self.ref_inner.contains_key(&base) {
+                        self.stack.pop();
+                    }
+                    let payload_offset = self.enums.layouts[id.index()].payload_offset;
+                    let field = self.enums.layouts[id.index()].variants[vi].fields[fi];
+                    let addr = self.field_ptr(base, payload_offset + field.offset);
+                    self.push_reference(addr, field.ty);
+                    return;
+                }
                 let local = self.locals.iter().find(|(n, _)| n == rest).map(|(_, v)| *v);
                 match local {
                     Some(value) => self.lower_borrow(value),
@@ -783,6 +799,124 @@ impl<'a> FuncBuilder<'a> {
 mod tests {
     use super::*;
     use crate::ir::test_helpers::*;
+
+    /// Phase 6 slice 3 (R6): `Circle`'s field 0 is a scalar `i64`, `Rect`'s
+    /// field 0 is an aggregate `P` -- so reading `variants[1]` (`Rect`) for a
+    /// `Circle` (`vi` 0) projection yields a *differently-typed* address, not
+    /// merely a missing one. Both field 0s sit at offset 0, so the address
+    /// assertion cannot see that mutation on its own: the `ref_inner` type
+    /// assertion is the only thing that catches a wrong variant index here,
+    /// and deleting it would leave the wrong-variant case unguarded. No
+    /// surface syntax reaches this mechanism
+    /// yet (Phase 4's eliminator is what calls it), so the state is
+    /// hand-built, mirroring how P7 slice 1 and Slice 2 each unit-tested a
+    /// checker-only mechanism before its lowering arm existed.
+    fn shape_enums() -> Enums {
+        enums_of(
+            "type: P a i64 b i64 ;\n\
+             type: Shape | Circle r i64 p P | Rect q P ;\n\
+             : main ( -- ) ;\n",
+        )
+    }
+
+    #[test]
+    fn variant_field_projection_reads_the_correct_variant_and_field() {
+        let enums = shape_enums();
+        // `bool` is injected as enum 0 ahead of any user enum (`BOOL_ENUM_ID`),
+        // so `Shape` is enum 1.
+        let id = EnumId::from_index(1);
+        let payload_offset = enum_layout(&enums, "Shape").payload_offset;
+        let field = enum_layout(&enums, "Shape").variants[0].fields[0];
+        let structs = Structs::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                statics: empty_statics(),
+            },
+        );
+        let span = Span::default();
+        let mut variant_fields = HashMap::new();
+        variant_fields.insert(span, (id, 0usize, 0usize));
+        b.resolved_variant_fields = &variant_fields;
+        let receiver = b.fresh_value(IrType::Enum(id));
+        b.stack.push(receiver);
+        b.lower_reference_word("&r", span);
+        // D2: owned receiver, non-consuming -- the receiver stays and the
+        // projected reference joins it.
+        assert_eq!(b.stack.len(), 2);
+        assert_eq!(b.stack[0], receiver);
+        let addr = b.stack[1];
+        assert!(
+            b.cur_instrs.iter().any(|i| matches!(i,
+                Instr::PtrOffset(dst, base, off)
+                    if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
+            )),
+            "expected a PtrOffset at payload_offset + field.offset: {:?}",
+            b.cur_instrs
+        );
+        assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
+    }
+
+    #[test]
+    fn variant_field_projection_reference_receiver_pops_it() {
+        // The owned-vs-reference split (D2): a reference receiver is
+        // consumed by the projection (`ref_inner` is what tells the two
+        // apart), an owned one is not.
+        let enums = shape_enums();
+        let id = EnumId::from_index(1);
+        let payload_offset = enum_layout(&enums, "Shape").payload_offset;
+        let field = enum_layout(&enums, "Shape").variants[0].fields[0];
+        let structs = Structs::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                statics: empty_statics(),
+            },
+        );
+        let span = Span::default();
+        let mut variant_fields = HashMap::new();
+        variant_fields.insert(span, (id, 0usize, 0usize));
+        b.resolved_variant_fields = &variant_fields;
+        let receiver = b.fresh_value(IrType::Ptr);
+        b.ref_inner.insert(receiver, IrType::Enum(id));
+        b.stack.push(receiver);
+        b.lower_reference_word("&r", span);
+        // The reference receiver is popped; only the projected reference
+        // remains.
+        assert_eq!(b.stack.len(), 1);
+        let addr = b.stack[0];
+        assert!(
+            b.cur_instrs.iter().any(|i| matches!(i,
+                Instr::PtrOffset(dst, base, off)
+                    if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
+            )),
+            "expected a PtrOffset at payload_offset + field.offset: {:?}",
+            b.cur_instrs
+        );
+        assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
+    }
 
     #[test]
     fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {

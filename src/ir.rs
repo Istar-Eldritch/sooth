@@ -78,6 +78,15 @@ pub(crate) fn empty_resolved_fields() -> &'static HashMap<Span, (StructId, usize
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// Phase 6 slice 3 (R6): the resolved-variant-field companion of
+/// `empty_resolved_fields`, handed to every lowering path that resolved no
+/// variant-field projection (destructor synthesis and unit tests).
+pub(crate) fn empty_resolved_variant_fields() -> &'static HashMap<Span, (EnumId, usize, usize)> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, (EnumId, usize, usize)>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// The poly-arity companion of `empty_instantiations`.
 fn empty_poly_arities() -> &'static HashMap<String, usize> {
     static EMPTY: std::sync::OnceLock<HashMap<String, usize>> = std::sync::OnceLock::new();

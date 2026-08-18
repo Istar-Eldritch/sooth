@@ -131,21 +131,22 @@ pub(crate) fn demangle_word(name: &str) -> &str {
     &name[..idx]
 }
 
-/// `demangle_word` for a *call* name, which may carry the one remaining
-/// generated-word suffix: a destructure mangles as `P__m0>`, so the `__m0`
-/// sits mid-string and the trailing-suffix strip above cannot see it; the
-/// type prefix has to be demangled and the trailing `>` put back. A
-/// constructor call (`P__m0`) has no suffix and falls straight through to
-/// `demangle_word`.
+/// `demangle_word` for a *call* name, which may carry one remaining
+/// generated-word suffix: a destructure mangles as `P__m0>` and an eliminator
+/// as `Shape__m0?` (Phase 6 slice 3), so in either case the `__m0` sits
+/// mid-string and the trailing-suffix strip above cannot see it; the type
+/// prefix has to be demangled and the trailing sigil put back. A constructor
+/// call (`P__m0`) has no suffix and falls straight through to `demangle_word`.
 pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
-    let Some(head) = name.strip_suffix('>') else {
+    let Some(head) = name.strip_suffix('>').or_else(|| name.strip_suffix('?')) else {
         return std::borrow::Cow::Borrowed(demangle_word(name));
     };
+    let suffix = &name[head.len()..];
     let demangled = demangle_word(head);
     if demangled.len() == head.len() {
         return std::borrow::Cow::Borrowed(name);
     }
-    std::borrow::Cow::Owned(format!("{demangled}>"))
+    std::borrow::Cow::Owned(format!("{demangled}{suffix}"))
 }
 
 /// Split a leading reference sigil (`&!`/`&`) off a call name, so `rewrite`
@@ -165,22 +166,32 @@ fn strip_ref_sigil(name: &str) -> (&str, &str) {
 
 /// Split a call name into its leading type identifier and the one remaining
 /// generated-word suffix: `Point>` -> (`Point`, `>`), `Point` -> (`Point`,
-/// ``). A type name never contains `>`, so a trailing one is unambiguous.
+/// ``). Phase 6 slice 3: an eliminator call (`Shape?`) is a second such
+/// suffix, `Shape?` -> (`Shape`, `?`). A type name never contains `>` or `?`,
+/// so a trailing one is unambiguous *as a split*; whether the head plus that
+/// suffix is a generated name at all is `NameTables::names_a_type`'s call, and
+/// depends on which kind of type the head names.
 pub(crate) fn split_destructure_suffix(name: &str) -> (&str, &str) {
-    match name.strip_suffix('>') {
-        Some(head) => (head, ">"),
-        None => (name, ""),
+    if let Some(head) = name.strip_suffix('>') {
+        return (head, ">");
     }
+    if let Some(head) = name.strip_suffix('?') {
+        return (head, "?");
+    }
+    (name, "")
 }
 
 /// The per-module name tables the rewrite consults: which bare names are this
-/// module's types (so a constructor/accessor call rewrites), which are its
-/// words/externs (so a plain call rewrites), and (R2) which are its `static:`
-/// declarations (so a `&NAME`/`&!NAME` borrow of one rewrites). Builtins and
-/// genuinely unknown names appear in none of them and are left raw for the
-/// checker to resolve or reject.
+/// module's struct and enum types (so a constructor/accessor call rewrites),
+/// which are its words/externs (so a plain call rewrites), and (R2) which are
+/// its `static:` declarations (so a `&NAME`/`&!NAME` borrow of one rewrites).
+/// Builtins and genuinely unknown names appear in none of them and are left
+/// raw for the checker to resolve or reject. Structs and enums are kept apart
+/// because a generated suffix belongs to one kind or the other, never both
+/// (`names_a_type`).
 struct NameTables {
-    types: Vec<HashSet<String>>,
+    structs: Vec<HashSet<String>>,
+    enums: Vec<HashSet<String>>,
     words: Vec<HashSet<String>>,
     statics: Vec<HashSet<String>>,
 }
@@ -188,17 +199,18 @@ struct NameTables {
 impl NameTables {
     fn build(module: &Module) -> NameTables {
         let n = module.modules.len();
-        let mut types = vec![HashSet::new(); n];
+        let mut structs = vec![HashSet::new(); n];
+        let mut enums = vec![HashSet::new(); n];
         let mut words = vec![HashSet::new(); n];
         let mut statics = vec![HashSet::new(); n];
         for s in &module.statics {
             statics[s.module as usize].insert(s.name.clone());
         }
         for s in &module.structs {
-            types[s.module as usize].insert(s.name.clone());
+            structs[s.module as usize].insert(s.name.clone());
         }
         for e in &module.enums {
-            types[e.module as usize].insert(e.name.clone());
+            enums[e.module as usize].insert(e.name.clone());
         }
         for w in &module.words {
             words[w.module as usize].insert(w.name.clone());
@@ -207,9 +219,27 @@ impl NameTables {
             words[x.module as usize].insert(x.name.clone());
         }
         NameTables {
-            types,
+            structs,
+            enums,
             words,
             statics,
+        }
+    }
+
+    /// Whether `head` + `suffix` (as split by `split_destructure_suffix`) is a
+    /// name `module` generates from a type declaration. Each generated suffix
+    /// comes from exactly one kind of type -- `>` is the struct destructure,
+    /// `?` (slice 3) the enum eliminator -- so eligibility is per suffix, not
+    /// per "names a type at all": a plain word called `P?` where `P` is a
+    /// *struct* (or `E>` where `E` is an *enum*) is a word, and must fall
+    /// through to the word branches rather than be mangled into a generated
+    /// name nothing ever generated.
+    fn names_a_type(&self, module: u32, head: &str, suffix: &str) -> bool {
+        let m = module as usize;
+        match suffix {
+            ">" => self.structs[m].contains(head),
+            "?" => self.enums[m].contains(head),
+            _ => self.structs[m].contains(head) || self.enums[m].contains(head),
         }
     }
 
@@ -254,7 +284,7 @@ impl NameTables {
                 None => return Ok(None),
             };
             let (type_part, suffix) = split_destructure_suffix(rest);
-            if word_ok && self.types[target as usize].contains(type_part) {
+            if word_ok && self.names_a_type(target, type_part, suffix) {
                 if !is_exported(&exports[target as usize], type_part) {
                     return Err(not_exported_error(type_part, qualifier, span));
                 }
@@ -264,7 +294,15 @@ impl NameTables {
                     suffix
                 )));
             }
-            if word_ok && suffix.is_empty() && self.words[target as usize].contains(rest) {
+            // Review fix: `suffix` only means "the type branch above already
+            // handled this" if `type_part` actually named a real type, which
+            // that branch's own `return` already guarantees by the time
+            // control reaches here -- gating on `suffix.is_empty()` too
+            // silently dropped a plain word whose bare name happens to end in
+            // `>`/`?` (Phase 6 slice 3's `Shape?`, or any pre-existing `Foo>`)
+            // when no type of that head name exists, which is a real word
+            // this table holds, not a destructure/eliminator collision.
+            if word_ok && self.words[target as usize].contains(rest) {
                 if !is_exported(&exports[target as usize], rest) {
                     return Err(not_exported_error(rest, qualifier, span));
                 }
@@ -273,7 +311,7 @@ impl NameTables {
             return Ok(None);
         }
         let (type_part, suffix) = split_destructure_suffix(core);
-        if word_ok && self.types[module as usize].contains(type_part) {
+        if word_ok && self.names_a_type(module, type_part, suffix) {
             return Ok(Some(format!(
                 "{sigil}{}{}",
                 mangle(type_part, module),
@@ -285,7 +323,7 @@ impl NameTables {
         // accessor-free, unqualified name declared by the *accessing* module
         // resolves, and only under a sigil: a static is reachable no other
         // way, so a bare `COUNT` stays whatever it means today.
-        if !sigil.is_empty() && suffix.is_empty() && self.statics[module as usize].contains(core) {
+        if !sigil.is_empty() && self.statics[module as usize].contains(core) {
             return Ok(Some(format!("{sigil}{}", mangle_static(core, module))));
         }
         // A bare call to one of `check::builtin_table`'s operator names stays
@@ -298,10 +336,10 @@ impl NameTables {
         // between the builtin and the overload, exactly as it does in a
         // single-module build (where this pass is a no-op and the name is
         // never touched at all).
-        if word_ok
-            && suffix.is_empty()
-            && !is_operator_dispatch_name(core)
-            && self.words[module as usize].contains(core)
+        // Review fix: as in the qualified branch above, `suffix` non-empty
+        // no longer means "skip -- already a destructure/eliminator"; the
+        // type branch's own early `return` already owns that case.
+        if word_ok && !is_operator_dispatch_name(core) && self.words[module as usize].contains(core)
         {
             return Ok(Some(format!("{sigil}{}", mangle(core, module))));
         }
@@ -312,7 +350,7 @@ impl NameTables {
         // target module just like a plain word does.
         if word_ok {
             if let Some(&target) = selective.get(type_part) {
-                if self.types[target as usize].contains(type_part) {
+                if self.names_a_type(target, type_part, suffix) {
                     return Ok(Some(format!(
                         "{sigil}{}{}",
                         mangle(type_part, target),
@@ -330,7 +368,7 @@ impl NameTables {
         // the imported overload as a candidate alongside the builtin and any own
         // overload, so `check_operator`'s per-call-site operand-type dispatch
         // still finds it -- this only defers the rewrite to that dispatch.
-        if word_ok && suffix.is_empty() && !is_operator_dispatch_name(core) {
+        if word_ok && !is_operator_dispatch_name(core) {
             if let Some(&target) = selective.get(core) {
                 if self.words[target as usize].contains(core) {
                     return Ok(Some(format!("{sigil}{}", mangle(core, target))));
@@ -545,6 +583,7 @@ mod tests {
         assert_eq!(split_destructure_suffix("Point"), ("Point", ""));
         assert_eq!(split_destructure_suffix("Point>"), ("Point", ">"));
         assert_eq!(split_destructure_suffix(">"), ("", ">"));
+        assert_eq!(split_destructure_suffix("Shape?"), ("Shape", "?"));
     }
 
     #[test]
@@ -575,8 +614,11 @@ mod tests {
     fn visibility_lookup_distinguishes_unexported_from_absent() {
         let mut words = vec![HashSet::new(), HashSet::new()];
         words[1].insert("grow".to_string());
+        let mut enums = vec![HashSet::new(), HashSet::new()];
+        enums[1].insert("Hidden".to_string());
         let tables = NameTables {
-            types: vec![HashSet::new(), HashSet::new()],
+            structs: vec![HashSet::new(), HashSet::new()],
+            enums,
             words,
             statics: vec![HashSet::new(), HashSet::new()],
         };
@@ -615,6 +657,24 @@ mod tests {
             span,
         );
         assert_eq!(absent, Ok(None), "absent name defers to unknown-word");
+
+        // An enum is a type for an *unsuffixed* reference too, which is what
+        // makes a qualified one answer R16 here rather than falling through to
+        // unknown-word. (`?` eligibility is the enum set's other reader, see
+        // `names_a_type`.)
+        let private_enum = tables.rewrite(
+            "q::Hidden",
+            0,
+            &imports,
+            &no_selective,
+            &scope,
+            &exports,
+            span,
+        );
+        assert!(
+            matches!(private_enum, Err(ref e) if e.contains("`Hidden` is not exported")),
+            "an unexported enum is a located error, not unknown-word: {private_enum:?}"
+        );
     }
 
     /// U6 (R15): naming a type in `export:` exports it and its two generated
@@ -624,10 +684,11 @@ mod tests {
     /// so has no export entry of its own to gate.
     #[test]
     fn export_of_type_includes_both_generated_words() {
-        let mut types = vec![HashSet::new(), HashSet::new()];
-        types[1].insert("Point".to_string());
+        let mut structs = vec![HashSet::new(), HashSet::new()];
+        structs[1].insert("Point".to_string());
         let tables = NameTables {
-            types,
+            structs,
+            enums: vec![HashSet::new(), HashSet::new()],
             words: vec![HashSet::new(), HashSet::new()],
             statics: vec![HashSet::new(), HashSet::new()],
         };
@@ -754,7 +815,8 @@ mod tests {
         let mut statics = vec![HashSet::new(), HashSet::new()];
         statics[0].insert("COUNT".to_string());
         let tables = NameTables {
-            types: vec![HashSet::new(), HashSet::new()],
+            structs: vec![HashSet::new(), HashSet::new()],
+            enums: vec![HashSet::new(), HashSet::new()],
             words: vec![HashSet::new(), HashSet::new()],
             statics,
         };
@@ -803,6 +865,150 @@ mod tests {
             call_names(&main.body),
             vec!["close__m0".to_string()],
             "the call site is rewritten to match the mangled definition"
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (finding 4): a real build mangles the
+    /// enum-based eliminator key (`Shape__m0?`), not the ordinary
+    /// suffix-appended form (`Shape?__m0`) -- `check_src`-style tests never
+    /// exercise this at all, since they skip `resolve_modules` entirely and
+    /// leave every name bare, so the call site's mangled form has to be
+    /// pinned here instead.
+    #[test]
+    fn eliminator_call_site_mangles_to_match_the_enum_based_key() {
+        let tokens = lex("type: Shape | Circle r i64 | Rect w i64 h i64 ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module, true).unwrap();
+        let shape_id = module
+            .enums
+            .iter()
+            .position(|e| e.name == "Shape__m0")
+            .expect("`Shape` is mangled by declaration order, unconditionally");
+        assert_eq!(
+            shape_id,
+            module.enums.len() - 1,
+            "Shape is the last-declared enum"
+        );
+        let area = module.words.iter().find(|w| w.name == "area__m0").unwrap();
+        assert!(
+            call_names(&area.body).contains(&"Shape__m0?".to_string()),
+            "the eliminator call site mangles to the enum-based key, matching \
+             `eliminator_registry`'s own `\"{{EnumName}}?\"` keying, not the \
+             ordinary word-suffix form `Shape?__m0`: {:?}",
+            call_names(&area.body)
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (cycle 2): teaching `split_destructure_suffix`
+    /// about the eliminator's `?` made every *plain* word whose name ends in
+    /// `?` (`ok?`, `zero?` -- an ordinary spelling) present a non-empty
+    /// suffix to the four name-table branches below, each of which then
+    /// skipped it and left the call unresolved (`unknown word` across
+    /// modules). A generated word is recognized by its *type prefix* naming a
+    /// real type, and that branch returns on its own, so the suffix alone
+    /// must never gate the rest. Each assertion below fails if its branch's
+    /// `suffix.is_empty()` gate comes back, and every one of them is
+    /// reachable from real source (a qualified call, an own-module call, a
+    /// borrowed `static:`, a selective import).
+    #[test]
+    fn word_named_with_a_generated_suffix_resolves_in_every_branch() {
+        let mut enums = vec![HashSet::new(), HashSet::new()];
+        enums[0].insert("Shape".to_string());
+        let mut words = vec![HashSet::new(), HashSet::new()];
+        words[0].insert("own?".to_string());
+        words[1].insert("ok?".to_string());
+        let mut statics = vec![HashSet::new(), HashSet::new()];
+        statics[0].insert("FLAG?".to_string());
+        let tables = NameTables {
+            structs: vec![HashSet::new(), HashSet::new()],
+            enums,
+            words,
+            statics,
+        };
+        let mut imports = std::collections::HashMap::new();
+        imports.insert("lib".to_string(), 1u32);
+        let exports = vec![Vec::new(), vec![("ok?".to_string(), Span::default())]];
+        let scope = HashSet::new();
+        let span = Span::default();
+        let none = std::collections::HashMap::new();
+        let mut selective = std::collections::HashMap::new();
+        selective.insert("ok?".to_string(), 1u32);
+        let at = |name: &str, sel: &std::collections::HashMap<String, u32>| {
+            tables.rewrite(name, 0, &imports, sel, &scope, &exports, span)
+        };
+
+        assert_eq!(
+            at("lib::ok?", &none),
+            Ok(Some("ok?__m1".to_string())),
+            "qualified call to another module's word"
+        );
+        assert_eq!(
+            at("own?", &none),
+            Ok(Some("own?__m0".to_string())),
+            "unqualified call to this module's own word"
+        );
+        assert_eq!(
+            at("&!FLAG?", &none),
+            Ok(Some("&!FLAG?__m0".to_string())),
+            "borrow of this module's own static"
+        );
+        assert_eq!(
+            at("ok?", &selective),
+            Ok(Some("ok?__m1".to_string())),
+            "selectively imported word, bare"
+        );
+        assert_eq!(
+            at("Shape?", &none),
+            Ok(Some("Shape__m0?".to_string())),
+            "the eliminator itself still resolves through the type branch, \
+             which is what the suffix is actually for"
+        );
+    }
+
+    /// Phase 6 slice 3 review fix (cycle 3): a generated suffix belongs to
+    /// exactly one *kind* of type -- `>` is the struct destructure, `?` the
+    /// enum eliminator -- so the type branch's eligibility is per suffix, not
+    /// "the head names a type at all". Under the looser gate a plain word
+    /// called `P?` beside a *struct* `P` was rewritten to `P__m0?`, a
+    /// generated name nothing generates, and a call that resolved before this
+    /// slice became `unknown word`; `E>` beside an *enum* `E` was the same
+    /// hole in the other direction (that one predates this slice). Both plain
+    /// words and both genuinely generated names are asserted, so "never
+    /// mangle a suffixed name" does not pass either.
+    #[test]
+    fn word_named_for_another_kinds_generated_suffix_stays_a_word() {
+        let tokens = lex("type: P x i64 ;\n\
+             type: E | A y i64 ;\n\
+             : P? ( i64 -- bool ) 0 > ;\n\
+             : E> ( i64 -- bool ) 0 > ;\n\
+             : main ( -- ) 3 P? drop 3 E> drop 1 P P> drop E? ;\n")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module, true).unwrap();
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        assert_eq!(
+            call_names(&main.body),
+            vec![
+                "P?__m0".to_string(),
+                "drop".to_string(),
+                "E>__m0".to_string(),
+                "drop".to_string(),
+                "P__m0".to_string(),
+                "P__m0>".to_string(),
+                "drop".to_string(),
+                "E__m0?".to_string(),
+            ],
+            "`P?`/`E>` are words (mangled as words); `P`/`P>`/`E?` are the \
+             generated names (mangled through the type branch)"
+        );
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        assert!(
+            names.contains(&"P?__m0") && names.contains(&"E>__m0"),
+            "both declarations mangle as ordinary words, matching their call \
+             sites: {names:?}"
         );
     }
 
@@ -916,6 +1122,7 @@ mod tests {
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
+            resolved_variant_fields: HashMap::new(),
             modules: vec![
                 ModuleInfo {
                     imports: imports0,

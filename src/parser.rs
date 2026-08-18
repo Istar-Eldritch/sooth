@@ -16,10 +16,10 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
-    PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, EnumId, ExternDecl, GenericTypes,
+    GlobalEntry, GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl,
+    PolySig, PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl,
+    Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -563,6 +563,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,
+        resolved_variant_fields: HashMap::new(),
         modules: vec![ModuleInfo {
             imports: HashMap::new(),
             exports: bodies.exports,
@@ -2724,12 +2725,38 @@ impl<'t> Parser<'t> {
     /// tables rather than any enclosing signature's `PolySig` (R2). R6: only
     /// the full four-part form parses, so `( )` and a parenthesized list with
     /// no `--` are both located errors.
+    ///
+    /// Phase 6 slice 3 (R1): a leading token naming a known variant (bare,
+    /// `&`-prefixed, or `&!`-prefixed) is an eliminator arm's routing tag,
+    /// consumed before the ordinary input-list reader sees it and recorded on
+    /// `variant_tag`. The lone-variant-name form (`( Circle )`) is the one
+    /// place the arrow is elidable: reaching `)` immediately after that one
+    /// token is a complete elided arm, not the located `( )` rejection.
     fn parse_quot_annotation(&mut self) -> Result<QuotAnnot, String> {
         let span = self.expect(Token::LParen)?;
         let mut vars = AnnotVars::default();
-        let inputs = self.parse_annot_slots(&mut vars, false, |tok| {
+        let mut variant_tag = None;
+        let leading_variant_input = self.parse_leading_variant_slot(&mut variant_tag)?;
+        if let (Some(ty), Some((Token::RParen, _))) = (leading_variant_input, self.peek()) {
+            self.pos += 1;
+            return Ok(QuotAnnot {
+                inputs: vec![PolyType::Concrete(ty)],
+                outputs: vec![],
+                row_in: None,
+                row_out: None,
+                ty_var_names: vec![],
+                row_var_names: vec![],
+                span,
+                variant_tag,
+            });
+        }
+        let mut inputs = Vec::new();
+        if let Some(ty) = leading_variant_input {
+            inputs.push(PolyType::Concrete(ty));
+        }
+        inputs.extend(self.parse_annot_slots(&mut vars, false, |tok| {
             matches!(tok, Token::RParen) || is_word(tok, "--")
-        })?;
+        })?);
         if let Some((Token::RParen, span)) = self.peek() {
             return Err(annotation_missing_arrow_error(*span));
         }
@@ -2745,6 +2772,89 @@ impl<'t> Parser<'t> {
             ty_var_names: vars.ty_names,
             row_var_names: vars.row_names,
             span,
+            variant_tag,
+        })
+    }
+
+    /// Phase 6 slice 3 (R1): consume a leading `Variant`/`&Variant`/
+    /// `&!Variant` token opening an annotation, if the (sigil-stripped) word
+    /// names a known variant. Sets `variant_tag` to the bare name (never the
+    /// sigil-carrying spelling, since routing matches variant names, which
+    /// never carry a sigil in a `type:` declaration) and returns the token's
+    /// declared type -- owning for a bare name, `&`/`&!` via the same
+    /// `intern_ref_type` an ordinary reference slot resolves through.
+    /// Returns `None`, consuming nothing, when the leading token isn't a
+    /// known variant name at all: an ordinary annotation's first input slot.
+    fn parse_leading_variant_slot(
+        &mut self,
+        variant_tag: &mut Option<String>,
+    ) -> Result<Option<Type>, String> {
+        let word = match self.peek() {
+            Some((Token::Word(w), _)) => w.clone(),
+            _ => return Ok(None),
+        };
+        let sigil_len = if word.starts_with("&!") {
+            2
+        } else if word.starts_with('&') {
+            1
+        } else {
+            0
+        };
+        let bare = &word[sigil_len..];
+        let Some(base) = self.resolve_variant_type(bare) else {
+            return Ok(None);
+        };
+        self.pos += 1;
+        *variant_tag = Some(bare.to_string());
+        Ok(Some(if sigil_len == 0 {
+            base
+        } else {
+            crate::ast::intern_ref_type(self.refs, base, sigil_len == 2)
+        }))
+    }
+
+    /// The concrete `Type::Variant` a bare variant name resolves to, module-
+    /// scoped exactly like `resolve_type_name_in_module` one level down (own
+    /// module first, falling back to a selectively-imported variant's target
+    /// module). An in-scope struct/enum of the same name takes precedence: a
+    /// variant name is a routing tag only where no ordinary type resolves, so
+    /// this returns `None` immediately when `name` already names a type here.
+    /// A generic enum's variant is not resolved here: it has no concrete
+    /// `Type::Variant` until instantiated with type arguments, which a bare
+    /// variant-name token supplies none of.
+    fn resolve_variant_type(&self, name: &str) -> Option<Type> {
+        if crate::ast::resolve_type_name_in_module(
+            self.structs,
+            self.enums,
+            name,
+            self.module,
+            self.imports,
+            self.selective,
+        )
+        .is_some()
+        {
+            return None;
+        }
+        self.find_variant_type_in_module(name, self.module)
+            .or_else(|| {
+                let target = *self.selective.get(name)?;
+                self.find_variant_type_in_module(name, target)
+            })
+    }
+
+    /// One module's worth of `resolve_variant_type`'s search, mirroring
+    /// `find_type_in_module`'s per-module scoping and `name_static` match
+    /// (R8d, slice 5b): a REPL-spliced enum's `.name` carries an import-epoch
+    /// tag but its variants' `.name_static` stays the user-typed spelling.
+    fn find_variant_type_in_module(&self, name: &str, module: u32) -> Option<Type> {
+        self.enums.iter().enumerate().find_map(|(idx, e)| {
+            if e.module != module {
+                return None;
+            }
+            e.variants
+                .iter()
+                .position(|v| v.name_static == name)
+                .map(|vi| crate::ast::variant_type(self.enums, EnumId::from_index(idx), vi))
         })
     }
 
@@ -4069,6 +4179,189 @@ mod tests {
         let err = parse_src(": w ( -- ) [ ( ) dup ] drop ;").unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
         assert!(err.contains("line 1, col 16"), "unexpected: {err}");
+    }
+
+    /// Phase 6 slice 3 (R1): the lone-variant-name elided form sets
+    /// `variant_tag` and declares an owning `Type::Variant` input, with the
+    /// arrow and outputs both elided.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_owning_ok() {
+        let module = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle ) drop ] drop ;",
+        )
+        .unwrap();
+        let shape_id =
+            EnumId::from_index(module.enums.iter().position(|e| e.name == "Shape").unwrap());
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.variant_tag, Some("Circle".to_string()));
+                assert_eq!(
+                    annot.inputs,
+                    vec![PolyType::Concrete(Type::Variant(
+                        shape_id,
+                        0,
+                        "Shape.Circle"
+                    ))]
+                );
+                assert!(annot.outputs.is_empty());
+                assert_eq!((annot.row_in, annot.row_out), (None, None));
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// Phase 6 slice 3 (R1, decision 6): the `&!`-prefixed elided form sets
+    /// the same bare `variant_tag` (the sigil must not leak into the routing
+    /// name) but declares a mutable-reference input.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_mut_ref_ok() {
+        let module = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( &!Circle ) drop ] drop ;",
+        )
+        .unwrap();
+        let shape_id =
+            EnumId::from_index(module.enums.iter().position(|e| e.name == "Shape").unwrap());
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.variant_tag, Some("Circle".to_string()));
+                let inner = Type::Variant(shape_id, 0, "Shape.Circle");
+                match annot.inputs.as_slice() {
+                    [PolyType::Concrete(Type::Ref(id, mutable, _))] => {
+                        assert!(*mutable);
+                        assert_eq!(module.refs[id.index()].referent, inner);
+                    }
+                    other => panic!("expected a single mutable-ref input, got {other:?}"),
+                }
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// Phase 6 slice 3 (R1): a partial arm with a second token and no arrow
+    /// is the same located elided-form error as a bare `( )`, not accepted
+    /// as a partial arm.
+    #[test]
+    fn parse_quotation_annotation_variant_tag_extra_token_no_arrow_is_error() {
+        let err = parse_src(
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle bool ) drop ] drop ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
+    }
+
+    /// Review fix (blocker 1, part 2): an in-scope struct keeps precedence
+    /// over a variant of the same name -- `resolve_variant_type` must not
+    /// hijack a name ordinary type resolution already owns. Drives
+    /// `parse_bodies` directly (rather than `parse_src`, which has no way to
+    /// declare a struct and an enum-with-a-same-named-variant without one
+    /// shadowing the other in a single `type:` prepass) so the two decls can
+    /// be handed in side by side.
+    #[test]
+    fn parse_leading_variant_slot_struct_of_same_name_takes_precedence() {
+        let circle_static: &'static str = Box::leak("Circle".to_string().into_boxed_str());
+        let shape_static: &'static str = Box::leak("Shape".to_string().into_boxed_str());
+        let structs = vec![StructDecl {
+            name: "Circle".to_string(),
+            name_static: circle_static,
+            fields: Vec::new(),
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let enums = vec![EnumDecl {
+            name: "Shape".to_string(),
+            name_static: shape_static,
+            variants: vec![VariantDecl {
+                name: "Circle".to_string(),
+                name_static: circle_static,
+                display_static: "Shape.Circle",
+                fields: Vec::new(),
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        }];
+        let tokens = lex(": w ( -- ) [ ( Circle -- ) drop ] drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        let no_imports = HashMap::new();
+        let bodies = parse_bodies(
+            &tokens,
+            &structs,
+            &enums,
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            &mut generics,
+        )
+        .unwrap();
+        match &terms_body(&bodies.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.variant_tag, None);
+                assert_eq!(
+                    annot.inputs,
+                    vec![PolyType::Concrete(Type::Struct(StructId(0), "Circle"))]
+                );
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// Review fix (blocker 1, part 1): a variant declared in another module,
+    /// not imported here, must not resolve as this module's routing tag --
+    /// the pre-fix bug let any variant name anywhere in the program capture
+    /// every annotation's leading slot. Module 0 has no `Circle` of any kind,
+    /// so the leading token falls through to ordinary annotation parsing,
+    /// which reports it as an unknown type rather than routing to module 1's
+    /// variant.
+    #[test]
+    fn parse_leading_variant_slot_other_module_variant_is_not_visible() {
+        let circle_static: &'static str = Box::leak("Circle".to_string().into_boxed_str());
+        let shape_static: &'static str = Box::leak("Shape".to_string().into_boxed_str());
+        let enums = vec![EnumDecl {
+            name: "Shape".to_string(),
+            name_static: shape_static,
+            variants: vec![VariantDecl {
+                name: "Circle".to_string(),
+                name_static: circle_static,
+                display_static: "Shape.Circle",
+                fields: Vec::new(),
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 1,
+        }];
+        let tokens = lex(": w ( -- ) [ ( Circle ) drop ] drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        let no_imports = HashMap::new();
+        let result = parse_bodies(
+            &tokens,
+            &[],
+            &enums,
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            &mut generics,
+        );
+        let err = match result {
+            Ok(_) => panic!("expected an unknown-type error"),
+            Err(e) => e,
+        };
+        assert!(err.contains("unknown type `Circle`"), "unexpected: {err}");
     }
 
     /// R2: a row spelling is admitted and interned into the literal's own row
