@@ -265,38 +265,14 @@ same commit as the variant removal (they are unreachable the instant the variant
 {
   "phases": [
     {
-      "id": 1,
-      "name": "migrate producers and add the forward-declaration golden",
-      "requirements": ["R5", "R6", "R7", "R8"],
-      "adds_or_updates": [
-        "src/ast.rs (bool_print_word_def -> WordBody::Terms eliminator body)",
-        "examples/shapes.sth",
-        "examples/vm.sth",
-        "examples/vm_table.sth",
-        "examples/list.sth",
-        "examples/refs.sth",
-        "tests/phase6_slice3b.rs (forward_declared_generic_type_eliminates_after_the_matching_word)"
-      ],
-      "exit": "No .sth site and no compiler-internal word constructs a WordBody::Clauses; every migrated golden and the new forward-declaration golden pass; WordBody::Clauses and parse_clauses still exist. cargo fmt --check && cargo clippy -- -D warnings && cargo test green.",
-      "atomic": false
+      "phase": 1,
+      "focus": "Migrate producers (R5-R8): rebuild the generated Bool print word as a WordBody::Terms eliminator body, migrate examples/{shapes,vm,vm_table,list,refs}.sth to eliminator terms, and add the forward-declaration golden to tests/phase6_slice3b.rs. WordBody::Clauses and parse_clauses still exist at exit; every migrated golden and the new golden pass.",
+      "difficulty": "standard"
     },
     {
-      "id": 2,
-      "name": "delete the clause path",
-      "requirements": ["R1", "R2", "R3", "R4", "R8"],
-      "deletes": [
-        "src/parser.rs: parse_clauses, at_clause_start, parse_clause_body_terms, the clause call-site branch, clauses_body helper, terms_body dead arm, 4 clause-parsing unit tests (parse_term_word_with_leading_locals_is_not_a_clause retitled)",
-        "src/ast.rs: WordBody::Clauses variant",
-        "src/resolve.rs, src/ir/func_builder/mod.rs, src/repl.rs: WordBody::Clauses match arms",
-        "src/check/{combinators,drop_graph,globals,poly,audits,word_entry}.rs: WordBody::Clauses arms and guards",
-        "src/check/word_entry.rs: check_clause_word + call site; src/check/declarations.rs: its 5 unit tests",
-        "src/check/audits.rs: clause_bodied_quotation_word_error + its guard",
-        "src/ir/func_builder/control_flow.rs: ArmBinding::Decompose (ArmBinding collapse)",
-        "tests/phase5_generic_enum_elimination.rs (whole file)",
-        "src/check/globals.rs: direct_set_reaches_into_a_clause_body unit test"
-      ],
-      "exit": "grep -r 'WordBody::Clauses' src/ returns nothing; a clause-style body is a plain parse error; cargo fmt --check && cargo clippy -- -D warnings && cargo test green.",
-      "atomic": true
+      "phase": 2,
+      "focus": "Delete the clause path in one atomic commit (R1-R4, R8): remove parse_clauses/at_clause_start/parse_clause_body_terms and their call site and tests in src/parser.rs, delete the WordBody::Clauses variant and every production match arm it forces (resolve.rs, ir/func_builder/mod.rs, repl.rs, and the check/{combinators,drop_graph,globals,poly,audits,word_entry} sites), retire check_clause_word plus its five declarations.rs tests and clause_bodied_quotation_word_error plus its audits.rs guard, collapse ArmBinding, and delete tests/phase5_generic_enum_elimination.rs and the direct_set_reaches_into_a_clause_body unit test. Exit: grep -r 'WordBody::Clauses' src/ returns nothing and the tree is green.",
+      "difficulty": "hard"
     }
   ]
 }
