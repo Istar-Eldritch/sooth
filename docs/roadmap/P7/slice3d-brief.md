@@ -1,4 +1,4 @@
-# Phase 7 Slice 3: user-declarable trait bounds (brief)
+# Phase 7 Slice 3d: user-declarable trait bounds (brief)
 
 Open `Bound` (Phase 4 Slice 1) from a closed two-variant enum (`Copy`, `Ord`) satisfied by
 a hardcoded predicate to a user-declarable one: `trait: Show 'T show ( 'T -- ) ;`, then
@@ -212,7 +212,7 @@ programs are in `slice3-dogfood.md`; the load-bearing findings:
   type variable in a poly signature (`( ['T: Copy 4] 'T -- ['T 4] )`) already
   builds green. This is a Phase-5-shaped gap, orthogonal to trait bounds, and it
   means `Map['K 'V]`, `Entry['K 'V]`, and the `Vec['T]` form of `sort` are all
-  unparseable regardless of what P7.S3b ships — the gap is spun out as its own
+  unparseable regardless of what P7.S3d ships — the gap is spun out as its own
 prerequisite, **P7.S3a** (`docs/roadmap/P7-stdlib-nostd.md`), not fixed here.
 **The bounds feature currently has
   no consumer that compiles.**
@@ -244,14 +244,14 @@ prerequisite, **P7.S3a** (`docs/roadmap/P7-stdlib-nostd.md`), not fixed here.
 
 **Consequence:** this is why the roadmap now splits the slice — **P7.S3a** (generic
 instantiation over a poly word's own type variable) is a hard dependency of this
-slice's own `Map` consumer, tracked and specced separately. This slice (**P7.S3b**)
+slice's own `Map` consumer, tracked and specced separately. This slice (**P7.S3d**)
 can proceed independently against the array form of `sort`, which types structurally
 today with no dependency on S3a, while `Map` waits for S3a to land.
 
 ## Out of scope
 
 - Trait objects / dynamic dispatch (`dyn Show`, `^Any`, erasure). Fully compile-time
-  only; see the P7.S3b roadmap entry's own framing.
+  only; see the P7.S3d roadmap entry's own framing.
 - Associated types, default method bodies, blanket impls, supertraits, generic
   constants. None of these have a named consumer yet (`Map`/`Vec`'s `Eq`/`Ord` need
   is the only forcing pressure); do not build them speculatively.
@@ -267,7 +267,7 @@ confirmations.**
 - The paper dogfood found a **blocker outside this slice's own control**: generic
   types applied to a poly word's type variable don't parse today
   (`docs/roadmap/P7/slice3-dogfood.md`, finding #5), so `Map['K 'V]` — the slice's
-  own stated forcing consumer — is not writable regardless of what P7.S3b ships.
+  own stated forcing consumer — is not writable regardless of what P7.S3d ships.
   **Split out as P7.S3a**, its own roadmap entry — this slice now specs against the
   array form of `sort` only, with `Map` deferred until S3a lands.
 - The OQ1 probe found that **Recon 5's central cost claim is false**: lowering does
@@ -276,7 +276,40 @@ confirmations.**
   and exit criteria both need to price this in before implementation starts, not
   discover it mid-slice.
 
-**Now ready to spec.** All three pre-spec prerequisites are resolved:
+**No longer ready to spec — a spec was written (`slice3d-spec.md`) and then falsified by
+probing.** Three findings, in descending order of consequence:
+
+1. **No consumer compiles.** The array form of `sort` needs branching, so it must be
+   `inline`; an inline poly word mints no monomorph symbol, so the per-instantiation
+   dispatch record has nothing to key on. Blocked on **P7.S3b** (quotations, hence `if`,
+   in a polymorphic body). `Map['K 'V]` is blocked separately: a generic struct whose field
+   is an array of its own type variable (`keys ['K 8]`, `slots [Ent['K 'V] 8]`) fails with
+   `` error: unknown type 'K `` — a third gap, distinct from S3a's. The `Map` scope widening
+   recorded below is therefore withdrawn.
+2. **The dispatch key is sound, but only for a leaf word.** Check-time and lowering-time
+   monomorph symbols are byte-identical (probe: `sooth_mono_idc__m0__t0_i64`/`_bool` at both
+   sites, and across modules), so the mechanism works. But a bounded poly word calling
+   *another* poly word fails at check today (`` error: unknown word `inner__m0` ``), and
+   `module.instantiations` is keyed by bare call-site span with nested poly calls explicitly
+   out of scope, so a nested obligation has no coherent key. The slice must either restrict
+   bounded bodies to leaf calls with a located rejection and a guarding test, or specify
+   obligation propagation (which means re-keying `instantiations`, a much larger change).
+3. **The illustrative bound syntax in the spec is wrong.** A bound rides on the variable's
+   *first occurrence*, which is itself an input slot, so `( 'T: Show &'T &'T -- )` declares a
+   spurious bare `'T` input. The intended two-reference form is `( &'T: Show &'T -- )`.
+   Illustrative only, but it would propagate into golden signatures.
+
+**Also to settle before a re-spec: a third trait kind.** The spec has predicate-kind
+(`Copy`/`Ord`) and member-kind (user) traits. A *compiler-known, library-declared* trait is
+neither, and is probably wanted: it would let intrinsic compiler logic be written against a
+library implementation. `bool` is already this shape — a library-declared enum known by a
+reserved registry position (`src/ast.rs:779`), with its `.` overload injected (`:816`). A
+`Fallible`-style bound satisfied by `Result`/`Option` would give fallible slice indexing
+(S3c), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
+first:** a trait is only justified with two or more carrier types, or if users can add their
+own; with a single carrier this should be a lang *type* like `bool`, not a lang trait.
+
+The decisions below are still good, and survive the falsification:
 
 - **OQ2 — nominal satisfaction** via `impl: Trait for Type ; ... ;`, with an orphan
   rule confining an `impl:` block to the trait's or the type's own defining module.
@@ -284,14 +317,11 @@ confirmations.**
   `parse_capabilities`, duplicate-declaration error on collision.
 - **OQ4 — located rejection** of a member name colliding across a variable's bound set.
 
-**Consumer scope: both `sort` and `Map`.** P7.S3a landed, so `Map['K 'V]` is
-unblocked and comes back in as a first-class consumer rather than a deferred
-follow-up — it is the forcing case for multi-method bounds (`'K: Eq Hash`), so
-specing against `sort`'s array form alone would validate the design only against its
-easy consumer.
+**Consumer scope: withdrawn, pending S3b and S3c.** Neither `sort` (needs branching, so
+inline, so no monomorph symbol) nor `Map` (generic-struct array-of-own-type-variable field
+gap) is writable today. The multi-method-bound collision rule keeps a consumer regardless,
+since its rejection golden needs only two hand-declared traits and no collection.
 
-Still to be settled **inside** the spec, not before it: which of OQ1's two mechanisms
-(per-instantiation overload record, or lowering re-resolving against `Subst`) the
-slice commits to, and — if the second — renegotiating R7's "lowering never re-runs
-resolution" invariant with its owner. The spec must price the IR/lowering budget in
-rather than inheriting the brief's original zero-cost claim.
+OQ1 is settled: a per-instantiation dispatch record, populated at check time and read at
+lowering, so "lowering never re-runs resolution" stands. Probing confirmed the key matches
+across that boundary. What is *not* settled is the nested case (see finding 2 above).

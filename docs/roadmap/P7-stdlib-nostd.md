@@ -73,7 +73,7 @@ error naming the static (a private word's static access is inferred, not declara
 inferred everywhere, declared at the export boundary).
 
 **P7.S3a — Generic instantiation over a poly word's own type variable.** `[ done ]` Discovered as a
-blocker, not planned: the paper dogfood for S3b (below) found that a polymorphic word
+blocker, not planned: the paper dogfood for S3d (below) found that a polymorphic word
 cannot name a generic type applied to its own type variable in its signature —
 `: unbox ( Box['T] -- 'T )` and `: or-default ( 'T Option['T] -- 'T )` both fail
 `` error: unknown type 'T `` today, confirmed by compiling
@@ -86,17 +86,18 @@ representation for "a generic applied to an argument that is still abstract." Ev
 existing use of `Result[i64 str]`-style generics is a concrete argument to a
 *monomorphic* word; this is the first time anything has needed a generic applied to a
 *poly* word's own `'T`.
-This is Phase-5-shaped, not P7.S3b-shaped: it is a type-system extension (a new
+This is Phase-5-shaped, not P7.S3d-shaped: it is a type-system extension (a new
 `PolyType` variant for a symbolic/deferred generic application, threaded through
 unification, `apply_subst`, and resolved to a real monomorphized type only once
 `check_poly_call` has a concrete `Subst` — the same shape Phase 4 Slice 6a/7a's
 quotation-type variant took), not a checker whitelist extension. Needs its own recon
 and brief before implementation; only the parser-side root cause has been traced so
 far, not unification, monomorphization, or lowering.
-Blocks S3b's own forcing consumer (`Map['K 'V]`) and, transitively, S4's generic
-collections; does not block S3b's *bounds* mechanism itself, which is orthogonal (a
-plain `sort ( ['T: Copy Order 'N] -- ['T 'N] )` over an array types today with no
-dependency on this).
+Was a prerequisite of S3d's `Map['K 'V]` consumer and, transitively, of S4's generic
+collections. It did not turn out to be sufficient for either: `Map` is still unwritable
+because a generic struct's field cannot be an array of the struct's own type variable, and
+the `sort` consumer needs S3b (a polymorphic body that branches). Both were established by
+probing after this slice landed.
 **Exit:** a polymorphic word can declare and use a generic type applied to its own
 type variable (`Box['T]`, `Option['T]`, `Map['K 'V]`) in its signature and body,
 resolved correctly per concrete instantiation. Landed as a new `PolyType::Generic`
@@ -106,7 +107,47 @@ generic-constructor calls (`Ok`/`Err`-style) admitted inside poly bodies, double
 by exit-time structural unification and instantiation-time reverse-mint unification
 (`docs/roadmap/P7/slice3a-spec.md`, `tests/phase7_slice3a.rs`).
 
-**P7.S3b — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
+**P7.S3b — Quotations in a polymorphic body.** A quotation in a non-inline polymorphic
+body is rejected outright: `` error: a quotation in the polymorphic body of `w` is not yet
+supported `` (`src/check/poly.rs:505-513`). It fires for *any* quotation — a bare `~[ ]`,
+an `if`, a declared comparator parameter — and it is a deliberate structural rejection,
+not a stub: `poly_term`'s stack is `Vec<PolyType>` rather than `Vec<Slot>`, so there is
+nowhere to hang the quotation marker, and Slice 10a's D1 forbids a `PolyType` variant for
+it. The inline path is unaffected, because splicing into a concrete caller exposes that
+caller's full `Slot` stack.
+**This is what makes every interesting polymorphic word `inline` today**, and `inline`
+words mint no monomorph symbol at all — their bodies are spliced, so nothing per-type is
+emitted. Probe-verified: a non-inline poly word over an array *does* work and mints
+`sooth_mono_swap01__m0__t0_i64`/`_bool`, but only for a straight-line body; adding an `if`
+hits this wall. Since `if` is itself a library word over quotations (Slice 10c), any
+polymorphic word that *branches* is forced inline, which is why it is a prerequisite of
+S3d rather than a nicety: a bounded `sort` needs compare-then-conditionally-swap.
+**Exit:** a non-inline polymorphic word's body may contain a quotation (and therefore
+`if`), checked abstractly and lowered per instantiation, with the quotation's identity
+surviving unification, `Subst`, and mangling.
+
+**P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
+types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
+already the pattern's one instance, a pointer plus a runtime length. A general
+`Slice['T]` view over an array carries its length at runtime, which is what makes it the
+right answer to a problem the alternatives handle badly: a word over a slice needs no
+length variable in its signature, so it never asks the checker to prove an index against
+an abstract `'N`. Indexing a slice is *fallible* rather than provable — it reports through
+an `Option`/`Result` and the must-consume rule forces the caller to handle the miss — so
+the compile-time guarantee is kept without a runtime panic and without index refinement.
+**Length arithmetic is explicitly not the answer here and is not in scope**: `'N` is a
+length variable usable only as an array count, with no arithmetic (`src/parser.rs:2253`
+admits a decimal literal or a bare `'N`), and relating lengths in a signature
+(`['T 'N+'M]`) would mean unifying arithmetic terms and owning a decision procedure, the
+Dependent-ML tax. Where a later slice genuinely needs a relation, the cheap form is a
+constraint checked at monomorphization against concrete literals, not arithmetic in the
+type language. Ordered after S3b (a slice-consuming word still needs to branch) and before
+S3d, whose consumers want slice-shaped signatures rather than fixed-length ones.
+**Exit:** a buffer can be sliced into a view; a word takes `Slice['T]` without naming a
+length variable; indexing reports failure through an `Option`/`Result` the caller must
+handle, with no runtime panic path.
+
+**P7.S3d — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
 (`is_copy`/`is_numeric`); the comment on it says "Kitten-style, with no trait objects,"
 and this slice is the intended next step it left open, not a new idea. Forced here,
@@ -138,19 +179,40 @@ invariant and needs that invariant's owner to weigh in). The other real work is 
 body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
 bounded type variable — required members take `&'T`, per the dogfood) may be used for
 has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a**, which has landed, so both consumers are in scope: the array form
-of `sort` and `Map['K 'V]`, the latter being the forcing case for multi-method bounds
-(`'K: Eq Hash`).
-**Design decisions settled in the brief** (`docs/roadmap/P7/slice3b-brief.md`):
+**Depends on S3a (landed), S3b, and S3c — and the consumer scope is not settled, because
+probing falsified both candidates.** `Map['K 'V]` is *not* writable: a generic struct
+whose field is an array of its own type variable (`keys ['K 8]`, or
+`slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
+third gap distinct from S3a's (which fixed generic-applied-to-own-var in poly *word*
+signatures, not in generic *struct fields*). The array form of `sort` is not writable
+either: it needs branching, so it must be `inline`, and an inline word mints no monomorph
+symbol for a per-instantiation dispatch record to key on — hence the S3b dependency. A
+non-inline, straight-line, concrete-length poly word *is* a viable consumer shape today,
+but nothing in the stdlib wants one. **This slice must not be specced until it has a
+consumer that compiles**, which means after S3b (branching) and S3c (slice-shaped
+signatures), with the generic-struct-array-field gap resolved or routed around.
+**Design decisions settled in the brief** (`docs/roadmap/P7/slice3d-brief.md`):
 satisfaction is **nominal**, via an `impl: Trait for Type ;` block confined by an
 orphan rule to the trait's or the type's own defining module; `Copy`/`Ord` become
 pre-seeded **predicate-kind** entries in the trait table (satisfaction still runs
 `is_copy`/`is_ord`) so a colliding user `trait:` fails as an ordinary duplicate
 declaration; a member name colliding across one variable's bound set is a located
-rejection. **Left for the spec:** which of the two lowering mechanisms the slice
-commits to — a per-instantiation overload record, or lowering re-resolving against
-`Subst`, the latter requiring R7's "lowering never re-runs resolution" invariant to be
-renegotiated with its owner.
+rejection. The lowering mechanism is settled as a per-instantiation dispatch record
+(check mints, lowering only looks up, so "lowering never re-runs resolution" stands);
+probing confirmed the check-time and lowering-time monomorph symbols are byte-identical,
+so the key is sound — for a leaf word. **Still open:** a bounded poly word calling another
+poly word has no coherent key (`module.instantiations` is span-keyed and excludes nested
+poly calls), so the slice must either restrict bounded bodies to leaf calls with a located
+rejection or specify obligation propagation.
+**A third trait kind is likely needed, beyond predicate and member kinds:** a
+*compiler-known, library-declared* trait, so intrinsic compiler logic can be written
+against a library implementation. `bool` is already exactly this shape — a library-declared
+enum the compiler knows by a reserved registry position (`src/ast.rs:779`) with its `.`
+overload injected (`:816`). A `Fallible`-style bound satisfied by `Result`/`Option` would
+let fallible slice indexing (S3c), a failing allocator (S5), and S8's fallible push share
+one desugaring. **Test before designing it as a trait:** if there is only ever one carrier
+type and users cannot add their own, this wants to be a lang *type* like `bool`, not a
+lang trait — a trait earns its keep only with two or more carriers.
 **Exit:** a user can declare a bound naming required word signatures, a polymorphic word
 can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with
@@ -176,7 +238,7 @@ user-supplied allocator cannot be a backend special case. Ambient context (Odin/
 is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
 rather than the allocation site, which converts a compile error into a runtime one in the
 language whose point is the opposite. Needs S2 (statics, for the allocator's own state),
-S3a (generic instantiation, for naming `Map['K 'V]`/`Vec['T]` at all), and S3b (bounds,
+S3a (generic instantiation, for naming `Map['K 'V]`/`Vec['T]` at all), and S3d (bounds,
 for `Map`'s key type).
 **Exit:** the compiler-emitted `malloc`/`free` shim is gone, replaced by ordinary Sooth code
 bound as foreign words; `Vec`/`Map`/`String` take an explicit, defaulted allocator type
@@ -206,7 +268,7 @@ walks the checked AST, filters to the exported declarations Slice 5 already dist
 and emits a file listing every exported signature for the API diff to compare between
 versions. That is the remaining prerequisite in `docs/dependency-management.md`, and it is a
 packaging/publishing concern (letting other people depend on you with enforced semver)
-rather than a personal-reuse one, which is why it waited. Needs S2 (statics) and S3b
+rather than a personal-reuse one, which is why it waited. Needs S2 (statics) and S3d
 (bounds), since a
 global clause on an exported word is part of that word's exported signature.
 **Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump

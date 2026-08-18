@@ -1,6 +1,6 @@
 # Phase 7 Slice 3a: generic instantiation over a poly word's own type variable (brief)
 
-Split out from P7.S3b (`docs/roadmap/P7/slice3b-brief.md`) as its own prerequisite:
+Split out from P7.S3d (`docs/roadmap/P7/slice3d-brief.md`) as its own prerequisite:
 discovered as a compiled blocker during that slice's paper dogfood
 (`docs/roadmap/P7/slice3-dogfood.md`, finding #5), not planned work. A polymorphic
 word cannot today name a generic type applied to its own type variable —
@@ -92,9 +92,9 @@ silently shared.
   fired in any legal test program, because **generic construction inside a poly
   body is itself unsupported today** (`: wrap ( 'T -- Result['T i64] ) Ok ;`
   fails with `` unknown word `Ok` ``, the pre-existing
-  `generic-enum-elimination-blocked` gap, P7.S3b/construction territory). A poly
+  `generic-enum-elimination-blocked` gap, P7.S3d/construction territory). A poly
   word can never *produce* a generic monomorph that isn't already present as one
-  of its inputs, so S3a's minting wall and S3b's construction gap must be
+  of its inputs, so S3a's minting wall and S3d's construction gap must be
   scoped/sequenced together, or S3a needs "instantiation must already exist
   elsewhere in the program" stated as an explicit hard precondition with its own
   rejection test.
@@ -142,17 +142,17 @@ were confirmed clean/green afterward.
    can both consume and produce instances freely — nothing left as an
    "instantiation must already exist" restriction or ruled-out by construction.
 
-6. ~~Relationship to P7.S3b in this slice~~. The registry-lifetime and
+6. ~~Relationship to P7.S3d in this slice~~. The registry-lifetime and
    construction fixes across poly bodies and generics required for S3a's on-
    demand minting look like they might reach further than S3a alone (higher-level
    generics like `Error`, or non-generic enums that instantiate downstream). Plan
    to defer that exploration to the spec-writer if it emerges as a separate
-   consumer pressure, not gate the current slice on it. For now, S3b's array
+   consumer pressure, not gate the current slice on it. For now, S3d's array
    `sort` consumer remains entirely independent of this type-system plumbing.
 
 ## Out of scope
 
-- Trait bounds (P7.S3b's concern entirely).
+- Trait bounds (P7.S3d's concern entirely).
 - Nesting depth beyond 1 (OQ4), unless a real consumer forces it.
 - Any change to how a *concrete* generic argument resolves — that path is
   unaffected and stays exactly as it is.
