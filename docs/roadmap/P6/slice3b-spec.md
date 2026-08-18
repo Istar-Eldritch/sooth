@@ -271,16 +271,21 @@ All anchors verified at `78d8cee`.
   test must **fail** with `test result: FAILED`. State this in the phase's exit criteria and
   run it (edit out the synthesis line, `cargo test check_eliminator_call_mode_mismatch_is_error`,
   observe FAILED, restore).
-- **T2 (R1/OQ1 collision).** Extend
-  `parse_leading_variant_slot_struct_of_same_name_takes_precedence` (`src/parser.rs:4260`):
-  `( Circle )` → `annot.variant_tag == None`, `annot.inputs == [Concrete(Type::Struct(Circle))]`;
-  and a new escalated case `( Circle -- i64 )` → `annot.variant_tag == None`,
+- **T2 (R1/OQ1 collision).** Beside
+  `parse_leading_variant_slot_struct_of_same_name_takes_precedence` (`src/parser.rs:4260`),
+  a new escalated case `( Circle -- i64 )` → `annot.variant_tag == None`,
   `annot.inputs == [Concrete(Type::Struct(Circle))]`, `annot.outputs == [Concrete(Type::I64)]`.
+  The lone spelling `( Circle )` cannot assert an inputs slot at all: arrow elision is
+  tag-only, so a leading name the struct claimed leaves the ordinary missing-arrow
+  rejection. Pin that instead (`err.contains("( inputs -- outputs )")`) — it is the same
+  precedence observation from the other side.
 - **T3 (R1/F1 module scoping).** `parse_leading_variant_slot_other_module_variant_is_not_visible`
   (`src/parser.rs:4325`) keeps passing: a `Circle` variant declared only in module 1 does
   **not** become module 0's tag — assert the module-0 parse errors as an unknown *type*
   (`err.contains("unknown type \`Circle\`")`), i.e. recognition declined. This is the guard
-  that a bare-`is_variant_name` recognizer would break.
+  that a bare-`is_variant_name` recognizer would break. **Also its generic half:** the same
+  scoping over `self.generics.enums` (a `Circle` variant of a generic enum declared only in
+  module 1), a distinct branch of the recognizer that needs its own test.
 - **T4 (R2 parser).** Migrate `parse_quotation_annotation_variant_tag_owning_ok`
   (`src/parser.rs:4188`) and`..._mut_ref_ok` (`src/parser.rs:4217`): owning →
   `variant_tag == Some(VariantTag { name: "Circle", mode: Owning })` and
@@ -328,14 +333,16 @@ All anchors verified at `78d8cee`.
 - **T10b (R7's mode mapping, at IR level where it is observable).** The one shape in which
   `ref_mutable` changes codegen is a **scalar** (all-unit-variant) enum eliminated by
   reference: `scrutinee_is_value` flips, and `dispatch_on_tag` then treats the pointer itself
-  as the discriminant instead of loading the tag through it. Add the generic analogue of the
-  existing concrete unit test `lower_eliminator_call_over_a_reference_to_a_scalar_enum_loads_the_tag`
-  (`src/ir/func_builder/control_flow.rs:588`): lower a generic all-unit-variant enum
-  eliminated through `&` arms and assert exactly **one** `Instr::FieldLoad` (the tag, loaded
-  through the pointer). **Mutation check (T10ba):** force `lower_eliminator`'s `ref_mutable`
-  to `None` and this test must fail with `test result: FAILED` (the count drops to 0). The
-  existing concrete test at `control_flow.rs:588` must keep passing unchanged; it is the
-  reason R7's mapping is checkable at all.
+  as the discriminant instead of loading the tag through it. The guard is the existing
+  concrete unit test `lower_eliminator_call_over_a_reference_to_a_scalar_enum_loads_the_tag`
+  (`src/ir/func_builder/control_flow.rs:588`), which lowers a scalar enum eliminated through
+  `&` arms and asserts exactly **one** `Instr::FieldLoad` (the tag, loaded through the
+  pointer); it must keep passing unchanged. **No generic analogue is writable:** the
+  phantom-parameter rule rejects a generic enum whose every variant is unit
+  (`Dir 'T | North | South`), so `is_scalar` is unreachable for one — the concrete test is
+  the only test that catches R7's mapping. **Mutation check (T10ba):** force
+  `lower_eliminator`'s `ref_mutable` to `None` and exactly that test must fail with
+  `test result: FAILED` (the count drops to 0).
   This guard lives at IR level deliberately: a *runnable* scalar-enum-by-reference elimination
   does not survive the backend today (see "Out of scope"), so no golden can carry it.
 - **T11 (non-exhaustive generic eliminator names the surface variant).** A missing arm over a
@@ -378,7 +385,7 @@ breaks `arm_tag`'s `inputs.first()` at run time. Both land here or the phase is 
 
 **Exit criteria (tests):** T1 (unchanged wording) + T1a (mutation FAILED); T2, T3, T4
 (parser); T5 (generic single-instantiation runs); T8 (stray generic tag); T10 (generic ×
-by-reference runs); T10b (scalar generic by reference loads the tag) + T10ba (mutation
+by-reference runs); T10b (scalar enum by reference loads the tag) + T10ba (mutation
 FAILED); T11 (non-exhaustive generic names the surface
 variant); T9 (clause path + concrete suite unchanged, `examples/eliminator_ref.sth`
 included). Full `cargo test` green.

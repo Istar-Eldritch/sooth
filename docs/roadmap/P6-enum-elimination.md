@@ -108,16 +108,17 @@ registry, which makes the eliminator unable to eliminate a **generic** enum at a
 tag carries no type arguments and a generic header contributes no concrete variant to
 scan. Tag *typing* moves to check time, against the `EnumId` the scrutinee operand already
 carries (the rule Slice 2 settled for accessors, which the parser is the last site to
-violate); tag *recognition* stays at parse time and becomes generic-aware by reusing
-`is_variant_name`, the predicate the clause path already uses for the same job. The
+violate); tag *recognition* stays at parse time as a name-only, module-scoped predicate
+over the concrete and generic enum registries alike (a variant of an unimported module's
+enum is not a routing tag, and an in-scope type of the same name takes precedence). The
 surface syntax does not change: the generic case must read exactly like the concrete one.
 Required before Slice 4, because clause bodies are today the only working generic-enum
 elimination mechanism (`tests/phase5_generic_enum_elimination.rs`), so deleting them first
-would regress a shipped Phase 5 capability rather than migrate it. Also re-keys
-`eliminator_registry` by the instantiated spelling, since its `generic_surface_name`
-collision stops being dormant on the same commit. See
-`docs/roadmap/P6/slice3b-brief.md`.
-**Exit:** a generic enum is eliminable with bare tags, `Result[i64 i64]` and
+would regress a shipped Phase 5 capability rather than migrate it. `eliminator_registry`
+stays keyed by the base family and serves as a family gate; the operative `EnumId` comes
+from the scrutinee slot, which is what makes two instantiations independent. See
+`docs/roadmap/P6/slice3b-spec.md`.
+**Exit:** a generic enum is eliminable with bare tags, `Result[i64 bool]` and
 `Result[bool i64]` eliminate independently in one word, and every Slice 3 diagnostic
 still fires with unchanged wording (the mode-mismatch check included, since it is the one
 consumer of the annotation's parse-time input slot).

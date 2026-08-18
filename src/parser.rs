@@ -4388,6 +4388,49 @@ mod tests {
         assert!(err.contains("unknown type `Circle`"), "unexpected: {err}");
     }
 
+    /// The generic half of the rule above (R1/F1). `module_declares_variant`
+    /// searches the generic enum registry too, and that search is scoped by
+    /// the same `module` filter -- an unimported generic enum's variant name
+    /// is no more visible as a routing tag than a concrete one's.
+    #[test]
+    fn parse_leading_variant_slot_other_module_generic_variant_is_not_visible() {
+        let tokens = lex(": w ( -- ) [ ( Circle ) drop ] drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
+        generics.enums.push(crate::ast::GenericEnumDecl {
+            name: "Shape".to_string(),
+            ty_var_names: vec!["T".to_string()],
+            variants: vec![crate::ast::GenericVariantDecl {
+                name: "Circle".to_string(),
+                fields: vec![("r".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 1,
+        });
+        let no_imports = HashMap::new();
+        let result = parse_bodies(
+            &tokens,
+            &[],
+            &[],
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            &mut generics,
+        );
+        let err = match result {
+            Ok(_) => panic!("expected an unknown-type error"),
+            Err(e) => e,
+        };
+        assert!(err.contains("unknown type `Circle`"), "unexpected: {err}");
+    }
+
     /// R2: a row spelling is admitted and interned into the literal's own row
     /// table; the same name on both sides is one id (a passthrough row).
     #[test]
