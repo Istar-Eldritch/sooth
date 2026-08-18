@@ -132,36 +132,36 @@ fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
     );
 }
 
-/// T6/T7 (R5, decision 5): one word eliminates two *asymmetric* instantiations
-/// of the same generic enum -- `Result[i64 bool]` and `Result[bool i64]`,
-/// which can only be told apart because they are not the same instantiation
-/// (`Result[i64 i64]` could not distinguish `Ok 'T | Err 'E` from its swap).
-/// The eliminator registry keys both calls to the same base-family entry
-/// (`"Result__m0?"`, last write wins), so this only routes correctly if each
-/// call's operative `EnumId` is read from its own scrutinee rather than from
-/// whichever instantiation the registry happened to retain (R5). T7 rides
-/// along: `Result[i64 bool]`'s stored variant name is `Ok[i64 bool]`, so a
-/// bare `( Ok )` arm only matches it if both sides normalize to the surface
-/// name `Ok`.
+/// T6/T7 (R5, decision 5): **one word** eliminates two *asymmetric*
+/// instantiations of the same generic enum -- `Result[i64 bool]` and
+/// `Result[bool i64]`, which can only be told apart because they are not the
+/// same instantiation (`Result[i64 i64]` could not distinguish `Ok 'T | Err
+/// 'E` from its swap). The word calls `Result?` twice, once per
+/// instantiation, so the eliminator registry keys both calls to the same
+/// base-family entry (`"Result__m0?"`, last write wins): this only routes
+/// each call correctly if its operative `EnumId` is read from its own
+/// scrutinee rather than from whichever instantiation the registry happened
+/// to retain (R5). T7 rides along: `Result[i64 bool]`'s stored variant name
+/// is `Ok[i64 bool]`, so a bare `( Ok )` arm only matches it if both sides
+/// normalize to the surface name `Ok`.
 #[test]
 fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
     let (stdout, code) = build_and_run(
         "s3b-two-asymmetric-instantiations",
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
-         : elim-int-bool ( Result[i64 bool] -- i64 )\n  \
-           ~[ ( Ok ) Ok> ]\n  \
-           ~[ ( Err ) Err> ~[ 1 ] ~[ 0 ] if ]\n  \
-           Result? ;\n\
-         : elim-bool-int ( Result[bool i64] -- i64 )\n  \
+         : elim-both ( Result[i64 bool] Result[bool i64] -- i64 i64 )\n  \
            ~[ ( Ok ) Ok> ~[ 10 ] ~[ 20 ] if ]\n  \
            ~[ ( Err ) Err> ]\n  \
-           Result? ;\n\
+           Result?\n  \
+           swap\n  \
+           ~[ ( Ok ) Ok> ]\n  \
+           ~[ ( Err ) Err> ~[ 1 ] ~[ 0 ] if ]\n  \
+           Result?\n  \
+           swap ;\n\
          : main ( -- )\n  \
-           42 Ok elim-int-bool .\n  \
-           true Err elim-int-bool .\n  \
-           true Ok elim-bool-int .\n  \
-           7 Err elim-bool-int . ;\n",
+           42 Ok 7 Err elim-both . .\n  \
+           true Err true Ok elim-both . . ;\n",
     );
-    assert_eq!(stdout, "42\n1\n10\n7\n");
+    assert_eq!(stdout, "7\n42\n10\n1\n");
     assert_eq!(code, 0);
 }

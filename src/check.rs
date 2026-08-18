@@ -2267,13 +2267,17 @@ fn check_eliminator_call(
     // consulted above to reach this call at all, never to decide which
     // instantiation it narrows to. A non-enum scrutinee, or one whose enum is
     // not a member of this call name's base family, is the same
-    // `type_mismatch_error` as before.
+    // `type_mismatch_error` as before. `gate_decl` names whichever
+    // instantiation the registry happened to retain (last write wins), so
+    // the "expected" side is rendered under the family's surface name
+    // (`Result`), not one arbitrary instantiation's (`Result[bool i64]`).
+    let expected_family = Type::Enum(gate_id, generic_surface_name(gate_decl.name_static));
     let Type::Enum(id, _) = referent else {
         return Err(type_mismatch_error(
             ctx,
             span,
             name,
-            Type::Enum(gate_id, gate_decl.name_static),
+            expected_family,
             scrutinee.ty,
         ));
     };
@@ -2283,7 +2287,7 @@ fn check_eliminator_call(
             ctx,
             span,
             name,
-            Type::Enum(gate_id, gate_decl.name_static),
+            expected_family,
             scrutinee.ty,
         ));
     }
@@ -4626,6 +4630,26 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("`Shape?` expected `Shape`, found `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Phase 2 review, finding 2: R5 split the old single referent check into
+    /// two -- non-enum (above) and wrong-family, since a generic instantiation
+    /// no longer has the same `EnumId` as `gate_id` even when it is a member
+    /// of the right family. Deleting the family comparison leaves this green
+    /// at check time and dies in the backend instead (`qbe: invalid type for
+    /// second operand ... in ceql`), so it is load-bearing but was untested.
+    #[test]
+    fn check_eliminator_call_wrong_enum_family_scrutinee_is_a_type_mismatch() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}{ABC_DECL}\
+             : f ( Abc -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 A f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`Shape?` expected `Shape`, found `Abc`"),
             "unexpected message: {err}"
         );
     }
