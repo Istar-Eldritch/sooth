@@ -408,6 +408,31 @@ fn poly_eliminator_untagged_arm_is_error() {
     );
 }
 
+/// L3: a quotation that has been through a `| q |` bind keeps its marker and
+/// loses its identity (`PolyScope.locals` carries no `QuotRef`), so naming it
+/// back puts an untagged arm in the scrutinee position. It must be reported
+/// as that, not sent to the abstract-scrutinee diagnostic, which would ask
+/// for an enum-kind bound on a type variable this program never wrote.
+#[test]
+fn poly_eliminator_bound_quotation_as_scrutinee_is_an_untagged_arm() {
+    let src = format!(
+        "{SHAPE}\
+         : bad ( 'T: Copy -- 'T )\n\
+           ~[ dup ] | q |\n\
+           q\n\
+           ~[ ( Rect ) Rect> drop drop ]\n\
+           ~[ ( Circle ) Circle> drop ]\n\
+           Shape? ;\n\
+         : main ( -- ) 1 bad . ;\n"
+    );
+    let err = check_err(&src);
+    assert!(
+        err.contains("an arm of `Shape?` requires a variant tag"),
+        "{err}"
+    );
+    assert!(!err.contains("enum-kind bound"), "{err}");
+}
+
 /// L2/OQ5, the **word-exit** escape route: a quotation left unconsumed has to
 /// *be* a value to leave the word, and it has none in a generic body.
 #[test]
@@ -468,6 +493,20 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
         arith.contains("`+` is not permitted on a quotation literal in `bad`"),
         "{arith}"
     );
+    // The marker one slot down is an operand of a *binary* operator just as
+    // much as the top one, and the guard must read the whole operand window
+    // to say so: reading the top alone leaves this to `poly_delegate_op`,
+    // whose concrete suffix stops at the marker and reports `+` as
+    // underflowing a stack that is not actually short.
+    let deep = check_err(
+        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] swap + drop ;\n\
+         : main ( -- ) 1 bad . ;\n",
+    );
+    assert!(
+        deep.contains("`+` is not permitted on a quotation literal in `bad`"),
+        "{deep}"
+    );
+    assert!(!deep.contains("needs 2 values"), "{deep}");
 }
 
 /// OQ6: the quotation-*consuming* combinator family is deferred to

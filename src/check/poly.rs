@@ -896,7 +896,24 @@ pub(super) fn poly_call_term(
     // rather than left to `poly_delegate_op`, whose maximal-concrete-suffix
     // extraction stops at the marker and would report the operator as
     // underflowing a stack that is not actually short.
-    if matches!(stack.last().map(|slot| &slot.pt), Some(PolyType::QuotLit)) {
+    //
+    // The window is the *whole* operand run, not the top slot: a binary
+    // operator reads `stack[n - 2]` too, so a marker parked there is an
+    // operand of it just as much (`1 ~[ .. ] swap +`). This is the concrete
+    // path's own rule -- `check_operator` guards the top and, for a
+    // non-unary name, the slot beneath it. Arity comes from `BUILTIN_TABLE`,
+    // whose rows for one name all agree on it; a name with no row (an
+    // ordinary word, a `>T` conversion) reads only the top here, and a
+    // deeper marker under an ordinary word is reported by the env dispatch
+    // below against the declared input it fails to be.
+    let operand_window = BUILTIN_TABLE
+        .get(name)
+        .map_or(1, |rows| rows[0].inputs.len())
+        .min(stack.len());
+    if stack[stack.len() - operand_window..]
+        .iter()
+        .any(|slot| matches!(slot.pt, PolyType::QuotLit))
+    {
         return Err(poly_op_on_variable_error(
             ctx,
             span,
@@ -1048,9 +1065,15 @@ fn poly_eliminator_call(
             held,
         ));
     };
-    if scrutinee.quot.is_some() {
+    if scrutinee.quot.is_some() || matches!(scrutinee.pt, PolyType::QuotLit) {
         // The operand that stopped collection is a quotation, so it was meant
-        // as an arm but carries no variant tag to match one by.
+        // as an arm but carries no variant tag to match one by. The marker is
+        // checked beside the identity because a quotation that has been
+        // through a `| q |` bind keeps the one and loses the other (L3:
+        // `PolyScope.locals` carries no `QuotRef`), and it is still an
+        // untagged arm -- not the abstract-scrutinee case below, which would
+        // send it off to ask for an enum-kind bound on a type variable it
+        // does not have.
         return Err(eliminator_untagged_arm_error(ctx, span, name));
     }
     match &scrutinee.pt {
