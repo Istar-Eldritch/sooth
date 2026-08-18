@@ -815,26 +815,44 @@ pub fn bool_enum_decl() -> EnumDecl {
 
 /// Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected into
 /// every assembled module's `words` (and REPL session at startup) exactly as
-/// `bool_enum_decl` injects the enum itself. Clause-matches `False`/`True` and
-/// prints `false`/`true` including the trailing newline the retired
+/// `bool_enum_decl` injects the enum itself. Eliminates over `False`/`True`
+/// and prints `false`/`true` including the trailing newline the retired
 /// primitive `bool` printable row used to emit, by delegating to the still-
 /// primitive `str` row -- reached at call sites through 8a's
 /// `builtin_overloads` dispatch, not a checker builtin row.
 pub fn bool_print_word_def() -> WordDef {
-    fn clause(variant: &str, text: &str) -> Clause {
-        Clause {
-            variant: variant.to_string(),
-            locals: Vec::new(),
-            body: vec![
-                Term {
-                    kind: TermKind::StrLit(text.to_string()),
+    fn arm(variant: &str, text: &str) -> Term {
+        Term {
+            kind: TermKind::Quotation(
+                vec![
+                    Term {
+                        kind: TermKind::Call("drop".to_string()),
+                        span: Span::default(),
+                    },
+                    Term {
+                        kind: TermKind::StrLit(text.to_string()),
+                        span: Span::default(),
+                    },
+                    Term {
+                        kind: TermKind::Call(".".to_string()),
+                        span: Span::default(),
+                    },
+                ],
+                true,
+                Some(QuotAnnot {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                    row_in: None,
+                    row_out: None,
+                    ty_var_names: Vec::new(),
+                    row_var_names: Vec::new(),
                     span: Span::default(),
-                },
-                Term {
-                    kind: TermKind::Call(".".to_string()),
-                    span: Span::default(),
-                },
-            ],
+                    variant_tag: Some(VariantTag {
+                        name: variant.to_string(),
+                        mode: VariantTagMode::Owning,
+                    }),
+                }),
+            ),
             span: Span::default(),
         }
     }
@@ -847,7 +865,14 @@ pub fn bool_print_word_def() -> WordDef {
             }],
             outputs: Vec::new(),
         },
-        body: WordBody::Clauses(vec![clause("False", "false\n"), clause("True", "true\n")]),
+        body: vec![
+            arm("False", "false\n"),
+            arm("True", "true\n"),
+            Term {
+                kind: TermKind::Call("bool?".to_string()),
+                span: Span::default(),
+            },
+        ],
         poly: None,
         declares_inline: false,
         module: 0,
@@ -1053,7 +1078,10 @@ pub struct WordDef {
     /// bundle interning) skips such a word, so no variable is ever forced into
     /// a concrete `Type` slot (R4/S1).
     pub effect: StackEffect,
-    pub body: WordBody,
+    /// A word's body: a term sequence. Entry locals are not a field here: a
+    /// `| names |` binding is a `TermKind::Bind` term like any other, and the
+    /// entry position is just the first one (R1).
+    pub body: Vec<Term>,
     /// R4 (phase 4 slice 1): the polymorphic signature, present only when the
     /// declared effect mentions a type variable `'T`, a length variable `'N`,
     /// or the row variable `..s`. `None` for a monomorphic word, whose whole
@@ -1065,16 +1093,15 @@ pub struct WordDef {
     /// taking no quotation can still mint no `IrFunc` and no call
     /// (`is_combinator`, the single predicate `check` and `ir::lower` share, is
     /// the only load-bearing reader). The guarantee is unconditional: a shape
-    /// that cannot be spliced (a clause body, a variable-bearing signature) is
-    /// a located error at the definition, never a silent fall-back to a real
-    /// call.
+    /// that cannot be spliced (`main`, a builtin-operator name) is a located
+    /// error at the definition, never a silent fall-back to a real call.
     pub declares_inline: bool,
     /// Phase 4 slice 5a (R10): the owning module id, mirroring
     /// `StructDecl::module`.
     pub module: u32,
     /// The declaration site (the word's name token), used by every
     /// diagnostic that must point at this word regardless of its body shape.
-    /// Kept separate from `word_span`'s old first-term/first-clause fallback
+    /// Kept separate from `word_span`'s old first-term fallback
     /// (which is `Span::default()`, i.e. line 0 col 0, for an empty body --
     /// `: main ( -- ) ;` and every other trivial stub word hit this) so a
     /// located error always has somewhere real to point.
@@ -1372,24 +1399,13 @@ pub struct ExternDecl {
     pub module: u32,
 }
 
-/// A word's body: either a term sequence, or a clause list (a clause-style
-/// eliminator over the word's enum top input, D4). Entry locals are not a
-/// field here: a `| names |` binding is a `TermKind::Bind` term like any
-/// other, and the entry position is just the first one (R1). A clause-style
-/// word has no word-entry locals (D8).
-#[derive(Debug)]
-pub enum WordBody {
-    Terms { terms: Vec<Term> },
-    Clauses(Vec<Clause>),
-}
-
-/// One `|`-led clause of a clause-style word (D4): the matched variant name,
-/// its optional clause-body `| names |` locals (payload then the stack below,
-/// D7), and the body terms.
+/// One arm of a tag dispatch: the variant it handles, its body terms, and the
+/// span of the call it belongs to. Built by `lower_eliminator` from an
+/// eliminator call's variant-tagged quotation operands; it is a lowering
+/// vehicle, not surface syntax.
 #[derive(Debug)]
 pub struct Clause {
     pub variant: String,
-    pub locals: Vec<String>,
     pub body: Vec<Term>,
     pub span: Span,
 }
@@ -1423,13 +1439,14 @@ pub enum Type {
     Float(FloatType),
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
-    /// Phase 6 slice 2 (R1): one variant of an enum, standalone rather than
-    /// carried inline as clause-body context -- the type Slice 3's eliminator
-    /// binds an arm's payload to. Carries the owning `EnumId`, the variant's
-    /// index into `EnumDecl.variants`, and a leaked `Enum.Variant` display
-    /// name sourced once from `VariantDecl::display_static` (never a per-site
-    /// `format!`+`Box::leak`, see `variant_type`), so two `Type::Variant`s for
-    /// the same `(EnumId, vi)` are always byte-identical and compare equal.
+    /// Phase 6 slice 2 (R1): one variant of an enum, standalone -- the type
+    /// Slice 3's eliminator narrows a scrutinee to inside an arm. Carries the
+    /// owning `EnumId`, the variant's index into `EnumDecl.variants`, and a
+    /// leaked `Enum.Variant` display
+    /// name sourced once from `VariantDecl::display_static` (never a
+    /// per-site `format!`+`Box::leak`, see `variant_type`), so two
+    /// `Type::Variant`s for the same `(EnumId, vi)` are always byte-identical
+    /// and compare equal.
     Variant(EnumId, usize, &'static str),
     Array(ArrayId, &'static str),
     /// A single-value owning heap cell: a compiler-known type constructor,
@@ -1806,7 +1823,7 @@ pub struct QuotAnnot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantTag {
     /// The bare variant name, sigil stripped: the spelling both the checker's
-    /// arm-to-variant routing and the IR's clause dispatch match against, and
+    /// arm-to-variant routing and the IR's tag dispatch match against, and
     /// the one a `type:` declaration writes.
     pub name: String,
     pub mode: VariantTagMode,
@@ -2808,7 +2825,7 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: Vec::new(),
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module: 0,

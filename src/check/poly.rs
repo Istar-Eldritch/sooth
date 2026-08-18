@@ -274,20 +274,13 @@ pub(super) fn check_poly_combinator_standalone(
         let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
         outputs.push(TypedSlot { name: None, ty });
     }
-    let terms = match &word.body {
-        WordBody::Terms { terms } => terms.clone(),
-        WordBody::Clauses(_) => {
-            return Err(format!(
-                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
-                crate::resolve::demangle_word(&word.name)
-            ));
-        }
-    };
+    let terms = &word.body;
+    let terms = terms.clone();
     // A concrete stand-in for the combinator, checked by the ordinary path.
     let concrete = WordDef {
         name: word.name.clone(),
         effect: StackEffect { inputs, outputs },
-        body: WordBody::Terms { terms },
+        body: terms,
         poly: None,
         declares_inline: word.declares_inline,
         module: word.module,
@@ -416,15 +409,7 @@ pub fn check_poly_body(
         &CombinatorIndex::new(),
         generics,
     );
-    let terms = match &word.body {
-        WordBody::Terms { terms } => terms,
-        WordBody::Clauses(_) => {
-            return Err(format!(
-                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
-                crate::resolve::demangle_word(&word.name)
-            ));
-        }
-    };
+    let terms = &word.body;
     let stack: Vec<PolySlot> = sig.inputs.iter().cloned().map(PolySlot::new).collect();
     let mut scope = PolyScope::default();
     let residual = poly_walk(
@@ -1342,8 +1327,8 @@ fn poly_row_str(row: &[PolySlot], sig: &PolySig) -> String {
 /// what `called` constructs does not depend on whether this particular word
 /// happens to declare a matching output, only the argument *values* do (see
 /// `poly_construction_fallback`). A module's own headers are preferred over
-/// an imported one of the same bare name, mirroring the clause-checker's
-/// own name resolution; ties beyond that take the first declared.
+/// an imported one of the same bare name, mirroring type-name resolution
+/// itself; ties beyond that take the first declared.
 fn poly_construction_header(
     generics: &GenericTypes,
     called: &str,
@@ -3948,10 +3933,10 @@ mod tests {
     }
     #[test]
     fn check_poly_local_named_after_variant_is_error() {
-        // A local named after a registered variant would make the clause-vs-
-        // locals `|` disambiguation ambiguous: the poly binder rejects it as
-        // the monomorphic sibling `( i64 i64 -- i64 )` of the same body does,
-        // naming the collision.
+        // A local named after a registered variant shadows the value that
+        // name constructs: the poly binder rejects it as the monomorphic
+        // sibling `( i64 i64 -- i64 )` of the same body does, naming the
+        // collision.
         let err = check_src(
             "type: Maybe | None | Some v i64 ;\n: f ( 'T i64 -- 'T ) drop | Some | Some ;\n: main ( -- ) 1 2 f drop ;",
         )

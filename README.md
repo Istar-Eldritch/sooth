@@ -31,8 +31,8 @@ at branch joins; the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with e
 target-only conversions (`>i8`..`>u64`); floating point (`f32`/`f64`); bitwise operators;
 boolean logic with the full comparison set (`= < > <= >= <>`); **structs** (the `type:`
 form, inline-aggregate layout, generated constructor/accessor words); **enums/ADTs**
-(`|`-separated variants, tagged inline aggregates, exhaustiveness-checked clause-style
-elimination, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
+(`|`-separated variants, tagged inline aggregates, exhaustiveness-checked elimination
+through the generated eliminator word, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
 lowered to a jump; and a bytecode VM as the exit dogfood.
 
 Phase 3 made the linear spine real: move-by-default with `dup` gated on `Copy` and `drop`

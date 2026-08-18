@@ -1,8 +1,13 @@
 //! Phase 5 Slice 2, phase 3 goldens: `Result 'T 'E` and `Option 'T` as real,
 //! importable generic library enums (`lib/result.sth`, `lib/option.sth`),
-//! each exercising construction, monomorphization, and clause-style
-//! elimination through to concrete stdout, plus a cross-module import golden
-//! that is the direct witness of Phase 2's qualified generic resolution.
+//! each exercising construction, monomorphization, and elimination through to
+//! concrete stdout, plus a cross-module import golden that is the direct
+//! witness of Phase 2's qualified generic resolution.
+//!
+//! A cross-module eliminator needs the variant names in scope as arm tags, so
+//! each library file exports its variants and each importer names them in a
+//! selective import list (`import: r | Ok Err | "..." ;`); the dispatch call
+//! itself is the unqualified `Result?`, keyed by the generic's surface name.
 
 fn build_and_run(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
@@ -48,7 +53,7 @@ fn build_and_run_dir(name: &str, files: &[(&str, &str)], entry: &str) -> (String
 }
 
 /// The 2-variable case: a fallible word returns `Result[i64 i64]` (attributeless
-/// `Ok 'T` / `Err 'E`, matching `lib/result.sth` exactly) and a clause
+/// `Ok 'T` / `Err 'E`, matching `lib/result.sth` exactly) and the generated
 /// eliminator handles both arms.
 #[test]
 fn result_constructs_monomorphizes_and_eliminates_both_arms() {
@@ -58,8 +63,9 @@ fn result_constructs_monomorphizes_and_eliminates_both_arms() {
          : safe-add ( i64 i64 -- Result[i64 i64] )\n\
            dup 0 < ~[ drop drop -1 Err ] ~[ + Ok ] if ;\n\
          : to-int ( Result[i64 i64] -- i64 )\n\
-         | Ok  |v| v\n\
-         | Err |e| e ;\n\
+           ~[ ( Ok )  Ok> ]\n\
+           ~[ ( Err ) Err> ]\n\
+           Result? ;\n\
          : main ( -- )\n\
            5 7 safe-add to-int .\n\
            5 -3 safe-add to-int . ;\n",
@@ -78,10 +84,11 @@ fn option_constructs_monomorphizes_and_eliminates_both_arms() {
     let (stdout, code) = build_and_run(
         "slice2-option-i64",
         &format!(
-            "import: o \"{}/lib/option.sth\" ;\n\
+            "import: o | Some None | \"{}/lib/option.sth\" ;\n\
              : unwrap-or ( i64 o::Option[i64] -- i64 )\n\
-             | Some |v| drop v\n\
-             | None ;\n\
+               ~[ ( Some ) Some> swap drop ]\n\
+               ~[ ( None ) drop ]\n\
+               Option? ;\n\
              : main ( -- )\n\
                9 5 Some unwrap-or .\n\
                9 None unwrap-or . ;\n",
@@ -104,8 +111,9 @@ fn option_instantiates_over_a_pointer_type() {
         "type: Option 'T | None | Some 'T ;\n\
          type: Node val i64 ;\n\
          : unwrap-or ( i64 Option[^Node] -- i64 )\n\
-         | Some |v| drop v ^> &val @ swap drop\n\
-         | None ;\n\
+           ~[ ( Some ) Some> swap drop ^> &val @ swap drop ]\n\
+           ~[ ( None ) drop ]\n\
+           Option? ;\n\
          : main ( -- )\n\
            0 7 Node ^ Some unwrap-or .\n\
            0 None unwrap-or . ;\n",
@@ -120,7 +128,7 @@ fn option_instantiates_over_a_pointer_type() {
 /// correctly.
 fn result_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/result.sth\" ;\n",
+        "import: {qualifier} | Ok Err | \"{}/lib/result.sth\" ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -132,8 +140,9 @@ fn result_imports_and_applies_qualified_across_a_module() {
         &format!(
             "{}\
              : to-int ( r::Result[i64 i64] -- i64 )\n\
-             | Ok  |v| v\n\
-             | Err |e| e ;\n\
+               ~[ ( Ok )  Ok> ]\n\
+               ~[ ( Err ) Err> ]\n\
+               Result? ;\n\
              : main ( -- )\n\
                12 Ok to-int .\n\
                -3 Err to-int . ;\n",
@@ -145,8 +154,7 @@ fn result_imports_and_applies_qualified_across_a_module() {
 }
 
 /// The witness that `Result`'s two variables bind *positionally*: every other
-/// instantiation in this repo is symmetric (`Result[i64 i64]` above,
-/// `Result[bool bool]` in `tests/phase5_generic_enum_elimination.rs`), so
+/// instantiation in this repo is symmetric (`Result[i64 i64]` above), so
 /// rewriting `lib/result.sth` to `| Ok 'E | Err 'T` leaves them all green.
 /// Here `Ok` carries `i64` and `Err` carries `str`, so a swap is a type error.
 #[test]
@@ -156,8 +164,9 @@ fn result_binds_its_two_variables_positionally() {
         &format!(
             "{}\
              : report ( r::Result[i64 str] -- )\n\
-             | Ok  |v| v .\n\
-             | Err |e| e . ;\n\
+               ~[ ( Ok )  Ok> . ]\n\
+               ~[ ( Err ) Err> . ]\n\
+               Result? ;\n\
              : main ( -- )\n\
                12 Ok report\n\
                \"boom\" Err report ;\n",
@@ -182,8 +191,9 @@ fn result_cross_module_application_resolves_in_either_discovery_order() {
     let use_src = format!(
         "{}\
          : to-int ( r::Result[i64 i64] -- i64 )\n\
-         | Ok  |v| v\n\
-         | Err |e| e ;\n\
+           ~[ ( Ok )  Ok> ]\n\
+           ~[ ( Err ) Err> ]\n\
+           Result? ;\n\
          : show-ok ( i64 -- ) Ok to-int . ;\n\
          : show-err ( i64 -- ) Err to-int . ;\n\
          export: show-ok ;\n\

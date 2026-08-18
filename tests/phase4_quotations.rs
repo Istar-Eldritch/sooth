@@ -11,7 +11,7 @@
 //! enclosing declared output row (R11); the same literal in both arms stays a
 //! splice.
 
-use sooth::ast::WordBody;
+use sooth::ast::{Term, TermKind};
 use sooth::ir::{Instr, IrType};
 use sooth::{check, lexer, parser};
 
@@ -992,12 +992,22 @@ fn join_capture_union_kills_either_arm_referent_is_past_last_use() {
 
 // -- T-dogfood: examples/vm_table.sth matches examples/vm.sth byte-for-byte ---
 
+/// Every term of `terms`, at any quotation depth.
+fn walk_terms<'t>(terms: &'t [Term], out: &mut Vec<&'t Term>) {
+    for term in terms {
+        out.push(term);
+        if let TermKind::Quotation(inner, _, _) = &term.kind {
+            walk_terms(inner, out);
+        }
+    }
+}
+
 #[test]
-fn vm_table_dispatch_matches_clause_version() {
-    // `examples/vm_table.sth` replaces `examples/vm.sth`'s clause-dispatched
-    // `run` with a `decode` clause (the one unavoidable elimination, Q5) plus a
-    // table of nine uniform, match-free `[ Vm -- Vm ]` handlers, indirect-called
-    // by `dispatch`. Parity: same bytecode program, same result.
+fn vm_table_dispatch_matches_eliminator_version() {
+    // `examples/vm_table.sth` replaces `examples/vm.sth`'s eliminator-dispatched
+    // `run` with a `decode` (the one unavoidable elimination, Q5) plus a table
+    // of nine uniform, match-free `[ Vm -- Vm ]` handlers, indirect-called by
+    // `dispatch`. Parity: same bytecode program, same result.
     let table_binary = common::build_example("examples/vm_table.sth");
     let table_stdout = std::process::Command::new(&table_binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
@@ -1006,17 +1016,17 @@ fn vm_table_dispatch_matches_clause_version() {
         .stdout;
     std::fs::remove_file(&table_binary).ok();
 
-    let clause_binary = common::build_example("examples/vm.sth");
-    let clause_stdout = std::process::Command::new(&clause_binary)
+    let elim_binary = common::build_example("examples/vm.sth");
+    let elim_stdout = std::process::Command::new(&elim_binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
         .expect("vm binary should run")
         .stdout;
-    std::fs::remove_file(&clause_binary).ok();
+    std::fs::remove_file(&elim_binary).ok();
 
     assert_eq!(
-        table_stdout, clause_stdout,
-        "the table-dispatched VM must match the clause-dispatched one byte-for-byte"
+        table_stdout, elim_stdout,
+        "the table-dispatched VM must match the eliminator-dispatched one byte-for-byte"
     );
 
     let src = std::fs::read_to_string("examples/vm_table.sth").expect("read vm_table.sth");
@@ -1026,8 +1036,10 @@ fn vm_table_dispatch_matches_clause_version() {
     );
 
     // M5: the table only proves the feature if the handlers are genuinely
-    // match-free. Inlining a clause match back into a handler (defeating the
-    // decode/execute split) must be caught here, not just by lowering.
+    // match-free. Inlining an eliminator dispatch back into a handler
+    // (defeating the decode/execute split) must be caught here, not just by
+    // lowering. A dispatch is two things, and either one alone gives it away:
+    // a call to the generated `Op?` and a variant-tagged arm quotation.
     let tokens = lexer::lex(&src).expect("lexing vm_table.sth should succeed");
     let module = parser::parse(&tokens).expect("parsing vm_table.sth should succeed");
     let handler_names = [
@@ -1039,9 +1051,20 @@ fn vm_table_dispatch_matches_clause_version() {
             .iter()
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("vm_table.sth should define `{name}`"));
+        let terms = &word.body;
+        let mut all = Vec::new();
+        walk_terms(terms, &mut all);
         assert!(
-            matches!(word.body, WordBody::Terms { .. }),
-            "handler `{name}` must be match-free (a term body, not a clause body)"
+            !all.iter()
+                .any(|t| matches!(&t.kind, TermKind::Call(n) if n == "Op?")),
+            "handler `{name}` must be match-free: it calls the `Op?` eliminator"
+        );
+        assert!(
+            !all.iter().any(|t| matches!(
+                &t.kind,
+                TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some()
+            )),
+            "handler `{name}` must be match-free: it carries a variant-tagged arm"
         );
     }
 }

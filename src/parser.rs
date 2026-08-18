@@ -16,10 +16,10 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
+    intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
     GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
     PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordBody, WordDef,
+    TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -1469,14 +1469,7 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
-        // D8: a `|` immediately followed by a known variant name opens a
-        // clause-style body; otherwise a `|` is an ordinary binding term.
-        let body = if self.at_clause_start() {
-            WordBody::Clauses(self.parse_clauses()?)
-        } else {
-            let terms = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
-            WordBody::Terms { terms }
-        };
+        let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
         Ok(WordDef {
             name,
@@ -1745,78 +1738,6 @@ impl<'t> Parser<'t> {
             )),
             None => Err(self.eof_error("a string literal naming the C symbol")),
         }
-    }
-
-    /// Whether `name` is a registered variant name of any enum (D8's variant
-    /// pre-pass result), the load-bearing clause-vs-locals discriminator.
-    /// Consults the generic enum registry too: `parse_generic_typedefs` fills
-    /// it (variant names and all) before any word body parses, so a generic
-    /// enum's variants are recognized order-independently, exactly like a
-    /// concrete enum's -- a variant name is the same across every
-    /// instantiation, so no concrete instantiation need exist yet.
-    fn is_variant_name(&self, name: &str) -> bool {
-        self.enums
-            .iter()
-            .any(|e| e.variants.iter().any(|v| v.name == name))
-            || self
-                .generics
-                .enums
-                .iter()
-                .any(|e| e.variants.iter().any(|v| v.name == name))
-    }
-
-    /// Whether the token at `self.pos + offset` is a registered variant name.
-    fn token_at_is_variant(&self, offset: usize) -> bool {
-        matches!(self.tokens.get(self.pos + offset), Some((Token::Word(w), _)) if self.is_variant_name(w))
-    }
-
-    /// D8: the current position opens a clause-style body — a `|` immediately
-    /// followed by a known variant name.
-    fn at_clause_start(&self) -> bool {
-        matches!(self.peek(), Some((Token::Pipe, _))) && self.token_at_is_variant(1)
-    }
-
-    /// Parse a clause-style word body (D4, D7, D8): one `|`-led clause per
-    /// variant. Each clause is `|` + variant name + an optional clause-body
-    /// `| names |` locals block (present iff the `|` after the variant name is
-    /// *not* immediately followed by a known variant name) + body terms up to
-    /// the next clause-starting `|` or `;`.
-    fn parse_clauses(&mut self) -> Result<Vec<Clause>, String> {
-        let mut clauses = Vec::new();
-        loop {
-            match self.peek() {
-                Some((Token::Semicolon, _)) => break,
-                Some((Token::Pipe, span)) => {
-                    let span = *span;
-                    self.pos += 1; // the clause-leading `|`
-                    let variant = self.expect_word_any()?;
-                    // A `|` here opens clause-body locals unless it starts the
-                    // next clause (a `|` followed by a known variant name).
-                    let locals = if matches!(self.peek(), Some((Token::Pipe, _)))
-                        && !self.token_at_is_variant(1)
-                    {
-                        self.parse_locals_opt()?
-                    } else {
-                        Vec::new()
-                    };
-                    let body = self.parse_clause_body_terms()?;
-                    clauses.push(Clause {
-                        variant,
-                        locals,
-                        body,
-                        span,
-                    });
-                }
-                Some((tok, span)) => {
-                    return Err(format!(
-                        "parse error: expected a clause `|` or `;`, found {tok:?} at line {}, col {}",
-                        span.line, span.col
-                    ));
-                }
-                None => return Err(self.eof_error("`;` (unterminated clause-style word)")),
-            }
-        }
-        Ok(clauses)
     }
 
     fn parse_effect(&mut self) -> Result<StackEffect, String> {
@@ -3593,13 +3514,6 @@ impl<'t> Parser<'t> {
         Ok(PolyType::Concrete(ty))
     }
 
-    fn parse_locals_opt(&mut self) -> Result<Vec<String>, String> {
-        if !matches!(self.peek(), Some((Token::Pipe, _))) {
-            return Ok(Vec::new());
-        }
-        self.parse_binding_names()
-    }
-
     /// Parse a `| names |` binding at the current `|`. At least one name is
     /// required (R1): `| |` is a parse error, not a no-op, so a stray pipe pair
     /// cannot silently mean nothing.
@@ -3639,39 +3553,6 @@ impl<'t> Parser<'t> {
         Ok(names)
     }
 
-    /// Parse a clause's body terms, stopping at `;` or a `|` that opens the
-    /// next clause (D8's lookahead, applied at every `|` per R8, not only
-    /// the first). Any other `|` is an ordinary mid-body binding term,
-    /// parsed by `parse_term` like any other position.
-    fn parse_clause_body_terms(&mut self) -> Result<Vec<Term>, String> {
-        let mut terms = Vec::new();
-        loop {
-            match self.peek() {
-                None => return Err(self.eof_error("`;` or `|`")),
-                Some((Token::Semicolon, _)) => break,
-                Some((Token::Pipe, _)) if self.at_clause_start() => break,
-                Some((Token::Pipe, _)) => {
-                    // D8 found no registered variant after this `|`, so it is
-                    // read as a binding. When that read fails, a misspelt
-                    // variant name is the likelier cause than a malformed
-                    // binding, so name the disambiguation that was applied.
-                    let lead = match self.tokens.get(self.pos + 1) {
-                        Some((Token::Word(w), _)) => Some(w.clone()),
-                        _ => None,
-                    };
-                    terms.push(self.parse_term().map_err(|e| match lead {
-                        Some(name) => format!(
-                            "{e}\n  note: `| {name}` opens a binding here, not a clause, because `{name}` is not a variant name; check its spelling"
-                        ),
-                        None => e,
-                    })?);
-                }
-                _ => terms.push(self.parse_term()?),
-            }
-        }
-        Ok(terms)
-    }
-
     fn parse_terms(
         &mut self,
         expected: &str,
@@ -3693,9 +3574,7 @@ impl<'t> Parser<'t> {
             .peek()
             .cloned()
             .ok_or_else(|| self.eof_error("a term"))?;
-        // R1: a `|` at any term position opens a binding. A `|` that opens a
-        // clause instead is consumed by `parse_clauses`, which never reaches
-        // here.
+        // R1: a `|` at any term position opens a binding.
         if matches!(tok, Token::Pipe) {
             let names = self.parse_binding_names()?;
             return Ok(Term {
@@ -3909,12 +3788,10 @@ mod tests {
     /// any compiler-known bit.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
-    /// The terms of a `WordBody::Terms`; panics on a clause body.
+    /// The terms of a word body.
     fn terms_body(word: &WordDef) -> &[Term] {
-        match &word.body {
-            WordBody::Terms { terms } => terms,
-            WordBody::Clauses(_) => panic!("expected a term body, got clauses"),
-        }
+        let terms = &word.body;
+        terms
     }
 
     /// The names bound by a word's *entry* binding: the leading `Bind` term, if
@@ -5477,75 +5354,10 @@ mod tests {
         assert_eq!(generics.inst_enums[0].module, 7);
     }
 
-    /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.
-    fn clauses_body(word: &WordDef) -> &[crate::ast::Clause] {
-        match &word.body {
-            WordBody::Clauses(clauses) => clauses,
-            WordBody::Terms { .. } => panic!("expected clauses, got a term body"),
-        }
-    }
-
     #[test]
-    fn parse_clause_word_multi_field_with_body_locals() {
-        // D8: the first `|` is followed by a known variant, so the body is
-        // clauses, not entry-locals; the `Rect` clause's `| w h |` is
-        // clause-body locals (the `|` after `Rect` is not a variant).
-        let module = parse_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * ;",
-        )
-        .unwrap();
-        let area = module.words.iter().find(|w| w.name == "area").unwrap();
-        let clauses = clauses_body(area);
-        assert_eq!(clauses.len(), 2);
-        assert_eq!(clauses[0].variant, "Circle");
-        assert!(clauses[0].locals.is_empty());
-        assert_eq!(clauses[1].variant, "Rect");
-        assert_eq!(clauses[1].locals, ["w", "h"]);
-    }
-
-    #[test]
-    fn parse_clause_body_mid_body_pipe_produces_bind_term() {
-        // The D8 lookahead applies at every `|` in a clause body, not only
-        // the first, so a later `|` not followed by a known variant is an
-        // ordinary mid-body binding term rather than a clause boundary.
-        let module = parse_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n             : area ( Shape -- f64 ) | Circle dup | r | r * | Rect | w h | w h * ;",
-        )
-        .unwrap();
-        let area = module.words.iter().find(|w| w.name == "area").unwrap();
-        let clauses = clauses_body(area);
-        assert_eq!(clauses.len(), 2);
-        assert_eq!(clauses[0].variant, "Circle");
-        assert!(clauses[0].locals.is_empty());
-        assert_eq!(clauses[0].body.len(), 4, "expected dup, the bind, and r, *");
-        assert!(
-            matches!(clauses[0].body[1].kind, TermKind::Bind(ref names) if names == &["r".to_string()])
-        );
-    }
-
-    #[test]
-    fn parse_clause_word_empty_clause_before_next_clause() {
-        // D8 empty-clause disambiguation: `| None` directly followed by
-        // `| Some` (a known variant) is an empty-bodied clause, not locals.
-        let module = parse_src(
-            "type: MaybeInt | None | Some v i64 ;
-             : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
-        )
-        .unwrap();
-        let uo = module.words.iter().find(|w| w.name == "unwrap-or").unwrap();
-        let clauses = clauses_body(uo);
-        assert_eq!(clauses.len(), 2);
-        assert_eq!(clauses[0].variant, "None");
-        assert!(clauses[0].locals.is_empty());
-        assert!(clauses[0].body.is_empty());
-        assert_eq!(clauses[1].variant, "Some");
-    }
-
-    #[test]
-    fn parse_term_word_with_leading_locals_is_not_a_clause() {
-        // D8: a `|` followed by a non-variant word (with an enum in scope) is
-        // entry-locals, not a clause.
+    fn parse_word_with_leading_locals_binds_entry_locals() {
+        // A leading `| a b |` is the word body's entry binding, with an enum
+        // in scope and a variant name available to be misread as one.
         let module = parse_src(
             "type: Shape | Circle r f64 ;
              : sq ( i64 -- i64 ) | n | n n * ;",
@@ -5880,14 +5692,6 @@ mod tests {
     }
 
     #[test]
-    fn reserved_caret_clause_body_local_is_error() {
-        let src = "type: Shape | Circle r f64 ; : area ( Shape -- f64 ) | Circle | ^ | ^ ;";
-        let err = parse_src(src).unwrap_err();
-        assert!(err.contains("reserved"), "unexpected message: {err}");
-        assert!(err.contains('^'), "unexpected message: {err}");
-    }
-
-    #[test]
     fn parse_named_slot_array_type_resolves() {
         // The named-slot path (`name : type`) also recognises `[T N]`, not
         // just the unnamed-slot shortcut.
@@ -5915,8 +5719,8 @@ mod tests {
     fn parse_reference_to_owning_cell_type_hands_remainder_to_caret_splitter() {
         // The three-case splitter's `^`-led-remainder case: `&!^List` is one
         // token whose remainder `^List` is the *existing* caret splitter's
-        // input, not `resolve_type`'s. Reachable in the dogfood only via
-        // reference-mode clause inference, so it gets a unit test of its own.
+        // input, not `resolve_type`'s. Reachable in the dogfood only via a
+        // reference-mode eliminator arm, so it gets a unit test of its own.
         let module =
             parse_src("type: List | Nil | Cons v i64 next ^List ;\n: w ( &!^List -- ) drop ;")
                 .unwrap();

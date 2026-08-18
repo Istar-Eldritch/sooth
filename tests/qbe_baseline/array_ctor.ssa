@@ -26,20 +26,20 @@ type :__ret_0 = { b, l }
 
 export function $.2e.__m0(w %v0) {
 @start
-	%v1 =w copy 0
-	%v2 =w ceqw %v0, %v1
-	jnz %v2, @blk1, @blk2
+	%v3 =w copy 0
+	%v4 =w ceqw %v0, %v3
+	jnz %v4, @blk1, @blk2
 @blk1
-	%v3 =l copy $strd0
-	%sptr0 =l loadl %v3
-	%slena1 =l add %v3, 8
+	%v5 =l copy $strd0
+	%sptr0 =l loadl %v5
+	%slena1 =l add %v5, 8
 	%slen2 =l loadl %slena1
 	call $printf(l $strfmt, l %slen2, l %sptr0, ...)
 	jmp @blk3
 @blk2
-	%v4 =l copy $strd1
-	%sptr3 =l loadl %v4
-	%slena4 =l add %v4, 8
+	%v6 =l copy $strd1
+	%sptr3 =l loadl %v6
+	%slena4 =l add %v6, 8
 	%slen5 =l loadl %slena4
 	call $printf(l $strfmt, l %slen5, l %sptr3, ...)
 	jmp @blk3

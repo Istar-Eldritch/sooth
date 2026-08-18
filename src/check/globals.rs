@@ -83,17 +83,8 @@ struct Direct {
 
 fn direct_of(word: &WordDef, statics: &HashSet<&str>) -> Direct {
     let mut out = Direct::default();
-    match &word.body {
-        WordBody::Terms { terms } => {
-            walk(terms, statics, &mut HashSet::new(), &mut out);
-        }
-        WordBody::Clauses(clauses) => {
-            for clause in clauses {
-                let mut shadowed: HashSet<String> = clause.locals.iter().cloned().collect();
-                walk(&clause.body, statics, &mut shadowed, &mut out);
-            }
-        }
-    }
+    let terms = &word.body;
+    walk(terms, statics, &mut HashSet::new(), &mut out);
     out
 }
 
@@ -366,7 +357,7 @@ mod tests {
         WordDef {
             name: name.to_string(),
             effect: StackEffect::default(),
-            body: WordBody::Terms { terms },
+            body: terms,
             poly: None,
             declares_inline: false,
             module,
@@ -473,22 +464,6 @@ mod tests {
         let (sets, _) = infer_sets(&words, &statics);
         assert_eq!(sets[0], set_of(&[("COUNT", GlobalMode::W)]));
         assert_eq!(sets[1], set_of(&[("COUNT", GlobalMode::W)]));
-    }
-
-    #[test]
-    fn direct_set_reaches_into_a_clause_body() {
-        // A clause-style word's terms live under `WordBody::Clauses`, a body
-        // shape the term walk has to enter on its own.
-        let statics = vec![statik("COUNT")];
-        let mut w = word("elim", Vec::new());
-        w.body = WordBody::Clauses(vec![Clause {
-            variant: "Some".to_string(),
-            locals: vec!["x".to_string()],
-            body: vec![call("&!COUNT"), call("1"), call("+!")],
-            span: span(1),
-        }]);
-        let (sets, _) = infer_sets(&[w], &statics);
-        assert_eq!(sets[0], set_of(&[("COUNT", GlobalMode::W)]));
     }
 
     #[test]

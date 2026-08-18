@@ -212,32 +212,13 @@ fn inline_word_calling_inline_word_splices_transitively() {
 }
 
 #[test]
-fn inline_word_clause_body_is_located_error() {
-    // R3: a clause body cannot be spliced (`is_combinator` requires
-    // `WordBody::Terms`), so the definition is rejected rather than quietly
-    // lowered as an ordinary clause word.
-    let err = check_error(
-        "type: E | A | B ;\n\
-         : pick inline ( E -- i64 )\n\
-         | A  1\n\
-         | B  2\n\
-         ;\n\
-         : main ( -- ) A pick . ;\n",
-    );
-    assert_eq!(
-        err,
-        "error: `inline` on `pick`, which has a clause body; `inline` requires a term body (line 2, col 3)"
-    );
-}
-
-#[test]
 fn inline_word_polymorphic_signature_is_accepted() {
     // Slice 10c (R-P3-3b) **reverses R3's polymorphic half**, which its own
     // doc admitted was a policy rule and not a soundness one: the splice
     // already handles a variable-bearing body. The reversal is what lets the
     // six `lib/core.sth` comparison words be both `'T: Copy Ord`-polymorphic
-    // and `inline`. R3's other rejections (clause body, `main`, a builtin
-    // operator name) are untouched, and the tests above still pin them.
+    // and `inline`. R3's other rejections (`main`, a builtin operator name)
+    // are untouched, and the tests above still pin them.
     let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n")
         .expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");

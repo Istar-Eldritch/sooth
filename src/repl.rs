@@ -16,7 +16,7 @@ use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, Import, Line, OwnedCellDecl, OwnedCellId,
     PolySig, PolyType, RefDecl, RefId, Span, StackEffect, StructDecl, StructId, Term, TermKind,
-    Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    Type, TypedSlot, VariantDecl, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -165,7 +165,7 @@ fn ir_arity_env(env: &HashMap<String, Vec<check::Overload>>) -> HashMap<String, 
 fn checker_combinators(store: &HashMap<String, WordDef>) -> check::CombinatorEnv<'_> {
     store
         .iter()
-        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), vec![c])))
+        .map(|(name, word)| (name.clone(), vec![check::combinator_of(word)]))
         .collect()
 }
 
@@ -388,15 +388,11 @@ fn remap_imported_combinator(
             .collect();
         Box::new(sig)
     });
-    let WordBody::Terms { terms } = &w.body else {
-        unreachable!("a combinator body is always WordBody::Terms (is_combinator requires it)")
-    };
+    let terms = &w.body;
     WordDef {
         name: internal.to_string(),
         effect,
-        body: WordBody::Terms {
-            terms: rewrite_combinator_body_calls(terms, body_rename),
-        },
+        body: rewrite_combinator_body_calls(terms, body_rename),
         poly,
         declares_inline: w.declares_inline,
         module: module_base + w.module,
@@ -2223,16 +2219,8 @@ impl Session {
         }
     }
 
-    fn rewrite_wordbody_imports(&self, body: &mut WordBody) -> Result<(), String> {
-        match body {
-            WordBody::Terms { terms } => self.rewrite_terms_imports(terms),
-            WordBody::Clauses(clauses) => {
-                for c in clauses.iter_mut() {
-                    self.rewrite_terms_imports(&mut c.body)?;
-                }
-                Ok(())
-            }
-        }
+    fn rewrite_wordbody_imports(&self, body: &mut [Term]) -> Result<(), String> {
+        self.rewrite_terms_imports(body)
     }
 
     fn rewrite_terms_imports(&self, terms: &mut [Term]) -> Result<(), String> {
@@ -2635,9 +2623,7 @@ impl Session {
         // `Clone`): the view borrows every stored combinator plus the local
         // definee, which outlives the check calls below.
         let mut combinators = checker_combinators(&self.combinators);
-        if let Some(c) = check::combinator_of(&word) {
-            combinators.insert(name.clone(), vec![c]);
-        }
+        combinators.insert(name.clone(), vec![check::combinator_of(&word)]);
         // R8: reject a cycle formed *across lines* (define `a`; define `b`
         // calling `a`; redefine `a` calling `b`) as the same located
         // `combinator_cycle_error`, while a self-*tail* edge stays permitted
@@ -2700,9 +2686,9 @@ impl Session {
     }
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
-        // R7a (item 2): a quotation type in a word's *output* row (or a
-        // clause-bodied combinator) never reaches the native `unreachable!`
-        // because the native `check` audits it; the REPL must run the same
+        // R7a (item 2): a quotation type in a word's *output* row never
+        // reaches the native `unreachable!` because the native `check` audits
+        // it; the REPL must run the same
         // per-word audit, before the R6 combinator route below (so a quotation
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.

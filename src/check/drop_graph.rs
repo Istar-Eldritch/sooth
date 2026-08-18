@@ -59,9 +59,8 @@ pub(super) fn check_main_effect(
 /// R1 (D2, D7): the callee names of every tail-position call in a word body.
 ///
 /// Tail position is a purely *syntactic* property: a call is in tail position
-/// iff it is the final term of a terms body or the final term of a clause
-/// body. Any term after a call, arithmetic, a shuffle, a consumer, or another
-/// call, breaks tail position. Output-equality with the declared outputs is a
+/// iff it is the final term of a word body. Any term after a call,
+/// arithmetic, a shuffle, a consumer, or another call, breaks tail position. Output-equality with the declared outputs is a
 /// *consequence* of this rule for a well-typed final call, not a second check.
 ///
 /// Slice 10c (R-P1-1) adds the second way a term inherits tail position: a
@@ -70,8 +69,12 @@ pub(super) fn check_main_effect(
 /// `call`s in tail position is spliced there too. `[ ... ] call` at a tail is
 /// the same thing one step shorter. A trailing `~[ t ] ~[ e ] if` hands tail
 /// position to both arms through that rule rather than as a form of its own:
-/// `if` splices, and `branch` tail-calls both quotation parameters. See
-/// `TailWalk`.
+/// `if` splices, and `branch` tail-calls both quotation parameters.
+///
+/// Phase 6 slice 4 adds a third way: an eliminator dispatch call (`Shape?`)
+/// splices the same way, so a tail call inside one of the tagged arm
+/// quotations written immediately before it is the caller's tail call too.
+/// See `TailWalk`.
 ///
 /// Shared by the checker (R2 predicate, R3 tail-call graph); the lowerer
 /// re-encodes the same syntactic rule via positional `tail` threading in
@@ -80,20 +83,9 @@ pub(super) fn check_main_effect(
 pub(super) fn tail_position_calls<'a>(word: &'a WordDef, combs: &CombinatorIndex) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut walk = TailWalk::new(combs);
-    match &word.body {
-        WordBody::Terms { terms, .. } => {
-            let binds = param_binds(terms, declared_input_count(word));
-            walk.collect(terms, &binds, &mut out);
-        }
-        WordBody::Clauses(clauses) => {
-            // A clause body's leading binds pop the dispatched variant's
-            // payload, not the declared inputs, and a clause-bodied word is
-            // never a combinator, so it has no parameter slots to forward.
-            for clause in clauses {
-                walk.collect(&clause.body, &HashMap::new(), &mut out);
-            }
-        }
-    }
+    let terms = &word.body;
+    let binds = param_binds(terms, declared_input_count(word));
+    walk.collect(terms, &binds, &mut out);
     out
 }
 
@@ -225,6 +217,32 @@ impl<'a> TailWalk<'a> {
         let before = &terms[..terms.len() - 1];
         if let TermKind::Call(name) = &last.kind {
             out.push(TailHit::Name(name.as_str()));
+            // Phase 6 slice 4: an eliminator dispatch call (`Shape?`,
+            // `Op?`, ...) splices in place exactly like `call`/`branch` does
+            // (`check_eliminator_call` runs the same body-in-place-of-call
+            // semantics), so a tail call inside one of its arms is the
+            // caller's tail call too. The run of tagged quotation-literal
+            // arms directly preceding the call is the same run
+            // `check_eliminator_call` collects (stops at the first operand
+            // that isn't a tagged quotation literal); recognized by that
+            // shape alone; this is not a name check, since a dispatch name is
+            // minted per enum and unknown here.
+            let mut arm_bodies: Vec<&[Term]> = Vec::new();
+            for term in before.iter().rev() {
+                let TermKind::Quotation(body, _, Some(annot)) = &term.kind else {
+                    break;
+                };
+                if annot.variant_tag.is_none() {
+                    break;
+                }
+                arm_bodies.push(body);
+            }
+            if !arm_bodies.is_empty() {
+                for body in arm_bodies {
+                    self.walk(body, binds, out);
+                }
+                return;
+            }
             // Which of the callee's argument slots inherit this tail
             // position: `call`'s single quotation operand, `branch`'s two,
             // or an always-spliced callee's tail-`call`ed parameter slots.
@@ -693,22 +711,16 @@ pub(super) fn collect_drop_targets(
 
 /// R6: every callee name a body mentions, in any position -- the whole-body
 /// sibling of `tail_position_calls`, which only ever reads `terms.last()`.
-/// Both `if` arms and every clause body are visited.
+/// Every nested quotation body is visited, `if`'s two arms and an eliminator
+/// call's arms included.
 ///
 /// A local's own name reads as a `Call` term too, so a local sharing a word's
 /// name contributes an edge that no call justifies. That over-approximation
 /// can only add edges, never lose one, and is the same one
 /// `check_tail_call_cycles` already lives with.
-pub(super) fn all_calls(body: &WordBody) -> Vec<&str> {
+pub(super) fn all_calls(body: &[Term]) -> Vec<&str> {
     let mut out = Vec::new();
-    match body {
-        WordBody::Terms { terms } => collect_all_calls(terms, &mut out),
-        WordBody::Clauses(clauses) => {
-            for clause in clauses {
-                collect_all_calls(&clause.body, &mut out);
-            }
-        }
-    }
+    collect_all_calls(body, &mut out);
     out
 }
 
@@ -1105,14 +1117,53 @@ mod tests {
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
         assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
+
+    // -- Phase 6 slice 4: eliminator-arm tail splice --------------------------
+
     #[test]
-    fn tail_position_clause_body_final_self_call_is_tail() {
-        let w = first_word("type: E | A | B ; : w ( E -- E ) | A w | B w ;");
+    fn tail_position_eliminator_arm_self_call_is_tail() {
+        // The run of tagged quotation-literal arms directly preceding the
+        // dispatch call splices exactly like `call`/`branch` does, so a
+        // self-tail-call inside one arm inherits the call's own tail
+        // position.
+        let w = first_word("type: E | A | B ; : w ( E -- E ) ~[ ( A ) w ] ~[ ( B ) drop 0 ] E? ;");
         assert_eq!(
             tail_position_calls(&w, &CombinatorIndex::new()),
-            vec!["w", "w"]
+            vec!["E?", "w"]
         );
         assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    #[test]
+    fn tail_position_eliminator_arm_run_stops_at_untagged_operand() {
+        // The reverse scan for the tagged-arm run halts at the first operand
+        // that isn't a *tagged* quotation literal. The interposed `[ ( i64 --
+        // i64 ) 5 ]` is annotated but carries no variant tag, so it exercises
+        // the tag check and not merely the has-an-annotation check: it stops
+        // the run, leaving `~[ ( B ) w ]`'s self-tail-call unreachable.
+        let w = first_word(
+            "type: E | A | B ; : w ( E -- E ) ~[ ( B ) w ] [ ( i64 -- i64 ) 5 ] ~[ ( A ) drop 0 ] E? ;",
+        );
+        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["E?"]);
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    #[test]
+    fn tail_mutual_recursion_through_eliminator_arms_is_error() {
+        // Phase 6 slice 4 review: the eliminator-arm splice is a new source
+        // of tail edges, so a mutual cycle routed entirely through arms is
+        // now reachable and must be rejected the same way an ordinary or an
+        // `if`-arm mutual tail cycle already is.
+        let err = check_src(
+            "type: E | A | B ;\n\
+             : a ( E -- E ) ~[ ( A ) b ] ~[ ( B ) b ] E? ;\n\
+             : b ( E -- E ) ~[ ( A ) a ] ~[ ( B ) a ] E? ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("mutual tail recursion"),
+            "unexpected message: {err}"
+        );
     }
 
     // -- Slice 10c (R-P1): tail-splice recognition ---------------------------
@@ -1227,9 +1278,7 @@ mod tests {
         for (words, expected) in [(recon2, true), (recon4, false)] {
             let combs = combinator_index(&words);
             let word = named(&words, "walk");
-            let WordBody::Terms { terms } = &word.body else {
-                unreachable!("`walk` is a terms body")
-            };
+            let terms = &word.body;
             let checker = is_combinator(word) && has_self_tail_call(word, &combs);
             let lowering = terms_tail_call_self(terms, &word.name, &combs);
             assert_eq!(checker, expected, "the checker's `splice_tail`");
@@ -1266,9 +1315,7 @@ mod tests {
             // appends the `lib/core.sth` prelude, which now defines `<` too,
             // so both `last()` and a name lookup can find the wrong one.
             let word = words.first().expect("the builtin-named word");
-            let WordBody::Terms { terms } = &word.body else {
-                unreachable!("a terms body")
-            };
+            let terms = &word.body;
             let combs = combinator_index(&words);
             assert!(
                 !has_self_tail_call(word, &combs),

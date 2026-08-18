@@ -416,7 +416,7 @@ mod tests {
         WordDef {
             name: name.to_string(),
             effect: StackEffect::default(),
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module,

@@ -211,8 +211,8 @@ pub(crate) fn audit_quotation_type_registries(
 }
 
 /// R7a (REPL, item 2): the per-word half of the audit -- a quotation in a
-/// word's *output* row, a clause-bodied combinator, `main` taking one, or a
-/// quotation nested inside a declared effect. A direct quotation *parameter*
+/// word's *output* row, `main` taking one, or a quotation nested inside a
+/// declared effect. A direct quotation *parameter*
 /// (the one legal position) is accepted here and rejected separately at the
 /// REPL (R23), which discards word bodies the inliner needs.
 ///
@@ -237,22 +237,6 @@ pub(crate) fn audit_word_quotation_positions(
             continue;
         }
         reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
-    }
-    // R18/R7a: a monomorphic word taking a quotation is a combinator,
-    // which the inliner supports only with a *term* body (it splices the
-    // body against the live stack); a clause body cannot be spliced, so
-    // such a word would mint an `IrFunc` with a quotation parameter and
-    // reach `ir_type_of`'s `unreachable!` arm (R7). Reject it here, with
-    // the type positions, so that arm stays unreached. (A poly word's
-    // effect is empty and is checked on the poly path, phase 2.)
-    if w.poly.is_none()
-        && matches!(w.body, WordBody::Clauses(_))
-        && w.effect
-            .inputs
-            .iter()
-            .any(|s| crate::ast::is_quotation_type(s.ty).is_some())
-    {
-        return Err(clause_bodied_quotation_word_error(word));
     }
     for slot in &w.effect.inputs {
         // Slice 10a (R2): a `~` input is recognized here too (accessor), so a
@@ -454,16 +438,6 @@ fn reject_poly_quotation_anywhere(
     }
 }
 
-/// R18/R7a: a monomorphic quotation-taking word with a clause body cannot be
-/// inlined (a clause body is not a splice-able term list), so it is rejected
-/// rather than left to panic at lowering. Slice 7's runtime quotation value
-/// lifts it (the word would then `call` a real value, no inlining needed).
-fn clause_bodied_quotation_word_error(word: &str) -> String {
-    format!(
-        "error: the quotation-taking word `{word}` has a clause body; a quotation parameter is only supported on a word with a term body this slice (its body is inlined at each call site, and a clause body cannot be spliced), and a runtime quotation value is slice 7",
-    )
-}
-
 /// R7a: reject `ty` if it is a quotation type, naming the position and slice 7.
 pub(super) fn reject_quotation_type_position(ty: Type, position: &str) -> Result<(), String> {
     // Slice 10a (R2): both variants are rejected here. An ordinary
@@ -630,7 +604,7 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![TypedSlot { name: None, ty }],
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module: 0,

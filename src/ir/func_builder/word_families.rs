@@ -734,7 +734,7 @@ impl<'a> FuncBuilder<'a> {
 
     /// A nested-aggregate field's value: its interior address, typed as the
     /// inner struct/enum. No copy — the owning aggregate is consumed by the
-    /// getter/destructure/clause, so aliasing its storage is sound; a later
+    /// getter or destructure, so aliasing its storage is sound; a later
     /// `dup` or word-return copies the bytes.
     fn field_aggregate_value(&mut self, base: Value, offset: u32, inner: IrType) -> Value {
         let v = self.fresh_value(inner);

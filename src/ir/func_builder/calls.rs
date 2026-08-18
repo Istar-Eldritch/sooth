@@ -732,10 +732,9 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Lower a call to a generated eliminator (`Shape?`, R5): pop the one
-    /// quotation operand per variant, turn each into a synthetic `Clause`
-    /// routed by its annotation's variant tag, and run the existing N-way tag
-    /// dispatch over them. The arms bind no clause locals -- each receives the
-    /// whole narrowed value (`ArmBinding::WholeValue`) and reads fields through
+    /// quotation operand per variant, turn each into a `Clause` routed by its
+    /// annotation's variant tag, and run the N-way tag dispatch over them.
+    /// Each arm receives the whole narrowed value and reads fields through
     /// `&field` projections.
     fn lower_eliminator(&mut self, id: EnumId, span: Span, tail: bool) {
         let n = self.enums.layouts[id.index()].variants.len();
@@ -751,7 +750,6 @@ impl<'a> FuncBuilder<'a> {
             mode.get_or_insert(tag.mode);
             clauses.push(Clause {
                 variant: tag.name,
-                locals: Vec::new(),
                 body: self.quot_defs[qid.0].clone(),
                 span,
             });
@@ -767,13 +765,7 @@ impl<'a> FuncBuilder<'a> {
             Some(VariantTagMode::Owning) | None => None,
         };
         let params = mem::take(&mut self.stack);
-        self.lower_clauses(
-            &clauses,
-            &params,
-            (id, ref_mutable),
-            ArmBinding::WholeValue,
-            tail,
-        );
+        self.lower_clauses(&clauses, &params, (id, ref_mutable), tail);
     }
 }
 
@@ -1444,14 +1436,15 @@ mod tests {
     }
 
     #[test]
-    fn clause_tails_share_one_header() {
-        // R9: a `|`-clause self-tail-recursive word gets a single header; each
-        // clause's terminal self-call is one back-edge into it. Both clauses
-        // here tail-recurse, so each header phi has three arms (entry + two
+    fn eliminator_arm_tails_share_one_header() {
+        // R9: a self-tail-recursive word gets a single header; each arm's
+        // terminal self-call is one back-edge into it. Both arms here
+        // tail-recurse, so each header phi has three arms (entry + two
         // back-edges) and no `Instr::Call` to self remains.
         let ir = lower_src(
             "type: Flag | Go | Stop ; \
-             : loop2 ( i64 Flag -- i64 ) | Go 1 - Go loop2 | Stop 1 + Stop loop2 ;",
+             : loop2 ( i64 Flag -- i64 ) \
+             ~[ ( Go ) drop 1 - Go loop2 ] ~[ ( Stop ) drop 1 + Stop loop2 ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
         let header = loop_header(f);
@@ -1462,19 +1455,20 @@ mod tests {
         // (both scalar): 2 phis, not 1.
         assert_eq!(phis.len(), 2, "both the i64 and the scalar Flag slot phi");
         assert!(phis.iter().all(|arms| arms.len() == 3));
-        assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
+        assert_eq!(jmps_to(f, header), 3, "entry + two arm back-edges");
         assert_eq!(count(f, is_call_instr), 0);
     }
 
     #[test]
-    fn mixed_clause_header_and_join_predecessors_stay_disjoint() {
-        // R9 / risk 5: some clauses back-edge and one is a base case that
-        // `Ret`s. The loop header phi (preds = entry + tail clause ends) and
-        // the Slice-4 dispatch-join phi (preds = non-tail clause ends) must
+    fn mixed_arm_header_and_join_predecessors_stay_disjoint() {
+        // R9 / risk 5: some arms back-edge and one is a base case that
+        // `Ret`s. The loop header phi (preds = entry + tail arm ends) and
+        // the Slice-4 dispatch-join phi (preds = non-tail arm ends) must
         // keep disjoint predecessor sets.
         let ir = lower_src(
             "type: Flag | Go | Stop ; \
-             : run ( i64 Flag -- i64 ) | Go 1 - Stop run | Stop ;",
+             : run ( i64 Flag -- i64 ) \
+             ~[ ( Go ) drop 1 - Stop run ] ~[ ( Stop ) drop ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         let header = loop_header(f);
@@ -1515,8 +1509,8 @@ mod tests {
     }
 
     #[test]
-    fn clause_tail_call_alloc_is_hoisted_to_entry_not_loop_body() {
-        // A clause self-tail-call rebuilds its enum scrutinee on every
+    fn arm_tail_call_alloc_is_hoisted_to_entry_not_loop_body() {
+        // An arm's self-tail-call rebuilds its enum scrutinee on every
         // back-edge. `Stop` carries a payload here (Slice 9, R1: a
         // zero-payload variant's construct no longer allocs at all -- it is a
         // bare scalar `Const` -- so this test needs a payload-bearing variant
@@ -1527,7 +1521,8 @@ mod tests {
         // instead, so the loop body has none.
         let ir = lower_src(
             "type: Flag | Go | Stop n i64 ; \
-             : run ( i64 Flag -- i64 ) | Go 1 - dup Stop run | Stop drop ;",
+             : run ( i64 Flag -- i64 ) \
+             ~[ ( Go ) drop 1 - dup Stop run ] ~[ ( Stop ) Stop> drop ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         let header = loop_header(f);

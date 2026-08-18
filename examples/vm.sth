@@ -1,6 +1,6 @@
 \ Dogfood: Phase 2 exit, now with Phase 3 Slice 6 references. A fixed-size
 \ bytecode stack machine that interprets a toy instruction set, composing
-\ fixed-size arrays, `usize`, enums with clause dispatch, structs, and the
+\ fixed-size arrays, `usize`, enums with eliminator dispatch, structs, and the
 \ Phase 2 Slice 6 self-tail-call dispatch loop.
 \
 \ `Op` is mixed-arity: `Push`/`Load`/`Store`/`Jz`/`Jmp` carry a `i64`/`usize`
@@ -15,10 +15,10 @@
 \ `VmPop>` word. `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same
 \ way.
 \
-\ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the first
+\ `run`'s `Add`/`Sub`/`Mul`/`Store` arms (Phase 3 Slice 5) name the first
 \ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
 \ into position with `swap`/`over`/`rot`. `vm-push`/`vm-pop`/`fetch` and
-\ `run`'s `Load`/`Store` clauses (Phase 3 Slice 6) read and write the
+\ `run`'s `Load`/`Store` arms (Phase 3 Slice 6) read and write the
 \ operand stack and memory arrays through a borrowed element reference
 \ (`&>`/`&!>` then `@`/`!`).
 
@@ -70,16 +70,19 @@ type: VmPop vm Vm val i64 ;
   &vm &prog i &> @ | op |
   vm op Fetched ;
 
-\ Nine-clause self-tail-recursive dispatch loop. Every non-`Halt` clause
-\ produces an updated `Vm`, refetches the next `Op` out of the carried
-\ `prog`, and tail-calls `run` (the Slice 6 back-edge). `Halt` returns the
-\ popped operand-stack top without a self-call (the base case that `Ret`s).
+\ Nine-arm self-tail-recursive dispatch loop. Every non-`Halt` arm produces
+\ an updated `Vm`, refetches the next `Op` out of the carried `prog`, and
+\ tail-calls `run` (the Slice 6 back-edge). `Halt` returns the popped
+\ operand-stack top without a self-call (the base case that `Ret`s).
 : run ( Vm Op -- i64 )
-| Push  | vm v |
+  ~[ ( Push )
+    Push> | vm v |
     vm v vm-push
     bump-pc
     fetch Fetched> run
-| Add   | vm |
+  ]
+  ~[ ( Add )
+    drop | vm |
     vm vm-pop VmPop>          \ vm b
     | b |
     vm-pop VmPop>              \ vm'' a
@@ -87,7 +90,9 @@ type: VmPop vm Vm val i64 ;
     vm-push
     bump-pc
     fetch Fetched> run
-| Sub   | vm |
+  ]
+  ~[ ( Sub )
+    drop | vm |
     vm vm-pop VmPop>
     | b |
     vm-pop VmPop>
@@ -95,7 +100,9 @@ type: VmPop vm Vm val i64 ;
     vm-push
     bump-pc
     fetch Fetched> run
-| Mul   | vm |
+  ]
+  ~[ ( Mul )
+    drop | vm |
     vm vm-pop VmPop>
     | b |
     vm-pop VmPop>
@@ -103,19 +110,25 @@ type: VmPop vm Vm val i64 ;
     vm-push
     bump-pc
     fetch Fetched> run
-| Load  | vm addr |
+  ]
+  ~[ ( Load )
+    Load> | vm addr |
     &vm &mem addr &> @ | x |
     vm x vm-push
     bump-pc
     fetch Fetched> run
-| Store | vm addr |
+  ]
+  ~[ ( Store )
+    Store> | vm addr |
     vm vm-pop VmPop>           \ v x
     | v x |
     &!v &!mem addr &!> x !
     v
     bump-pc
     fetch Fetched> run
-| Jz    | vm target |
+  ]
+  ~[ ( Jz )
+    Jz> | vm target |
     vm vm-pop VmPop>           \ vm' x
     0 =
     ~[
@@ -124,13 +137,18 @@ type: VmPop vm Vm val i64 ;
       bump-pc
     ] if
     fetch Fetched> run
-| Jmp   | vm target |
+  ]
+  ~[ ( Jmp )
+    Jmp> | vm target |
     vm &!pc target !
     fetch Fetched> run
-| Halt  | vm |
+  ]
+  ~[ ( Halt )
+    drop | vm |
     vm vm-pop VmPop>
     swap drop
-;
+  ]
+  Op? ;
 
 \ Assembles the sum-1..N-via-bytecode program (fill, then write each opcode
 \ through a reference into a named local, no array literal):

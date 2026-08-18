@@ -13,11 +13,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
-    intern_owned_cell_type, intern_ref_type, variant_type, ArrayDecl, Bound, CallInst, Clause,
-    EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo,
-    OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect,
-    StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl,
-    VariantTag, VariantTagMode, WordBody, WordDef,
+    intern_owned_cell_type, intern_ref_type, variant_type, ArrayDecl, Bound, CallInst, EnumDecl,
+    EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
+    PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StaticDecl, StructDecl,
+    StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
+    WordDef,
 };
 
 mod audits;
@@ -395,9 +395,8 @@ pub(crate) fn variant_field_desc(field: &str, idx: usize) -> String {
 
 /// Phase 6 slice 2 (R4): a variant's field types in declared order (first
 /// field deepest), value-mode as the plain field type, ref-mode via
-/// `intern_ref_type`. Shared by the clause-body path (`check_clause_body`)
-/// and the accessor path (Phase 3), so both project a variant's payload
-/// identically.
+/// `intern_ref_type`. Shared by the destructure-word path and the accessor
+/// path (Phase 3), so both project a variant's payload identically.
 pub(crate) fn variant_field_projection(
     variant: &VariantDecl,
     ref_mutable: Option<bool>,
@@ -699,10 +698,9 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // knows which body each site sits in.
     let mut dropped: Vec<Vec<Type>> = Vec::with_capacity(words.len());
     // Slice 11 (R3): reject a declared `inline` the splice cannot deliver on
-    // *before* `is_combinator` is consulted, so a clause-bodied or
-    // variable-bearing `inline` word never enters the splice env, the cycle
-    // graph, or the poly checker (which would take it for a legitimate poly
-    // combinator).
+    // *before* `is_combinator` is consulted, so an `inline` word the splice
+    // cannot deliver on never enters the splice env, the cycle graph, or the
+    // poly checker (which would take it for a legitimate poly combinator).
     for word in words.iter() {
         check_inline_declaration(word)?;
         check_inline_quotation_requires_inline(word)?;
@@ -710,8 +708,8 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // R18: the monomorphic quotation-taking words, gathered once so a call to
     // one is intercepted and inlined (term-splice) rather than lowered to a
     // call. A polymorphic combinator's body is checked by the poly pass, so it
-    // is not registered here; only a `WordBody::Terms` monomorphic word with a
-    // `Type::Quotation` input qualifies.
+    // is not registered here; only a monomorphic word with a `Type::Quotation`
+    // input qualifies.
     let combinators = collect_combinators(words);
     // R22 (D5): reject a cycle in the quotation-taking-word call subgraph
     // before any body is checked, so the splice below may assume acyclicity.
@@ -907,8 +905,8 @@ fn intern_output_bundles(module: &mut Module) {
 
 /// Check a single word definition against an external env, seeding the env with
 /// the word's own signature so self-recursion type-checks. `enums` is the
-/// registry the clause-style checks (coverage, scrutinee type, variant-name
-/// collision) consult. Also returns this body's recorded overload-dispatch
+/// registry the elimination checks (arm coverage, scrutinee type,
+/// variant-name collision) consult. Also returns this body's recorded overload-dispatch
 /// call sites (item 3), so the REPL definition path can thread them into
 /// lowering instead of discarding them.
 #[allow(clippy::too_many_arguments)]
@@ -1140,9 +1138,9 @@ fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
         .any(|e| e.variants.iter().any(|v| v.name == name))
 }
 
-/// A parameter / word-entry / clause-body binding name equal to a registered
-/// variant name is a sharp error (D8 backstop, X12): it would make the
-/// clause-vs-locals `|` disambiguation ambiguous.
+/// A parameter or binding name equal to a registered variant name is a sharp
+/// error (X12): a variant name in a `|` binding reads as the value it
+/// constructs everywhere else in a body, so binding one shadows it.
 fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String> {
     if !is_registered_variant(name, ctx.enums()) {
         return Ok(());
@@ -1212,8 +1210,8 @@ fn reject_duplicate_local<'a>(
     })
 }
 
-/// The output-count / output-type mismatch check shared by a term body and a
-/// clause body (M6, X8): `final_stack` must match the declared outputs.
+/// The output-count / output-type mismatch check for a word body (M6, X8):
+/// `final_stack` must match the declared outputs.
 /// Honors D8's literal coercion (a bare integer literal satisfies a declared
 /// `usize` output) and reports the X10 diagnostic for a computed one.
 fn check_outputs(
@@ -1278,8 +1276,7 @@ fn check_outputs(
     Ok(())
 }
 
-/// A word's location, derived from the first term (or clause) of its body,
-/// for locating a whole-word diagnostic like X1.
+/// A word's location, for locating a whole-word diagnostic like X1.
 pub(crate) fn word_span(word: &WordDef) -> Span {
     word.span
 }
@@ -2303,8 +2300,8 @@ fn check_eliminator_call(
     let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
 
     // R4 step 3: exhaustiveness and duplication, in written source order and
-    // before any arm body is checked -- adapted from `check_clause_word`,
-    // whose clauses are the same value shape by another spelling.
+    // before any arm body is checked, so a coverage fault is reported where it
+    // is, not as an arity failure inside some sibling arm.
     let mut seen: HashSet<&str> = HashSet::new();
     let mut variant_indices = Vec::with_capacity(arms.len());
     for (qid, tag) in &arms {
@@ -2564,9 +2561,8 @@ fn merge_arm_output_slot(
 }
 
 /// R4 step 3: an arm annotated with a variant the eliminated enum does not
-/// declare. Names both, mirroring `check_clause_word`'s unknown-variant
-/// message -- a tag naming *another* enum's variant is the shape this catches
-/// (an unknown bare name never parses as a tag at all).
+/// declare. Names both -- a tag naming *another* enum's variant is the shape
+/// this catches (an unknown bare name never parses as a tag at all).
 fn eliminator_unknown_variant_error(
     ctx: &Ctx,
     span: Span,
@@ -3263,8 +3259,8 @@ mod tests {
 
     #[test]
     fn variant_field_projection_matches_pre_extraction_inline_loop() {
-        // Mutation check (R5): reproduces the loop check_clause_body ran
-        // before the R4 extraction, field by field, in both modes.
+        // Mutation check (R5): reproduces the loop this helper replaced at
+        // the R4 extraction, field by field, in both modes.
         let variant = test_variant(vec![
             ("r".to_string(), Type::F64),
             ("n".to_string(), Type::I64),
@@ -3366,8 +3362,7 @@ mod tests {
         let prelude = crate::parser::prelude_words();
         let mut combinators = CombinatorEnv::default();
         for word in &prelude {
-            let entry = combinator_of(word).expect("a prelude word has a term body");
-            combinators.insert(word.name.clone(), vec![entry]);
+            combinators.insert(word.name.clone(), vec![combinator_of(word)]);
         }
         // `True`/`False`, which a comparison word's branch-and-construct body
         // calls; a session registers them from the injected `bool` enum.
@@ -3748,7 +3743,7 @@ mod tests {
     #[test]
     fn check_duplicate_empty_bodied_word_reports_a_real_location() {
         // Regression: `word_span` used to derive a word's location from its
-        // first term/clause, so an empty body (`terms.first()` is `None`)
+        // first term, so an empty body (`terms.first()` is `None`)
         // fell back to `Span::default()` -- line 0, col 0 -- for every
         // trivial stub word, `main ( -- )` being the single most common
         // shape that hits it. `WordDef` now carries its own declaration span

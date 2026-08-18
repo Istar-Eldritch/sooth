@@ -1,12 +1,13 @@
 \ Dogfood: Phase 4 Slice 7a. The same bytecode stack machine as `examples/vm.sth`,
-\ rewired around a table of quotations instead of a clause-dispatched `run`.
+\ rewired around a table of quotations instead of an eliminator-dispatched `run`.
 \
-\ `Op` still needs one clause elimination (sum types are clause-style only,
-\ slice 7a Q5), but that clause is now a pure *decoder*: it reads the tag and
-\ any immediate operand, pushes the operand onto the `Vm`'s operand stack, and
-\ yields an opcode index. The nine opcode *handlers* are uniform, match-free
-\ `[ Vm -- Vm ]` quotations living in one array (a materialization boundary,
-\ 7a): dispatch indexes the table and `call`s the selected entry indirectly.
+\ `Op` still needs one eliminator (sum types are eliminated by tag only,
+\ slice 7a Q5), but that eliminator arm is now a pure *decoder*: it reads the
+\ tag and any immediate operand, pushes the operand onto the `Vm`'s operand
+\ stack, and yields an opcode index. The nine opcode *handlers* are uniform,
+\ match-free `[ Vm -- Vm ]` quotations living in one array (a materialization
+\ boundary, 7a): dispatch indexes the table and `call`s the selected entry
+\ indirectly.
 \ `decode` always advances `pc` by one; `h-jz`/`h-jmp` overwrite it afterward,
 \ so no handler needs to know whether it is straight-line or a branch.
 
@@ -64,56 +65,74 @@ type: Decoded vm Vm idx usize ;
 \   0 Push  1 Add  2 Sub  3 Mul  4 Load  5 Store  6 Jz  7 Jmp  8 Halt
 
 : decode ( Vm Op -- Decoded )
-| Push  | vm v |
+  ~[ ( Push )
+    Push> | vm v |
     vm v vm-push
     bump-pc
     0 >usize
     Decoded
-| Add   | vm |
+  ]
+  ~[ ( Add )
+    drop | vm |
     vm
     bump-pc
     1 >usize
     Decoded
-| Sub   | vm |
+  ]
+  ~[ ( Sub )
+    drop | vm |
     vm
     bump-pc
     2 >usize
     Decoded
-| Mul   | vm |
+  ]
+  ~[ ( Mul )
+    drop | vm |
     vm
     bump-pc
     3 >usize
     Decoded
-| Load  | vm addr |
+  ]
+  ~[ ( Load )
+    Load> | vm addr |
     addr >i64 | a |
     vm a vm-push
     bump-pc
     4 >usize
     Decoded
-| Store | vm addr |
+  ]
+  ~[ ( Store )
+    Store> | vm addr |
     addr >i64 | a |
     vm a vm-push
     bump-pc
     5 >usize
     Decoded
-| Jz    | vm target |
+  ]
+  ~[ ( Jz )
+    Jz> | vm target |
     target >i64 | t |
     vm t vm-push
     bump-pc
     6 >usize
     Decoded
-| Jmp   | vm target |
+  ]
+  ~[ ( Jmp )
+    Jmp> | vm target |
     target >i64 | t |
     vm t vm-push
     bump-pc
     7 >usize
     Decoded
-| Halt  | vm |
+  ]
+  ~[ ( Halt )
+    drop | vm |
     vm
     bump-pc
     8 >usize
     Decoded
-;
+  ]
+  Op? ;
 
 \ Nine uniform, match-free handlers. `decode` has already pushed every
 \ immediate operand the handler needs onto the `Vm`'s operand stack, in the
@@ -189,7 +208,7 @@ type: Decoded vm Vm idx usize ;
   &!t 8 >usize &!> [ h-halt ] !
   t ;
 
-\ The dispatch loop: fetch, decode (the one legal clause elimination), and
+\ The dispatch loop: fetch, decode (the one legal enum elimination), and
 \ either stop (index 8 is `Halt`) or index the table and indirect-call the
 \ selected handler, then tail-call itself with the updated `Vm`. `table` is
 \ threaded alongside `Vm` across the self-tail-call back-edge exactly as

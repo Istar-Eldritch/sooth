@@ -159,6 +159,33 @@ fn wrong_family_scrutinee_names_the_generic_surface_family() {
     );
 }
 
+/// Phase 6 slice 4 (R8): the eliminator-form replacement for
+/// `phase5_generic_enum_elimination.rs`'s
+/// `generic_enum_elimination_type_declared_after_matching_word`, the one
+/// clause-path capability (forward-declared generic type resolution) with no
+/// prior eliminator-form witness. The generic `type:` header is declared
+/// textually *after* the word that eliminates it, and elimination still
+/// parses and runs -- recognition rides on `parse_generic_typedefs` (run
+/// before any word body) rather than on the generic registry being populated
+/// by the time a body is walked, exactly as the retired clause-path test
+/// guarded.
+#[test]
+fn forward_declared_generic_type_eliminates_after_the_matching_word() {
+    let (stdout, code) = build_and_run(
+        "s3b-generic-eliminator-forward",
+        ": to-int ( Result[i64 i64] -- i64 )\n  \
+           ~[ ( Ok ) Ok> ]\n  \
+           ~[ ( Err ) Err> 100 + ]\n  \
+           Result? ;\n\
+         type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+         : main ( -- )\n  \
+           42 Ok  to-int .\n  \
+           7  Err to-int . ;\n",
+    );
+    assert_eq!(stdout, "42\n107\n");
+    assert_eq!(code, 0);
+}
+
 /// T6/T7 (R5, decision 5): **one word** eliminates two *asymmetric*
 /// instantiations of the same generic enum -- `Result[i64 bool]` and
 /// `Result[bool i64]`, which can only be told apart because they are not the

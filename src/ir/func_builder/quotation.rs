@@ -236,16 +236,16 @@ impl<'a> FuncBuilder<'a> {
     /// and `Cmp`/`Jnz` variant-by-variant, the last compare's false edge
     /// falling straight through to the final variant with no default/trap
     /// block) and return one freshly allocated, not-yet-started block per
-    /// variant in declaration order. Shared by `lower_clauses` (a clause
-    /// word's scrutinee) and `synthesize_enum_destructor` (the same shape,
-    /// only what each variant block does next differs).
+    /// variant in declaration order. Shared by `lower_clauses` (an
+    /// eliminator's scrutinee) and `synthesize_enum_destructor` (the same
+    /// shape, only what each variant block does next differs).
     ///
     /// `scrutinee_is_value` (Slice 9): whether `scrutinee` already *is* the
     /// discriminant (a zero-payload enum's bare scalar value) rather than a
     /// pointer to tagged storage needing a `FieldLoad`. A linear enum is
     /// never scalar (zero fields implies `is_linear == false`), so
     /// `synthesize_enum_destructor`'s call is always the pointer case; a
-    /// non-reference clause scrutinee of a scalar enum is the value case.
+    /// non-reference eliminator scrutinee of a scalar enum is the value case.
     pub(super) fn dispatch_on_tag(
         &mut self,
         scrutinee: Value,

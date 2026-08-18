@@ -60,8 +60,8 @@ lacks: statically-checked stack effects and named locals.
 order as the effect comment, and a word calls itself directly (no `recurse`). A
 binding is a term, not just an entry declaration: `| names |` is legal at any point
 in a body, popping that many values off the stack where it appears, with its extent
-running to the end of the enclosing block (a word body, a clause body, or a
-quotation body) rather than the whole word:
+running to the end of the enclosing block (a word body or a quotation body)
+rather than the whole word:
 
 ```forth
 : gcd ( int int -- int )
@@ -300,7 +300,7 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 ## Control flow and iteration
 
 Boolean branching is the library word `if` (`~[ then ] ~[ else ] if`, see below);
-structural dispatch is clause-bodied definition. There are deliberately **no loop
+structural dispatch is the generated eliminator word. There are deliberately **no loop
 keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
 matches the Factor/Kitten lineage, where iteration is expressed with combinators
 rather than syntax.
@@ -452,17 +452,19 @@ imported `while`'s self-call still resolves to itself and the self-tail recogniz
 fires rather than recursing forever through an unrecognized name.
 
 **Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
-`bool` and two quotations (`~[ then ] ~[ else ] if`). Structural
-dispatch on ADTs is **clause-bodied definition**, the sole enum eliminator: a word
-whose top input is an enum is defined per variant (`| Variant ... ;`),
-exhaustiveness-checked, with no inline `match`. The rejected Haskell-style machine —
-literal patterns, guards, clause sugar — never shipped; one-clause-per-variant
-dispatch keeps none of it, needing only variant names and ordinary word bodies. Haskell
-matches named positional arguments while Sooth's inputs are anonymous stack values (the
-same named-vs-position tension that rules out dependent types), which is why the guard
-and pattern apparatus stayed out while the per-variant body won. Multi-way branching is
-a **`cond` combinator** (a library word taking `[ pred ] [ body ]` pairs), not syntax,
-so nested `if`s aren't the only option.
+`bool` and two quotations (`~[ then ] ~[ else ] if`). Structural dispatch on ADTs is
+the **generated eliminator word** (`Shape?`), the sole enum eliminator: each variant
+gets a variant-tagged quotation arm written immediately before the call
+(`~[ ( Circle ) ... ] ~[ ( Rect ) ... ] Shape?`), exhaustiveness-checked, with no
+inline `match`. It is an ordinary term, so it composes mid-body and needs no
+definition of its own. The rejected Haskell-style machine — literal patterns, guards,
+match sugar — never shipped; tag-routed arms keep none of it, needing only variant
+names and ordinary quotation bodies. Haskell matches named positional arguments while
+Sooth's inputs are anonymous stack values (the same named-vs-position tension that
+rules out dependent types), which is why the guard and pattern apparatus stayed out
+while the per-variant arm won. Multi-way branching is a **`cond` combinator** (a
+library word taking `[ pred ] [ body ]` pairs), not syntax, so nested `if`s aren't the
+only option.
 
 **The machine layer and the library layer.** The compiler knows three machine-level
 primitives and nothing else about conditionals: `branch`, a two-way jump on a 32-bit
@@ -507,11 +509,11 @@ word over this floor, demoted one slice at a time as the machinery beneath it la
 The grammar that makes anything else definable: word and type declarations
 (`: ... ;` with its effect comment, `type:`, `extern:`), the module declarations
 (`import:`/`export:`), and locals (`| names |`, with block extent to the end of the
-enclosing body or clause).
+enclosing body).
 
-Structural dispatch: clause-bodied definitions, the sole eliminator for enums. A clause
-is checked against its variant's payload, coverage is exhaustive, and there is no
-inline `match` — dispatch is definition-shaped.
+Structural dispatch: the generated eliminator word, the sole eliminator for enums. An
+arm is checked against the variant its tag names, coverage is exhaustive, and there is
+no inline `match` — dispatch is a term, not a definition form.
 
 Quotations: the literal `[ ... ]` and `call`. A quotation's body is checked where it is
 spliced, so a library word cannot defer code the way `call` does; no word below them
@@ -1029,9 +1031,10 @@ rows, no borrow analysis needed to write the compiler in it.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
 - Control flow: `if`/`unless`, ordinary `lib/core.sth` words taking a `bool` and two
   quotations over the `branch` and `tag` primitives (see The machine layer and the
-  library layer); clause-bodied definitions as the sole, exhaustive
-  eliminator for enums (no inline `match`, no guards or literal patterns); a `cond`
-  combinator (library word) for multi-way branching. No loop keywords.
+  library layer); the generated eliminator word (`Shape?`) over variant-tagged
+  quotation arms as the sole, exhaustive eliminator for enums (no inline `match`, no
+  guards or literal patterns); a `cond` combinator (library word) for multi-way
+  branching. No loop keywords.
 - Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
   loop primitive for constant stack; combinators (`each`/`while`/`fold`/`times`/`map`)
   are library words built on quotations and inlined at call sites. Raw recursion is

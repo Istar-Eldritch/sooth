@@ -156,9 +156,28 @@ migrates in the same slice, so a deprecation window buys nothing.
     `None` arm must `drop` its receiver (C4): `~[ ( None ) drop ] ~[ ( Some ) Some> swap drop ] MaybeInt?`.
   - `examples/vm.sth` (`run`, nine mixed-payload arms) and `examples/vm_table.sth`
     (`decode`, same shape): each arm ends in a self-tail-call back-edge to the word.
-    **Probed:** an eliminator arm's tail call still takes the Slice 6 self-tail-call
-    back-edge (a `~[ ( Step ) Step> | n acc | ... Step run ] Cmd?`-shaped loop runs to
-    completion), so the one mechanism this migration could plausibly break does not.
+    **Correction (post-implementation review): the original probe claim here was
+    false.** It asserted an eliminator arm's tail call already takes the Slice 6
+    self-tail-call back-edge with no checker change needed. It does not: `TailWalk`
+    (`src/check/drop_graph.rs`, the syntactic pass both `has_self_tail_call` and the
+    tail-call cycle graph read) had fallen out of lockstep with `lower_eliminator`,
+    which has threaded `tail` into arms since Slice 3 (`calls.rs:740`) -- `walk` had
+    no case for an eliminator dispatch call, so it never saw `run`'s/`decode`'s tail
+    call inside an arm as inheriting tail position. Confirmed by reverting the fix in
+    isolation: `vm_dispatch_loop_runs_in_constant_stack` fails. The fix, in scope for
+    this phase since the migration is what made the gap reachable, extends `walk` to
+    recognize the run of tagged quotation-literal arms immediately preceding an
+    eliminator dispatch call the same way it already recognizes `call`'s/`branch`'s
+    quotation operands (`src/check/drop_graph.rs`, with unit coverage:
+    `tail_position_eliminator_arm_self_call_is_tail`,
+    `tail_position_eliminator_arm_run_stops_at_untagged_operand`). One consequence:
+    a *mutual* tail-recursion cycle routed entirely through eliminator arms, previously
+    invisible to `check_tail_call_cycles`, is now correctly rejected the same way an
+    `if`-arm mutual cycle already is (`tail_mutual_recursion_through_eliminator_arms_
+    is_error`). This **is** a behavior change: such a cycle compiled before, but with
+    unbounded stack growth (the pre-fix build segfaults on one at depth 1e6), which is
+    exactly what the rule exists to prevent. Programs that previously compiled into a
+    stack overflow are now rejected at compile time.
   - `examples/list.sth` (`pop`) and `examples/refs.sth` (`pop`, `walk`): a recursive,
     boxed enum `List | Nil | Cons v i64 next ^List`, in both owning and `&!` mode.
     **Migrated and run this session; output matches the clause form byte-for-byte** (R7).
@@ -210,6 +229,54 @@ migrates in the same slice, so a deprecation window buys nothing.
   (`globals.rs:480-491`) retires with the mechanism (it is deleted, not "fixed"), and the
   parser clause tests (C2) are deleted with `parse_clauses`.
 
+## Corrections from phase 2 (implementation)
+
+- **C5 — R6's inventory was `.sth`-only; the Rust test suite carried the bulk of the
+  migration.** R6 grepped `examples/` and `lib/` and found five files. It did not
+  inventory test *sources*: 64 tests embedded clause-bodied programs, across
+  `tests/{phase0,phase1,phase3_locals,phase3_refs,phase4_combinators,phase4_generics,
+  phase4_quotations,phase4_slice11_inline,phase5_generic_enum_elimination,phase5_slice2,
+  phase7_slice3a}.rs` and `src/{lexer,parser,check/declarations,check/globals,
+  check/word_entry,check/drop_graph,ir/func_builder/calls,
+  ir/func_builder/control_flow}.rs`. 25 were deleted and 39 migrated or retitled. Each was classified by **test subject**, not by grep count: a
+  test whose subject *is* the clause path (the D8 clause-vs-locals disambiguation, its
+  misspelt-variant notes, the clause exhaustiveness pre-pass ordering, the
+  `inline`/quotation-parameter clause-body rejections) is deleted with the mechanism; a
+  test whose subject is something else and merely used a clause body as its vehicle
+  (N-way dispatch routing, nested-aggregate field sizing, the single-variant
+  no-compare path, `if` inside an arm, self-tail-call back-edges, linear-payload
+  disposal, generic monomorphization, cross-module generic resolution) is migrated to
+  eliminator form and keeps its assertions. Migrating first, against the *still-live*
+  clause path, is what proves each migration output-preserving before the deletion lands.
+- **C6 — the clause form's simultaneously-live payload references have no eliminator
+  equivalent.** A clause binding every field of one variant at once held two `&!` field
+  references live together (a named exemption from the disjointness rule, since one
+  clause's fields are statically disjoint). An arm cannot: `| c | c &!a c &!b` is
+  rejected with "cannot reborrow `c` while a reference derived from it is live". The
+  arm-authoring pattern is sequential (`c &!b 2 +! c &!a 1 +!`), which R7 already
+  states; what R7 does not say is that the *simultaneous* shape is gone. No in-tree
+  program needed it (the one test asserting it,
+  `reference_mode_clause_payload_bindings_are_simultaneously_live`, is migrated to the
+  sequential form under a name that claims only what it now proves), so this is a
+  recorded capability narrowing, not a blocker.
+- **C7 — a cross-module eliminator needs the variant names exported and selectively
+  imported.** The clause path's discriminator was the global `is_variant_name` (any
+  enum, any module), so `| Ok` worked on an imported generic with no export of `Ok`
+  itself. An arm tag resolves through `variant_name_is_visible`, which is own-module
+  or *selectively imported* only. `lib/result.sth` and `lib/option.sth` therefore
+  gained `export:` lines for their variants, and their importers name them in a
+  selective list (`import: r | Ok Err | "..." ;`). The dispatch call is the
+  unqualified `Result?` for a generic (keyed by surface name) but the qualified
+  `q::Sh?` for a concrete imported enum; that asymmetry is pre-existing and untouched.
+- **C8 — X12's stated rationale is now stale (not changed here).** `reject_variant_local`
+  rejects a parameter or binding name equal to a registered variant name, and its
+  documented reason was that it "would make the clause-vs-locals `|` disambiguation
+  ambiguous" -- a disambiguation that no longer exists. The rule still has an
+  independent justification (binding a variant name shadows the constructor call of
+  that name inside the body) and is left in force, reworded to that reason. Whether it
+  should survive at all is a rule question for its own slice, not a deletion this one
+  is licensed to make.
+
 ## Guards (tests the phase adds or must keep green)
 
 - **R5 golden.** `bool_print_word_prints_false_and_true` (or the migrated Slice 9 `bool`
@@ -225,6 +292,13 @@ migrates in the same slice, so a deprecation window buys nothing.
 - **R8 golden.** `forward_declared_generic_type_eliminates_after_the_matching_word`
   (`tests/phase6_slice3b.rs`), asserting `"42\n107\n"`, added **before**
   `tests/phase5_generic_enum_elimination.rs` is deleted.
+- **`TailWalk` eliminator-arm unit coverage.** `src/check/drop_graph.rs` gets a unit
+  test per this phase's new tail rule, mirroring the existing splice-recognition tests:
+  `tail_position_eliminator_arm_self_call_is_tail` (a self-tail-call inside a tagged arm
+  is recognized) and `tail_position_eliminator_arm_run_stops_at_untagged_operand` (the
+  reverse scan for the tagged-arm run halts at the first non-tagged operand, so a
+  self-tail-call sitting beyond it is not reached). `tail_mutual_recursion_through_
+  eliminator_arms_is_error` covers the new-rejection consequence noted above.
 - **Deletion is proved by absence, not by a new test.** The exit criterion "no
   `WordBody::Clauses` anywhere in `src/`" is checked mechanically (grep) and by the tree
   building green; there is no located "clause body rejected" diagnostic to test, because
@@ -260,6 +334,20 @@ same commit as the variant removal (they are unreachable the instant the variant
   delete `tests/phase5_generic_enum_elimination.rs`, the parser clause tests, and
   `direct_set_reaches_into_a_clause_body` (R8). At phase exit `grep -r 'WordBody::Clauses'
   src/` returns nothing and the tree is green.
+  Three items outside `src/` ride this commit, all falsified by the variant's removal:
+  - **`DESIGN.md`.** `:456`, `:512` and `:1032` declare clause-bodied definition "the
+    sole enum eliminator"; `:63` and `:510` name "a clause body" as a locals-extent
+    scope. All five are false once the form is gone; they must name the eliminator
+    (`~[ ( V ) .. ] Shape?`) and its arm bodies instead.
+  - **`tests/phase4_quotations.rs:1042`.** The M5 guard
+    `matches!(word.body, WordBody::Terms { .. })` becomes **irrefutable** the instant
+    `WordBody` drops to one variant, i.e. a silent placebo asserting nothing. R2's
+    inventory swept only `src/`, so it does not catch this. Re-point it at what the
+    guard actually means (a `vm_table.sth` handler contains no eliminator dispatch
+    call) and mutation-test the replacement by inlining a dispatch back into a handler.
+  - **Stale prose.** `tests/phase4_quotations.rs:996-997` and
+    `tests/phase3_locals.rs:456-459` still describe the migrated `vm.sth` bodies as
+    "clauses".
 
 ```json
 {
@@ -271,7 +359,7 @@ same commit as the variant removal (they are unreachable the instant the variant
     },
     {
       "phase": 2,
-      "focus": "Delete the clause path in one atomic commit (R1-R4, R8): remove parse_clauses/at_clause_start/parse_clause_body_terms and their call site and tests in src/parser.rs, delete the WordBody::Clauses variant and every production match arm it forces (resolve.rs, ir/func_builder/mod.rs, repl.rs, and the check/{combinators,drop_graph,globals,poly,audits,word_entry} sites), retire check_clause_word plus its five declarations.rs tests and clause_bodied_quotation_word_error plus its audits.rs guard, collapse ArmBinding, and delete tests/phase5_generic_enum_elimination.rs and the direct_set_reaches_into_a_clause_body unit test. Exit: grep -r 'WordBody::Clauses' src/ returns nothing and the tree is green.",
+      "focus": "Delete the clause path in one atomic commit (R1-R4, R8): remove parse_clauses/at_clause_start/parse_clause_body_terms and their call site and tests in src/parser.rs, delete the WordBody::Clauses variant and every production match arm it forces (resolve.rs, ir/func_builder/mod.rs, repl.rs, and the check/{combinators,drop_graph,globals,poly,audits,word_entry} sites), retire check_clause_word plus its five declarations.rs tests and clause_bodied_quotation_word_error plus its audits.rs guard, collapse ArmBinding, and delete tests/phase5_generic_enum_elimination.rs and the direct_set_reaches_into_a_clause_body unit test. Also outside src/: update DESIGN.md:63,456,510,512,1032 (they call clause-bodied definition the sole enum eliminator and name a clause body as a locals scope), re-point the now-irrefutable M5 guard at tests/phase4_quotations.rs:1042 (matches!(word.body, WordBody::Terms { .. }) asserts nothing once WordBody has one variant) and mutation-test its replacement, and fix the stale \"clause\" prose at tests/phase4_quotations.rs:996-997 and tests/phase3_locals.rs:456-459. Exit: grep -r 'WordBody::Clauses' src/ returns nothing and the tree is green.",
       "difficulty": "hard"
     }
   ]
