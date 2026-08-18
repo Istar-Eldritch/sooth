@@ -348,8 +348,11 @@ reads the registry from `poly.eliminators` (a precomputed `PolyCtx` field), but
   predicates the arm walk runs (`poly_is_copy`, `is_reference_slot`) must handle
   `Type::Variant` for a linear payload — `Type::Variant` has fallen through predicate
   matches in this codebase before. `eliminator_variant_escape_error` is reused so escape
-  is caught, but confirm the predicate behaves. An arm that **binds** a local is where
-  R3's poly `Scope::leave` analogue earns its keep (the arm-local must-consume check).
+  is caught, but confirm the predicate behaves. **Checked at phase 2 exit, and it does
+  not** — see "The `Type::Variant` caveat, answered" below; the guard is exit-row only
+  and the in-arm hole is a standing concrete-path bug this slice does not widen. An arm
+  that **binds** a local is where R3's poly `Scope::leave` analogue earns its keep (the
+  arm-local must-consume check).
 
 ### R3 abstract N-arm join (structural, rigid, borrow-unioning)
 
@@ -618,6 +621,63 @@ eliminator join (Phase 2), against **zero** lowering work. OQ1's ruling holds th
 slice on the cheaper side — the row-typed `if`/`call`/`times`/`tag` family is
 deferred to P7.S3b-follow, so no row-unification-against-an-abstract-stack is
 built here.
+
+## Phase 2 exit notes
+
+### The `Type::Variant` caveat, answered: the predicate does not behave
+
+R2 asked the implementer to confirm `poly_is_copy`/`is_reference_slot` handle a
+`Type::Variant` with a linear payload. They do not. `is_copy`
+(`src/check/builtins.rs`) matches `Type::Struct` and `Type::Enum` and ends `_ =>
+true`, so a narrowed variant reads as trivially `Copy` and
+`~[ ( A ) dup A> drop A> drop ]` runs the payload's destructor **twice**. Step 5b
+guards only the arm's *exit* row, which is what stops the variant leaving the call;
+it does nothing about a `dup` **inside** the arm that bound it.
+
+This reproduces on the **concrete** path at this slice's parent commit, so it is not
+a P7.S3b regression — the slice makes the same hole reachable from a second path
+without widening it. Recorded rather than fixed here: the fix is a `Type::Variant`
+arm on the predicate family (`is_copy`, `contains_reference`, the `drop`-import
+visibility check in `check_shuffle`), which belongs to whichever slice owns that
+family, and probing it needs a linear payload (a scalar-payload enum is `Copy`
+anyway and hides the bug).
+
+### Structure signals at phase exit: split deferred, deliberately
+
+CLAUDE.md asks for the split signals to be re-run at phase exit. `src/check/poly.rs`
+is 3348 source lines after this phase. Three of the five signals fire (a module doing
+several things, high- and low-level code mixed, ~30 diagnostic formatters that never
+call each other); two do not (no import divergence — the file has a single `use
+super::*`; no circular dependency forcing a split). The decision is to **defer**, for
+reasons that are about the split point rather than about the churn:
+
+- The layer-shaped split (`poly/diagnostics.rs`) is the one CLAUDE.md names as wrong
+  ("group by responsibility, not by technical layer") and has no precedent here:
+  `src/check.rs` carries 40 error formatters beside their checks, `terms.rs` 10,
+  `declarations.rs` 17, all interleaved. Moving poly's 30 out would invent an
+  organizing principle the rest of the checker does not use.
+- The responsibility-shaped split (`poly/eliminator.rs`) would cut a mutual recursion
+  — `poly_call_term` → `poly_eliminator_call` → `poly_walk` → `poly_call_term` — across
+  a file boundary to move ~430 lines, raising coupling to lower a line count.
+- The split point becomes real at **P7.S3b-follow**, which adds `call`/`branch`/`if`/
+  `times`/`tag` as a *second* quotation consumer. Two consumers plus their shared arm
+  machinery is a responsibility; one consumer is not. Re-run the signals there.
+
+### What the unblocked family can be written against today
+
+Two standing limits, both pre-existing and both verified at this slice's parent
+commit, bound the `unwrap_or`/`map_or` family this slice unblocks:
+
+- **A generic word cannot call another generic word** (`: f ( 'T: Copy -- 'T ) g ;`
+  → `` error: unknown word `g__m0` ``): poly words are not registered in `env`, and
+  `poly_call_term` has no `PolyCtx` to read `poly_env` from. So a combinator written
+  here composes **concrete and builtin callees only**.
+- **Field projection (`&w`) is rejected in every generic body**, so an arm
+  destructures (`Rect>`) rather than projects. This is why a monomorphic twin is
+  evidence for operand order and nothing else.
+
+Neither is this slice's to fix; both belong to whichever slice takes generic-to-generic
+dispatch.
 
 ## Acceptance report
 

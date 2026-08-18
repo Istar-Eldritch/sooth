@@ -107,43 +107,35 @@ generic-constructor calls (`Ok`/`Err`-style) admitted inside poly bodies, double
 by exit-time structural unification and instantiation-time reverse-mint unification
 (`docs/roadmap/P7/slice3a-spec.md`, `tests/phase7_slice3a.rs`).
 
-**P7.S3b — Quotations in a polymorphic body.** A quotation in a non-inline polymorphic
-body is rejected outright: `` error: a quotation in the polymorphic body of `w` is not yet
-supported `` (`src/check/poly.rs:505-513`). It fires for *any* quotation — a bare `~[ ]`,
-an `if`, a declared comparator parameter. The inline path is unaffected, because splicing
-into a concrete caller exposes that caller's full `Slot` stack.
-The brief (`docs/roadmap/P7/slice3b-brief.md`) carries worker-verified recon, and it
-corrects the rejection's own stated reason: the claim that there is "nowhere to hang the
-quotation marker" on a `Vec<PolyType>` stack is false, refuted by the parallel per-slot
-`lits` vector the same function already threads. The true constraints are narrower — the
-identity must not live in the *type* (two bodies with one effect are one `PolyType`), and
-the side state must be positional rather than name-keyed.
-**The forcing consumer is enum elimination**, because a Phase 6 eliminator's arms *are*
-quotation literals (`examples/eliminator.sth`). Move `area`'s body into a polymorphic
-signature and it hits this wall and nothing else, so **no polymorphic word can eliminate an
-enum at all**, which rules out the `unwrap_or`/`map_or`/`Result`-combinator family. This is
-testable today against a *concrete* enum in a polymorphic body, needing nothing from Phase
-6's in-flight work. P6.S3b widens the consumer to generic enums; P6.S4, by deleting
-`WordBody::Clauses`, makes this the only route to elimination that exists. Neither is an
-implementation dependency.
-A prior justification — that this is what forces every interesting polymorphic word
-`inline` — was probe-falsified and withdrawn: a polymorphic word that branches *via a
-callee* already compiles (`: less ( 'T: Copy Ord 'T -- bool ) > ;`), and no existing
-`inline` library word is freed by this slice (each is inline for a different reason — an
-abstract operand `u<` cannot consume, a row-typed quotation parameter, or `'N`-array
-indexing).
-Three check-side layers, and **zero lowering work** — probe-verified by stubbing the
-rejection open and running the result: the concrete lowering path already splices
-quotation bodies, grounds `'T` structurally per instantiation, and picks the correct
-per-type destructor for a linear `'T` dropped inside a spliced quotation. The layers are a
-`PolySlot { pt, quot }` representation change (~54 sites), a quotation-consuming word
-dispatch family (absent from `poly_call_term` entirely — the generated eliminators lead it,
-and it is the bulk), and an abstract **N-arm** join, which does not exist in any form today
-(`poly_walk` is a linear fold and `Moves::join` is never called from `poly.rs`).
+**P7.S3b — Quotations in a polymorphic body.** `[ done ]` A quotation literal may appear in a
+non-inline polymorphic body and be consumed there by a generated eliminator, so a polymorphic
+word can eliminate an enum: the arms *are* quotation literals (`examples/eliminator.sth`), and
+that is what the `unwrap_or`/`map_or`/`Result`-combinator family is built out of. The inline
+path is unaffected, because splicing into a concrete caller exposes that caller's full `Slot`
+stack.
+A quotation's identity rides its stack slot, so `dup`/`swap`/`drop` reorder arms with no
+special handling, while a *tagged* arm must still reach its eliminator by written adjacency —
+the same rule the concrete path applies, so a generic body is not the laxer of the two.
+Elimination is the only quotation consumer a generic body has: `call`/`branch`/`if`/`times`/
+`tag` each take a quotation as a row-typed parameter, which needs row unification against an
+abstract stack, and each is a located rejection naming **P7.S3b-follow**. A quotation may not
+be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
+route is its own located error.
+Two standing limits bound what can be written against this today: field projection (`&w`) is
+rejected in every generic body, so an arm destructures (`Rect>`) rather than projects; and a
+generic word cannot call another generic word (`unknown word g__m0`), so a combinator written
+here composes concrete and builtin callees only. P6.S3b widens the consumer to generic enums;
+P6.S4, by deleting `WordBody::Clauses`, makes this the only route to elimination that exists.
 **Exit:** a polymorphic word can eliminate an enum — quotation-literal arms in its body,
 dispatched to the generated eliminator — with the quotation's identity surviving a shuffle,
 arms merged over an abstract stack with type variables rigid and the borrow table unioned,
-and a materialised (non-spliced) quotation rejected with a located error.
+and a materialised (non-spliced) quotation rejected with a located error. Landed as a
+`PolySlot { pt, int_val, quot }` stack replacing the poly walk's `Vec<PolyType>` and the
+parallel `lits` vector beside it, a `QuotRef` index over a per-body literal interner on
+`PolyScope`, an `eliminator_registry` intercept in `poly_call_term` ahead of env dispatch
+(`poly_eliminator_call`), and an abstract N-arm join with a poly analogue of `Scope::leave`
+run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
+`tests/phase7_slice3b.rs`).
 
 **P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
 types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
