@@ -52,13 +52,11 @@ type: Popped rest List val i64 ;
   ] if ;
 
 : pop ( List -- Popped )
-  | Nil   Nil 0 Popped
-  | Cons  | v next | next ^> v Popped
-  ;
+  ~[ ( Nil )  drop Nil 0 Popped ]
+  ~[ ( Cons ) Cons> | v next | next ^> v Popped ]
+  List? ;
 
 : walk ( &!List -- )
-  | Nil
-  | Cons | v next |
-      v 1 +!
-      next &!^ walk
-  ;
+  ~[ ( &!Nil ) drop ]
+  ~[ ( &!Cons ) | c | c &!v 1 +! c &!next &!^ walk ]
+  List? ;

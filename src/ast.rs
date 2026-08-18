@@ -821,20 +821,38 @@ pub fn bool_enum_decl() -> EnumDecl {
 /// primitive `str` row -- reached at call sites through 8a's
 /// `builtin_overloads` dispatch, not a checker builtin row.
 pub fn bool_print_word_def() -> WordDef {
-    fn clause(variant: &str, text: &str) -> Clause {
-        Clause {
-            variant: variant.to_string(),
-            locals: Vec::new(),
-            body: vec![
-                Term {
-                    kind: TermKind::StrLit(text.to_string()),
+    fn arm(variant: &str, text: &str) -> Term {
+        Term {
+            kind: TermKind::Quotation(
+                vec![
+                    Term {
+                        kind: TermKind::Call("drop".to_string()),
+                        span: Span::default(),
+                    },
+                    Term {
+                        kind: TermKind::StrLit(text.to_string()),
+                        span: Span::default(),
+                    },
+                    Term {
+                        kind: TermKind::Call(".".to_string()),
+                        span: Span::default(),
+                    },
+                ],
+                true,
+                Some(QuotAnnot {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                    row_in: None,
+                    row_out: None,
+                    ty_var_names: Vec::new(),
+                    row_var_names: Vec::new(),
                     span: Span::default(),
-                },
-                Term {
-                    kind: TermKind::Call(".".to_string()),
-                    span: Span::default(),
-                },
-            ],
+                    variant_tag: Some(VariantTag {
+                        name: variant.to_string(),
+                        mode: VariantTagMode::Owning,
+                    }),
+                }),
+            ),
             span: Span::default(),
         }
     }
@@ -847,7 +865,16 @@ pub fn bool_print_word_def() -> WordDef {
             }],
             outputs: Vec::new(),
         },
-        body: WordBody::Clauses(vec![clause("False", "false\n"), clause("True", "true\n")]),
+        body: WordBody::Terms {
+            terms: vec![
+                arm("False", "false\n"),
+                arm("True", "true\n"),
+                Term {
+                    kind: TermKind::Call("bool?".to_string()),
+                    span: Span::default(),
+                },
+            ],
+        },
         poly: None,
         declares_inline: false,
         module: 0,

@@ -20,9 +20,9 @@ type: Summed rest List total i64 ;
   ] if ;
 
 : pop ( List -- Popped )
-| Nil   Nil 0 Popped
-| Cons  | v next | next ^> v Popped
-;
+  ~[ ( Nil )  drop Nil 0 Popped ]
+  ~[ ( Cons ) Cons> | v next | next ^> v Popped ]
+  List? ;
 
 : sum-first ( List i64 i64 -- Summed )
   | l k acc |

@@ -225,6 +225,32 @@ impl<'a> TailWalk<'a> {
         let before = &terms[..terms.len() - 1];
         if let TermKind::Call(name) = &last.kind {
             out.push(TailHit::Name(name.as_str()));
+            // Phase 6 slice 4: an eliminator dispatch call (`Shape?`,
+            // `Op?`, ...) splices in place exactly like `call`/`branch` does
+            // (`check_eliminator_call` runs the same body-in-place-of-call
+            // semantics), so a tail call inside one of its arms is the
+            // caller's tail call too. The run of tagged quotation-literal
+            // arms directly preceding the call is the same run
+            // `check_eliminator_call` collects (stops at the first operand
+            // that isn't a tagged quotation literal); recognized by that
+            // shape alone; this is not a name check, since a dispatch name is
+            // minted per enum and unknown here.
+            let mut arm_bodies: Vec<&[Term]> = Vec::new();
+            for term in before.iter().rev() {
+                let TermKind::Quotation(body, _, Some(annot)) = &term.kind else {
+                    break;
+                };
+                if annot.variant_tag.is_none() {
+                    break;
+                }
+                arm_bodies.push(body);
+            }
+            if !arm_bodies.is_empty() {
+                for body in arm_bodies {
+                    self.walk(body, binds, out);
+                }
+                return;
+            }
             // Which of the callee's argument slots inherit this tail
             // position: `call`'s single quotation operand, `branch`'s two,
             // or an always-spliced callee's tail-`call`ed parameter slots.
