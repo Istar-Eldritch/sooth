@@ -1,9 +1,17 @@
 # Phase 6 Slice 5: nested tag paths (brief)
 
+**Status: deferred.** The mechanism is sound (recon below, and confirmed again in spec
+review) but the entire payoff is cosmetic, while every viable implementation placement
+adds a first-of-its-kind mechanism (an AST-rewrite pass, or check-time synthesis with no
+current home, or a check-validates/pass-rewrites split) to buy it. Not worth building for
+one consumer. Revisit only if a second consumer motivates the rewrite-pass mechanism on
+its own merits. See `docs/roadmap/P6-enum-elimination.md`'s P6.S5 entry for the ruling; the
+spec that was drafted against this brief has been removed rather than kept stale.
+
 An eliminator arm's tag names one variant of the scrutinee's enum. When that variant's
 payload is itself an enum, reaching the inner variant costs a second, hand-written
 eliminator call inside the arm body. This slice lets one arm tag name a path through
-both levels — `( Some[Circle] )` — and desugars it to exactly the nested call a program
+both levels — `( Some[v Circle] )` — and desugars it to exactly the nested call a program
 writes by hand today.
 
 This is surface sugar. It adds no checker mechanism, no lowering, and no new rule about
@@ -11,8 +19,8 @@ modes; every guarantee it produces is one the nested form already produces.
 
 ```text
 : describe ( Wrapped -- i64 )
-  ~[ ( Has[Circle] ) &r @ swap drop dup * 3 * ]
-  ~[ ( Has[Rect] )   &w @ swap &h @ swap drop * ]
+  ~[ ( Has[v Circle] ) &r @ swap drop dup * 3 * ]
+  ~[ ( Has[v Rect] )   &w @ swap &h @ swap drop * ]
   ~[ ( Empty )       drop 0 ]
   Wrapped?
 ;
@@ -69,7 +77,7 @@ records them.
    instantiated-variant spelling is not reachable from the surface.** An instantiated
    variant's name *is* mangled with brackets — `instantiate_enum` (`src/ast.rs:713`)
    builds `Ok[i64 str]` via `type_instantiation_name(&variant.name, args, regs)` — which
-   is what makes `( Some[Circle] )` look ambiguous at first read. It is not, because that
+   is what makes `( Some[v Circle] )` look ambiguous at first read. It is not, because that
    spelling is internal: it keys the generated-constructor `Sig` and the lowering-side
    variant word map, and no surface tag position ever admits it. Slice 3b's rule is that
    generic elimination is spelled with *bare* tags and the instantiation comes from the
@@ -86,7 +94,7 @@ records them.
    `check_eliminator_call`'s dispatch rule. Recon 1 is why: the target is already green.
 
 2. **Sibling arms sharing an outer tag are grouped into one synthesized outer arm.**
-   `( Has[Circle] )` and `( Has[Rect] )` are two surface arms but one `Has` arm of
+   `( Has[v Circle] )` and `( Has[v Rect] )` are two surface arms but one `Has` arm of
    `Wrapped?`, whose body is a `Shape?` call over the projected payload carrying both
    bodies as its arms. Grouping is by outer tag, and the group's arms keep their written
    order for reading; routing is by name at both levels, so order is not semantic (the
@@ -97,11 +105,11 @@ records them.
 3. **Exhaustiveness is enforced at every level, by the existing checks.** The synthesized
    outer call still requires an arm for every variant of the scrutinee's enum; each
    synthesized inner call still requires an arm for every variant of the payload's enum.
-   A partially-nested group (`Has[Circle]` present, `Has[Rect]` absent) is a missing-arm
+   A partially-nested group (`Has[v Circle]` present, `Has[v Rect]` absent) is a missing-arm
    error from the inner call, with no new check written.
 
 4. **Mixing a plain outer arm with a nested group for the same outer variant is an
-   error.** `( Has )` and `( Has[Circle] )` in one call is a duplicated `Has` arm, which
+   error.** `( Has )` and `( Has[v Circle] )` in one call is a duplicated `Has` arm, which
    Slice 3's duplication rule already names; the spec states it rather than leaving the
    grouping pass to silently pick one.
 
@@ -116,6 +124,13 @@ records them.
    own declared type** (do not route on it, hand the whole value to the arm body):
    `( Both[a Circle b Shape] )` routes on `a` and leaves `b` whole. A non-enum field can
    only take the type form (`( Tagged[n i64 s Circle] )`).
+
+   **The field name is always written, even for a single-field variant:**
+   `( Some[v Circle] )`, never `( Some[Circle] )`. Reason: fieldless / tuple-style
+   variants may be added later, and an elision rule that let a single-field variant drop
+   its field name would become a trap the moment a second field appears. Every bracket
+   segment is therefore a field name followed by a selector, with no exceptions;
+   downstream sections reference this rule rather than re-arguing it.
 
    This kills the inference problem: no rule ever has to guess which field a bare
    `( Both[Circle] )` meant, and no heuristic ("descend into the only enum-typed field")
@@ -153,7 +168,7 @@ records them.
 
 ## Open questions for the spec
 
-- **OQ1 — settled: the separator is the bracket, `( Some[Circle] )`** (recon 6 plus
+- **OQ1 — settled: the separator is the bracket, `( Some[v Circle] )`** (recon 6 plus
   decision 7). Retained here only as a note of what the spec must still *test*: a generic
   enum whose payload is itself an enum (`Option[Shape]`), which is the case that would
   expose a path tag accidentally matching a mangled name. `( Some Circle )`
@@ -221,7 +236,7 @@ errors for a missing, duplicated, unknown, or wrong-enum field segment.
 ## Ready to spec?
 
 **Yes.** The syntax question is settled (recon 6, decision 7): brackets are free at tag
-position because a tag never denotes an instantiation, so `( Some[Circle] )` stands and
+position because a tag never denotes an instantiation, so `( Some[v Circle] )` stands and
 needs no exotic separator. Field selection is settled too (decision 6): every field named
 exactly once, each either routed on by variant or left whole by naming its type.
 

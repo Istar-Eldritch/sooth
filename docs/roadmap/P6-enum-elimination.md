@@ -132,30 +132,24 @@ because a clause body cannot be spliced by the inliner), and `ArmBinding`, whose
 `Decompose` case has the clause path as its sole caller.
 **Exit:** the clause word body no longer parses; the tree builds green without it.
 
-**P6.S5 — Phase 6 Slice 5 — nested tag paths.** An arm tag may name a path through nested
-enums, `( Some[Circle] )`, desugaring at parse/check time to one eliminator call nested
-inside another's arm body -- `Maybe?`'s `Some` arm containing a `Shape?` over the
-unwrapped payload, which is exactly what a hand-written program does today with no new
-syntax (confirmed by direct probe, both owning mode via `Some>`'s whole destructure and
-reference mode via `&v`/`&!v`, then `Shape?` over the projected field). This slice is
-therefore surface sugar only: no new checker mechanism and no new mode-interaction rule.
-Mode is inherited, not decided by this slice -- an outer `&`/`&!` scrutinee already forces
-the nested field to reach the inner call as a reference (there is no owning route out of
-a borrowed parent, the same as any other field projection), so the desugar always nests
-the inner call at the mode the outer projection produced. Exhaustiveness holds at every
-level the desugar produces: the outer eliminator still requires all of `Maybe`'s arms, the
-inner one still requires all of `Shape`'s. The bracket reuses generic-instantiation syntax
-(`Result[i64 i64]`) rather than introducing a new bracket meaning; `( Some Circle )`
-(space-separated) stays illegal since it already means two stack inputs under the
-existing elision rule. A multi-field variant names every field, reading like the `type:`
-declaration it matches -- `( Both[a Circle b Rect] )` -- where each segment is either a
-variant of that field's enum (route on it) or that field's own type (leave it whole),
-so no rule ever guesses which field a path descends through. Guard/literal dispatch (`cond`, matching on a value rather than a
-variant tag) is explicitly out of scope: it has no exhaustiveness proof and stays a
-separate, honestly-unchecked construct rather than an arm form here.
-**Exit:** a nested tag path type-checks and lowers to nested eliminator calls; a program
-matching two levels of enum nesting reads as one `match`-shaped word body, not two nested
-word bodies.
+**P6.S5 — Phase 6 Slice 5 — nested tag paths.** `[ deferred ]` An arm tag would name a path
+through nested enums, `( Some[v Circle] )`, desugaring to one eliminator call nested
+inside another's arm body -- exactly what a hand-written program already does today, by
+probe, in both owning and reference mode, with the current eliminator and no compiler
+change. **Deferred, not planned:** the entire payoff is cosmetic (an arm reads as one line
+instead of a nested call the checker already accepts) while the honest cost is not --
+review round 1 forced a choice between a new AST-rewrite pass run before `check`, or
+check-time synthesis with no home in `check_eliminator_call`'s current signature, or a
+split where check validates the path form and a separate pass rewrites it; every option
+adds a first-of-its-kind mechanism to buy pure syntax sugar, the kind of complexity
+CLAUDE.md's growth rules ask to notice before building, not after. See
+`docs/roadmap/P6/slice5-brief.md` for the settled syntax (field name always required, since
+a fieldless/tuple variant form may exist later and single-field elision would trap it) and
+for the full recon. Revisit only if a second consumer motivates the rewrite-pass mechanism
+itself; a rewrite pass justified by one cosmetic slice alone is not worth building.
+**Exit (if revived):** a nested tag path type-checks and lowers to nested eliminator calls;
+a program matching two levels of enum nesting reads as one `match`-shaped word body, not
+two nested word bodies.
 
 **Exit:** enum elimination is a term, matched by variant name, with the clause-style word
 body deleted.
