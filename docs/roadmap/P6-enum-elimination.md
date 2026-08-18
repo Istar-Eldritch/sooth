@@ -102,9 +102,33 @@ declaration's variants leaves every call site correct. Two goldens
 (`examples/eliminator.sth`, `examples/eliminator_ref.sth`) cover owning- and
 reference-mode dispatch.
 
+**P6.S3b — Phase 6 Slice 3b — check-time arm-tag resolution.** An arm's `( Ok )` tag is
+resolved to a concrete `Type::Variant` by the *parser*, against the concrete enum
+registry, which makes the eliminator unable to eliminate a **generic** enum at all: a bare
+tag carries no type arguments and a generic header contributes no concrete variant to
+scan. Tag *typing* moves to check time, against the `EnumId` the scrutinee operand already
+carries (the rule Slice 2 settled for accessors, which the parser is the last site to
+violate); tag *recognition* stays at parse time and becomes generic-aware by reusing
+`is_variant_name`, the predicate the clause path already uses for the same job. The
+surface syntax does not change: the generic case must read exactly like the concrete one.
+Required before Slice 4, because clause bodies are today the only working generic-enum
+elimination mechanism (`tests/phase5_generic_enum_elimination.rs`), so deleting them first
+would regress a shipped Phase 5 capability rather than migrate it. Also re-keys
+`eliminator_registry` by the instantiated spelling, since its `generic_surface_name`
+collision stops being dormant on the same commit. See
+`docs/roadmap/P6/slice3b-brief.md`.
+**Exit:** a generic enum is eliminable with bare tags, `Result[i64 i64]` and
+`Result[bool i64]` eliminate independently in one word, and every Slice 3 diagnostic
+still fires with unchanged wording (the mode-mismatch check included, since it is the one
+consumer of the annotation's parse-time input slot).
+
 **P6.S4 — Phase 6 Slice 4 — migration.** Every clause-dispatch site moves to the eliminator, and
-`WordBody::Clauses`/`parse_clauses` are deleted, including the `Bool` declaration
-injected in `src/ast.rs` and Phase 5's `Result`/`Option` consumers.
+`WordBody::Clauses`/`parse_clauses` are deleted, including the `Bool` print word declared
+in `src/ast.rs` and the generic-enum elimination witnesses in
+`tests/phase5_generic_enum_elimination.rs`. Deleting the clause path also retires
+`check_clause_word`, the `clause_bodied_quotation_word_error` rule (which exists only
+because a clause body cannot be spliced by the inliner), and `ArmBinding`, whose
+`Decompose` case has the clause path as its sole caller.
 **Exit:** the clause word body no longer parses; the tree builds green without it.
 
 **Exit:** enum elimination is a term, matched by variant name, with the clause-style word
