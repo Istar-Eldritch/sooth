@@ -66,7 +66,7 @@ fn generic_enum_eliminator_by_reference_reads_and_mutates_in_place() {
         "type: Cell 'T | Pair a 'T b 'T | One v 'T ;\n\
          : total ( &Cell[i64] -- i64 )\n  \
            ~[ ( &One )  &v @ ]\n  \
-           ~[ ( &Pair ) dup &a @ swap &b @ + ]\n  \
+           ~[ ( &Pair ) dup &a @ swap &b @ add ]\n  \
            Cell? ;\n\
          : bump ( &!Cell[i64] -- )\n  \
            ~[ ( &!One )  &!v 1 +! ]\n  \

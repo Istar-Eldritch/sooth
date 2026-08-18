@@ -37,7 +37,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 /// literal's body, with no consuming parameter present at all.
 #[test]
 fn annotated_literal_body_mismatch_diagnostic() {
-    let src = ": w ( -- ) [ ( i64 -- i64 ) dup 10 < ] drop ;\n";
+    let src = ": w ( -- ) [ ( i64 -- i64 ) dup 10 lt ] drop ;\n";
     let err = build_check_error("phase6_slice1_body_mismatch", src);
     assert_eq!(
         err,
@@ -68,7 +68,7 @@ fn annotated_literal_parameter_mismatch_diagnostic() {
 fn annotated_literal_agreeing_builds() {
     let src = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n\
         : main ( -- )\n\
-        \x20 [ ( i64 -- i64 bool ) dup 10 < ] drop\n\
+        \x20 [ ( i64 -- i64 bool ) dup 10 lt ] drop\n\
         \x20 true ~[ ( bool -- bool ) dup drop ] on . ;\n";
     let (stdout, code) = run_src("phase6_slice1_agreeing", src);
     assert_eq!(stdout, "true\n");

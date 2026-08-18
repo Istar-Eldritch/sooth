@@ -74,8 +74,8 @@ fn poly_word_eliminates_a_concrete_enum_runs() {
     let src = format!(
         "{SHAPE}\
          : area_and_keep ( 'T Shape -- 'T )\n\
-           ~[ ( Rect )   Rect> * drop ]\n\
-           ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
+           ~[ ( Rect )   Rect> mul drop ]\n\
+           ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
            Shape? ;\n\
          : main ( -- )\n\
            1 5 Circle area_and_keep .\n\
@@ -102,8 +102,8 @@ fn poly_eliminator_carries_a_type_variable_across_arms_at_two_instantiations() {
     let src = format!(
         "{SHAPE}\
          : pick ( 'T Shape -- 'T )\n\
-           ~[ ( Rect )   Rect> * drop ]\n\
-           ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
+           ~[ ( Rect )   Rect> mul drop ]\n\
+           ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
            Shape? ;\n\
          : main ( -- )\n\
            1 5 Circle pick .\n\
@@ -127,16 +127,16 @@ fn poly_body_tagged_arm_not_adjacent_to_its_eliminator_is_error() {
     let poly = format!(
         "{SHAPE}\
          : pick ( 'T Shape -- 'T )\n\
-           ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
-           ~[ ( Rect )   Rect> * drop ]\n\
+           ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
+           ~[ ( Rect )   Rect> mul drop ]\n\
            swap Shape? ;\n\
          : main ( -- ) ;\n"
     );
     let concrete = format!(
         "{SHAPE}\
          : pick ( Shape -- i64 )\n\
-           ~[ ( Circle ) Circle> dup * 3 * ]\n\
-           ~[ ( Rect )   Rect> * ]\n\
+           ~[ ( Circle ) Circle> dup mul 3 mul ]\n\
+           ~[ ( Rect )   Rect> mul ]\n\
            swap Shape? ;\n\
          : main ( -- ) ;\n"
     );
@@ -486,11 +486,11 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
         "{ctor}"
     );
     let arith = check_err(
-        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] + drop ;\n\
+        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] add drop ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
-        arith.contains("`+` is not permitted on a quotation literal in `bad`"),
+        arith.contains("`add` is not permitted on a quotation literal in `bad`"),
         "{arith}"
     );
     // The marker one slot down is an operand of a *binary* operator just as
@@ -499,11 +499,11 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     // whose concrete suffix stops at the marker and reports `+` as
     // underflowing a stack that is not actually short.
     let deep = check_err(
-        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] swap + drop ;\n\
+        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] swap add drop ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
-        deep.contains("`+` is not permitted on a quotation literal in `bad`"),
+        deep.contains("`add` is not permitted on a quotation literal in `bad`"),
         "{deep}"
     );
     assert!(!deep.contains("needs 2 values"), "{deep}");
@@ -556,8 +556,8 @@ fn poly_eliminator_ordinary_bracket_arm_is_error() {
     let src = format!(
         "{SHAPE}\
          : bad ( 'T Shape -- 'T )\n\
-           [ ( Rect )   Rect> * drop ]\n\
-           [ ( Circle ) Circle> dup * 3 * drop ]\n\
+           [ ( Rect )   Rect> mul drop ]\n\
+           [ ( Circle ) Circle> dup mul 3 mul drop ]\n\
            Shape? ;\n\
          : main ( -- ) ;\n"
     );

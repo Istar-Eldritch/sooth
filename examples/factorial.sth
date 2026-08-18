@@ -1,8 +1,8 @@
 : factorial ( i64 -- i64 )
-  dup 0 = ~[
+  dup 0 eq ~[
     drop 1
   ] ~[
-    dup 1 - factorial *
+    dup 1 sub factorial mul
   ] if ;
 
 : main ( -- )

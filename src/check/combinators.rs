@@ -808,7 +808,7 @@ mod tests {
         // disjunct to `is_combinator` flips `apply` to `true` and this must fail.
         let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
                    : apply-inline inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-                   : plain ( i64 -- i64 ) 1 + ;\n";
+                   : plain ( i64 -- i64 ) 1 add ;\n";
         let tokens = lex(src).unwrap();
         let module = parse(&tokens).unwrap();
         let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
@@ -868,7 +868,7 @@ mod tests {
     /// back-edge, so it is finite rather than a splice-forever cycle.
     #[test]
     fn check_inline_self_nontail_cycle_is_error() {
-        let src = ": loopy inline ( i64 -- i64 ) 1 + loopy 2 * ;";
+        let src = ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         let err = check(&mut module).unwrap_err();
@@ -877,7 +877,7 @@ mod tests {
             "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
         );
 
-        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;";
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 gt ~[ 1 sub down ] ~[ ] if ;";
         let tokens = lex(tail_src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)

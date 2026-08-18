@@ -80,14 +80,15 @@ pub(crate) fn is_prelude_word_name(name: &str) -> bool {
 /// though they are no longer table rows. They are `lib/` words now, reached by
 /// bare name from every module, so mangling one per module would bind every
 /// use inside a module to that module's own spelling and leave every other
-/// module's bare `=` unresolvable. The `u`-prefixed primitives that took over
+/// module's bare `eq` unresolvable. The `u`-prefixed primitives that took over
 /// their rows are listed beside them.
 fn is_operator_dispatch_name(name: &str) -> bool {
     matches!(
         name,
-        "+" | "-"
-            | "*"
-            | "/"
+        "add"
+            | "sub"
+            | "mul"
+            | "div"
             | "mod"
             | "and"
             | "or"
@@ -95,18 +96,18 @@ fn is_operator_dispatch_name(name: &str) -> bool {
             | "not"
             | "shl"
             | "shr"
-            | "="
-            | "<"
-            | ">"
-            | "<="
-            | ">="
-            | "<>"
-            | "u="
-            | "u<"
-            | "u>"
-            | "u<="
-            | "u>="
-            | "u<>"
+            | "eq"
+            | "lt"
+            | "gt"
+            | "lte"
+            | "gte"
+            | "ne"
+            | "ueq"
+            | "ult"
+            | "ugt"
+            | "ulte"
+            | "ugte"
+            | "une"
             | "max"
             | "max-total"
             | "."
@@ -461,7 +462,7 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     // the bare name). Its decl must therefore stay bare too, or that lookup
     // would miss it and fall through to the builtin, rejecting struct operands.
     // A genuine multi-module closure keeps mangling operator decls: a qualified
-    // `v::+` *is* rewritten to `+__m1` (a cross-module use names one module's
+    // `v::add` *is* rewritten to `add__m1` (a cross-module use names one module's
     // overload directly), so the decl it targets must carry the same mangled
     // name. An operator symbol never collides with a libc name (`qbe_name`
     // escapes `+` to `.2b.`), so leaving it bare here reintroduces no hijack.
@@ -877,7 +878,7 @@ mod tests {
     #[test]
     fn eliminator_call_site_mangles_to_match_the_enum_based_key() {
         let tokens = lex("type: Shape | Circle r i64 | Rect w i64 h i64 ;\n\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
@@ -982,8 +983,8 @@ mod tests {
     fn word_named_for_another_kinds_generated_suffix_stays_a_word() {
         let tokens = lex("type: P x i64 ;\n\
              type: E | A y i64 ;\n\
-             : P? ( i64 -- bool ) 0 > ;\n\
-             : E> ( i64 -- bool ) 0 > ;\n\
+             : P? ( i64 -- bool ) 0 gt ;\n\
+             : E> ( i64 -- bool ) 0 gt ;\n\
              : main ( -- ) 3 P? drop 3 E> drop 1 P P> drop E? ;\n")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();

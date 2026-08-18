@@ -9,8 +9,8 @@ type: Shape
 ;
 
 : area ( Shape -- i64 )
-  ~[ ( Rect )   &w @ swap &h @ swap drop * ]
-  ~[ ( Circle ) &r @ swap drop dup * 3 * ]
+  ~[ ( Rect )   &w @ swap &h @ swap drop mul ]
+  ~[ ( Circle ) &r @ swap drop dup mul 3 mul ]
   Shape? ;
 
 : main ( -- )

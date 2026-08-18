@@ -807,7 +807,7 @@ pub(super) fn poly_call_term(
     }
     // Comparisons: on a bare variable they need `Ord` (X8); on two concrete
     // operands they delegate to the ordinary operator check below.
-    if matches!(name, "=" | "<" | ">" | "<=" | ">=" | "<>") {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
         let n = stack.len();
         if n >= 2 {
             let a = stack[n - 2].pt.clone();
@@ -3525,7 +3525,7 @@ mod tests {
         // before `unify_poly_input` is what makes the R9 rejection reachable.
         let err = check_src(
             ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
-             : main ( -- ) [ + ] dupit drop drop ;\n",
+             : main ( -- ) [ add ] dupit drop drop ;\n",
         )
         .expect_err("a quotation passed to a polymorphic word should be rejected");
         assert!(
@@ -3655,8 +3655,8 @@ mod tests {
             check_src(&format!(
                 "{SHAPE}\
                  : pick ( 'T Shape -- 'T )\n\
-                   ~[ ( Rect )   Rect> * drop ]\n\
-                   ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
+                   ~[ ( Rect )   Rect> mul drop ]\n\
+                   ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
                    Shape? ;\n\
                  : main ( -- ) 1 5 Circle pick . ;\n"
             ))
@@ -3834,7 +3834,7 @@ mod tests {
     fn check_poly_ord_word_accepts_comparison_body() {
         // R7: a `'T: Ord` variable may be compared; the body and a numeric
         // instantiation both check.
-        check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+        check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) 3 4 less drop ;").unwrap();
     }
     #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
@@ -3885,7 +3885,7 @@ mod tests {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
         let err =
-            check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) true false less drop ;")
+            check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) true false less drop ;")
                 .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
@@ -3901,7 +3901,7 @@ mod tests {
     #[test]
     fn check_x8_compare_of_unbounded_variable_requires_ord() {
         // X8: `>` on an unbounded `'T` inside a body requires an `Ord` bound.
-        let err = check_src(": bad ( 'T 'T -- bool ) > ;\n: main ( -- ) ;").unwrap_err();
+        let err = check_src(": bad ( 'T 'T -- bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -4575,7 +4575,7 @@ mod tests {
         // is false at the representation the backend emits even though the
         // type system still refuses the borrow.
         let err = check_src(
-            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 + ] ap . ;\n",
+            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 add ] ap . ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -4886,7 +4886,7 @@ mod tests {
     fn poly_body_can_borrow_a_module_static() {
         check_src(
             "static: COUNT i64 = 0 ;\n\
-             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 + &!COUNT swap ! v ;\n\
+             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 add &!COUNT swap ! v ;\n\
              : main ( -- ) 5 bump drop ;",
         )
         .unwrap();

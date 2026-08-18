@@ -49,19 +49,19 @@ type: VmPop vm Vm val i64 ;
   | vm x |
   &vm &sp @ | i |
   &!vm &!stack i &!> x !
-  &vm &sp @ 1 + | newsp |
+  &vm &sp @ 1 add | newsp |
   vm &!sp newsp ! ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  &vm &sp @ 1 - | i |
+  &vm &sp @ 1 sub | i |
   &vm &stack i &> @ | x |
   vm &!sp i !
   x
   VmPop ;
 
 : bump-pc ( Vm -- Vm )
-  &pc @ 1 + | newpc |
+  &pc @ 1 add | newpc |
   &!pc newpc ! ;
 
 : fetch ( Vm -- Fetched )
@@ -83,7 +83,7 @@ type: VmPop vm Vm val i64 ;
     vm vm-pop VmPop>          \ vm b
     | b |
     vm-pop VmPop>              \ vm'' a
-    b +
+    b add
     vm-push
     bump-pc
     fetch Fetched> run
@@ -91,7 +91,7 @@ type: VmPop vm Vm val i64 ;
     vm vm-pop VmPop>
     | b |
     vm-pop VmPop>
-    b -
+    b sub
     vm-push
     bump-pc
     fetch Fetched> run
@@ -99,7 +99,7 @@ type: VmPop vm Vm val i64 ;
     vm vm-pop VmPop>
     | b |
     vm-pop VmPop>
-    b *
+    b mul
     vm-push
     bump-pc
     fetch Fetched> run
@@ -117,7 +117,7 @@ type: VmPop vm Vm val i64 ;
     fetch Fetched> run
 | Jz    | vm target |
     vm vm-pop VmPop>           \ vm' x
-    0 =
+    0 eq
     ~[
       &!pc target !
     ] ~[
@@ -165,11 +165,11 @@ type: VmPop vm Vm val i64 ;
 
 : main ( -- )
   build
-  0 >usize                       \ pc = 0
+  0 >usize                       \ pc eq 0
   0 8 fill
-  0 >usize                       \ sp = 0
+  0 >usize                       \ sp eq 0
   0 4 fill | mem |
-  &!mem 0 >usize &!> 100000 !    \ mem[0] = N = 100000, mem[1] = 0
+  &!mem 0 >usize &!> 100000 !    \ mem[0] eq N eq 100000, mem[1] eq 0
   mem
   Vm
   fetch Fetched> run . ;

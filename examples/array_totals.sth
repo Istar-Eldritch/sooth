@@ -19,5 +19,5 @@ import: c "../lib/combinators.sth" ;
   s ;
 
 : main ( -- )
-  scores 0 ~[ + ] c::fold .              \ 25, the total
-  scores ~[ 2 * ] c::map ~[ . ] c::each ; \ 6 14 2 18 10, each doubled
+  scores 0 ~[ add ] c::fold .              \ 25, the total
+  scores ~[ 2 mul ] c::map ~[ . ] c::each ; \ 6 14 2 18 10, each doubled

@@ -627,7 +627,7 @@ mod tests {
         // This is the check that is red when the gate is missing.
         let ir = lower_src(
             "type: Res n i64 ;\n\
-             : drop ( Res -- ) | r | r Res> 5000 + . ;\n\
+             : drop ( Res -- ) | r | r Res> 5000 add . ;\n\
              : mkres ( i64 -- Res ) | n | n Res ;\n\
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",
@@ -828,7 +828,7 @@ mod tests {
             .iter()
             .find(|f| f.name == "sooth_enum_drop_1")
             .expect("a destructor was synthesized for the linear enum");
-        assert_eq!(dtor.blocks.len(), 5, "2 compares + 3 variant blocks");
+        assert_eq!(dtor.blocks.len(), 5, "2 compares add 3 variant blocks");
         assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 2);
         let calls: Vec<&String> = instrs(dtor)
             .iter()

@@ -36,7 +36,7 @@ fn run(name: &str, src: &str) -> String {
 fn ordinary_literal_at_an_inline_parameter_is_located_error() {
     let err = check_error(
         ": takes-tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) [ 1 + ] takes-tilde . ;\n",
+         : main ( -- ) [ 1 add ] takes-tilde . ;\n",
     );
     assert_eq!(
         err,
@@ -52,7 +52,7 @@ fn ordinary_literal_at_an_inline_parameter_is_located_error() {
 fn inline_literal_at_an_ordinary_parameter_is_located_error() {
     let err = check_error(
         ": takes-ordinary ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) ~[ 1 + ] takes-ordinary . ;\n",
+         : main ( -- ) ~[ 1 add ] takes-ordinary . ;\n",
     );
     assert_eq!(
         err,
@@ -68,7 +68,7 @@ fn inline_literal_at_an_ordinary_parameter_is_located_error() {
 #[test]
 fn inline_literal_at_a_word_output_is_located_error() {
     let err = check_error(
-        ": mk ( -- [ i64 -- i64 ] ) ~[ 1 + ] ;\n\
+        ": mk ( -- [ i64 -- i64 ] ) ~[ 1 add ] ;\n\
          : main ( -- ) 5 mk call . ;\n",
     );
     assert_eq!(
@@ -103,11 +103,11 @@ fn inline_literal_at_an_array_store_is_located_error() {
 #[test]
 fn both_quotation_flavours_are_accepted_at_a_direct_call() {
     assert_eq!(
-        run("call-ordinary", ": main ( -- ) 5 [ 1 + ] call . ;\n"),
+        run("call-ordinary", ": main ( -- ) 5 [ 1 add ] call . ;\n"),
         "6\n"
     );
     assert_eq!(
-        run("call-inline", ": main ( -- ) 5 ~[ 1 + ] call . ;\n"),
+        run("call-inline", ": main ( -- ) 5 ~[ 1 add ] call . ;\n"),
         "6\n"
     );
 }

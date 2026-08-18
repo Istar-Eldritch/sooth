@@ -105,7 +105,7 @@ fn operator_i64_lowers_identically_after_table() {
     // in the emitted machine code but not in the IL; asserting the IL of `<`
     // would be asserting the library definition, not the operator lowering
     // this test exists to pin.
-    let src = ": ops ( i64 i64 -- i64 ) | a b | a b + a b - * a b u< drop ;";
+    let src = ": ops ( i64 i64 -- i64 ) | a b | a b add a b sub mul a b ult drop ;";
     let tokens = lexer::lex(src).unwrap();
     let mut module = parser::parse(&tokens).unwrap();
     check::check(&mut module).unwrap();

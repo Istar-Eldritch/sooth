@@ -182,7 +182,7 @@ fn usize_carried_across_a_repl_line_renders_unsigned_not_negative() {
     // The same wildcard degraded a carried `usize` to `I64`, so an
     // underflowed `usize` (whose `i64` bit pattern is negative) rendered
     // signed in the stack display instead of unsigned.
-    let out = run_session(&["\"h\" len \"hh\" len -"]);
+    let out = run_session(&["\"h\" len \"hh\" len sub"]);
     assert_eq!(out, "stack: 18446744073709551615\n");
 }
 
@@ -194,8 +194,8 @@ fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
     // as an `i64` but enormous as a `usize`, so `< "hh" len` (2) flips
     // between `true` (signed) and `false` (unsigned, correct); the same-line
     // form is the reference.
-    let same_line = run_session(&["\"h\" len \"hh\" len - \"hh\" len < ."]);
-    let carried = run_session(&["\"h\" len \"hh\" len -", "\"hh\" len < ."]);
+    let same_line = run_session(&["\"h\" len \"hh\" len sub \"hh\" len lt ."]);
+    let carried = run_session(&["\"h\" len \"hh\" len sub", "\"hh\" len lt ."]);
     assert_eq!(same_line, "false\nstack: (empty)\n");
     assert_eq!(
         carried,

@@ -66,9 +66,9 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 /// single count.
 const MY_TIMES: &str = ": my-times inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < ~[\n\
+     from to lt ~[\n\
        from f call\n\
-       from 1 + to f my-times\n\
+       from 1 add to f my-times\n\
      ] ~[\n\
      ] if ;\n";
 
@@ -81,7 +81,7 @@ fn my_times_runs_one_million_iterations_in_constant_stack() {
     // (`tests/phase4_combinators.rs:1403`) uses for the intrinsic. A
     // per-iteration `Call` (no TCO) would overflow this stack long before 1M
     // rounds.
-    let src = format!("{MY_TIMES}: main ( -- ) 0 0 1000000 ~[ drop 1 + ] my-times . ;\n");
+    let src = format!("{MY_TIMES}: main ( -- ) 0 0 1000000 ~[ drop 1 add ] my-times . ;\n");
     let binary = build_binary("my-times-1m", &src);
     let (code, out) = run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
@@ -137,8 +137,8 @@ fn my_times_carries_an_aggregate_without_aliasing() {
          0 0 Acc 0 5 ~[ | i | | acc |\n\
            acc Acc>\n\
            | x0 y0 |\n\
-           x0 i +\n\
-           y0 x0 i + +\n\
+           x0 i add\n\
+           y0 x0 i add add\n\
            Acc\n\
          ] my-times\n\
          Acc> . . ;\n"
@@ -162,7 +162,7 @@ fn my_times_nested_in_itself_produces_correct_output() {
     let src = format!(
         "{MY_TIMES}: main ( -- )\n\
          0 0 3 ~[ | i |\n\
-           0 0 2 ~[ | j | 1 + ] my-times +\n\
+           0 0 2 ~[ | j | 1 add ] my-times add\n\
          ] my-times . ;\n"
     );
     let (stdout, code) = run_src("my-times-nested", &src);
@@ -202,7 +202,7 @@ fn combinators_library_declares_exactly_seven_tildes() {
     assert_eq!(
         current_src.matches('~').count(),
         17,
-        "lib/combinators.sth's total `~` count (signatures + call sites) has drifted"
+        "lib/combinators.sth's total `~` count (signatures add call sites) has drifted"
     );
 }
 
@@ -216,7 +216,7 @@ fn while_is_unaffected_by_the_row_and_back_edge_rewrite() {
     // (`src/check.rs`), run end to end.
     let src = ": while inline ( 'a [ 'a -- 'a bool ] -- 'a )\n\
                | p | p call ~[ p while ] ~[ ] if ;\n\
-               : main ( -- ) 0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n";
+               : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n";
     let (stdout, code) = run_src("while-unaffected", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);

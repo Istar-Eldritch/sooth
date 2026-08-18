@@ -174,7 +174,7 @@ fn static_scalar_type_error(name: &str, ty_name: &str, span: Span) -> String {
 /// would otherwise silently truncate.
 fn static_u32_init_range_error(n: i64, span: Span) -> String {
     format!(
-        "error: static initializer {n} is out of range for `u32` at line {}, col {} (requires 0 <= N <= {})",
+        "error: static initializer {n} is out of range for `u32` at line {}, col {} (requires 0 lte N lte {})",
         span.line,
         span.col,
         u32::MAX
@@ -1293,7 +1293,7 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
 /// (the brief's OQ4).
 fn generic_nesting_depth_error(outer: &str, inner: &str, span: Span) -> String {
     format!(
-        "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth > 1) is not yet supported",
+        "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth gt 1) is not yet supported",
         span.line, span.col
     )
 }
@@ -2244,7 +2244,7 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 return Err(format!(
-                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 <= N <= {})",
+                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 lte N lte {})",
                     span.line, span.col, u32::MAX
                 ));
             }
@@ -2907,14 +2907,14 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N <= {})",
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N lte {})",
                     element.name(), n, n, span.line, span.col, u32::MAX
                 ))
             }
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N >= 1)",
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N gte 1)",
                     element.name(), n, n, span.line, span.col
                 ))
             }
@@ -3944,7 +3944,7 @@ mod tests {
         assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
         assert!(matches!(&gcd_body[1].kind, TermKind::Call(w) if w == "b"));
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
-        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
+        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "eq"));
         match &gcd_body[4].kind {
             TermKind::Quotation(then_branch, is_inline, _) => {
                 assert_eq!(then_branch.len(), 1);
@@ -4048,7 +4048,7 @@ mod tests {
     fn quotation_literal_parses_into_quotation_term() {
         // R1: `[ ... ]` parses into `TermKind::Quotation`, nested by
         // construction since the element list is `parse_terms`.
-        let module = parse_src(": w ( -- ) [ 1 + ] drop [ [ ] ] drop ;").unwrap();
+        let module = parse_src(": w ( -- ) [ 1 add ] drop [ [ ] ] drop ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 4);
         match &body[0].kind {
@@ -4056,7 +4056,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "+"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -4082,7 +4082,7 @@ mod tests {
     /// generic `other =>` "unexpected token" arm.
     #[test]
     fn tilde_quotation_literal_parses_into_an_inline_quotation_term() {
-        let module = parse_src(": w ( -- ) ~[ 1 + ] drop ~[ ~[ ] ] drop ;").unwrap();
+        let module = parse_src(": w ( -- ) ~[ 1 add ] drop ~[ ~[ ] ] drop ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 4);
         match &body[0].kind {
@@ -4090,7 +4090,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "+"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -4115,7 +4115,7 @@ mod tests {
     /// and both name tables empty.
     #[test]
     fn parse_quotation_annotation_full_form_ok() {
-        let module = parse_src(": w ( -- ) [ ( i64 -- bool ) dup 10 < ] drop ;").unwrap();
+        let module = parse_src(": w ( -- ) [ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3, "the body is read by the untouched reader");
@@ -4133,7 +4133,7 @@ mod tests {
     /// The `~[ ... ]` flavour reads the same annotation and keeps its flag.
     #[test]
     fn parse_quotation_annotation_inline_flavour_ok() {
-        let module = parse_src(": w ( -- ) ~[ ( i64 -- bool ) dup 10 < ] drop ;").unwrap();
+        let module = parse_src(": w ( -- ) ~[ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3);
@@ -4149,7 +4149,7 @@ mod tests {
     /// as before, carrying no annotation.
     #[test]
     fn parse_quotation_no_annotation_unchanged() {
-        let module = parse_src(": w ( -- ) [ dup 10 < ] drop ;").unwrap();
+        let module = parse_src(": w ( -- ) [ dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, _, annotation) => {
                 assert_eq!(terms.len(), 3);
@@ -4163,7 +4163,7 @@ mod tests {
     /// with no `--` is a located error rather than an elided effect.
     #[test]
     fn parse_quotation_annotation_missing_arrow_is_error() {
-        let err = parse_src(": w ( -- ) [ ( i64 bool ) dup 10 < ] drop ;").unwrap_err();
+        let err = parse_src(": w ( -- ) [ ( i64 bool ) dup 10 lt ] drop ;").unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
         assert!(err.contains("line 1, col 25"), "unexpected: {err}");
     }
@@ -4490,7 +4490,7 @@ mod tests {
 
     #[test]
     fn unterminated_quotation_is_located_parse_error() {
-        let result = parse_src(": w ( -- ) [ 1 +");
+        let result = parse_src(": w ( -- ) [ 1 add");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -4534,19 +4534,27 @@ mod tests {
         assert!(result.unwrap_err().contains("end"));
     }
 
-    /// Slice 10c: `>=` is spelled with a leading `>` but is a comparison, and
-    /// since R-P3-3 moved it out of `BUILTIN_TABLE` nothing claims it before
-    /// `check_operator`'s `>T` conversion prefix test. Without the carve-out
-    /// there it reads as a conversion to a type named `=`.
+    /// The retired surface spelling `>=` still lexes as an ordinary word
+    /// (nothing reserves it): it is spelled with a leading `>`, and
+    /// `conversion_target_name`'s hand-written carve-out (R8) keeps
+    /// `check_operator`'s `>T` conversion prefix test from claiming it.
+    /// Without that carve-out a bare `>=` reads as a conversion to a type
+    /// named `=`, reported as an unknown *type*; with it, `>=` falls through
+    /// to the ordinary word lookup and is reported as an unknown *word*
+    /// (`gte` is its bound replacement, R-P3-3/Decision 2).
     #[test]
     fn ge_is_not_read_as_a_type_conversion() {
         let module = parse_src(": w ( i64 i64 -- bool ) >= ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
-        crate::check::check(
+        let err = crate::check::check(
             &mut parse_src(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;").unwrap(),
         )
-        .expect("`>=` resolves to the library comparison word");
+        .unwrap_err();
+        assert!(
+            err.contains("unknown word `>=`"),
+            "the carve-out must route `>=` to the word lookup, not a type conversion: {err}"
+        );
     }
 
     /// Slice 10c (E-P3-2): `if` is an ordinary word now, so it opens nothing
@@ -4570,11 +4578,11 @@ mod tests {
 
     #[test]
     fn parse_line_bare_expression_is_expr() {
-        match parse_line_src("2 3 +").unwrap() {
+        match parse_line_src("2 3 add").unwrap() {
             Line::Expr(terms) => {
                 assert_eq!(terms.len(), 3);
                 assert!(matches!(terms[0].kind, TermKind::IntLit(2)));
-                assert!(matches!(&terms[2].kind, TermKind::Call(w) if w == "+"));
+                assert!(matches!(&terms[2].kind, TermKind::Call(w) if w == "add"));
             }
             other => panic!("expected Expr, got {other:?}"),
         }
@@ -4593,7 +4601,7 @@ mod tests {
 
     #[test]
     fn parse_line_colon_is_def() {
-        match parse_line_src(": sq ( i64 -- i64 ) dup * ;").unwrap() {
+        match parse_line_src(": sq ( i64 -- i64 ) dup mul ;").unwrap() {
             Line::Def(def) => assert_eq!(def.name, "sq"),
             other => panic!("expected Def, got {other:?}"),
         }
@@ -4601,7 +4609,7 @@ mod tests {
 
     #[test]
     fn parse_line_trailing_tokens_after_def_is_error() {
-        let result = parse_line_src(": sq ( i64 -- i64 ) dup * ; 5 sq");
+        let result = parse_line_src(": sq ( i64 -- i64 ) dup mul ; 5 sq");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("after `;`"), "unexpected message: {err}");
@@ -4609,7 +4617,7 @@ mod tests {
 
     #[test]
     fn parse_line_unterminated_def_is_error() {
-        let result = parse_line_src(": sq ( i64 -- i64 ) dup *");
+        let result = parse_line_src(": sq ( i64 -- i64 ) dup mul");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
@@ -5492,7 +5500,7 @@ mod tests {
         // clause-body locals (the `|` after `Rect` is not a variant).
         let module = parse_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * ;",
+             : area ( Shape -- f64 ) | Circle dup mul | Rect | w h | w h mul ;",
         )
         .unwrap();
         let area = module.words.iter().find(|w| w.name == "area").unwrap();
@@ -5510,7 +5518,7 @@ mod tests {
         // the first, so a later `|` not followed by a known variant is an
         // ordinary mid-body binding term rather than a clause boundary.
         let module = parse_src(
-            "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n             : area ( Shape -- f64 ) | Circle dup | r | r * | Rect | w h | w h * ;",
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n             : area ( Shape -- f64 ) | Circle dup | r | r mul | Rect | w h | w h mul ;",
         )
         .unwrap();
         let area = module.words.iter().find(|w| w.name == "area").unwrap();
@@ -5518,7 +5526,11 @@ mod tests {
         assert_eq!(clauses.len(), 2);
         assert_eq!(clauses[0].variant, "Circle");
         assert!(clauses[0].locals.is_empty());
-        assert_eq!(clauses[0].body.len(), 4, "expected dup, the bind, and r, *");
+        assert_eq!(
+            clauses[0].body.len(),
+            4,
+            "expected dup, the bind, and r, mul"
+        );
         assert!(
             matches!(clauses[0].body[1].kind, TermKind::Bind(ref names) if names == &["r".to_string()])
         );
@@ -5548,7 +5560,7 @@ mod tests {
         // entry-locals, not a clause.
         let module = parse_src(
             "type: Shape | Circle r f64 ;
-             : sq ( i64 -- i64 ) | n | n n * ;",
+             : sq ( i64 -- i64 ) | n | n n mul ;",
         )
         .unwrap();
         let sq = module.words.iter().find(|w| w.name == "sq").unwrap();
@@ -5630,7 +5642,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("[i64 0]"), "unexpected message: {err}");
-        assert!(err.contains(">= 1"), "unexpected message: {err}");
+        assert!(err.contains("gte 1"), "unexpected message: {err}");
     }
 
     #[test]
@@ -6163,7 +6175,7 @@ mod tests {
 
     #[test]
     fn parse_effect_without_global_clause_unchanged() {
-        let module = parse_src(": inc ( i64 -- i64 ) 1 + ;").unwrap();
+        let module = parse_src(": inc ( i64 -- i64 ) 1 add ;").unwrap();
         assert!(module.words[0].declared_globals.is_none());
         assert_eq!(module.words[0].effect.inputs.len(), 1);
         assert_eq!(module.words[0].effect.outputs.len(), 1);
@@ -6186,7 +6198,7 @@ mod tests {
     fn parse_monomorphic_word_carries_no_poly_sig() {
         // R2: an effect with no variable is unchanged — the polymorphic
         // representation is attached only when a variable is present.
-        let module = parse_src(": inc ( i64 -- i64 ) 1 + ;").unwrap();
+        let module = parse_src(": inc ( i64 -- i64 ) 1 add ;").unwrap();
         assert!(module.words[0].poly.is_none());
     }
 
@@ -6735,7 +6747,7 @@ mod tests {
     #[test]
     fn array_constructor_zero_count_is_parse_error() {
         let err = parse_src(": w ( -- ) [ i64 ; 0 ] drop ;").unwrap_err();
-        assert!(err.contains(">= 1"), "unexpected message: {err}");
+        assert!(err.contains("gte 1"), "unexpected message: {err}");
     }
 
     #[test]
@@ -6812,7 +6824,7 @@ mod tests {
         // The name slot is consumed first, so `inline` in *that* position is an
         // ordinary word name and the definition declares nothing. This is why
         // the keyword needs no global reservation.
-        let module = parse_src(": inline ( i64 -- i64 ) 1 + ;").unwrap();
+        let module = parse_src(": inline ( i64 -- i64 ) 1 add ;").unwrap();
         assert_eq!(module.words[0].name, "inline");
         assert!(!module.words[0].declares_inline);
     }

@@ -862,7 +862,7 @@ mod tests {
                 Instr::PtrOffset(dst, base, off)
                     if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
             )),
-            "expected a PtrOffset at payload_offset + field.offset: {:?}",
+            "expected a PtrOffset at payload_offset add field.offset: {:?}",
             b.cur_instrs
         );
         assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
@@ -912,7 +912,7 @@ mod tests {
                 Instr::PtrOffset(dst, base, off)
                     if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
             )),
-            "expected a PtrOffset at payload_offset + field.offset: {:?}",
+            "expected a PtrOffset at payload_offset add field.offset: {:?}",
             b.cur_instrs
         );
         assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
@@ -1341,7 +1341,7 @@ mod tests {
         let ir = lower_src(
             "type: Stats hp i64 mp i64 ;\n\
              type: Unit tag i64 stats Stats ;\n\
-             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ + . u drop ;",
+             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ add . u drop ;",
         );
         let w = &ir.funcs[0];
         let five = instrs(w)

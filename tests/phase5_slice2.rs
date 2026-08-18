@@ -56,7 +56,7 @@ fn result_constructs_monomorphizes_and_eliminates_both_arms() {
         "slice2-result-basic",
         "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
          : safe-add ( i64 i64 -- Result[i64 i64] )\n\
-           dup 0 < ~[ drop drop -1 Err ] ~[ + Ok ] if ;\n\
+           dup 0 lt ~[ drop drop -1 Err ] ~[ add Ok ] if ;\n\
          : to-int ( Result[i64 i64] -- i64 )\n\
          | Ok  |v| v\n\
          | Err |e| e ;\n\

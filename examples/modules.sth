@@ -2,12 +2,12 @@
 \ exported from `examples/modules_point.sth`, words exported from
 \ `examples/modules_ops.sth` (which itself imports the type file), and this
 \ entry file importing both and using them together — the type via a receiver-
-\ directed projection (`&x`), the words via their qualifier (`ops::add`/`len2`).
+\ directed projection (`&x`), the words via their qualifier (`ops::point-add`/`len2`).
 
 import: point | Point | "modules_point.sth" ;
-import: ops | len2 add | "modules_ops.sth" ;
+import: ops | len2 point-add | "modules_ops.sth" ;
 
 : main ( -- )
-  1 2 Point 3 4 Point add
+  1 2 Point 3 4 Point point-add
   &x @ .          \ 4
-  len2 . ;        \ 4*4 + 6*6 = 52
+  len2 . ;        \ 4*4 add 6*6 eq 52

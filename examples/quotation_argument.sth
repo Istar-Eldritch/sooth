@@ -12,6 +12,6 @@
 : run ( [ -- i64 ] -- i64 ) call ;
 
 : main ( -- )
-  [ 1 + ] 5 apply .
-  [ 2 * ] 20 apply2 .
+  [ 1 add ] 5 apply .
+  [ 2 mul ] 20 apply2 .
   [ 42 ] run . ;

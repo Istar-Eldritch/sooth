@@ -1399,7 +1399,7 @@ mod tests {
         // would collide with any other name whose own non-alphanumeric
         // characters also collapsed to one underscore.
         let il = emit_src(
-            ": shift-x ( i64 -- i64 ) | n | n 1 + ;
+            ": shift-x ( i64 -- i64 ) | n | n 1 add ;
             : main ( -- ) 5 shift-x . ;",
         );
         assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
@@ -1522,7 +1522,7 @@ mod tests {
 
     #[test]
     fn emit_square_contains_mul_and_ret() {
-        let il = emit_src(": sq ( i64 -- i64 ) | n | n n * ;");
+        let il = emit_src(": sq ( i64 -- i64 ) | n | n n mul ;");
         assert!(il.contains("mul"));
         assert!(il.contains("ret "));
     }
@@ -1814,7 +1814,7 @@ mod tests {
         // epilogue must widen it (`extuw`) before the fixed 8-byte `storel`
         // (R4/RK1). Slice 10c: the *primitive*, since `>` is a `lib/` word now
         // and this helper lowers a bare line with no word environment.
-        let il = emit_line("5 3 u>", 0);
+        let il = emit_line("5 3 ugt", 0);
         assert!(il.contains("=w csgtl"), "unexpected IL: {il}");
         assert!(il.contains("extuw"), "expected a w->l extension: {il}");
         assert!(il.contains("storel"), "expected a storel: {il}");
@@ -1822,7 +1822,7 @@ mod tests {
 
     #[test]
     fn emit_wrapper_signature_takes_stack_and_top() {
-        let il = emit_line("2 3 +", 0);
+        let il = emit_line("2 3 add", 0);
         assert!(
             il.contains("export function l $sooth_line_0(l %v0, l %v1)"),
             "unexpected signature: {il}"
@@ -1832,7 +1832,7 @@ mod tests {
     #[test]
     fn emit_line_wrapper_has_load_and_store() {
         // `+` from a carried depth of 2 loads the two slots and stores the result.
-        let il = emit_line("+", 2);
+        let il = emit_line("add", 2);
         assert!(il.contains("loadl "), "expected a load: {il}");
         assert!(il.contains("storel "), "expected a store: {il}");
     }
@@ -2490,7 +2490,7 @@ mod tests {
             emit_src("type: Shape | Circle r f64 | Rect w f64 h f64 ; : id ( Shape -- Shape ) ;");
         assert!(
             il.contains("export function :Shape $id(:Shape"),
-            "expected an aggregate param + return: {il}"
+            "expected an aggregate param add return: {il}"
         );
     }
 
@@ -2521,7 +2521,7 @@ mod tests {
         // This structural test verifies the loop IL (a header `phi` with a
         // back-edge predecessor, plus the back-edge `jmp`) is valid QBE text.
         let il = emit_src(
-            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;",
+            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;",
         );
         assert!(
             il.contains("phi"),
@@ -2537,7 +2537,7 @@ mod tests {
             .collect();
         assert!(
             jmp_targets.len() >= 2,
-            "expected at least two jmps (entry forward jump + back-edge): {il}"
+            "expected at least two jmps (entry forward jump add back-edge): {il}"
         );
         let target = jmp_targets[0];
         assert!(

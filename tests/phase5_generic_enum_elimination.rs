@@ -44,7 +44,7 @@ fn generic_enum_clause_elimination_runs() {
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
          : to-int ( Result[i64 i64] -- i64 )\n\
          | Ok   | v |  v\n\
-         | Err  | e |  e 100 +\n\
+         | Err  | e |  e 100 add\n\
          ;\n\
          : main ( -- )\n\
            42 Ok  to-int .\n\
@@ -65,7 +65,7 @@ fn generic_enum_elimination_type_declared_after_matching_word() {
         "gen-enum-elim-forward",
         ": to-int ( Result[i64 i64] -- i64 )\n\
          | Ok   | v |  v\n\
-         | Err  | e |  e 100 +\n\
+         | Err  | e |  e 100 add\n\
          ;\n\
          type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
          : main ( -- )\n\
@@ -88,7 +88,7 @@ fn two_generic_enum_instantiations_eliminate_independently() {
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
          : to-int ( Result[i64 i64] -- i64 )\n\
          | Ok   | v |  v\n\
-         | Err  | e |  e 100 +\n\
+         | Err  | e |  e 100 add\n\
          ;\n\
          : to-flag ( Result[bool bool] -- i64 )\n\
          | Ok   | b |  b drop  1\n\

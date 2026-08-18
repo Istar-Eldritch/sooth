@@ -816,7 +816,7 @@ mod tests {
         for (branch, callee, expected) in [(BOOL_Q, "Bool?", true), (BOOL_D, "Bool!?", false)] {
             let src = format!(
                 "{branch}: sum-to ( i64 i64 -- i64 )\n\
-                 | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] {callee} ;\n\
+                 | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] {callee} ;\n\
                  : main ( -- ) 0 10 sum-to . ;\n"
             );
             let tokens = lex(&src).unwrap();
@@ -865,7 +865,7 @@ mod tests {
         let resolve = |name: &str| name.to_string();
         let (func, _q, m, _) = lower_line(
             0,
-            &line_terms("+"),
+            &line_terms("add"),
             2,
             &[Type::I64, Type::I64],
             &env,
@@ -897,7 +897,7 @@ mod tests {
         let resolve = |name: &str| name.to_string();
         let (func, _q, m, _) = lower_line(
             0,
-            &line_terms("2 3 +"),
+            &line_terms("2 3 add"),
             0,
             &[],
             &env,
@@ -1059,7 +1059,7 @@ mod tests {
         let resolve = |name: &str| name.to_string();
         let (func, _q, m, out_bytes) = lower_line(
             0,
-            &line_terms("+"),
+            &line_terms("add"),
             2,
             &[Type::I64, Type::I64],
             &env,
@@ -1107,7 +1107,7 @@ mod tests {
         let u8_ty = Type::from_name("u8").unwrap();
         let (func, _q, _m, _) = lower_line(
             0,
-            &line_terms("1 >u8 +"),
+            &line_terms("1 >u8 add"),
             1,
             &[u8_ty],
             &env,

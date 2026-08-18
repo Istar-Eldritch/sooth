@@ -18,7 +18,7 @@ import: c "../lib/combinators.sth" ;
   s ;
 
 : main ( -- )
-  scores ~[ 4 > ] c::filter | n | | out | \ kept: 7 9 5, n = 3
+  scores ~[ 4 gt ] c::filter | n | | out | \ kept: 7 9 5, n eq 3
   n .
   out drop
-  0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ; \ fixpoint: 5
+  0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ; \ fixpoint: 5

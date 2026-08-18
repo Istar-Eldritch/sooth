@@ -20,18 +20,18 @@ type: Stack
   | s x |
   &s &top @ | i |
   &!s &!items i &!> x !   \ write in place, no whole-array rebuild
-  &s &top @ 1 + | newtop |
+  &s &top @ 1 add | newtop |
   s &!top newtop ! ;
 
 : pop ( Stack -- Stack i64 )
   | s |
-  &s &top @ 1 - | i |
+  &s &top @ 1 sub | i |
   &s &items i &> @ | v |  \ read without aliasing the array
   s &!top i ! v ;
 
 : peek ( Stack -- Stack i64 )
   | s |
-  &s &top @ 1 - | i |
+  &s &top @ 1 sub | i |
   &s &items i &> @ | v |
   s v ;
 

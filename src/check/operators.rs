@@ -53,7 +53,8 @@ pub(super) enum OpDispatch {
 /// latent. Slice 10c (R-P3-3) moves `>=` out of the table and into `lib/`,
 /// which exposes it: without this filter a bare `>=` is read as a conversion
 /// to a type named `=` and rejected with `` unknown type `=` `` instead of
-/// reaching the library word.
+/// falling through to the ordinary word lookup (`>=` itself retired with the
+/// operators-as-words rename, so that lookup now reports an unknown word).
 fn conversion_target_name(name: &str) -> Option<&str> {
     name.strip_prefix('>')
         .filter(|rest| !rest.is_empty() && *rest != "=")
@@ -83,9 +84,10 @@ pub(super) fn check_operator(
     // already treats as unary here).
     let is_operator = matches!(
         name,
-        "+" | "-"
-            | "*"
-            | "/"
+        "add"
+            | "sub"
+            | "mul"
+            | "div"
             | "mod"
             | "and"
             | "or"
@@ -93,12 +95,12 @@ pub(super) fn check_operator(
             | "not"
             | "shl"
             | "shr"
-            | "u="
-            | "u<"
-            | "u>"
-            | "u<="
-            | "u>="
-            | "u<>"
+            | "ueq"
+            | "ult"
+            | "ugt"
+            | "ulte"
+            | "ugte"
+            | "une"
             | "max"
             | "max-total"
             | "."
@@ -187,7 +189,7 @@ pub(super) fn check_operator(
     }
 
     match name {
-        "+" | "-" | "*" => {
+        "add" | "sub" | "mul" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -203,7 +205,7 @@ pub(super) fn check_operator(
             stack.truncate(n - 2);
             stack.push(Slot::computed(ty));
         }
-        "/" => {
+        "div" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -272,7 +274,7 @@ pub(super) fn check_operator(
             stack.truncate(n - 2);
             stack.push(Slot::computed(a.ty));
         }
-        "u=" | "u<" | "u>" | "u<=" | "u>=" | "u<>" => {
+        "ueq" | "ult" | "ugt" | "ulte" | "ugte" | "une" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -368,11 +370,11 @@ fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
 fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `/` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `div` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
             name, span.line, a, b, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: type mismatch: `/` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
+            "error: type mismatch: `div` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
         ),
     }
 }
@@ -537,8 +539,38 @@ mod tests {
     /// one relative to a spy-free program.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     #[test]
+    fn check_symbolic_plus_is_unknown_word() {
+        // Operators-as-words: `+` no longer aliases `add`. Restoring `"+"` to
+        // `BUILTIN_TABLE` (or to `is_operator`'s list) must make this fail.
+        let err = check_src(": w ( i64 i64 -- i64 ) + ;").unwrap_err();
+        assert!(
+            err.contains("unknown word `+`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_symbolic_comparison_is_unknown_word() {
+        // The retired `<` is gone from `lib/core.sth` too, not just the table.
+        let err = check_src(": w ( i64 i64 -- bool ) < ;").unwrap_err();
+        assert!(
+            err.contains("unknown word `<`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_add_word_dispatches_on_operand_type() {
+        check_src(": w ( -- i64 ) 1 2 add ;").unwrap();
+        check_src(": w ( -- f64 ) 1.0 2.0 add ;").unwrap();
+        let err = check_src(": w ( -- i64 ) 1 2.0 add ;").unwrap_err();
+        assert!(err.contains("`add`"), "unexpected message: {err}");
+        assert!(
+            err.contains("`i64`") && err.contains("`f64`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
     fn check_declared_output_type_mismatch_is_error() {
-        let src = ": w ( i64 -- bool ) 1 + ;";
+        let src = ": w ( i64 -- bool ) 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("type mismatch"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -551,14 +583,14 @@ mod tests {
     }
     #[test]
     fn check_arith_same_width_ok() {
-        check_src(": w ( -- i32 ) 1 >i32 2 >i32 + ;").unwrap();
+        check_src(": w ( -- i32 ) 1 >i32 2 >i32 add ;").unwrap();
     }
     #[test]
     fn check_arith_mixed_width_is_error() {
         // An `i32` and an `i64` fed to `+` names both differing types, via
         // the operand-pair-mismatch diagnostic specifically (not just any error
         // that happens to mention both type names).
-        let src = ": f ( -- i32 ) 1 >i32 5 + ;";
+        let src = ": f ( -- i32 ) 1 >i32 5 add ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -573,7 +605,7 @@ mod tests {
         // 10c: `<` is a `'T: Copy Ord` library word now, so the rejection is
         // the variable-conflict one rather than the builtin operand-pair one;
         // both operand types are still named.
-        let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
+        let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
@@ -585,7 +617,7 @@ mod tests {
     #[test]
     fn check_arith_mixed_int_float_is_error() {
         // X1: mixed int/float arithmetic names both operand types.
-        let src = ": f ( -- f64 ) 1 >i32 5.0 + ;";
+        let src = ": f ( -- f64 ) 1 >i32 5.0 add ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -599,7 +631,7 @@ mod tests {
         // X2: mixed float-width comparison names both operand types (slice
         // 10c: through the library `<`'s variable conflict, see
         // `check_cmp_mixed_sign_is_error`).
-        let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
+        let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
@@ -610,14 +642,14 @@ mod tests {
     }
     #[test]
     fn check_div_same_float_type_ok() {
-        check_src(": w ( -- f64 ) 1.0 2.0 / ;").unwrap();
+        check_src(": w ( -- f64 ) 1.0 2.0 div ;").unwrap();
     }
     #[test]
     fn check_div_on_ints_is_error() {
-        // X3: `/` requires floats; integer operands are a sharp error.
-        let src = ": w ( -- i64 ) 4 2 / ;";
+        // X3: `div` requires floats; integer operands are a sharp error.
+        let src = ": w ( -- i64 ) 4 2 div ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("`/`"), "unexpected message: {err}");
+        assert!(err.contains("`div`"), "unexpected message: {err}");
         assert!(err.contains("float"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
@@ -718,13 +750,13 @@ mod tests {
     }
     #[test]
     fn check_cmp_le_ge_ne_numeric_same_type_ok() {
-        check_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;").unwrap();
+        check_src(": w ( -- bool bool bool ) 1 2 lte 1 2 gte 1 2 ne ;").unwrap();
     }
     #[test]
     fn check_cmp_le_ge_ne_on_bool_is_error() {
         // Comparisons stay numeric-only: `bool` is never accepted, even
         // though it now is for `and`/`or`/`xor`.
-        let src = ": w ( -- bool ) true false <= ;";
+        let src = ": w ( -- bool ) true false lte ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -737,7 +769,7 @@ mod tests {
         // Slice 10c: D8's literal coercion covers the two size types only, so
         // a fresh `2` beside an `i32` is still a mismatch; the rejection is
         // now the library `<>`'s variable conflict.
-        let err = check_src(": w ( -- bool ) 1 >i32 2 <> ;").unwrap_err();
+        let err = check_src(": w ( -- bool ) 1 >i32 2 ne ;").unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
             "unexpected message: {err}"
@@ -772,21 +804,21 @@ mod tests {
     }
     #[test]
     fn check_usize_arithmetic_and_comparison_ok() {
-        check_src(": w ( -- usize ) 5 3 >usize + ;").unwrap();
-        check_src(": w ( -- bool ) 5 3 >usize < ;").unwrap();
+        check_src(": w ( -- usize ) 5 3 >usize add ;").unwrap();
+        check_src(": w ( -- bool ) 5 3 >usize lt ;").unwrap();
     }
     #[test]
     fn check_usize_literal_coerces_into_usize_position_ok() {
         // D8: a bare integer literal fills a `usize` position on either side
         // of a homogeneous binary op, no `>usize` required.
-        check_src(": w ( -- usize ) 3 >usize 5 + ;").unwrap();
-        check_src(": w ( -- usize ) 5 3 >usize + ;").unwrap();
+        check_src(": w ( -- usize ) 3 >usize 5 add ;").unwrap();
+        check_src(": w ( -- usize ) 5 3 >usize add ;").unwrap();
     }
     #[test]
     fn check_usize_computed_value_without_conversion_is_error() {
         // X10: `1 1 +` is a *computed* i64 (no constant folding), so mixing
         // it with a `usize` still needs an explicit `>usize`.
-        let src = ": w ( -- usize ) 3 >usize 1 1 + + ;";
+        let src = ": w ( -- usize ) 3 >usize 1 1 add add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("usize"), "unexpected message: {err}");
         assert!(err.contains(">usize"), "unexpected message: {err}");
@@ -817,7 +849,7 @@ mod tests {
     #[test]
     fn check_usize_mixed_with_float_is_error() {
         // X9: `usize` mixed with `f64` (both numeric, not coercible).
-        let src = ": w ( -- bool ) 5 >usize 1.0 < ;";
+        let src = ": w ( -- bool ) 5 >usize 1.0 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`usize`"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
@@ -826,7 +858,7 @@ mod tests {
     fn check_usize_declared_output_needs_conversion_is_error() {
         // X10 at a declared-output position: a computed `i64` doesn't
         // silently satisfy a declared `usize` output.
-        let src = ": w ( -- usize ) 1 1 + ;";
+        let src = ": w ( -- usize ) 1 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("usize"), "unexpected message: {err}");
         assert!(err.contains(">usize"), "unexpected message: {err}");
@@ -836,7 +868,7 @@ mod tests {
         // `usize` and `isize` are sibling size types but do not coerce
         // into each other; mixing them is a plain type mismatch naming both
         // backticked types.
-        let src = ": w ( -- bool ) 5 >usize 3 >isize < ;";
+        let src = ": w ( -- bool ) 5 >usize 3 >isize lt ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`usize`"), "unexpected message: {err}");
         assert!(err.contains("`isize`"), "unexpected message: {err}");
@@ -847,7 +879,7 @@ mod tests {
         // check_usize_declared_output_needs_conversion_is_error: a computed
         // `i64` doesn't silently satisfy a declared `isize` output, and the
         // message names the backticked `isize` form rather than `usize`.
-        let src = ": w ( -- isize ) 1 1 + ;";
+        let src = ": w ( -- isize ) 1 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`isize`"), "unexpected message: {err}");
         assert!(err.contains(">isize"), "unexpected message: {err}");
@@ -858,8 +890,8 @@ mod tests {
         // merge to a coercible literal: on the computed arm's runtime path a
         // computed `i64` would fill the `usize` output without `>usize` (X10).
         for src in [
-            ": w ( bool -- usize ) ~[ 5 ] ~[ 1 1 + ] if ;",
-            ": w ( bool -- usize ) ~[ 1 1 + ] ~[ 5 ] if ;",
+            ": w ( bool -- usize ) ~[ 5 ] ~[ 1 1 add ] if ;",
+            ": w ( bool -- usize ) ~[ 1 1 add ] ~[ 5 ] if ;",
         ] {
             let err = check_src(src).unwrap_err();
             assert!(err.contains("usize"), "unexpected message: {err}");
@@ -880,7 +912,7 @@ mod tests {
     }
     #[test]
     fn check_usize_call_argument_computed_needs_conversion_is_error() {
-        let src = ": at ( usize -- usize ) ; : w ( -- usize ) 1 1 + at ;";
+        let src = ": at ( usize -- usize ) ; : w ( -- usize ) 1 1 add at ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("usize"), "unexpected message: {err}");
         assert!(err.contains(">usize"), "unexpected message: {err}");

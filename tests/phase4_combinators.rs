@@ -81,7 +81,7 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n\
 /// `lib/combinators.sth`'s `times`, inlined: `check_error`/`check_ok` run the
 /// checker in process, where an `import:` line never resolves, and a REPL
 /// session takes one definition per line.
-const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to lt ~[ from f call from 1 add to f times-helper ] ~[ ] if ;\n\
     : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | n | 0 n f times-helper ;\n";
 
 #[test]
@@ -297,19 +297,19 @@ fn quotation_type_is_rejected_at_every_audited_position() {
     // rejected, and must still leave the session usable.
     let item1_rows = [
         BrickRow {
-            src: "type: P x ^[ i64 -- ] ;\n40 2 +\n",
+            src: "type: P x ^[ i64 -- ] ;\n40 2 add\n",
             msg: "a quotation type",
         },
         BrickRow {
-            src: "type: P x &[ i64 -- ] ;\n40 2 +\n",
+            src: "type: P x &[ i64 -- ] ;\n40 2 add\n",
             msg: "a reference cannot be stored",
         },
         BrickRow {
-            src: "type: X | Mk a ^[ i64 -- ] ;\n40 2 +\n",
+            src: "type: X | Mk a ^[ i64 -- ] ;\n40 2 add\n",
             msg: "a quotation type",
         },
         BrickRow {
-            src: "type: Y | Mk a &[ i64 -- ] ;\n40 2 +\n",
+            src: "type: Y | Mk a &[ i64 -- ] ;\n40 2 add\n",
             msg: "a reference cannot be stored",
         },
     ];
@@ -346,7 +346,7 @@ fn array_of_quotation_type_is_a_legal_declaration() {
 #[test]
 fn monomorphic_quotation_taking_word_inlines_and_runs() {
     let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-               : main ( -- ) 3 [ 1 + ] apply . ;\n";
+               : main ( -- ) 3 [ 1 add ] apply . ;\n";
     let (stdout, code) = run_src("apply", src);
     assert_eq!(stdout, "4\n");
     assert_eq!(code, 0);
@@ -363,7 +363,7 @@ fn abstract_quotation_forward_inlines_and_runs() {
     // through both frames and prints `8`.
     let src = ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
                : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
-               : main ( -- ) 7 [ 1 + . ] outer ;\n";
+               : main ( -- ) 7 [ 1 add . ] outer ;\n";
     let (stdout, code) = run_src("forward", src);
     assert_eq!(stdout, "8\n");
     assert_eq!(code, 0);
@@ -377,7 +377,7 @@ fn literal_effect_mismatch_against_parameter_is_error() {
     // `[ i64 -- i64 ]`; the error names the word, both effects.
     let err = check_error(
         ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         : main ( -- ) 3 [ 1 + . ] apply . ;\n",
+         : main ( -- ) 3 [ 1 add . ] apply . ;\n",
     );
     assert!(
         err.contains("`apply`") && err.contains("[ i64 -- i64 ]") && err.contains("[ i64 -- ]"),
@@ -399,7 +399,7 @@ fn quotation_literal_capturing_linear_local_is_error() {
     let src = format!(
         "{SPY_DEF}\
          : apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         : main ( -- ) 7 Spy | s | 3 [ s drop 0 + ] apply . ;\n"
+         : main ( -- ) 7 Spy | s | 3 [ s drop 0 add ] apply . ;\n"
     );
     let err = check_error(&src);
     assert!(
@@ -428,7 +428,7 @@ fn quotation_literal_capturing_copy_local_runs() {
     // Reading a `Copy` enclosing local (`n`, an `i64`) by value is accepted
     // and runs.
     let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-               : main ( -- ) 10 | n | 3 [ n + ] apply . ;\n";
+               : main ( -- ) 10 | n | 3 [ n add ] apply . ;\n";
     let (stdout, code) = run_src("copy_capture", src);
     assert_eq!(stdout, "13\n");
     assert_eq!(code, 0);
@@ -441,7 +441,7 @@ fn quotation_parameter_used_twice_splices_twice() {
     // `| f | f call f call` splices the body twice; the second run observes
     // the first's effect (3 -> 4 -> 5).
     let src = ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | f | f call f call ;\n\
-               : main ( -- ) 3 [ 1 + ] twice . ;\n";
+               : main ( -- ) 3 [ 1 add ] twice . ;\n";
     let (stdout, code) = run_src("twice", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
@@ -454,7 +454,7 @@ fn quotation_against_non_quotation_parameter_is_error() {
     // Still rejected, reworded off "Phase 6" to slice 7 (R26).
     let err = check_error(
         ": f ( i64 -- i64 ) ;\n\
-         : main ( -- ) [ 1 + ] f . ;\n",
+         : main ( -- ) [ 1 add ] f . ;\n",
     );
     assert!(
         err.contains("a quotation cannot be passed to `f`") && err.contains("slice 7"),
@@ -488,22 +488,22 @@ fn stale_phase6_diagnostics_are_reworded() {
         ),
         // an operator operand.
         (
-            ": main ( -- ) [ + ] 1 + ;\n",
+            ": main ( -- ) [ add ] 1 add ;\n",
             "cannot take a quotation as an operand",
         ),
         // a stored quotation (`fill`'s element).
         (
-            ": main ( -- ) [ + ] 8 fill drop ;\n",
+            ": main ( -- ) [ add ] 8 fill drop ;\n",
             "a quotation cannot be stored",
         ),
         // two different quotations at an `if` join.
         (
-            ": main ( -- ) true ~[ [ 1 + ] ] ~[ [ 1 - ] ] if drop ;\n",
+            ": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n",
             "leave different quotations",
         ),
         // a quotation on one `if` arm, a value on the other.
         (
-            ": main ( -- ) true ~[ [ 1 + ] ] ~[ \"x\" cstr ] if drop ;\n",
+            ": main ( -- ) true ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n",
             "leaves a quotation and the other does not",
         ),
     ];
@@ -525,7 +525,7 @@ fn stale_phase6_diagnostics_are_reworded() {
 
     // The last site (R19's residual REPL line) is checked through the REPL,
     // not `check_error`.
-    let transcript = repl_error("1 [ + ]\n:quit\n");
+    let transcript = repl_error("1 [ add ]\n:quit\n");
     assert!(
         transcript.contains("a quotation cannot be left on the stack at the end of a line"),
         "the residual-line rejection should still fire, got: {transcript}"
@@ -550,7 +550,7 @@ fn recursive_quotation_taking_word_is_located_error() {
     // `self_tail_combinator_edge_is_allowed`.)
     let err = check_error(
         ": loopy inline ( i64 [ i64 -- i64 ] -- i64 ) loopy drop ;\n\
-         : main ( -- ) 3 [ 1 + ] loopy . ;\n",
+         : main ( -- ) 3 [ 1 add ] loopy . ;\n",
     );
     assert!(
         err.contains("`loopy`") && err.contains("recursive"),
@@ -584,9 +584,9 @@ fn quotation_taking_word_cycle_names_members() {
     // A two-word cycle (non-tail, so it is the splice-forever rejection, not
     // mutual tail recursion) names both members.
     let err = check_error(
-        ": a inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 + ] b 1 + ;\n\
-         : b inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 + ] a 1 + ;\n\
-         : main ( -- ) 3 [ 1 + ] a . ;\n",
+        ": a inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 add ] b 1 add ;\n\
+         : b inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 add ] a 1 add ;\n\
+         : main ( -- ) 3 [ 1 add ] a . ;\n",
     );
     assert!(
         err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
@@ -631,8 +631,8 @@ fn combinator_through_helper_recursion_is_not_a_splice_cycle() {
     // forward must not newly reject this.
     let src = ": helper ( i64 -- )\n\
                  | n |\n\
-                 n 0 > ~[\n\
-                   n 1 - [ . ] comb\n\
+                 n 0 gt ~[\n\
+                   n 1 sub [ . ] comb\n\
                    0 drop\n\
                  ] ~[\n\
                  ] if ;\n\
@@ -751,7 +751,7 @@ fn fold_computes_sum() {
          &!s 2 >usize &!> 7 !\n\
          &!s 3 >usize &!> 9 !\n\
          s ;\n\
-         : main ( -- ) arr 0 ~[ + ] c::fold . ;\n",
+         : main ( -- ) arr 0 ~[ add ] c::fold . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("fold_sum", &src);
@@ -771,7 +771,7 @@ fn filter_checks_standalone() {
     let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize )\n\
                   | p | len >i64 | n | | arr |\n\
                   0 n ~[ | i | &arr i >usize &> @ dup p call ~[\n\
-                          | v | &!arr over >usize &!> v ! 1 +\n\
+                          | v | &!arr over >usize &!> v ! 1 add\n\
                         ] ~[ drop ] if ] times\n\
                   | wf | arr wf >usize ;\n";
     check_ok(&format!("{TIMES_DEF}{filter}"));
@@ -793,7 +793,7 @@ fn filter_over_array_inlines_and_runs() {
          &!s 3 >usize &!> 1 !\n\
          s ;\n\
          : main ( -- )\n\
-           arr ~[ 4 > ] c::filter | n | | out |\n\
+           arr ~[ 4 gt ] c::filter | n | | out |\n\
            n .\n\
            &out 0 >usize &> @ .\n\
            &out 1 >usize &> @ .\n\
@@ -819,7 +819,7 @@ fn filter_is_element_polymorphic() {
          &!s 2 >usize &!> 0.3 !\n\
          s ;\n\
          : main ( -- )\n\
-           arr ~[ 1.0 > ] c::filter | n | | out |\n\
+           arr ~[ 1.0 gt ] c::filter | n | | out |\n\
            n .\n\
            &out 0 >usize &> @ .\n\
            out drop ;\n",
@@ -898,7 +898,7 @@ fn two_poly_combinators_declaring_the_same_signature_is_a_duplicate_error() {
     let err = check_error(
         ": apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
          : apply ( 'T [ 'T -- 'T ] -- 'T ) call call ;\n\
-         : main ( -- ) 5 [ 2 * ] apply . ;\n",
+         : main ( -- ) 5 [ 2 mul ] apply . ;\n",
     );
     assert!(
         err.contains("duplicate overload") && err.contains("apply"),
@@ -930,7 +930,7 @@ fn while_runs_to_a_fixpoint() {
     // Criterion 7 (R10/R13): the canonical fixpoint. `while` threads the
     // counter through the predicate until it reaches 5, then leaves it.
     let src = format!(
-        "{}: main ( -- ) 0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_fixpoint", &src);
@@ -946,7 +946,7 @@ fn while_carrying_an_aggregate_state_runs() {
     let src = format!(
         "{}type: Box n i64 ;\n\
          : main ( -- )\n\
-           0 Box ~[ | b | &b &n @ dup 5 < ~[ 1 + Box true ] ~[ Box false ] if ] c::while\n\
+           0 Box ~[ | b | &b &n @ dup 5 lt ~[ 1 add Box true ] ~[ Box false ] if ] c::while\n\
            | r | &r &n @ . ;\n",
         combinators_import("c")
     );
@@ -962,7 +962,7 @@ fn while_empty_false_arm_falls_through() {
     // exits immediately with the initial state (7) untouched, exercising the
     // fall-through arm directly.
     let src = format!(
-        "{}: main ( -- ) 7 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 7 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_falls_through", &src);
@@ -992,7 +992,7 @@ fn while_body_linear_local_across_back_edge_is_error() {
         "{SPY_DEF}\
          : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
            | p | p call ~[ 3 Spy | leak | p while ] ~[ ] if ;\n\
-         : main ( -- ) 0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n"
+         : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n"
     );
     let err = check_error(&src);
     assert!(
@@ -1038,7 +1038,7 @@ fn while_inside_a_times_body_runs_to_fixpoint() {
     // counts `0` up to `5` with the inner `while` and prints it.
     let src = format!(
         "{}: main ( -- )\n\
-           3 ~[ | i | 0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ] c::times ;\n",
+           3 ~[ | i | 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ] c::times ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_times", &src);
@@ -1060,7 +1060,7 @@ fn times_inside_a_self_tail_combinator_body_runs() {
     // counts `0` up to `5`.
     let src = format!(
         "{}: main ( -- )\n\
-           0 ~[ 2 ~[ | i | ] c::times dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+           0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("times_in_while", &src);
@@ -1083,8 +1083,8 @@ fn while_inside_a_while_body_runs() {
     // `while` runs to its own fixpoint each step but drops its result.
     let src = format!(
         "{}: main ( -- )\n\
-           0 ~[ dup 3 < ~[ 0 ~[ dup 2 < ~[ 1 + true ] ~[ false ] if ] c::while drop\n\
-                        1 + true ] ~[ false ] if ] c::while . ;\n",
+           0 ~[ dup 3 lt ~[ 0 ~[ dup 2 lt ~[ 1 add true ] ~[ false ] if ] c::while drop\n\
+                        1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_while", &src);
@@ -1107,7 +1107,7 @@ fn times_nested_in_a_times_runs_with_correct_output() {
     let (out, code) = run_src(
         "times_in_times",
         &format!(
-            "{}: main ( -- ) 0 3 ~[ | i | 2 ~[ | j | 1 + ] times ] times . ;\n",
+            "{}: main ( -- ) 0 3 ~[ | i | 2 ~[ | j | 1 add ] times ] times . ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -1123,7 +1123,7 @@ fn times_in_times_with_inner_allocation_runs() {
     let (out, code) = run_src(
         "times_in_times_alloc",
         &format!(
-            "{}: main ( -- ) 0 3 ~[ | i | 2 ~[ | j | 0 4 fill | a | a drop 1 + ] times ] times . ;\n",
+            "{}: main ( -- ) 0 3 ~[ | i | 2 ~[ | j | 0 4 fill | a | a drop 1 add ] times ] times . ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -1163,7 +1163,7 @@ fn three_deep_times_nesting_runs_in_constant_stack() {
     // save/restore.
     let src = format!(
         "{}: main ( -- )\n\
-         0 50000 ~[ | i | 2 ~[ | j | 2 ~[ | k | 0 8 fill | a | a drop 1 + ] times ] times ] times . ;\n",
+         0 50000 ~[ | i | 2 ~[ | j | 2 ~[ | k | 0 8 fill | a | a drop 1 add ] times ] times ] times . ;\n",
         combinators_import("c | times |")
     );
     let binary = build_binary("three_deep", &src);
@@ -1217,10 +1217,10 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
         "{}type: List | Nil | Cons v i64 next ^List ;\n\
          : build ( i64 List -- List )\n  \
            | n acc |\n  \
-           n 0 = ~[\n    \
+           n 0 eq ~[\n    \
              acc\n  \
            ] ~[\n    \
-             n 1 - n acc ^ Cons build\n  \
+             n 1 sub n acc ^ Cons build\n  \
            ] if ;\n\
          : main ( -- ) 200000 ~[ drop 5 Nil build drop ] times ;\n",
         combinators_import("c | times |")
@@ -1248,11 +1248,11 @@ fn while_and_hand_threaded_loop_agree_across_stack_limits() {
     // `while_lowers_to_a_back_edge_not_an_infinite_splice` unit.
     const N: usize = 10_000;
     let comb = format!(
-        "{}: main ( -- ) 0 ~[ dup {N} < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 0 ~[ dup {N} lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let hand = format!(
-        ": countup ( i64 -- i64 ) dup {N} < ~[ 1 + countup ] ~[ ] if ;\n\
+        ": countup ( i64 -- i64 ) dup {N} lt ~[ 1 add countup ] ~[ ] if ;\n\
          : main ( -- ) 0 countup . ;\n"
     );
     let comb_bin = build_binary("wq-comb", &comb);
@@ -1411,7 +1411,7 @@ fn quotation_at_runtime_position_in_poly_body_is_error() {
     // `Slot`-with-`quot` path), not slice 4's blanket `poly_term` rejection.
     let err = check_error(
         ": bad inline ( ['T 'N] [ 'T -- ] -- ['T 'N] )\n\
-         | f arr | [ 1 + ] 4 fill drop arr ;\n",
+         | f arr | [ 1 add ] 4 fill drop arr ;\n",
     );
     assert!(
         err.contains("`bad`")
@@ -1479,11 +1479,11 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // zero would also produce.
     const N: usize = 10_000;
     let comb = format!(
-        "{}: main ( -- ) 1 {N} fill 0 ~[ + ] c::fold . ;\n",
+        "{}: main ( -- ) 1 {N} fill 0 ~[ add ] c::fold . ;\n",
         combinators_import("c")
     );
     let hand = format!(
-        "{}: main ( -- ) 1 {N} fill | arr | 0 {N} ~[ | i | &arr i >usize &> @ + ] times . arr drop ;\n",
+        "{}: main ( -- ) 1 {N} fill | arr | 0 {N} ~[ | i | &arr i >usize &> @ add ] times . arr drop ;\n",
         combinators_import("c | times |")
     );
     let comb_bin = build_binary("eq-comb", &comb);
@@ -1533,7 +1533,7 @@ fn repl_error(input: &str) -> String {
 // `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
     ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n";
-const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 + ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
+const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
 
 // A REPL expr line's residual stack is what the in-process driver writes to the
 // capture buffer; the runtime `.` word prints to the real process stdout, which
@@ -1547,8 +1547,9 @@ fn repl_quotation_taking_definition_is_accepted() {
     // quotation-taking word defines at a session line and a *later* bare line
     // calls it, inlined against that line's live env (D1): `5 [ 3 + ] apply`
     // leaves 8. The guarded behavior flips (define-and-call), not vanishes.
-    let transcript =
-        repl_error(": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n5 [ 3 + ] apply\n:quit\n");
+    let transcript = repl_error(
+        ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n5 [ 3 add ] apply\n:quit\n",
+    );
     assert_eq!(transcript, "defined apply\nstack: 8\n");
     assert!(
         !transcript.contains("not yet supported at the REPL"),
@@ -1563,7 +1564,7 @@ fn repl_poly_quotation_taking_definition_is_accepted() {
     // defines and a later line calls it, leaving 6 -- a value witness, unlike an
     // `each`-shaped combinator that would leave the stack empty.
     let transcript =
-        repl_error(": apply1 inline ( 'a [ 'a -- 'a ] -- 'a ) call ;\n5 [ 1 + ] apply1\n:quit\n");
+        repl_error(": apply1 inline ( 'a [ 'a -- 'a ] -- 'a ) call ;\n5 [ 1 add ] apply1\n:quit\n");
     assert_eq!(transcript, "defined apply1\nstack: 6\n");
     assert!(
         !transcript.contains("not yet supported at the REPL"),
@@ -1590,7 +1591,7 @@ fn repl_mono_combinator_define_and_call() {
     // from a *later* bare line, inlines and runs. `on_double` applies the
     // quotation then doubles: `(5+1)*2 = 12`.
     let transcript = repl_error(
-        ": on_double inline ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n5 [ 1 + ] on_double\n:quit\n",
+        ": on_double inline ( i64 [ i64 -- i64 ] -- i64 ) call 2 mul ;\n5 [ 1 add ] on_double\n:quit\n",
     );
     assert_eq!(transcript, "defined on_double\nstack: 12\n");
 }
@@ -1602,7 +1603,7 @@ fn repl_while_define_runs_to_fixpoint() {
     // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
     // stack), not an infinite splice or a link failure to a never-minted symbol.
     let transcript = repl_error(&format!(
-        "{WHILE_DEF}0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while\n:quit\n"
+        "{WHILE_DEF}0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while\n:quit\n"
     ));
     assert_eq!(transcript, "defined while\nstack: 5\n");
 }
@@ -1616,7 +1617,7 @@ fn repl_two_output_combinator_define_and_call() {
     // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
     // be wrongly deferred as "resolves to 2 outputs".
     let transcript = repl_error(&format!(
-        "{TIMES_DEF}{FILTER_DEF}7 3 fill [ 5 > ] filter\n:quit\n"
+        "{TIMES_DEF}{FILTER_DEF}7 3 fill [ 5 gt ] filter\n:quit\n"
     ));
     assert_eq!(
         transcript,
@@ -1632,11 +1633,11 @@ fn repl_combinator_splice_sees_current_helper() {
     // the *new* helper (206 = 5+1+200). This fails if any frozen-resolver/env
     // capture is added for a combinator -- the new line would still see +100.
     let transcript = repl_error(
-        ": helper ( i64 -- i64 ) 100 + ;\n\
+        ": helper ( i64 -- i64 ) 100 add ;\n\
          : useh inline ( i64 [ i64 -- i64 ] -- i64 ) call helper ;\n\
-         5 [ 1 + ] useh\n\
-         : helper ( i64 -- i64 ) 200 + ;\n\
-         5 [ 1 + ] useh\n:quit\n",
+         5 [ 1 add ] useh\n\
+         : helper ( i64 -- i64 ) 200 add ;\n\
+         5 [ 1 add ] useh\n:quit\n",
     );
     // The stack accumulates: the first call leaves 106, the redefinition of
     // `helper` follows, the second call leaves 206 on top. A frozen capture
@@ -1654,10 +1655,10 @@ fn repl_ordinary_caller_frozen_across_combinator_redefinition() {
     // a later redefinition of `c` (+1000 instead of +1). `w`'s `.so` is frozen;
     // only a *new* splice site would see the new `c`.
     let transcript = repl_error(
-        ": c inline ( i64 [ i64 -- i64 ] -- i64 ) call 1 + ;\n\
-         : w ( i64 -- i64 ) [ 10 * ] c ;\n\
+        ": c inline ( i64 [ i64 -- i64 ] -- i64 ) call 1 add ;\n\
+         : w ( i64 -- i64 ) [ 10 mul ] c ;\n\
          5 w\n\
-         : c inline ( i64 [ i64 -- i64 ] -- i64 ) call 1000 + ;\n\
+         : c inline ( i64 [ i64 -- i64 ] -- i64 ) call 1000 add ;\n\
          5 w\n:quit\n",
     );
     // Both calls leave 51: `w`'s `.so` is frozen with the original `c` spliced,
@@ -1679,11 +1680,11 @@ fn repl_redefining_combinator_shape_evicts_other_stores() {
     // ordinary entry evicted).
     let transcript = repl_error(
         ": foo inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         5 [ 1 + ] foo\n\
-         : foo ( i64 -- i64 ) 99 + ;\n\
+         5 [ 1 add ] foo\n\
+         : foo ( i64 -- i64 ) 99 add ;\n\
          5 foo\n\
-         : foo inline ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n\
-         5 [ 1 + ] foo\n:quit\n",
+         : foo inline ( i64 [ i64 -- i64 ] -- i64 ) call 2 mul ;\n\
+         5 [ 1 add ] foo\n:quit\n",
     );
     // The stack accumulates across the three shapes: `6` (combinator, 5+1),
     // then `104` (ordinary, 5+99 -- proving the combinator entry was evicted,
@@ -1753,12 +1754,12 @@ fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
     // reliably segfaults when mutated back to an empty map.
     let transcript = repl_error(
         "type: Vec2 x i64 y i64 ;\n\
-         : + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
-         : vsum ( 'T Vec2 Vec2 -- i64 ) + Vec2> + swap drop ;\n\
+         : add ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add Vec2 ;\n\
+         : vsum ( 'T Vec2 Vec2 -- i64 ) add Vec2> add swap drop ;\n\
          42 1 2 Vec2 3 4 Vec2 vsum\n",
     );
     assert_eq!(
-        transcript, "defined type Vec2\ndefined +\ndefined vsum\nstack: 10\n",
+        transcript, "defined type Vec2\ndefined add\ndefined vsum\nstack: 10\n",
         "vsum should compute (1+3)+(2+4)=10 through the user overload, not crash: {transcript}"
     );
 }
@@ -1888,7 +1889,7 @@ fn repl_import_exporting_combinator_retains_and_runs() {
         "export: apply_each ;\n: apply_each inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n",
     );
     let transcript = repl_error(&format!(
-        "import: c \"{}\" ;\n5 [ 3 + ] c::apply_each\n:quit\n",
+        "import: c \"{}\" ;\n5 [ 3 add ] c::apply_each\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1899,7 +1900,7 @@ fn repl_import_exporting_combinator_retains_and_runs() {
     // closure's own native compilation.
     let internal = temp_lib(
         "crit8-internal",
-        "export: bump ;\n: ap inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: bump ( i64 -- i64 ) [ 1 + ] ap ;\n",
+        "export: bump ;\n: ap inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: bump ( i64 -- i64 ) [ 1 add ] ap ;\n",
     );
     // Leave the result on the stack (no `.`): a runtime `.` prints to the real
     // process stdout, not this captured writer, but the REPL's own residual
@@ -1933,12 +1934,12 @@ fn repl_imported_combinator_body_call_to_private_word_uses_closure_env() {
     // process's shared `dlopen(RTLD_GLOBAL)` namespace.)
     let path = temp_lib(
         "private-body-call",
-        ": priv_calc6c ( i64 -- i64 ) 1 + ;\n\
+        ": priv_calc6c ( i64 -- i64 ) 1 add ;\n\
          : apply2 inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c ;\n\
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(
-        ": priv_calc6c ( i64 -- i64 ) 1000 + ;\nimport: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        ": priv_calc6c ( i64 -- i64 ) 1000 add ;\nimport: c \"{}\" ;\n5 [ 10 mul ] c::apply2\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1955,12 +1956,12 @@ fn repl_imported_combinator_body_call_to_private_word_without_collision_resolves
     // ((5 * 10) + 1), and the import must not error.
     let path = temp_lib(
         "private-body-call-no-collision",
-        ": priv_calc6c_nc ( i64 -- i64 ) 1 + ;\n\
+        ": priv_calc6c_nc ( i64 -- i64 ) 1 add ;\n\
          : apply2 inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c_nc ;\n\
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(
-        "import: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        "import: c \"{}\" ;\n5 [ 10 mul ] c::apply2\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1982,7 +1983,7 @@ fn repl_imported_private_word_still_rejected_by_qualified_name() {
     // import outright and never reach this test's own subject, `privword6c`.
     let path = temp_lib(
         "private-body-call-qualified",
-        ": privword6c ( i64 -- i64 ) 1 + ;\n\
+        ": privword6c ( i64 -- i64 ) 1 add ;\n\
          : apply2 inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call privword6c ;\n\
          export: apply2 ;\n",
     );
@@ -2017,7 +2018,7 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     // (Column 3 is the name token itself, not the body's first term: `WordDef`
     // carries its own declaration span now, so `word_span` no longer derives
     // a word's location from its body -- see the `word_span` fix.)
-    let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 + ;\n:quit\n");
+    let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 add ;\n:quit\n");
     assert_eq!(
         transcript,
         "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 3)\n",
@@ -2050,7 +2051,7 @@ fn repl_imported_while_runs_to_fixpoint() {
     // deleted, the self-call would miss the recognizer and the splice would
     // recurse forever.
     let transcript = repl_error(&format!(
-        "{}0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while\n:quit\n",
+        "{}0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while\n:quit\n",
         combinators_import("c")
     ));
     assert_eq!(transcript, "imported c\nstack: 5\n");
@@ -2064,7 +2065,7 @@ fn repl_imported_filter_runs() {
     // The two-output poly combinator lands both outputs on the residual stack,
     // exactly as the session-defined `filter` does.
     let transcript = repl_error(&format!(
-        "{}7 3 fill ~[ 5 > ] c::filter\n:quit\n",
+        "{}7 3 fill ~[ 5 gt ] c::filter\n:quit\n",
         combinators_import("c")
     ));
     assert_eq!(transcript, "imported c\nstack: <[i64 3]> 3\n");
@@ -2113,8 +2114,8 @@ fn repl_combinators_dogfood_matches_native() {
         ": scores ( -- [i64 5] ) 0 5 fill | s | \
          &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
          &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
-        "scores ~[ 4 > ] c::filter | n | | out | out drop n",
-        "0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while"
+        "scores ~[ 4 gt ] c::filter | n | | out | out drop n",
+        "0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while"
     ));
     assert_eq!(
         transcript,
@@ -2134,7 +2135,7 @@ fn repl_combinators_dogfood_matches_native() {
 fn build_error_with_import(name: &str, entry: &str) -> String {
     let lib = temp_lib(
         &format!("{name}-lib"),
-        "export: helper ;\n: helper ( i64 -- i64 ) | x | x 1 + ;\n",
+        "export: helper ;\n: helper ( i64 -- i64 ) | x | x 1 add ;\n",
     );
     let entry_src = format!("import: lib \"{}\" ;\n{entry}", lib.display());
     let path = temp_lib(&format!("{name}-entry"), &entry_src);
@@ -2153,7 +2154,7 @@ fn r10_quotation_argument_diagnostic_shows_unmangled_word() {
     // not satisfied by the leak; the negative assertion pins the leak itself.
     let err = build_error_with_import(
         "m0-r10",
-        ": w ( i64 -- i64 ) ;\n: main ( -- ) [ 1 + ] w . ;\n",
+        ": w ( i64 -- i64 ) ;\n: main ( -- ) [ 1 add ] w . ;\n",
     );
     assert!(
         err.contains("a quotation cannot be passed to `w`"),
@@ -2170,7 +2171,7 @@ fn r22_combinator_cycle_diagnostic_shows_unmangled_words() {
     // stay a cycle error.)
     let err = build_error_with_import(
         "m0-r22",
-        ": self inline ( i64 [ i64 -- i64 ] -- i64 ) self drop ;\n: main ( -- ) 3 [ 1 + ] self . ;\n",
+        ": self inline ( i64 [ i64 -- i64 ] -- i64 ) self drop ;\n: main ( -- ) 3 [ 1 add ] self . ;\n",
     );
     assert!(
         err.contains("`self` -> `self`"),
@@ -2186,7 +2187,7 @@ fn r12_capture_diagnostic_shows_unmangled_word() {
         "m0-r12",
         &format!(
             "{SPY_DEF}: c ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-             : main ( -- ) 7 Spy | s | 3 [ s drop 0 + ] c . ;\n"
+             : main ( -- ) 7 Spy | s | 3 [ s drop 0 add ] c . ;\n"
         ),
     );
     assert!(
@@ -2218,7 +2219,7 @@ fn r11_effect_mismatch_diagnostic_shows_unmangled_word() {
     // A literal whose effect disagrees with combinator `show`'s parameter.
     let err = build_error_with_import(
         "m0-r11",
-        ": show ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: main ( -- ) 3 [ 1 + . ] show . ;\n",
+        ": show ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: main ( -- ) 3 [ 1 add . ] show . ;\n",
     );
     assert!(
         err.contains("the quotation passed to `show` was declared"),
@@ -2271,7 +2272,7 @@ fn everyday_diagnostics_show_the_unmangled_enclosing_word() {
         ),
         (
             "type-mismatch",
-            ": w ( -- ) 1 2.0 + drop ;\n: main ( -- ) ;\n",
+            ": w ( -- ) 1 2.0 add drop ;\n: main ( -- ) ;\n",
             "type mismatch in `w`",
         ),
         (
@@ -2339,8 +2340,8 @@ fn self_tail_back_edge_check_still_fires_under_an_import() {
     let err = build_error_with_import(
         "m0-backedge",
         "type: V x i64 ;\n\
-         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = ~[\n  ] ~[\n    \
-         0 V | x |\n    &!x n 1 - spin\n  ] if ;\n\
+         : spin ( &!V i64 -- )\n  | r n |\n  n 0 eq ~[\n  ] ~[\n    \
+         0 V | x |\n    &!x n 1 sub spin\n  ] if ;\n\
          : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
     );
     assert!(
@@ -2366,7 +2367,7 @@ fn combinator_called_from_drop_override_body_lowers_correctly() {
         "drop-override-combinator",
         ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;\n\
          type: Bx v i64 ;\n\
-         : drop ( Bx -- ) Bx> [ 1 + ] twice . ;\n\
+         : drop ( Bx -- ) Bx> [ 1 add ] twice . ;\n\
          : main ( -- ) 1 Bx drop ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");
@@ -2388,7 +2389,7 @@ fn self_tail_combinator_dups_its_quotation_instead_of_binding_it() {
     let (stdout, code) = run_src(
         "dup-quot-self-tail",
         ": rep inline ( i64 [ -- ] -- )\n\
-         dup call swap 1 - dup 0 > ~[ swap rep ] ~[ drop drop ] if ;\n\
+         dup call swap 1 sub dup 0 gt ~[ swap rep ] ~[ drop drop ] if ;\n\
          : main ( -- ) 3 [ 7 . ] rep ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");
@@ -2405,7 +2406,7 @@ fn self_tail_combinator_dups_an_inline_quotation_parameter() {
     let (stdout, code) = run_src(
         "dup-inline-quot-self-tail",
         ": rep inline ( i64 ~[ -- ] -- )\n\
-         dup call swap 1 - dup 0 > ~[ swap rep ] ~[ drop drop ] if ;\n\
+         dup call swap 1 sub dup 0 gt ~[ swap rep ] ~[ drop drop ] if ;\n\
          : main ( -- ) 3 ~[ 9 . ] rep ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");
@@ -2420,7 +2421,7 @@ fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
     let binary = build_binary(
         "dup-quot-constant-stack",
         ": rep inline ( i64 [ -- ] -- )\n\
-         dup call swap 1 - dup 0 > ~[ swap rep ] ~[ drop drop ] if ;\n\
+         dup call swap 1 sub dup 0 gt ~[ swap rep ] ~[ drop drop ] if ;\n\
          : main ( -- ) 1000000 [ ] rep 42 . ;\n",
     );
     let (code, stdout) = run_at_stack_limit(&binary, 1024);

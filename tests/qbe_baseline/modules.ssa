@@ -29,7 +29,7 @@ export function $sooth_main() {
 	storel %v5, %v8
 	%v9 =l add %v7, 8
 	storel %v6, %v9
-	%v10 =:Point call $add__m2(:Point %v2, :Point %v7)
+	%v10 =:Point call $point.2d.add__m2(:Point %v2, :Point %v7)
 	%v11 =l add %v10, 0
 	%v12 =l loadl %v11
 	call $printf(l $fmt, l %v12, ...)
@@ -38,7 +38,7 @@ export function $sooth_main() {
 	ret
 }
 
-export function :Point $add__m2(:Point %v0, :Point %v1) {
+export function :Point $point.2d.add__m2(:Point %v0, :Point %v1) {
 @start
 	%v2 =l add %v0, 0
 	%v3 =l add %v2, 0

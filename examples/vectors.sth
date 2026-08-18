@@ -6,24 +6,24 @@
 type: Vec2 x i64 y i64 ;
 type: Segment from Vec2 to Vec2 ;
 
-: sub ( Vec2 Vec2 -- Vec2 )
+: vec2-sub ( Vec2 Vec2 -- Vec2 )
   | a b |
-  &a &x @ &b &x @ -
-  &a &y @ &b &y @ -
+  &a &x @ &b &x @ sub
+  &a &y @ &b &y @ sub
   Vec2 ;
 
 : len2 ( Vec2 -- i64 )
   | v |
-  &v &x @ &v &x @ *
-  &v &y @ &v &y @ *
-  + ;
+  &v &x @ &v &x @ mul
+  &v &y @ &v &y @ mul
+  add ;
 
 : span ( Segment -- Vec2 )
-  Segment> swap sub ;
+  Segment> swap vec2-sub ;
 
 : shift-x ( Vec2 i64 -- Vec2 )
   | v dx |
-  &v &x @ dx + | newx |
+  &v &x @ dx add | newx |
   v &!x newx ! ;
 
 : main ( -- )

@@ -121,7 +121,7 @@ fn repl_redefined_drop_overload_runs_the_new_body() {
         ": drop ( Res -- ) | r | r Res> . ;",
         "7 Res",
         "drop",
-        ": drop ( Res -- ) | r | r Res> 100 + . ;",
+        ": drop ( Res -- ) | r | r Res> 100 add . ;",
         "7 Res",
         "drop",
     ]);
@@ -157,7 +157,7 @@ fn repl_redefining_an_overrides_callee_leaves_the_override_alone() {
         "type: Res n i64 ;",
         ": helper ( i64 -- ) . ;",
         ": drop ( Res -- ) | r | r Res> helper ;",
-        ": helper ( i64 i64 -- ) + . ;",
+        ": helper ( i64 i64 -- ) add . ;",
         "7 Res",
         "drop",
     ]);
@@ -188,7 +188,7 @@ fn repl_declaring_a_second_override_leaves_the_first_alone() {
         "type: B n i64 ;",
         ": helper ( i64 -- ) . ;",
         ": drop ( A -- ) | a | a A> helper ;",
-        ": helper ( i64 i64 -- ) + . ;",
+        ": helper ( i64 i64 -- ) add . ;",
         ": drop ( B -- ) | b | b B> . ;",
         "1 A",
         "drop",
@@ -251,7 +251,7 @@ fn repl_redefining_drop_overload_refreshes_a_composing_structs_glue() {
         "type: Holder r Res ;",
         "7 Res Holder",
         "drop",
-        ": drop ( Res -- ) | r | r Res> 100 + . ;",
+        ": drop ( Res -- ) | r | r Res> 100 add . ;",
         "7 Res Holder",
         "drop",
     ]);

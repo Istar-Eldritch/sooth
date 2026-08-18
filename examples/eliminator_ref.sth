@@ -11,7 +11,7 @@ type: Shape
 
 : area ( &Shape -- i64 )
   ~[ ( &Circle ) &r @ ]
-  ~[ ( &Rect )   dup &w @ swap &h @ * ]
+  ~[ ( &Rect )   dup &w @ swap &h @ mul ]
   Shape? ;
 
 : grow ( &!Shape -- )

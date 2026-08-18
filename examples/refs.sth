@@ -45,10 +45,10 @@ type: Popped rest List val i64 ;
 
 : build ( i64 List -- List )
   | n acc |
-  n 0 = ~[
+  n 0 eq ~[
     acc
   ] ~[
-    n 1 - acc n push-front build
+    n 1 sub acc n push-front build
   ] if ;
 
 : pop ( List -- Popped )

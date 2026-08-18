@@ -23,8 +23,8 @@ type: Pair a i64 b i64 ;
 \ the seed read back from index 0.
 : countdown ( i64 -- )
   | n | 0 4 fill | a | &a 0 >usize &> @ | z | a drop
-  n z + .
-  n 0 > ~[ n 1 - countdown ] ~[ ] if ;
+  n z add .
+  n 0 gt ~[ n 1 sub countdown ] ~[ ] if ;
 
 : main ( -- )
   scalar_last .          \ 42

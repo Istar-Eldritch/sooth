@@ -1060,7 +1060,7 @@ mod tests {
         let ir = lower_src(
             "type: Box n i64 ;\n\
              : mk ( i64 -- Box ) | n | n Box ;\n\
-             : loop ( i64 Box -- Box ) | n prev | n 0 = ~[ prev ] ~[ n 1 - prev loop ] if ;",
+             : loop ( i64 Box -- Box ) | n prev | n 0 eq ~[ prev ] ~[ n 1 sub prev loop ] if ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
         let header = loop_header(f);

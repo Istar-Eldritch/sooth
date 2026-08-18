@@ -48,7 +48,7 @@ fn check_error(src: &str) -> String {
 /// run in process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+     from to lt ~[ from f call from 1 add to f times-helper ] ~[ ] if ;\n\
      : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -123,7 +123,7 @@ fn alloc_sizes(src: &str, func: &str) -> Vec<u32> {
 #[test]
 fn quotation_stored_in_struct_field_compiles_and_calls() {
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) [ 1 + ] Holder Holder> 4 swap call . ;\n";
+               : main ( -- ) [ 1 add ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qfield", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
@@ -142,10 +142,10 @@ fn quotation_in_array_element_indirect_calls() {
     // second element is a literal stored through the array's `&!` referent,
     // which carries the declared `[ i64 -- i64 ]` the store materializes it
     // against. A bare literal to `fill` has no effect context and is rejected.
-    let src = ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+    let src = ": one ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
                : main ( -- )\n\
                one 2 fill | a |\n\
-               &!a 1 >usize &!> [ 2 + ] !\n\
+               &!a 1 >usize &!> [ 2 add ] !\n\
                &a 0 &> @ 4 swap call .\n\
                &a 1 &> @ 4 swap call . ;\n";
     let (stdout, code) = run_src("qarray", src);
@@ -161,7 +161,7 @@ fn quotation_in_array_element_indirect_calls() {
 
 #[test]
 fn quotation_returned_from_word_indirect_calls() {
-    let src = ": mk ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+    let src = ": mk ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
                : main ( -- ) mk 4 swap call . ;\n";
     let (stdout, code) = run_src("qreturn", src);
     assert_eq!(stdout, "5\n");
@@ -181,7 +181,7 @@ fn capturing_scalar_stored_snapshots_into_env() {
     // rather than rejected. Stored into a field, read back, and called with 4:
     // 4 + 10 = 14.
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) 10 | x | [ x + ] Holder Holder> 4 swap call . ;\n";
+               : main ( -- ) 10 | x | [ x add ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapfield", src);
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
@@ -195,11 +195,11 @@ fn capturing_scalar_in_array_element_snapshots() {
     // `[ x + ]` snapshots `x = 10` into element 1, while element 0 keeps `one`'s
     // non-capturing seed; each reads its own env, proving coexistence. Element
     // 0: 4 + 1 = 5; element 1: 4 + 10 = 14.
-    let src = ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+    let src = ": one ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
                : main ( -- )\n\
                10 | x |\n\
                one 2 fill | a |\n\
-               &!a 1 >usize &!> [ x + ] !\n\
+               &!a 1 >usize &!> [ x add ] !\n\
                &a 0 &> @ 4 swap call .\n\
                &a 1 &> @ 4 swap call . ;\n";
     let (stdout, code) = run_src("qcaparray", src);
@@ -215,7 +215,7 @@ fn capturing_scalar_through_nested_quotation_snapshots() {
     // top level. The capture scan recurses into nested quotation bodies, so the
     // outer `[ [ x + ] call ]` snapshots `x` and stores admissibly: 4 + 10 = 14.
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
-               : main ( -- ) 10 | x | [ [ x + ] call ] Holder Holder> 4 swap call . ;\n";
+               : main ( -- ) 10 | x | [ [ x add ] call ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapnested", src);
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
@@ -245,7 +245,7 @@ fn capturing_f32_scalar_snapshots_into_env() {
     // since a float capture cannot share `Ptr`'s add-of-zero reinterpret.
     // 2.5 + 4.0 = 6.5, widened to `f64` by `.`.
     let src = "type: F32Holder q [ f32 -- f32 ] ;\n\
-               : main ( -- ) 2.5 >f32 | x | [ x + ] F32Holder F32Holder> 4.0 >f32 swap call . ;\n";
+               : main ( -- ) 2.5 >f32 | x | [ x add ] F32Holder F32Holder> 4.0 >f32 swap call . ;\n";
     let (stdout, code) = run_src("qcapf32", src);
     assert_eq!(stdout, "6.5\n");
     assert_eq!(code, 0);
@@ -256,7 +256,7 @@ fn capturing_f64_scalar_snapshots_into_env() {
     // The `f64` sibling of the `f32` case above, same backend failure mode.
     // 2.5 + 4.0 = 6.5.
     let src = "type: Holder q [ f64 -- f64 ] ;\n\
-               : main ( -- ) 2.5 | x | [ x + ] Holder Holder> 4.0 swap call . ;\n";
+               : main ( -- ) 2.5 | x | [ x add ] Holder Holder> 4.0 swap call . ;\n";
     let (stdout, code) = run_src("qcapf64", src);
     assert_eq!(stdout, "6.5\n");
     assert_eq!(code, 0);
@@ -273,9 +273,9 @@ fn capturing_i32_u32_and_usize_scalars_snapshot_into_env() {
                type: U32Holder q [ u32 -- u32 ] ;\n\
                type: UsizeHolder q [ usize -- usize ] ;\n\
                : main ( -- )\n\
-               10 >i32 | a | [ a + ] I32Holder I32Holder> 4 >i32 swap call .\n\
-               20 >u32 | b | [ b + ] U32Holder U32Holder> 4 >u32 swap call .\n\
-               30 >usize | c | [ c + ] UsizeHolder UsizeHolder> 4 >usize swap call . ;\n";
+               10 >i32 | a | [ a add ] I32Holder I32Holder> 4 >i32 swap call .\n\
+               20 >u32 | b | [ b add ] U32Holder U32Holder> 4 >u32 swap call .\n\
+               30 >usize | c | [ c add ] UsizeHolder UsizeHolder> 4 >usize swap call . ;\n";
     let (stdout, code) = run_src("qcapints", src);
     assert_eq!(stdout, "14\n24\n34\n");
     assert_eq!(code, 0);
@@ -289,7 +289,7 @@ fn escaping_closure_over_param_ref_compiles_and_runs() {
     // is rooted outside `make-b`'s frame (in `main`'s `a`, still live at the
     // call), so the escaping capture is admitted. The env holds the reference;
     // reading `r[0] = 5` and adding the input 4 gives 9.
-    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ + ] ;\n\
+    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
                : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     let (stdout, code) = run_src("qmakeb", src);
     assert_eq!(stdout, "9\n");
@@ -314,7 +314,7 @@ fn materialized_single_capture_builds_inline_env() {
     // Phase 2's multi-capture path and does not exist yet, so asserting its
     // absence would be a placebo; the discriminating witness is the param
     // shape, which goes red if the env param (R17) is dropped.
-    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ + ] ;\n\
+    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
                : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     assert_eq!(
         materialized_quot_params(src),
@@ -338,7 +338,7 @@ fn escaping_closure_over_frame_local_is_past_owning_frame() {
     // `make-b`'s parameter, this is frame-rooted, so the escaping boundary is a
     // past-owning-frame error (R15/R24), asserted whole.
     let err = check_error(
-        ": make-a ( -- [ i64 -- i64 ] ) 5 4 fill | arr | [ &arr 0 >usize &> @ + ] ;\n\
+        ": make-a ( -- [ i64 -- i64 ] ) 5 4 fill | arr | [ &arr 0 >usize &> @ add ] ;\n\
          : main ( -- ) make-a 4 swap call . ;\n",
     );
     assert_eq!(
@@ -357,7 +357,7 @@ fn escaping_closure_over_frame_local_borrow_is_past_owning_frame() {
     // `classify_capture`'s `Type::Ref` arm, not the unconditional aggregate
     // arm. Rejected the same way, naming `r`.
     let err = check_error(
-        ": make-a2 ( -- [ i64 -- i64 ] ) 5 4 fill | arr | &arr | r | [ r 0 >usize &> @ + ] ;\n\
+        ": make-a2 ( -- [ i64 -- i64 ] ) 5 4 fill | arr | &arr | r | [ r 0 >usize &> @ add ] ;\n\
          : main ( -- ) make-a2 4 swap call . ;\n",
     );
     assert_eq!(
@@ -379,11 +379,11 @@ fn frame_capture_escaping_via_store_through_param_ref_is_past_owning_frame() {
     // syntax looks like the in-frame R21 case. Before the fix this compiled
     // clean and stored a dangling reference into `tbl`.
     let err = check_error(
-        ": seed ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+        ": seed ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
          : install ( &![ [ i64 -- i64 ] 2 ] -- )\n\
          5 4 fill | arr |\n\
          &arr | r |\n\
-         0 >usize &!> [ r 0 >usize &> @ + ] ! ;\n\
+         0 >usize &!> [ r 0 >usize &> @ add ] ! ;\n\
          : main ( -- ) seed 2 fill | tbl | &!tbl install &tbl 0 &> @ 4 swap call . tbl drop ;\n",
     );
     assert_eq!(
@@ -400,7 +400,7 @@ fn capturing_quotation_typed_name_is_rejected_deferred() {
     // quotation env slot is two words and needs a recursive surviving-set fold
     // (R15 case 4), so it is deferred at every boundary rather than admitted.
     let err = check_error(
-        ": wrap ( -- [ i64 -- i64 ] ) [ 1 + ] | q | [ q call ] ;\n\
+        ": wrap ( -- [ i64 -- i64 ] ) [ 1 add ] | q | [ q call ] ;\n\
          : main ( -- ) wrap 4 swap call . ;\n",
     );
     assert_eq!(
@@ -416,7 +416,7 @@ fn multi_capture_escaping_closure_is_rejected_deferred() {
     // Phase 1's inline env holds one word; `[ x y + + ]` captures two scalars,
     // which needs a heap env (R18), deferred.
     let err = check_error(
-        ": mk ( -- [ i64 -- i64 ] ) 10 | x | 20 | y | [ x y + + ] ;\n\
+        ": mk ( -- [ i64 -- i64 ] ) 10 | x | 20 | y | [ x y add add ] ;\n\
          : main ( -- ) mk 4 swap call . ;\n",
     );
     assert_eq!(
@@ -432,7 +432,7 @@ fn capturing_literal_spliced_still_works() {
     // Unchanged from the combinator slices: a capturing literal consumed by a
     // direct `call` is spliced in place (no materialization, no boundary), so
     // it reads the enclosing local and runs.
-    let src = ": main ( -- ) 10 | x | 4 [ x + ] call . ;\n";
+    let src = ": main ( -- ) 10 | x | 4 [ x add ] call . ;\n";
     let (stdout, code) = run_src("qsplice", src);
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
@@ -453,7 +453,7 @@ fn capturing_literal_spliced_through_combinator_stays_splice() {
     // adding the env parameter to the materialized path (R17) must leave this
     // splice path bit-identical -- no materialization, no `CallIndirect`.
     // acc over i=0..4 of (acc + i + x=10): 10, 21, 33, 46, 60.
-    let src = &format!("{TIMES_DEF}: main ( -- ) 10 | x | 0 5 ~[ + x + ] times . ;\n");
+    let src = &format!("{TIMES_DEF}: main ( -- ) 10 | x | 0 5 ~[ add x add ] times . ;\n");
     let (stdout, code) = run_src("qcaptimes", src);
     assert_eq!(stdout, "60\n");
     assert_eq!(code, 0);
@@ -472,7 +472,7 @@ fn two_differing_quotation_arms_materialize_and_call() {
     // splice, so it materializes each against the word's declared
     // `[ i64 -- i64 ]` output (R11) and `call` at the site dispatches
     // indirectly through whichever aggregate the branch left.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) ~[ [ 1 + ] ] ~[ [ 2 + ] ] if ;\n\
+    let src = ": pick ( bool -- [ i64 -- i64 ] ) ~[ [ 1 add ] ] ~[ [ 2 add ] ] if ;\n\
                : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qjoin", src);
     assert_eq!(stdout, "5\n6\n");
@@ -490,7 +490,7 @@ fn same_quotation_both_arms_still_splices() {
     // One literal bound before the `if`, named in both arms: the equal `Known`
     // ids forward the marker (no `Phi`, no materialization), so `call` after
     // the join splices exactly as today and emits no indirect call.
-    let src = ": main ( -- ) [ 1 + ] | q | true ~[ q ] ~[ q ] if 5 swap call . ;\n";
+    let src = ": main ( -- ) [ 1 add ] | q | true ~[ q ] ~[ q ] if 5 swap call . ;\n";
     let (stdout, code) = run_src("qjoinsame", src);
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
@@ -508,7 +508,7 @@ fn capturing_scalar_at_join_snapshots() {
     // `true` arm captures the scalar `x`. 7b re-points 7a's rejection: the arm
     // snapshots `x = 10` and both arms materialize (the `false` arm captures
     // nothing, a null env). `true`: 4 + 10 = 14; `false`: 4 + 2 = 6.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | ~[ [ x + ] ] ~[ [ 2 + ] ] if ;\n\
+    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | ~[ [ x add ] ] ~[ [ 2 add ] ] if ;\n\
                : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapjoin", src);
     assert_eq!(stdout, "14\n6\n");
@@ -535,8 +535,8 @@ fn loop_over_erased_quotation_emits_one_indirect_call() {
     // intrinsic effectively had.
     let src = ": spin ( i64 i64 i64 [ i64 i64 -- i64 ] -- i64 )\n\
                | f | | to | | from |\n\
-               from to < ~[ from f call from 1 + to f spin ] ~[ ] if ;\n\
-               : acc ( -- [ i64 i64 -- i64 ] ) [ + ] ;\n\
+               from to lt ~[ from f call from 1 add to f spin ] ~[ ] if ;\n\
+               : acc ( -- [ i64 i64 -- i64 ] ) [ add ] ;\n\
                : main ( -- ) 0 0 5 acc spin . ;\n";
     let (stdout, code) = run_src("qtimes", src);
     assert_eq!(stdout, "10\n");
@@ -662,7 +662,7 @@ fn materialized_multi_capture_builds_stack_bundle() {
                20 1 fill | b |\n\
                &a | ra |\n\
                &b | rb |\n\
-               [ ra 0 >usize &> @ rb 0 >usize &> @ + ] Holder | h |\n\
+               [ ra 0 >usize &> @ rb 0 >usize &> @ add ] Holder | h |\n\
                h Holder> call .\n\
                a drop b drop ;\n";
     let one = "type: Holder q [ -- i64 ] ;\n\
@@ -872,7 +872,7 @@ fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
         "type: Holder q [ -- i64 ] ;\n\
          : make ( &[i64 2] &[i64 2] -- Holder )\n\
          | ra rb |\n\
-         [ ra 0 >usize &> @ rb 0 >usize &> @ + ] Holder ;\n\
+         [ ra 0 >usize &> @ rb 0 >usize &> @ add ] Holder ;\n\
          : main ( -- )\n\
          10 2 fill | a |\n\
          20 2 fill | b |\n\
@@ -896,7 +896,7 @@ fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
         "type: Holder q [ -- i64 ] ;\n\
          : make ( &[i64 3] i64 -- Holder )\n\
          | ra n |\n\
-         [ ra 0 >usize &> @ n + ] Holder ;\n\
+         [ ra 0 >usize &> @ n add ] Holder ;\n\
          : main ( -- )\n\
          10 3 fill | a |\n\
          &a 5 make Holder> call .\n\
@@ -923,7 +923,7 @@ fn scalar_only_bundle_escaping_via_carrier_is_rejected_deferred() {
          : make ( -- Holder )\n\
          10 | x |\n\
          20 | y |\n\
-         [ x y + ] Holder ;\n\
+         [ x y add ] Holder ;\n\
          : main ( -- ) make Holder> call . ;\n",
     );
     assert_eq!(

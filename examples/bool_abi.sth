@@ -1,5 +1,5 @@
 : pos ( i64 -- bool )
-  0 > ;
+  0 gt ;
 
 : classify ( i64 -- i64 )
   pos ~[ 1 ] ~[ 0 ] if ;

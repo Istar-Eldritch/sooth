@@ -757,13 +757,13 @@ mod tests {
         // never lands in the buffer, so the committed line lexes cleanly.
         feed(&mut ed, b"1 2");
         feed(&mut ed, b"\x1b[C"); // right at end: no-op, escape consumed
-        feed(&mut ed, b" +");
+        feed(&mut ed, b" add");
         let actions = feed(&mut ed, b"\r");
         let line = match &actions[..] {
             [Action::Commit(l)] => l.clone(),
             other => panic!("expected one Commit, got {other:?}"),
         };
-        assert_eq!(line, "1 2 +");
+        assert_eq!(line, "1 2 add");
         assert!(
             !line.as_bytes().contains(&0x1b),
             "escape byte reached lexer"
@@ -877,10 +877,10 @@ mod tests {
         let mut ed = Editor::new("> ", "... ", empty_history(), crate::repl::text_is_complete);
         let none = feed(&mut ed, b": sq ( i64 -- i64 )\r");
         assert!(none.is_empty(), "unclosed def must not commit yet");
-        let actions = feed(&mut ed, b"dup * ;\r");
+        let actions = feed(&mut ed, b"dup mul ;\r");
         assert_eq!(
             actions,
-            vec![Action::Commit(": sq ( i64 -- i64 )\ndup * ;".to_string())]
+            vec![Action::Commit(": sq ( i64 -- i64 )\ndup mul ;".to_string())]
         );
     }
 
@@ -918,8 +918,8 @@ mod tests {
 
         // A fresh, complete line after the abort commits normally, proving
         // the process (and the editor) survived.
-        let actions = feed(&mut ed, b"1 2 +\r");
-        assert_eq!(actions, vec![Action::Commit("1 2 +".to_string())]);
+        let actions = feed(&mut ed, b"1 2 add\r");
+        assert_eq!(actions, vec![Action::Commit("1 2 add".to_string())]);
     }
 
     #[test]
@@ -960,11 +960,11 @@ mod tests {
         let history = History::load_from(Some(dir.clone()), HISTORY_CAP);
         let mut ed = Editor::new("> ", "... ", history, |_| true);
         let mut out = Vec::new();
-        for &b in b"1 2 +" {
+        for &b in b"1 2 add" {
             ed.push_byte(b, &mut out).unwrap();
         }
         let action = ed.push_byte(b'\r', &mut out).unwrap();
-        assert_eq!(action, Some(Action::Commit("1 2 +".to_string())));
+        assert_eq!(action, Some(Action::Commit("1 2 add".to_string())));
         let rendered = String::from_utf8_lossy(&out);
         assert!(
             rendered.contains("history not saved"),

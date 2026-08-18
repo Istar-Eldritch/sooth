@@ -1660,12 +1660,12 @@ mod tests {
     /// an edge case, it is the case the whole slice rests on.
     #[test]
     fn check_branch_accepts_a_literal_and_a_forwarded_quotation_operand() {
-        check_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
+        check_src(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
             .expect("two quotation literals splice at the call site");
         check_src(
             ": myif inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
-             : main ( -- ) 1 2 = ~[ 7 ] ~[ 8 ] myif . ;\n",
+             : main ( -- ) 1 2 eq ~[ 7 ] ~[ 8 ] myif . ;\n",
         )
         .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
     }
@@ -1693,7 +1693,7 @@ mod tests {
         .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
         let err = check_src(
             ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
-             : main ( -- ) 1 2 u= ~[ 5 ] w . ;\n",
+             : main ( -- ) 1 2 ueq ~[ 5 ] w . ;\n",
         )
         .unwrap_err();
         assert!(
@@ -1707,12 +1707,12 @@ mod tests {
     /// condition position is still rejected, naming `branch`.
     #[test]
     fn check_branch_rejects_a_quotation_condition_and_a_non_quotation_arm() {
-        let cond = check_src(": main ( -- ) [ + ] [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
+        let cond = check_src(": main ( -- ) [ add ] [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
         assert!(
             cond.contains("`branch`") && cond.contains("cannot take a quotation as an operand"),
             "unexpected message: {cond}"
         );
-        let arm = check_src(": main ( -- ) 1 2 u= 3 [ 2 ] branch drop ;\n").unwrap_err();
+        let arm = check_src(": main ( -- ) 1 2 ueq 3 [ 2 ] branch drop ;\n").unwrap_err();
         assert!(
             arm.contains("`branch` requires two quotation operands"),
             "unexpected message: {arm}"

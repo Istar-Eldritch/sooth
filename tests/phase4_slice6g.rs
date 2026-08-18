@@ -64,7 +64,7 @@ fn check_error(src: &str) -> String {
 /// process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+     from to lt ~[ from f call from 1 add to f times-helper ] ~[ ] if ;\n\
      : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -279,7 +279,7 @@ fn bound_array_passed_to_filter_is_accepted() {
             "{}\n\
              : main ( -- )\n\
              0 4 fill | a |\n\
-             a ~[ 4 > ] c::filter drop drop ;\n",
+             a ~[ 4 gt ] c::filter drop drop ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
     );
@@ -307,7 +307,7 @@ fn while_over_an_aliased_array_local_is_accepted() {
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
@@ -333,7 +333,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 ~[ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
@@ -355,7 +355,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ .\n\
              &a 0 >usize &> @ drop ;\n",
             lib_import("c", "lib/combinators.sth")
@@ -383,7 +383,7 @@ fn sort_called_with_bound_array_locals_runs() {
              &!d 2 >usize &!> 1 !\n\
              &!d 3 >usize &!> 3 !\n\
              0 4 fill | s |\n\
-             d s ~[ | x y | x y - ] a::sort\n\
+             d s ~[ | x y | x y sub ] a::sort\n\
              | ra rs | rs drop\n\
              &ra 0 >usize &> @ .\n\
              &ra 1 >usize &> @ .\n\

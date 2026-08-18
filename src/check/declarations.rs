@@ -67,10 +67,10 @@ pub(super) const BUILTIN_WORDS: &[&str] = &[
     "swap",
     "over",
     "rot", // check_operator
-    "+",
-    "-",
-    "*",
-    "/",
+    "add",
+    "sub",
+    "mul",
+    "div",
     "mod",
     "and",
     "or",
@@ -80,23 +80,23 @@ pub(super) const BUILTIN_WORDS: &[&str] = &[
     "shr",
     // Slice 10c (R-P3-3): the comparison primitives, each yielding the 32-bit
     // flag `branch` consumes.
-    "u=",
-    "u<",
-    "u>",
-    "u<=",
-    "u>=",
-    "u<>",
+    "ueq",
+    "ult",
+    "ugt",
+    "ulte",
+    "ugte",
+    "une",
     // The six surface comparison names are `lib/` words now, not name-
     // dispatched builtins, but they stay listed: this set is also what stops
     // a bare tail call being read as a call to the enclosing word
-    // (`has_self_tail_call`), and a trailing `<` inside a user's own `Vec2 <`
-    // is still far more often the library `<` on two scalars than a self-call.
-    "=",
-    "<",
-    ">",
-    "<=",
-    ">=",
-    "<>",
+    // (`has_self_tail_call`), and a trailing `lt` inside a user's own `Vec2 lt`
+    // is still far more often the library `lt` on two scalars than a self-call.
+    "eq",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "ne",
     ".",
     // Slice 10c (R-P3-1/R-P3-2): the two control/discriminant primitives.
     "branch",
@@ -112,8 +112,9 @@ pub(super) const BUILTIN_WORDS: &[&str] = &[
 /// lookup. Beyond the fixed names, `check_operator` claims every `>`-prefixed
 /// name with a non-empty remainder as a numeric conversion (`>u8`), erroring
 /// on an unrecognised target type rather than falling through, so no such
-/// name can reach a registered signature either. Bare `>` is the comparison
-/// operator, and is in the list.
+/// name can reach a registered signature either. A bare `>` with no suffix
+/// falls through this filter; the comparison operator, now spelled `gt`, is
+/// in the list separately.
 pub(super) fn is_builtin_word_name(name: &str) -> bool {
     BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
 }
@@ -2076,11 +2077,11 @@ mod tests {
         // R1: an overload whose input types exactly match a builtin row is a
         // located error too, naming the operand types.
         let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( i64 i64 -- i64 ) drop ;\n\
+: add ( i64 i64 -- i64 ) drop ;\n\
 : main ( -- ) ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("overload of `+`") && err.contains("as a builtin"),
+            err.contains("overload of `add`") && err.contains("as a builtin"),
             "unexpected message: {err}"
         );
         assert!(err.contains("i64 i64"), "names the operand types: {err}");
@@ -2100,15 +2101,15 @@ mod tests {
     }
     #[test]
     fn overload_arity_clash_is_error() {
-        // R4: a local overload of `+` whose arity disagrees with the
+        // R4: a local overload of `add` whose arity disagrees with the
         // builtin's is rejected at its own definition site.
         let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 -- Vec2 ) ;\n\
+: add ( Vec2 -- Vec2 ) ;\n\
 : main ( -- ) ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("overload of `+`")
-                && err.contains("takes 1 input but another `+` takes 2")
+            err.contains("overload of `add`")
+                && err.contains("takes 1 input but another `add` takes 2")
                 && err.contains("must agree on input count"),
             "unexpected message: {err}"
         );
@@ -2135,16 +2136,17 @@ mod tests {
     }
     #[test]
     fn overload_generic_and_concrete_overlap_is_error() {
-        // R5: a poly candidate overlapping the builtin `+` of the same
+        // R5: a poly candidate overlapping the builtin `add` of the same
         // arity is rejected -- no specialization ordering.
-        let src = ": + ( 'T 'T -- 'T ) drop ;\n: main ( -- ) ;\n";
+        let src = ": add ( 'T 'T -- 'T ) drop ;\n: main ( -- ) ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("generic overload") && err.contains("overlaps a concrete overload of `+`"),
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `add`"),
             "unexpected message: {err}"
         );
         assert!(
-            err.contains(": + ( 'T 'T -- 'T )"),
+            err.contains(": add ( 'T 'T -- 'T )"),
             "renders the poly signature: {err}"
         );
 
@@ -2251,8 +2253,8 @@ mod tests {
         // `Vec2 +` overload does not answer an `i64 bool` call site
         // either).
         let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: main ( -- ) 1 true + drop ;\n";
+: add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) 1 true add drop ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("requires two operands of the same numeric type")
@@ -2853,7 +2855,7 @@ mod tests {
     #[test]
     fn check_struct_equality_operator_is_error() {
         // X7: `=` on two structs is scalar-only, naming the struct type.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 = ;";
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 eq ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -2864,7 +2866,7 @@ mod tests {
     #[test]
     fn check_struct_arithmetic_operator_is_error() {
         // X7: `+` on two structs is scalar-only, naming the struct type.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 1 2 Vec2 + ;";
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 1 2 Vec2 add ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -2979,7 +2981,7 @@ mod tests {
         check_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;
              type: MaybeInt | None | Some v i64 ;
-             : area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;
+             : area ( Shape -- f64 ) | Circle dup mul 3.14159 mul | Rect | w h | w h mul ;
              : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
         )
         .unwrap();
@@ -2989,7 +2991,7 @@ mod tests {
         // X4: a clause word missing a variant names the missing one.
         let err = check_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * ;",
+             : area ( Shape -- f64 ) | Circle dup mul ;",
         )
         .unwrap_err();
         assert!(err.contains("non-exhaustive"), "unexpected message: {err}");
@@ -3001,7 +3003,7 @@ mod tests {
         // X5: two clauses for the same variant names it.
         let err = check_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Circle dup * | Rect | w h | w h * ;",
+             : area ( Shape -- f64 ) | Circle dup mul | Circle dup mul | Rect | w h | w h mul ;",
         )
         .unwrap_err();
         assert!(
@@ -3016,7 +3018,7 @@ mod tests {
         let err = check_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;
              type: Other | Blob b i64 ;
-             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * | Blob 0.0 ;",
+             : area ( Shape -- f64 ) | Circle dup mul | Rect | w h | w h mul | Blob 0.0 ;",
         )
         .unwrap_err();
         assert!(err.contains("unknown variant"), "unexpected message: {err}");
@@ -3058,15 +3060,15 @@ mod tests {
     fn check_enum_equality_operator_is_error() {
         // X10/M2: `=` on two enums reaches the operand-pair guard.
         let err =
-            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) = ;").unwrap_err();
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) eq ;").unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
         assert!(err.contains("Shape"), "unexpected message: {err}");
     }
     #[test]
     fn check_enum_arithmetic_operator_is_error() {
         // X10/M2: arithmetic on an enum reaches the operand-pair guard.
-        let err =
-            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Shape ) + ;").unwrap_err();
+        let err = check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Shape ) add ;")
+            .unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
         assert!(err.contains("Shape"), "unexpected message: {err}");
     }

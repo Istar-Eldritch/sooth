@@ -96,9 +96,9 @@ fn if_resolves_to_a_library_word_definition() {
 /// otherwise grow into colliding with.
 #[test]
 fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
-    let src = ": cond ( i64 -- i64 ) 1 + ;\n\
-               : then-arm ( i64 -- i64 ) 1 + ;\n\
-               : else-arm ( i64 -- i64 ) 1 + ;\n\
+    let src = ": cond ( i64 -- i64 ) 1 add ;\n\
+               : then-arm ( i64 -- i64 ) 1 add ;\n\
+               : else-arm ( i64 -- i64 ) 1 add ;\n\
                : main ( -- ) 1 cond then-arm else-arm . ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
@@ -248,7 +248,7 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 fn the_six_comparisons_are_library_words() {
     let prelude = parser::prelude_words();
     let table = check::builtin_table();
-    for name in ["=", "<", ">", "<=", ">=", "<>"] {
+    for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
         let word = prelude
             .iter()
             .find(|w| w.name == name)
@@ -267,7 +267,7 @@ fn the_six_comparisons_are_library_words() {
             "`{name}` left `BUILTIN_TABLE` for `lib/`"
         );
     }
-    for name in ["u=", "u<", "u>", "u<=", "u>=", "u<>"] {
+    for name in ["ueq", "ult", "ugt", "ulte", "ugte", "une"] {
         assert!(
             table.contains_key(name),
             "`{name}` carries the per-numeric-type rows now"
@@ -279,7 +279,7 @@ fn the_six_comparisons_are_library_words() {
 /// same operands the retired builtin row did.
 #[test]
 fn a_comparison_primitive_emits_one_cmp_over_its_operands() {
-    let funcs = lowered(": w ( i64 i64 -- u32 ) u< ;\n: main ( -- ) 1 2 w drop ;\n");
+    let funcs = lowered(": w ( i64 i64 -- u32 ) ult ;\n: main ( -- ) 1 2 w drop ;\n");
     let w = func(&funcs, "w");
     let body = instrs(w);
     let cmps: Vec<_> = body
@@ -306,6 +306,43 @@ fn a_comparison_primitive_emits_one_cmp_over_its_operands() {
     );
 }
 
+/// Operators-as-words (Phase 1): all six renamed unsigned primitives still
+/// lower to their own `CmpOp`, one comparison each, over the declared
+/// operands in order -- the same shape `a_comparison_primitive_emits_one_cmp_over_its_operands`
+/// checks for `ult` alone, now covering the whole family so a rename that
+/// missed a `CmpOp` mapping fails here.
+#[test]
+fn check_ueq_family_lowers_to_cmpop() {
+    for (name, op) in [
+        ("ueq", CmpOp::Eq),
+        ("ult", CmpOp::Lt),
+        ("ugt", CmpOp::Gt),
+        ("ulte", CmpOp::Le),
+        ("ugte", CmpOp::Ge),
+        ("une", CmpOp::Ne),
+    ] {
+        let funcs = lowered(&format!(
+            ": w ( i64 i64 -- u32 ) {name} ;\n: main ( -- ) 1 2 w drop ;\n"
+        ));
+        let w = func(&funcs, "w");
+        let cmps: Vec<_> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Cmp(dst, cmp_op, lhs, rhs) => Some((*dst, *cmp_op, *lhs, *rhs)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cmps.len(), 1, "`{name}`: one comparison, no diamond");
+        let (_, cmp_op, lhs, rhs) = cmps[0];
+        assert_eq!(cmp_op, op, "`{name}` lowers to the wrong `CmpOp`");
+        assert_eq!(
+            (w.value_types[lhs.0 as usize], w.value_types[rhs.0 as usize]),
+            (w.params[0], w.params[1]),
+            "`{name}`: the two declared operands, in order"
+        );
+    }
+}
+
 /// Part 3: the canonical `a b = if ... ...` pattern costs nothing. The library
 /// `=` is spliced, so its call site mints no symbol and emits no `Instr::Call`;
 /// the branch-and-construct diamond it adds in IR is what QBE folds away.
@@ -317,10 +354,10 @@ fn a_comparison_primitive_emits_one_cmp_over_its_operands() {
 /// polymorphic comparison word exist.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
-    let funcs = lowered(": w ( i64 i64 -- i64 ) = ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
+    let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
-        !funcs.iter().any(|f| f.name.starts_with('=')),
-        "no `IrFunc` is minted for the library `=`"
+        !funcs.iter().any(|f| f.name.starts_with("eq")),
+        "no `IrFunc` is minted for the library `eq`"
     );
     let w = func(&funcs, "w");
     assert!(
@@ -396,8 +433,8 @@ fn word_w_assembly(src: &str) -> String {
 /// diverge or the build breaks.
 #[test]
 fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
-    let library = word_w_assembly(": w ( i64 i64 -- i64 ) = ~[ 1 ] ~[ 2 ] if ;");
-    let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;");
+    let library = word_w_assembly(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;");
+    let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;");
     assert_eq!(
         library, primitive,
         "library `=`/`if` must fold to the same machine code as raw `u=`/`branch`"
@@ -412,10 +449,10 @@ fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
 #[test]
 fn the_library_comparisons_cover_non_i64_numeric_types() {
     let src = ": main ( -- )\n  \
-               1 >u32 2 >u32 < .\n  \
-               5 >i8 5 >i8 = .\n  \
-               3 >u32 2 >u32 >= .\n  \
-               1.5 2.5 <> . ;\n";
+               1 >u32 2 >u32 lt .\n  \
+               5 >i8 5 >i8 eq .\n  \
+               3 >u32 2 >u32 gte .\n  \
+               1.5 2.5 ne . ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("the comparisons cover `u32`, `i8` and `f64` too");
@@ -464,7 +501,7 @@ fn corpus_loops_still_lower_to_a_back_edge_through_the_library_if() {
 fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
     let funcs = lowered(
         ": sum-to ( i64 i64 -- i64 )\n  \
-         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;\n\
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;\n\
          : main ( -- ) 0 10 sum-to . ;\n",
     );
     let w = func(&funcs, "sum-to");
@@ -483,14 +520,14 @@ fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
 fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
     let src = format!(
         "import: c \"{}/lib/combinators.sth\" ;\n\
-               : classify ( i64 -- i64 ) dup 10 < ~[ 1 ] ~[ 2 ] if swap drop ;\n\
+               : classify ( i64 -- i64 ) dup 10 lt ~[ 1 ] ~[ 2 ] if swap drop ;\n\
                : countdown ( i64 i64 -- i64 )\n  \
-               | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - countdown ] if ;\n\
+               | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub countdown ] if ;\n\
                : main ( -- )\n  \
                3 classify .\n  \
                30 classify .\n  \
                true ~[ 0 ] ~[ 1 ] unless .\n  \
-               0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while .\n  \
+               0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while .\n  \
                0 100 countdown . ;\n",
         env!("CARGO_MANIFEST_DIR")
     );
