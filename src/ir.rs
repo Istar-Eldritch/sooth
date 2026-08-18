@@ -14,7 +14,7 @@ use crate::ast::{
     generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, GenericTypes,
     Len, Module, OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span,
     StackEffect, StaticDecl, StaticInit, StructDecl, StructId, Subst, Term, TermKind, Type,
-    TypedSlot, WordBody, WordDef,
+    TypedSlot, VariantTag, VariantTagMode, WordBody, WordDef,
 };
 
 mod destructors;

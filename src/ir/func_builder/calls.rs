@@ -742,34 +742,35 @@ impl<'a> FuncBuilder<'a> {
         let split = self.stack.len() - n;
         let arm_values = self.stack.split_off(split);
         let mut clauses = Vec::with_capacity(n);
-        let mut receiver = None;
+        let mut mode = None;
         for value in arm_values {
             let qid = self.quot_bodies[&value];
-            let (tag, declared) = self.quot_arm_tags[qid.0]
+            let tag = self.quot_arm_tags[qid.0]
                 .clone()
                 .expect("checked: an eliminator arm is a variant-tagged quotation literal");
-            receiver.get_or_insert(declared);
+            mode.get_or_insert(tag.mode);
             clauses.push(Clause {
-                variant: tag,
+                variant: tag.name,
                 locals: Vec::new(),
                 body: self.quot_defs[qid.0].clone(),
                 span,
             });
         }
-        // Decision 6: the call's scrutinee mode. Every arm declares the same
-        // one (the checker builds each arm's expected effect from it), so the
-        // first arm's receiver type carries it: a reference arm's referent is
-        // the narrowed variant, which erases to the same `IrType::Enum(id)` as
-        // the enum itself, so `lower_clauses` resolves through it unchanged.
-        let scrutinee_ty = match receiver {
-            Some(reference @ Type::Ref(..)) => reference,
-            _ => Type::Enum(id, self.enums.layouts[id.index()].name),
+        // Decision 6: the call's scrutinee mode, read off the tag each arm
+        // wrote it on (slice 3b, R7). Every arm spells the same one -- the
+        // checker builds each arm's expected effect from the call's single
+        // resolved mode -- so the first arm settles it. A zero-variant enum
+        // has no arm to read and no scrutinee to dereference either.
+        let ref_mutable = match mode {
+            Some(VariantTagMode::Ref) => Some(false),
+            Some(VariantTagMode::RefMut) => Some(true),
+            Some(VariantTagMode::Owning) | None => None,
         };
         let params = mem::take(&mut self.stack);
         self.lower_clauses(
             &clauses,
             &params,
-            scrutinee_ty,
+            (id, ref_mutable),
             ArmBinding::WholeValue,
             tail,
         );
@@ -777,15 +778,10 @@ impl<'a> FuncBuilder<'a> {
 }
 
 /// Phase 6 slice 3 (R5): the eliminator-arm routing an annotation carries --
-/// its variant tag and the concrete receiver slot the tag expanded to. `None`
-/// for an untagged (ordinary) literal, which is every literal but an arm.
-fn arm_tag(annot: Option<&QuotAnnot>) -> Option<(String, Type)> {
-    let annot = annot?;
-    let tag = annot.variant_tag.clone()?;
-    let Some(PolyType::Concrete(receiver)) = annot.inputs.first() else {
-        unreachable!("a tagged annotation opens with its concrete receiver slot (parser, R1)")
-    };
-    Some((tag, *receiver))
+/// the variant to dispatch to and the mode the arm receives it in. `None` for
+/// an untagged (ordinary) literal, which is every literal but an arm.
+fn arm_tag(annot: Option<&QuotAnnot>) -> Option<VariantTag> {
+    annot?.variant_tag.clone()
 }
 
 #[cfg(test)]

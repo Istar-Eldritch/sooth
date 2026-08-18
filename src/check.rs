@@ -17,7 +17,7 @@ use crate::ast::{
     EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo,
     OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect,
     StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl,
-    WordBody, WordDef,
+    VariantTag, VariantTagMode, WordBody, WordDef,
 };
 
 mod audits;
@@ -253,7 +253,7 @@ struct AnnotEffect {
     span: Span,
     /// Phase 6 slice 3 (R1/R4): the variant an eliminator arm handles, carried
     /// through from `QuotAnnot::variant_tag`. `None` for every plain literal.
-    variant_tag: Option<String>,
+    variant_tag: Option<VariantTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2220,7 +2220,7 @@ fn check_eliminator_call(
     // always present as underflow and the exhaustiveness pass below could
     // never name it. Collection stops at the first operand that is not a
     // tagged quotation literal; that operand is the scrutinee slot.
-    let mut arms: Vec<(QuotId, String)> = Vec::new();
+    let mut arms: Vec<(QuotId, VariantTag)> = Vec::new();
     while let Some(top) = stack.last().copied() {
         let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
             break;
@@ -2228,11 +2228,11 @@ fn check_eliminator_call(
         let Some(tag) = prov.quotations[qid.0]
             .annot
             .as_ref()
-            .and_then(|a| a.variant_tag.clone())
+            .and_then(|a| a.variant_tag.as_ref())
         else {
             break;
         };
-        arms.push((qid, tag));
+        arms.push((qid, tag.clone()));
         stack.pop();
     }
     // The checker pushes operands in written source order, so popping off the
@@ -2279,13 +2279,13 @@ fn check_eliminator_call(
         let Some(vi) = enum_decl
             .variants
             .iter()
-            .position(|v| generic_surface_name(&v.name) == tag)
+            .position(|v| generic_surface_name(&v.name) == tag.name)
         else {
             return Err(eliminator_unknown_variant_error(
                 ctx,
                 prov.quotations[qid.0].span,
                 name,
-                tag,
+                &tag.name,
                 enum_name,
             ));
         };
@@ -2294,7 +2294,7 @@ fn check_eliminator_call(
                 ctx,
                 prov.quotations[qid.0].span,
                 name,
-                tag,
+                &tag.name,
                 enum_name,
             ));
         }
@@ -2332,7 +2332,7 @@ fn check_eliminator_call(
     let row: Vec<Slot> = stack[..base].to_vec();
     let mut baseline: Option<Vec<Slot>> = None;
     let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
-    for ((qid, _), vi) in arms.iter().zip(&variant_indices) {
+    for ((qid, tag), vi) in arms.iter().zip(&variant_indices) {
         let owned = variant_type(ctx.enums(), id, *vi);
         // Decision 6: the call's one resolved mode, applied uniformly. An arm
         // whose annotation spells the other mode disagrees with this built
@@ -2345,6 +2345,24 @@ fn check_eliminator_call(
         let Some(eff) = crate::ast::is_quotation_type(declared) else {
             unreachable!("`inline_quotation_type` builds a quotation type")
         };
+        // Slice 3b (R3): the arm's annotation declares no input slot -- a bare
+        // tag is not typeable before the scrutinee's enum is known -- so the
+        // slot is built here, from this variant in the mode the *user* wrote.
+        // The reconciliation inside `check_literal_against_declared_effect`
+        // then holds it against `narrowed`, built above in the *call's* mode:
+        // both go through the same `variant_type`/`intern_ref_type`, so they
+        // are the identical interned `Type` when the modes agree and a plain
+        // annotation/parameter mismatch when they disagree (decision 6).
+        let written = match tag.mode {
+            VariantTagMode::Owning => owned,
+            VariantTagMode::Ref => intern_ref_type(refs, owned, false),
+            VariantTagMode::RefMut => intern_ref_type(refs, owned, true),
+        };
+        prov.quotations[qid.0]
+            .annot
+            .as_mut()
+            .expect("an arm was collected by its annotation's variant tag")
+            .inputs = vec![written];
         // The arm receives the caller's *own* scrutinee, retyped to the
         // narrowed variant -- not a fresh provenance-free slot. A reference
         // scrutinee is rooted at a caller place, and an arm that borrowed

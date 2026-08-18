@@ -849,13 +849,12 @@ fn check_term(
                     // supplied by the eliminator call site, where
                     // `check_eliminator_call` runs the same directional check
                     // against the real stack.
-                    if resolved.variant_tag.is_none() {
-                        check_literal_against_annotation(
+                    match &resolved.variant_tag {
+                        None => check_literal_against_annotation(
                             &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov,
                             scope, poly,
-                        )?;
-                    } else if !tagged_literal_reaches_an_eliminator_call(siblings, at, poly) {
-                        // Review fix (Phase 6 slice 3, finding 3): the branch
+                        )?,
+                        // Review fix (Phase 6 slice 3, finding 3): the arm
                         // above skips the standalone annotation check entirely
                         // for *every* tagged literal, on the premise that
                         // `check_eliminator_call` checks it instead -- true
@@ -864,14 +863,16 @@ fn check_term(
                         // eliminator call (a typo'd call name, or a tagged
                         // literal used as an ordinary value) was silently
                         // never checked at all, magic that this rejects.
-                        return Err(eliminator_arm_outside_call_error(
-                            ctx,
-                            resolved.span,
-                            resolved
-                                .variant_tag
-                                .as_deref()
-                                .expect("the `else` branch only runs when `variant_tag` is `Some`"),
-                        ));
+                        Some(tag)
+                            if !tagged_literal_reaches_an_eliminator_call(siblings, at, poly) =>
+                        {
+                            return Err(eliminator_arm_outside_call_error(
+                                ctx,
+                                resolved.span,
+                                &tag.name,
+                            ));
+                        }
+                        Some(_) => {}
                     }
                     Some(resolved)
                 }
