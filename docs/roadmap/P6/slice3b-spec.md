@@ -419,6 +419,21 @@ This is independent of this slice (reproduced on `main` before any S3b work) and
 T10b guards R7's mode mapping at IR level rather than with a golden. It wants its own
 slice; do not fix it here.
 
+**Latent gap found reviewing Phase 2, deliberately not fixed here:** R5's family gate
+compares `generic_surface_name` on both sides, which is module-scoped for a concrete enum
+(`Shape__m0` vs `Shape__m1` differ) but *not* for a generic one. An instantiation's mangle
+lands after its arguments (`Result[i64 bool]__m0`), so splitting at the first `[` takes the
+module tag with it and the gate compares a bare `Result` to a bare `Result`. The
+eliminator registry keys the same way, so two modules each declaring a generic `Result`
+share one entry. This is unreachable today for a reason outside this slice: a generic
+instantiation cannot cross a module boundary at all, since `export:` does not parse
+`Result[i64 bool]` and exporting the base `Result` does not satisfy the private-type check
+on an exported word's effect (reproduced on `36b45fb`, before this slice). Two same-named
+generic enums in separate modules therefore only ever eliminate their own values, which R5
+already routes correctly from the scrutinee. Whichever slice lets a generic instantiation
+be exported must scope this gate (and the registry key) by module first; do not add a
+stopgap here.
+
 **In scope, contrary to an earlier boundary:** `arm_tag`, `quot_arm_tags` and
 `lower_eliminator` in `src/ir/func_builder/calls.rs`, and `lower_clauses`' *signature* in
 `src/ir/func_builder/control_flow.rs` (its parameter becomes the already-destructured

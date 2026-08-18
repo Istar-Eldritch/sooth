@@ -2292,11 +2292,12 @@ fn check_eliminator_call(
         ));
     }
     let enum_decl = &ctx.enums()[id.index()];
-    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
-    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
-    // built from the mangled base) -- unlike `name_static`, which every
-    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
-    // would still leave `Shape__m0` in a diagnostic.
+    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`)
+    // -- unlike `name_static`, which every `Type::Enum` render already uses.
+    // Stripping the `[...]` arguments alone would still leave `Shape__m0` in a
+    // diagnostic. An instantiation's mangle lands *after* the arguments
+    // (`Result[i64 bool]__m0`), so for those the strip alone already yields a
+    // bare `Result` and the demangle is what covers the concrete case.
     let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
 
     // R4 step 3: exhaustiveness and duplication, in written source order and
@@ -4637,9 +4638,11 @@ mod tests {
     /// Phase 2 review, finding 2: R5 split the old single referent check into
     /// two -- non-enum (above) and wrong-family, since a generic instantiation
     /// no longer has the same `EnumId` as `gate_id` even when it is a member
-    /// of the right family. Deleting the family comparison leaves this green
-    /// at check time and dies in the backend instead (`qbe: invalid type for
-    /// second operand ... in ceql`), so it is load-bearing but was untested.
+    /// of the right family. The comparison is a diagnostic-quality guard, not
+    /// a crash guard: deleting it still rejects this program, but as `unknown
+    /// variant `Circle` of enum `Abc`` -- blaming the arm for naming a variant
+    /// the *scrutinee's* enum lacks, rather than the scrutinee for not being a
+    /// member of `Shape?`'s family at all.
     #[test]
     fn check_eliminator_call_wrong_enum_family_scrutinee_is_a_type_mismatch() {
         let err = check_src(&format!(

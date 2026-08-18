@@ -132,13 +132,42 @@ fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
     );
 }
 
+/// Phase 2 review, finding 1: the "expected" side of a wrong-family rejection
+/// is rendered under the family's *surface* name. Only a generic gate can show
+/// this: the registry retains one arbitrary instantiation (last write wins), so
+/// without the surface-name normalization this blames the scrutinee for not
+/// being `Result[i64 bool]` -- an instantiation the offending word never
+/// mentions, and which would change with declaration order. The concrete
+/// counterpart in `check.rs` cannot discriminate it, since there the
+/// normalization is a no-op.
+#[test]
+fn wrong_family_scrutinee_names_the_generic_surface_family() {
+    let err = build_err(
+        "s3b-wrong-family-generic",
+        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+         type: Abc | A a i64 | B b i64 | C c i64 ;\n\
+         : to-int ( Result[i64 bool] -- i64 )\n  \
+           ~[ ( Ok ) Ok> ]\n  \
+           ~[ ( Err ) Err> ~[ 1 ] ~[ 0 ] if ]\n  \
+           Result? ;\n\
+         : f ( Abc -- i64 ) ~[ ( Ok ) Ok> ] ~[ ( Err ) Err> ] Result? ;\n\
+         : main ( -- ) 42 Ok to-int . ;\n",
+    );
+    assert!(
+        err.contains("`Result?` expected `Result`, found `Abc`"),
+        "not surface-named: {err}"
+    );
+}
+
 /// T6/T7 (R5, decision 5): **one word** eliminates two *asymmetric*
 /// instantiations of the same generic enum -- `Result[i64 bool]` and
 /// `Result[bool i64]`, which can only be told apart because they are not the
 /// same instantiation (`Result[i64 i64]` could not distinguish `Ok 'T | Err
 /// 'E` from its swap). The word calls `Result?` twice, once per
 /// instantiation, so the eliminator registry keys both calls to the same
-/// base-family entry (`"Result__m0?"`, last write wins): this only routes
+/// base-family entry (a bare `"Result?"` -- an instantiation's mangle lands
+/// after its arguments, `Result[i64 bool]__m0`, so the surface-name strip
+/// takes the module tag with it; last write wins): this only routes
 /// each call correctly if its operative `EnumId` is read from its own
 /// scrutinee rather than from whichever instantiation the registry happened
 /// to retain (R5). T7 rides along: `Result[i64 bool]`'s stored variant name
