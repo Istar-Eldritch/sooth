@@ -1777,10 +1777,34 @@ pub struct QuotAnnot {
     /// The annotation's opening `(`, where a body/annotation disagreement is
     /// reported.
     pub span: Span,
-    /// Phase 6 slice 3 (R1): the bare variant name a leading `Variant`/
-    /// `&Variant`/`&!Variant` token names, sigil stripped -- an eliminator
-    /// arm's routing tag. `None` for every plain (non-arm) annotation.
-    pub variant_tag: Option<String>,
+    /// Phase 6 slice 3b (R1/R2): the routing tag a leading `Variant`/
+    /// `&Variant`/`&!Variant` token names. `None` for every plain (non-arm)
+    /// annotation.
+    pub variant_tag: Option<VariantTag>,
+}
+
+/// Phase 6 slice 3b (R2): an eliminator arm's routing tag. The parser
+/// recognizes it by name alone -- a bare variant name is not typeable at
+/// parse time for a generic enum, whose variants have no concrete
+/// `Type::Variant` until an instantiation supplies its arguments -- so the
+/// mode the user wrote rides here as data rather than on an interned
+/// `Type::Ref`. The checker types the tag against the scrutinee's own enum
+/// and the IR reads the mode straight off `mode`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantTag {
+    /// The bare variant name, sigil stripped: the spelling both the checker's
+    /// arm-to-variant routing and the IR's clause dispatch match against, and
+    /// the one a `type:` declaration writes.
+    pub name: String,
+    pub mode: VariantTagMode,
+}
+
+/// The mode an arm's tag was written in: `Variant`, `&Variant`, `&!Variant`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantTagMode {
+    Owning,
+    Ref,
+    RefMut,
 }
 
 #[derive(Debug, Clone)]

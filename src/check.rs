@@ -17,7 +17,7 @@ use crate::ast::{
     EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo,
     OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect,
     StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl,
-    WordBody, WordDef,
+    VariantTag, VariantTagMode, WordBody, WordDef,
 };
 
 mod audits;
@@ -253,7 +253,7 @@ struct AnnotEffect {
     span: Span,
     /// Phase 6 slice 3 (R1/R4): the variant an eliminator arm handles, carried
     /// through from `QuotAnnot::variant_tag`. `None` for every plain literal.
-    variant_tag: Option<String>,
+    variant_tag: Option<VariantTag>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2191,7 +2191,7 @@ fn check_literal_against_declared_effect(
 /// declared-vs-written comparison rather than by a mode-specific diagnostic.
 #[allow(clippy::too_many_arguments)]
 fn check_eliminator_call(
-    id: EnumId,
+    gate_id: EnumId,
     name: &str,
     span: Span,
     mut stack: Vec<Slot>,
@@ -2206,13 +2206,14 @@ fn check_eliminator_call(
     granted: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
-    let enum_decl = &ctx.enums()[id.index()];
-    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`,
-    // and `Shape__m0[i64]` once instantiated, since an instantiation name is
-    // built from the mangled base) -- unlike `name_static`, which every
-    // `Type::Enum` render already uses. Stripping the `[...]` arguments alone
-    // would still leave `Shape__m0` in a diagnostic.
-    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    // R5 (Slice 3b phase 2): `gate_id` is the registry's entry for this call
+    // name -- a base-family key, since two instantiations of one generic
+    // enum share one registry entry (last write wins). It is used below only
+    // to gate that this call is an eliminator of the right family and for
+    // the arity of the underflow diagnostic (a variant count every
+    // instantiation of the family shares); the operative `EnumId` this call
+    // actually eliminates is read off the scrutinee's own type once found.
+    let gate_decl = &ctx.enums()[gate_id.index()];
     let held = stack.len();
     // R4 step 1: arm collection is variable-arity, not a fixed
     // `1 + variant_count` pop. A fixed pop cannot tell "an arm is missing"
@@ -2220,7 +2221,7 @@ fn check_eliminator_call(
     // always present as underflow and the exhaustiveness pass below could
     // never name it. Collection stops at the first operand that is not a
     // tagged quotation literal; that operand is the scrutinee slot.
-    let mut arms: Vec<(QuotId, String)> = Vec::new();
+    let mut arms: Vec<(QuotId, VariantTag)> = Vec::new();
     while let Some(top) = stack.last().copied() {
         let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
             break;
@@ -2228,11 +2229,11 @@ fn check_eliminator_call(
         let Some(tag) = prov.quotations[qid.0]
             .annot
             .as_ref()
-            .and_then(|a| a.variant_tag.clone())
+            .and_then(|a| a.variant_tag.as_ref())
         else {
             break;
         };
-        arms.push((qid, tag));
+        arms.push((qid, tag.clone()));
         stack.pop();
     }
     // The checker pushes operands in written source order, so popping off the
@@ -2246,7 +2247,7 @@ fn check_eliminator_call(
             ctx,
             span,
             name,
-            enum_decl.variants.len() + 1,
+            gate_decl.variants.len() + 1,
             held,
         ));
     };
@@ -2260,15 +2261,44 @@ fn check_eliminator_call(
         Some((referent, mutable)) => (referent, Some(mutable)),
         None => (scrutinee.ty, None),
     };
-    if referent != Type::Enum(id, enum_decl.name_static) {
+    // R5: the operative `EnumId` is the scrutinee's own -- not `gate_id` --
+    // so two asymmetric instantiations of one generic enum eliminate
+    // independently in the same word: the registry's one entry is only
+    // consulted above to reach this call at all, never to decide which
+    // instantiation it narrows to. A non-enum scrutinee, or one whose enum is
+    // not a member of this call name's base family, is the same
+    // `type_mismatch_error` as before. `gate_decl` names whichever
+    // instantiation the registry happened to retain (last write wins), so
+    // the "expected" side is rendered under the family's surface name
+    // (`Result`), not one arbitrary instantiation's (`Result[bool i64]`).
+    let expected_family = Type::Enum(gate_id, generic_surface_name(gate_decl.name_static));
+    let Type::Enum(id, _) = referent else {
         return Err(type_mismatch_error(
             ctx,
             span,
             name,
-            Type::Enum(id, enum_decl.name_static),
+            expected_family,
+            scrutinee.ty,
+        ));
+    };
+    if generic_surface_name(&ctx.enums()[id.index()].name) != generic_surface_name(&gate_decl.name)
+    {
+        return Err(type_mismatch_error(
+            ctx,
+            span,
+            name,
+            expected_family,
             scrutinee.ty,
         ));
     }
+    let enum_decl = &ctx.enums()[id.index()];
+    // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`)
+    // -- unlike `name_static`, which every `Type::Enum` render already uses.
+    // Stripping the `[...]` arguments alone would still leave `Shape__m0` in a
+    // diagnostic. An instantiation's mangle lands *after* the arguments
+    // (`Result[i64 bool]__m0`), so for those the strip alone already yields a
+    // bare `Result` and the demangle is what covers the concrete case.
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
 
     // R4 step 3: exhaustiveness and duplication, in written source order and
     // before any arm body is checked -- adapted from `check_clause_word`,
@@ -2279,13 +2309,13 @@ fn check_eliminator_call(
         let Some(vi) = enum_decl
             .variants
             .iter()
-            .position(|v| generic_surface_name(&v.name) == tag)
+            .position(|v| generic_surface_name(&v.name) == tag.name)
         else {
             return Err(eliminator_unknown_variant_error(
                 ctx,
                 prov.quotations[qid.0].span,
                 name,
-                tag,
+                &tag.name,
                 enum_name,
             ));
         };
@@ -2294,7 +2324,7 @@ fn check_eliminator_call(
                 ctx,
                 prov.quotations[qid.0].span,
                 name,
-                tag,
+                &tag.name,
                 enum_name,
             ));
         }
@@ -2332,7 +2362,7 @@ fn check_eliminator_call(
     let row: Vec<Slot> = stack[..base].to_vec();
     let mut baseline: Option<Vec<Slot>> = None;
     let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
-    for ((qid, _), vi) in arms.iter().zip(&variant_indices) {
+    for ((qid, tag), vi) in arms.iter().zip(&variant_indices) {
         let owned = variant_type(ctx.enums(), id, *vi);
         // Decision 6: the call's one resolved mode, applied uniformly. An arm
         // whose annotation spells the other mode disagrees with this built
@@ -2345,6 +2375,25 @@ fn check_eliminator_call(
         let Some(eff) = crate::ast::is_quotation_type(declared) else {
             unreachable!("`inline_quotation_type` builds a quotation type")
         };
+        // Slice 3b (R3): the arm's annotation declares no input slot -- a bare
+        // tag is not typeable before the scrutinee's enum is known -- so the
+        // slot is built here, from this variant in the mode the *user* wrote.
+        // The reconciliation inside `check_literal_against_declared_effect`
+        // then holds it against `narrowed`, built above in the *call's* mode:
+        // both go through the same `variant_type`/`intern_ref_type`, so they
+        // are the identical interned `Type` when the modes agree and a plain
+        // annotation/parameter mismatch when they disagree (decision 6).
+        let written = match tag.mode {
+            VariantTagMode::Owning => owned,
+            VariantTagMode::Ref => intern_ref_type(refs, owned, false),
+            VariantTagMode::RefMut => intern_ref_type(refs, owned, true),
+        };
+        prov.quotations[qid.0]
+            .annot
+            .as_mut()
+            .expect("an arm was collected by its annotation's variant tag")
+            .inputs
+            .insert(0, written);
         // The arm receives the caller's *own* scrutinee, retyped to the
         // narrowed variant -- not a fresh provenance-free slot. A reference
         // scrutinee is rooted at a caller place, and an arm that borrowed
@@ -4424,6 +4473,25 @@ mod tests {
     }
 
     #[test]
+    fn check_eliminator_call_arm_extra_declared_input_is_error() {
+        // R3 synthesizes the receiver slot but must not replace an arm's own
+        // declared inputs: `Rect i64` here declares a second input after the
+        // tag, which the call's real effect (`Shape.Rect -- i64`, one input)
+        // does not have.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect i64 -- i64 ) &w @ swap &h @ swap drop * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("annotated `~[ Shape.Rect i64 -- i64 ]`")
+                && err.contains("`Shape?` declares it `~[ Shape.Rect -- ]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn check_eliminator_call_diagnostics_demangle_the_call_name_in_a_real_build() {
         // Phase 6 slice 3 review fix (finding 1): `check_src` skips
         // `resolve_modules`, so every name is left bare and the two tests
@@ -4563,6 +4631,28 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("`Shape?` expected `Shape`, found `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Phase 2 review, finding 2: R5 split the old single referent check into
+    /// two -- non-enum (above) and wrong-family, since a generic instantiation
+    /// no longer has the same `EnumId` as `gate_id` even when it is a member
+    /// of the right family. The comparison is a diagnostic-quality guard, not
+    /// a crash guard: deleting it still rejects this program, but as `unknown
+    /// variant `Circle` of enum `Abc`` -- blaming the arm for naming a variant
+    /// the *scrutinee's* enum lacks, rather than the scrutinee for not being a
+    /// member of `Shape?`'s family at all.
+    #[test]
+    fn check_eliminator_call_wrong_enum_family_scrutinee_is_a_type_mismatch() {
+        let err = check_src(&format!(
+            "{SHAPE_DECL}{ABC_DECL}\
+             : f ( Abc -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : main ( -- ) 3 A f . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`Shape?` expected `Shape`, found `Abc`"),
             "unexpected message: {err}"
         );
     }

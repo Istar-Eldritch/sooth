@@ -197,6 +197,26 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// The enum a clause word dispatches on, and its scrutinee reference's
+    /// mutability (`None` when the scrutinee is owning). Read from the
+    /// already-checked frontend `Type` rather than re-derived from the lowered
+    /// scrutinee's `IrType` — because a `&!Enum` scrutinee lowers to the opaque
+    /// `IrType::Ptr`, not `IrType::Enum(id)`, so reading `self.value_type` here
+    /// would make the enum arm below a reachable panic in reference mode.
+    pub(in crate::ir) fn clause_scrutinee_parts(
+        &self,
+        scrutinee_ty: Type,
+    ) -> (EnumId, Option<bool>) {
+        match scrutinee_ty {
+            Type::Enum(id, _) => (id, None),
+            Type::Ref(rid, mutable, _) => match self.refs.referent[rid.index()] {
+                IrType::Enum(id) => (id, Some(mutable)),
+                _ => unreachable!("checked: reference-mode clause scrutinee's referent is an enum"),
+            },
+            _ => unreachable!("checked: a clause word's top input is an enum"),
+        }
+    }
+
     /// Lower a clause-style word (R16): load the scrutinee's discriminant into
     /// a temp, dispatch N-way (a `Cmp(Eq)`-tag compare-chain to each variant's
     /// clause block, the last variant the terminal fall-through since coverage
@@ -205,11 +225,18 @@ impl<'a> FuncBuilder<'a> {
     ///
     /// This is deliberately *not* the 2-predecessor `lower_if` shape: the join
     /// has N predecessors and M outputs.
+    ///
+    /// `scrutinee_parts` is the enum being dispatched on and, for a reference
+    /// scrutinee, that reference's mutability (`None` for an owning one). A
+    /// clause word derives the pair from its declared scrutinee type
+    /// (`clause_scrutinee_parts`); an eliminator call has both in hand already
+    /// (slice 3b, R7), the enum from the call it resolved to and the mode from
+    /// its arms' tags.
     pub(in crate::ir) fn lower_clauses(
         &mut self,
         clauses: &[Clause],
         params: &[Value],
-        scrutinee_ty: Type,
+        scrutinee_parts: (EnumId, Option<bool>),
         binding: ArmBinding,
         tail: bool,
     ) {
@@ -222,19 +249,7 @@ impl<'a> FuncBuilder<'a> {
         let tail = tail && self.header.is_some();
         let scrutinee = *params.last().expect("clause word has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
-        // Threaded from the already-checked frontend `Type` rather than
-        // re-derived from the lowered scrutinee's `IrType` — because a
-        // `&!Enum` scrutinee lowers to the opaque `IrType::Ptr`, not
-        // `IrType::Enum(id)`, so reading `self.value_type(scrutinee)` here
-        // would make the enum arm below a reachable panic in reference mode.
-        let (scrut_id, ref_mutable) = match scrutinee_ty {
-            Type::Enum(id, _) => (id, None),
-            Type::Ref(rid, mutable, _) => match self.refs.referent[rid.index()] {
-                IrType::Enum(id) => (id, Some(mutable)),
-                _ => unreachable!("checked: reference-mode clause scrutinee's referent is an enum"),
-            },
-            _ => unreachable!("checked: a clause word's top input is an enum"),
-        };
+        let (scrut_id, ref_mutable) = scrutinee_parts;
         let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
         let n = self.enums.layouts[scrut_id.index()].variants.len();
 
@@ -580,10 +595,9 @@ mod tests {
     /// Decision 6's mode selection matters even when every arm's own body
     /// reads no fields: an all-unit-variant enum (`is_scalar`) is a bare
     /// discriminant by value, but a *reference* to one is still a pointer to
-    /// tagged storage. `scrutinee_ty` threading `Type::Ref` (rather than
-    /// falling back to `Type::Enum` unconditionally) is what makes
-    /// `dispatch_on_tag` load the tag through the pointer instead of treating
-    /// the pointer itself as the discriminant.
+    /// tagged storage. The mode `lower_eliminator` reads off the arms' tags
+    /// (slice 3b, R7) is what makes `dispatch_on_tag` load the tag through the
+    /// pointer instead of treating the pointer itself as the discriminant.
     #[test]
     fn lower_eliminator_call_over_a_reference_to_a_scalar_enum_loads_the_tag() {
         let ir = lower_src(
@@ -598,4 +612,12 @@ mod tests {
             "a reference scrutinee always loads its tag through the pointer, even for an all-unit-variant enum"
         );
     }
+
+    // The generic analogue of the test above, which R7's mode mapping would
+    // otherwise want, cannot be written: `is_scalar` requires every variant to
+    // declare no fields, while a generic `type:` header requires every type
+    // variable it binds to appear in some field (no phantom parameters), so a
+    // generic all-unit-variant enum does not exist. The concrete test above is
+    // the mapping's guard -- it runs the same `lower_eliminator` derivation,
+    // generic or not -- and it fails if the mode is forced to owning.
 }

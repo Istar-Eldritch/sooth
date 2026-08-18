@@ -288,12 +288,12 @@ pub(super) struct FuncBuilder<'a> {
     /// emitted as a runtime code value.
     pub(super) quot_defs: Vec<Vec<Term>>,
     /// Phase 6 slice 3 (R5): the eliminator-arm routing each interned
-    /// quotation literal carries, in lockstep with `quot_defs` — the annotation's
-    /// variant tag (which is also the `enums.words` key of that variant's
-    /// constructor) and the arm's declared receiver type, whose owning-vs-
-    /// reference shape is the whole call's scrutinee mode. `None` for every
-    /// ordinary (non-arm) literal.
-    pub(super) quot_arm_tags: Vec<Option<(String, Type)>>,
+    /// quotation literal carries, in lockstep with `quot_defs` — the
+    /// annotation's variant tag (whose name is also the `enums.words` key of
+    /// that variant's constructor) and the mode the arm receives the variant
+    /// in, which is the whole call's scrutinee mode. `None` for every ordinary
+    /// (non-arm) literal.
+    pub(super) quot_arm_tags: Vec<Option<VariantTag>>,
     /// R12: the phantom quotation `Value` -> its `QuotId`. A shuffle/bind moves
     /// the phantom verbatim (`self.locals`/`self.stack` carry `Value` ids), so
     /// no `Binding` analogue is needed here (D2); `call`/`times` resolve the
@@ -795,10 +795,11 @@ pub(super) fn lower_word_parts(
                 .last()
                 .expect("clause word has a scrutinee input")
                 .ty;
+            let scrutinee_parts = b.clause_scrutinee_parts(scrutinee_ty);
             b.lower_clauses(
                 clauses,
                 &stack_inputs,
-                scrutinee_ty,
+                scrutinee_parts,
                 ArmBinding::Decompose,
                 self_tail,
             )
