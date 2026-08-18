@@ -48,21 +48,31 @@ and drift by a few lines; the corrected anchors are used throughout this spec.
   arms to variants on `generic_surface_name(&v.name) == tag` (`src/check.rs:2280`, in the
   exhaustiveness pre-pass). So decision 1's premise holds: the check side is already
   operand-`EnumId`-driven.
-- **Recon 5 — confirmed.** For a tagged literal, `src/check/terms.rs:854` skips
+- **Recon 5 — FALSIFIED as stated (see R7).** Its enumeration greps `src/check` only and
+  misses the IR reader `arm_tag` (`src/ir/func_builder/calls.rs:785`), which reads
+  `annot.inputs.first()` on the *tagged* path and is neither a `word.effect.inputs` reader
+  nor an untagged path. The brief carries the same error. What survives: reconcile is the
+  only **checker-side** consumer. For a tagged literal, `src/check/terms.rs:852` skips
   `check_literal_against_annotation` (the `resolved.variant_tag.is_none()` branch is the
   only caller of that standalone check). The only remaining consumer of a tagged literal's
   annotation leading input is `reconcile_annotation_with_parameter` (`src/check.rs:1840`),
   reached via `check_literal_against_declared_effect` (`src/check.rs:1919`, calling reconcile
-  at `src/check.rs:1978`). That comparison (`annot.inputs == eff.inputs`,
-  `src/check.rs:1852`) is what catches decision 6's mode mismatch and renders the
+  at `src/check.rs:1978`). An eliminator arm is checked with `LiteralBoundary`
+  `shape_changing: true`, so the operative comparison is `tails_agree(&annot.inputs,
+  &eff.inputs)` (`src/check.rs:1849`), **not** the `annot.inputs == eff.inputs` equality
+  (`src/check.rs:1852`, the `shape_changing: false` branch the eliminator never takes). That
+  comparison is what catches decision 6's mode mismatch and renders the
   `annotated \`~[ Shape.Circle -- ]\`` / `\`Shape?\` declares it \`~[ &Shape.Circle -- ]\``
   wording. **Account of every reader of `annot.inputs`/` AnnotEffect.inputs` on the
   tagged-literal path:** `resolve_annotation` → `resolve_annot_slots` (`src/check.rs:1630`)
   transforms `annot.inputs` into the resolved effect (a pass-through, no comparison);
   `check_literal_against_annotation` (`src/check.rs:1767`,`:1803`,`:1806`) is **skipped**
-  for a tagged literal; `reconcile_annotation_with_parameter` (`src/check.rs:1850`/`:1852`)
-  is the sole comparison. Every other`.inputs` reader grepped is `word.effect.inputs` or an
-  untagged path. Recon 5 stands: reconcile is the only thing catching the mode mismatch.
+  for a tagged literal; `reconcile_annotation_with_parameter` (`src/check.rs:1849`) is the
+  sole checker-side comparison; and `arm_tag` (`src/ir/func_builder/calls.rs:785`) is the
+  reader outside `src/check` that the original grep missed. Note `tails_agree`
+  (`src/check.rs:1817`) compares only the overlapping tail, so `tails_agree([], [narrowed])`
+  is **vacuously true** on min-length 0 — which is precisely why T1a fails under mutation
+  when R3's synthesis is removed.
 - **Recon 6 — confirmed, with a mechanism correction (see decision 5 below).**
   `eliminator_registry` (`src/check/declarations.rs:1469`) keys by
   `format!("{}?", generic_surface_name(&decl.name))`, so two instantiations of one generic
@@ -130,7 +140,7 @@ program output. This fails if either side stops normalizing to the bare name.
 ### OQ3 — the deferred typing and the stray-tag guard
 
 **Ruling: both guards keep working, and are extended to the generic case.**
-`tagged_literal_reaches_an_eliminator_call` (`src/check/terms.rs:939`) and the skip that
+`tagged_literal_reaches_an_eliminator_call` (`src/check/terms.rs:940`) and the skip that
 precedes it key off `variant_tag.is_some()`, not off any resolved type, so a tag carrying no
 resolved type still flows through the existing branch unchanged. Because recognition is now
 generic-aware, a *generic* enum's stray tag (which previously could not parse) now parses,
@@ -166,9 +176,14 @@ All anchors verified at `78d8cee`.
   `variant_tag: Option<String>` with `variant_tag: Option<VariantTag>` where
   `struct VariantTag { name: String, mode: VariantTagMode }` and
   `enum VariantTagMode { Owning, Ref, RefMut }`. `AnnotEffect.variant_tag` (`src/check.rs:256`)
-  and `resolve_annotation` (`src/check.rs:1633`) mirror the new shape. Every reader
-  (`src/check.rs:2231` in collection, `src/check/terms.rs:854`/the `else` branch, the parser
-  tests) is updated to the struct.
+  and `resolve_annotation` (`src/check.rs:1633`) mirror the new shape. Every reader is
+  updated to the struct **in this same phase**, because the retype is a hard compile error at
+  each one and phase independence is a hard rule: `src/check.rs:2231` in collection (extract
+  `.name`; `arms` is `Vec<(QuotId, String)>`), `src/check/terms.rs:852` (`.is_none()`, works
+  as-is), `src/check/terms.rs:940` (`.is_some()`, works as-is), the `else` branch's
+  `.variant_tag.as_deref()` (breaks: `VariantTag` does not `Deref` to `str`),
+  **`src/ir/func_builder/calls.rs:784`** (`let tag = annot.variant_tag.clone()?;` then used
+  as a `String` — see R7, the same edit site), and the parser tests.
 - **R3 — check-time synthesis of the leading input slot.** In `check_eliminator_call`
   (`src/check.rs:2193`), after resolving each arm's `vi` and building `narrowed` (variant
   type in the **call's** mode, unchanged), synthesize the annotation's leading input from
@@ -196,7 +211,7 @@ All anchors verified at `78d8cee`.
   return `None`, so the eliminator would not be recognized at all. Decision 5's **intent**
   (independent elimination of two instantiations in one word, no last-write-wins) is instead
   achieved the way every other generic generated word already achieves it — operand-driven
-  (`enum_generated_sigs`/`variant_generated_sigs` at `src/check.rs:561` already key env by
+  (`enum_generated_sigs`/`variant_generated_sigs` at `src/check.rs:559`/`:562` already key env by
   bare name and disambiguate per instantiation by operand type):
   - `check_eliminator_call` takes the operative `EnumId` from the **scrutinee slot's own
     `Type::Enum(id, _)`** (via `ref_parts` on `scrutinee.ty`), not from the registry value;
@@ -211,6 +226,38 @@ All anchors verified at `78d8cee`.
 - **R6 — goldens** (`tests/phase6_slice3b.rs`, new): a runnable generic-enum eliminator,
   spelled identically to the concrete case, instantiation from the scrutinee; plus the
   decision-5 two-instantiation golden. See test requirements.
+- **R7 — the IR takes the arm mode from `VariantTag`, not from an interned `Type::Ref`.**
+  R1 empties the AST annotation's leading input, and the IR lowering reads that slot off the
+  **AST term**, not off `prov`: `arm_tag` (`src/ir/func_builder/calls.rs:782`) does
+  `let Some(PolyType::Concrete(receiver)) = annot.inputs.first() else { unreachable!(...) }`,
+  and `lower_eliminator` (`src/ir/func_builder/calls.rs:765`) recovers the `&`/`&!` scrutinee
+  mode *solely* from that interned `Type::Ref`. R3's synthesis cannot reach it: `driver.rs`
+  runs `check::check(&mut module)` and then `ir::lower(&module)`, and the checker writes only
+  `prov.quotations[..].annot` (an `AnnotEffect`, `src/check.rs:256`), never the AST
+  `QuotAnnot` (`src/ast.rs:1770`). Left unaddressed, R1 turns that `unreachable!` — whose
+  message literally cites "(parser, R1)" — into an ICE on **every** eliminator lowering,
+  concrete and generic, so the Slice 3 goldens T9 promises would crash rather than pass.
+  **Fix direction: rewire, not writeback.** A writeback would have the checker mutate the AST
+  so a later pass can read a type the checker already computed — a hidden channel that
+  re-creates the very parse-time-typing coupling this slice exists to delete. Instead the mode
+  gets one source of truth (R2's `VariantTagMode`):
+  - `arm_tag` stops reading `annot.inputs` entirely and returns the tag *name* plus the
+    recorded mode from `VariantTag`; its `unreachable!` is deleted, since the invariant it
+    asserts is exactly what this slice removes. `quot_arm_tags`
+    (`src/ir/func_builder/calls.rs:63`) changes element type to match.
+  - `lower_clauses` (`src/ir/func_builder/control_flow.rs:208`) consumes its `scrutinee_ty:
+    Type` for one purpose only: destructuring it into `(scrut_id, ref_mutable)` at
+    `src/ir/func_builder/control_flow.rs:230-239`. It therefore takes that pair directly
+    instead — `(EnumId, Option<bool>)` — and the existing destructuring match moves into a
+    small helper that its clause-path caller (`src/ir/func_builder/mod.rs:798`) calls, so the
+    match is relocated, not duplicated, and the clause path's behaviour is untouched.
+  - `lower_eliminator` passes `(id, ref_mutable)` where `id` is the `EnumId` it already
+    receives and `ref_mutable` maps from the recorded mode: `Owning -> None`,
+    `Ref -> Some(false)`, `RefMut -> Some(true)`. This reproduces today's values exactly,
+    including the `scrutinee_is_value` scalar-enum path (`control_flow.rs:246`), which keys
+    off `ref_mutable.is_none()`. No `Type::Ref` is manufactured and the `refs` table is not
+    consulted on the eliminator path at all — `Type::Ref` needs a `RefId` index
+    (`src/ir/driver.rs:677`), which the eliminator has no honest way to obtain.
 
 ## Test requirements (breakable assertions only)
 
@@ -250,7 +297,9 @@ All anchors verified at `78d8cee`.
   number), so a last-write-wins regression prints the wrong value or errors as a type
   mismatch rather than routing to the scrutinee's own instantiation. **Mutation check (T6a):**
   reverting R5 (use the registry's stored id instead of the scrutinee's) makes one of the two
-  instantiations fail as `type_mismatch_error` — state and run.
+  instantiations fail as `type_mismatch_error` — state and run, keying the pass criterion on
+  the literal `test result: FAILED` line as T1a does (grepping for `error` fails open, since
+  cargo prints `error: test failed` on any failure).
 - **T7 (OQ2 differing stored name).** Covered by T6: `Result[i64 bool]`'s stored variant name
   is `Ok[i64 bool]`, surface `Ok`; routing through bare `( Ok )` proves both sides normalize
   to the surface name. Assert the run succeeds and prints the expected value (not a
@@ -259,6 +308,25 @@ All anchors verified at `78d8cee`.
   case): a generic `Option`'s `~[ ( Some ) 0 ]` with no following `Option?` →
   `err.contains("this quotation is annotated \`( Some )\`, an eliminator-arm tag, but it is
   not consumed by a call to a generated eliminator")`.
+- **T10 (R7, generic × by-reference, runnable).** `tests/phase6_slice3b.rs`: a generic enum
+  eliminated through reference-mode arms (`&`, and `&!` mutating a payload) that **builds and
+  runs**, `assert_eq!` on exact stdout. This is the untested product of slice 3's
+  mode-polymorphic scrutinee and this slice's generic capability, and it is the exact path R7
+  rewires. **Mutation check (T10a):** force `lower_eliminator`'s `ref_mutable` to `None` (the
+  owning branch) and this golden must fail with `test result: FAILED`. Without T10a a silent
+  regression to owning-mode codegen keeps the whole suite green — `examples/eliminator_ref.sth`
+  (`tests/phase6_slice3.rs:43`, expecting `"12\n16\n"`) is the concrete analogue and must
+  also still pass.
+- **T11 (non-exhaustive generic eliminator names the surface variant).** A missing arm over a
+  generic enum must still error naming the **surface** variant and enum, not the
+  instantiation-suffixed or mangled spelling. Assert
+  `err.contains("non-exhaustive call to \`Result?\`")` and
+  `err.contains("missing variant \`Err\` of enum \`Result\`")` — matching the concrete
+  wording pinned by `check_eliminator_call_missing_arm_names_missing_variant`
+  (`src/check.rs:4177`). If the implementation renders `Err[i64 bool]` or `Result__m0`, that
+  is a defect to fix **in this slice** (normalize at the render site), not a wording to
+  accept. Existing coverage (`non_exhaustive_generic_enum_clause_names_surface_variant`,
+  `tests/phase5_generic_enum_elimination.rs:114`) is the **clause** path only.
 - **T9 (regression — clause path untouched).** `cargo test` includes
   `tests/phase5_generic_enum_elimination.rs` (all four:
   `generic_enum_clause_elimination_runs`, `generic_enum_elimination_type_declared_after_matching_word`,
@@ -271,20 +339,27 @@ All anchors verified at `78d8cee`.
 Each phase is independently green: `cargo fmt --check && cargo clippy -- -D warnings &&
 cargo test`. No import or helper is introduced before its first use.
 
-### Phase 1 — recognition/typing split, explicit mode, check-time synthesis
+### Phase 1 — recognition/typing split, explicit mode, check-time synthesis, IR rewire
 
-Delivers decisions 1–4. Parser recognizes tags by name (R1, module-scoped, generic-aware,
-type-precedent), records `variant_tag: Option<VariantTag>` with the three-state mode (R2),
-and stops synthesizing the leading input slot; `check_eliminator_call` synthesizes it from
-`(variant, recorded mode)` before reconciliation (R3). Concrete enums behave identically;
+Delivers decisions 1–4 plus R7. Parser recognizes tags by name (R1, module-scoped,
+generic-aware, type-precedent), records `variant_tag: Option<VariantTag>` with the three-state
+mode (R2), and stops synthesizing the leading input slot; `check_eliminator_call` synthesizes
+it from `(variant, recorded mode)` before reconciliation (R3); and the IR takes the arm mode
+from `VariantTag` instead of an interned `Type::Ref` (R7). Concrete enums behave identically;
 generic enums with a **single** instantiation now recognize, type, and eliminate (the
 registry's one entry equals the scrutinee's id, so decision 5 is not yet needed). All
 `resolve_variant_type`/`find_variant_type_in_module` callers are repurposed, not orphaned
 (no dead code / unused import).
 
+**R2 and R7 cannot be split across phases:** retyping `variant_tag` breaks
+`src/ir/func_builder/calls.rs:784` at compile time, and dropping the parser-synthesized slot
+breaks `arm_tag`'s `inputs.first()` at run time. Both land here or the phase is not green.
+
 **Exit criteria (tests):** T1 (unchanged wording) + T1a (mutation FAILED); T2, T3, T4
-(parser); T5 (generic single-instantiation runs); T8 (stray generic tag); T9 (clause path +
-concrete suite unchanged). Full `cargo test` green.
+(parser); T5 (generic single-instantiation runs); T8 (stray generic tag); T10 (generic ×
+by-reference runs) + T10a (mutation FAILED); T11 (non-exhaustive generic names the surface
+variant); T9 (clause path + concrete suite unchanged, `examples/eliminator_ref.sth`
+included). Full `cargo test` green.
 
 ### Phase 2 — operand-driven `EnumId`, registry as family gate
 
@@ -300,8 +375,14 @@ mismatch); T7 (differing stored name, via T6); everything from Phase 1 still gre
 
 Deleting `WordBody::Clauses`/`parse_clauses` and migrating
 `tests/phase5_generic_enum_elimination.rs` (Slice 4); any change to `Type::Variant`,
-accessors, `lower_clauses`, `ArmBinding`, or tag-dispatch codegen; generic-enum
-construction; inferring an instantiation from an arm rather than from the scrutinee operand.
+accessors, `ArmBinding`, the clause path's behaviour, generic-enum construction; or
+inferring an instantiation from an arm rather than from the scrutinee operand.
+
+**In scope, contrary to an earlier boundary:** `arm_tag`, `quot_arm_tags` and
+`lower_eliminator` in `src/ir/func_builder/calls.rs`, and `lower_clauses`' *signature* in
+`src/ir/func_builder/control_flow.rs` (its parameter becomes the already-destructured
+`(EnumId, Option<bool>)`; its body logic and the clause path's behaviour are untouched). R7
+explains why the previous "no change to tag-dispatch codegen" fence was wrong.
 
 ## Machine-readable phases
 
@@ -310,7 +391,7 @@ construction; inferring an instantiation from an arm rather than from the scruti
   "phases": [
     {
       "phase": 1,
-      "focus": "recognition-typing split, explicit arm mode, check-time input synthesis",
+      "focus": "recognition-typing split, explicit arm mode, check-time input synthesis, IR arm-mode rewire",
       "difficulty": "hard"
     },
     {
