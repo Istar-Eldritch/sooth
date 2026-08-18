@@ -783,17 +783,10 @@ fn quotation_passed_to_polymorphic_word_is_error() {
     );
 }
 
-#[test]
-fn quotation_in_polymorphic_body_is_error() {
-    // R5p: a quotation literal in a polymorphic body rejects eagerly at the
-    // literal (the polymorphic path cannot carry the marker yet).
-    let err = check_error(": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n: main ( -- ) 1 bad . ;\n");
-    assert!(
-        err.contains("a quotation in the polymorphic body of `bad`")
-            && err.contains("not yet supported"),
-        "R5p should name the polymorphic word, got: {err}"
-    );
-}
+// R5p's blanket "a quotation literal in a polymorphic body is rejected"
+// rule is retired by P7 slice 3b: a literal is admitted and consumed by an
+// in-body eliminator. What survives of it -- the rejection of a quotation
+// that is *not* consumed there -- lives in `tests/phase7_slice3b.rs`.
 
 #[test]
 fn quotation_left_on_stack_is_output_error() {

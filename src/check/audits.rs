@@ -360,6 +360,8 @@ fn contains_poly_reference(
         PolyType::Concrete(ty) => contains_reference(*ty, structs, enums, arrays),
         PolyType::Array(elem, _) => contains_poly_reference(elem, structs, enums, arrays),
         PolyType::Var(_) | PolyType::Quotation(..) => false,
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         // P7 slice 3a: a generic carrying `&'T` (e.g. `Box[&'T]`) must not
         // escape the Copy-containment audit through an argument.
         PolyType::Generic { args, .. } => args
@@ -396,6 +398,8 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
             Ok(())
         }
         PolyType::Var(_) => Ok(()),
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         // Slice 13 (R-A9): a quotation buried behind a `&` is still a nested
         // effect position, so recurse rather than accepting the referent
         // unseen.
@@ -445,6 +449,8 @@ fn reject_poly_quotation_anywhere(
             "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
             poly_type_str(pt, sig),
         )),
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
     }
 }
 

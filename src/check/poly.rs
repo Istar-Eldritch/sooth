@@ -29,6 +29,11 @@ pub(super) fn poly_is_copy(
         // Slice 6a (D3): a quotation parameter is always `Copy`, so it may be
         // called repeatedly and carries no move obligation.
         PolyType::Quotation(..) => true,
+        // P7 slice 3b (R2): a quotation *literal* marker is not a value at
+        // all, so it is never `Copy`. `dup`/`over` therefore reject it
+        // through `poly_copy_gate`'s own located arm rather than silently
+        // minting a second slot pointing at the same interned body.
+        PolyType::QuotLit => false,
         // Slice 13 (D3/R-A5): mirrors the monomorphic `is_copy` on
         // `Type::Ref` exactly -- a shared reference is freely duplicated (the
         // exclusivity rule has nothing to protect), a mutable one is not
@@ -57,7 +62,32 @@ pub(super) struct PolyScope {
     /// Slice 13 (R-B5): the prefix borrows this body has taken and not yet
     /// proven dead, in the order they were taken.
     borrows: Vec<PolyBorrow>,
+    /// P7 slice 3b (R1): the quotation literals this body has written so far,
+    /// the poly twin of `Provenance::quotations`. Append-only and indexed by
+    /// `PolyQuotRef`, so it is *not* a parallel stack vector: a slot popped
+    /// or shuffled never shrinks it, and an index stays valid for the whole
+    /// body. It rides `PolyScope` because that is already `&mut`-threaded
+    /// through every walk function, so no stack-threading signature grows a
+    /// parameter for it.
+    quotations: Vec<PolyQuotLit>,
 }
+
+/// P7 slice 3b (R1): one quotation literal encountered in a polymorphic body
+/// -- its raw body, the flavour it was written in, and its resolved
+/// annotation, whose `variant_tag` is the eliminator arm tag.
+#[derive(Debug, Clone)]
+pub(super) struct PolyQuotLit {
+    body: Vec<Term>,
+    span: Span,
+    is_inline: bool,
+    annot: Option<AnnotEffect>,
+}
+
+/// P7 slice 3b (R1): an index into `PolyScope::quotations`, the poly twin of
+/// `QuotId`. `Copy`, so a `PolySlot` stays cheap to clone and a `swap` moves
+/// the identity with the slot for free (L3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PolyQuotRef(usize);
 
 /// Slice 13 (R-B5): one recorded prefix borrow of a local -- the place, its
 /// mutability, and the site, so a later conflict can name the borrow it
@@ -67,6 +97,43 @@ pub(super) struct PolyBorrow {
     place: String,
     mutable: bool,
     span: Span,
+}
+
+/// P7 slice 3b (R1): one entry of the poly walk's virtual stack, replacing
+/// the bare `PolyType` plus the parallel `lits: Vec<Option<i64>>` shadow.
+/// `int_val` carries exactly what `lits` did (set on `IntLit`, `None`
+/// elsewhere, truncated on `Bind`); folding it in here removes the
+/// stack/lits length-desync class outright rather than widening it (a third
+/// parallel vector for a future `quot` field would only add a second
+/// invariant to keep in lock-step).
+#[derive(Debug, Clone)]
+pub(super) struct PolySlot {
+    pub(super) pt: PolyType,
+    pub(super) int_val: Option<i64>,
+    /// P7 slice 3b (R2): the literal this slot marks, for a slot whose `pt`
+    /// is `PolyType::QuotLit`. `None` for every value slot; the two always
+    /// agree, which is why the marker is not a value type.
+    pub(super) quot: Option<PolyQuotRef>,
+}
+
+impl PolySlot {
+    fn new(pt: PolyType) -> Self {
+        PolySlot {
+            pt,
+            int_val: None,
+            quot: None,
+        }
+    }
+
+    /// P7 slice 3b (R2): the slot a quotation literal pushes -- the identity
+    /// in `quot`, and a `pt` no predicate treats as a value.
+    fn quotation(quot: PolyQuotRef) -> Self {
+        PolySlot {
+            pt: PolyType::QuotLit,
+            int_val: None,
+            quot: Some(quot),
+        }
+    }
 }
 
 impl PolyScope {
@@ -91,12 +158,13 @@ impl PolyScope {
     /// be a conservative false positive (pinned by
     /// `poly_borrow_liveness_is_coarse_across_places`). It never misses a
     /// hazard, which is the locked minimum -- a live borrow is never pruned.
-    fn prune_dead_borrows(&mut self, stack: &[PolyType]) {
+    fn prune_dead_borrows(&mut self, stack: &[PolySlot]) {
         if self.borrows.is_empty() {
             return;
         }
         let reachable = stack
             .iter()
+            .map(|slot| &slot.pt)
             .chain(self.locals.values())
             .any(is_reference_slot);
         if !reachable {
@@ -114,6 +182,18 @@ impl PolyScope {
             .rev()
             .find(|b| b.place == place && (b.mutable || !mutable_only))
     }
+
+    /// P7 slice 3b (R1): record one quotation literal and hand back its
+    /// index. Append-only, so every index already handed out stays valid --
+    /// including across the per-arm clones `poly_eliminator_call` makes.
+    fn intern_quotation(&mut self, lit: PolyQuotLit) -> PolyQuotRef {
+        self.quotations.push(lit);
+        PolyQuotRef(self.quotations.len() - 1)
+    }
+
+    fn quotation(&self, quot: PolyQuotRef) -> &PolyQuotLit {
+        &self.quotations[quot.0]
+    }
 }
 
 /// Whether a `PolyType` slot holds a reference: a poly one (`&['T 4]`, from a
@@ -124,6 +204,9 @@ fn is_reference_slot(pt: &PolyType) -> bool {
         PolyType::Ref(..) => true,
         PolyType::Concrete(t) => t.is_ref(),
         PolyType::Var(_) | PolyType::Array(..) | PolyType::Quotation(..) => false,
+        // P7 slice 3b (R2): not a value type, so it holds nothing, least of
+        // all a reference that would keep a borrow observable.
+        PolyType::QuotLit => false,
         // P7 slice 3a: a generic application never denotes a reference
         // itself (a reference nested inside one is D5's out-of-scope depth,
         // or, if concrete, was already rejected by the audits below).
@@ -342,19 +425,11 @@ pub fn check_poly_body(
             ));
         }
     };
-    let stack = sig.inputs.clone();
-    // Slice 13 (R-B3): a parallel int-literal shadow of the stack, `None` for
-    // every non-`IntLit` value (mirrors `Slot::int_val`, which the `PolyType`
-    // stack has no room for). Load-bearing only for `&>`'s static bounds
-    // check against a literal index; every other consumer clears it, exactly
-    // as any operator but a bare shuffle clears `Slot::int_val` in the
-    // monomorphic checker.
-    let mut lits: Vec<Option<i64>> = vec![None; stack.len()];
+    let stack: Vec<PolySlot> = sig.inputs.iter().cloned().map(PolySlot::new).collect();
     let mut scope = PolyScope::default();
     let residual = poly_walk(
         terms,
         stack,
-        &mut lits,
         &mut scope,
         sig,
         &ctx,
@@ -364,8 +439,20 @@ pub fn check_poly_body(
         arrays,
         builtin_overloads,
     )?;
-    if residual != sig.outputs {
-        return Err(poly_output_mismatch_error(word, sig, &residual));
+    // P7 slice 3b (R4/L2): splice-consumed quotations only. A literal still
+    // on the stack here would have to *be* a value to leave the word, and it
+    // has no runtime representation in a generic body. Checked ahead of the
+    // output comparison so the diagnostic names the real problem rather than
+    // reporting the marker as a stack-shape mismatch.
+    if let Some(quot) = residual.iter().find_map(|slot| slot.quot) {
+        return Err(poly_quotation_not_consumed_error(
+            &ctx,
+            scope.quotation(quot).span,
+        ));
+    }
+    let residual_pt: Vec<PolyType> = residual.into_iter().map(|slot| slot.pt).collect();
+    if residual_pt != sig.outputs {
+        return Err(poly_output_mismatch_error(word, sig, &residual_pt));
     }
     // A non-`Copy` local never read still holds its value here; nothing is
     // auto-dropped, so it leaks. The monomorphic sibling rejects the same
@@ -381,8 +468,7 @@ pub fn check_poly_body(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poly_walk(
     terms: &[Term],
-    mut stack: Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    mut stack: Vec<PolySlot>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -391,12 +477,27 @@ pub(super) fn poly_walk(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     builtin_overloads: &mut HashMap<Span, String>,
-) -> Result<Vec<PolyType>, String> {
-    for term in terms {
+) -> Result<Vec<PolySlot>, String> {
+    // P7 slice 3b (R2): the same written-adjacency rule the concrete path
+    // applies to a variant-tagged literal. A tag is only meaningful as
+    // arm-to-variant routing, so a tagged literal that no eliminator call
+    // collects is never checked against anything -- and admitting quotation
+    // literals here is exactly what would let one through. Applied over this
+    // term list, so an arm body re-entering `poly_walk` is held to it too.
+    let eliminators = eliminator_registry(enums);
+    for (at, term) in terms.iter().enumerate() {
+        if let TermKind::Quotation(_, _, Some(annot)) = &term.kind {
+            if let Some(tag) = &annot.variant_tag {
+                if !tagged_literal_reaches_an_eliminator_call(terms, at, &eliminators) {
+                    return Err(eliminator_arm_outside_call_error(
+                        ctx, annot.span, &tag.name,
+                    ));
+                }
+            }
+        }
         stack = poly_term(
             term,
             stack,
-            lits,
             scope,
             sig,
             ctx,
@@ -406,11 +507,6 @@ pub(super) fn poly_walk(
             arrays,
             builtin_overloads,
         )?;
-        // `lits` is indexed off `stack.len()` (`over` reads `lits[n - 2]`,
-        // `dup` `.expect`s a last entry), so a desync is either an ICE or,
-        // worse, a silently wrong bounds decision at `&>`. Every arm that
-        // pushes or truncates one must do the same to the other.
-        debug_assert_eq!(stack.len(), lits.len(), "stack/lits length invariant");
     }
     Ok(stack)
 }
@@ -418,8 +514,7 @@ pub(super) fn poly_walk(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poly_term(
     term: &Term,
-    mut stack: Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    mut stack: Vec<PolySlot>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -428,20 +523,21 @@ pub(super) fn poly_term(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     builtin_overloads: &mut HashMap<Span, String>,
-) -> Result<Vec<PolyType>, String> {
+) -> Result<Vec<PolySlot>, String> {
     let span = term.span;
     match &term.kind {
         TermKind::IntLit(n) => {
-            stack.push(PolyType::Concrete(Type::I64));
-            lits.push(Some(*n));
+            stack.push(PolySlot {
+                pt: PolyType::Concrete(Type::I64),
+                int_val: Some(*n),
+                quot: None,
+            });
         }
         TermKind::FloatLit(_) => {
-            stack.push(PolyType::Concrete(Type::F64));
-            lits.push(None);
+            stack.push(PolySlot::new(PolyType::Concrete(Type::F64)));
         }
         TermKind::StrLit(_) => {
-            stack.push(PolyType::Concrete(Type::Str));
-            lits.push(None);
+            stack.push(PolySlot::new(PolyType::Concrete(Type::Str)));
         }
         TermKind::Bind(names) => {
             if stack.len() < names.len() {
@@ -476,8 +572,8 @@ pub(super) fn poly_term(
             // needs a literal that is still the immediate top of stack); a
             // local read back later carries no int value, same as any other
             // computed slot.
-            lits.truncate(lits.len() - names.len());
-            for (name, pt) in names.iter().zip(bound) {
+            for (name, slot) in names.iter().zip(bound) {
+                let pt = slot.pt;
                 // A non-`Copy` binding carries a consume-exactly-once
                 // obligation tracked in `moves`; a `Copy` one does not.
                 if !poly_is_copy(&pt, sig, structs, enums, arrays) {
@@ -491,7 +587,6 @@ pub(super) fn poly_term(
                 name,
                 span,
                 stack,
-                lits,
                 scope,
                 sig,
                 ctx,
@@ -502,23 +597,34 @@ pub(super) fn poly_term(
                 builtin_overloads,
             );
         }
-        // R5p: a quotation in a polymorphic body is rejected eagerly at the
-        // literal. `poly_term`'s stack is `Vec<PolyType>`, not `Vec<Slot>`, so
-        // there is nowhere to hang the `quot` marker, and D1 forbids a
-        // `PolyType` variant; pushing a placeholder would erase the identity
-        // into output unification/`Subst`/mangling. Mirrors the
-        // `if`-in-a-polymorphic-body rejection above.
-        TermKind::Quotation(_, _, _) => {
-            return Err(format!(
-                "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
-                ctx.word_name().unwrap_or("<line>"),
-                span.line
-            ));
+        // P7 slice 3b (R2): a quotation literal is admitted, interned, and
+        // marked on the stack -- the identity rides `PolySlot::quot` and the
+        // `pt` is `PolyType::QuotLit`, which is not a value type, so the
+        // literal can only ever be consumed by an in-body eliminator (L2). An
+        // annotation is resolved here, at the interning site, exactly as the
+        // concrete path resolves it: an eliminator arm's `( Rect )` carries
+        // no rows, so the resolution is the same one, and its `variant_tag`
+        // is what `poly_eliminator_call` matches arms by.
+        TermKind::Quotation(body, is_inline, annot) => {
+            let annot = match annot {
+                Some(annot) => Some(resolve_annotation(ctx, annot)?),
+                None => None,
+            };
+            let quot = scope.intern_quotation(PolyQuotLit {
+                body: body.clone(),
+                span,
+                is_inline: *is_inline,
+                annot,
+            });
+            stack.push(PolySlot::quotation(quot));
         }
         // Slice 6h: no interning route exists for a body-internal array
         // shape absent from a poly signature (`subst_polytype`/`array_id_of`
         // both look up an already-interned shape and panic otherwise), so
-        // this is rejected eagerly, mirroring the quotation rejection above.
+        // this is rejected eagerly. The quotation rejection this once
+        // mirrored is gone (P7 slice 3b, R5): a quotation *does* have a hang
+        // point now, `PolySlot::quot`; an array constructor still has no
+        // interning route, which is a separate gap of its own.
         TermKind::ArrayCtor(_) => {
             return Err(format!(
                 "error: an array constructor in the polymorphic body of `{}` (line {}) is not yet supported",
@@ -534,8 +640,7 @@ pub(super) fn poly_term(
 pub(super) fn poly_call_term(
     name: &str,
     span: Span,
-    mut stack: Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    mut stack: Vec<PolySlot>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -544,7 +649,7 @@ pub(super) fn poly_call_term(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     builtin_overloads: &mut HashMap<Span, String>,
-) -> Result<Vec<PolyType>, String> {
+) -> Result<Vec<PolySlot>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
     // consumed on read (R3/D2): a second read is use-after-move, exactly as
     // the monomorphic checker treats a linear local; a `Copy` local carries no
@@ -572,8 +677,7 @@ pub(super) fn poly_call_term(
             .moves
             .take(name, span)
             .map_err(|site| poly_use_after_move_error(ctx, span, name, site))?;
-        stack.push(pt);
-        lits.push(None);
+        stack.push(PolySlot::new(pt));
         return Ok(stack);
     }
     let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
@@ -582,7 +686,7 @@ pub(super) fn poly_call_term(
     // `check_reference_word`'s own position ahead of the monomorphic
     // family. `Ok(None)` (not `&`-led) falls through unchanged.
     if let Some(next) = poly_reference_word(
-        name, span, &mut stack, lits, scope, sig, ctx, structs, enums, arrays,
+        name, span, &mut stack, scope, sig, ctx, structs, enums, arrays,
     )? {
         return Ok(next);
     }
@@ -590,16 +694,14 @@ pub(super) fn poly_call_term(
     // shared or mutable -- there is no `&!T -> &T` demotion to write, so both
     // mutabilities are typed identically here.
     if name == "@" {
-        let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
+        let top = stack.last().ok_or_else(|| need(1, stack.len()))?.pt.clone();
         let PolyType::Ref(referent, _) = &top else {
             return Err(poly_op_on_variable_error(ctx, span, "@", &top, sig));
         };
         poly_copy_gate(referent, "@", sig, ctx, span, structs, enums, arrays)?;
         let out = (**referent).clone();
         stack.pop();
-        lits.pop();
-        stack.push(out);
-        lits.push(None);
+        stack.push(PolySlot::new(out));
         return Ok(stack);
     }
     // Slice 13 (R-B4): `!` stores a `Copy` value through a *mutable*
@@ -610,8 +712,8 @@ pub(super) fn poly_call_term(
         if n < 2 {
             return Err(need(2, n));
         }
-        let receiver = stack[n - 2].clone();
-        let value = stack[n - 1].clone();
+        let receiver = stack[n - 2].pt.clone();
+        let value = stack[n - 1].pt.clone();
         let PolyType::Ref(referent, mutable) = &receiver else {
             return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
         };
@@ -639,7 +741,6 @@ pub(super) fn poly_call_term(
             ));
         }
         stack.truncate(n - 2);
-        lits.truncate(n - 2);
         return Ok(stack);
     }
     // Slice 13 (R-B6): `+!` never lands in a generic body, so it is a located
@@ -647,14 +748,13 @@ pub(super) fn poly_call_term(
     if name == "+!" {
         return Err(poly_unsupported_accessor_error(ctx, span, name));
     }
-    // The five core shuffles move `PolyType` slots verbatim; `dup`/`over` gate
+    // The five core shuffles move `PolySlot` slots verbatim; `dup`/`over` gate
     // on `Copy` (a bare variable answers from its bound set, X7).
     match name {
         "dup" => {
             let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
-            poly_copy_gate(&top, "dup", sig, ctx, span, structs, enums, arrays)?;
+            poly_copy_gate(&top.pt, "dup", sig, ctx, span, structs, enums, arrays)?;
             stack.push(top);
-            lits.push(*lits.last().expect("stack/lits length invariant"));
             return Ok(stack);
         }
         "over" => {
@@ -663,9 +763,8 @@ pub(super) fn poly_call_term(
                 return Err(need(2, n));
             }
             let below = stack[n - 2].clone();
-            poly_copy_gate(&below, "over", sig, ctx, span, structs, enums, arrays)?;
+            poly_copy_gate(&below.pt, "over", sig, ctx, span, structs, enums, arrays)?;
             stack.push(below);
-            lits.push(lits[n - 2]);
             return Ok(stack);
         }
         "swap" => {
@@ -674,7 +773,6 @@ pub(super) fn poly_call_term(
                 return Err(need(2, n));
             }
             stack.swap(n - 1, n - 2);
-            lits.swap(n - 1, n - 2);
             return Ok(stack);
         }
         "rot" => {
@@ -684,28 +782,22 @@ pub(super) fn poly_call_term(
             }
             let a = stack.remove(n - 3);
             stack.push(a);
-            let al = lits.remove(n - 3);
-            lits.push(al);
             return Ok(stack);
         }
         "drop" => {
             stack.pop().ok_or_else(|| need(1, 0))?;
-            lits.pop();
             return Ok(stack);
         }
         "len" => {
-            let top = stack.last().ok_or_else(|| need(1, stack.len()))?;
+            let top = &stack.last().ok_or_else(|| need(1, stack.len()))?.pt;
             match top {
                 PolyType::Array(..) | PolyType::Concrete(Type::Array(..)) => {
                     // Non-consuming: the array stays, `len` folds to `usize`.
-                    stack.push(PolyType::Concrete(Type::Usize));
-                    lits.push(None);
+                    stack.push(PolySlot::new(PolyType::Concrete(Type::Usize)));
                 }
                 PolyType::Concrete(Type::Str) => {
                     stack.pop();
-                    lits.pop();
-                    stack.push(PolyType::Concrete(Type::Usize));
-                    lits.push(None);
+                    stack.push(PolySlot::new(PolyType::Concrete(Type::Usize)));
                 }
                 _ => return Err(poly_op_on_variable_error(ctx, span, "len", top, sig)),
             }
@@ -718,8 +810,8 @@ pub(super) fn poly_call_term(
     if matches!(name, "=" | "<" | ">" | "<=" | ">=" | "<>") {
         let n = stack.len();
         if n >= 2 {
-            let a = stack[n - 2].clone();
-            let b = stack[n - 1].clone();
+            let a = stack[n - 2].pt.clone();
+            let b = stack[n - 1].pt.clone();
             let (av, bv) = (poly_var_id(&a), poly_var_id(&b));
             if av.is_some() || bv.is_some() {
                 match (av, bv) {
@@ -736,9 +828,7 @@ pub(super) fn poly_call_term(
                     _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
                 }
                 stack.truncate(n - 2);
-                lits.truncate(n - 2);
-                stack.push(PolyType::Concrete(Type::BOOL));
-                lits.push(None);
+                stack.push(PolySlot::new(PolyType::Concrete(Type::BOOL)));
                 return Ok(stack);
             }
         }
@@ -763,6 +853,58 @@ pub(super) fn poly_call_term(
     // before this lookup dispatches one for a drop-overloaded struct, or a
     // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
+    // P7 slice 3b (R4/OQ6): the quotation-*consuming* combinator family is
+    // deferred to P7.S3b-follow -- each takes a quotation as a row-typed
+    // parameter, which needs row unification against an abstract stack, the
+    // machinery an eliminator dispatch deliberately avoids. Located and
+    // named here rather than left to fall through to `unknown word`, which
+    // is what these emit otherwise (`poly_call_term` cannot see `poly_env`,
+    // so none of them is even registered on this path).
+    if matches!(name, "call" | "branch" | "if" | "times" | "tag")
+        && stack.iter().any(|slot| slot.quot.is_some())
+    {
+        return Err(poly_quotation_combinator_unsupported_error(ctx, span, name));
+    }
+    // P7 slice 3b (R2): a generated eliminator (`Shape?`) routes ahead of the
+    // ordinary `env` dispatch, mirroring `check_term`'s own intercept: its
+    // arms are matched to variants by annotation tag, not by slot position,
+    // so the `PolySig` it is registered under must never be what checks a
+    // call site. Unlike `check_term` there is no `PolyCtx` here to read a
+    // precomputed registry off, so it is built from the `enums` this walk
+    // already carries -- one keying rule, in `eliminator_registry`.
+    if let Some(id) = eliminator_registry(enums).get(name).copied() {
+        return poly_eliminator_call(
+            id,
+            name,
+            span,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            builtin_overloads,
+        );
+    }
+    // P7 slice 3b (R2/L2): every legal use of a quotation literal has been
+    // tried by now -- the shuffles moved it, the deferred family named
+    // itself, the eliminator consumed it. What is left is a *data* operand
+    // use (a constructor argument, an operator operand), and the marker is
+    // not a value type, so this is where that is rejected. Located here
+    // rather than left to `poly_delegate_op`, whose maximal-concrete-suffix
+    // extraction stops at the marker and would report the operator as
+    // underflowing a stack that is not actually short.
+    if matches!(stack.last().map(|slot| &slot.pt), Some(PolyType::QuotLit)) {
+        return Err(poly_op_on_variable_error(
+            ctx,
+            span,
+            name,
+            &PolyType::QuotLit,
+            sig,
+        ));
+    }
     // P7 slice 3a (R3): a call naming a variant of a generic enum header (or
     // a generic struct's own constructor) is legal in a polymorphic body,
     // tried *before* the ordinary `env` dispatch below: a fully-concrete
@@ -776,7 +918,7 @@ pub(super) fn poly_call_term(
     // program) commits unconditionally below and errors on a `'T` operand
     // mismatch rather than falling through.
     if let Some(next) = poly_construct_generic(
-        name, span, &mut stack, lits, sig, ctx, env, structs, enums, arrays,
+        name, span, &mut stack, sig, ctx, env, structs, enums, arrays,
     )? {
         return Ok(next);
     }
@@ -787,7 +929,7 @@ pub(super) fn poly_call_term(
                 && stack[stack.len() - o.sig.inputs.len()..]
                     .iter()
                     .zip(&o.sig.inputs)
-                    .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp))
+                    .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
         }),
     });
     if let Some(chosen) = chosen {
@@ -798,14 +940,14 @@ pub(super) fn poly_call_term(
             && stack[stack.len() - n_in..]
                 .iter()
                 .zip(&msig.inputs)
-                .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp));
+                .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp));
         if exact || !is_builtin_name {
             if stack.len() < n_in {
                 return Err(need(n_in, stack.len()));
             }
             let base = stack.len() - n_in;
             for (i, inp) in msig.inputs.iter().enumerate() {
-                match &stack[base + i] {
+                match &stack[base + i].pt {
                     PolyType::Concrete(t) if t == inp => {}
                     PolyType::Var(v) => {
                         return Err(poly_var_to_concrete_error(
@@ -822,10 +964,8 @@ pub(super) fn poly_call_term(
                 }
             }
             stack.truncate(base);
-            lits.truncate(base);
             for out in &msig.outputs {
-                stack.push(PolyType::Concrete(*out));
-                lits.push(None);
+                stack.push(PolySlot::new(PolyType::Concrete(*out)));
             }
             if exact && (is_builtin_name || chosen.symbol != name) {
                 builtin_overloads.insert(span, chosen.symbol.clone());
@@ -836,11 +976,335 @@ pub(super) fn poly_call_term(
     // Everything else is an ordinary operator over concrete operands. Extract
     // the maximal concrete suffix, run the concrete check, reflect it back; a
     // variable operand (a too-short suffix) surfaces as the op's own error.
-    if let Some(next) = poly_delegate_op(name, span, &mut stack, lits, ctx, env, builtin_overloads)?
-    {
+    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P7 slice 3b (R2/R3): the abstract twin of `check_eliminator_call`
+/// (`src/check.rs`) -- a *concrete* enum eliminated inside a **polymorphic**
+/// body, whose arms are quotation literals written in that body.
+///
+/// It is dispatchable without any of the row-typed combinator machinery `if`
+/// and `call` need (OQ1): the scrutinee is concrete, so its `EnumId`, its
+/// variant set and every arm's narrowed input type are concrete too, and arm
+/// collection, exhaustiveness, duplication and unknown-variant checking are
+/// structural over that concrete data -- ported here with the concrete
+/// diagnostics reused verbatim. The only abstract data is the caller row
+/// *below* the scrutinee and the arms' exit rows, and those are compared
+/// **structurally**, never row-unified against an abstract stack.
+///
+/// L1: type variables stay rigid. Two arms agree on an exit position iff the
+/// `PolyType`s are structurally equal; `'T` against `i64` is a rejection, not
+/// a mid-body bind, so no `Subst` is built or applied in the term walk and no
+/// per-arm clone can diverge on one.
+#[allow(clippy::too_many_arguments)]
+fn poly_eliminator_call(
+    id: EnumId,
+    name: &str,
+    span: Span,
+    mut stack: Vec<PolySlot>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Vec<PolySlot>, String> {
+    let enum_decl = &enums[id.index()];
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    let held = stack.len();
+    // Step 1, the concrete path's variable-arity arm collection: a fixed pop
+    // cannot tell "an arm is missing" from "the stack is short below the
+    // scrutinee", so a missing arm would always present as underflow and the
+    // exhaustiveness pass below could never name it.
+    let mut arms: Vec<(PolyQuotRef, VariantTag)> = Vec::new();
+    while let Some(quot) = stack.last().and_then(|slot| slot.quot) {
+        let Some(tag) = scope
+            .quotation(quot)
+            .annot
+            .as_ref()
+            .and_then(|a| a.variant_tag.clone())
+        else {
+            break;
+        };
+        arms.push((quot, tag));
+        stack.pop();
+    }
+    // Popping off the top yielded the arms reversed; both passes below walk
+    // them in *written* order, so the reversal is undone here, once.
+    arms.reverse();
+
+    // Step 2: the scrutinee.
+    let Some(scrutinee) = stack.last().cloned() else {
+        return Err(underflow_error(
+            ctx,
+            span,
+            name,
+            enum_decl.variants.len() + 1,
+            held,
+        ));
+    };
+    if scrutinee.quot.is_some() {
+        // The operand that stopped collection is a quotation, so it was meant
+        // as an arm but carries no variant tag to match one by.
+        return Err(eliminator_untagged_arm_error(ctx, span, name));
+    }
+    match &scrutinee.pt {
+        PolyType::Concrete(Type::Enum(found, _)) if *found == id => {}
+        PolyType::Concrete(t) if !t.is_ref() => {
+            return Err(type_mismatch_error(
+                ctx,
+                span,
+                name,
+                Type::Enum(id, enum_decl.name_static),
+                *t,
+            ));
+        }
+        // A *reference* scrutinee is the concrete path's decision 6, and it
+        // buys nothing here: reading a field out of the narrowed variant it
+        // would hand each arm needs the projection accessors a generic body
+        // does not have yet (P7 slice 1), so every arm it could reach is
+        // already unwritable. Located rather than silently narrowed to an
+        // owning scrutinee, which would let an arm consume a borrowed enum.
+        PolyType::Ref(..) | PolyType::Concrete(_) => {
+            return Err(poly_reference_scrutinee_error(ctx, span, name, enum_name));
+        }
+        // OQ2: an abstract scrutinee is a `'T` that is *some* enum, which is
+        // not constructible without an enum-kind bound (P7.S3d).
+        _ => {
+            return Err(poly_abstract_enum_scrutinee_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(&scrutinee.pt, sig),
+            ));
+        }
+    }
+
+    // Step 3: exhaustiveness and duplication, in written source order and
+    // before any arm body is checked.
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut variant_indices = Vec::with_capacity(arms.len());
+    for (quot, tag) in &arms {
+        let literal_span = scope.quotation(*quot).span;
+        let Some(vi) = enum_decl
+            .variants
+            .iter()
+            .position(|v| generic_surface_name(&v.name) == tag.name)
+        else {
+            return Err(eliminator_unknown_variant_error(
+                ctx,
+                literal_span,
+                name,
+                &tag.name,
+                enum_name,
+            ));
+        };
+        if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
+            return Err(eliminator_duplicate_arm_error(
+                ctx,
+                literal_span,
+                name,
+                &tag.name,
+                enum_name,
+            ));
+        }
+        variant_indices.push(vi);
+    }
+    for variant in &enum_decl.variants {
+        let variant_surface = generic_surface_name(&variant.name);
+        if !seen.contains(variant_surface) {
+            return Err(eliminator_non_exhaustive_error(
+                ctx,
+                span,
+                name,
+                variant_surface,
+                enum_name,
+            ));
+        }
+    }
+
+    // Steps 4-5 (OQ4): there is no declared `~[ ..a -- ..b ]` effect to match
+    // an arm against -- an arm is annotated by *variant*, and its input is
+    // the concrete narrowed variant this dispatch computes. So the poly
+    // analogue of `check_literal_against_declared_effect` is a recursive
+    // `poly_walk` of the arm body over `(caller row ++ narrowed variant)`,
+    // yielding an abstract exit row. Each arm walks its own clone of the
+    // enclosing scope, exactly as the concrete path clones `scope` per arm;
+    // the join below reconciles the clones.
+    let base = stack.len() - 1;
+    let row: Vec<PolySlot> = stack[..base].to_vec();
+    let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+    let mut baseline: Option<Vec<PolySlot>> = None;
+    let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
+    let mut arm_borrows: Vec<Vec<PolyBorrow>> = Vec::with_capacity(arms.len());
+    for ((quot, _), vi) in arms.iter().zip(&variant_indices) {
+        let lit = scope.quotation(*quot);
+        let (literal_span, body, is_inline) = (lit.span, lit.body.clone(), lit.is_inline);
+        let narrowed = variant_type(enums, id, *vi);
+        // An eliminator's arm parameters are declared inline
+        // (`enum_eliminator_sigs`), so an ordinary `[ ... ]` arm is the wrong
+        // bracket here exactly as it is on the concrete path -- same
+        // diagnostic, so the two paths do not disagree about one spelling.
+        if !is_inline {
+            return Err(ordinary_literal_at_inline_param_error(
+                ctx,
+                literal_span,
+                name,
+                crate::ast::inline_quotation_type(vec![narrowed], vec![]),
+            ));
+        }
+        let mut arm_stack = row.clone();
+        arm_stack.push(PolySlot::new(PolyType::Concrete(narrowed)));
+        let mut arm_scope = scope.clone();
+        let exit = poly_walk(
+            &body,
+            arm_stack,
+            &mut arm_scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            builtin_overloads,
+        )?;
+        // Step 5b: a `Type::Variant` may not leave the call. Every
+        // type-directed predicate outside the eliminator is written over
+        // `Type::Enum`, so `is_copy` reads an escaped variant as trivially
+        // `Copy` and a later `dup` double-drops a linear payload.
+        for slot in &exit {
+            let escaping = match &slot.pt {
+                PolyType::Concrete(t) => Some(*t),
+                PolyType::Ref(referent, _) => match referent.as_ref() {
+                    PolyType::Concrete(t) => Some(*t),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(escaping @ Type::Variant(..)) = escaping {
+                return Err(eliminator_variant_escape_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    escaping,
+                ));
+            }
+            // L2: nor may a quotation literal, which would then have to be
+            // materialised to exist past the arm.
+            if slot.quot.is_some() {
+                return Err(poly_quotation_not_consumed_error(ctx, literal_span));
+            }
+        }
+        // R3, the poly analogue of `Scope::leave`. The poly walk has no block
+        // scope: `poly_term`'s `Bind` inserts into `locals`/`moves` and
+        // nothing removes them. Without this, an arm-bound linear local leaks
+        // unreported, *and* `Moves::join` (which indexes the other arm's map
+        // by the first arm's keys) panics the moment two arms bind different
+        // names. Reject first, then truncate, so the leak is a diagnostic
+        // rather than something the truncation quietly erases.
+        let leaked = arm_scope
+            .moves
+            .unconsumed()
+            .into_iter()
+            .find(|local| !enclosing_locals.contains(*local))
+            .map(str::to_string);
+        if let Some(local) = leaked {
+            let pt = arm_scope.locals[&local].clone();
+            return Err(poly_arm_local_not_consumed_error(
+                ctx,
+                literal_span,
+                name,
+                &local,
+                &poly_type_str(&pt, sig),
+            ));
+        }
+        arm_scope.locals.retain(|k, _| enclosing_locals.contains(k));
+        arm_scope
+            .moves
+            .states
+            .retain(|k, _| enclosing_locals.contains(k));
+        arm_moves.push(arm_scope.moves);
+        arm_borrows.push(arm_scope.borrows);
+        match &baseline {
+            None => baseline = Some(exit),
+            Some(expected) => {
+                if expected.len() != exit.len() {
+                    return Err(combinator_branch_output_mismatch_rendered(
+                        ctx,
+                        literal_span,
+                        name,
+                        &poly_row_str(expected, sig),
+                        &poly_row_str(&exit, sig),
+                    ));
+                }
+                // L1: structural equality under *rigid* variables. `'T` in one
+                // arm against `'U`, or against `i64`, disagrees -- binding
+                // either would be a mid-body unification this slice does not
+                // do (and could not undo across the sibling arms).
+                for (a, b) in expected.iter().zip(&exit) {
+                    if a.pt != b.pt {
+                        return Err(poly_arm_output_disagreement_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            &poly_type_str(&a.pt, sig),
+                            &poly_type_str(&b.pt, sig),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // L4: the borrow table is **unioned**, not picked or intersected. It is
+    // keyed by place and a *missing* record reads as "no conflict", so
+    // dropping one arm's record is a silent false accept: arm A's `&!x` and
+    // arm B's `&!y` must both survive, or a later use of whichever was
+    // dropped is wrongly admitted. A genuine disagreement (one place, two
+    // mutabilities) is rejected rather than erased.
+    for borrows in arm_borrows {
+        for borrow in borrows {
+            match scope.borrows.iter().find(|b| b.place == borrow.place) {
+                Some(existing) if existing.mutable != borrow.mutable => {
+                    return Err(poly_arm_borrow_disagreement_error(
+                        ctx, span, name, existing, &borrow,
+                    ));
+                }
+                Some(_) => {}
+                None => scope.borrows.push(borrow),
+            }
+        }
+    }
+    // The move-state join, generalized from the concrete path's two arms to N
+    // by the same reduction. Every arm now presents the enclosing key set
+    // (the `leave` analogue above), which is what makes `Moves::join`'s
+    // indexing sound here. A zero-variant enum has no arms and no
+    // constructible value, so its call is unreachable and `scope`/`row` are
+    // simply left untouched.
+    if let Some(joined) = arm_moves.into_iter().reduce(Moves::join) {
+        scope.moves = joined;
+    }
+    Ok(baseline.unwrap_or(row))
+}
+
+/// The exit row of one eliminator arm, rendered for the cross-arm shape
+/// diagnostic.
+fn poly_row_str(row: &[PolySlot], sig: &PolySig) -> String {
+    match row.is_empty() {
+        true => "nothing".to_string(),
+        false => format!(
+            "`{}`",
+            row.iter()
+                .map(|slot| poly_type_str(&slot.pt, sig))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    }
 }
 
 /// P7 slice 3a (R3): the generic header `called` names as a constructor --
@@ -959,7 +1423,7 @@ fn poly_bind_construction_arg(
 fn poly_env_exact_match(
     env: &HashMap<String, Vec<Overload>>,
     name: &str,
-    stack: &[PolyType],
+    stack: &[PolySlot],
 ) -> bool {
     env.get(name).is_some_and(|candidates| {
         candidates.iter().any(|o| {
@@ -968,7 +1432,7 @@ fn poly_env_exact_match(
                 && stack[stack.len() - n..]
                     .iter()
                     .zip(&o.sig.inputs)
-                    .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp))
+                    .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
         })
     })
 }
@@ -982,15 +1446,14 @@ fn poly_env_exact_match(
 fn poly_construct_generic(
     name: &str,
     span: Span,
-    stack: &mut Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    stack: &mut Vec<PolySlot>,
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
-) -> Result<Option<Vec<PolyType>>, String> {
+) -> Result<Option<Vec<PolySlot>>, String> {
     let Some(cell) = ctx.generics() else {
         return Ok(None);
     };
@@ -1043,7 +1506,7 @@ fn poly_construct_generic(
     let base = n - field_ptys.len();
     let mut args: Vec<Option<PolyType>> = vec![None; arity];
     for (i, field_pty) in field_ptys.iter().enumerate() {
-        let operand = stack[base + i].clone();
+        let operand = stack[base + i].pt.clone();
         poly_bind_construction_arg(field_pty, &operand, &mut args, sig, ctx, span, name)?;
     }
     // R3: an argument the operands leave undetermined (a phantom for this
@@ -1079,7 +1542,6 @@ fn poly_construct_generic(
     }
 
     stack.truncate(base);
-    lits.truncate(base);
     let all_concrete: Option<Vec<Type>> = resolved
         .iter()
         .map(|p| match p {
@@ -1111,8 +1573,7 @@ fn poly_construct_generic(
             name: header_name,
         }
     };
-    stack.push(result_pt);
-    lits.push(None);
+    stack.push(PolySlot::new(result_pt));
     Ok(Some(std::mem::take(stack)))
 }
 
@@ -1144,15 +1605,14 @@ fn poly_generic_constructor_undetermined_error(
 pub(super) fn poly_reference_word(
     name: &str,
     span: Span,
-    stack: &mut Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    stack: &mut Vec<PolySlot>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
     _structs: &[StructDecl],
     _enums: &[EnumDecl],
     arrays: &[ArrayDecl],
-) -> Result<Option<Vec<PolyType>>, String> {
+) -> Result<Option<Vec<PolySlot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
     }
@@ -1175,9 +1635,9 @@ pub(super) fn poly_reference_word(
             if n < 2 {
                 return Err(need(name, 2, n));
             }
-            let index_pt = stack[n - 1].clone();
-            let index_lit = lits[n - 1];
-            let receiver = stack[n - 2].clone();
+            let index_pt = stack[n - 1].pt.clone();
+            let index_lit = stack[n - 1].int_val;
+            let receiver = stack[n - 2].pt.clone();
             let Some((recv_mut, elem, len)) = poly_ref_array_parts(&receiver, arrays) else {
                 return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
             };
@@ -1211,9 +1671,7 @@ pub(super) fn poly_reference_word(
             };
             check_poly_array_index(&index_pt, index_lit, count, ctx, span, name, sig)?;
             stack.truncate(n - 2);
-            lits.truncate(n - 2);
-            stack.push(PolyType::Ref(Box::new(elem), mutable));
-            lits.push(None);
+            stack.push(PolySlot::new(PolyType::Ref(Box::new(elem), mutable)));
         }
         _ => {
             if rest.is_empty() {
@@ -1294,8 +1752,7 @@ pub(super) fn poly_reference_word(
                 mutable,
                 span,
             });
-            stack.push(PolyType::Ref(Box::new(referent_pt), mutable));
-            lits.push(None);
+            stack.push(PolySlot::new(PolyType::Ref(Box::new(referent_pt), mutable)));
         }
     }
     Ok(Some(std::mem::take(stack)))
@@ -1326,10 +1783,10 @@ fn poly_ref_array_parts(pt: &PolyType, arrays: &[ArrayDecl]) -> Option<(bool, Po
 }
 
 /// Slice 13 (R-B3): `&>`/`&!>`'s static bounds check against a concrete
-/// count, the poly-body twin of the monomorphic `check_array_index`. Unlike
-/// `Slot`, the `PolyType` stack carries no `int_val` of its own, so the
-/// caller passes the parallel `lits` shadow's entry (`R-B3`'s doc comment on
-/// `check_poly_body`) alongside the index's `PolyType`.
+/// count, the poly-body twin of the monomorphic `check_array_index`. The
+/// caller passes the index slot's `int_val` alongside its `PolyType`; this is
+/// the only consumer of that field, which is why every operator but a bare
+/// shuffle leaves it `None`.
 #[allow(clippy::too_many_arguments)]
 fn check_poly_array_index(
     index_pt: &PolyType,
@@ -1389,6 +1846,9 @@ pub(super) fn poly_copy_gate(
             &sig.ty_var_names[*v as usize],
         )),
         PolyType::Concrete(t) => Err(cannot_copy_error(ctx, span, op, *t)),
+        // P7 slice 3b (R2): `dup`/`over` on a quotation literal. Located, and
+        // rendered by the shared operand renderer below.
+        PolyType::QuotLit => Err(poly_op_on_variable_error(ctx, span, op, pt, sig)),
         // A variable-bearing array is non-`Copy` exactly when its element is
         // (a length-variable array is never interned, so the declaration-time
         // `check_no_linear_array_elements` never sees it). Recurse so the
@@ -1428,15 +1888,14 @@ pub(super) fn poly_copy_gate(
 pub(super) fn poly_delegate_op(
     name: &str,
     span: Span,
-    stack: &mut Vec<PolyType>,
-    lits: &mut Vec<Option<i64>>,
+    stack: &mut Vec<PolySlot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
     builtin_overloads: &mut HashMap<Span, String>,
-) -> Result<Option<Vec<PolyType>>, String> {
+) -> Result<Option<Vec<PolySlot>>, String> {
     let mut split = stack.len();
     while split > 0 {
-        if matches!(stack[split - 1], PolyType::Concrete(_)) {
+        if matches!(stack[split - 1].pt, PolyType::Concrete(_)) {
             split -= 1;
         } else {
             break;
@@ -1444,7 +1903,7 @@ pub(super) fn poly_delegate_op(
     }
     let mut cstack: Vec<Slot> = stack[split..]
         .iter()
-        .map(|pt| match pt {
+        .map(|slot| match &slot.pt {
             PolyType::Concrete(t) => Slot::computed(*t),
             _ => unreachable!("suffix is all concrete by construction"),
         })
@@ -1489,10 +1948,8 @@ pub(super) fn poly_delegate_op(
         return Ok(None);
     }
     stack.truncate(split);
-    lits.truncate(split);
     for slot in cstack {
-        stack.push(PolyType::Concrete(slot.ty));
-        lits.push(None);
+        stack.push(PolySlot::new(PolyType::Concrete(slot.ty)));
     }
     Ok(Some(std::mem::take(stack)))
 }
@@ -1901,6 +2358,9 @@ pub(super) fn unify_poly_input(
     subst: &mut Subst,
 ) -> Result<(), String> {
     match pty {
+        // P7 slice 3b: `pty` is the callee's *declared* input, which a
+        // body-only marker never reaches.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         PolyType::Concrete(t) => {
             if *t != slot_ty {
                 return Err(type_mismatch_error(ctx, span, name, *t, slot_ty));
@@ -2156,6 +2616,9 @@ pub(super) fn apply_subst(
 ) -> Result<Type, String> {
     match pty {
         PolyType::Concrete(t) => Ok(*t),
+        // P7 slice 3b: `pty` is a declared signature slot, which a body-only
+        // marker never reaches.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
             poly_unbound_output_error(ctx, span, name, &sig.ty_var_names[*v as usize])
         }),
@@ -2330,6 +2793,7 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::Array(..) => "an array with a variable".to_string(),
         PolyType::Concrete(t) => format!("`{t}`"),
         PolyType::Quotation(..) => "a quotation".to_string(),
+        PolyType::QuotLit => "a quotation literal".to_string(),
         PolyType::Ref(..) => "a reference".to_string(),
         // P7 slice 3a: rendered with the application, so the diagnostic
         // names which generic header and which arguments, not just "a
@@ -2393,8 +2857,8 @@ pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -
 /// Whether the receiver a `&f` would project out of is a struct or a variant,
 /// rather than a bare type parameter or a scalar. Reference or owned alike:
 /// both are receivers of a projection under P7 slice 1's D2.
-fn receiver_is_aggregate_projection(stack: &[PolyType]) -> bool {
-    let Some(top) = stack.last() else {
+fn receiver_is_aggregate_projection(stack: &[PolySlot]) -> bool {
+    let Some(top) = stack.last().map(|slot| &slot.pt) else {
         return false;
     };
     let referent = match top {
@@ -2553,6 +3017,144 @@ fn poly_naming_aliases_borrowed_place_error(
 
 /// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
 /// element cannot be statically bounds-checked without a known count.
+/// P7 slice 3b (R4/L2): a quotation literal that is still on the stack where
+/// it would have to *exist* as a value -- at the polymorphic word's exit, or
+/// leaving an eliminator arm. Splice-consumed literals only: a quotation in a
+/// generic body has no runtime representation to return, store, or capture,
+/// and the one thing that consumes one here is an eliminator in the same body.
+pub(super) fn poly_quotation_not_consumed_error(ctx: &Ctx, span: Span) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: a quotation in the polymorphic body of `{}` (line {}) is not consumed there\n  only an eliminator call in the same body consumes a quotation in a generic word: it cannot be returned, stored, or captured",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b (R4/OQ6): `call`/`branch`/`if`/`times`/`tag` applied to a
+/// quotation in a generic body. Each takes its quotation as a row-typed
+/// parameter, so dispatching one needs row unification against an abstract
+/// stack -- the machinery eliminator dispatch is specifically shaped to avoid.
+/// Deferred to P7.S3b-follow, and located rather than an `unknown word`.
+pub(super) fn poly_quotation_combinator_unsupported_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{word}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  only an enum eliminator consumes a quotation in a generic body today (P7.S3b-follow)",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b (R2/OQ2): eliminating a scrutinee that is not a concrete enum
+/// -- a bare type variable, or a generic application. `'T` is *some* enum only
+/// under an enum-kind bound, which is P7.S3d.
+pub(super) fn poly_abstract_enum_scrutinee_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    found: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{word}` in `{}` (line {}) eliminates `{found}`, which is not a concrete enum\n  an abstract scrutinee needs an enum-kind bound on the type variable, which this slice does not have",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b (R2): eliminating *through a reference* inside a generic body.
+/// Legal in a concrete body (decision 6), but every arm it could hand a
+/// narrowed `&Shape.Rect` to would need the field projections a generic body
+/// does not have (P7 slice 1), so it is rejected rather than half-supported.
+pub(super) fn poly_reference_scrutinee_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    enum_name: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{word}` in `{}` (line {}) eliminates a reference, which is not yet supported in a generic body\n  pass the owned `{enum_name}` instead",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b (R3/L1): two eliminator arms leaving structurally different
+/// types at one exit position, under rigid type variables -- `'T` against
+/// `'U`, or `'T` against `i64`. Binding either would be a mid-body
+/// unification, which would silently retype the sibling arms already checked.
+pub(super) fn poly_arm_output_disagreement_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    expected: &str,
+    found: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: the arms of `{word}` in `{}` (line {}) disagree: an earlier one leaves `{expected}`, this one leaves `{found}`\n  a type variable is rigid across arms: it is never bound to the other arm's type",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b (R3/L4): one place borrowed at two different mutabilities
+/// across two arms. The union that merges the arms' borrow tables cannot
+/// represent both, and erasing either would read as "no conflict" at a later
+/// use of that place -- a false accept, so it is named instead.
+pub(super) fn poly_arm_borrow_disagreement_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    a: &PolyBorrow,
+    b: &PolyBorrow,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    let sigil = |b: &PolyBorrow| if b.mutable { "&!" } else { "&" };
+    format!(
+        "error: the arms of `{word}` in `{}` (line {}) borrow `{}` differently: `{}{}` (line {}) against `{}{}` (line {})\n  one place is borrowed at one mutability across every arm, or the merged table could not answer a later use of it",
+        crate::resolve::demangle_word(where_),
+        span.line,
+        a.place,
+        sigil(a),
+        a.place,
+        a.span.line,
+        sigil(b),
+        b.place,
+        b.span.line,
+    )
+}
+
+/// P7 slice 3b (R3): a linear local bound *inside* an eliminator arm and
+/// never consumed there. The concrete path gets this for free from block
+/// exit (`Scope::leave`); the poly walk has no block scope, so the arm walk
+/// checks it explicitly before truncating the arm's locals away.
+pub(super) fn poly_arm_local_not_consumed_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    local: &str,
+    ty: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: the local `{local}` of type `{ty}`, bound in an arm of `{word}` in `{}` (line {}), is never consumed\n  nothing is dropped for you: consume it in the arm that binds it",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
 pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
@@ -2691,6 +3293,9 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
     match pt {
         PolyType::Concrete(t) => t.name().to_string(),
         PolyType::Var(v) => sig.ty_var_names[*v as usize].clone(),
+        // P7 slice 3b (R2): no effect to render (that is the point of the
+        // marker), so it renders as what it is.
+        PolyType::QuotLit => "a quotation literal".to_string(),
         PolyType::Array(elem, len) => {
             let l = match len {
                 Len::Concrete(n) => n.to_string(),
@@ -2756,6 +3361,20 @@ mod tests {
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
     const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
+    /// A signature over no variables, for the unit tests that drive
+    /// `poly_term` directly rather than through a source program.
+    fn bare_sig() -> PolySig {
+        PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        }
+    }
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
@@ -2887,25 +3506,189 @@ mod tests {
         );
     }
     #[test]
-    fn poly_term_rejects_a_quotation_literal() {
-        // R5p: a quotation literal in a polymorphic body is rejected eagerly at
-        // the literal (the polymorphic path cannot yet carry the marker).
-        let err = check_src(
-            ": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n\
-             : main ( -- ) 1 bad . ;\n",
+    fn poly_term_admits_a_quotation_literal_as_a_marker_slot() {
+        // P7 slice 3b (R2): the literal pushes a slot carrying its identity in
+        // `quot` and a `pt` that is not a value type. Checked at the
+        // `poly_term` level because no source program can observe the marker
+        // directly: every route out of the body rejects it.
+        let sig = bare_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let mut overloads = HashMap::new();
+        let quot_term = Term {
+            kind: TermKind::Quotation(Vec::new(), true, None),
+            span: Span::default(),
+        };
+        let stack = poly_term(
+            &quot_term,
+            Vec::new(),
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut overloads,
         )
-        .expect_err("a quotation literal in a polymorphic body should be rejected");
-        assert!(
-            err.contains("a quotation in the polymorphic body of `bad`")
-                && err.contains("not yet supported"),
-            "poly_term should name `bad`, got: {err}"
+        .expect("a quotation literal is admitted in a polymorphic body");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].pt, PolyType::QuotLit);
+        assert_eq!(
+            stack[0].quot,
+            Some(PolyQuotRef(0)),
+            "the literal's identity rides the slot, not its `PolyType`"
         );
+    }
+    #[test]
+    fn poly_quotation_identity_moves_with_the_slot_under_swap() {
+        // L3: the literal's identity rides the slot, so a shuffle reorders the
+        // indices with no special handling. Pinned here rather than through a
+        // source program: a *tagged* literal must reach its eliminator by
+        // written adjacency (the concrete path's rule), so no program can put
+        // a shuffle between two arms.
+        let sig = bare_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let mut overloads = HashMap::new();
+        let quot = Term {
+            kind: TermKind::Quotation(Vec::new(), true, None),
+            span: Span::default(),
+        };
+        let swap = Term {
+            kind: TermKind::Call("swap".to_string()),
+            span: Span::default(),
+        };
+        let mut stack = Vec::new();
+        for term in [&quot, &quot, &swap] {
+            stack = poly_term(
+                term,
+                stack,
+                &mut scope,
+                &sig,
+                &ctx,
+                &env,
+                &[],
+                &[],
+                &[],
+                &mut overloads,
+            )
+            .expect("two literals then a swap");
+        }
+        assert_eq!(
+            stack.iter().map(|s| s.quot).collect::<Vec<_>>(),
+            vec![Some(PolyQuotRef(1)), Some(PolyQuotRef(0))],
+            "`swap` reorders the identities with the slots"
+        );
+    }
+    #[test]
+    fn poly_quotation_slot_is_not_copy() {
+        // R2: the marker is not a value, so it is never `Copy` -- `dup` on one
+        // must not silently mint a second slot pointing at one interned body.
+        assert!(!poly_is_copy(
+            &PolyType::QuotLit,
+            &bare_sig(),
+            &[],
+            &[],
+            &[]
+        ));
+        assert!(!is_reference_slot(&PolyType::QuotLit));
+    }
+    /// The enum the eliminator unit tests below write their arms against.
+    /// Declared `Circle` first so a test can write its arms `Rect`-first and
+    /// still be correct: arms are matched by annotation tag, never by slot
+    /// position.
+    const SHAPE: &str = "type: Shape | Circle r i64 | Rect w i64 h i64 ;\n";
+    #[test]
+    fn poly_eliminator_registry_intercept_precedes_env_dispatch() {
+        // R2: the eliminator is intercepted by name ahead of the ordinary
+        // `env` dispatch. The arms here are written in the reverse of the
+        // enum's declaration order, so an implementation that paired arms to
+        // variants positionally (which is what the `PolySig` the eliminator is
+        // registered under would do) checks `( Rect )`'s `Rect>` against a
+        // narrowed `Shape.Circle` and fails.
+        //
+        // Anti-placebo note: deleting the intercept does *not* reach env
+        // dispatch on this path at all -- `poly_call_term` has no `PolyCtx`,
+        // so the eliminator's `PolySig` (registered in `poly_env`) is
+        // unreachable and the call falls through to `unknown word`. So the
+        // mutation flips accept -> reject, just not via the positional
+        // mismatch; the reversed arm order is what makes the *accept* here
+        // evidence of tag matching rather than of position matching.
+        assert!(
+            check_src(&format!(
+                "{SHAPE}\
+                 : pick ( 'T Shape -- 'T )\n\
+                   ~[ ( Rect )   Rect> * drop ]\n\
+                   ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
+                   Shape? ;\n\
+                 : main ( -- ) 1 5 Circle pick . ;\n"
+            ))
+            .is_ok(),
+            "arms are matched by annotation tag, in any written order"
+        );
+    }
+    #[test]
+    fn poly_arm_join_rejects_rigid_type_variable_disagreement() {
+        // L1: `'T` stays rigid across arms. One arm leaving `'T` and another
+        // `i64` is a located rejection naming both sides in order, never a
+        // mid-body bind of `'T := i64`.
+        let err = check_src(&format!(
+            "{SHAPE}\
+             : bad ( 'T: Copy Shape -- 'T )\n\
+               ~[ ( Rect )   Rect> drop drop dup ]\n\
+               ~[ ( Circle ) Circle> ]\n\
+               Shape? drop ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .expect_err("two arms leaving different types disagree");
+        assert!(
+            err.contains("an earlier one leaves `'T`, this one leaves `i64`"),
+            "the pairing is asserted, not just the failure: {err}"
+        );
+    }
+    #[test]
+    fn poly_arm_join_unions_borrows() {
+        // L4: the arms' borrow tables are unioned, not picked between. A
+        // missing record reads as "no conflict", so dropping either arm's is a
+        // silent false accept -- both directions are asserted, since "pick arm
+        // A" keeps `x` and drops `y` and an `x`-only assertion would not flip.
+        let program = |later: &str| {
+            format!(
+                "type: P a i64 ;\n\
+                 {SHAPE}\
+                 : bad ( 'T: Copy P P Shape -- 'T )\n\
+                   | x y s | s\n\
+                   ~[ ( Rect )   Rect> drop drop &!x ]\n\
+                   ~[ ( Circle ) Circle> drop &!y ]\n\
+                   Shape?\n\
+                   {later} drop drop ;\n\
+                 : main ( -- ) ;\n"
+            )
+        };
+        for place in ["x", "y"] {
+            let err = check_src(&program(place))
+                .expect_err("both arms' borrows survive the merge, so either use conflicts");
+            assert!(
+                err.contains(&format!("cannot name `{place}`"))
+                    && err.contains("a mutable borrow of it is still live"),
+                "the `{place}` record must survive the union: {err}"
+            );
+        }
     }
     #[test]
     fn poly_term_rejects_an_array_constructor() {
         // Slice 6h: an array constructor in a polymorphic body is rejected
-        // eagerly, mirroring the quotation rejection above (no interning
-        // route exists for a body-internal shape absent from the signature).
+        // eagerly (no interning route exists for a body-internal shape absent
+        // from the signature).
         let err = check_src(
             ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
              : main ( -- ) 1 bad . ;\n",
@@ -2916,6 +3699,64 @@ mod tests {
                 && err.contains("not yet supported"),
             "poly_term should name `bad`, got: {err}"
         );
+    }
+    #[test]
+    fn polyslot_int_val_folds_lits() {
+        // R1: `int_val` carries what the deleted `lits` shadow did -- set on
+        // `IntLit`, `None` elsewhere, truncated on `Bind`. Round-tripped
+        // directly at the `poly_term` level since a bound local's own
+        // literal-ness is discarded (D6), not observable through `check_src`.
+        let sig = bare_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let mut overloads = HashMap::new();
+        let lit_term = Term {
+            kind: TermKind::IntLit(9),
+            span: Span::default(),
+        };
+        let stack = poly_term(
+            &lit_term,
+            Vec::new(),
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut overloads,
+        )
+        .expect("an int literal should push a slot");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].pt, PolyType::Concrete(Type::I64));
+        assert_eq!(stack[0].int_val, Some(9));
+
+        let bind_term = Term {
+            kind: TermKind::Bind(vec!["x".to_string()]),
+            span: Span::default(),
+        };
+        let stack = poly_term(
+            &bind_term,
+            stack,
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut overloads,
+        )
+        .expect("binding the literal should consume the slot");
+        assert!(
+            stack.is_empty(),
+            "the bound literal's slot leaves the stack"
+        );
+        assert_eq!(scope.locals["x"], PolyType::Concrete(Type::I64));
     }
     #[test]
     fn check_poly_copy_word_accepts_and_instantiates() {
@@ -3410,13 +4251,13 @@ mod tests {
         // P7 slice 3a: an ungrounded generic application is a struct or enum
         // header, so it is a projection receiver exactly as a concrete
         // `Type::Struct`/`Type::Enum` is (R1's table).
-        let stack = vec![PolyType::Generic {
+        let stack = vec![PolySlot::new(PolyType::Generic {
             is_enum: true,
             idx: 0,
             module: 0,
             args: Vec::new(),
             name: "Result",
-        }];
+        })];
         assert!(receiver_is_aggregate_projection(&stack));
     }
 

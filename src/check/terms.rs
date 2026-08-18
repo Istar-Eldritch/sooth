@@ -864,7 +864,11 @@ fn check_term(
                         // literal used as an ordinary value) was silently
                         // never checked at all, magic that this rejects.
                         Some(tag)
-                            if !tagged_literal_reaches_an_eliminator_call(siblings, at, poly) =>
+                            if !tagged_literal_reaches_an_eliminator_call(
+                                siblings,
+                                at,
+                                poly.eliminators,
+                            ) =>
                         {
                             return Err(eliminator_arm_outside_call_error(
                                 ctx,
@@ -934,14 +938,18 @@ fn check_term(
 /// merely because an unrelated eliminator call follows it later in the body.
 /// The error names the adjacency requirement so the rejection is a stated
 /// rule rather than an unexplained one.
-fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly: &PolyCtx) -> bool {
+pub(super) fn tagged_literal_reaches_an_eliminator_call(
+    siblings: &[Term],
+    at: usize,
+    eliminators: &HashMap<String, EnumId>,
+) -> bool {
     let mut j = at + 1;
     while let Some(term) = siblings.get(j) {
         match &term.kind {
             TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
                 j += 1;
             }
-            TermKind::Call(name) => return poly.eliminators.contains_key(name),
+            TermKind::Call(name) => return eliminators.contains_key(name),
             _ => return false,
         }
     }
@@ -952,7 +960,7 @@ fn tagged_literal_reaches_an_eliminator_call(siblings: &[Term], at: usize, poly:
 /// that is not consumed as an eliminator arm. The tag is only meaningful as
 /// arm-to-variant routing (R1/R4); anywhere else it is a stray annotation this
 /// checker must not silently let through unchecked.
-fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
+pub(super) fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
     format!(
         "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})\n  arms are written together, immediately before the call: `~[ ( A ) .. ] ~[ ( B ) .. ] Enum?`",
         in_word(ctx),

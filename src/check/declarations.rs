@@ -359,6 +359,8 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
                 collect_poly_concrete(t, out);
             }
         }
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         // P7 slice 3a: recurse into args only -- a variable-bearing generic
         // names no concrete `Type` of its own to contribute (its header is a
         // separate, currently-unclosed export-privacy gap; see the spec's

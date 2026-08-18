@@ -1188,6 +1188,19 @@ pub enum PolyType {
     /// the classification bit (`Copy`-ness, store-vs-fetch, exclusivity),
     /// asked at sites that hold no registry.
     Ref(Box<PolyType>, bool),
+    /// P7 slice 3b (R2): the compile-only marker a quotation *literal* written
+    /// inside a non-inline polymorphic body occupies on the poly walk's
+    /// virtual stack. Deliberately carries no effect: two literals with one
+    /// effect would be one `PolyType`, erasing the per-literal identity the
+    /// eliminator needs to pick an arm's body -- that identity rides
+    /// `PolySlot::quot` instead. It is not a value type, so every predicate
+    /// answers "no" for it (`poly_is_copy`, `is_reference_slot`) and every
+    /// type-directed operation rejects it. Minted only by `poly_term`'s
+    /// quotation arm and consumed only by `poly_eliminator_call`; a literal
+    /// still on the stack at word exit is rejected, so it can never reach a
+    /// declared signature -- which is what makes the arms for it outside the
+    /// poly walk unreachable rather than merely unexercised.
+    QuotLit,
     /// P7 slice 3a (R1/D2): a generic type applied to the enclosing
     /// signature's own variables (`Result['T 'E]`), deferred exactly as
     /// `Ref` defers its `RefId`: there is no `StructId`/`EnumId` to mint

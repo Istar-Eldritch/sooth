@@ -243,6 +243,8 @@ fn remap_poly_type(
             ref_base,
         )),
         PolyType::Var(id) => PolyType::Var(*id),
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         PolyType::Array(inner, len) => PolyType::Array(
             Box::new(remap_poly_type(
                 inner,

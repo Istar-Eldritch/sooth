@@ -68,6 +68,8 @@ pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_ty
 use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
+use self::terms::eliminator_arm_outside_call_error;
+use self::terms::tagged_literal_reaches_an_eliminator_call;
 pub(crate) use self::word_entry::{
     check_inline_declaration, check_inline_quotation_requires_inline,
 };
@@ -2745,7 +2747,6 @@ fn combinator_branch_output_mismatch_error(
     // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
     // same way it already does for a destructure's `>`; an ordinary word name
     // (never carrying either suffix) demangles identically either way.
-    let word = crate::resolve::demangle_call(word);
     let render = |types: &[Type]| match types.is_empty() {
         true => "nothing".to_string(),
         false => format!(
@@ -2757,10 +2758,27 @@ fn combinator_branch_output_mismatch_error(
                 .join(" ")
         ),
     };
+    combinator_branch_output_mismatch_rendered(ctx, span, word, &render(expected), &render(found))
+}
+
+/// P7 slice 3b (R3): the same message over already-rendered rows, so the
+/// abstract eliminator join can raise the *same* diagnostic for a cross-arm
+/// depth mismatch -- its rows are `PolyType`s, which no `Type` slice can hold.
+fn combinator_branch_output_mismatch_rendered(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    expected: &str,
+    found: &str,
+) -> String {
+    // Phase 6 slice 3 review fix (finding 4): shared with `check_eliminator_call`
+    // (decision 4), whose `word` is a call name that may carry the `?` suffix
+    // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
+    // same way it already does for a destructure's `>`; an ordinary word name
+    // (never carrying either suffix) demangles identically either way.
+    let word = crate::resolve::demangle_call(word);
     format!(
-        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {}, this one leaves {}{} (line {})",
-        render(expected),
-        render(found),
+        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {expected}, this one leaves {found}{} (line {})",
         in_word(ctx),
         span.line,
     )

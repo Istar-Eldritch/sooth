@@ -663,6 +663,8 @@ pub(super) fn subst_polytype(
         PolyType::Quotation(..) => {
             unreachable!("a quotation effect never reaches monomorphized lowering (R7/R20)")
         }
+        // P7 slice 3b: a body-only marker, never in a declared signature.
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
         // Slice 13 (R-A8/D4): lowering only *looks up* an already-interned
         // shape, exactly as the array arm does -- check-side `apply_subst`
         // has interned every `Type::Ref` this word's instantiations can
