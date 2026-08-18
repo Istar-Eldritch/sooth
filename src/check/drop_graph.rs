@@ -1164,13 +1164,12 @@ mod tests {
     #[test]
     fn tail_position_eliminator_arm_run_stops_at_untagged_operand() {
         // The reverse scan for the tagged-arm run halts at the first operand
-        // that isn't itself a tagged quotation literal. `~[ ( B ) w ]` holds
-        // the only self-tail-call, but an untagged `[ 5 ]` sits between it and
-        // the dispatch call, so the run collects only `~[ ( A ) .. ]` and
-        // never reaches `B`'s arm: a scan that failed to stop at the untagged
-        // operand would wrongly see `w` and report a self-tail-call.
+        // that isn't a *tagged* quotation literal. The interposed `[ ( i64 --
+        // i64 ) 5 ]` is annotated but carries no variant tag, so it exercises
+        // the tag check and not merely the has-an-annotation check: it stops
+        // the run, leaving `~[ ( B ) w ]`'s self-tail-call unreachable.
         let w = first_word(
-            "type: E | A | B ; : w ( E -- E ) ~[ ( B ) w ] [ 5 ] ~[ ( A ) drop 0 ] E? ;",
+            "type: E | A | B ; : w ( E -- E ) ~[ ( B ) w ] [ ( i64 -- i64 ) 5 ] ~[ ( A ) drop 0 ] E? ;",
         );
         assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["E?"]);
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));

@@ -174,8 +174,10 @@ migrates in the same slice, so a deprecation window buys nothing.
     a *mutual* tail-recursion cycle routed entirely through eliminator arms, previously
     invisible to `check_tail_call_cycles`, is now correctly rejected the same way an
     `if`-arm mutual cycle already is (`tail_mutual_recursion_through_eliminator_arms_
-    is_error`) -- a new user-visible rejection, not a behavior change to any program
-    that compiled before.
+    is_error`). This **is** a behavior change: such a cycle compiled before, but with
+    unbounded stack growth (the pre-fix build segfaults on one at depth 1e6), which is
+    exactly what the rule exists to prevent. Programs that previously compiled into a
+    stack overflow are now rejected at compile time.
   - `examples/list.sth` (`pop`) and `examples/refs.sth` (`pop`, `walk`): a recursive,
     boxed enum `List | Nil | Cons v i64 next ^List`, in both owning and `&!` mode.
     **Migrated and run this session; output matches the clause form byte-for-byte** (R7).
@@ -284,6 +286,20 @@ same commit as the variant removal (they are unreachable the instant the variant
   delete `tests/phase5_generic_enum_elimination.rs`, the parser clause tests, and
   `direct_set_reaches_into_a_clause_body` (R8). At phase exit `grep -r 'WordBody::Clauses'
   src/` returns nothing and the tree is green.
+  Three items outside `src/` ride this commit, all falsified by the variant's removal:
+  - **`DESIGN.md`.** `:456`, `:512` and `:1032` declare clause-bodied definition "the
+    sole enum eliminator"; `:63` and `:510` name "a clause body" as a locals-extent
+    scope. All five are false once the form is gone; they must name the eliminator
+    (`~[ ( V ) .. ] Shape?`) and its arm bodies instead.
+  - **`tests/phase4_quotations.rs:1042`.** The M5 guard
+    `matches!(word.body, WordBody::Terms { .. })` becomes **irrefutable** the instant
+    `WordBody` drops to one variant, i.e. a silent placebo asserting nothing. R2's
+    inventory swept only `src/`, so it does not catch this. Re-point it at what the
+    guard actually means (a `vm_table.sth` handler contains no eliminator dispatch
+    call) and mutation-test the replacement by inlining a dispatch back into a handler.
+  - **Stale prose.** `tests/phase4_quotations.rs:996-997` and
+    `tests/phase3_locals.rs:456-459` still describe the migrated `vm.sth` bodies as
+    "clauses".
 
 ```json
 {
@@ -295,7 +311,7 @@ same commit as the variant removal (they are unreachable the instant the variant
     },
     {
       "phase": 2,
-      "focus": "Delete the clause path in one atomic commit (R1-R4, R8): remove parse_clauses/at_clause_start/parse_clause_body_terms and their call site and tests in src/parser.rs, delete the WordBody::Clauses variant and every production match arm it forces (resolve.rs, ir/func_builder/mod.rs, repl.rs, and the check/{combinators,drop_graph,globals,poly,audits,word_entry} sites), retire check_clause_word plus its five declarations.rs tests and clause_bodied_quotation_word_error plus its audits.rs guard, collapse ArmBinding, and delete tests/phase5_generic_enum_elimination.rs and the direct_set_reaches_into_a_clause_body unit test. Exit: grep -r 'WordBody::Clauses' src/ returns nothing and the tree is green.",
+      "focus": "Delete the clause path in one atomic commit (R1-R4, R8): remove parse_clauses/at_clause_start/parse_clause_body_terms and their call site and tests in src/parser.rs, delete the WordBody::Clauses variant and every production match arm it forces (resolve.rs, ir/func_builder/mod.rs, repl.rs, and the check/{combinators,drop_graph,globals,poly,audits,word_entry} sites), retire check_clause_word plus its five declarations.rs tests and clause_bodied_quotation_word_error plus its audits.rs guard, collapse ArmBinding, and delete tests/phase5_generic_enum_elimination.rs and the direct_set_reaches_into_a_clause_body unit test. Also outside src/: update DESIGN.md:63,456,510,512,1032 (they call clause-bodied definition the sole enum eliminator and name a clause body as a locals scope), re-point the now-irrefutable M5 guard at tests/phase4_quotations.rs:1042 (matches!(word.body, WordBody::Terms { .. }) asserts nothing once WordBody has one variant) and mutation-test its replacement, and fix the stale \"clause\" prose at tests/phase4_quotations.rs:996-997 and tests/phase3_locals.rs:456-459. Exit: grep -r 'WordBody::Clauses' src/ returns nothing and the tree is green.",
       "difficulty": "hard"
     }
   ]
