@@ -598,7 +598,7 @@ mod tests {
                 inputs: Vec::new(),
                 outputs: vec![TypedSlot { name: None, ty }],
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module: 0,

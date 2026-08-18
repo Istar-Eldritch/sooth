@@ -83,7 +83,7 @@ pub fn combinator_index<'w>(words: impl IntoIterator<Item = &'w WordDef>) -> Com
         if !is_combinator(word) {
             continue;
         }
-        let WordBody::Terms { terms } = &word.body;
+        let terms = &word.body;
         let inputs = match word.poly.as_ref() {
             Some(sig) => sig.inputs.len(),
             None => word.effect.inputs.len(),
@@ -123,7 +123,7 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
         if !is_combinator(word) {
             continue;
         }
-        let WordBody::Terms { terms } = &word.body;
+        let terms = &word.body;
         map.entry(word.name.clone())
             .or_default()
             .push(Combinator { word, terms });
@@ -136,7 +136,7 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
 /// session store into the `HashMap<String, Combinator>` the inline path reads
 /// without reaching into `Combinator`'s private fields.
 pub(crate) fn combinator_of(word: &WordDef) -> Combinator<'_> {
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     Combinator { word, terms }
 }
 
@@ -774,7 +774,7 @@ mod tests {
                 }],
                 outputs: Vec::new(),
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module: 0,
@@ -833,7 +833,7 @@ mod tests {
                     ty: Type::I64,
                 }],
             },
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: true,
             module: 0,

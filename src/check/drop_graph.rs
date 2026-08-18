@@ -83,7 +83,7 @@ pub(super) fn check_main_effect(
 pub(super) fn tail_position_calls<'a>(word: &'a WordDef, combs: &CombinatorIndex) -> Vec<&'a str> {
     let mut out = Vec::new();
     let mut walk = TailWalk::new(combs);
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     let binds = param_binds(terms, declared_input_count(word));
     walk.collect(terms, &binds, &mut out);
     out
@@ -718,10 +718,9 @@ pub(super) fn collect_drop_targets(
 /// name contributes an edge that no call justifies. That over-approximation
 /// can only add edges, never lose one, and is the same one
 /// `check_tail_call_cycles` already lives with.
-pub(super) fn all_calls(body: &WordBody) -> Vec<&str> {
+pub(super) fn all_calls(body: &[Term]) -> Vec<&str> {
     let mut out = Vec::new();
-    let WordBody::Terms { terms } = body;
-    collect_all_calls(terms, &mut out);
+    collect_all_calls(body, &mut out);
     out
 }
 
@@ -1279,7 +1278,7 @@ mod tests {
         for (words, expected) in [(recon2, true), (recon4, false)] {
             let combs = combinator_index(&words);
             let word = named(&words, "walk");
-            let WordBody::Terms { terms } = &word.body;
+            let terms = &word.body;
             let checker = is_combinator(word) && has_self_tail_call(word, &combs);
             let lowering = terms_tail_call_self(terms, &word.name, &combs);
             assert_eq!(checker, expected, "the checker's `splice_tail`");
@@ -1316,7 +1315,7 @@ mod tests {
             // appends the `lib/core.sth` prelude, which now defines `<` too,
             // so both `last()` and a name lookup can find the wrong one.
             let word = words.first().expect("the builtin-named word");
-            let WordBody::Terms { terms } = &word.body;
+            let terms = &word.body;
             let combs = combinator_index(&words);
             assert!(
                 !has_self_tail_call(word, &combs),

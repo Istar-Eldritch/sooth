@@ -191,13 +191,13 @@ pub(super) fn check_poly_combinator_standalone(
         let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
         outputs.push(TypedSlot { name: None, ty });
     }
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     let terms = terms.clone();
     // A concrete stand-in for the combinator, checked by the ordinary path.
     let concrete = WordDef {
         name: word.name.clone(),
         effect: StackEffect { inputs, outputs },
-        body: WordBody::Terms { terms },
+        body: terms,
         poly: None,
         declares_inline: word.declares_inline,
         module: word.module,
@@ -326,7 +326,7 @@ pub fn check_poly_body(
         &CombinatorIndex::new(),
         generics,
     );
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     let stack = sig.inputs.clone();
     // Slice 13 (R-B3): a parallel int-literal shadow of the stack, `None` for
     // every non-`IntLit` value (mirrors `Slot::int_val`, which the `PolyType`

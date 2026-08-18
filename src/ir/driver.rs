@@ -763,7 +763,7 @@ pub(crate) fn lower_instantiation(
     builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     subst: &Subst,
-    body: &WordBody,
+    body: &[Term],
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,

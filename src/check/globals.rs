@@ -83,7 +83,7 @@ struct Direct {
 
 fn direct_of(word: &WordDef, statics: &HashSet<&str>) -> Direct {
     let mut out = Direct::default();
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     walk(terms, statics, &mut HashSet::new(), &mut out);
     out
 }
@@ -357,7 +357,7 @@ mod tests {
         WordDef {
             name: name.to_string(),
             effect: StackEffect::default(),
-            body: WordBody::Terms { terms },
+            body: terms,
             poly: None,
             declares_inline: false,
             module,

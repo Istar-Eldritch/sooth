@@ -51,7 +51,7 @@ pub(super) fn check_word(
     if !is_combinator(word) {
         check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
     }
-    let WordBody::Terms { terms } = &word.body;
+    let terms = &word.body;
     check_terms_word(
         word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
         generics,

@@ -11,7 +11,7 @@
 //! enclosing declared output row (R11); the same literal in both arms stays a
 //! splice.
 
-use sooth::ast::{Term, TermKind, WordBody};
+use sooth::ast::{Term, TermKind};
 use sooth::ir::{Instr, IrType};
 use sooth::{check, lexer, parser};
 
@@ -1051,7 +1051,7 @@ fn vm_table_dispatch_matches_eliminator_version() {
             .iter()
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("vm_table.sth should define `{name}`"));
-        let WordBody::Terms { terms } = &word.body;
+        let terms = &word.body;
         let mut all = Vec::new();
         walk_terms(terms, &mut all);
         assert!(

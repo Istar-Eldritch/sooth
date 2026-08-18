@@ -1336,7 +1336,7 @@ mod tests {
         WordDef {
             name: name.to_string(),
             effect: StackEffect::default(),
-            body: WordBody::Terms { terms: Vec::new() },
+            body: Vec::new(),
             poly: None,
             declares_inline: false,
             module,
@@ -2030,7 +2030,7 @@ mod tests {
                         .map(|ty| TypedSlot { name: None, ty })
                         .collect(),
                 },
-                body: WordBody::Terms { terms: Vec::new() },
+                body: Vec::new(),
                 poly: None,
                 declares_inline: false,
                 module: 0,

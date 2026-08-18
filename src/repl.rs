@@ -2217,9 +2217,8 @@ impl Session {
         }
     }
 
-    fn rewrite_wordbody_imports(&self, body: &mut Vec<Term>) -> Result<(), String> {
-        let terms = body;
-        self.rewrite_terms_imports(terms)
+    fn rewrite_wordbody_imports(&self, body: &mut [Term]) -> Result<(), String> {
+        self.rewrite_terms_imports(body)
     }
 
     fn rewrite_terms_imports(&self, terms: &mut [Term]) -> Result<(), String> {
