@@ -2362,7 +2362,8 @@ fn check_eliminator_call(
             .annot
             .as_mut()
             .expect("an arm was collected by its annotation's variant tag")
-            .inputs = vec![written];
+            .inputs
+            .insert(0, written);
         // The arm receives the caller's *own* scrutinee, retyped to the
         // narrowed variant -- not a fresh provenance-free slot. A reference
         // scrutinee is rooted at a caller place, and an arm that borrowed
@@ -4437,6 +4438,25 @@ mod tests {
         assert!(
             err.contains("annotated `~[ &Shape.Circle -- ]`")
                 && err.contains("`Shape?` declares it `~[ &!Shape.Circle -- ]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_eliminator_call_arm_extra_declared_input_is_error() {
+        // R3 synthesizes the receiver slot but must not replace an arm's own
+        // declared inputs: `Rect i64` here declares a second input after the
+        // tag, which the call's real effect (`Shape.Rect -- i64`, one input)
+        // does not have.
+        let err = check_src(&format!(
+            "{SHAPE_DECL}\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect i64 -- i64 ) &w @ swap &h @ swap drop * ] Shape? ;\n\
+             : main ( -- ) 3 Circle area . ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("annotated `~[ Shape.Rect i64 -- i64 ]`")
+                && err.contains("`Shape?` declares it `~[ Shape.Rect -- ]`"),
             "unexpected message: {err}"
         );
     }

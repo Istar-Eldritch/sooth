@@ -2,7 +2,6 @@
 //! (`lower_terms`, `lower_term`, `lower_self_tail_combinator`, `lower_call`).
 
 use super::*;
-use crate::ast::QuotAnnot;
 
 impl<'a> FuncBuilder<'a> {
     pub(in crate::ir) fn lower_terms(&mut self, terms: &[Term], tail: bool) {
@@ -60,7 +59,8 @@ impl<'a> FuncBuilder<'a> {
                 // body, since the phantom `Value` the arm is pushed as carries
                 // no annotation of its own and the eliminator's interception
                 // below routes arms to variants by tag, not by position.
-                self.quot_arm_tags.push(arm_tag(annot.as_ref()));
+                self.quot_arm_tags
+                    .push(annot.as_ref().and_then(|a| a.variant_tag.clone()));
                 let v = self.fresh_value(IrType::I64);
                 self.quot_bodies.insert(v, id);
                 self.stack.push(v);
@@ -775,13 +775,6 @@ impl<'a> FuncBuilder<'a> {
             tail,
         );
     }
-}
-
-/// Phase 6 slice 3 (R5): the eliminator-arm routing an annotation carries --
-/// the variant to dispatch to and the mode the arm receives it in. `None` for
-/// an untagged (ordinary) literal, which is every literal but an arm.
-fn arm_tag(annot: Option<&QuotAnnot>) -> Option<VariantTag> {
-    annot?.variant_tag.clone()
 }
 
 #[cfg(test)]
