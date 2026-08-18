@@ -17,7 +17,7 @@ eliminator's arms *are* quotation literals (`examples/eliminator.sth`):
 Move that into a polymorphic signature and it hits this wall and nothing else, verified
 against the built compiler at HEAD:
 
-```
+```text
 : area_and_keep ( Shape 'T -- 'T ) ~[ ( Rect ) ... ] ~[ ( Circle ) ... ] Shape? . ;
 error: a quotation in the polymorphic body of `area_and_keep` (line 8) is not yet supported
 ```
