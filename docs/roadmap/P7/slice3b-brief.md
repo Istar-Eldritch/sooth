@@ -1,14 +1,29 @@
 # Phase 7 Slice 3b: quotations in a polymorphic body (brief)
 
 A quotation literal in a **non-inline** polymorphic word body is rejected outright
-(`src/check/poly.rs:505-513`). It fires for any quotation: a bare `~[ ]`, an `if`, a
-declared comparator. Since `if` is an ordinary library word over the `branch` builtin
-(slice 10c), **any polymorphic word that branches is forced `inline` today**, and an
-`inline` word's body is spliced rather than compiled once, so it mints no monomorph
-symbol and its code is duplicated at every call site.
+(`src/check/poly.rs:505-513`). It fires for any quotation: a bare `~[ ]`, an `if`, an
+eliminator arm.
 
-This slice makes a non-inline polymorphic body able to hold a quotation, and therefore
-to branch.
+The forcing consumer is **enum elimination inside a polymorphic body**, because a Phase 6
+eliminator's arms *are* quotation literals (`examples/eliminator.sth`):
+
+```sooth
+: area ( Shape -- i64 )
+  ~[ ( Rect )   &w @ swap &h @ swap drop * ]
+  ~[ ( Circle ) &r @ swap drop dup * 3 * ]
+  Shape? ;
+```
+
+Move that into a polymorphic signature and it hits this wall and nothing else, verified
+against the built compiler at HEAD:
+
+```
+: area_and_keep ( Shape 'T -- 'T ) ~[ ( Rect ) ... ] ~[ ( Circle ) ... ] Shape? . ;
+error: a quotation in the polymorphic body of `area_and_keep` (line 8) is not yet supported
+```
+
+So **no polymorphic word can eliminate an enum at all**, which rules out the whole
+`unwrap_or`/`map_or`/`Result`-combinator family. This slice lifts that.
 
 ## Recon (worker-verified against the built compiler)
 
@@ -86,6 +101,47 @@ a poly body*. This is the bulk of the slice.
 (~18 logical ops) plus ~26 type-reads, across the 6 functions threading the stack
 (`poly.rs:384/421/537/985/1147/1431`). Hand-counted, accurate to about ±1.
 
+## The consumer (probe-verified, and the reason this brief was rewritten)
+
+The first draft justified the slice as "everything interesting is forced `inline`" and
+named no word that would stop being `inline`. A probe falsified that framing twice over,
+and the real consumer turned out to be elsewhere.
+
+**The "forced inline" premise is partly false.** A non-inline polymorphic word that
+branches *via a callee* already compiles today:
+`: less ( 'T: Copy Ord 'T -- bool ) > ;` builds clean. `>` is an inline library word whose
+body is `u< [ true ] [ false ] branch`, and the poly walk never sees that quotation because
+the splice happens later, at concrete lowering. The wall fires only on a quotation written
+*directly* in the polymorphic body.
+
+**No existing `inline` library word is freed by this slice.** Surveyed, with the reason
+each is inline:
+
+| word(s) | why inline | freed by S3b? |
+|---|---|---|
+| `= < > <= >= <>` (`core.sth`) | body needs `u<` on an abstract operand; `poly_delegate_op` only feeds an operator the maximal *concrete* stack suffix (`poly.rs:1437-1451`) | no, different wall |
+| `if` `unless` (`core.sth`) | row-typed, take quotation *parameters* | no, inherently inline |
+| `each` `map` `fold` `filter` `while` `times` | row-typed quotation-parameter combinators | no, inherently inline |
+| `sort` `bin_search` (`arrays.sth`) | comparator parameter *and* index a generic-length `['T 'N]` array | no, two other walls (`'N` indexing is P7.S3c) |
+| `En` `TxEn` `ClkDiv` `TxRdy` (`uart_mmio.sth`) | monomorphic constant pairs, inline as call-avoidance | no, not polymorphic |
+
+**The consumer is enum elimination, and it is available to test today.** Eliminator arms
+are quotation literals, so a polymorphic word eliminating even a *concrete* enum is blocked
+(the `area_and_keep` probe above). P6.S3 has shipped, so this consumer needs nothing from
+Phase 6's in-flight work.
+
+**Phase 6 widens it and then makes it mandatory, but is not an implementation
+dependency.** P6.S3b (in flight) makes *generic* enums eliminable with bare tags, which
+extends this slice's reach to `Opt['T]`/`Result['T 'E]` eliminators. P6.S4 then deletes
+`WordBody::Clauses` and `parse_clauses` entirely, after which the eliminator word is the
+only elimination mechanism that exists, so this wall becomes the sole thing standing
+between a polymorphic word and any enum at all. Neither changes the mechanism this slice
+builds; they change how much it unlocks and how urgent it is.
+
+A consequence for scope: the clause-style rejection at `poly.rs:196-201`/`:336-341`
+("combines a clause-style body with a polymorphic signature") is **not** this slice's
+problem and must not be lifted here. Its subject is being deleted by P6.S4.
+
 ## Shape of the work
 
 Three check-side layers and no lowering work:
@@ -96,10 +152,17 @@ Three check-side layers and no lowering work:
    them would be dead weight inviting "why is this always `None`". Folding `lits`'s
    `int_val` into the struct (deleting the parallel vector) is optional consolidation and
    should be decided, not drifted into.
-2. **Combinator dispatch.** Teach `poly_call_term` to consume a quotation slot: `call`,
-   `branch`, and the inline-combinator splice, so `if` works. The bulk.
-3. **Abstract branch-join.** Port the depth check, per-slot agreement, and `Moves::join`
-   wiring from `check_branch_join`. `Moves::join` is reusable as-is.
+2. **Quotation-consuming word dispatch.** Teach `poly_call_term` to consume a quotation
+   slot. `poly_call_term`'s `match name` has no `call`, `branch`, `if`, `times`, or `tag`,
+   and while `resolve_combinator_overload` is defined (`poly.rs:1701`) it is never called
+   from `poly.rs`; `inline_combinator` (`check/combinators.rs:364`) is reached only from
+   the concrete path (`check/terms.rs:644`). The generated eliminators (`Shape?`, `Opt?`)
+   are members of this family and are the consumer, so they lead. The bulk of the slice.
+3. **Abstract N-arm join.** Port the depth check, per-slot agreement, and `Moves::join`
+   wiring from `check_branch_join`. Needed in its **N-arm** form, not just two-arm: an
+   eliminator has one arm per variant, and the concrete path already generalizes
+   `Moves::join` from two to N with a per-slot `merge_arm_output_slot` (`check.rs:2443`,
+   `:2480`). `Moves::join` itself is reusable as-is.
 
 ## Locked decisions
 
@@ -127,28 +190,53 @@ the generic message this slice is deleting.
 (no `dup`/`swap` before use) would be cheaper but rejects legal programs, since combinator
 code shuffles quotations routinely. Identity must survive reordering.
 
+**The arm merge unions the borrow table.** Probe-established, and this one can produce a
+**false accept** rather than merely a false reject, so it is not a detail. `PolyScope`'s
+borrow table is keyed by a local's *name*, and `prune_dead_borrows` (`poly.rs:90-104`) only
+ever decides whether to clear the table wholesale: a conflict is detected by
+`live_borrow_of(place)` *finding* a record, so a **missing** record reads as "no conflict"
+and accepts. If arm A borrows `&!x` and arm B borrows `&!y`, a merge that picks one arm or
+intersects drops the other's record while its reference is still live on the merged stack,
+and a later use of that place is silently accepted. Within a single linear path the
+table's coarseness only over-rejects, which is why it has been safe until now; a branch
+breaks that property. The concrete path already does the right thing for comparison:
+`check_branch_join` threads one `&mut Provenance` through both arms (accumulating a union),
+and `merge_arm_output_slot`'s doc states that "one arm leaving a live borrow the other
+doesn't (or of a different place) is rejected here rather than silently erased to a
+provenance-free slot" (`check.rs:2476-2480`). The poly join must union, and must reject the
+disagreement rather than erase it.
+
 ## Open questions
 
-1. **`PolySlot` struct vs. a third lock-step vector.** A parallel
+1. **Can the poly path dispatch a generated eliminator word?** `Shape?` is an ordinary word
+   resolved by name, unlike `if`, which is a row-typed inline combinator. If eliminator
+   dispatch is materially simpler than the row-typed combinator path, the slice may be able
+   to deliver its consumer without solving row-unification-against-an-abstract-stack at all,
+   and `if`/`call`/`times` could follow separately. This is the single biggest remaining
+   sizing question and the spec should open with it.
+2. **Does an abstract scrutinee interact with P6.S3b's check-time tag resolution?** P6.S3b
+   moves arm-tag typing to check time against the `EnumId` the scrutinee operand carries.
+   In a polymorphic body that operand may be abstract. For a *concrete* enum in a poly body
+   (this slice's first consumer) the `EnumId` is known, so this may be vacuous — but it must
+   be confirmed, and it is the seam where this slice meets the other session's work.
+3. **`PolySlot` struct vs. a third lock-step vector.** A parallel
    `quots: Vec<Option<QuotRef>>` is fewer edits (the ~26 `stack[i]` type-reads stay
    untouched) but adds a third vector to keep synchronised across all 28 mutation sites and
    widens the length invariant to three-way. The struct is more edits but removes that
    invariant class, mirrors the concrete `Slot`, and lets `lits` be deleted. Recon
    recommends the struct on the grounds that a desynced `quot` **mis-compiles** where a
    desynced `lits` only mis-diagnoses. The spec should confirm and record the choice.
-2. **What does the arm-merge do about the coarse borrow table?** `PolyScope.borrows` has no
-   arm-aware logic and `prune_dead_borrows` is prefix-only. Does each arm clone and merge
-   it, or does its existing coarseness already fail safe across a join? Unverified.
-3. **Does the quotation literal's own body get walked abstractly, and against what?** The
+4. **Does the quotation literal's own body get walked abstractly, and against what?** The
    concrete path checks a literal against a declared effect
    (`check_literal_against_declared_effect`); there is no poly analogue. For `if`'s arms
    this is where a `~[ ..a -- ..b ]` row effect meets an abstract stack.
-4. **Capture admission has no poly twin.** The concrete `check_branch_join` carries
+5. **Capture admission has no poly twin.** The concrete `check_branch_join` carries
    capture-admission machinery. Under the splice-only rule a quotation cannot escape, so
    this may be vacuous — but "may be" needs to become "is", with a test.
-5. **Does `times` need to be in scope, or only `call`/`branch`?** `times` also consumes a
-   quotation by splicing. Including it is probably cheap; excluding it needs a located
-   rejection.
+6. **How much of the quotation-consuming family is in scope?** The consumer needs
+   eliminators. `call`, `branch`, `if`, and `times` are separable, and `if` is the expensive
+   one (row-typed). Each one left out needs a located rejection rather than an `unknown
+   word` fallthrough, which is what they produce today with the wall stubbed open.
 
 ## Out of scope
 
@@ -162,10 +250,20 @@ code shuffles quotations routinely. Identity must survive reordering.
 
 ## Ready to spec?
 
-Yes, with the five open questions above to be resolved in the spec. The two facts that
-most affect sizing are settled and evidence-backed: lowering needs no work, and no abstract
-branch-join exists. Two stale/false source comments (`poly.rs:505-513`) should be corrected
-by this slice, since it is deleting the rejection they justify.
+Yes. The consumer question that sank P7.S3d is answered here and answered by a compiling
+witness, not an argument: a polymorphic word cannot eliminate an enum, and the failure is
+this wall alone.
 
-Expect **L**, comparable to P7.S3a: a mechanical representation change across ~54 sites, a
-new combinator dispatch family, and a ~290-line port, against zero lowering work.
+No dependency on Phase 6's in-flight work for the implementation — the first consumer is a
+*concrete* enum eliminated in a polymorphic body, which P6.S3 already shipped. P6.S3b
+widens the consumer to generic enums and P6.S4 makes this the only route to elimination at
+all, so the two threads should stay in touch (open question 2 is the seam), but neither
+blocks starting.
+
+Sizing is **L**, comparable to P7.S3a: a mechanical representation change across ~54 sites,
+a new quotation-consuming dispatch family, and an N-arm port of `check_branch_join`,
+against zero lowering work. Open question 1 could reduce it: if eliminator dispatch alone
+satisfies the consumer, the row-typed `if` path can be deferred to its own slice.
+
+Two stale/false source comments at `poly.rs:505-513` should be corrected by this slice,
+since it deletes the rejection they justify.

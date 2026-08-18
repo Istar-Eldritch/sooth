@@ -118,25 +118,32 @@ quotation marker" on a `Vec<PolyType>` stack is false, refuted by the parallel p
 `lits` vector the same function already threads. The true constraints are narrower — the
 identity must not live in the *type* (two bodies with one effect are one `PolyType`), and
 the side state must be positional rather than name-keyed.
-**This is what makes every interesting polymorphic word `inline` today**, and `inline`
-words mint no monomorph symbol at all — their bodies are spliced, so nothing per-type is
-emitted. Probe-verified: a non-inline poly word over an array *does* work and mints
-`sooth_mono_swap01__m0__t0_i64`/`_bool`, but only for a straight-line body; adding an `if`
-hits this wall. Since `if` is itself a library word over quotations (Slice 10c), any
-polymorphic word that *branches* is forced inline, which is why it is a prerequisite of
-S3d rather than a nicety: a bounded `sort` needs compare-then-conditionally-swap.
+**The forcing consumer is enum elimination**, because a Phase 6 eliminator's arms *are*
+quotation literals (`examples/eliminator.sth`). Move `area`'s body into a polymorphic
+signature and it hits this wall and nothing else, so **no polymorphic word can eliminate an
+enum at all**, which rules out the `unwrap_or`/`map_or`/`Result`-combinator family. This is
+testable today against a *concrete* enum in a polymorphic body, needing nothing from Phase
+6's in-flight work. P6.S3b widens the consumer to generic enums; P6.S4, by deleting
+`WordBody::Clauses`, makes this the only route to elimination that exists. Neither is an
+implementation dependency.
+A prior justification — that this is what forces every interesting polymorphic word
+`inline` — was probe-falsified and withdrawn: a polymorphic word that branches *via a
+callee* already compiles (`: less ( 'T: Copy Ord 'T -- bool ) > ;`), and no existing
+`inline` library word is freed by this slice (each is inline for a different reason — an
+abstract operand `u<` cannot consume, a row-typed quotation parameter, or `'N`-array
+indexing).
 Three check-side layers, and **zero lowering work** — probe-verified by stubbing the
 rejection open and running the result: the concrete lowering path already splices
 quotation bodies, grounds `'T` structurally per instantiation, and picks the correct
 per-type destructor for a linear `'T` dropped inside a spliced quotation. The layers are a
-`PolySlot { pt, quot }` representation change (~54 sites), a combinator dispatch family
-(`call`/`branch`/`if`, absent from `poly_call_term` entirely — the bulk), and an abstract
-branch-join, which does not exist in any form today (`poly_walk` is a linear fold and
-`Moves::join` is never called from `poly.rs`).
-**Exit:** a non-inline polymorphic word's body may contain a quotation and therefore
-branch via `if`, with the quotation's identity surviving a shuffle, arms merged over an
-abstract stack with type variables rigid, and a materialised (non-spliced) quotation
-rejected with a located error.
+`PolySlot { pt, quot }` representation change (~54 sites), a quotation-consuming word
+dispatch family (absent from `poly_call_term` entirely — the generated eliminators lead it,
+and it is the bulk), and an abstract **N-arm** join, which does not exist in any form today
+(`poly_walk` is a linear fold and `Moves::join` is never called from `poly.rs`).
+**Exit:** a polymorphic word can eliminate an enum — quotation-literal arms in its body,
+dispatched to the generated eliminator — with the quotation's identity surviving a shuffle,
+arms merged over an abstract stack with type variables rigid and the borrow table unioned,
+and a materialised (non-spliced) quotation rejected with a located error.
 
 **P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
 types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
