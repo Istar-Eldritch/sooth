@@ -12,7 +12,7 @@ clause path already uses.
 The surface syntax does not change. That is the point: the generic case must read exactly
 like the concrete case.
 
-```
+```text
 : to-int ( Result[i64 i64] -- i64 )
   ~[ ( Ok )  Ok>  ]
   ~[ ( Err ) Err> 100 + ]
