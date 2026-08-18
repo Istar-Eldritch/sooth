@@ -1195,9 +1195,14 @@ fn poly_eliminator_call(
                 ));
             }
             // L2: nor may a quotation literal, which would then have to be
-            // materialised to exist past the arm.
-            if slot.quot.is_some() {
-                return Err(poly_quotation_not_consumed_error(ctx, literal_span));
+            // materialised to exist past the arm. Its own span, not the
+            // arm's: a quotation nested inside the arm body is not written
+            // where the arm literal is.
+            if let Some(quot) = slot.quot {
+                return Err(poly_quotation_not_consumed_error(
+                    ctx,
+                    arm_scope.quotation(quot).span,
+                ));
             }
         }
         // R3, the poly analogue of `Scope::leave`. The poly walk has no block
@@ -3015,8 +3020,6 @@ fn poly_naming_aliases_borrowed_place_error(
     )
 }
 
-/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
-/// element cannot be statically bounds-checked without a known count.
 /// P7 slice 3b (R4/L2): a quotation literal that is still on the stack where
 /// it would have to *exist* as a value -- at the polymorphic word's exit, or
 /// leaving an eliminator arm. Splice-consumed literals only: a quotation in a
@@ -3155,6 +3158,8 @@ pub(super) fn poly_arm_local_not_consumed_error(
     )
 }
 
+/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
+/// element cannot be statically bounds-checked without a known count.
 pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
@@ -3683,6 +3688,27 @@ mod tests {
                 "the `{place}` record must survive the union: {err}"
             );
         }
+    }
+    #[test]
+    fn poly_eliminator_arm_leaving_its_own_variant_is_error() {
+        // R2 step 5b: with two arms, R3's rigid-arm-disagreement check
+        // (different exit shapes) fires before this guard ever gets a chance
+        // to look at the escaping `Type::Variant`, so a two-arm repro cannot
+        // exercise it. A single-variant enum is exhaustive with one arm and
+        // reaches this guard directly. Stubbing it out here builds and
+        // double-drops the linear `Spy` payload underneath, since `is_copy`
+        // falls through `Type::Variant` to `true`.
+        let err = check_src(&format!(
+            "{SPY}\
+             type: One | A p Spy ;\n\
+             : bad ( 'T: Copy One -- 'T ) ~[ ( A ) ] One? ;\n\
+             : main ( -- ) 1 9 Spy A bad drop ;\n"
+        ))
+        .expect_err("an arm leaving its own narrowed variant unconsumed is an escape");
+        assert!(
+            err.contains("an arm of `One?` leaves `One.A` on the stack"),
+            "unexpected message: {err}"
+        );
     }
     #[test]
     fn poly_term_rejects_an_array_constructor() {

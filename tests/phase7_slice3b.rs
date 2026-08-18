@@ -422,6 +422,28 @@ fn poly_body_materialized_quotation_is_located_error() {
     );
 }
 
+/// L2/OQ5, the **arm-exit** escape route, the third of three: a quotation
+/// left on the stack by an eliminator arm would have to be materialised to
+/// exist past the arm. The asserted line is the *nested* literal's own, not
+/// the enclosing arm's -- the arm is written on line 3 and the offender on
+/// line 5, so a report of the arm's span blames a quotation that is in fact
+/// consumed by the `One?` call.
+#[test]
+fn poly_eliminator_arm_unconsumed_quotation_reports_the_inner_literal_span() {
+    let err = check_err(
+        "type: One | A p i64 ;\n\
+         : bad ( 'T: Copy One -- 'T )\n\
+           ~[ ( A )\n\
+              A> drop\n\
+              ~[ ] ] One? ;\n\
+         : main ( -- ) 1 9 A bad drop ;\n",
+    );
+    assert!(
+        err.contains("a quotation in the polymorphic body of `bad` (line 5) is not consumed there"),
+        "{err}"
+    );
+}
+
 /// L2/OQ5, the **data-operand** escape route -- a different rejection path
 /// from the word-exit one above, and the one most likely to regress silently:
 /// a predicate stubbed open would let a quotation slot flow into a constructor

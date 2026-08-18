@@ -21,8 +21,8 @@ Built against the compiler at HEAD, the concrete `area` from
 
 ```sooth
 : area_and_keep ( 'T Shape -- 'T )
-  ~[ ( Rect )   &w @ swap &h @ swap drop * drop ]
-  ~[ ( Circle ) &r @ swap drop dup * 3 * drop ]
+  ~[ ( Rect )   Rect> * drop ]
+  ~[ ( Circle ) Circle> dup * 3 * drop ]
   Shape? ;
 ```
 
@@ -34,7 +34,9 @@ The draft's order is masked today because the quotation wall fires at
 exactly the expected message — and would then fail the moment the wall is lifted,
 which is precisely when the golden is supposed to pass. The corrected order was
 verified by compiling the monomorphic twin, which exercises the same dispatch and
-is buildable today:
+is buildable today. The twin vouches for the **operand order only**: its arms may
+project (`&w @`) where a generic body's may not, so arm bodies here destructure
+(`Rect>`) and a twin that compiles is no evidence that the generic arms do.
 
 ```text
 : area_and_keep ( i64 Shape -- i64 ) ... Shape? ;   -> builds, runs, prints 1 then 2
@@ -210,9 +212,16 @@ today with the wall stubbed open. R4 owns these rejections.
   `unreachable!("a quotation effect never reaches monomorphized lowering")` at
   `src/ir/driver.rs:664`, which fires only when a quotation type reaches the
   grounded *signature*. The rejection is R4's, located and named.
-- **L3 Shuffling a quotation stays legal.** `dup`/`swap`/`drop` before use is fine;
-  identity survives reordering. The `QuotRef` in a `PolySlot` moves with the slot,
-  so a `swap` reorders indices with zero special handling. This does **not** extend
+- **L3 A quotation's identity rides its slot; a *tagged* arm is still written adjacent
+  to its eliminator.** The `QuotRef` in a `PolySlot` moves with the slot, so
+  `dup`/`swap`/`drop` reorder indices with zero special handling — pinned at the
+  **unit** level, because what a *source* program may write is narrower. A
+  variant-tagged literal must reach its eliminator by written adjacency, the same rule
+  the concrete path applies, so a `swap` between two arms is rejected on **both** paths
+  with the same message: a tagged literal that no eliminator call collects is never
+  checked against anything, and admitting quotation literals in a generic body is
+  exactly what would otherwise let one through. The generic path does not get to be
+  laxer than the concrete one here. Identity motion also does **not** extend
   across a `| q |` bind: `PolyScope.locals` is `HashMap<String, PolyType>` and carries
   no `QuotRef` (unlike the concrete `Binding.quot`), so a bound-then-named quotation
   loses its identity and is safely over-rejected as an untagged arm — an over-reject,
@@ -234,8 +243,8 @@ today with the wall stubbed open. R4 owns these rejections.
 type: Shape | Circle r i64 | Rect w i64 h i64 ;
 
 : area_and_keep ( 'T Shape -- 'T )
-  ~[ ( Rect )   &w @ swap &h @ swap drop * drop ]
-  ~[ ( Circle ) &r @ swap drop dup * 3 * drop ]
+  ~[ ( Rect )   Rect> * drop ]
+  ~[ ( Circle ) Circle> dup * 3 * drop ]
   Shape? ;
 
 : main ( -- )
@@ -243,13 +252,15 @@ type: Shape | Circle r i64 | Rect w i64 h i64 ;
   2 3 4 Rect area_and_keep . ;   \ prints 2
 ```
 
-`Shape?` in a polymorphic body now checks, with `'T` carried untouched through the
-shared caller row across both arms and grounded per instantiation at concrete
-lowering. Lowering is **unchanged** — probe-verified in the brief: the concrete
-`lower_instantiation` path already splices raw quotation bodies, grounds `'T`
-structurally per instantiation, and selects the correct per-type destructor for a
-linear `'T` dropped inside a spliced arm (`emit_drop` reads `value_type`, not a
-span-keyed map). A phase that "adds lowering support" would be inventing work.
+The arms **destructure** (`Rect>`) rather than project (`&w @`): field projection is
+rejected in every generic body, so a projecting arm does not compile here even though
+its monomorphic twin does. `Shape?` in a polymorphic body now checks, with `'T` carried
+untouched through the shared caller row across both arms and grounded per instantiation
+at concrete lowering. Lowering is **unchanged** — probe-verified in the brief: the
+concrete `lower_instantiation` path already splices raw quotation bodies, grounds `'T`
+structurally per instantiation, and selects the correct per-type destructor for a linear
+`'T` dropped inside a spliced arm (`emit_drop` reads `value_type`, not a span-keyed
+map). A phase that "adds lowering support" would be inventing work.
 
 ## Requirements
 
@@ -319,9 +330,13 @@ reads the registry from `poly.eliminators` (a precomputed `PolyCtx` field), but
   (each must be `Some` and tagged), not via `resolve_quotation_operand` over a
   `Slot`. Untagged/forwarded-abstract arm → the located
   `eliminator_untagged_arm` diagnostic, reused.
-- The scrutinee slot's `pt` must be `PolyType::Concrete(Type::Enum(id, ..))` (or a
-  concrete ref to one). An abstract scrutinee is a **located** rejection naming
-  that an abstract enum scrutinee needs a bound (OQ2; forward-refs P7.S3d).
+- The scrutinee slot's `pt` must be `PolyType::Concrete(Type::Enum(id, ..))`. An
+  abstract scrutinee is a **located** rejection naming that an abstract enum
+  scrutinee needs a bound (OQ2; forward-refs P7.S3d). A **reference** scrutinee is
+  its own located rejection (`poly_reference_scrutinee_error`): eliminating through a
+  ref leaves each arm projecting fields off a borrowed variant, and field projection
+  is rejected in every generic body, so those arms cannot be written at all. Arms
+  destructure instead, as the delivered shape above does.
 - Exhaustiveness, duplicate-arm, unknown-variant, and variant-escape checks reuse
   the concrete diagnostics verbatim (`eliminator_non_exhaustive_error`,
   `eliminator_duplicate_arm_error`, `eliminator_unknown_variant_error`,
@@ -481,11 +496,18 @@ Golden (`tests/phase7_slice3b.rs`):
 - `poly_body_call_on_a_quotation_is_located_error` (OQ6): `[ … ] call` in a poly
   body → `poly_quotation_combinator_unsupported_error` naming P7.S3b-follow, **not**
   `unknown word`.
-- `poly_body_shuffles_a_quotation_before_eliminating` (L3): a `swap` between two arm
-  literals before `Shape?` still checks — identity survives reordering. This is a
-  **representation/design test**, not a mutation guard: identity-survives-shuffle is
-  automatic under `Vec<PolySlot>` (the index moves with the slot), so no deletable
-  guard backs it; it is (correctly) absent from the mutation list.
+- `poly_body_tagged_arm_not_adjacent_to_its_eliminator_is_error` (L3): a `swap`
+  between two arm literals before `Shape?` is rejected, and the test asserts the
+  **poly and concrete paths reject with the same message** — the point being that the
+  generic body is not laxer. Pure slot motion (an *untagged* literal shuffled) is
+  automatic under `Vec<PolySlot>` and is pinned instead by the unit test
+  `poly_quotation_identity_moves_with_the_slot_under_swap`, which no deletable guard
+  backs and which is (correctly) absent from the mutation list.
+- `poly_eliminator_arm_unconsumed_quotation_reports_the_inner_literal_span` (L2/OQ5,
+  **arm-exit route**, the third of three): a quotation left on the stack by an arm →
+  `poly_quotation_not_consumed_error` at the *nested* literal's own span, not the
+  enclosing arm's, so the diagnostic does not blame a quotation the `Shape?` call in
+  fact consumes. Mutation entry below.
 
 Unit tests beside their stage:
 
@@ -493,20 +515,29 @@ Unit tests beside their stage:
   round-trips the literal exactly as `lits` did); `poly_quotation_slot_is_not_copy`;
   `poly_arm_join_unions_borrows` (L4 at the unit level);
   `poly_arm_join_rejects_rigid_type_variable_disagreement` (L1);
+  `poly_eliminator_arm_leaving_its_own_variant_is_error` (R2 step 5b);
   `poly_eliminator_registry_intercept_precedes_env_dispatch` (R2 ordering, the slice3a
   R3 trap). **Its discriminator (B4):** the eliminator registers a `PolySig` in
   `poly_env` (`enum_eliminator_sigs`, `declarations.rs:1422`) whose arm parameters are
-  in enum **declaration order** and, if ordinary env poly-call unification wins, are
-  matched **by slot position**; the intercept instead matches arms **by annotation
-  tag** (`( Rect )`/`( Circle )`). The golden writes its arms in the **reverse** of
-  declaration order (`Shape | Circle | Rect`, arms `( Rect )` then `( Circle )`), so
-  the two paths disagree observably: the intercept type-checks (the golden runs),
-  while deleting it lets env dispatch slot-pair the `( Rect )` arm against the sig's
-  first (Circle) parameter, so that arm's `&w @` is checked against a `Shape.Circle`
-  narrowed input and fails with a **located** error (a variant/field mismatch, or a
-  "not a quotation" operand mismatch since the arm slot is a marker) — not the
-  intercept's accept. The test asserts that specific env-dispatch diagnostic under the
-  mutation, never merely "it still type-checks".
+  in enum **declaration order** and would be matched **by slot position**; the
+  intercept instead matches arms **by annotation tag** (`( Rect )`/`( Circle )`). The
+  test writes its arms in the **reverse** of declaration order (`Shape | Circle |
+  Rect`, arms `( Rect )` then `( Circle )`), and it is that reversed order which makes
+  the **accept** evidence of tag matching rather than of position matching. Deleting
+  the intercept does **not** reach env dispatch on this path at all: `poly_call_term`
+  has no `PolyCtx`, so the eliminator's `PolySig` (registered in `poly_env`) is
+  unreachable and the call falls through to `unknown word`. The mutation therefore
+  flips accept → reject, just not via a positional mismatch; the test carries that
+  caveat rather than asserting an env-dispatch diagnostic this path cannot produce.
+
+  **`poly_eliminator_arm_leaving_its_own_variant_is_error` needs a single-variant
+  enum**, and that constraint is the whole reason the guard is easy to leave
+  uncovered: with two arms, R3's rigid-arm-disagreement check fires on the differing
+  exit shapes before the escaping `Type::Variant` is ever looked at, so no two-arm
+  program reaches the guard. A one-variant enum is exhaustive with one arm and reaches
+  it directly. Stubbing the guard with a linear payload under it builds and
+  **double-drops** — the `Type::Variant`-falls-through-`is_copy` hole R2 warns about
+  above, so the test carries a linear `Spy` rather than an `i64`.
 - `src/check.rs`: confirm `check_eliminator_call`'s existing units
   (`check_eliminator_call_*`) stay green (shared diagnostics).
 
@@ -521,6 +552,12 @@ shipped placebo tests five times, so prove each can fail):
   catch it;
 - the word-exit materialisation rejection (L2) — stub it open, the unconsumed-
   quotation test must catch it;
+- the **arm-exit** materialisation rejection (L2/R4) — mutate it **twice**: stub it
+  open, and separately revert its span to the enclosing arm literal's; the arm-exit
+  test must flip both times (it asserts the reported line, not just the failure);
+- the **variant-escape** rejection (R2 step 5b) — stub it open; the single-variant
+  unit test must flip. Verify by *running*, not only by checking: with the guard open
+  the linear payload is destructed twice;
 - the pt-marker **data-operand** predicate (L2/R2) — stub it open so a quotation slot
   flows into a constructor/arithmetic, the data-operand test must catch it;
 - the eliminator intercept ordering (R2/B4) — delete the intercept so env dispatch
