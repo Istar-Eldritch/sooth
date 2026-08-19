@@ -48,15 +48,18 @@ today.
    shrinks to exactly `main`/`drop`, which is where `project_repl_bypasses_module_checks`
    already flagged the REPL's own bypass of this same list as a related gap.
 
-4. **`lib/core.sth`'s own header already draws the split this slice needs.** Its comment
-   names three compiler primitives (`branch`, `tag`, six `u`-prefixed comparisons) and says
-   everything else — `bool`, `if`, `unless`, `=`/`<`/`>`/`<=`/`>=`/`<>` — is "written here,
-   in Sooth," built on top. That is a two-package split waiting to happen: an intrinsics
-   package holding only what the compiler actually special-cases, and a typed-core package
-   depending on it that holds the rest. Splitting the file is mechanical once imports are
-   single-mode; nothing in the checker or backend treats `lib/core.sth` as a single
-   indivisible unit today (it's read once via `include_str!` and never referenced by path
-   at runtime).
+4. **`lib/core.sth`'s own header already draws the split this slice needs, but it is a
+   split into modules, not packages.** Its comment names three compiler primitives
+   (`branch`, `tag`, six `u`-prefixed comparisons) and says everything else — `bool`, `if`,
+   `unless`, `=`/`<`/`>`/`<=`/`>=`/`<>` — is "written here, in Sooth," built on top. Only
+   the second half is Sooth code: the primitives are entries in `BUILTIN_WORDS`
+   (`src/check/declarations.rs:85-110`), dispatched by `is_builtin_word_name` ahead of any
+   environment lookup, so there is no intrinsics *package* to depend on and no dependency
+   edge to draw. The intrinsics stay ambient (they are the language surface, not a library);
+   what splits is the Sooth half, into modules of one `core` package. Splitting the file is
+   mechanical once imports are single-mode; nothing in the checker or backend treats
+   `lib/core.sth` as indivisible today (it's read once via `include_str!` and never
+   referenced by path at runtime).
 
 5. **The CLI takes a bare entry file, not a project root.** `main.rs:16-35` dispatches
    `build <file.sth>` / `run <file.sth>` straight to `driver::build`/`driver::run`, both
@@ -116,16 +119,31 @@ five probes confirmed the brief; one falsified a decision.
   is a handful of declaration keywords (`package:`, `layer:`, `depends:`), parsed by a
   small dedicated parser rather than routed through `parse_bodies`'s word-declaration loop.
 
-- **The manifest does not replace `import:`; it constrains it.** An `import:` line keeps
-  meaning exactly what it means today — a path, resolved relative to the importing file,
-  with no search path. What the manifest adds is a *check* over the existing closure: for
-  every import edge that crosses from one package's directory into another's, the target
-  package must appear in the source package's `depends:` list, and the target's declared
-  `layer:` must not be lower than the source's. An edge that stays inside one package (the
-  overwhelmingly common case — most of `lib/`'s existing files importing each other) is
-  unconstrained, exactly as it is today. This is why finding 1 matters: no new resolution
-  mechanism, one new validation pass over `Closure` after `discover_closure` runs,
-  attributing each `FileNode` to the nearest ancestor directory holding a manifest.
+- **A cross-package import names a module; an intra-package import stays a path.**
+  (This reverses an earlier decision in this brief that the manifest would only *constrain*
+  `import:` and never participate in resolution.) A quoted string keeps today's meaning
+  exactly: a path relative to the importing file, no search path, staying within one
+  package. An unquoted `pkg::module` resolves `pkg` through the importing package's
+  `depends:` and `module` through that package's own `module:` declarations. The reason is
+  that a path-based cross-package import bakes the dependency's internal file layout into
+  every consumer, so moving a file inside a dependency breaks its consumers, which defeats
+  the boundary a package exists to draw. This is not the declined search path: the location
+  is written down in a manifest table and nothing is discovered by scanning.
+
+- **A package declares the modules it exposes, and that is its export surface.** A
+  `module: name "file.sth" ;` entry both names a module and makes it public; a file the
+  manifest does not declare is package-private, reachable by path from inside the package
+  and unnameable from outside it. This mirrors `export:` one level up (`export:` decides
+  which names leave a file, `module:` which modules leave a package) and means no file is
+  privileged: there is no root or entry module. It also gives P8.S3's API description its
+  natural scope, the declared modules and their export lists, rather than every file in the
+  closure.
+
+- **The layer and `depends:` checks still run as a pass over the discovered closure.**
+  Naming a package no `depends:` entry lists is an error, and a package may not depend on
+  one in a higher layer. Per finding 1, package membership is computed over the existing
+  `Closure` by attributing each `FileNode` to its nearest ancestor manifest, so the
+  file-graph resolver is extended at the naming layer, not replaced.
 
 - **Dependencies are source locations, not registry lookups.** A `depends:` entry names a
   path (later, a git URL + revision) directly, matching `docs/dependency-management.md`'s
@@ -139,11 +157,17 @@ five probes confirmed the brief; one falsified a decision.
   `examples/*.sth` golden and every scratch file to carry a manifest is ceremony this
   project's craft bias argues against paying for something that has no cross-package
   dependency to declare. Manifests matter where the layer check actually has teeth: the
-  stdlib packages Phase 9 builds, and any real multi-package program.
+  stdlib packages Phase 9 builds, and any real multi-package program. **The known cost:** a
+  manifest-less file belongs to no package, so nothing constrains it and it can path-import
+  into another package's undeclared files, bypassing the `module:` surface. Accepted: it is
+  exactly today's trust level, and these checks exist to keep declared packages honest, not
+  to sandbox. The alternative (closing a package's directory even to manifest-less
+  consumers) costs the frictionless scratch file, which is the thing the optional manifest
+  is for.
 
 - **`is_prelude_word_name` and `parser::prelude_words` are deleted, not deprecated.**
   Every existing `.sth` file — every example, every golden, every `lib/` file that isn't
-  the new intrinsics/typed-core split itself — gains explicit `import:` lines for what it
+  the newly split `core` modules themselves — gains explicit `import:` lines for what it
   uses. A corpus file that still resolves `if` through the deleted prelude is a build
   failure, and the fix is adding the import, not restoring the exemption.
 
@@ -176,19 +200,19 @@ five probes confirmed the brief; one falsified a decision.
 ## Open questions for the spec
 
 - **Manifest grammar, exactly.** Field names and syntax for `package:`/`layer:`/
-  `depends:` (is a dependency's local qualifier declared in the manifest, in the
-  importing `import:` line, or derived from the dependency's own `package:` name?), and
-  whether `layer:` is a fixed four-value enum (`core`/`fixed`/`alloc`/`hosted`) checked
-  against a hardcoded ordering or an open list the checker orders lexically by some rule.
+  `depends:`/`module:`, whether a dependency may be aliased locally or must be named by its
+  own `package:` name (aliasing an import is declined per Phase 4 Slice 5, which argues for
+  the latter), and whether `layer:` is a fixed four-value enum
+  (`core`/`fixed`/`alloc`/`hosted`) checked against a hardcoded ordering or an open list
+  ordered by some declared rule.
 - **Where the manifest lives relative to a multi-file package's own files** — root of the
   directory tree the package's files are discovered under, and whether a package's files
   may nest in subdirectories at all (today's flat `lib/` has no subdirectories to test
   this against).
-- **What names a cross-package qualifier in `import:`.** Today's qualifier (`import: q
-  "path.sth"`) is just a locally chosen identifier with no relationship to the target
-  file's own name. Does crossing a package boundary keep that (any local name, whatever
-  the target package calls itself) or does the manifest's dependency list fix the
-  qualifier a consumer must use?
+- **Whether the local qualifier stays free in the module form.** Today's qualifier
+  (`import: q "path.sth"`) is a locally chosen identifier unrelated to the target. Does
+  `import: q core::cmp` keep that freedom, or is the qualifier fixed to the module's own
+  declared name once the module has one?
 - **Diagnostic wording and located-ness for the two new failure modes**: an import
   crossing a package boundary with no matching `depends:` entry, and a `depends:` entry
   naming a lower-layered package than the declaring one's own `layer:`. Both need a
@@ -221,10 +245,10 @@ five probes confirmed the brief; one falsified a decision.
 
 1. Delete the compiler-baked prelude (`parser::prelude_words`, both call sites, the
    `is_prelude_word_name` exemption) and migrate every corpus file to explicit imports,
-   adding the narrowing diagnostic and its rejection test. Split `lib/core.sth` into an
-   intrinsics file and a typed-core file that imports it, per recon finding 4, as part of
-   this same pass (the split is only meaningful once the consuming files already import
-   explicitly).
+   adding the narrowing diagnostic and its rejection test. Split `lib/core.sth` into
+   modules per recon finding 4 (the compiler's builtins stay ambient), as part of this same
+   pass, since the split is only meaningful once the consuming files already import
+   explicitly.
 2. Design and implement the manifest parser and the package-boundary attribution pass
    over `Closure`.
 3. Implement the dependency-direction and missing-`depends:` checks as a validation pass

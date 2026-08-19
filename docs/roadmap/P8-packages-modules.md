@@ -12,12 +12,31 @@ the file, nothing expresses a dependency between two bodies of code, and the `co
 which file rather than a checked property.
 
 This phase adds the unit above the file and makes the layering enforceable. A **package**
-is a directory with a manifest naming the package, its layer, and its dependencies.
-Dependencies are **source-based**: a dependency resolves to a source location (a path, or
-later a revision), and its sources are compiled into the program alongside the consumer's,
-because Sooth compiles one unit with no per-crate overhead and so has no binary artifact to
-resolve. There is deliberately no search path: a dependency's location is written down, not
-discovered.
+is a directory with a manifest naming the package, its layer, its dependencies, and the
+**modules it exposes**. Dependencies are **source-based**: a dependency resolves to a source
+location (a path, or later a revision), and its sources are compiled into the program
+alongside the consumer's, because Sooth compiles one unit with no per-crate overhead and so
+has no binary artifact to resolve. There is deliberately no search path: a dependency's
+location is written down in the manifest, not discovered by scanning.
+
+**A cross-package import names a module, not a file.** A quoted path stays what it is today
+and stays inside one package; an unquoted `pkg::module` names a declared module of a
+declared dependency, resolved through the manifest's own tables:
+
+```
+import: cmp core::cmp ;            \ cross-package, by module name
+import: d | grow | "detail.sth" ;  \ intra-package, by path
+```
+
+A path-based cross-package import would bake the dependency's internal file layout into
+every consumer, so moving a file *inside* a dependency would break its consumers, which
+defeats the boundary the package exists to draw. Naming modules also gives a package a
+second encapsulation level mirroring the first: `export:` decides which names leave a file,
+`module:` decides which modules leave a package, and a file the manifest doesn't declare is
+package-private (reachable by path from inside, unnameable from outside). No file is
+privileged, so there is no root or entry module. The cost is one more resolution rule to
+learn than the single quoted-path form, accepted because the two forms track a real
+boundary.
 
 The manifest's **layer** field is what gives the layering teeth. A package may not depend
 on a package in a higher layer, so `core` depending on `alloc` is a build error rather than
@@ -39,25 +58,40 @@ and `drop`, and those locals become plain names. The cost is a visible one: ever
 `.sth` file gains import lines, and a new file's most likely first error is `unknown word:
 if`, which needs a diagnostic naming the missing import.
 
-That splits today's `lib/core.sth` along the boundary its own header already draws: the
-compiler's primitives (`branch`, `tag`, and the six `u`-prefixed comparisons) are one
-package, and everything typed that is built on them (`bool`, `=`, `if`/`unless`,
-arithmetic, combinators) is another that depends on it. Both are `core`-layer; the split is
-package granularity, not a layer boundary, and it gives bare metal an honest floor to
-depend on.
+That leaves `lib/core.sth` splittable along the boundary its own header draws, but into
+**modules of one package, not two packages**: `bool`, the comparisons, and `if`/`unless` are
+Sooth source, while `branch`, `tag`, and the `u`-prefixed comparisons underneath them are
+entries in `BUILTIN_WORDS` (`src/check/declarations.rs:85-110`) dispatched by
+`is_builtin_word_name` ahead of any environment lookup. There is no intrinsics package to
+depend on, because the intrinsics are not Sooth code; an "intrinsics package" would be an
+empty directory and a fictional dependency edge.
+
+**The intrinsics stay ambient rather than becoming an importable meta-module.** Single-mode
+imports remove implicitly present *library* words; the builtins are the language surface
+itself, and ambient availability of the language is not the same hole. The prelude was a
+hole precisely because `if` and `=` are written in Sooth while presenting as language.
+Three costs make the meta-module a bad trade today: it works ergonomically only with
+wholesale unqualified import (declined) or a dozen-name import line in every file;
+`BUILTIN_WORDS` does double duty as the guard that stops a bare tail call being read as a
+self-call (`has_self_tail_call`), so moving builtin dispatch behind an environment lookup
+untangles a list serving two purposes; and `src/check/poly.rs:848` already special-cases
+`call`/`branch`/`if`/`times`/`tag` by name. An enumerable, documented intrinsic surface is
+better bought from the auto-generated reference doc in the cross-cutting tooling section.
+Revisit only if a real consumer (the self-hosted compiler reasoning about its own intrinsic
+set) forces it.
 
 **Exit:** a program builds from a manifest against a package dependency it names; a package
 declaring a lower layer than its dependency is a located build error; no word is visible
 without an `import:`, and `is_prelude_word_name` and `parser::prelude_words` are gone.
-**Dogfood:** `lib/`'s existing words restructured as packages (intrinsics, the typed core
-built on it, and the array/combinator words as consumers), with every example and golden
-program importing what it uses.
+**Dogfood:** `lib/`'s existing words restructured as packages (a `core` package whose
+modules are the typed core, and a collections/combinators package consuming it by module
+name), with every example and golden program importing what it uses.
 
 **P8.S1 — Single-mode imports: delete the implicit prelude.** Every name a file uses comes
 from an `import:`. `parser::prelude_words` and its two injection sites go, the mangling
-exemption shrinks to `main`/`drop`, `lib/core.sth` splits into the typed-core words and
-whatever the compiler genuinely provides, and every example, golden, and `lib/` file gains
-explicit imports. `if`'s locals lose their `if--` prefixes, since the hygiene problem that
+exemption shrinks to `main`/`drop`, `lib/core.sth` splits into modules (the compiler's own
+builtins stay ambient, since they are not Sooth code), and every example, golden, and `lib/`
+file gains explicit imports. `if`'s locals lose their `if--` prefixes, since the hygiene problem that
 forced them is the hole this slice closes. Brief written and probe-verified
 (`docs/roadmap/P8/slice1-brief.md`): an imported inline combinator splices correctly
 (qualified and selective), self-tail-to-loop lowering survives an imported `if` at 5M
@@ -81,16 +115,21 @@ the callee, and the reason.
 words they use, and `lib/core.sth`'s locals spelled plainly.
 
 **P8.S2 — Packages, manifests, and the layer check.** The unit above the file: a package is
-a directory with a manifest naming the package, its layer, and its dependencies, resolved to
-source locations rather than binary artifacts. Two new checks over the already-discovered
-file closure, attributing each file to its nearest ancestor manifest: an import edge
-crossing a package boundary requires that package in `depends:`, and a package may not
-depend on one in a higher layer. A manifest is optional, so a bare `.sth` file with no
-manifest above it builds exactly as it does today. The manifest-half decisions and the five
-open questions (manifest grammar, multi-file package layout, cross-package reference form,
-and the two diagnostics) are in `docs/roadmap/P8/slice1-brief.md` pending their own brief.
-**Exit:** a program builds from a manifest against a package dependency it names; a package
-declaring a lower layer than its dependency is a located build error.
+a directory with a manifest declaring its name, its layer, its dependencies (as source
+locations, not binary artifacts), and the modules it exposes. The manifest participates in
+*resolution*, not only checking: an unquoted `pkg::module` import resolves `pkg` through
+`depends:` and `module` through that package's own `module:` declarations, while a quoted
+path keeps today's meaning and stays inside one package. Two checks come with it: naming a
+package no `depends:` entry lists is an error, and a package may not depend on one in a
+higher layer. A manifest stays optional, so a bare `.sth` file with no manifest above it
+belongs to no package and builds exactly as today, path imports included; the known cost is
+that such a file is unconstrained and can path-import into another package's undeclared
+files, accepted because the check exists to keep declared packages honest rather than to
+sandbox. Wants its own brief: the manifest-half recon and open questions are in
+`docs/roadmap/P8/slice1-brief.md`.
+**Exit:** a program builds against a dependency's module named as `pkg::module`; a module a
+package does not declare is unnameable from outside it; a package declaring a lower layer
+than its dependency is a located build error.
 **Dogfood:** `lib/`'s words restructured as packages with the array/combinator words as
 consumers, and a deliberate layer violation rejected.
 
