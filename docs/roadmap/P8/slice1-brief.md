@@ -215,6 +215,11 @@ five probes confirmed the brief; one falsified a decision.
 
 ## Open questions for the spec
 
+- **Whether `--manifest` overrides an ancestor manifest or only applies when none is
+  found.** The model doc states override (a named, deliberate act beats a discovered one),
+  but the diagnostic if a file has both an ancestor manifest *and* a conflicting
+  `--manifest` flag naming a different package needs its own wording, since it is not the
+  same failure as either the ancestor-manifest or the fallback path alone.
 - **Manifest grammar, exactly.** Field names and syntax for `package:`/`layer:`/
   `depends:`/`module:`, whether a dependency may be aliased locally or must be named by its
   own `package:` name (aliasing an import is declined per Phase 4 Slice 5, which argues for

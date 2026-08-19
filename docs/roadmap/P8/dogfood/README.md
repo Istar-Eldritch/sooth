@@ -45,11 +45,14 @@ developer config. Two ways out were weighed: reserving `core` as a compiler-know
 the way `intrinsics` is (cheap, but re-privileges the standard library this phase exists to
 de-privilege) lost to reordering — manifests and module names first (P8.S1), single-mode
 imports second (P8.S2), so the corpus migrates once to its final form. The phase file now
-carries that order; the cost paid for it is that the test harness must give every inline
-fixture a generated manifest, so each becomes a two-file fixture rather than one. The
-user-level manifest is not an escape from that cost: a fixture inheriting a developer's
-global config is a reproducibility hole, and the model already forbids the fallback for any
-file with an ancestor manifest.
+carries that order. The remaining cost is cheaper than first written down here: S1 also
+adds an explicit `--manifest <path>` flag (`sooth build`/`run`), so the harness points every
+inline fixture at one shared manifest on the command line instead of generating one per
+fixture, and stays reproducible because the path is named at the call site rather than
+discovered. The user-level manifest is still not an escape from that cost: a fixture
+inheriting a developer's global config is a reproducibility hole, and the model forbids the
+fallback for any file with an ancestor manifest; `--manifest` is a different thing, a named
+override rather than a discovered one, which is why it's exempt from that rule.
 
 **F2. Intra-package module references need a stated base.** `core/text/ascii.sth` says
 `import: c | lt gt | cmp ;`, a sibling named without the package prefix, while the hub says

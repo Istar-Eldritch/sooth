@@ -80,21 +80,34 @@ DESIGN.md's "tag every stdlib word with the layer it needs" becomes a field with
 behind it. Phase 9 builds `fixed` / `alloc` / `hosted` as packages that must pass it, which
 is what makes that phase's exit criteria mean anything.
 
-**A manifest is optional, and resolution falls back twice.** A file's package is the
-nearest ancestor manifest. Failing that, the **user-level manifest** at
+**A manifest is optional, and resolution falls back three ways.** Highest priority: `sooth
+build`/`run` take an explicit `--manifest <path>` naming the manifest to resolve against,
+overriding discovery entirely; this is the escape hatch for a named entry file that is not
+sitting inside its package's own tree (a test harness fixture written to a temp directory,
+a one-off script pointed at a project without living in it). Failing that, a file's package
+is the nearest ancestor manifest. Failing that, the **user-level manifest** at
 `$XDG_CONFIG_HOME/sooth/global_sooth.pkg` supplies the `depends:` a scratch file resolves
-against, which is the same manifest the REPL reads for a session. Failing *that*, the file
-is an **implicit anonymous package** with no dependencies: it can import `intrinsics` and
-its own path-derived siblings, and naming any other package is a located error whose
-remedy is a manifest. A scratch file therefore stays frictionless without a second import
-form, and the old loophole (a manifest-less file reaching past a package's `module:` list
-into a private module) is not policed but unspellable.
+against, which is the same manifest the REPL reads for a session. Failing *all three*, the
+file is an **implicit anonymous package** with no dependencies: it can import `intrinsics`
+and its own path-derived siblings, and naming any other package is a located error whose
+remedy is a manifest, `--manifest`, or the user-level file. A scratch file therefore stays
+frictionless without a second import form, and the old loophole (a manifest-less file
+reaching past a package's `module:` list into a private module) is not policed but
+unspellable.
+
+**`--manifest` is explicit, so it doesn't reopen the reproducibility guarantee below it.**
+An ancestor manifest and the user-level fallback are both *discovered*, which is why the
+latter is barred inside a package; `--manifest` is *named on the command line*, so a CI
+invocation that pins it is exactly as reproducible as pinning the entry file itself. This is
+what answers dogfood finding F1's cost: the ~460 inline test fixtures can point at one
+shared manifest via `--manifest` rather than the harness generating one per fixture.
 
 **The fallback never applies inside a package.** A file with an ancestor manifest resolves
-against that manifest and nothing else, so a package's build cannot depend on machine-local
-configuration. The same reasoning applies to the test corpus: fixtures must carry or be
-given an explicit manifest rather than inheriting a developer's global one, or CI stops
-being reproducible.
+against that manifest and nothing else (an explicit `--manifest` may still override it,
+since that is a deliberate act at the call site, not a discovered one), so a package's build
+cannot depend on machine-local configuration. The same reasoning applies to the test corpus:
+fixtures must carry, be given, or be pointed at an explicit manifest rather than inheriting
+a developer's global one, or CI stops being reproducible.
 
 **Exit:** no word resolves without an `import:`, including the intrinsics; a program builds
 against a dependency's module named as `pkg::module`; a module the package does not declare
@@ -122,15 +135,19 @@ the corpus once, to its final form, instead of twice with a red suite in between
 **P8.S1 — Packages, manifests, path-derived module names, and the layer check.** The
 manifest and its parser, package attribution over the discovered closure, module names
 derived from paths, the public-module list, cross-package `pkg::module` resolution, the
-user-level manifest fallback (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), and the three
-checks (naming a module its package does not make public; naming a package no `depends:`
-entry lists; depending on a higher layer). Lands first because S2 has nothing to migrate the
-corpus to without it. Wants its own brief: the manifest-half recon and the open questions
-are in `docs/roadmap/P8/slice1-brief.md`.
+`--manifest` CLI flag and its precedence over discovery, the user-level manifest fallback
+(`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), and the three checks (naming a module its
+package does not make public; naming a package no `depends:` entry lists; depending on a
+higher layer). Lands first because S2 has nothing to migrate the corpus to without it, and
+`--manifest` is what lets S2's test-fixture migration point at one shared manifest instead
+of generating one per fixture. Wants its own brief: the manifest-half recon and the open
+questions are in `docs/roadmap/P8/slice1-brief.md`.
 **Exit:** a program builds against a dependency's module named as `pkg::module`; a
 package-private module is unnameable from outside; a layer violation is a located build
-error; a manifest-less file resolves against the user-level manifest, then falls back to an
-implicit anonymous package with no dependencies.
+error; `sooth build entry.sth --manifest path/to/sooth.pkg` resolves against the named
+manifest regardless of `entry.sth`'s own directory; a manifest-less, flag-less file resolves
+against the user-level manifest, then falls back to an implicit anonymous package with no
+dependencies.
 **Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
 rejected.
 
