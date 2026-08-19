@@ -83,6 +83,7 @@ today.
    current package" or "the workspace root" for a manifest to be discovered from.
 
 ## Resolved recon (probe-verified against the built compiler, 2026-08-19, `main` at
+
 `e43df46`; probe files built, run, and deleted, `git status` and `cargo test` clean
 afterward)
 
@@ -215,11 +216,12 @@ five probes confirmed the brief; one falsified a decision.
 
 ## Open questions for the spec
 
-- **Whether `--manifest` overrides an ancestor manifest or only applies when none is
-  found.** The model doc states override (a named, deliberate act beats a discovered one),
-  but the diagnostic if a file has both an ancestor manifest *and* a conflicting
-  `--manifest` flag naming a different package needs its own wording, since it is not the
-  same failure as either the ancestor-manifest or the fallback path alone.
+- **Ruled: `--manifest` unconditionally overrides an ancestor manifest**, silently, with no
+  separate conflict diagnostic — a named, deliberate act beats a discovered one, full stop.
+  What still needs spec wording is the *ordinary* located error when the named manifest
+  itself doesn't resolve the file's imports (a module or package the flag's manifest
+  doesn't grant), which is the same shape as an ancestor-manifest failure today, not a new
+  diagnostic category.
 - **Manifest grammar, exactly.** Field names and syntax for `package:`/`layer:`/
   `depends:`/`module:`, whether a dependency may be aliased locally or must be named by its
   own `package:` name (aliasing an import is declined per Phase 4 Slice 5, which argues for
