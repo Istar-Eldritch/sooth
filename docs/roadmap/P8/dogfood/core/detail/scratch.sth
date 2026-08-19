@@ -1,0 +1,8 @@
+\ core::detail::scratch -- NOT in the manifest's `module:` list, so it is
+\ package-private: importable by its siblings, unnameable by a consumer.
+import: i | * | intrinsics ;
+
+export: clamp-u8 ;
+
+: clamp-u8 ( i64 -- u8 ) | n | n 255 min-of >u8 ;
+: min-of ( i64 i64 -- i64 ) | a b | a b lte ~[ a ] ~[ b ] if ;

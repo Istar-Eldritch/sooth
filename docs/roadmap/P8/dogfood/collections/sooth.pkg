@@ -1,0 +1,4 @@
+package: collections ;
+layer: fixed ;
+depends: core path "../core" ;
+module: vec ;

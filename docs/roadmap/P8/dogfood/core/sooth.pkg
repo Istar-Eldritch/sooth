@@ -1,0 +1,3 @@
+package: core ;
+layer: core ;
+module: bool cmp text ;

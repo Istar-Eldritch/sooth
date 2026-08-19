@@ -1,0 +1,14 @@
+\ core::bool -- the typed branch. Imports the two control primitives it needs
+\ and nothing else, so a reader can see the whole intrinsic surface this
+\ module touches.
+import: i | branch tag | intrinsics ;
+
+export: if unless ;
+
+: if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+  | else-arm | | then-arm | | cond |
+  cond tag then-arm else-arm branch ;
+
+: unless inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+  | else-arm | | then-arm | | cond |
+  cond tag else-arm then-arm branch ;

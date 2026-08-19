@@ -1,0 +1,7 @@
+import: i | * | intrinsics ;
+import: t | upper? | core::text ;
+import: v collections::vec ;
+
+: main ( -- )
+  65 upper? .
+  7 v::sum-to . ;

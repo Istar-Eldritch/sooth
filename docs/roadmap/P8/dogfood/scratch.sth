@@ -1,0 +1,8 @@
+\ A manifest-less file: belongs to no package, so it cannot name `core::bool`
+\ and falls back to quoted paths -- including straight past `core`'s module
+\ list into a package-private file. This is the accepted loophole.
+import: i | * | intrinsics ;
+import: b | if | "core/bool.sth" ;
+import: d | clamp-u8 | "core/detail/scratch.sth" ;
+
+: main ( -- ) 300 clamp-u8 . ;

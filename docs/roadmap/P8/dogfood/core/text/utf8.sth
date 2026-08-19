@@ -1,0 +1,7 @@
+\ core::text::utf8
+import: i | * | intrinsics ;
+import: b | if | bool ;
+
+export: continuation? ;
+
+: continuation? ( u8 -- bool ) | c | c 192 and 128 eq ;

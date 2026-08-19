@@ -1,0 +1,9 @@
+\ core::text::ascii -- name derives from the path, not from a manifest entry.
+import: i | * | intrinsics ;
+import: c | lt gt | cmp ;
+import: b | if | bool ;
+
+export: upper? lower? ;
+
+: upper? ( u8 -- bool ) | c | c 65 gte c 90 lte and ;
+: lower? ( u8 -- bool ) | c | c 97 gte c 122 lte and ;

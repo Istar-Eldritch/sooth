@@ -1,0 +1,11 @@
+import: i | * | intrinsics ;
+import: b | if | core::bool ;
+import: c | lt | core::cmp ;
+
+export: Vec sum-to ;
+
+type: Vec items [i64 8] used usize ;
+
+: sum-to ( i64 -- i64 )
+  | n |
+  n 0 lt ~[ 0 ] ~[ n ] if ;

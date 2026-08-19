@@ -1,0 +1,4 @@
+package: app ;
+layer: hosted ;
+depends: core path "../core" ;
+depends: collections path "../collections" ;

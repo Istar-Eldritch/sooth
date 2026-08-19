@@ -1,0 +1,11 @@
+\ core::cmp -- the typed comparisons over the raw flag primitives.
+import: i | ueq ult ugt ulte ugte une | intrinsics ;
+
+export: eq lt gt lte gte ne ;
+
+: eq  inline ( 'T: Copy Ord 'T -- bool ) ueq  [ true ] [ false ] branch ;
+: lt  inline ( 'T: Copy Ord 'T -- bool ) ult  [ true ] [ false ] branch ;
+: gt  inline ( 'T: Copy Ord 'T -- bool ) ugt  [ true ] [ false ] branch ;
+: lte inline ( 'T: Copy Ord 'T -- bool ) ulte [ true ] [ false ] branch ;
+: gte inline ( 'T: Copy Ord 'T -- bool ) ugte [ true ] [ false ] branch ;
+: ne  inline ( 'T: Copy Ord 'T -- bool ) une  [ true ] [ false ] branch ;
