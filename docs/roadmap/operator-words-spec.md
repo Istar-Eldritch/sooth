@@ -95,6 +95,11 @@ as oracle.
 New guards: `check_symbolic_plus_is_unknown_word`,
 `check_symbolic_comparison_is_unknown_word` (the `lib/` half),
 `check_add_word_dispatches_on_operand_type`, `check_ueq_family_lowers_to_cmpop`.
+R10's mangle-like-any-other-word mechanism is covered by
+`check_operator_overload_is_visible_without_the_mangling_pass`
+(`src/check/operators.rs`: a builtin-name overload like `add` is a real,
+discoverable candidate, not silently dropped) and `tests/symbol_hijack.rs`
+(a one-file `div` overload no longer hijacks the libc symbol).
 
 ## Accepted costs and residual debt
 

@@ -395,7 +395,7 @@ mod tests {
                 assert_eq!(
                     r.inputs,
                     vec![r.outputs[0], r.outputs[0]],
-                    "a `add` row is homogeneous `(T T -- T)`"
+                    "an `add` row is homogeneous `(T T -- T)`"
                 );
                 assert_eq!(r.lower, BuiltinLower::Add);
                 r.outputs[0]
@@ -404,7 +404,7 @@ mod tests {
         let mut want = numeric_types();
         got.sort_by_key(|t| t.name());
         want.sort_by_key(|t| t.name());
-        assert_eq!(got, want, "one `+` row per numeric type, no more");
+        assert_eq!(got, want, "one `add` row per numeric type, no more");
     }
     #[test]
     fn builtin_table_sub_has_a_row_per_numeric_type() {

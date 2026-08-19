@@ -952,14 +952,8 @@ pub(super) fn scoped_operator_overloads(
     let mut out: Vec<Overload> = Vec::new();
     for d in defining {
         if is_name_visible_to_module(modules, caller, d, name) {
-            // A parse-then-check path (`check_src` and its kin) skips
-            // `resolve_modules` entirely, so its decls are still bare. Such a
-            // closure is always one module, where the bare and mangled
-            // spellings can only ever name that same module's decl, so reading
-            // both widens the candidate set by nothing. A >=2-module closure is
-            // mangled unconditionally, so no bare key exists there to find.
             let mangled = crate::resolve::mangle(name, d);
-            if let Some(cands) = env.get(&mangled).or_else(|| env.get(name)) {
+            if let Some(cands) = env.get(&mangled) {
                 out.extend(cands.iter().cloned());
             }
         }

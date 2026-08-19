@@ -531,6 +531,16 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    /// `check_src` skips `resolve_modules` entirely, so it never mangles a
+    /// name and cannot catch a diagnostic that forgot to demangle one. Every
+    /// real build mangles (`assemble_module`'s `always_mangle`, `driver.rs`)
+    /// even for a single file, so this helper runs that same pass first.
+    fn check_src_mangled(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        check(&mut module)
+    }
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
@@ -576,14 +586,11 @@ mod tests {
     }
     /// A parse-then-check path (`check_src`) skips `resolve_modules`, so its
     /// decls stay bare while `scoped_operator_overloads` keys on the mangled
-    /// spelling. Without the bare-key fallback the overload is absent from the
-    /// candidate set entirely, and every `check_src` test involving one (e.g.
-    /// `overload_missing_at_call_site_is_error`) quietly stops testing its own
-    /// premise: it still gets the builtin's diagnostic, just for the wrong
-    /// reason. This is the assertion that fails instead.
+    /// spelling; `check_src_mangled` runs that pass first so the overload is
+    /// found under its real, mangled key.
     #[test]
     fn check_operator_overload_is_visible_without_the_mangling_pass() {
-        check_src(
+        check_src_mangled(
             "type: Vec2 x i64 y i64 ;\n\
              : add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
              : main ( -- ) 1 2 Vec2 3 4 Vec2 add drop ;\n",

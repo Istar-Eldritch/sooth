@@ -66,9 +66,9 @@ quotation body) rather than the whole word:
 ```forth
 : gcd ( int int -- int )
   | a b |
-  b 0 eq [
+  b 0 eq ~[
     a
-  ] [
+  ] ~[
     b  a b mod  gcd
   ] if ;
 ```

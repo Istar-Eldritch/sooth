@@ -1414,9 +1414,11 @@ mod tests {
         // Regression: qbe_name used to replace every non-alphanumeric
         // character with a bare `_`, so any two names built entirely of
         // non-alphanumeric characters of the same length collapsed onto the
-        // identical symbol -- `+` and `-` both sanitized to `_`. This is the
-        // exact set 8a's overload table is about to make dispatchable, so
-        // every pair in it must be checked, not just one.
+        // identical symbol -- `+` and `-` both sanitized to `_`. These are
+        // unrelated to the retired builtin operators: qbe_name still has to
+        // sanitize a genuinely symbolic *user* word name (`~`, `?`, the
+        // hyphen in `max-total`) injectively, so every pair in this list
+        // must be checked, not just one.
         let ops = [
             "+",
             "-",

@@ -12,9 +12,9 @@ is a compile error).
 
 ```forth
 : gcd ( i64 i64 -- i64 )
-  dup 0 eq [
+  dup 0 eq ~[
     drop
-  ] [
+  ] ~[
     swap over mod gcd
   ] if ;
 ```
