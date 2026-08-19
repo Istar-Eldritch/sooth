@@ -136,26 +136,7 @@ parallel `lits` vector beside it, a `QuotRef` index over a per-body literal inte
 run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
 `tests/phase7_slice3b.rs`).
 
-**P7.S3c — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
-quotation marker only where an enum eliminator collects it; every other consumer is
-denied, row-typed or not — probe-verified: `~[ -- ] call` and a fully concrete
-`inline ( ~[ -- ] -- )` helper both fail today even though neither needs any row
-unification (`` `call` on a quotation ... is not yet supported ``,
-`` ... is not permitted on a quotation literal ``). The family splits into two tiers by
-cost. This slice is the cheap tier: splice a second, fully concrete quotation consumer
-(no `..a`/`..b` in its signature, e.g. a comparator `~[ &'T &'T -- Ordering ]`) through the
-poly walk, no row unification against an abstract stack required. `if`/`branch`/`times`/
-`tag` stay deferred to **P7.S3b-follow**, the expensive tier: those are row-typed
-(`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) and need unifying a
-declared row against the poly walk's abstract stack, machinery this slice does not add.
-This is also the second quotation consumer S3b's own exit findings named as the trigger
-for re-running `poly.rs`'s deferred split signals. Ordered here, ahead of S3d and S3e,
-because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
-already shipped.
-**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
-`if`/`branch`/`times`/`tag` remain a located rejection naming P7.S3b-follow.
-
-**P7.S3d — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
+**P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
 types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
 already the pattern's one instance, a pointer plus a runtime length. A general
 `Slice['T]` view over an array carries its length at runtime, which is what makes it the
@@ -170,11 +151,34 @@ admits a decimal literal or a bare `'N`), and relating lengths in a signature
 (`['T 'N+'M]`) would mean unifying arithmetic terms and owning a decision procedure, the
 Dependent-ML tax. Where a later slice genuinely needs a relation, the cheap form is a
 constraint checked at monomorphization against concrete literals, not arithmetic in the
-type language. Ordered after S3b and S3c and before
-S3e, whose consumers want slice-shaped signatures rather than fixed-length ones.
+type language. Ordered after S3b, ahead of S3d, and before S3e, whose consumers want
+slice-shaped signatures rather than fixed-length ones. **It does not depend on S3d**:
+every exit criterion below is exercised by a *concrete* consumer — an array-reference
+parameter, a runtime `usize` index, a bounds guard, an `Option`-returning access, and a
+caller-side eliminator on both arms all compile today. Only a comparator-taking consumer
+(`sort`/`bin_search`) needs S3d's quotation splice.
 **Exit:** a buffer can be sliced into a view; a word takes `Slice['T]` without naming a
 length variable; indexing reports failure through an `Option`/`Result` the caller must
 handle, with no runtime panic path.
+
+**P7.S3d — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
+quotation marker only where an enum eliminator collects it; every other consumer is
+denied, row-typed or not — probe-verified: `~[ -- ] call` and a fully concrete
+`inline ( ~[ -- ] -- )` helper both fail today even though neither needs any row
+unification (`` `call` on a quotation ... is not yet supported ``,
+`` ... is not permitted on a quotation literal ``). The family splits into two tiers by
+cost. This slice is the cheap tier: splice a second, fully concrete quotation consumer
+(no `..a`/`..b` in its signature, e.g. a comparator `~[ &'T &'T -- Ordering ]`) through the
+poly walk, no row unification against an abstract stack required. `if`/`branch`/`times`/
+`tag` stay deferred to **P7.S3b-follow**, the expensive tier: those are row-typed
+(`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) and need unifying a
+declared row against the poly walk's abstract stack, machinery this slice does not add.
+This is also the second quotation consumer S3b's own exit findings named as the trigger
+for re-running `poly.rs`'s deferred split signals. Ordered after S3c and ahead of S3e,
+because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
+already shipped.
+**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
+`if`/`branch`/`times`/`tag` remain a located rejection naming P7.S3b-follow.
 
 **P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
@@ -208,7 +212,7 @@ invariant and needs that invariant's owner to weigh in). The other real work is 
 body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
 bounded type variable — required members take `&'T`, per the dogfood) may be used for
 has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a (landed), S3b (landed), and S3c — and the consumer scope is not settled,
+**Depends on S3a (landed), S3b (landed), and S3d — and the consumer scope is not settled,
 because probing falsified one candidate and corrected another.** `Map['K 'V]` is *not*
 writable: a generic struct whose field is an array of its own type variable (`keys ['K 8]`,
 or `slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
@@ -216,9 +220,9 @@ third gap distinct from S3a's (which fixed generic-applied-to-own-var in poly *w
 signatures, not in generic *struct fields*). The array form of `sort` was originally
 thought to need branching (hence `inline`, hence no monomorph symbol for a per-instantiation
 dispatch record to key on) — probe-verified false: S3b's eliminator branching already mints
-a monomorph symbol for a non-inline poly word. The real remaining wall is S3c's (calling the
+a monomorph symbol for a non-inline poly word. The real remaining wall is S3d's (calling the
 comparator quotation itself from inside the poly body). **This slice must not be specced
-until it has a consumer that compiles**, which means after S3c, with the
+until it has a consumer that compiles**, which means after S3d, with the
 generic-struct-array-field gap resolved or routed around for `Map`.
 **Design decisions settled in the brief** (`docs/roadmap/P7/slice3e-brief.md`):
 satisfaction is **nominal**, via an `impl: Trait for Type ;` block confined by an
@@ -238,7 +242,7 @@ rejection or specify obligation propagation.
 against a library implementation. `bool` is already exactly this shape — a library-declared
 enum the compiler knows by a reserved registry position (`src/ast.rs:779`) with its `.`
 overload injected (`:816`). A `Fallible`-style bound satisfied by `Result`/`Option` would
-let fallible slice indexing (S3d), a failing allocator (P9.S2), and P9.S4's fallible push share
+let fallible slice indexing (S3c), a failing allocator (P9.S2), and P9.S4's fallible push share
 one desugaring. **Test before designing it as a trait:** if there is only ever one carrier
 type and users cannot add their own, this wants to be a lang *type* like `bool`, not a
 lang trait — a trait earns its keep only with two or more carriers.

@@ -10,7 +10,7 @@ was rejected outright at `src/check/poly.rs`, which blocked the whole
 eliminate an enum at all.
 
 The consumer is a *concrete* enum eliminated in a polymorphic body, so nothing here
-depends on Phase 6's in-flight work. Trait bounds are P7.S3e; slices are P7.S3d.
+depends on Phase 6's in-flight work. Trait bounds are P7.S3e; slices are P7.S3c.
 
 ## Delivered shape
 

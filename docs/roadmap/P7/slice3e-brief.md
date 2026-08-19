@@ -289,7 +289,7 @@ findings, in descending order of consequence:
    `~[ &'T &'T -- Ordering ]` (a comparator, no `..a`/`..b`) inside a poly body is still
    rejected (`` `call` on a quotation ... is not yet supported ``), distinct from the
    row-typed `if`/`branch`/`times`/`tag` family S3b deferred to S3b-follow. This is now its
-   own slice, **P7.S3c**, inserted ahead of this one. `Map['K 'V]` is blocked separately: a
+   own slice, **P7.S3d**, inserted ahead of this one. `Map['K 'V]` is blocked separately: a
    generic struct whose field is an array of its own type variable (`keys ['K 8]`,
    `slots [Ent['K 'V] 8]`) fails with `` error: unknown type 'K `` — a third gap, distinct
    from S3a's. The `Map` scope widening recorded below is therefore withdrawn.
@@ -312,10 +312,10 @@ neither, and is probably wanted: it would let intrinsic compiler logic be writte
 library implementation. `bool` is already this shape — a library-declared enum known by a
 reserved registry position (`src/ast.rs:779`), with its `.` overload injected (`:816`). A
 `Fallible`-style bound satisfied by `Result`/`Option` would give fallible slice indexing
-(S3d), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
+(S3c), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
 first:** a trait is only justified with two or more carrier types, or if users can add their
 own; with a single carrier this should be a lang *type* like `bool`, not a lang trait.
-**Test before S3d locks its index-failure carrier, not after** — this decides whether
+**Test before S3c locks its index-failure carrier, not after** — this decides whether
 fallible slice indexing returns a plain `Option['T]` or rides a bound.
 
 The decisions below are still good, and survive the falsification:
@@ -326,7 +326,7 @@ The decisions below are still good, and survive the falsification:
   `parse_capabilities`, duplicate-declaration error on collision.
 - **OQ4 — located rejection** of a member name colliding across a variable's bound set.
 
-**Consumer scope: withdrawn, pending P7.S3c (rowless quotation-consumer splice).** S3b
+**Consumer scope: withdrawn, pending P7.S3d (rowless quotation-consumer splice).** S3b
 already supplies the branching `sort`'s comparator dispatch needs (`Ordering?` elimination);
 the one remaining wall is calling the comparator quotation itself from inside the poly body.
 `Map` stays separately blocked on the generic-struct array-of-own-type-variable field gap.
