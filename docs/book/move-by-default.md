@@ -16,8 +16,8 @@ from the stack, and they do not come back unless the word's effect
 says so:
 
 ```sooth
-: add ( i64 i64 -- i64 ) + ;
-: main ( -- ) 3 4 add . ;
+: sum ( i64 i64 -- i64 ) add ;
+: main ( -- ) 3 4 sum . ;
 ```
 
 `3` and `4` go in, `7` comes out. The `3` and `4` are consumed — they
@@ -29,7 +29,7 @@ in its effect. A word that takes a number, adds one, and returns both
 the original and the sum:
 
 ```sooth
-: bump ( i64 -- i64 i64 ) | n | n n 1 + ;
+: bump ( i64 -- i64 i64 ) | n | n n 1 add ;
 : main ( -- ) 5 bump . . ;
 ```
 
@@ -47,7 +47,7 @@ If you produce a value and forget about it, the compiler catches it.
 This is the first rule of the linear spine:
 
 ```sooth
-: surplus ( i64 -- ) | n | n n + ;
+: surplus ( i64 -- ) | n | n n add ;
 : main ( -- ) 5 surplus ;
 ```
 
@@ -57,7 +57,7 @@ error: stack effect mismatch in `surplus` (line 1)
   note: declared ( i64 -- )
 ```
 
-`n n +` produces one value, but `surplus` declares zero outputs. The
+`n n add` produces one value, but `surplus` declares zero outputs. The
 compiler does not silently discard the extra value. It tells you to
 account for it: use it, return it, or drop it.
 
@@ -97,7 +97,7 @@ The types you have seen so far are all **Copy**: integers, floats,
 twice is ordinary reuse — the compiler copies the bits:
 
 ```sooth
-: square ( i64 -- i64 ) | x | x x * ;
+: square ( i64 -- i64 ) | x | x x mul ;
 : main ( -- ) 5 square . ;
 ```
 
@@ -105,7 +105,7 @@ twice is ordinary reuse — the compiler copies the bits:
 25
 ```
 
-`x` appears twice in `x x *`. Because `i64` is Copy, the second `x`
+`x` appears twice in `x x mul`. Because `i64` is Copy, the second `x`
 is a copy of the first. There is no `dup` word needed — the local
 name does it.
 

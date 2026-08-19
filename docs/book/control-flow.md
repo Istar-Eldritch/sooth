@@ -13,7 +13,7 @@ covers what exists today.
 ```sooth
 : sign ( i64 -- i64 )
   | n |
-  n 0 < if
+  n 0 lt if
     -1
   else
     1
@@ -22,7 +22,7 @@ covers what exists today.
 
 The `then` branch runs between `if` and `else`. The `else` branch runs
 between `else` and `end`. The condition comes from the stack, not
-from parentheses — `n 0 <` pushes a `bool`, and `if` pops it.
+from parentheses — `n 0 lt` pushes a `bool`, and `if` pops it.
 
 ```text
 > -5 sign .
@@ -51,7 +51,7 @@ this at the point of `if`:
 ```sooth
 : bad ( i64 -- i64 )
   | n |
-  n 0 < if
+  n 0 lt if
     -1
   else
     "oops"
@@ -71,7 +71,7 @@ different *depths*:
 ```sooth
 : bad-depth ( i64 -- i64 )
   | n |
-  0 n < if
+  0 n lt if
     n n
   else
     n
@@ -92,7 +92,7 @@ branches still must agree:
 ```sooth
 : print-if-positive ( i64 -- )
   | n |
-  0 n < if
+  0 n lt if
     n .
   end ;
 ```
@@ -118,10 +118,10 @@ innermost:
 ```sooth
 : classify ( i64 -- )
   | n |
-  n 0 < if
+  n 0 lt if
     "negative" .
   else
-    n 0 = if
+    n 0 eq if
       "zero" .
     else
       "positive" .
@@ -148,10 +148,10 @@ There is no `while` or `for`. You loop by calling yourself:
 ```sooth
 : countdown ( i64 -- )
   | n |
-  n 0 = if
+  n 0 eq if
   else
     n .
-    n 1 - countdown
+    n 1 sub countdown
   end ;
 ```
 
@@ -165,7 +165,7 @@ sooth run countdown.sth
 1
 ```
 
-The base case (`n 0 =`) stops the recursion with an empty `then`
+The base case (`n 0 eq`) stops the recursion with an empty `then`
 branch. The `else` branch prints and recurses. This is the pattern
 for every loop in Sooth today.
 

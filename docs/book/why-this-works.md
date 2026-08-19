@@ -17,14 +17,14 @@ In a stack language, data flow is explicit. Values enter at the bottom
 of the stack effect, leave at the top, and the effect is a contract:
 
 ```sooth
-: sub ( i64 i64 -- i64 ) - ;
+: diff ( i64 i64 -- i64 ) sub ;
 ```
 
 Two `i64`s go in, one comes out. There is nothing to infer. The
 programmer wrote the data flow down in the effect declaration, and the
 compiler checks that the body matches.
 
-When you call `sub`, the two values are consumed. They are gone from
+When you call `diff`, the two values are consumed. They are gone from
 the stack. There is no way to reference them again because the stack
 is the only state — there is no named variable that holds a stale
 reference to a consumed value.
@@ -101,7 +101,7 @@ Mentioning a local twice copies the bits. There is no ownership to
 track because there is nothing to own:
 
 ```sooth
-: square ( i64 -- i64 ) | x | x x * ;
+: square ( i64 -- i64 ) | x | x x mul ;
 ```
 
 `x` appears twice. The compiler copies it. No move state, no tracking.

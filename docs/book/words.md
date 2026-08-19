@@ -11,7 +11,7 @@ A word definition has four parts: the name, the stack effect, the
 body, and the terminating `;`:
 
 ```sooth
-: inc ( i64 -- i64 ) | x | x 1 + ;
+: inc ( i64 -- i64 ) | x | x 1 add ;
 ```
 
 The colon starts the definition. The name follows — `inc`. The
@@ -19,7 +19,7 @@ parentheses hold the stack effect (chapter 2). The body is everything
 between the effect and `;`. The semicolon ends the definition.
 
 The body is a sequence of terms. You have already seen every kind of
-term there is: literals (`42`, `"hello"`), names (`inc`, `+`, `x`),
+term there is: literals (`42`, `"hello"`), names (`inc`, `add`, `x`),
 and bindings (`| a b |`). There is no statement separator — terms are
 whitespace-delimited, and the parser reads them left to right until it
 hits `;`.
@@ -39,7 +39,7 @@ the block.
 
 ```text
 > : foo ( -- i64 ) 1 ;
-> : bar ( i64 -- i64 ) | foo | foo foo + ;
+> : bar ( i64 -- i64 ) | foo | foo foo add ;
 > 5 bar .
 10
 stack: (empty)
@@ -48,7 +48,7 @@ stack: (empty)
 stack: (empty)
 ```
 
-Inside `bar`, `foo` is the local (5), so `foo foo +` gives 10. Outside
+Inside `bar`, `foo` is the local (5), so `foo foo add` gives 10. Outside
 the block, `foo` is the word, which leaves 1.
 
 ## Calling words
@@ -68,10 +68,10 @@ below:
 
 : factorial ( i64 -- i64 )
   | n |
-  n 1 = if
+  n 1 eq if
     1
   else
-    n n 1 - factorial *
+    n n 1 sub factorial mul
   end ;
 ```
 
@@ -88,10 +88,10 @@ begins.
 ```sooth
 : countdown ( i64 -- )
   | n |
-  n 0 = if
+  n 0 eq if
   else
     n .
-    n 1 - countdown
+    n 1 sub countdown
   end ;
 ```
 
@@ -117,7 +117,7 @@ the line is ignored:
 \ compute the greatest common divisor
 : gcd ( i64 i64 -- i64 )
   | a b |
-  b 0 = if          \ base case: b is zero
+  b 0 eq if         \ base case: b is zero
     a
   else
     b a b mod gcd   \ recursive case

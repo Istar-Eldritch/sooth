@@ -46,24 +46,24 @@ stack: (empty)
 
 ## Arithmetic
 
-The arithmetic operators are `+`, `-`, `*`, `/`, and `mod`:
+The arithmetic operator words are `add`, `sub`, `mul`, `div`, and `mod`:
 
-- `+`, `-`, `*` work on any pair of the same numeric type (integers or
+- `add`, `sub`, `mul` work on any pair of the same numeric type (integers or
   floats).
-- `/` is **float-only**. There is no integer division. Use `mod` for
+- `div` is **float-only**. There is no integer division. Use `mod` for
   the remainder.
 - `mod` is **integer-only**. It gives the remainder of integer
   division.
 
 ```text
-> 1 2 + .
+> 1 2 add .
 3
 > 10 3 mod .
 1
-> 7.0 2.0 / .
+> 7.0 2.0 div .
 3.5
-> 10 3 /
-error: type mismatch: `/` requires two operands of the same float
+> 10 3 div
+error: type mismatch: `div` requires two operands of the same float
 type (integer division is unsupported), found `i64` and `i64`
 ```
 
@@ -72,8 +72,8 @@ promotion — `i32` and `i64` do not mix, `i8` and `u8` do not mix,
 `f64` and `i64` do not mix:
 
 ```text
-> 1 >i32 2 >i64 + .
-error: type mismatch: `+` requires two operands of the same numeric
+> 1 >i32 2 >i64 add .
+error: type mismatch: `add` requires two operands of the same numeric
 type, found `i32` and `i64`
 ```
 
@@ -101,19 +101,19 @@ shift operators `shl` and `shr` take any integer on the bottom and an
 
 ## Comparisons
 
-Six comparison operators: `=`, `<>`, `<`, `>`, `<=`, `>=`. They work
+Six comparison words: `eq`, `ne`, `lt`, `gt`, `lte`, `gte`. They work
 on any pair of the same numeric type and produce a `bool`:
 
 ```text
-> 1 2 < .
+> 1 2 lt .
 true
-> 1 2 > .
+> 1 2 gt .
 false
-> 1 1 = .
+> 1 1 eq .
 true
-> 1 2 <> .
+> 1 2 ne .
 true
-> 3 2 >= .
+> 3 2 gte .
 true
 ```
 
@@ -184,12 +184,12 @@ This means a literal argument to a word that expects `usize` works:
 But a computed `i64` value does not:
 
 ```text
-> 1 1 + needs-usize
+> 1 1 add needs-usize
 error: type mismatch: `needs-usize` mixes `usize` with a computed `i64`:
 convert it explicitly with `>usize` first
 ```
 
-`1 1 +` is a computed `i64`. You must convert it explicitly with
+`1 1 add` is a computed `i64`. You must convert it explicitly with
 `>usize`. The compiler can confirm a bare literal fits in the target
 width, but a computed value has no known value at compile time, so the
 compiler refuses to guess.
@@ -207,10 +207,10 @@ conversion:
 ## Overflow
 
 Arithmetic wraps silently on overflow. There is no overflow check at
-runtime or compile time. `255 >u8 1 >u8 +` gives `0`:
+runtime or compile time. `255 >u8 1 >u8 add` gives `0`:
 
 ```text
-> 255 >u8 1 >u8 + .
+> 255 >u8 1 >u8 add .
 0
 ```
 

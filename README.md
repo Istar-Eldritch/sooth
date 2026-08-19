@@ -12,7 +12,7 @@ is a compile error).
 
 ```forth
 : gcd ( i64 i64 -- i64 )
-  dup 0 = [
+  dup 0 eq [
     drop
   ] [
     swap over mod gcd
@@ -29,7 +29,7 @@ session where words are compiled to shared objects and `dlopen`'d in as you defi
 Phase 2 delivered the **typed core**, all of it heap-free: a `Type` per stack slot, unified
 at branch joins; the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit
 target-only conversions (`>i8`..`>u64`); floating point (`f32`/`f64`); bitwise operators;
-boolean logic with the full comparison set (`= < > <= >= <>`); **structs** (the `type:`
+boolean logic with the full comparison set (`eq lt gt lte gte ne`); **structs** (the `type:`
 form, inline-aggregate layout, generated constructor/accessor words); **enums/ADTs**
 (`|`-separated variants, tagged inline aggregates, exhaustiveness-checked clause-style
 elimination, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
@@ -89,13 +89,13 @@ process, with a stack that persists across lines (no prompt is printed in Phase 
 lines below are input, other lines are the session's output):
 
 ```forth
-: sq ( i64 -- i64 ) | n | n n * ;
+: sq ( i64 -- i64 ) | n | n n mul ;
 defined sq
 5 sq
 stack: 25
 1 2 3
 stack: 25 1 2 3
-| a b | a b + .
+| a b | a b add .
 5
 stack: 25 1
 ```
