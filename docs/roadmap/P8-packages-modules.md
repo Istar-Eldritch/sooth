@@ -130,36 +130,47 @@ exists to de-privilege.
 
 The split is still on whether a manifest is required, it's just S1 that needs one now.
 Everything manifest-level (S1) has to exist before everything file-level (S2) can migrate
-the corpus once, to its final form, instead of twice with a red suite in between.
+the corpus once, to its final form, instead of twice with a red suite in between. S1 itself
+splits into **S1a** (the manifest and the checker/resolver work it drives) and **S1b** (the
+CLI-level question of which manifest resolves a given invocation): they share the manifest
+grammar and nothing else, no file and no checker pass, so bundling them would review a new
+file format alongside `main.rs` argument parsing as if they were one concern.
 
-**P8.S1 — Packages, manifests, path-derived module names, and the layer check.** The
+**P8.S1a — Packages, manifests, path-derived module names, and the layer check.** The
 manifest and its parser, package attribution over the discovered closure, module names
-derived from paths, the public-module list, cross-package `pkg::module` resolution, the
-`--manifest` CLI flag and its precedence over discovery, the user-level manifest fallback
-(`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), and the three checks (naming a module its
-package does not make public; naming a package no `depends:` entry lists; depending on a
-higher layer). Lands first because S2 has nothing to migrate the corpus to without it, and
-`--manifest` is what lets S2's test-fixture migration point at one shared manifest instead
-of generating one per fixture. Wants its own brief: the manifest-half recon and the open
-questions are in `docs/roadmap/P8/slice1-brief.md`.
+derived from paths, the public-module list, cross-package `pkg::module` resolution, and the
+three checks (naming a module its package does not make public; naming a package no
+`depends:` entry lists; depending on a higher layer). Lands first because S2 has nothing to
+migrate the corpus to without it. Brief: `docs/roadmap/P8/slice1-brief.md`.
 **Exit:** a program builds against a dependency's module named as `pkg::module`; a
 package-private module is unnameable from outside; a layer violation is a located build
-error; `sooth build entry.sth --manifest path/to/sooth.pkg` resolves against the named
-manifest regardless of `entry.sth`'s own directory; a manifest-less, flag-less file resolves
-against the user-level manifest, then falls back to an implicit anonymous package with no
-dependencies.
+error.
 **Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
 rejected.
+
+**P8.S1b — The `--manifest` CLI flag and the fallback chain.** `sooth build`/`run` gain an
+explicit `--manifest <path>` flag ranked above discovery, then the nearest ancestor
+manifest, then the user-level manifest (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`, also read
+by the REPL for a session), then an implicit anonymous package with no dependencies. This is
+what lets S2's ~460-inline-test-fixture migration point at one shared manifest instead of
+generating one per fixture. Brief: `docs/roadmap/P8/slice1b-brief.md`.
+**Exit:** `sooth build entry.sth --manifest path/to/sooth.pkg` resolves against the named
+manifest regardless of `entry.sth`'s own directory, unconditionally overriding an ancestor
+manifest; a manifest-less, flag-less file resolves against the user-level manifest, then
+falls back to an implicit anonymous package with no dependencies; each fallback tier's
+failure names its own remedy.
+**Dogfood:** the test harness pointing a temp-directory fixture at a shared manifest via
+`--manifest`.
 
 **P8.S2 — Single-mode imports, the intrinsics module, wildcard import, and re-export.**
 Delete `parser::prelude_words` and its two injection sites, shrink the mangling exemption to
 `main`/`drop`, gate `BUILTIN_WORDS` visibility on an `intrinsics` import, add the `| * |`
 wildcard form and re-export through `export:`, split `lib/core.sth` into modules with a hub,
-and migrate every `.sth` file and every inline test source to module names now that S1 gives
-them something to name. `if`'s locals lose their `if--` prefixes: bodies are checked in
-their own module's scope now, so the hygiene hack the whole-program environment forced is
-gone for good.
-Brief and probe results in `docs/roadmap/P8/slice1-brief.md`. Probing established that an
+and migrate every `.sth` file and every inline test source to module names now that S1a
+gives them something to name and S1b gives fixtures a manifest to name it against. `if`'s
+locals lose their `if--` prefixes: bodies are checked in their own module's scope now, so
+the hygiene hack the whole-program environment forced is gone for good.
+Brief and probe results in `docs/roadmap/P8/slice2-brief.md`. Probing established that an
 imported inline combinator splices correctly (qualified and selective), that
 self-tail-to-loop lowering survives an imported `if` at 5M iterations, and that an inline
 poly word over imported comparisons monomorphizes at `i64` and `f64`. It also found the
