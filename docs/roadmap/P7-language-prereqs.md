@@ -56,7 +56,7 @@ items in this phase need it first:
   allocator is ordinary Sooth code bound as foreign words, it needs somewhere in the
   program to live. Statics are a prerequisite of the explicit-allocator item, not a
   sibling of it.
-- The **API description** (P8.S2). A global clause on an exported word is part of that
+- The **API description** (P8.S3). A global clause on an exported word is part of that
   word's exported signature. Building the serialisable API format first and adding globals
   to it later means retrofitting the format and re-baselining every diff it has already
   emitted.
@@ -193,8 +193,8 @@ every signature that mentions it — P9.S1's own words, about allocators, apply 
 bounds: "retrofitting it onto collections specified without it is the mistake Rust's
 `allocator_api` is still paying for, and this is the only moment it is cheap." S1 made
 the same argument about itself, for the same reason: writing the collections against the
-old mechanism and migrating afterwards is the waste. It is also a hard dependency of P8.S2
-(the API description), for the reason P8.S2 already gives about globals: a trait bound on
+old mechanism and migrating afterwards is the waste. It is also a hard dependency of P8.S3
+(the API description), for the reason P8.S3 already gives about globals: a trait bound on
 an exported word's signature is part of that exported signature, so building the
 diffable API format before bounds exist means re-baselining every diff it has already
 emitted.
