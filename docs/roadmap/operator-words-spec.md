@@ -225,7 +225,10 @@ Exit criteria:
 - `cargo run -- build examples/gcd.sth` and the corpus stdout goldens
   (`tests/phase4_slice10c_corpus_stdout.rs`) pass unchanged in *output*.
 - `git grep -nE '(^|[[:space:]])(\+|-|\*|/|=|<|>|<=|>=|<>|u=|u<|u>|u<=|u>=|u<>)([[:space:]]|$)' -- '*.sth'`
-  returns nothing.
+  returns no *code*. It does not return nothing: R1 protects English and math
+  prose inside `\` comments, so hits like `\ a + (b - a) * t` and `\ pc = 0`
+  survive by design. Read every hit and confirm each one sits after the `\` on
+  its line.
 - No `"+"`, `"u<"`-family quoted literal remains in `src/` or `tests/` naming a
   builtin; the ones that remain (`qbe_name` fixtures, lexer token tests) are
   exactly R3's keep list.
@@ -275,8 +278,10 @@ Exit criteria:
 
 - No occurrence of a retired spelling in `DESIGN.md`, `README.md` or
   `docs/book/` as sooth code or as a description of current syntax.
-- `docs/roadmap/` and the completed-work briefs/specs are byte-identical to
-  Phase 1's tree (verify with `git diff --stat`).
+- No retired spelling is rewritten anywhere in R6's leave-as-is set:
+  `docs/roadmap/` and the completed-work briefs/specs carry no operator diff
+  against Phase 1's tree (verify with `git diff`). A correction to this spec's
+  own criteria is the one permitted change.
 - Suite still green (no code change in this phase; a red suite means Phase 1
   leaked).
 
@@ -306,3 +311,12 @@ Exit criteria:
   sigils (R8).
 - `mod and or xor not shl shr max max-total .`: already words.
 - Rewriting historical phase docs (R6).
+- Two book claims that the compiler already rejects, for reasons unrelated to
+  this rename and present before it. Left as found here; they want their own
+  item, since R6's justification applies to them at least as hard:
+  - `control-flow.md` (all of it), `getting-started.md:28-34` and
+    `words.md:73,92,122` teach `if … else … end`. `if` is an ordinary word taking
+    two quotations, and the parser answers ``` `else` is not a word ```.
+  - `words.md:27-52` teaches that a local shadows a word of the same name. A
+    local cannot shadow a callable name: ``` local `foo` in `bar` collides with
+    the callable name `foo` ```.
