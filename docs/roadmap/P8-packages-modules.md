@@ -143,8 +143,8 @@ listing every exported signature for the API diff to compare between versions. B
 that surface by the public-module list is what stops a package-private refactor churning
 the diff. That is the remaining prerequisite in `docs/dependency-management.md`, and it is a
 packaging concern (letting other people depend on you with enforced semver) rather than a
-personal-reuse one, which is why it waited. Needs P7.S2 (statics) and P7.S3e (bounds), since a global clause on
-an exported word is part of that word's exported signature.
+personal-reuse one, which is why it waited. Needs P7.S2 (statics) and P7.S3e (bounds),
+since a global clause on an exported word is part of that word's exported signature.
 **Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump
 across a two-file change.
 **Dogfood:** `sooth publish --check` on a two-version bump of a small library, one that adds
