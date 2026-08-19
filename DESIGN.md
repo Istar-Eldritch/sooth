@@ -79,7 +79,7 @@ one- or two-value words stay point-free (`square`, below, is just `dup mul`). Re
 values reused out of order, like a formula:
 
 ```forth
-: lerp ( int int int -- int )   \ a add (b sub a) mul t
+: lerp ( int int int -- int )   \ a + (b - a) * t
   | a b t | b a sub t mul a add ;
 ```
 

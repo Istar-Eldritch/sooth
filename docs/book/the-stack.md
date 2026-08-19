@@ -44,10 +44,10 @@ produces (outputs, bottom to top).
 Some common shapes:
 
 ```sooth
-: answer ( -- i64 ) 42 ;              \ no inputs, one output
-: print-it ( i64 -- ) . ;             \ one input, no outputs
+: answer ( -- i64 ) 42 ;                \ no inputs, one output
+: print-it ( i64 -- ) . ;               \ one input, no outputs
 : double ( i64 -- i64 ) | x | x 2 mul ; \ one in, one out
-: add3 ( i64 i64 i64 -- i64 )          \ three in, one out
+: add3 ( i64 i64 i64 -- i64 )            \ three in, one out
   | a b c | a b add c add ;
 ```
 
@@ -63,7 +63,7 @@ in order, bottom to top, just like inputs:
 : dup2 ( i64 -- i64 i64 ) | x | x x ;
 : remainder-range ( i64 i64 -- i64 i64 )
   | a b |
-  a b mod            \ remainder (first output, bottom)
+  a b mod               \ remainder (first output, bottom)
   a b sub a b mod sub ; \ difference of remainders (second output, top)
 ```
 
