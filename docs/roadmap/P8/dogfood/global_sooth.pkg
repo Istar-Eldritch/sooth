@@ -1,0 +1,5 @@
+\ Stands in for $XDG_CONFIG_HOME/sooth/global_sooth.pkg. Read only by files
+\ with no ancestor manifest, and by the REPL for a session's imports; never
+\ consulted for a file inside a package, so no package build depends on it.
+depends: core path "./core" ;
+depends: collections path "./collections" ;

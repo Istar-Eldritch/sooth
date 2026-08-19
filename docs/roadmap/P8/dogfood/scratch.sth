@@ -1,8 +1,11 @@
-\ A manifest-less file: belongs to no package, so it cannot name `core::bool`
-\ and falls back to quoted paths -- including straight past `core`'s module
-\ list into a package-private file. This is the accepted loophole.
+\ A file with no ancestor manifest. Resolution falls back to the user-level
+\ manifest (`global_sooth.pkg` beside this file stands in for
+\ `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), which is where `core` comes from.
+\ With no user-level manifest either, this file would be an implicit anonymous
+\ package: `intrinsics` and its own siblings only, and the two lines below
+\ would be located errors naming the missing manifest.
 import: i | * | intrinsics ;
-import: b | if | "core/bool.sth" ;
-import: d | clamp-u8 | "core/detail/scratch.sth" ;
+import: b | if | core::bool ;
+import: t | upper? | core::text ;
 
-: main ( -- ) 300 clamp-u8 . ;
+: main ( -- ) 65 upper? ~[ 1 ] ~[ 0 ] if . ;
