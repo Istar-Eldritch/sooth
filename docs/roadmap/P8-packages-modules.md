@@ -37,20 +37,21 @@ A package's public surface is normally a hub or two rather than every file, so t
 stays short by construction, and a package that finds itself listing many modules is one
 that wants a hub.
 
-**Imports name modules.** A quoted path survives only for a file belonging to no package
-(the manifest-less scratch case); anything inside a package is named:
+**Imports name modules, and that is the only form.** There is no path-based import:
 
 ```
-import: a text::ascii ;              \ same package
+import: a text::ascii ;               \ same package, by path-derived name
 import: cmp core::cmp ;              \ another package, via depends:
 import: i | * | intrinsics ;         \ every exported name, unqualified
 import: s | split trim | core::text ; \ two names unqualified, plus the qualifier
 ```
 
 The qualifier is always bound and is always a single segment, so use sites stay `a::decode`
-regardless of how deeply the module is nested. A path-based cross-package import would bake
-the dependency's internal layout into every consumer, so moving a file inside a dependency
-would break them; naming modules is what stops that.
+regardless of how deeply the module is nested. A path-based import would bake a
+dependency's internal layout into every consumer, so moving a file inside a dependency
+would break them; naming modules is what stops that. Keeping the quoted form for the
+manifest-less case would leave a second resolution rule alive for one consumer, so it is
+deleted from the language and the manifest-less case is answered below instead.
 
 **Modules re-export, so a package curates its own surface.** `export:` accepts a name the
 file imported as readily as one it declared, which makes a hub module: `core` can import
@@ -79,11 +80,21 @@ DESIGN.md's "tag every stdlib word with the layer it needs" becomes a field with
 behind it. Phase 9 builds `fixed` / `alloc` / `hosted` as packages that must pass it, which
 is what makes that phase's exit criteria mean anything.
 
-**A manifest is optional.** A bare `.sth` file with no manifest above it belongs to no
-package and builds as it does today, quoted-path imports included. The known cost is that
-such a file is unconstrained and can path-import into another package's private modules;
-accepted, because these checks exist to keep declared packages honest rather than to
-sandbox, and the frictionless scratch file is what the optional manifest is for.
+**A manifest is optional, and resolution falls back twice.** A file's package is the
+nearest ancestor manifest. Failing that, the **user-level manifest** at
+`$XDG_CONFIG_HOME/sooth/global_sooth.pkg` supplies the `depends:` a scratch file resolves
+against, which is the same manifest the REPL reads for a session. Failing *that*, the file
+is an **implicit anonymous package** with no dependencies: it can import `intrinsics` and
+its own path-derived siblings, and naming any other package is a located error whose
+remedy is a manifest. A scratch file therefore stays frictionless without a second import
+form, and the old loophole (a manifest-less file reaching past a package's `module:` list
+into a private module) is not policed but unspellable.
+
+**The fallback never applies inside a package.** A file with an ancestor manifest resolves
+against that manifest and nothing else, so a package's build cannot depend on machine-local
+configuration. The same reasoning applies to the test corpus: fixtures must carry or be
+given an explicit manifest rather than inheriting a developer's global one, or CI stops
+being reproducible.
 
 **Exit:** no word resolves without an `import:`, including the intrinsics; a program builds
 against a dependency's module named as `pkg::module`; a module the package does not declare
@@ -183,6 +194,12 @@ freely.
 **Wildcard re-export** (`export: | * | ;`). Declined: a hub exists to curate, and an
 implicit public surface is exactly what P8.S3 has to enumerate.
 
+**Quoted-path imports.** Deleted rather than kept for the manifest-less case. Once every
+file inside a package names modules, the path form has exactly one consumer left, and
+carrying a second resolution rule for it costs more than the three-line manifest a scratch
+file writes when it wants more than `intrinsics`. Deleting it also makes the
+reach-past-the-module-list loophole unspellable rather than merely tolerated.
+
 **Listing every module in the manifest.** Declined, which is a different thing from the
 public list the manifest does carry. Discovery is the import-graph walk and needs no
 listing; the `module:` entries are visibility only, so what gets written down is a
@@ -197,6 +214,7 @@ module would need, so both wait.
 
 **Semver enforcement itself** (the API diff and `sooth publish --check`) is tooling on top
 of P8.S3's format, specified in `docs/dependency-management.md`. **Git dependencies** are an
-additive grammar extension to `depends:`, not a redesign. **A user-level manifest**
-(`$XDG_CONFIG_HOME/sooth`) is how the REPL eventually gets a session's imports; a REPL
-exemption in the compiler is not, since that is the special case this phase deletes.
+additive grammar extension to `depends:`, not a redesign. **A REPL exemption in the
+compiler** stays declined, since that is the special case this phase deletes; the REPL gets
+its session imports from the user-level manifest above, like any other file without an
+ancestor manifest.
