@@ -108,11 +108,14 @@ deliberate layer violation rejected.
 ## Slices
 
 **A paper dogfood of this model is in `P8/dogfood/`**, and its headline finding is that the
-slice order below may be backwards: P8.S1 makes every file import what it uses, but with no
-manifests yet it can only do so by quoted path, and P8.S2 would then rewrite the same import
-lines to module names. The ~460 inline test sources are what make that bite. Ruling on it
-(reorder, reserve `core` as a compiler-known package, or generate manifests for test
-fixtures) belongs in the first spec written for this phase.
+slice order below is backwards. P8.S1 makes every file import what it uses, but with no
+manifests yet there is nothing for an import to name: deleting the quoted-path form removed
+the only spelling S1 could have migrated the corpus to, and the ~460 inline test sources are
+what make that bite. Either the manifest work moves first, so the corpus migrates once to
+its final form, or `core` is reserved as a compiler-known package the way `intrinsics` is,
+which re-privileges the standard library this phase exists to de-privilege. The first spec
+written for this phase has to rule, and the slice numbering below should be read as
+provisional until it does.
 
 The split is on whether a manifest is required. Everything file-level lands together in S1,
 because all of it is one corpus-wide migration and doing it in two passes means editing the
