@@ -227,10 +227,15 @@ New tests (Phase 1):
   operand-mismatch diagnostic text with the new name.
 - `check_ueq_family_lowers_to_cmpop`: the renamed unsigned six still map to
   their `CmpOp` (extends `tests/phase4_slice10c_primitives.rs:270`'s loop).
-- `resolve_user_word_named_add_overloads_builtin`: an explicit test that
-  `: add ( Vec2 Vec2 -- Vec2 )` is a builtin-name overload and is not mangled
-  per module. This is the mechanism R4 keeps the corpus *off*, so it gets its own
-  named coverage rather than being an accident of a dogfood file.
+- A plain word named exactly `: add ( Vec2 Vec2 -- Vec2 )` still dispatches
+  through `resolve::is_operator_dispatch_name` as a builtin-name overload rather
+  than an ordinary per-module-mangled word: `resolve::mangle` still gives its
+  own-module declaration a `__m{k}` suffix in a multi-module build (confirmed by
+  `nm`), but the call-site rewrite deliberately leaves the bare call unmangled so
+  `check_operator`'s candidate scan finds it. This is byte-identical, mechanism
+  and all, to `own_module_operator_overload_reachable_bare_in_multi_module`
+  (Phase 4 slice 8b, R13), so it is that test's coverage, not a separate one --
+  no new test is added for it.
 
 ### Phase 2: documentation
 

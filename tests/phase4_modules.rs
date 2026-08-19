@@ -546,33 +546,6 @@ fn own_module_operator_overload_reachable_bare_in_multi_module() {
 }
 
 #[test]
-fn resolve_user_word_named_add_overloads_builtin() {
-    // R4 (Recon delta 1): a plain user word named exactly like a retired
-    // builtin's new spelling (`add`) is a builtin-name overload, not an
-    // ordinary per-module-mangled word -- `resolve::is_operator_dispatch_name`
-    // matches it and `resolve::mangle` leaves its own-module declaration bare
-    // (`$add`, never `$add__m{k}`), exactly the mechanism R4 keeps
-    // `examples/modules_ops.sth`'s `point-add` off of.
-    let c = Closure::new("add-overload-not-mangled");
-    c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
-    let entry = c.write(
-        "main.sth",
-        concat!(
-            "import: lib \"lib.sth\" ;\n",
-            "type: Vec2 x i64 y i64 ;\n",
-            ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 add &x @ . drop ;\n",
-        ),
-    );
-    let (stdout, code) = build_and_run(&entry);
-    assert_eq!(
-        stdout, "0\n1\n",
-        "the bare `add` resolved to the own overload (unmangled), not the builtin"
-    );
-    assert_eq!(code, 0);
-}
-
-#[test]
 fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
     // R13: same fix, exercised through `poly_delegate_op` (the poly-body
     // operator path) rather than `check_term`'s concrete path. `probe` is

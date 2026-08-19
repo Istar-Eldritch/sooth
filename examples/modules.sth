@@ -10,4 +10,4 @@ import: ops | len2 point-add | "modules_ops.sth" ;
 : main ( -- )
   1 2 Point 3 4 Point point-add
   &x @ .          \ 4
-  len2 . ;        \ 4*4 add 6*6 eq 52
+  len2 . ;        \ 4*4 + 6*6 = 52

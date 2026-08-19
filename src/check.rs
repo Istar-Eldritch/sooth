@@ -3861,7 +3861,7 @@ mod tests {
         // A `fill` count < 1 is invalid (an array length must be >= 1).
         let err = check_src(": w ( -- ) 0 0 fill drop ;").unwrap_err();
         assert!(
-            err.contains("length must be gte 1"),
+            err.contains("length must be >= 1"),
             "unexpected message: {err}"
         );
     }

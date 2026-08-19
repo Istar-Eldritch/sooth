@@ -241,11 +241,11 @@ type: Decoded vm Vm idx usize ;
 
 : main ( -- )
   build
-  0 >usize                       \ pc eq 0
+  0 >usize                       \ pc = 0
   0 8 fill
-  0 >usize                       \ sp eq 0
+  0 >usize                       \ sp = 0
   0 4 fill | mem |
-  &!mem 0 >usize &!> 100000 !    \ mem[0] eq N eq 100000, mem[1] eq 0
+  &!mem 0 >usize &!> 100000 !    \ mem[0] = N = 100000, mem[1] = 0
   mem
   Vm
   build-table

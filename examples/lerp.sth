@@ -1,6 +1,6 @@
 \ Locals earn their keep here: three live values, `a` reused and reordered.
 \ Point-free this would be a dup/over/rot knot; named, it reads like the formula.
-: lerp ( i64 i64 i64 -- i64 )   \ a add (b sub a) mul t  (integer affine combo)
+: lerp ( i64 i64 i64 -- i64 )   \ a + (b - a) * t  (integer affine combo)
   | a b t | b a sub t mul a add ;
 
 : main ( -- )

@@ -335,8 +335,8 @@ fn param_binds(terms: &[Term], inputs: usize) -> HashMap<&str, usize> {
 /// `drop` disposes whatever is on top (the dogfood's own
 /// `| f | f File> close drop ;` closes the fd rather than looping), and since
 /// slice 8a made every builtin name overloadable the same applies throughout,
-/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;` ends in the
-/// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
+/// e.g. `: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;` ends in the
+/// *builtin* `lt` on two `i64`s. Treating either as a back-edge opens loop
 /// machinery whose phi operands never arrive, and lowering then panics on the
 /// missing header.
 ///

@@ -174,7 +174,7 @@ fn static_scalar_type_error(name: &str, ty_name: &str, span: Span) -> String {
 /// would otherwise silently truncate.
 fn static_u32_init_range_error(n: i64, span: Span) -> String {
     format!(
-        "error: static initializer {n} is out of range for `u32` at line {}, col {} (requires 0 lte N lte {})",
+        "error: static initializer {n} is out of range for `u32` at line {}, col {} (requires 0 <= N <= {})",
         span.line,
         span.col,
         u32::MAX
@@ -1293,7 +1293,7 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
 /// (the brief's OQ4).
 fn generic_nesting_depth_error(outer: &str, inner: &str, span: Span) -> String {
     format!(
-        "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth gt 1) is not yet supported",
+        "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth > 1) is not yet supported",
         span.line, span.col
     )
 }
@@ -2244,7 +2244,7 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 return Err(format!(
-                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 lte N lte {})",
+                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 <= N <= {})",
                     span.line, span.col, u32::MAX
                 ));
             }
@@ -2907,14 +2907,14 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N lte {})",
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N <= {})",
                     element.name(), n, n, span.line, span.col, u32::MAX
                 ))
             }
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N gte 1)",
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N >= 1)",
                     element.name(), n, n, span.line, span.col
                 ))
             }
@@ -5642,7 +5642,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("[i64 0]"), "unexpected message: {err}");
-        assert!(err.contains("gte 1"), "unexpected message: {err}");
+        assert!(err.contains(">= 1"), "unexpected message: {err}");
     }
 
     #[test]
@@ -6747,7 +6747,7 @@ mod tests {
     #[test]
     fn array_constructor_zero_count_is_parse_error() {
         let err = parse_src(": w ( -- ) [ i64 ; 0 ] drop ;").unwrap_err();
-        assert!(err.contains("gte 1"), "unexpected message: {err}");
+        assert!(err.contains(">= 1"), "unexpected message: {err}");
     }
 
     #[test]

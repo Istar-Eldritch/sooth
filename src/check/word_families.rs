@@ -1093,11 +1093,11 @@ fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
 fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be gte 1 and lte {})\n  note: declared {}",
+            "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
             name, span.line, count, u32::MAX, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: `fill` count {count} is invalid (an array length must be gte 1 and lte {})",
+            "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
             u32::MAX
         ),
     }

@@ -541,7 +541,7 @@ mod tests {
                 b.cur_instrs.iter().any(|i| matches!(i,
                     Instr::PtrOffset(_, base, off) if *base == receiver && *off == want_off
                 )),
-                "expected a PtrOffset at payload_offset add field.offset ({want_off}) for field {field:?}: {:?}",
+                "expected a PtrOffset at payload_offset + field.offset ({want_off}) for field {field:?}: {:?}",
                 b.cur_instrs
             );
         }

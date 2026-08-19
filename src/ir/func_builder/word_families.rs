@@ -862,7 +862,7 @@ mod tests {
                 Instr::PtrOffset(dst, base, off)
                     if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
             )),
-            "expected a PtrOffset at payload_offset add field.offset: {:?}",
+            "expected a PtrOffset at payload_offset + field.offset: {:?}",
             b.cur_instrs
         );
         assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
@@ -912,7 +912,7 @@ mod tests {
                 Instr::PtrOffset(dst, base, off)
                     if *dst == addr && *base == receiver && *off as u32 == payload_offset + field.offset
             )),
-            "expected a PtrOffset at payload_offset add field.offset: {:?}",
+            "expected a PtrOffset at payload_offset + field.offset: {:?}",
             b.cur_instrs
         );
         assert_eq!(*b.ref_inner.get(&addr).unwrap(), field.ty);
