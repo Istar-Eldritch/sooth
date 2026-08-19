@@ -1,6 +1,6 @@
 [← ROADMAP](./ROADMAP.md)
 
-### Phase 9 — Bare metal  `[M]`  `[the craft milestone: own the vertical to the metal]`
+### Phase 11 — Bare metal  `[M]`  `[the craft milestone: own the vertical to the metal]`
 
 Cross-compile to arm64 (or Cortex-M) bare metal: per-target intrinsics
 (memcpy/memset, integer-divide/soft-float helpers), linker script, entry point,

@@ -213,7 +213,7 @@ programs are in `slice3-dogfood.md`; the load-bearing findings:
   builds green. This is a Phase-5-shaped gap, orthogonal to trait bounds, and it
   means `Map['K 'V]`, `Entry['K 'V]`, and the `Vec['T]` form of `sort` are all
   unparseable regardless of what P7.S3d ships — the gap is spun out as its own
-prerequisite, **P7.S3a** (`docs/roadmap/P7-stdlib-nostd.md`), not fixed here.
+prerequisite, **P7.S3a** (`docs/roadmap/P7-language-prereqs.md`), not fixed here.
 **The bounds feature currently has
   no consumer that compiles.**
 - Trait members must take `&'T`, not `'T` (every real method — `eq`/`hash`/`cmp`

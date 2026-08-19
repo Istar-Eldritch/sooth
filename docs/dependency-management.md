@@ -2,9 +2,9 @@
 
 Exploration, not decision. Records the design for Elm-style enforced
 semantic versioning in Sooth, to preserve the reasoning before the
-module system (Phase 6) lands and the details fade. Nothing here
+module system (Phase 8) lands and the details fade. Nothing here
 overrides a decision in DESIGN.md; it specifies a mechanism the design
-leaves open, and marks what it depends on from Phase 6.
+leaves open, and marks what it depends on from Phase 8.
 
 ## The goal
 
@@ -110,7 +110,7 @@ every MINOR is a pure addition, every MAJOR is a real breaking change,
 and there is no scenario where the bump classification lies about
 behavioral impact.
 
-## What it depends on from Phase 6
+## What it depends on from Phase 8
 
 Two things, both straightforward:
 
@@ -118,7 +118,7 @@ Two things, both straightforward:
    Sooth needs the equivalent — a way to mark which words, types, and
    externs are public. Everything not exported is private and invisible
    to the API diff. Without this, every declaration is public and the
-   diff is meaningless. The module system (Phase 6) introduces
+   diff is meaningless. The module system (Phase 8) introduces
    compilation units and imports; export lists are the natural companion
    that says what crosses the boundary.
 
@@ -129,7 +129,7 @@ Two things, both straightforward:
    serialize. The infrastructure already exists — the checker produces
    exactly this information; it just needs a serialization target.
 
-Neither is specified here. Both are Phase 6's job; this doc records what
+Neither is specified here. Both are Phase 8's job; this doc records what
 the semver enforcement needs from them, not how they're built.
 
 ## No central registry needed to start
@@ -156,7 +156,7 @@ languages where transitive dependency builds take minutes.
 - **Extends "Concurrency: a library, not a core feature" (DESIGN.md)**
   only in spirit — both reflect the "own the small thing" philosophy.
   Dependency management is a tooling concern, not a language feature.
-- **Consumes Phase 4 Slice 5's export list; the tooling stays Phase 6.**
+- **Consumes Phase 4 Slice 5's export list; the tooling stays Phase 8.**
   Multi-file compilation, word and type imports, and the `export:` list
   itself all land early (Phase 4 Slice 5, pulled forward once a reusable
   component — usually a type plus its operations — needed somewhere to
@@ -164,7 +164,7 @@ languages where transitive dependency builds take minutes.
   invariant while its generated setters cross the boundary). So the
   "what's public" half of this doc's first prerequisite is answered there,
   including the Elm-style opaque-type distinction between exporting a type
-  name and exporting its constructors. What stays Phase 6 is the second
+  name and exporting its constructors. What stays Phase 8 is the second
   prerequisite: a serializable API description and the diffing that reads
   it. This doc records the design so the reasoning survives, but the
   tooling still waits.

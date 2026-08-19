@@ -10,10 +10,11 @@ complete and merged to `main` — see each phase file's own header for its exit 
 and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-3
 (quotation effect annotations; variant types and accessors; the mode-polymorphic
 eliminator word) are done and merged; see [P6](./P6-enum-elimination.md) for the full
-slice breakdown. **Phase 7 (stdlib and
-`no_std` layering) is in progress**: Slice 1 (accessors as receiver-directed
-projections) and Slice 2 (static storage and global sets) are done and merged; see
-[P7](./P7-stdlib-nostd.md) for the full slice breakdown. Per-phase completion history
+slice breakdown. **Phase 7 (language prerequisites for the
+stdlib) is in progress**: Slice 1 (accessors as receiver-directed projections), Slice 2
+(static storage and global sets), and Slices 3a-3b (generic instantiation and quotations
+in a polymorphic body) are done and merged; see [P7](./P7-language-prereqs.md) for the
+full slice breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
 `docs/roadmap/P{N}/` briefs/specs, not here.
@@ -50,10 +51,12 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
-| **P7** | [Stdlib and `no_std` layering](./P7-stdlib-nostd.md) | `[L]` — in progress (Slices 1-2) |
-| **P8** | [Concurrency (library)](./P8-concurrency.md) | `[M]` |
-| **P9** | [Bare metal](./P9-bare-metal.md) | `[M]` — the craft milestone |
-| **P10** | [Self-hosting](./P10-self-hosting.md) | `[XL]` |
+| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-3b) |
+| **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
+| **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
+| **P10** | [Concurrency (library)](./P10-concurrency.md) | `[M]` |
+| **P11** | [Bare metal](./P11-bare-metal.md) | `[M]` — the craft milestone |
+| **P12** | [Self-hosting](./P12-self-hosting.md) | `[XL]` |
 
 ## Cross-cutting — Tooling and diagnostics  `[ongoing from Phase 0]`
 
@@ -73,10 +76,12 @@ completion. The piped (non-tty) path is unchanged byte-for-byte.
 
 - **Phase 0 is done and the go/no-go came back *go***: the virtual-stack → IR → QBE
   → native path holds. **Phase 3** (the linear memory model, the most novel work and
-  the reason the language exists) is also done. **Phase 10** (self-hosting) is the
+  the reason the language exists) is also done. **Phase 12** (self-hosting) is the
   other large lift and is well understood, but still ahead.
-- Phases 4-9 are more independent than the numbering implies. Errors (5) is nearly
-  free once ADTs exist (2). Concurrency (8) needs the linear model (3) but little
-  else. Bare metal (9) needs the `fixed` layer (7) but not the hosted one. Reorder
+- Phases 4-11 are more independent than the numbering implies. Errors (5) is nearly
+  free once ADTs exist (2). Concurrency (10) needs the linear model (3) but little
+  else. Bare metal (11) needs the `fixed` layer (9) but not the hosted one. Reorder
   within that band by what you want to play with first, which for a craft project is
-  a legitimate way to choose.
+  a legitimate way to choose. Two orderings are not free: the stdlib layers (9) are
+  built as packages, so they follow packages (8), and packages need Phase 7's bounds
+  before an exported signature's API description can be baselined.

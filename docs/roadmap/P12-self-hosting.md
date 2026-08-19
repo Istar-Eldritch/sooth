@@ -1,6 +1,6 @@
 [← ROADMAP](./ROADMAP.md)
 
-### Phase 10 — Self-hosting  `[XL]`
+### Phase 12 — Self-hosting  `[XL]`
 
 Stabilise the self-hosting subset S (smaller than before: concrete types + ADTs +
 pattern matching, growable collections + strings, words + modules, errors as

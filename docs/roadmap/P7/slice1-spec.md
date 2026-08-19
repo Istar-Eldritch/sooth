@@ -170,7 +170,7 @@ call sites had moved.
 
 ## Roadmap correction
 
-`docs/roadmap/P7-stdlib-nostd.md` specified the lens words as `&>`/`<`/`|>` and required
+`docs/roadmap/P7-language-prereqs.md` specified the lens words as `&>`/`<`/`|>` and required
 "one `&>` accepting both an array and a struct". Both were wrong and the text now states
 the delivered design:
 

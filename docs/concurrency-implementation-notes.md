@@ -26,7 +26,7 @@ The syscall FFI is expressible today: `epoll_create1`, `epoll_ctl`, `epoll_wait`
 are `extern:` declarations in the same shape as the `open`/`read`/`close` in
 `examples/resources.sth`. No language feature is missing for the bounded event
 loop; a fixed-size `[Conn N]` array as the connection table works with existing
-arrays + `usize`. A growable `Map<fd, Conn>` table waits for Phase 6's `alloc`
+arrays + `usize`. A growable `Map<fd, Conn>` table waits for Phase 9's `alloc`
 layer.
 
 ### Coroutines via `ucontext`
@@ -75,7 +75,7 @@ double-close — the same guarantees the spine gives everywhere.
 **M:1 (single OS thread, cooperative).** The event loop *is* the scheduler: a
 run queue of ready coroutines, a current-coroutine pointer, and a `yield` that
 enqueues the current one and dequeues the next. Fully doable as a library after
-Phase 4 (quotations, for `spawn [ body ]`) and Phase 6 (growable queues, heaps
+Phase 4 (quotations, for `spawn [ body ]`) and Phase 9 (growable queues, heaps
 for stacks). A fixed-capacity pool of fixed-stack coroutines works with what
 exists today.
 
@@ -190,7 +190,7 @@ Both are equally safe.
   concrete need. The move-based messaging model extends naturally (a network
   message is a serialized move), but the serialization, failure detection, and
   location-routing machinery is a project of its own.
-- **Worklist-based disposal for branching structures** (Phase 6, per ROADMAP).
+- **Worklist-based disposal for branching structures** (Phase 9, per ROADMAP).
   Independent of concurrency but interacts: a work-stealing scheduler's pending
   structure and a branching structure's disposal worklist are the same shape.
 

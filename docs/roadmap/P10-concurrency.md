@@ -1,6 +1,6 @@
 [← ROADMAP](./ROADMAP.md)
 
-### Phase 8 — Concurrency (library)  `[M]`
+### Phase 10 — Concurrency (library)  `[M]`
 
 Core intrinsics only: **atomics + memory ordering** and a **spawn** primitive (thin
 FFI to `pthread_create` at the hosted layer). Everything else is library:
