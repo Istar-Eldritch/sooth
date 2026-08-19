@@ -55,13 +55,17 @@ program importing what it uses.
 
 **P8.S1 — Packages, manifests, and single-mode imports.** The unit above the file, the
 manifest and its layer field, source-based dependency resolution, the layering
-dependency-direction check, and the deletion of the implicit prelude. Brief written
-(`docs/roadmap/P8/slice1-brief.md`): a manifest constrains `import:` rather than replacing
-it (only cross-package edges are checked), a manifest is optional (a bare `.sth` file with
-no manifest builds as it does today), and the prelude deletion is sequenced first since it
-has no open design question left and doesn't need the manifest to exist. Four questions
-(manifest grammar, multi-file package layout, cross-package qualifier naming, diagnostic
-wording) are left for the spec.
+dependency-direction check, and the deletion of the implicit prelude. Brief written and
+probe-verified (`docs/roadmap/P8/slice1-brief.md`): a manifest constrains `import:` rather
+than replacing it (only cross-package edges are checked), a manifest is optional (a bare
+`.sth` file with no manifest builds as it does today), and the prelude deletion is
+sequenced first, since importing core's words needs no manifest to exist. Probing found
+the mangling exemption is **load-bearing** rather than a bare-name convenience: a
+non-inline polymorphic word can call the prelude's poly `<` and cannot call an imported
+one, so deleting the prelude exposes the generic-calls-generic gap. No live corpus word
+uses that capability (every poly word over a comparison is `inline`), so the slice accepts
+the narrowing behind a located diagnostic rather than pulling a type-system fix into a
+packaging slice.
 
 **P8.S2 — The serialisable API description.** "Which words, types, and externs are public"
 is already answered by Phase 4 Slice 5's `export:` list, and answered where it had to be,

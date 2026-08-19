@@ -56,6 +56,49 @@ today.
    typed `&Path` to a single file (`driver.rs:403`). There is no existing notion of "the
    current package" or "the workspace root" for a manifest to be discovered from.
 
+## Resolved recon (probe-verified against the built compiler, 2026-08-19, `main` at
+`e43df46`; probe files built, run, and deleted, `git status` and `cargo test` clean
+afterward)
+
+The prelude-deletion half was probed before speccing, because "every file just gains
+`import:` lines" assumes the imported words behave like ordinary words, and they don't:
+`if`/`unless` are row-typed inline combinators taking quotation parameters and
+`=`/`<`/`>` are `'T: Copy Ord` inline words going through operator dispatch. Four of the
+five probes confirmed the brief; one falsified a decision.
+
+1. **An imported inline combinator splices correctly, qualified and selectively.** A
+   copy of `if`/`unless` in a second module, exported and imported, produced correct
+   branch selection through both `c::if2` and a selectively-imported bare `if2`.
+
+2. **Self-tail-call-to-loop lowering survives an imported combinator.** A `gcd`-shaped
+   `count` recursing 5,000,000 deep through an *imported* `if2` ran to completion with no
+   stack growth, matching its prelude-`if` control. This was the largest suspected risk
+   (INV-INLINE-COMBINATOR has the checker read the callee's body, and a spliced inline
+   combinator is re-scoped under the callee's module) and it is not a risk.
+
+3. **The corpus's actual shape works.** An `inline` poly word (the shape of
+   `examples/poly_if.sth`'s `mymax`, `lib/arrays.sth`'s `sort`/`bin_search`,
+   `lib/combinators.sth`'s `each`/`map`/`fold`/`filter`) calling an imported comparison
+   *and* an imported `if` monomorphized and ran correctly at both `i64` and `f64`.
+
+4. **Falsified: the prelude mangling exemption is load-bearing, not merely a bare-name
+   convenience.** A **non-inline** poly word calling the prelude's poly `<`
+   (`: mylt ( 'T: Copy Ord 'T -- bool ) < ;`) works; the identical word calling an
+   imported copy fails with `` unknown word `lt2__m1` ``. Same-module non-inline
+   poly-to-poly fails identically (`lt2__m0`), so the underlying defect is the
+   already-known generic-calls-generic gap and the exemption is what has been hiding it.
+   Deleting the prelude does not cause this bug; it exposes it.
+
+5. **Blast radius of finding 4: no live corpus word, but the next one written.** Every
+   poly word in `lib/` and `examples/` that uses a comparison or `if` is `inline`, so
+   nothing in the tree breaks. The three non-inline poly words (`poly_borrow_first`'s
+   `first`, `poly_borrow_setat`'s `setat`, and the paper-grammar `bin_search` in the
+   untracked `lib/binary_search.sth`) use no comparison that compiles today — but
+   `binary_search.sth`'s intended shape is exactly a non-inline poly word over a
+   comparison, so this gap is the first thing a real `bin_search` hits. Separately, `if`
+   in a non-inline poly body is already rejected outright by the P7.S3b-follow
+   diagnostic, independent of imports.
+
 ## Decisions (settled here, not reopened by the spec)
 
 - **A package is a directory with a manifest at its root; the manifest is a Sooth-lexed
@@ -94,10 +137,23 @@ today.
 - **`is_prelude_word_name` and `parser::prelude_words` are deleted, not deprecated.**
   Every existing `.sth` file — every example, every golden, every `lib/` file that isn't
   the new intrinsics/typed-core split itself — gains explicit `import:` lines for what it
-  uses. This is mechanical migration work, not a design question, and is scoped to this
-  slice rather than left half-done: a corpus file that still resolves `if` through the
-  deleted prelude is a build failure, and the fix is adding the import, not restoring the
-  exemption.
+  uses. A corpus file that still resolves `if` through the deleted prelude is a build
+  failure, and the fix is adding the import, not restoring the exemption.
+
+- **The migration is mechanical for the live corpus but is not purely mechanical, and the
+  spec must rule on the difference** (resolved recon, finding 4). Deleting the exemption
+  removes one capability that exists today: a *non-inline* polymorphic word may call the
+  prelude's poly comparison and may not call an imported one. No word in the tree uses
+  that capability, so nothing breaks on migration, but the spec must choose explicitly
+  between two options rather than discovering this in review: (a) declare the
+  generic-calls-generic fix a hard prerequisite of this slice, which moves work into P7
+  and grows the slice, or (b) accept the narrowing for now, with a located diagnostic and
+  a rejection test naming it, so the next author to write a non-inline poly `bin_search`
+  gets an error that explains itself instead of `` unknown word `<__m1` ``. **(b) is the
+  recommendation**: the capability has no current user, the diagnostic is small, and
+  bundling a type-system fix into a packaging slice is how a slice stops being reviewable.
+  A silent third option — leaving the exemption in place for comparisons only — is
+  declined, since it keeps the hole this slice exists to close.
 
 - **Ordering: the prelude split does not need to wait on the manifest, and shouldn't.**
   The two were flagged in `docs/roadmap/P8-packages-modules.md` as having an open
@@ -107,7 +163,8 @@ today.
   `cargo test` and diffing the whole corpus's import lines, independent of whether a
   manifest parser exists yet. Building the prelude split first gives the manifest work a
   smaller, already-cleanly-layered `lib/core.sth` to point `depends:` at instead of one
-  monolithic file.
+  monolithic file. The probes above were run specifically to test this independence claim,
+  and it survived: nothing about importing core's words needs a manifest to exist.
 
 ## Open questions for the spec
 
@@ -133,6 +190,11 @@ today.
 - **Whether `depends:` needs a version/revision field at all in this slice**, or whether
   that's cleanly deferred to `docs/dependency-management.md`'s later semver work (P8.S2)
   without leaving `depends:`'s grammar needing a breaking change to add one later.
+- **The wording of the narrowing diagnostic**, if the spec takes option (b) above: a
+  non-inline poly word calling an imported poly word needs a located error naming the
+  caller, the callee, and the reason (a polymorphic callee is not yet reachable from a
+  polymorphic body across a module boundary), not the raw `` unknown word `<__m1` ``
+  that leaks the mangled name today.
 
 ## Out of scope
 
@@ -151,10 +213,11 @@ today.
 ## Sequencing
 
 1. Delete the compiler-baked prelude (`parser::prelude_words`, both call sites, the
-   `is_prelude_word_name` exemption) and migrate every corpus file to explicit imports.
-   Split `lib/core.sth` into an intrinsics file and a typed-core file that imports it,
-   per finding 4, as part of this same pass (the split is only meaningful once the
-   consuming files already import explicitly).
+   `is_prelude_word_name` exemption) and migrate every corpus file to explicit imports,
+   adding the narrowing diagnostic and its rejection test. Split `lib/core.sth` into an
+   intrinsics file and a typed-core file that imports it, per recon finding 4, as part of
+   this same pass (the split is only meaningful once the consuming files already import
+   explicitly).
 2. Design and implement the manifest parser and the package-boundary attribution pass
    over `Closure`.
 3. Implement the dependency-direction and missing-`depends:` checks as a validation pass
@@ -169,9 +232,13 @@ example and golden program imports what it uses.
 
 ## Ready to spec?
 
-Recon is source-verified, not inferred, for both halves (prelude deletion and package
-boundary). The prelude-deletion half has no open design question left — it's sequencing
-item 1 above and can go straight to a spec. The manifest half has four real open
-questions (grammar, nesting, qualifier naming, diagnostic wording) that should be
-answered in the spec itself rather than guessed at here, since none of them changes the
-shape of *this* brief's decisions, only their concrete syntax.
+Recon is source-verified for both halves and probe-verified for the prelude-deletion
+half, which is where the one falsified decision was found (resolved recon, finding 4:
+the mangling exemption is load-bearing for non-inline poly callees, and the brief's
+original "mechanical migration, not a design question" claim was wrong as written).
+That is now a stated ruling with a recommendation, not a discovery left for review.
+
+The prelude-deletion half is ready to spec, with the one ruling above to make explicit.
+The manifest half has five open questions (grammar, nesting, qualifier naming, and the
+two diagnostics) that belong in the spec rather than guessed at here, since none of them
+changes the shape of this brief's decisions, only their concrete syntax.
