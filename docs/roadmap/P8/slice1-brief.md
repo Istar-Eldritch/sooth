@@ -8,10 +8,13 @@ prelude deletion. Those are unaffected by the design changes.
 
 What changed after this brief was written:
 
-- The phase is now three slices. **P8.S1** is everything file-level (prelude deletion, the
-  `intrinsics` module, wildcard import, re-export/hubs, the corpus migration); **P8.S2** is
-  everything manifest-level; **P8.S3** is the API description. The split is on whether a
-  manifest is required, so the corpus is migrated once.
+- The phase is now three slices, in this order: **P8.S1** is everything manifest-level
+  (packages, module names, the layer check); **P8.S2** is everything file-level (prelude
+  deletion, the `intrinsics` module, wildcard import, re-export/hubs, the corpus migration);
+  **P8.S3** is the API description. S1 lands first, reversing this brief's own original
+  sequencing, because the paper dogfood (`P8/dogfood/README.md`, finding F1) found that S2
+  has no manifest to resolve a module name against otherwise: deleting the quoted-path import
+  form removed the only spelling S2 could have migrated the corpus to first.
 - **Superseded: "the manifest does not replace `import:`, it constrains it."** A
   cross-package import names a module, so the manifest participates in resolution.
 - **Superseded: the manifest's `module:` entries carry paths.** Module names derive from
@@ -232,7 +235,7 @@ five probes confirmed the brief; one falsified a decision.
   located error naming the two packages and (for the layer case) their declared layers,
   matching this project's existing diagnostic bar.
 - **Whether `depends:` needs a version/revision field at all in this slice**, or whether
-  that's cleanly deferred to `docs/dependency-management.md`'s later semver work (P8.S2)
+  that's cleanly deferred to `docs/dependency-management.md`'s later semver work (P8.S3)
   without leaving `depends:`'s grammar needing a breaking change to add one later.
 - **The wording of the narrowing diagnostic**, if the spec takes option (b) above: a
   non-inline poly word calling an imported poly word needs a located error naming the
@@ -243,7 +246,7 @@ five probes confirmed the brief; one falsified a decision.
 ## Out of scope
 
 - Semver enforcement, the serializable API description, and `sooth publish --check`
-  stay P8.S2, per `docs/roadmap/P8-packages-modules.md`.
+  stay P8.S3, per `docs/roadmap/P8-packages-modules.md`.
 - Git-based dependency resolution (only a path-based `depends:` lands here); a git
   revision is an additive grammar extension to the same field, not a redesign.
 - Re-exports, import aliasing, wholesale unqualified import, and a `mod.sth`-style

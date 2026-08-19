@@ -29,32 +29,27 @@ What each piece is there to exercise: path-derived nested names (`text/ascii.sth
 package-private module the manifest omits, both import modes (`| * |` for leaf code,
 an explicit list where the intrinsic surface is worth reading), the layer ladder
 core -> fixed -> hosted, and a file with no ancestor manifest falling back to the
-user-level manifest.
+user-level manifest. It is written in the model's *final* shape (P8.S1's packages already
+in place), which is what surfaced F1 below: the slice that builds single-mode imports (S2)
+has no earlier stage where this tree's imports would have been spellable at all.
 
 ## Findings
 
-**F1. The corpus migration wants manifests to exist first, which inverts the slice order.**
-This is the headline, and deleting the quoted-path form turned it from a cost into a
-blocker. P8.S1 deletes the prelude and makes every file import what it uses, but P8.S1 lands
-*before* manifests (P8.S2), and with no path form left there is no spelling for those
-imports at all: nothing can say `core::bool` without a `depends:` table to resolve `core`
-against. The ~460 inline test sources are what make it bite rather than the 48 `.sth` files,
-since an inline source is written to a temp location and compiled, so it cannot carry a
-stable reference to `lib/` and cannot inherit the user-level manifest without making CI
-depend on developer config. Two ways out, and the spec has to pick one:
-
-   1. **Reorder**: manifests and module names first, prelude deletion second. The corpus
-      migrates once, to its final form. Costs the property that the import work needed no
-      new file format, and obliges the test harness to give each inline fixture a generated
-      manifest, so every inline source becomes a two-file fixture.
-   2. **Reserve `core` the way `intrinsics` is reserved**, so a compiler-known package is
-      nameable without a manifest and fixtures stay single-file. Cheap, but it re-privileges
-      the standard library, which is close to the special case this phase exists to delete.
-
-   The user-level manifest is not a third way out: a fixture inheriting a developer's global
-   config is a reproducibility hole, and the model already forbids the fallback for any file
-   with an ancestor manifest.
-   Option 1 looks right and it means the phase's slice order is currently backwards.
+**F1. The corpus migration needed manifests to exist first — ruled, not left open.** With
+the quoted-path form deleted there is no spelling for a cross-file import before a manifest
+exists: nothing can say `core::bool` without a `depends:` table to resolve `core` against.
+The ~460 inline test sources are what make it bite rather than the 48 `.sth` files, since an
+inline source is written to a temp location and compiled, so it cannot carry a stable
+reference to `lib/` and cannot inherit the user-level manifest without making CI depend on
+developer config. Two ways out were weighed: reserving `core` as a compiler-known package
+the way `intrinsics` is (cheap, but re-privileges the standard library this phase exists to
+de-privilege) lost to reordering — manifests and module names first (P8.S1), single-mode
+imports second (P8.S2), so the corpus migrates once to its final form. The phase file now
+carries that order; the cost paid for it is that the test harness must give every inline
+fixture a generated manifest, so each becomes a two-file fixture rather than one. The
+user-level manifest is not an escape from that cost: a fixture inheriting a developer's
+global config is a reproducibility hole, and the model already forbids the fallback for any
+file with an ancestor manifest.
 
 **F2. Intra-package module references need a stated base.** `core/text/ascii.sth` says
 `import: c | lt gt | cmp ;`, a sibling named without the package prefix, while the hub says
@@ -91,6 +86,12 @@ dependency-direction rule has to treat it as below every layer.
 application exposes nothing to anyone. So the manifest's required fields are `package:` and
 `layer:`, with `depends:` and `module:` both empty-by-default.
 
+**F8. Untested by this scaffold, and worth a fixture when it is built:** a hub re-exporting a
+*type* (the Elm-style whole-name-scope rule crossing two boundaries at once), two hubs
+re-exporting the same word name into one consumer, and a `depends:` cycle between packages
+(the file-level cycle checker should already catch it, but through a confusing message that
+names files rather than packages).
+
 **F9. The three-tier fallback needs a diagnostic per tier.** A file with no ancestor
 manifest that names `core::bool` can fail two different ways: no user-level manifest at
 all, or one that does not list `core`. Those are different remedies (write
@@ -98,9 +99,3 @@ all, or one that does not list `core`. Those are different remedies (write
 different messages. The implicit-anonymous-package case also has to name itself in the
 error, or the user is told a package is missing without being told why their file is not
 in one.
-
-**F8. Untested by this scaffold, and worth a fixture when it is built:** a hub re-exporting a
-*type* (the Elm-style whole-name-scope rule crossing two boundaries at once), two hubs
-re-exporting the same word name into one consumer, and a `depends:` cycle between packages
-(the file-level cycle checker should already catch it, but through a confusing message that
-names files rather than packages).

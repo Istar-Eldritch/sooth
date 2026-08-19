@@ -107,27 +107,41 @@ deliberate layer violation rejected.
 
 ## Slices
 
-**A paper dogfood of this model is in `P8/dogfood/`**, and its headline finding is that the
-slice order below is backwards. P8.S1 makes every file import what it uses, but with no
-manifests yet there is nothing for an import to name: deleting the quoted-path form removed
-the only spelling S1 could have migrated the corpus to, and the ~460 inline test sources are
-what make that bite. Either the manifest work moves first, so the corpus migrates once to
-its final form, or `core` is reserved as a compiler-known package the way `intrinsics` is,
-which re-privileges the standard library this phase exists to de-privilege. The first spec
-written for this phase has to rule, and the slice numbering below should be read as
-provisional until it does.
+**Ruled by the paper dogfood in `P8/dogfood/`: manifests land first.** Deleting the
+quoted-path form left single-mode imports with no spelling to migrate the corpus to before a
+manifest exists — nothing can say `core::bool` without a `depends:` table to resolve `core`
+against — so the reorder that dogfood finding F1 flagged as forced is now the slice order,
+not a risk to rule on later. The alternative, reserving `core` as a compiler-known package
+the way `intrinsics` is, was rejected: it re-privileges the standard library this phase
+exists to de-privilege.
 
-The split is on whether a manifest is required. Everything file-level lands together in S1,
-because all of it is one corpus-wide migration and doing it in two passes means editing the
-same ~500 sites twice with a red suite in between.
+The split is still on whether a manifest is required, it's just S1 that needs one now.
+Everything manifest-level (S1) has to exist before everything file-level (S2) can migrate
+the corpus once, to its final form, instead of twice with a red suite in between.
 
-**P8.S1 — Single-mode imports, the intrinsics module, wildcard import, and re-export.**
+**P8.S1 — Packages, manifests, path-derived module names, and the layer check.** The
+manifest and its parser, package attribution over the discovered closure, module names
+derived from paths, the public-module list, cross-package `pkg::module` resolution, the
+user-level manifest fallback (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), and the three
+checks (naming a module its package does not make public; naming a package no `depends:`
+entry lists; depending on a higher layer). Lands first because S2 has nothing to migrate the
+corpus to without it. Wants its own brief: the manifest-half recon and the open questions
+are in `docs/roadmap/P8/slice1-brief.md`.
+**Exit:** a program builds against a dependency's module named as `pkg::module`; a
+package-private module is unnameable from outside; a layer violation is a located build
+error; a manifest-less file resolves against the user-level manifest, then falls back to an
+implicit anonymous package with no dependencies.
+**Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
+rejected.
+
+**P8.S2 — Single-mode imports, the intrinsics module, wildcard import, and re-export.**
 Delete `parser::prelude_words` and its two injection sites, shrink the mangling exemption to
 `main`/`drop`, gate `BUILTIN_WORDS` visibility on an `intrinsics` import, add the `| * |`
 wildcard form and re-export through `export:`, split `lib/core.sth` into modules with a hub,
-and migrate every `.sth` file and every inline test source. `if`'s locals lose their `if--`
-prefixes: bodies are checked in their own module's scope now, so the hygiene hack the
-whole-program environment forced is gone for good.
+and migrate every `.sth` file and every inline test source to module names now that S1 gives
+them something to name. `if`'s locals lose their `if--` prefixes: bodies are checked in
+their own module's scope now, so the hygiene hack the whole-program environment forced is
+gone for good.
 Brief and probe results in `docs/roadmap/P8/slice1-brief.md`. Probing established that an
 imported inline combinator splices correctly (qualified and selective), that
 self-tail-to-loop lowering survives an imported `if` at 5M iterations, and that an inline
@@ -143,18 +157,6 @@ uses it; the corpus builds and every golden passes; a non-inline poly word calli
 imported poly word is a located error naming the caller, the callee, and the reason.
 **Dogfood:** `examples/gcd.sth` and `factorial.sth` building with explicit imports, and a
 `core` hub re-exporting a curated subset of `intrinsics`.
-
-**P8.S2 — Packages, manifests, path-derived module names, and the layer check.** The
-manifest and its parser, package attribution over the discovered closure, module names
-derived from paths, the public-module list, cross-package `pkg::module` resolution, and the
-three checks (naming a module its package does not make public; naming a package no
-`depends:` entry lists; depending on a higher layer). Wants its own brief: the manifest-half
-recon and the open questions are in `docs/roadmap/P8/slice1-brief.md`.
-**Exit:** a program builds against a dependency's module named as `pkg::module`; a
-package-private module is unnameable from outside; a layer violation is a located build
-error.
-**Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
-rejected.
 
 **P8.S3 — The serialisable API description.** "Which words, types, and externs are public"
 is answered by Phase 4 Slice 5's `export:` list plus the manifest's public-module list, and
