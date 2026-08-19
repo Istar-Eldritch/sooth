@@ -1,5 +1,12 @@
 # Phase 8 Slice 1: packages, manifests, and single-mode imports (brief)
 
+**Now covers two slices.** The work below was split after probing: **P8.S1** is the
+prelude deletion and single-mode imports (this brief's Recon findings 2-4, resolved recon,
+and Sequencing item 1, all ready to spec), and **P8.S2** is packages, manifests, and the
+layer check (Recon findings 1 and 5, the manifest decisions, every open question, and
+Sequencing items 2-3, which want their own brief before speccing). They share no file, no
+grammar, and no open question.
+
 The unit above the file. Today's import model (Phase 4 Slice 5, `docs/roadmap/P4/`) makes
 a single `.sth` file a compilation unit and nothing coarser: `import: q "path.sth"` names
 another file by a path resolved relative to the importer, the whole transitive closure is

@@ -53,21 +53,48 @@ without an `import:`, and `is_prelude_word_name` and `parser::prelude_words` are
 built on it, and the array/combinator words as consumers), with every example and golden
 program importing what it uses.
 
-**P8.S1 — Packages, manifests, and single-mode imports.** The unit above the file, the
-manifest and its layer field, source-based dependency resolution, the layering
-dependency-direction check, and the deletion of the implicit prelude. Brief written and
-probe-verified (`docs/roadmap/P8/slice1-brief.md`): a manifest constrains `import:` rather
-than replacing it (only cross-package edges are checked), a manifest is optional (a bare
-`.sth` file with no manifest builds as it does today), and the prelude deletion is
-sequenced first, since importing core's words needs no manifest to exist. Probing found
-the mangling exemption is **load-bearing** rather than a bare-name convenience: a
-non-inline polymorphic word can call the prelude's poly `<` and cannot call an imported
-one, so deleting the prelude exposes the generic-calls-generic gap. No live corpus word
-uses that capability (every poly word over a comparison is `inline`), so the slice accepts
-the narrowing behind a located diagnostic rather than pulling a type-system fix into a
-packaging slice.
+**P8.S1 — Single-mode imports: delete the implicit prelude.** Every name a file uses comes
+from an `import:`. `parser::prelude_words` and its two injection sites go, the mangling
+exemption shrinks to `main`/`drop`, `lib/core.sth` splits into the typed-core words and
+whatever the compiler genuinely provides, and every example, golden, and `lib/` file gains
+explicit imports. `if`'s locals lose their `if--` prefixes, since the hygiene problem that
+forced them is the hole this slice closes. Brief written and probe-verified
+(`docs/roadmap/P8/slice1-brief.md`): an imported inline combinator splices correctly
+(qualified and selective), self-tail-to-loop lowering survives an imported `if` at 5M
+iterations, and an inline poly word over imported comparisons monomorphizes at `i64` and
+`f64`. Probing also found the exemption is **load-bearing** rather than a bare-name
+convenience: a non-inline polymorphic word can call the prelude's poly `<` and cannot call
+an imported one, so deleting the prelude exposes the generic-calls-generic gap. No live
+corpus word is in that shape (every poly word over a comparison is `inline`), so the slice
+accepts the narrowing behind a located diagnostic rather than pulling a P7 type-system fix
+into a packaging slice.
+**Split from S2 because they share no file, no grammar, and no open question**: this slice
+is a resolution-model cleanup with a corpus-wide but mechanical diff and no design question
+left, while S2 adds a new file format and carries every remaining open question. Bundled,
+the interesting few hundred lines hide inside the import churn. It stands alone: even if
+manifests were abandoned, the resolution hole is closed and the hygiene hack is gone.
+**Exit:** no word resolves without an `import:`; `is_prelude_word_name` and
+`parser::prelude_words` are deleted; the corpus builds and every golden still passes; a
+non-inline poly word calling an imported poly word is a located error naming the caller,
+the callee, and the reason.
+**Dogfood:** `examples/gcd.sth` and `factorial.sth` building with explicit imports of the
+words they use, and `lib/core.sth`'s locals spelled plainly.
 
-**P8.S2 — The serialisable API description.** "Which words, types, and externs are public"
+**P8.S2 — Packages, manifests, and the layer check.** The unit above the file: a package is
+a directory with a manifest naming the package, its layer, and its dependencies, resolved to
+source locations rather than binary artifacts. Two new checks over the already-discovered
+file closure, attributing each file to its nearest ancestor manifest: an import edge
+crossing a package boundary requires that package in `depends:`, and a package may not
+depend on one in a higher layer. A manifest is optional, so a bare `.sth` file with no
+manifest above it builds exactly as it does today. The manifest-half decisions and the five
+open questions (manifest grammar, multi-file package layout, cross-package reference form,
+and the two diagnostics) are in `docs/roadmap/P8/slice1-brief.md` pending their own brief.
+**Exit:** a program builds from a manifest against a package dependency it names; a package
+declaring a lower layer than its dependency is a located build error.
+**Dogfood:** `lib/`'s words restructured as packages with the array/combinator words as
+consumers, and a deliberate layer violation rejected.
+
+**P8.S3 — The serialisable API description.** "Which words, types, and externs are public"
 is already answered by Phase 4 Slice 5's `export:` list, and answered where it had to be,
 since a type cannot hold an invariant while its generated setters cross the boundary
 unchecked. What is left is one thing, not two: a **serializable API description**, a
@@ -88,7 +115,7 @@ can link) is codegen work (symbol naming, calling convention, header generation)
 shares nothing with dependency resolution, so it is not bundled here; it is also the
 prerequisite for **Rust↔Sooth FFI**, which is what a self-hosted compiler module would need
 and which waits on it. **Semver enforcement itself** (the API diff and `sooth publish
---check`) is tooling on top of P8.S2's format, specified in
+--check`) is tooling on top of P8.S3's format, specified in
 `docs/dependency-management.md`. **A user-level manifest** (`$XDG_CONFIG_HOME/sooth`) is
 how the REPL eventually gets a session's imports; a REPL exemption in the compiler is not,
 since that is the special case this phase deletes. **Re-exports, aliasing an import to a
