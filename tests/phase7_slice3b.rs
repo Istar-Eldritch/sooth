@@ -496,7 +496,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     // The marker one slot down is an operand of a *binary* operator just as
     // much as the top one, and the guard must read the whole operand window
     // to say so: reading the top alone leaves this to `poly_delegate_op`,
-    // whose concrete suffix stops at the marker and reports `+` as
+    // whose concrete suffix stops at the marker and reports `add` as
     // underflowing a stack that is not actually short.
     let deep = check_err(
         ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] swap add drop ;\n\

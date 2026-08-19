@@ -292,9 +292,9 @@ const APPLY_WITH: &str =
 #[test]
 fn row_bearing_inline_quotation_grounds_and_runs() {
     // R9 context 1 (known-literal splice). The caller row `..s` is `[i64]` (the
-    // `10`), so the grounded quotation input is `[ i64 i64 ]` and `[ + ]` folds
+    // `10`), so the grounded quotation input is `[ i64 i64 ]` and `[ add ]` folds
     // the row's top with the fixed input: 10 + 5 = 15. If the row were not
-    // prepended, `[ + ]` would underflow (`+` needs 2, the sub-stack holds 1).
+    // prepended, `[ add ]` would underflow (`add` needs 2, the sub-stack holds 1).
     let src = format!("{APPLY_WITH}: main ( -- ) 10 5 ~[ add ] apply-with . ;\n");
     let (stdout, code) = run_src("row-ground-run", &src);
     assert_eq!(stdout, "15\n");

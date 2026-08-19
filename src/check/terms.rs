@@ -285,7 +285,7 @@ fn check_term(
             // builtin family and user-word lookup (a local named `call`
             // already won above). It requires a statically-known
             // quotation literal on top (D4) and splices its interned body
-            // against the live stack, so `[ 1 + ] call` checks as `1 +` (D3).
+            // against the live stack, so `[ 1 add ] call` checks as `1 add` (D3).
             if name == "call" {
                 let Some(top) = stack.pop() else {
                     return Err(underflow_error(ctx, span, "call", 1, 0));
@@ -612,7 +612,7 @@ fn check_term(
             // for the splice.
             // Slice 10c: a name can now be *both* a polymorphic library word
             // and a concrete user overload -- `lib/core.sth`'s `'T: Copy Ord`
-            // comparisons against a user's `: < ( Vec2 Vec2 -- bool )` for
+            // comparisons against a user's `: lt ( Vec2 Vec2 -- bool )` for
             // their own type, which slice 8a shipped. The library candidate's
             // `Ord` bound excludes `Vec2`, so when no polymorphic candidate
             // admits these operands the call falls through to the concrete
@@ -690,7 +690,7 @@ fn check_term(
                     // without the record `lower_call` still finds the name in
                     // its combinator env and splices the library definition,
                     // so the checker and the backend would disagree about
-                    // which `<` a `Vec2 Vec2 <` site means.
+                    // which `lt` a `Vec2 Vec2 lt` site means.
                     if poly.combinators.contains_key(name) {
                         poly.builtin_overloads.insert(span, only.symbol.clone());
                     }
@@ -718,7 +718,7 @@ fn check_term(
                 let found = stack[base + i];
                 // R8 (D4): a declared `Type::Quotation` parameter is a
                 // materialization boundary. This is the site a struct
-                // *constructor* call (`[ 1 + ] Holder`) and a generated setter
+                // *constructor* call (`[ 1 add ] Holder`) and a generated setter
                 // reach; a `Known` literal is materialized (validated here,
                 // lowered to a `(code, env)` value), a capturing one run through
                 // the R15 admission rule (a parameter is an in-frame boundary).

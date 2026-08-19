@@ -3,7 +3,7 @@
 //! declared signature.
 //!
 //! Every operand is checked against the type its consumer expects, so a
-//! `bool` where `+` wants an `i64` is a located compile error (Forth's silent
+//! `bool` where `add` wants an `i64` is a located compile error (Forth's silent
 //! coercion failure mode becomes a diagnostic here). Branch join points unify
 //! on both depth and per-slot type: the `then` and `else` arms must leave the
 //! same stack shape.
@@ -130,7 +130,7 @@ struct PolyCtx<'a> {
     env: &'a PolyEnv,
     insts: &'a mut HashMap<Span, CallInst>,
     /// Slice 8a phase 2 (R7): the call sites this walk resolved to a user
-    /// overload of a builtin-named word (`Vec2 +` -> the user `+`), span ->
+    /// overload of a builtin-named word (`Vec2 add` -> the user `add`), span ->
     /// resolved callee name, relayed onto `Module::builtin_overloads` so
     /// lowering emits an `Instr::Call` there instead of the builtin
     /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
@@ -358,7 +358,7 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
 }
 
 /// The result of unifying two `Slot`s for a homogeneous binary operator
-/// (`+ - * = < > <= >= <> mod and or xor`): the operands' common `Type` once
+/// (`add sub mul eq lt gt lte gte ne mod and or xor`): the operands' common `Type` once
 /// D8's literal coercion is applied (a `usize`/`isize` paired with a bare
 /// integer literal unifies to that size type), the X10 diagnostic's target
 /// type for a size type paired with a *computed* `i64` instead, or a plain
@@ -3360,7 +3360,7 @@ mod tests {
         // session seeds this at index 0 (`Session::new`); this bare-line
         // helper mirrors that so a `bool`-producing comparison resolves.
         // Slice 10c (R-P3-4): a session also seeds `lib/core.sth`'s words, so
-        // a line's `<`/`if` resolves to the library definition; without them a
+        // a line's `lt`/`if` resolves to the library definition; without them a
         // bare comparison is an unknown word.
         let bool_enums = [crate::ast::bool_enum_decl()];
         let prelude = crate::parser::prelude_words();
@@ -3440,7 +3440,7 @@ mod tests {
     const ON_DEF: &str = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n";
 
     /// R1/R3: an annotation that describes the body is a no-op confirmation.
-    /// (`dup 10 <` leaves the original `i64` under the `bool`, so its effect
+    /// (`dup 10 lt` leaves the original `i64` under the `bool`, so its effect
     /// is `i64 -- i64 bool`, not `i64 -- bool`.)
     #[test]
     fn check_annotation_matches_body_ok() {
@@ -3778,7 +3778,7 @@ mod tests {
     }
     #[test]
     fn check_type_propagates_through_body_expected() {
-        // `0 >` yields a bool that `if` consumes; both arms leave an i64.
+        // `0 gt` yields a bool that `if` consumes; both arms leave an i64.
         check_src(": sign ( i64 -- i64 ) 0 gt ~[ 1 ] ~[ 0 ] if ;").unwrap();
     }
     #[test]
@@ -3936,14 +3936,14 @@ mod tests {
     }
     #[test]
     fn check_equality_on_array_is_error() {
-        // X7/R13: `=` on arrays reaches the operand guard naming the type.
+        // X7/R13: `eq` on arrays reaches the operand guard naming the type.
         let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill eq ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
     #[test]
     fn check_arithmetic_on_array_is_error() {
-        // X7/R13: `+` on arrays reaches the operand guard naming the type
-        // (the diagnostic covers `=` *and* arithmetic; both are exercised).
+        // X7/R13: `add` on arrays reaches the operand guard naming the type
+        // (the diagnostic covers `eq` *and* arithmetic; both are exercised).
         let err = check_src(": w ( -- [i64 4] ) 0 4 fill 0 4 fill add ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
@@ -3978,8 +3978,8 @@ mod tests {
     }
     #[test]
     fn infer_line_carries_entry_depth() {
-        // `2 +` from a carried `i64`: the literal plus the carried slot are
-        // consumed by `+`, leaving one `i64`.
+        // `2 add` from a carried `i64`: the literal plus the carried slot are
+        // consumed by `add`, leaving one `i64`.
         assert_eq!(infer_src("2 add", &[Type::I64]).unwrap(), vec![Type::I64]);
     }
     #[test]

@@ -104,7 +104,7 @@ pub(super) fn int_types() -> Vec<Type> {
     numeric_types().into_iter().filter(|t| t.is_int()).collect()
 }
 
-/// The two float types: the domain of `/` and `max-total`.
+/// The two float types: the domain of `div` and `max-total`.
 pub(super) fn float_types() -> Vec<Type> {
     numeric_types()
         .into_iter()
@@ -163,7 +163,7 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         // layer, not an unsigned-operand variant: there is exactly one
         // primitive per comparison shape and it derives signed / unsigned /
         // float behaviour from its operand type at lowering, exactly as the
-        // rows it replaces did. `=`/`<`/... are now ordinary `lib/` words over
+        // rows it replaces did. `eq`/`lt`/... are now ordinary `lib/` words over
         // these, so the six surface names have *left* this table -- which is
         // also what lets them be `inline` (`check_inline_declaration`'s
         // builtin-name gate keys on membership here).
@@ -380,14 +380,14 @@ mod tests {
     }
     #[test]
     fn builtin_table_plus_has_a_row_per_numeric_type() {
-        // Q-A: `+` resolves by exact operand type, so the table carries one
+        // Q-A: `add` resolves by exact operand type, so the table carries one
         // homogeneous `(T T -- T)` row for every numeric type and nothing
         // else. Anchored to the literal count (12: eight fixed-width ints,
         // usize/isize, two floats) rather than `numeric_types()` itself, so
         // shrinking that function can't shrink both sides of the comparison
         // together and hide a wiring bug.
         let table = builtin_table();
-        let rows = table.get("add").expect("`+` is a builtin operator");
+        let rows = table.get("add").expect("`add` is a builtin operator");
         assert_eq!(rows.len(), 12, "12 numeric rows");
         let mut got: Vec<Type> = rows
             .iter()
@@ -395,7 +395,7 @@ mod tests {
                 assert_eq!(
                     r.inputs,
                     vec![r.outputs[0], r.outputs[0]],
-                    "a `+` row is homogeneous `(T T -- T)`"
+                    "a `add` row is homogeneous `(T T -- T)`"
                 );
                 assert_eq!(r.lower, BuiltinLower::Add);
                 r.outputs[0]
@@ -416,7 +416,7 @@ mod tests {
     }
     #[test]
     fn builtin_table_div_has_a_row_per_float_type() {
-        // `/` is float-only (D7): the integer tower divides via a separate
+        // `div` is float-only (D7): the integer tower divides via a separate
         // hand-written path this table does not cover.
         assert_homogeneous_binary_rows("div", float_types(), BuiltinLower::DivFloat);
     }
@@ -487,7 +487,7 @@ mod tests {
     fn builtin_table_comparisons_have_a_row_per_numeric_type() {
         // Slice 10c (R-P3-3): **retargeted, not deleted**. This is the only
         // thing pinning comparison coverage of the whole numeric tower, and
-        // the tower rows moved wholesale from `=`/`<`/... to the `u`-prefixed
+        // the tower rows moved wholesale from `eq`/`lt`/... to the `u`-prefixed
         // primitives. Deleting it to go green would drop the guard at exactly
         // the moment the slice puts it under strain; the surface names are now
         // `'T: Copy Ord`-polymorphic library words over these rows, whose own

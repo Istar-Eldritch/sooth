@@ -149,7 +149,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
     assert!(lines[3].contains("body leaves 2 values"));
     assert!(lines[3].contains("declares 1 outputs"));
     // The failed redefinition never committed: `sq` still resolves to the
-    // original generation (`n n *`), and the stack from the first `3 sq` is
+    // original generation (`n n mul`), and the stack from the first `3 sq` is
     // untouched, so the second `3 sq` appends its own 9.
     assert_eq!(lines[5], "stack: 9 9");
 }
@@ -1125,7 +1125,7 @@ fn redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds() {
 // ordinary env; redefining `id` as ordinary again must take gen2 (past the
 // poly entry), not reset to gen0 and collide with the first body under
 // `RTLD_GLOBAL` first-loaded-wins. Witnessed by the last call observing the
-// *new* body (`+ 2` -> 7), not the shadowed first (`+ 1` -> 6).
+// *new* body (`add 2` -> 7), not the shadowed first (`add 1` -> 6).
 #[test]
 fn ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symbol() {
     let out = run_session(&[

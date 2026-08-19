@@ -662,8 +662,8 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
 
 #[test]
 fn call_of_literal_quotation_fuses_and_runs() {
-    // Criterion 2 (R6/R13): `[ + ] call` type-checks and lowers identically to
-    // writing the body inline, so the fused `+` runs against the live stack.
+    // Criterion 2 (R6/R13): `[ add ] call` type-checks and lowers identically to
+    // writing the body inline, so the fused `add` runs against the live stack.
     let (stdout, code) = run_src(
         "call-literal",
         ": main ( -- ) 1 2 [ add ] call . ;\n",
@@ -690,7 +690,7 @@ fn quotation_forwarded_through_bind_still_calls() {
 #[test]
 fn quotation_body_reads_enclosing_local() {
     // Criterion 3b (R6 capture): the spliced body sees the current scope in
-    // lexical extent, so `[ t + ]` reads the enclosing `t` with no capture
+    // lexical extent, so `[ t add ]` reads the enclosing `t` with no capture
     // machinery.
     let (stdout, code) = run_src(
         "call-capture",
@@ -904,7 +904,7 @@ fn quotation_left_on_repl_line_is_error() {
 
 #[test]
 fn times_loop_computes_the_index_sum() {
-    // Criterion 4a (R14/R18): the headline value. `[ + ]` sums the index over
+    // Criterion 4a (R14/R18): the headline value. `[ add ]` sums the index over
     // 0..1e6, so the loop runs exactly `count` iterations passing each index.
     let (stdout, code) = run_src(
         "times-sum",
@@ -1062,7 +1062,7 @@ fn quotation_left_as_a_declared_output_is_error() {
 
 #[test]
 fn times_body_changing_the_row_is_error() {
-    // Criterion R18c (D6 row-effect equality): `[ + 1 ]` leaves the row one
+    // Criterion R18c (D6 row-effect equality): `[ add 1 ]` leaves the row one
     // deeper than it received, so the body's net effect is not identity.
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ add 1 ] times . ;\n"
@@ -1082,7 +1082,7 @@ fn times_body_changing_the_row_is_error() {
 
 #[test]
 fn times_example_matches_hand_threaded_countdown() {
-    // Criterion 7: `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) builds and
+    // Criterion 7: `examples/times.sth` (`0 1000000 [ 1 add add ] times .`) builds and
     // prints the same total as `examples/countdown.sth`'s hand-threaded
     // self-recursive sum 1..1e6, demonstrating parity between the internal loop
     // primitive and the slice 6 self-tail-call -> loop transform rather than a
@@ -1102,7 +1102,7 @@ fn times_example_matches_hand_threaded_countdown() {
 
 #[test]
 fn poly_mymax_runs_at_i64_and_f64() {
-    // T9: `mymax`'s `'T: Copy Ord` body branches on `>`, instantiated at `i64`
+    // T9: `mymax`'s `'T: Copy Ord` body branches on `gt`, instantiated at `i64`
     // and `f64` in one program. Slice 10c: `inline`, because `if` is an
     // ordinary word taking two quotation literals and a non-spliced
     // polymorphic body rejects a quotation outright; the branch runs through

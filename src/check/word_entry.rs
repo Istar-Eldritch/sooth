@@ -77,7 +77,7 @@ pub(super) fn check_word(
 /// rule that excluded it was a policy one, not a soundness one -- the splice
 /// already handles a variable-bearing body, so lifting it needed no lowering
 /// work -- and slice 10c ships its first consumers: the six comparison words
-/// (`: = inline ( 'T: Copy Ord 'T -- bool ) u= [ true ] [ false ] branch ;`),
+/// (`: eq inline ( 'T: Copy Ord 'T -- bool ) ueq [ true ] [ false ] branch ;`),
 /// which must be both `'T: Copy Ord`-polymorphic, to keep covering the whole
 /// numeric tower, and `inline`, or every comparison in the language becomes a
 /// real call with a frame. The builtin-name rule below is a *soundness* rule
@@ -629,27 +629,27 @@ mod tests {
     /// The other half of the original pair, a `~`-bearing but variable-free
     /// effect, is unaffected and stays.
     ///
-    /// The witness is a word named `=`, not a neutral name: a neutral name is
+    /// The witness is a word named `eq`, not a neutral name: a neutral name is
     /// claimed by no builtin, so it slips past the *second* (soundness)
     /// `inline` gate, `BUILTIN_TABLE.contains_key`, and would pass whether or
     /// not the real comparison words can ever be `inline`. Restoring the
     /// polymorphic gate rejects with `requires a monomorphic effect`; leaving
     /// the six rows in `BUILTIN_TABLE` under their old names rejects with
-    /// `overlaps a concrete overload of `=``.
+    /// `overlaps a concrete overload of `eq``.
     #[test]
     fn check_inline_polymorphic_signature_is_accepted() {
         check_src(": id inline ( 'T -- 'T ) ;\n: main ( -- ) ;")
             .expect("`inline` on a polymorphic signature is a splice, not a rejection");
-        // The witness is `lib/core.sth`'s own `=`, driven straight through
+        // The witness is `lib/core.sth`'s own `eq`, driven straight through
         // both gates: it cannot be *redeclared* in a test source (that is a
         // duplicate overload of the injected one), and a neutral stand-in
         // would not exercise the builtin-name gate at all.
         let eq = crate::parser::prelude_words()
             .into_iter()
             .find(|w| w.name == "eq")
-            .expect("`lib/core.sth` defines `=`");
-        assert!(eq.declares_inline, "`=` is declared `inline`");
-        let sig = eq.poly.as_ref().expect("`=` is polymorphic");
+            .expect("`lib/core.sth` defines `eq`");
+        assert!(eq.declares_inline, "`eq` is declared `inline`");
+        let sig = eq.poly.as_ref().expect("`eq` is polymorphic");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
         check_inline_declaration(&eq)
             .expect("the real witness: a builtin-operator-named polymorphic `inline` word");

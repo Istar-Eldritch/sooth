@@ -270,7 +270,7 @@ fn bound_array_passed_to_filter_is_accepted() {
     // a`), because `inline_combinator`'s body-check ran the plain `check_terms`
     // -- the root entry point, which grants nothing -- instead of
     // `check_terms_relaxed` with a `releasable_into`-computed grant. D1 is the
-    // whole fix here: `filter`'s own predicate literal `[ 4 > ]` never mentions
+    // whole fix here: `filter`'s own predicate literal `[ 4 gt ]` never mentions
     // the array, so R2's pass has nothing to do with this shape (M-D1 reds
     // this test, M-R2 does not; see Q-witness).
     let (out, code) = run_src(

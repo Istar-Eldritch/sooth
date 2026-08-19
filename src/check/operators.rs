@@ -2,12 +2,12 @@ use super::*;
 
 /// Apply an arithmetic/comparison/conversion operator if `name` is one,
 /// returning `Some(stack)`; `None` if the name is none of those (the caller
-/// then looks it up in the env). `+ - *` are homogeneous over the numeric
+/// then looks it up in the env). `add sub mul` are homogeneous over the numeric
 /// types (int or float, `bool` is never numeric): both operands must be the
-/// *same* type, producing that type; no implicit promotion (R6). `/` is
+/// *same* type, producing that type; no implicit promotion (R6). `div` is
 /// float-only: both operands must be the same float type (R7). `mod` stays
-/// integer-only: both operands must be the same integer type (R8). `= < >`
-/// generalise the same way as `+ - *` but always produce `bool` (R9). A
+/// integer-only: both operands must be the same integer type (R8). `eq lt gt`
+/// generalise the same way as `add sub mul` but always produce `bool` (R9). A
 /// conversion word is `>` followed by a known numeric type name
 /// (`>i8`..`>u64`, `>f32`, `>f64`): pop one numeric value, push the named
 /// target (R10). `and`/`or`/`xor` are homogeneous over the integer types and
@@ -17,7 +17,7 @@ use super::*;
 /// in, same type out (int stays bitwise complement, `bool` is logical
 /// negation; the difference is only in how `lower_call` codegens it).
 /// `shl`/`shr` take an integer value and always an `i64` shift count,
-/// producing the value's type. `<= >= <>` generalise the same way as `= < >`:
+/// producing the value's type. `lte gte ne` generalise the same way as `eq lt gt`:
 /// numeric-only (never `bool`), same type, producing `bool`. `.` is
 /// type-directed over any primitive printable scalar (every integer width or
 /// either float width): pops one, produces nothing; the concrete type picks
@@ -178,7 +178,7 @@ pub(super) fn check_operator(
     // inputs match the operands exactly beats the numeric coercion fallback
     // below, so a call the builtin already answers is untouched (corpus
     // byte-for-byte, since no corpus word overloads a builtin name) while a
-    // `Vec2 +` site is redirected to the user word. Checked only on a
+    // `Vec2 add` site is redirected to the user word. Checked only on a
     // builtin-row exact miss. Both callers pass their candidate set, so a
     // poly body's delegated operator resolves an overload the same way a
     // monomorphic call site does.
@@ -295,7 +295,7 @@ pub(super) fn check_operator(
         // `usize`/`isize`, D7). A float pair is rejected by name (X9),
         // directing to `max-total` (R13) rather than pretending IEEE `>` is
         // total (D6); the pair must still agree on one concrete type exactly
-        // like `+`/`>`.
+        // like `add`/`gt`.
         "max" => {
             let n = stack.len();
             if n < 2 {
@@ -349,7 +349,7 @@ pub(super) fn check_operator(
     Ok(OpDispatch::Builtin(std::mem::take(stack)))
 }
 
-/// Both-operand type mismatch for a homogeneous operator (`+ - * = < >`):
+/// Both-operand type mismatch for a homogeneous operator (`add sub mul eq lt gt`):
 /// mixed int/float, mixed integer widths/signs, mixed float widths, or a
 /// `bool` operand, name both operand types (X1, X2).
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
@@ -365,7 +365,7 @@ fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
     }
 }
 
-/// `/` applied to a non-float or mixed-float-type pair (X3): `/` is
+/// `div` applied to a non-float or mixed-float-type pair (X3): `div` is
 /// float-only, integer division is unsupported.
 fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
@@ -559,6 +559,12 @@ mod tests {
     }
     #[test]
     fn check_add_word_dispatches_on_operand_type() {
+        // The renamed `add` reaches the arithmetic dispatch at all, and its
+        // mismatch diagnostic names the new spelling. It does *not* pin the
+        // `BUILTIN_TABLE` rows: a table restricted to `i64` still passes here,
+        // because the `"add" | "sub" | "mul"` coercion arm below answers a
+        // homogeneous `f64` pair identically. The row set is
+        // `builtin_table_plus_has_a_row_per_numeric_type`'s subject.
         check_src(": w ( -- i64 ) 1 2 add ;").unwrap();
         check_src(": w ( -- f64 ) 1.0 2.0 add ;").unwrap();
         let err = check_src(": w ( -- i64 ) 1 2.0 add ;").unwrap_err();
@@ -567,6 +573,22 @@ mod tests {
             err.contains("`i64`") && err.contains("`f64`"),
             "unexpected message: {err}"
         );
+    }
+    /// A parse-then-check path (`check_src`) skips `resolve_modules`, so its
+    /// decls stay bare while `scoped_operator_overloads` keys on the mangled
+    /// spelling. Without the bare-key fallback the overload is absent from the
+    /// candidate set entirely, and every `check_src` test involving one (e.g.
+    /// `overload_missing_at_call_site_is_error`) quietly stops testing its own
+    /// premise: it still gets the builtin's diagnostic, just for the wrong
+    /// reason. This is the assertion that fails instead.
+    #[test]
+    fn check_operator_overload_is_visible_without_the_mangling_pass() {
+        check_src(
+            "type: Vec2 x i64 y i64 ;\n\
+             : add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+             : main ( -- ) 1 2 Vec2 3 4 Vec2 add drop ;\n",
+        )
+        .expect("the `Vec2` pair dispatches to the user overload");
     }
     #[test]
     fn check_declared_output_type_mismatch_is_error() {
@@ -587,7 +609,7 @@ mod tests {
     }
     #[test]
     fn check_arith_mixed_width_is_error() {
-        // An `i32` and an `i64` fed to `+` names both differing types, via
+        // An `i32` and an `i64` fed to `add` names both differing types, via
         // the operand-pair-mismatch diagnostic specifically (not just any error
         // that happens to mention both type names).
         let src = ": f ( -- i32 ) 1 >i32 5 add ;";
@@ -601,8 +623,8 @@ mod tests {
     }
     #[test]
     fn check_cmp_mixed_sign_is_error() {
-        // `u8` and `i8` fed to `<` names both differing operand types. Slice
-        // 10c: `<` is a `'T: Copy Ord` library word now, so the rejection is
+        // `u8` and `i8` fed to `lt` names both differing operand types. Slice
+        // 10c: `lt` is a `'T: Copy Ord` library word now, so the rejection is
         // the variable-conflict one rather than the builtin operand-pair one;
         // both operand types are still named.
         let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
@@ -629,7 +651,7 @@ mod tests {
     #[test]
     fn check_cmp_mixed_float_width_is_error() {
         // X2: mixed float-width comparison names both operand types (slice
-        // 10c: through the library `<`'s variable conflict, see
+        // 10c: through the library `lt`'s variable conflict, see
         // `check_cmp_mixed_sign_is_error`).
         let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
         let err = check_src(src).unwrap_err();
@@ -768,7 +790,7 @@ mod tests {
     fn check_cmp_ne_mixed_type_is_error() {
         // Slice 10c: D8's literal coercion covers the two size types only, so
         // a fresh `2` beside an `i32` is still a mismatch; the rejection is
-        // now the library `<>`'s variable conflict.
+        // now the library `ne`'s variable conflict.
         let err = check_src(": w ( -- bool ) 1 >i32 2 ne ;").unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
@@ -816,7 +838,7 @@ mod tests {
     }
     #[test]
     fn check_usize_computed_value_without_conversion_is_error() {
-        // X10: `1 1 +` is a *computed* i64 (no constant folding), so mixing
+        // X10: `1 1 add` is a *computed* i64 (no constant folding), so mixing
         // it with a `usize` still needs an explicit `>usize`.
         let src = ": w ( -- usize ) 3 >usize 1 1 add add ;";
         let err = check_src(src).unwrap_err();

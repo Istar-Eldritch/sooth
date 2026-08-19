@@ -922,13 +922,14 @@ pub(super) fn is_name_visible_to_module(
 
 /// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
 /// module. `None` means "module scoping does not apply -- use the flat
-/// `env.get(name)`": the REPL path (`ctx.modules()` is `None`) and a
-/// single-module build, where `resolve_modules` leaves an operator decl bare
-/// (`+`, not `+__m0`) so the flat lookup already finds the own overload. In a
-/// multi-module build every operator decl is mangled per module, so a bare
-/// lookup of `+` is `None`; assemble the caller's own overload (under
-/// `mangle(name, M)`) plus one it selectively imported, membership decided by
-/// `is_name_visible_to_module` (R1), never re-derived.
+/// `env.get(name)`": only the REPL path, where `ctx.modules()` is `None`.
+/// Every operator decl is mangled per module, so a bare lookup of `add` is
+/// `None`; assemble the caller's own overload (under `mangle(name, M)`) plus
+/// one it selectively imported, membership decided by
+/// `is_name_visible_to_module` (R1), never re-derived. This holds for a
+/// single-module build too: its lone decl is `add__m0`, and routing it through
+/// the same lookup is what lets `resolve_modules` mangle it rather than leave
+/// it owning the bare (possibly libc) symbol.
 pub(super) fn scoped_operator_overloads(
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -943,9 +944,6 @@ pub(super) fn scoped_operator_overloads(
         return None;
     }
     let modules = ctx.modules()?;
-    if modules.len() < 2 {
-        return None;
-    }
     let caller = ctx.module();
     let mut defining = vec![caller];
     if let Some(&k) = modules[caller as usize].selective.get(name) {
@@ -954,7 +952,14 @@ pub(super) fn scoped_operator_overloads(
     let mut out: Vec<Overload> = Vec::new();
     for d in defining {
         if is_name_visible_to_module(modules, caller, d, name) {
-            if let Some(cands) = env.get(&crate::resolve::mangle(name, d)) {
+            // A parse-then-check path (`check_src` and its kin) skips
+            // `resolve_modules` entirely, so its decls are still bare. Such a
+            // closure is always one module, where the bare and mangled
+            // spellings can only ever name that same module's decl, so reading
+            // both widens the candidate set by nothing. A >=2-module closure is
+            // mangled unconditionally, so no bare key exists there to find.
+            let mangled = crate::resolve::mangle(name, d);
+            if let Some(cands) = env.get(&mangled).or_else(|| env.get(name)) {
                 out.extend(cands.iter().cloned());
             }
         }
@@ -1505,7 +1510,7 @@ mod tests {
         // FIX 2 (verified, no row): the only `check_operator` op that would
         // accept a `Cstr` operand if its guard were removed is `.` (print, whose
         // printable set includes `Str`/`Cstr`), and it already has the `.` row.
-        // Every comparison (`=`/`<`/`>`/...), like every arithmetic/bitwise/
+        // Every comparison (`eq`/`lt`/`gt`/...), like every arithmetic/bitwise/
         // shift op, requires `is_numeric`/`is_int`/`is_float` and rejects a
         // `cstr` outright, so there is no silent-accept comparison path to row.
         struct Row {

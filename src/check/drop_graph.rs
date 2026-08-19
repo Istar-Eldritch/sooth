@@ -389,10 +389,10 @@ pub(super) fn check_tail_call_cycles(
     //
     // Slice 8a generalizes that to every builtin name, for the same reason
     // `drop` needed it: this pass runs before any body is checked, so it has
-    // only names, and a tail-position `<` is far more often the builtin on two
-    // scalars than a call to a `Vec2 <` overload that happens to share the
+    // only names, and a tail-position `lt` is far more often the builtin on two
+    // scalars than a call to a `Vec2 lt` overload that happens to share the
     // name. Crediting it as an edge rejects valid programs outright -- a word
-    // ending in `<` beside any `<` overload was reported as `mutual tail
+    // ending in `lt` beside any `lt` overload was reported as `mutual tail
     // recursion`. The cost is that a real mutual cycle between two
     // builtin-named overloads is no longer rejected here; it compiles as
     // ordinary mutual recursion (correct, but without the tier-1 loop shape,
@@ -1044,7 +1044,7 @@ mod tests {
     }
     #[test]
     fn tail_position_trailing_arithmetic_is_not_tail() {
-        // `rec *`: the final term is `*`, so the self-call is not in tail
+        // `rec mul`: the final term is `mul`, so the self-call is not in tail
         // position (classic non-tail recursion).
         let w = first_word(": rec ( i64 -- i64 ) rec mul ;");
         assert_eq!(
@@ -1075,7 +1075,7 @@ mod tests {
     fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
         // Slice 8a made every builtin name overloadable, so a builtin-named
         // word ending in that same name is resolving against the builtin
-        // table, not recursing: `<` here compares the two extracted `i64`s.
+        // table, not recursing: `lt` here compares the two extracted `i64`s.
         // `tail_position_calls` still reports the name (it is syntactic);
         // only the self-call conclusion changes.
         let w = first_word(
@@ -1253,7 +1253,7 @@ mod tests {
         // here or not at all (the `collect_drop_targets` precedent).
         //
         // Both words end in their own builtin name, so a walk with no refusal
-        // reports a self-tail. `<` resolves against the builtin table, and
+        // reports a self-tail. `lt` resolves against the builtin table, and
         // `branch` is the narrowing that made this live: it is the one builtin
         // sanctioned to take quotation operands (R-P3-1a), so it is also the
         // one that can reach the env combinator lookup a builtin name used to
@@ -1266,7 +1266,7 @@ mod tests {
         ] {
             let words = words_of(src);
             // The word under test is the source's own, at index 0: `words_of`
-            // appends the `lib/core.sth` prelude, which now defines `<` too,
+            // appends the `lib/core.sth` prelude, which now defines `lt` too,
             // so both `last()` and a name lookup can find the wrong one.
             let word = words.first().expect("the builtin-named word");
             let WordBody::Terms { terms } = &word.body else {
@@ -1365,7 +1365,7 @@ mod tests {
     }
     #[test]
     fn check_non_tail_mutual_recursion_is_ok() {
-        // Both words call each other only in non-tail position (`x 1 +`), so no
+        // Both words call each other only in non-tail position (`x 1 add`), so no
         // tail-call edge exists and X1 must not fire (R4 no-false-positive).
         check_src(
             ": a ( i64 -- i64 ) dup 0 gt ~[ b 1 add ] ~[ drop 0 ] if ; \

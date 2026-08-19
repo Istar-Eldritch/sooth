@@ -406,7 +406,7 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 
 #[test]
 fn times_sums_the_index_over_five_iterations() {
-    // The headline value: `[ + ]` adds each 0-based index into the row seed,
+    // The headline value: `[ add ]` adds each 0-based index into the row seed,
     // so 0+1+2+3+4 = 10 -- the library `times` hands the body the same index
     // sequence the intrinsic did.
     let src = format!(

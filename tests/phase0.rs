@@ -185,7 +185,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
 
 #[test]
 fn mixed_width_arithmetic_reports_both_types() {
-    // X1: an `i32` and an `i64` fed to `+` names both differing types, via the
+    // X1: an `i32` and an `i64` fed to `add` names both differing types, via the
     // operand-pair-mismatch diagnostic specifically.
     let src = ": f ( -- i32 ) 1 >i32 5 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
@@ -202,8 +202,8 @@ fn mixed_width_arithmetic_reports_both_types() {
 
 #[test]
 fn mixed_sign_comparison_reports_both_types() {
-    // X2: `u8` and `i8` fed to `<` names both differing operand types. Slice
-    // 10c: `<` is a `'T: Copy Ord` library word now, so the rejection is its
+    // X2: `u8` and `i8` fed to `lt` names both differing operand types. Slice
+    // 10c: `lt` is a `'T: Copy Ord` library word now, so the rejection is its
     // variable conflict rather than the retired builtin row's operand-pair
     // message; both operand types are still named.
     let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
@@ -367,7 +367,7 @@ fn mean_dogfood_compiles_and_runs() {
 
 #[test]
 fn float_arithmetic_runs_on_both_widths_end_to_end() {
-    // S1/S3: `+ - *` run correctly on `f64` and on `f32` (converted back to
+    // S1/S3: `add sub mul` run correctly on `f64` and on `f32` (converted back to
     // `f64` for `.`, since `.` prints an `f32` by widening to `f64`).
     let src = ": main ( -- )\n  1.0 2.0 add .\n  5.0 2.0 sub .\n  3.0 4.0 mul .\n  \
 1.5 >f32 2.5 >f32 add >f64 . ;\n";
@@ -385,10 +385,10 @@ fn float_arithmetic_runs_on_both_widths_end_to_end() {
 
 #[test]
 fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
-    // S3: `1.0 0.0 /` is inf, `0.0 0.0 /` is NaN, with no trap, and NaN is
+    // S3: `1.0 0.0 div` is inf, `0.0 0.0 div` is NaN, with no trap, and NaN is
     // detectable via `x = x` (false only for NaN, D4). `fdiv` runs the
     // division through a real call boundary so QBE cannot constant-fold the
-    // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
+    // literal `0.0 0.0 div` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
 0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if . ;\n";
@@ -415,8 +415,8 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
 #[test]
 fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // S4: an ordered comparison gives the expected boolean, and every
-    // comparison involving a NaN produced by `0.0 0.0 /` is false, including
-    // `<` and `>` against a NaN (not just `=`, RISK 1).
+    // comparison involving a NaN produced by `0.0 0.0 div` is false, including
+    // `lt` and `gt` against a NaN (not just `eq`, RISK 1).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  1.0 2.0 lt ~[ 1 ] ~[ 0 ] if .\n  2.0 1.0 lt ~[ 1 ] ~[ 0 ] if .\n  \
 0.0 0.0 fdiv dup lt ~[ 1 ] ~[ 0 ] if .\n  0.0 0.0 fdiv dup gt ~[ 1 ] ~[ 0 ] if . ;\n";
@@ -494,7 +494,7 @@ fn float_to_unsigned_int_conversions_run_end_to_end() {
 
 #[test]
 fn mixed_int_float_arithmetic_reports_diagnostic() {
-    // X1 (headline negative, S8): `+` fed an `i64` and an `f64` names both
+    // X1 (headline negative, S8): `add` fed an `i64` and an `f64` names both
     // differing types via the operand-pair-mismatch diagnostic.
     let src = ": f ( -- f64 ) 1 3.0 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
@@ -511,8 +511,8 @@ fn mixed_int_float_arithmetic_reports_diagnostic() {
 
 #[test]
 fn mixed_float_width_comparison_reports_diagnostic() {
-    // X2: `f32` and `f64` fed to `<` names both differing operand types
-    // (slice 10c: through the library `<`'s variable conflict, see
+    // X2: `f32` and `f64` fed to `lt` names both differing operand types
+    // (slice 10c: through the library `lt`'s variable conflict, see
     // `mixed_sign_comparison_reports_both_types`).
     let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
@@ -755,7 +755,7 @@ fn negative_shift_count_masks_to_type_width() {
     assert_eq!(code, 0);
 }
 
-// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `<= >= <>`
+// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `lte gte ne`
 // comparison completion: diagnostics + goldens.
 
 #[test]
@@ -821,8 +821,8 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
 #[test]
 fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // The same bit pattern (200) compares differently as `i8` (-56, negative)
-    // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
-    // `<>` stays true either way (not-equal is sign-agnostic like `=`).
+    // vs `u8` (200, positive) against 5: `lte`/`gte` flip with the sign, while
+    // `ne` stays true either way (not-equal is sign-agnostic like `eq`).
     let src = ": main ( -- )\n  \
   200 >i8 5 >i8 lte ~[ 1 ] ~[ 0 ] if .\n  \
   200 >u8 5 >u8 lte ~[ 1 ] ~[ 0 ] if .\n  \
@@ -844,10 +844,10 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
 
 #[test]
 fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
-    // A real NaN (`0.0 0.0 /`, routed through a call so it isn't
+    // A real NaN (`0.0 0.0 div`, routed through a call so it isn't
     // constant-folded away) must report false for the ordered comparisons
-    // `<=`/`>=`/`=`, and true for `<>` (RISK 1): `<>` is the one comparison
-    // where "NaN involved" flips the answer relative to `=`.
+    // `lte`/`gte`/`eq`, and true for `ne` (RISK 1): `ne` is the one comparison
+    // where "NaN involved" flips the answer relative to `eq`.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  \
   0.0 0.0 fdiv dup lte ~[ 1 ] ~[ 0 ] if .\n  \
@@ -1788,8 +1788,8 @@ fn vm_dispatch_loop_runs_in_constant_stack() {
 
 #[test]
 fn non_tail_factorial_still_a_real_call_native() {
-    // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
-    // *`) has a self-call followed by `*`, so it is deliberately not in tail
+    // Criterion 5: the existing `examples/factorial.sth` (`dup 1 sub factorial
+    // mul`) has a self-call followed by `mul`, so it is deliberately not in tail
     // position and stays a real, un-eliminated `Call` (R10); it still
     // computes correctly at small N. The over-eager-miscompile boundary
     // (self-call inside a non-terminal `if`) is covered by the
@@ -3533,16 +3533,17 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     // Regression: the QBE backend's symbol sanitizer (`qbe_name`) used to
     // replace every character outside `[A-Za-z0-9_.]` with a bare `_`, so
     // two distinct word names built entirely of such characters could
-    // collapse onto the identical symbol. `+` and `-` are both ordinary `:`
-    // definitions, overloading the builtin operators on a struct type (so
-    // R1's builtin-collision check, slice 8a, does not itself reject them --
-    // the point here is purely the symbol sanitizer) -- and both used to
-    // sanitize to `_`, failing at the assembler with `symbol `_' is already
-    // defined` well before either word could ever be called.
-    let src = "type: Vec2 x i64 y i64 ;\n\
-: add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: sub ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: main ( -- ) ;\n";
+    // collapse onto the identical symbol, failing at the assembler with
+    // `symbol `_' is already defined` well before either word could be called.
+    //
+    // The fixture must stay *symbolic*: with the operators-as-words rename
+    // `+`/`-` are no longer builtin names but ordinary user words, which is
+    // exactly what keeps them a valid subject here. Migrating them to
+    // `add`/`sub` made this a placebo -- neither name contains a character
+    // `qbe_name` touches, so no sanitizer behaviour was reachable at all.
+    let src = ": + ( i64 i64 -- i64 ) drop ;\n\
+: - ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) 1 2 + . 3 4 - . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-qbe-name-injective-{}.sth",
         std::process::id()
@@ -3550,10 +3551,24 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let built = driver::build(&path);
     std::fs::remove_file(&path).ok();
+    let binary = built.expect("two distinctly-sanitized word names build cleanly");
 
+    let nm = std::process::Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_file(&binary).ok();
+    let symbols = String::from_utf8_lossy(&nm.stdout);
+    let names: Vec<&str> = symbols
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .collect();
+    // The injectivity itself, not merely "it linked": `+` is codepoint 0x2b and
+    // `-` is 0x2d, so the two own visibly different symbols. Collapsing both to
+    // `_` (the old scheme) satisfies neither.
     assert!(
-        built.is_ok(),
-        "two colliding-under-the-old-scheme word names should build cleanly: {built:?}"
+        names.contains(&".2b.__m0") && names.contains(&".2d.__m0"),
+        "each symbolic word owns its own escaped symbol; nm found:\n{symbols}"
     );
 }
 
@@ -3579,9 +3594,9 @@ fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
 
 #[test]
 fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
-    // `foo` ends in the builtin `<` on two `i64`s. The tail-call cycle pass
+    // `foo` ends in the builtin `lt` on two `i64`s. The tail-call cycle pass
     // runs before any body is checked, so it saw only the name and credited
-    // an edge `foo -> <` to the `Vec2` overload, closing a cycle with that
+    // an edge `foo -> lt` to the `Vec2` overload, closing a cycle with that
     // overload's tail call to `foo` and rejecting this valid program as
     // `mutual tail recursion`.
     let src = "type: Vec2 x i64 y i64 ;\n\
@@ -3808,7 +3823,7 @@ fn a_call_matching_no_overload_names_the_candidates() {
 #[test]
 fn overload_vec2_plus_dispatches_to_user_word() {
     // `Module::builtin_overloads` records this call site's resolution to the
-    // user `+` overload, but before the fix `lower_call`'s name-directed
+    // user `add` overload, but before the fix `lower_call`'s name-directed
     // `"+" | "-" | ...` arm never consulted it, so it always emitted
     // `Instr::Bin(Add)` on the two `Vec2` struct pointers (an address add),
     // producing a garbage pointer that segfaulted on the following field
@@ -3824,7 +3839,7 @@ fn overload_vec2_plus_dispatches_to_user_word() {
 
 #[test]
 fn overload_vec2_minus_dispatches_to_user_word() {
-    // Same bug, `-`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
+    // Same bug, `sub`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
     // subtracts addresses rather than fields, yielding a bogus pointer whose
     // field reads then segfault.
     let src = "type: Vec2 x i64 y i64 ;\n\
@@ -3837,7 +3852,7 @@ fn overload_vec2_minus_dispatches_to_user_word() {
 
 #[test]
 fn overload_vec2_lt_dispatches_to_user_word() {
-    // Same bug, `<`: unfixed, `Instr::Cmp(Lt)` compares the two struct
+    // Same bug, `lt`: unfixed, `Instr::Cmp(Lt)` compares the two struct
     // pointers' addresses rather than dispatching to the user overload, so
     // the printed boolean tracks allocation order, not the operands' values.
     // Negative coordinates whose semantic sum is negative (so the correct
@@ -3853,8 +3868,8 @@ fn overload_vec2_lt_dispatches_to_user_word() {
 
 #[test]
 fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
-    // The tail term `<` shares the enclosing word's name but resolves to the
-    // *builtin* `<` on two `i64` fields, not to a recursive call. Before the
+    // The tail term `lt` shares the enclosing word's name but resolves to the
+    // *builtin* `lt` on two `i64` fields, not to a recursive call. Before the
     // fix `has_self_tail_call` matched on the bare name, so the word was
     // treated as self-tail-recursive: lowering opened loop machinery, the
     // back-edge pushed the two `i64`s as phi operands for a header expecting
@@ -3884,9 +3899,9 @@ fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
 #[test]
 fn overload_from_poly_body_dispatches_to_user_word() {
     // Slice 8a fix 2: a genuinely polymorphic word (`pair-sum`, generic in
-    // `'T` for an unrelated passthrough slot) whose body calls `+` on two
+    // `'T` for an unrelated passthrough slot) whose body calls `add` on two
     // *concretely*-typed `Vec2` operands from its own signature. Before the
-    // fix, `poly_call_term`'s env-based dispatch intercepted `+` by name
+    // fix, `poly_call_term`'s env-based dispatch intercepted `add` by name
     // alone and never recorded the call site, so lowering fell through to
     // the builtin `Instr::Bin(Add)` arm on the two struct pointers and
     // segfaulted, identically to the monomorphic bug fix 1 addresses.
@@ -3903,11 +3918,11 @@ fn overload_from_poly_body_dispatches_to_user_word() {
 fn overload_exact_type_beats_numeric_coercion_at_the_call_site() {
     // R2: the resolver runs an exact-input-type pass across every candidate
     // (builtin rows and user overloads) before numeric coercion ever runs.
-    // `+ ( usize i64 -- usize )` is a legal overload (its mixed input types
-    // match no homogeneous builtin row, R1), and `5 >usize 3 +` presents
+    // `add ( usize i64 -- usize )` is a legal overload (its mixed input types
+    // match no homogeneous builtin row, R1), and `5 >usize 3 add` presents
     // exactly those operand types (a `usize` and an unconverted `i64`
     // literal) -- without this overload, that same call site would coerce
-    // the literal into the builtin homogeneous `usize +` (`unify_pair`'s
+    // the literal into the builtin homogeneous `usize add` (`unify_pair`'s
     // literal-coercion arm) and print `8`. The overload must win instead:
     // if a later addition ever let coercion run first, or ran it whenever an
     // exact candidate merely *exists* without checking the operands first,

@@ -4,7 +4,7 @@
 //! After this slice the compiler knows three primitives -- `branch` (a
 //! conditional jump on a 32-bit flag taking two quotations), `tag` (a scalar
 //! enum's discriminant as that flag) and the six comparison primitives that
-//! produce it -- and `bool`, `if`, `unless` and `=`/`<`/`>`/`<=`/`>=`/`<>` are
+//! produce it -- and `bool`, `if`, `unless` and `eq`/`lt`/`gt`/`lte`/`gte`/`ne` are
 //! ordinary words in `lib/core.sth`. `TermKind::If` and the `if`/`else`/`end`
 //! grammar are gone.
 
@@ -343,8 +343,8 @@ fn check_ueq_family_lowers_to_cmpop() {
     }
 }
 
-/// Part 3: the canonical `a b = if ... ...` pattern costs nothing. The library
-/// `=` is spliced, so its call site mints no symbol and emits no `Instr::Call`;
+/// Part 3: the canonical `a b eq if ... ...` pattern costs nothing. The library
+/// `eq` is spliced, so its call site mints no symbol and emits no `Instr::Call`;
 /// the branch-and-construct diamond it adds in IR is what QBE folds away.
 ///
 /// Measured mutation: drop `inline` from a comparison word and the program
@@ -413,22 +413,22 @@ fn word_w_assembly(src: &str) -> String {
 }
 
 /// Part 3, at the machine-code level. The IR-level test above pins that the
-/// library `=`/`if` mint no call and add one `Cmp`; this pins the stronger
+/// library `eq`/`if` mint no call and add one `Cmp`; this pins the stronger
 /// claim the spec's R-P3-3a actually makes: the library form costs *nothing*
-/// over the raw primitives. `= [ 1 ] [ 2 ] if` lowers to two branch-and-
-/// construct diamonds in QBE IL (one for `=`'s `bool`, one for `if`); the raw
-/// primitive `u= [ 1 ] [ 2 ] branch` lowers to one. QBE folds both to the same
+/// over the raw primitives. `eq [ 1 ] [ 2 ] if` lowers to two branch-and-
+/// construct diamonds in QBE IL (one for `eq`'s `bool`, one for `if`); the raw
+/// primitive `ueq [ 1 ] [ 2 ] branch` lowers to one. QBE folds both to the same
 /// branchless machine code, so the abstraction is free.
 ///
 /// This is a *relative* equivalence through one QBE on one host, not a pinned
 /// absolute assembly string: the rest of the suite pins portable QBE IL for a
 /// reason, and an x86 golden would rot on a different target or QBE version.
-/// The primitive `u= ... branch` form is exactly the post-migration lowering of
+/// The primitive `ueq ... branch` form is exactly the post-migration lowering of
 /// the pre-migration `= if 1 else 2 end`; that the two agree was cross-checked
 /// out of band against the compiler rebuilt at the pre-P3 checkpoint (builtin
-/// `=` + `TermKind::If`), whose `w` was the same `cmov`.
+/// `eq` + `TermKind::If`), whose `w` was the same `cmov`.
 ///
-/// Mutation: if the library `if`/`=` stop splicing (a real `call`, an
+/// Mutation: if the library `if`/`eq` stop splicing (a real `call`, an
 /// unfoldable extra `bool` materialisation, a lost `inline`) the two blocks
 /// diverge or the build breaks.
 #[test]

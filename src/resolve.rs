@@ -332,11 +332,10 @@ impl NameTables {
         // mangling it here would force *every* bare use inside the declaring
         // module onto that overload's declared signature, including ones
         // whose operands plainly mean the builtin (the overload's own body
-        // summing two `i64` fields with `+`, say). Left bare, `check_operator`
+        // summing two `i64` fields with `add`, say). Left bare, `check_operator`
         // still runs its own per-call-site, operand-type-directed dispatch
-        // between the builtin and the overload, exactly as it does in a
-        // single-module build (where this pass is a no-op and the name is
-        // never touched at all).
+        // between the builtin and the overload, reaching the decl through
+        // `scoped_operator_overloads`' mangled-key lookup rather than by name.
         // Review fix: as in the qualified branch above, `suffix` non-empty
         // no longer means "skip -- already a destructure/eliminator"; the
         // type branch's own early `return` already owns that case.
@@ -364,7 +363,7 @@ impl NameTables {
         // same reason the own-module branch above does: mangling it would force
         // *every* bare use in the importing module onto the imported overload's
         // signature, including ones plainly meant for the builtin (a plain
-        // `1 2 +` in a module that selectively imports `Vec2 +`). Left bare,
+        // `1 2 add` in a module that selectively imports `Vec2 add`). Left bare,
         // `scoped_operator_overloads` (R12, `check/word_families.rs`) assembles
         // the imported overload as a candidate alongside the builtin and any own
         // overload, so `check_operator`'s per-call-site operand-type dispatch
@@ -455,22 +454,16 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     for e in &mut module.enums {
         e.name = mangle(&e.name, e.module);
     }
-    // A forced single-module closure (the native build path's hijack fix) has
-    // no qualified calls, so an operator-named overload is only ever reached by
-    // a bare call, which the rewrite above deliberately left unmangled for
-    // `check_operator`'s operand-type dispatch (over the candidate set keyed by
-    // the bare name). Its decl must therefore stay bare too, or that lookup
-    // would miss it and fall through to the builtin, rejecting struct operands.
-    // A genuine multi-module closure keeps mangling operator decls: a qualified
-    // `v::add` *is* rewritten to `add__m1` (a cross-module use names one module's
-    // overload directly), so the decl it targets must carry the same mangled
-    // name. An operator symbol never collides with a libc name (`qbe_name`
-    // escapes `+` to `.2b.`), so leaving it bare here reintroduces no hijack.
-    let single = module.modules.len() < 2;
+    // An operator decl is mangled like any other, in a single-module closure as
+    // much as a multi-module one. The bare *call* the rewrite above leaves
+    // unmangled still finds it: `scoped_operator_overloads` assembles the
+    // caller-visible candidates under `mangle(name, m)` rather than the bare
+    // name, so `check_operator`'s operand-type dispatch sees the overload
+    // without the decl having to own the bare symbol. Owning it is not
+    // harmless: the operators-as-words rename made these names alphabetic, and
+    // a bare `div` decl is a strong definition of libc's `div` in the
+    // executable, interposing it for every shared library linked in.
     for w in &mut module.words {
-        if single && is_operator_dispatch_name(&w.name) {
-            continue;
-        }
         w.name = mangle(&w.name, w.module);
     }
     for x in &mut module.externs {
@@ -1010,6 +1003,41 @@ mod tests {
             names.contains(&"P?__m0") && names.contains(&"E>__m0"),
             "both declarations mangle as ordinary words, matching their call \
              sites: {names:?}"
+        );
+    }
+
+    /// An operator-named decl carries no exemption from mangling. It used to,
+    /// in a single-module closure, so `check_operator`'s candidate scan could
+    /// find it under the bare name -- which handed the word the bare symbol.
+    /// Harmless while every dispatch name was symbolic (`qbe_name` escapes `+`
+    /// to `.2b.`), but the operators-as-words rename spells four of them
+    /// `add`/`sub`/`mul`/`div`, and `div` is a libc function: the decl became a
+    /// strong definition of `div` in the executable, interposing libc's for
+    /// every shared library linked in. The call site stays bare (asserted here
+    /// too, since that is what the operand dispatch keys on); only the decl
+    /// moves.
+    #[test]
+    fn operator_named_decl_mangles_in_a_forced_single_module_build() {
+        let tokens = lex("type: V x f64 ;\n\
+             : div ( V V -- V ) drop ;\n\
+             : main ( -- ) 1.0 V 2.0 V div &x @ swap drop . 9.0 3.0 div . ;\n")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module, true).unwrap();
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        assert!(
+            names.contains(&"div__m0") && !names.contains(&"div"),
+            "the `div` overload owns a module-scoped symbol, not libc's: {names:?}"
+        );
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        assert!(
+            call_names(&main.body)
+                .iter()
+                .filter(|n| *n == "div")
+                .count()
+                == 2,
+            "both call sites stay bare for `check_operator`'s operand dispatch: {:?}",
+            call_names(&main.body)
         );
     }
 

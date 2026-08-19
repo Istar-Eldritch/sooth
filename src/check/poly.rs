@@ -836,7 +836,7 @@ pub(super) fn poly_call_term(
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
     // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
-    // of an operator, e.g. `+`) does not intercept here on a *mismatch* --
+    // of an operator, e.g. `add`) does not intercept here on a *mismatch* --
     // unlike an ordinary word, a builtin name also has `BUILTIN_TABLE` to
     // fall back to, so a mismatched candidate defers to `poly_delegate_op`
     // below instead of erroring outright. An exact match still wins here
@@ -899,7 +899,7 @@ pub(super) fn poly_call_term(
     //
     // The window is the *whole* operand run, not the top slot: a binary
     // operator reads `stack[n - 2]` too, so a marker parked there is an
-    // operand of it just as much (`1 ~[ .. ] swap +`). This is the concrete
+    // operand of it just as much (`1 ~[ .. ] swap add`). This is the concrete
     // path's own rule -- `check_operator` guards the top and, for a
     // non-unary name, the slot beneath it. Arity comes from `BUILTIN_TABLE`,
     // whose rows for one name all agree on it; a name with no row (an
@@ -1937,8 +1937,8 @@ pub(super) fn poly_delegate_op(
         })
         .collect();
     // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
-    // calling module exactly like the concrete path; `None` (REPL /
-    // single-module) falls back to the flat `env.get(name)`.
+    // calling module exactly like the concrete path; `None` (the REPL, which
+    // runs no mangling pass) falls back to the flat `env.get(name)`.
     let scoped_ops = scoped_operator_overloads(ctx, env, name);
     let op_candidates = match &scoped_ops {
         Some(v) => Some(&v[..]),
@@ -2144,8 +2144,8 @@ pub(super) fn poly_sig_could_match(
         }
         // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
         // (`is_ord` is `is_numeric` and nothing else), and the bound is what
-        // keeps `lib/core.sth`'s `: < ( 'T: Copy Ord 'T -- bool )` from
-        // claiming a call site meant for a user's `: < ( Vec2 Vec2 -- bool )`.
+        // keeps `lib/core.sth`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
         // library word swallows every operand type.
         if let PolyType::Var(v) = &sig.inputs[i] {
@@ -3900,7 +3900,7 @@ mod tests {
     }
     #[test]
     fn check_x8_compare_of_unbounded_variable_requires_ord() {
-        // X8: `>` on an unbounded `'T` inside a body requires an `Ord` bound.
+        // X8: `gt` on an unbounded `'T` inside a body requires an `Ord` bound.
         let err = check_src(": bad ( 'T 'T -- bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");

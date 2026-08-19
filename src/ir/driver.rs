@@ -382,7 +382,7 @@ pub(crate) fn collect_quot_sigs(
 /// authoritative), but a scalar slot narrower or differently-signed than
 /// `i64` is relabeled to its real `IrType` right after the load, via the same
 /// `Conv` the conversion words use, so a later op in this line sees the
-/// correct operand type (e.g. homogeneous `+` against another `u8`) instead
+/// correct operand type (e.g. homogeneous `add` against another `u8`) instead
 /// of a stale `i64`.
 ///
 /// Returns the `IrFunc`, the emitted output slot count `M`, and `out_bytes`
@@ -859,7 +859,7 @@ mod tests {
 
     #[test]
     fn lower_line_marshals_all_inputs_and_outputs() {
-        // `+` from a carried depth of 2 loads both slots and stores the single
+        // `add` from a carried depth of 2 loads both slots and stores the single
         // result: D=2 loads, M=1 store.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
@@ -1053,7 +1053,7 @@ mod tests {
     fn lower_line_scalar_only_uses_eight_byte_cells_and_no_blit() {
         // R16/NF3: a scalar-only line marshals exactly as before — 8-byte-cell
         // stores, `PtrOffset`s at multiples of 8, and never an aggregate
-        // `Blit`. `+` from a carried depth of 2 reads cells 0/8 and writes the
+        // `Blit`. `add` from a carried depth of 2 reads cells 0/8 and writes the
         // single result at 0.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();

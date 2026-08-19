@@ -161,6 +161,20 @@ comparison word `>` retires. `conversion_target_name`/`is_conversion_name`
 doc comment ends "Bare `>` is the comparison operator, and is in the list" —
 update the sentence to name `gt`.
 
+**R10: an operator decl is mangled like any other word.** The rename makes four
+dispatch names alphabetic (`add`/`sub`/`mul`/`div`), and `div` is a libc
+function. `resolve::resolve_modules` used to skip per-module mangling for an
+operator-named decl in a single-module closure, so the word owned the bare
+symbol: a strong definition of `div` in the executable, interposing libc's for
+every shared library linked in. Every decl now mangles, in a one-file closure as
+much as a multi-file one. The bare *call* still stays unrewritten (that is what
+`check_operator`'s operand-type dispatch keys on); it reaches the decl through
+`scoped_operator_overloads`, which assembles candidates under `mangle(name, m)`
+and so no longer needs its `modules.len() < 2` bail. This is the one mechanism
+change the rename forces, against the goal's "no mechanism changes"; the
+alternative is a hand-maintained list of libc names, and removing the exemption
+needs none.
+
 **R9: one atomic code phase, deliberately.** Decision 1 forbids an aliasing
 period, so any split between "rename the tables" and "migrate the call sites"
 leaves an intermediate commit whose test suite is red and whose corpus does not
@@ -195,10 +209,13 @@ Ordered steps, all in one phase:
    comment hunks.
 6. Embedded sooth sources in `src/**/*.rs` and `tests/*.rs` per R2.
 7. Test-name/assertion pass per R3.
-8. `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline`, then **review the
+8. R10's mangling fix: drop the operator carve-out in `resolve.rs` and the
+   `modules.len() < 2` bail in `check/word_families.rs`.
+9. `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline`, then **review the
    diff**: the only expected changes are the symbol names for R4's two renamed
    words (`$add__m2` → the sanitized `point-add` symbol in `modules.ssa`, and the
-   `vectors.ssa` counterpart). Instruction selection is unaffected — QBE's own
+   `vectors.ssa` counterpart) and R10's `leap.ssa` hunk. Instruction selection is
+   unaffected — QBE's own
    `add`/`sub` opcodes never saw the surface spelling. **Any other baseline hunk
    is a bug, not a rename.**
 
@@ -212,7 +229,12 @@ Exit criteria:
 - No `"+"`, `"u<"`-family quoted literal remains in `src/` or `tests/` naming a
   builtin; the ones that remain (`qbe_name` fixtures, lexer token tests) are
   exactly R3's keep list.
-- The qbe baseline diff is confined to step 8's two words.
+- The qbe baseline diff is confined to step 9's two words plus R10's one
+  consequence: `leap.ssa`'s `.` overload moves from the bare `$.2e.` to
+  `$.2e.__m0`, its three call sites following. Instruction selection is
+  unchanged.
+- `nm` on a one-file build declaring `: div ( V V -- V )` shows no bare `div`
+  symbol (R10).
 
 New tests (Phase 1):
 
@@ -222,9 +244,13 @@ New tests (Phase 1):
   this test fail.
 - `check_symbolic_comparison_is_unknown_word`: same for `<` (the `lib/` half),
   proving the prelude no longer defines it.
-- `check_add_word_dispatches_on_operand_type`: `add` resolves the same
-  `BUILTIN_TABLE` rows `+` did, over `i64` and `f64`, and reports the same
-  operand-mismatch diagnostic text with the new name.
+- `check_add_word_dispatches_on_operand_type`: `add` reaches the arithmetic
+  dispatch over `i64` and `f64`, and reports the same operand-mismatch
+  diagnostic text with the new name. It does not pin the `BUILTIN_TABLE` rows
+  (the `"add" | "sub" | "mul"` coercion arm answers a homogeneous pair
+  identically, so a table cut back to `i64` still passes); the row set per
+  numeric type stays `builtin_table_plus_has_a_row_per_numeric_type`'s
+  subject.
 - `check_ueq_family_lowers_to_cmpop`: the renamed unsigned six still map to
   their `CmpOp` (extends `tests/phase4_slice10c_primitives.rs:270`'s loop).
 - A plain word named exactly `: add ( Vec2 Vec2 -- Vec2 )` still dispatches
@@ -262,9 +288,11 @@ Exit criteria:
   substitution would break all three silently.
 - **A rename that changes a mechanism.** Recon delta 1 is exactly that class of
   bug: a word that was plain becomes an operator overload with different
-  mangling. R4 handles the two known cases; the Phase 1 exit grep plus the qbe
-  baseline review is the net for any missed one, since an unmangled symbol shows
-  up in the baseline diff.
+  mangling. R4 handles the two known cases. The qbe baseline is *not* a
+  sufficient net for the rest: it covers multi-module closures, while the
+  mangling exemption this class trips (R10) applied only to single-module ones,
+  so the offending symbol never reached a baseline. A symbol-level check (`nm`)
+  on a one-file build is the net, per R10.
 - **New-spelling collisions in future work.** After this change, `add sub mul
   div eq lt gt lte gte ne ueq ult ugt ulte ugte une` are reserved-ish names: a
   user word so named is an overload, not a fresh word. That is a real ergonomic

@@ -918,7 +918,7 @@ fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity:
 /// R5: a name with both a generic (poly) candidate and a concrete candidate
 /// (a builtin row or a local monomorphic word) of the same input arity is
 /// rejected -- there is no specialization ordering that could otherwise pick
-/// between `: + ( 'T 'T -- 'T )` and `: + ( i64 i64 -- i64 )` (or a builtin
+/// between `: add ( 'T 'T -- 'T )` and `: add ( i64 i64 -- i64 )` (or a builtin
 /// concrete row) at a call site. A poly word's `effect` is empty by
 /// construction, so R1's textual key never sees it; this is why the check is
 /// separate rather than folded into `check_duplicate_word_names`.
@@ -2249,8 +2249,8 @@ mod tests {
         // R3: a builtin operator's exact-match miss falls back to its
         // existing operand-class diagnostic, byte-for-byte, even when a
         // *different* struct's overload of the same name exists in the
-        // module (importing `Vec2` does not bring `+` for it, and a local
-        // `Vec2 +` overload does not answer an `i64 bool` call site
+        // module (importing `Vec2` does not bring `add` for it, and a local
+        // `Vec2 add` overload does not answer an `i64 bool` call site
         // either).
         let src = "type: Vec2 x i64 y i64 ;\n\
 : add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
@@ -2854,7 +2854,7 @@ mod tests {
     }
     #[test]
     fn check_struct_equality_operator_is_error() {
-        // X7: `=` on two structs is scalar-only, naming the struct type.
+        // X7: `eq` on two structs is scalar-only, naming the struct type.
         let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 eq ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -2865,7 +2865,7 @@ mod tests {
     }
     #[test]
     fn check_struct_arithmetic_operator_is_error() {
-        // X7: `+` on two structs is scalar-only, naming the struct type.
+        // X7: `add` on two structs is scalar-only, naming the struct type.
         let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 1 2 Vec2 add ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -3058,7 +3058,7 @@ mod tests {
     }
     #[test]
     fn check_enum_equality_operator_is_error() {
-        // X10/M2: `=` on two enums reaches the operand-pair guard.
+        // X10/M2: `eq` on two enums reaches the operand-pair guard.
         let err =
             check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) eq ;").unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");

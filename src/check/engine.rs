@@ -1804,7 +1804,7 @@ mod tests {
             vec![Type::from_name("u8").unwrap()]
         );
         // Slice 10c: the comparison *primitive*, which is what carries the
-        // per-numeric-type rows now; `<` is a `lib/` word over it and resolves
+        // per-numeric-type rows now; `lt` is a `lib/` word over it and resolves
         // through the word environment this bare-line helper does not build.
         assert_eq!(infer_src("5 >u8 3 >u8 ult", &[]).unwrap(), vec![Type::U32]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());

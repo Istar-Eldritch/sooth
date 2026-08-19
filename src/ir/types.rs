@@ -404,8 +404,8 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
-    /// Float division (`/`); present only for float operands (there is no
-    /// integer `/`, checker-guaranteed, R16).
+    /// Float division (`div`); present only for float operands (there is no
+    /// integer `div`, checker-guaranteed, R16).
     Div,
     Rem,
     And,

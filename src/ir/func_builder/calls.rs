@@ -231,7 +231,7 @@ impl<'a> FuncBuilder<'a> {
         // Slice 8a phase 4 (R7): a call site the checker resolved to a user
         // overload of a builtin-named word must dispatch to that word, not
         // the name-directed builtin arms below (a literal name match like
-        // "+" would otherwise always win) nor the self-tail/back-edge checks
+        // "add" would otherwise always win) nor the self-tail/back-edge checks
         // further down (a word named `.` overloading print must not be
         // miscategorized as a self-tail call on `.`). Same env-lookup +
         // resolve + bundle-unpack shape as the ordinary user-word path in the
@@ -457,10 +457,10 @@ impl<'a> FuncBuilder<'a> {
             }
             // Slice 10c (R-P3-3): the comparison primitives. Same
             // `Instr::Cmp`, same operands, same operand-type-driven signed /
-            // unsigned / float dispatch at the backend as the `=`/`<`/... rows
+            // unsigned / float dispatch at the backend as the `eq`/`lt`/... rows
             // they replace; only the result's `IrType` changed, from the
             // 32-bit `Bool` to the 32-bit `u32` flag `branch` consumes, which
-            // is the same `w` register. `=`/`<`/... are `lib/` words that wrap
+            // is the same `w` register. `eq`/`lt`/... are `lib/` words that wrap
             // these and construct a `bool`.
             _ if crate::check::COMPARISON_PRIMITIVES
                 .iter()
@@ -495,7 +495,7 @@ impl<'a> FuncBuilder<'a> {
             // `total_cmp` bit-pattern rule (map each operand's IEEE bits to a
             // monotone unsigned key — flip every bit if the sign bit is set,
             // else flip only the sign bit — then integer-compare the keys),
-            // so no float `>` is ever emitted.
+            // so no float `gt` is ever emitted.
             "max-total" => {
                 let rhs = self.stack.pop().expect("max-total: rhs");
                 let lhs = self.stack.pop().expect("max-total: lhs");
@@ -826,7 +826,7 @@ mod tests {
 
     #[test]
     fn call_of_literal_emits_no_call_instr() {
-        // Criterion 6b (R13): `[ + ] call` fuses in place, so lowered `main`
+        // Criterion 6b (R13): `[ add ] call` fuses in place, so lowered `main`
         // contains no `Instr::Call`; the phantom quotation never becomes a
         // runtime code value.
         let module = lower_src(": main ( -- ) 1 2 [ add ] call . ;");
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn lower_dup_reuses_value_id() {
-        // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
+        // `dup add` squares: both operands must be the same SSA value, dup emits nothing.
         let ir = lower_src(": w ( i64 -- i64 ) dup add ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
@@ -968,7 +968,7 @@ mod tests {
 
     #[test]
     fn lower_swap_reorders_without_instr() {
-        // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
+        // `swap sub` computes b - a instead of a - b, and swap itself emits no instr.
         let swapped = lower_src(": w ( i64 i64 -- i64 ) swap sub ;");
         let plain = lower_src(": w ( i64 i64 -- i64 ) sub ;");
         let operands = |ir: &IrModule| {
@@ -1127,7 +1127,7 @@ mod tests {
 
     #[test]
     fn lower_float_div_routes_to_div_op() {
-        // `/` lowers to `BinOp::Div` whose result carries the float operand type.
+        // `div` lowers to `BinOp::Div` whose result carries the float operand type.
         let ir = lower_src(": w ( -- f64 ) 1.0 2.0 div ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
@@ -1402,7 +1402,7 @@ mod tests {
 
     #[test]
     fn non_tail_self_call_stays_a_call() {
-        // R10: a self-call followed by more work (`fact *`) is not in tail
+        // R10: a self-call followed by more work (`fact mul`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
         let ir =
             lower_src(": fact ( i64 -- i64 ) dup 0 eq ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;");
@@ -1554,7 +1554,7 @@ mod tests {
     fn quotation_taking_word_emits_no_call_and_no_irfunc() {
         // Criterion 3b/R20: a monomorphic quotation-taking word is inlined, so
         // it mints no `IrFunc` and its caller emits no `Instr::Call`. The
-        // lowered `main` is just `1 +` (the spliced literal over `3`), a pure
+        // lowered `main` is just `1 add` (the spliced literal over `3`), a pure
         // arithmetic body. Deleting the `combinator_indices` filter would put
         // an `apply` func back, and deleting the `lower_call` inline branch
         // would leave an `Instr::Call apply` in `main`.

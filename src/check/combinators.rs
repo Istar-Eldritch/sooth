@@ -611,7 +611,7 @@ fn check_poly_combinator_args(
     // Slice 10c: a *fresh integer literal* filling a bare type variable is
     // held back and unified last, against whatever the variable resolved to.
     // This is D8's literal coercion, which the comparison operators had for
-    // free as builtin rows (`5 3 >usize <` typed through `unify_pair`'s
+    // free as builtin rows (`5 3 >usize lt` typed through `unify_pair`'s
     // `LiteralSizeType`) and would otherwise lose on becoming `'T: Copy Ord`
     // library words: a bare `5` carries `i64`, so unifying it first pins `'T`
     // to `i64` and the `usize` operand then reads as a conflict.
@@ -641,7 +641,7 @@ fn check_poly_combinator_args(
             // Exactly D8's domain, no wider: a fresh literal fills a `usize`
             // or `isize` position without an explicit conversion, and nothing
             // else. Widening this to every numeric type would accept
-            // `1 >i32 2 <>`, which the builtin rows always rejected.
+            // `1 >i32 2 ne`, which the builtin rows always rejected.
             Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
             _ => stack[base + i].ty,
         };

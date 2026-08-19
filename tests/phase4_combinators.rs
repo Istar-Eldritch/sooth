@@ -281,7 +281,7 @@ fn quotation_type_is_rejected_at_every_audited_position() {
     // `self.enums`, leaving the poisoned interned array/cell/ref entry
     // resident, so the per-line audit re-fired against it forever. Each row
     // asserts the located rejection *and* that a following line still
-    // evaluates: `40 2 +` must leave `stack: 42`. A bricked session would
+    // evaluates: `40 2 add` must leave `stack: 42`. A bricked session would
     // re-fire the rejection with `stack: (empty)` instead. The residual-stack
     // line, not the `.` output, is the witness -- `.` prints to process stdout,
     // which `repl_error` does not capture. The `&` shapes reject earlier (a
@@ -359,7 +359,7 @@ fn abstract_quotation_forward_inlines_and_runs() {
     // R21: `outer` passes its own quotation *parameter* `f` (an abstract
     // `[ i64 -- ]`, not a literal) to `inner`. The def-site check of `outer`
     // accepts the forward and splices `inner`, whose `call` checks `f` against
-    // its declared effect; at the real call site the literal `[ 1 + . ]` flows
+    // its declared effect; at the real call site the literal `[ 1 add . ]` flows
     // through both frames and prints `8`.
     let src = ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
                : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
@@ -373,7 +373,7 @@ fn abstract_quotation_forward_inlines_and_runs() {
 
 #[test]
 fn literal_effect_mismatch_against_parameter_is_error() {
-    // `[ 1 + . ]` has effect `[ i64 -- ]`, disagreeing with the declared
+    // `[ 1 add . ]` has effect `[ i64 -- ]`, disagreeing with the declared
     // `[ i64 -- i64 ]`; the error names the word, both effects.
     let err = check_error(
         ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
@@ -781,7 +781,7 @@ fn filter_checks_standalone() {
 
 #[test]
 fn filter_over_array_inlines_and_runs() {
-    // Criterion 2 (R1): `arr [ 4 > ] c::filter` over `[i64 8 3 9 1]` inlines
+    // Criterion 2 (R1): `arr [ 4 gt ] c::filter` over `[i64 8 3 9 1]` inlines
     // through 6a's inliner, prints the kept count `2`, and the array is
     // compacted in place, with `8` and `9` at the front.
     let src = format!(
@@ -1545,7 +1545,7 @@ const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 
 fn repl_quotation_taking_definition_is_accepted() {
     // R19: the former R23 rejection is now acceptance. A monomorphic
     // quotation-taking word defines at a session line and a *later* bare line
-    // calls it, inlined against that line's live env (D1): `5 [ 3 + ] apply`
+    // calls it, inlined against that line's live env (D1): `5 [ 3 add ] apply`
     // leaves 8. The guarded behavior flips (define-and-call), not vanishes.
     let transcript = repl_error(
         ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n5 [ 3 add ] apply\n:quit\n",
@@ -1613,7 +1613,7 @@ fn repl_two_output_combinator_define_and_call() {
     // Criterion 3 (mutation-pins R9's poly-combinator routing): a two-output
     // poly combinator (`filter` shape) defines and runs; both outputs land on
     // the residual stack (the compacted array and the kept-count). `7 3 fill`
-    // is three 7s; `[ 5 > ]` keeps all three, so the residual is the array then
+    // is three 7s; `[ 5 gt ]` keeps all three, so the residual is the array then
     // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
     // be wrongly deferred as "resolves to 2 outputs".
     let transcript = repl_error(&format!(
@@ -1690,7 +1690,7 @@ fn repl_redefining_combinator_shape_evicts_other_stores() {
     // then `104` (ordinary, 5+99 -- proving the combinator entry was evicted,
     // else `5 foo` with no quotation would type-error), then `12`
     // (combinator again, (5+1)*2 -- proving the ordinary entry was evicted,
-    // else `5 [ 1 + ] foo` would be "a quotation cannot be passed to foo").
+    // else `5 [ 1 add ] foo` would be "a quotation cannot be passed to foo").
     assert_eq!(
         transcript,
         "defined foo\nstack: 6\ndefined foo\nstack: 6 104\ndefined foo\nstack: 6 104 12\n"
@@ -1730,7 +1730,7 @@ fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
     // dispatches_to_user_word` (tests/phase0.rs). `eval_poly_def`/
     // `lower_instantiation` froze an *empty* overloads map onto every
     // REPL-defined poly word, explicitly marked out of scope for this slice
-    // at the time -- so `vsum`'s body called `+` on two `Vec2` operands, the
+    // at the time -- so `vsum`'s body called `add` on two `Vec2` operands, the
     // checker correctly resolved that to the user overload, but lowering
     // fell into the builtin numeric `Instr::Bin(Add)` arm on the two struct
     // pointers regardless, segfaulting the whole session (`run`/`build`
@@ -1881,7 +1881,7 @@ fn repl_import_exporting_combinator_retains_and_runs() {
     // R12/R13 (slice 6c): the former R24 rejection is gone. Importing a closure
     // that *exports* a quotation-taking word now retains the combinator (D5),
     // and a *later* session line calls it, inlined at that site's own live env.
-    // `5 [ 3 + ] c::apply_each` leaves 8. The mono combinator `apply_each` is
+    // `5 [ 3 add ] c::apply_each` leaves 8. The mono combinator `apply_each` is
     // skipped by the exported-ordinary-word loop (it mints no symbol, R20) and
     // retained by the combinator loop instead.
     let path = temp_lib(
@@ -1924,7 +1924,7 @@ fn repl_imported_combinator_body_call_to_private_word_uses_closure_env() {
     // definition, never against a same-named word the session happens to
     // define. The session defines `priv_calc6c` (+1000) *before* importing a
     // closure whose private `priv_calc6c` is +1 and whose exported `apply2`
-    // calls it: `5 [ 10 * ] c::apply2` is `(5 * 10) + 1 = 51` if the
+    // calls it: `5 [ 10 mul ] c::apply2` is `(5 * 10) + 1 = 51` if the
     // closure's own `priv_calc6c` wins, or `1050` if the retained body was
     // left unrewritten and fell through to the session's `priv_calc6c` -- the
     // hygiene break this test pins shut. (Named distinctly from the plainer
@@ -1952,7 +1952,7 @@ fn repl_imported_combinator_body_call_to_private_word_without_collision_resolves
     // `repl_imported_combinator_body_call_to_private_word_uses_closure_env`
     // above -- same shape, but the session never defines `priv_calc6c_nc`
     // itself, so there is nothing to fall through to even if the rewrite
-    // silently failed. `5 [ 10 * ] c::apply2` must still land on `51`
+    // silently failed. `5 [ 10 mul ] c::apply2` must still land on `51`
     // ((5 * 10) + 1), and the import must not error.
     let path = temp_lib(
         "private-body-call-no-collision",
@@ -2060,7 +2060,7 @@ fn repl_imported_while_runs_to_fixpoint() {
 #[test]
 fn repl_imported_filter_runs() {
     // Criterion 9: import the real `lib/combinators.sth` and run `filter` over
-    // an array at a session line. `7 3 fill` is three 7s; `[ 5 > ]` keeps all
+    // an array at a session line. `7 3 fill` is three 7s; `[ 5 gt ]` keeps all
     // three, so the residual is the compacted array then the kept-count `3`.
     // The two-output poly combinator lands both outputs on the residual stack,
     // exactly as the session-defined `filter` does.
@@ -2102,7 +2102,7 @@ fn repl_combinators_dogfood_matches_native() {
     // Criterion 12: a session transcript importing `lib/combinators.sth` and
     // using `filter`/`while` matches the native example's output. This is the
     // REPL twin of `examples/filter_while.sth` (R18's dogfood): the same
-    // `scores` array, the same `[ 4 > ] filter` keeping 3 elements, the same
+    // `scores` array, the same `[ 4 gt ] filter` keeping 3 elements, the same
     // fixpoint `while` loop landing on 5. The native example prints both via
     // runtime `.` to real stdout ("3\n5\n"); a REPL bare line's `.` also goes
     // to real stdout rather than this capture writer (see `repl_error`), so

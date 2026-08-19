@@ -176,7 +176,7 @@ fn quotation_returned_from_word_indirect_calls() {
 
 #[test]
 fn capturing_scalar_stored_snapshots_into_env() {
-    // 7b re-points 7a's `capturing_literal_stored_is_error_naming_7b`: `[ x + ]`
+    // 7b re-points 7a's `capturing_literal_stored_is_error_naming_7b`: `[ x add ]`
     // reads the enclosing scalar `x`, which is now snapshotted into the env
     // rather than rejected. Stored into a field, read back, and called with 4:
     // 4 + 10 = 14.
@@ -192,7 +192,7 @@ fn capturing_scalar_stored_snapshots_into_env() {
 #[test]
 fn capturing_scalar_in_array_element_snapshots() {
     // The `!`/`+!` store boundary (an array element via reference), re-pointed:
-    // `[ x + ]` snapshots `x = 10` into element 1, while element 0 keeps `one`'s
+    // `[ x add ]` snapshots `x = 10` into element 1, while element 0 keeps `one`'s
     // non-capturing seed; each reads its own env, proving coexistence. Element
     // 0: 4 + 1 = 5; element 1: 4 + 10 = 14.
     let src = ": one ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
@@ -211,9 +211,9 @@ fn capturing_scalar_in_array_element_snapshots() {
 
 #[test]
 fn capturing_scalar_through_nested_quotation_snapshots() {
-    // `x` is read inside a nested `[ x + ]`, not at the stored quotation's own
+    // `x` is read inside a nested `[ x add ]`, not at the stored quotation's own
     // top level. The capture scan recurses into nested quotation bodies, so the
-    // outer `[ [ x + ] call ]` snapshots `x` and stores admissibly: 4 + 10 = 14.
+    // outer `[ [ x add ] call ]` snapshots `x` and stores admissibly: 4 + 10 = 14.
     let src = "type: Holder q [ i64 -- i64 ] ;\n\
                : main ( -- ) 10 | x | [ [ x add ] call ] Holder Holder> 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapnested", src);
@@ -413,7 +413,7 @@ fn capturing_quotation_typed_name_is_rejected_deferred() {
 
 #[test]
 fn multi_capture_escaping_closure_is_rejected_deferred() {
-    // Phase 1's inline env holds one word; `[ x y + + ]` captures two scalars,
+    // Phase 1's inline env holds one word; `[ x y add add ]` captures two scalars,
     // which needs a heap env (R18), deferred.
     let err = check_error(
         ": mk ( -- [ i64 -- i64 ] ) 10 | x | 20 | y | [ x y add add ] ;\n\
@@ -449,7 +449,7 @@ fn capturing_literal_spliced_still_works() {
 fn capturing_literal_spliced_through_combinator_stays_splice() {
     // 7b makes a capturing literal legal at a materialization boundary, but a
     // force-inlined combinator (`times`, 6a's D2) still *splices* it: the body
-    // `[ + x + ]` reads the enclosing local `x` in place per iteration, so
+    // `[ add x add ]` reads the enclosing local `x` in place per iteration, so
     // adding the env parameter to the materialized path (R17) must leave this
     // splice path bit-identical -- no materialization, no `CallIndirect`.
     // acc over i=0..4 of (acc + i + x=10): 10, 21, 33, 46, 60.
