@@ -96,6 +96,13 @@ deliberate layer violation rejected.
 
 ## Slices
 
+**A paper dogfood of this model is in `P8/dogfood/`**, and its headline finding is that the
+slice order below may be backwards: P8.S1 makes every file import what it uses, but with no
+manifests yet it can only do so by quoted path, and P8.S2 would then rewrite the same import
+lines to module names. The ~460 inline test sources are what make that bite. Ruling on it
+(reorder, reserve `core` as a compiler-known package, or generate manifests for test
+fixtures) belongs in the first spec written for this phase.
+
 The split is on whether a manifest is required. Everything file-level lands together in S1,
 because all of it is one corpus-wide migration and doing it in two passes means editing the
 same ~500 sites twice with a red suite in between.
