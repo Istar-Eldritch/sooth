@@ -175,7 +175,8 @@ fn forward_declared_generic_type_eliminates_after_the_matching_word() {
         "s3b-generic-eliminator-forward",
         ": to-int ( Result[i64 i64] -- i64 )\n  \
            ~[ ( Ok ) Ok> ]\n  \
-           ~[ ( Err ) Err> 100 + ]\n  \
+           ~[ ( Err ) Err> 100 add ]
+  \
            Result? ;\n\
          type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
          : main ( -- )\n  \

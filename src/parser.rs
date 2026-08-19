@@ -3790,8 +3790,7 @@ mod tests {
 
     /// The terms of a word body.
     fn terms_body(word: &WordDef) -> &[Term] {
-        let terms = &word.body;
-        terms
+        &word.body
     }
 
     /// The names bound by a word's *entry* binding: the leading `Bind` term, if
