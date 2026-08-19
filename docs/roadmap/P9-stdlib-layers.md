@@ -42,7 +42,7 @@ user-supplied allocator cannot be a backend special case. Ambient context (Odin/
 is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
 rather than the allocation site, which converts a compile error into a runtime one in the
 language whose point is the opposite. Needs P7.S2 (statics, for the allocator's own state),
-P7.S3a (generic instantiation, for naming `Map['K 'V]`/`Vec['T]` at all), and P7.S3d
+P7.S3a (generic instantiation, for naming `Map['K 'V]`/`Vec['T]` at all), and P7.S3e
 (bounds, for `Map`'s key type).
 **Exit:** the compiler-emitted `malloc`/`free` shim is gone, replaced by ordinary Sooth code
 bound as foreign words; `Vec`/`Map`/`String` take an explicit, defaulted allocator type

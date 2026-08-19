@@ -1,4 +1,4 @@
-# Phase 7 Slice 3d: user-declarable trait bounds (brief)
+# Phase 7 Slice 3e: user-declarable trait bounds (brief)
 
 Open `Bound` (Phase 4 Slice 1) from a closed two-variant enum (`Copy`, `Ord`) satisfied by
 a hardcoded predicate to a user-declarable one: `trait: Show 'T show ( 'T -- ) ;`, then
@@ -212,7 +212,7 @@ programs are in `slice3-dogfood.md`; the load-bearing findings:
   type variable in a poly signature (`( ['T: Copy 4] 'T -- ['T 4] )`) already
   builds green. This is a Phase-5-shaped gap, orthogonal to trait bounds, and it
   means `Map['K 'V]`, `Entry['K 'V]`, and the `Vec['T]` form of `sort` are all
-  unparseable regardless of what P7.S3d ships — the gap is spun out as its own
+  unparseable regardless of what P7.S3e ships — the gap is spun out as its own
 prerequisite, **P7.S3a** (`docs/roadmap/P7-language-prereqs.md`), not fixed here.
 **The bounds feature currently has
   no consumer that compiles.**
@@ -244,14 +244,14 @@ prerequisite, **P7.S3a** (`docs/roadmap/P7-language-prereqs.md`), not fixed here
 
 **Consequence:** this is why the roadmap now splits the slice — **P7.S3a** (generic
 instantiation over a poly word's own type variable) is a hard dependency of this
-slice's own `Map` consumer, tracked and specced separately. This slice (**P7.S3d**)
+slice's own `Map` consumer, tracked and specced separately. This slice (**P7.S3e**)
 can proceed independently against the array form of `sort`, which types structurally
 today with no dependency on S3a, while `Map` waits for S3a to land.
 
 ## Out of scope
 
 - Trait objects / dynamic dispatch (`dyn Show`, `^Any`, erasure). Fully compile-time
-  only; see the P7.S3d roadmap entry's own framing.
+  only; see the P7.S3e roadmap entry's own framing.
 - Associated types, default method bodies, blanket impls, supertraits, generic
   constants. None of these have a named consumer yet (`Map`/`Vec`'s `Eq`/`Ord` need
   is the only forcing pressure); do not build them speculatively.
@@ -267,7 +267,7 @@ confirmations.**
 - The paper dogfood found a **blocker outside this slice's own control**: generic
   types applied to a poly word's type variable don't parse today
   (`docs/roadmap/P7/slice3-dogfood.md`, finding #5), so `Map['K 'V]` — the slice's
-  own stated forcing consumer — is not writable regardless of what P7.S3d ships.
+  own stated forcing consumer — is not writable regardless of what P7.S3e ships.
   **Split out as P7.S3a**, its own roadmap entry — this slice now specs against the
   array form of `sort` only, with `Map` deferred until S3a lands.
 - The OQ1 probe found that **Recon 5's central cost claim is false**: lowering does
@@ -276,16 +276,23 @@ confirmations.**
   and exit criteria both need to price this in before implementation starts, not
   discover it mid-slice.
 
-**No longer ready to spec — a spec was written (`slice3d-spec.md`) and then falsified by
-probing.** Three findings, in descending order of consequence:
+**No longer ready to spec — a spec was written (`slice3e-spec.md`) and then falsified by
+probing, and finding 1 below was itself later falsified by a second probe.** Three
+findings, in descending order of consequence:
 
-1. **No consumer compiles.** The array form of `sort` needs branching, so it must be
-   `inline`; an inline poly word mints no monomorph symbol, so the per-instantiation
-   dispatch record has nothing to key on. Blocked on **P7.S3b** (quotations, hence `if`,
-   in a polymorphic body). `Map['K 'V]` is blocked separately: a generic struct whose field
-   is an array of its own type variable (`keys ['K 8]`, `slots [Ent['K 'V] 8]`) fails with
-   `` error: unknown type 'K `` — a third gap, distinct from S3a's. The `Map` scope widening
-   recorded below is therefore withdrawn.
+1. **No consumer compiles — corrected.** The original claim here was that the array form
+   of `sort` needs branching, so it must be `inline`, so it mints no monomorph symbol for a
+   per-instantiation dispatch record to key on. That claim is false: **P7.S3b** shipped
+   eliminator-arm branching in a non-inline poly word (`Ordering?`-style), probe-verified to
+   compile and mint `sooth_mono_pick__m0__t0_i64`. The real remaining gap is narrower and is
+   not branching at all: a **rowless quotation-consumer splice** — calling a fully concrete
+   `~[ &'T &'T -- Ordering ]` (a comparator, no `..a`/`..b`) inside a poly body is still
+   rejected (`` `call` on a quotation ... is not yet supported ``), distinct from the
+   row-typed `if`/`branch`/`times`/`tag` family S3b deferred to S3b-follow. This is now its
+   own slice, **P7.S3c**, inserted ahead of this one. `Map['K 'V]` is blocked separately: a
+   generic struct whose field is an array of its own type variable (`keys ['K 8]`,
+   `slots [Ent['K 'V] 8]`) fails with `` error: unknown type 'K `` — a third gap, distinct
+   from S3a's. The `Map` scope widening recorded below is therefore withdrawn.
 2. **The dispatch key is sound, but only for a leaf word.** Check-time and lowering-time
    monomorph symbols are byte-identical (probe: `sooth_mono_idc__m0__t0_i64`/`_bool` at both
    sites, and across modules), so the mechanism works. But a bounded poly word calling
@@ -305,9 +312,11 @@ neither, and is probably wanted: it would let intrinsic compiler logic be writte
 library implementation. `bool` is already this shape — a library-declared enum known by a
 reserved registry position (`src/ast.rs:779`), with its `.` overload injected (`:816`). A
 `Fallible`-style bound satisfied by `Result`/`Option` would give fallible slice indexing
-(S3c), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
+(S3d), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
 first:** a trait is only justified with two or more carrier types, or if users can add their
 own; with a single carrier this should be a lang *type* like `bool`, not a lang trait.
+**Test before S3d locks its index-failure carrier, not after** — this decides whether
+fallible slice indexing returns a plain `Option['T]` or rides a bound.
 
 The decisions below are still good, and survive the falsification:
 
@@ -317,10 +326,12 @@ The decisions below are still good, and survive the falsification:
   `parse_capabilities`, duplicate-declaration error on collision.
 - **OQ4 — located rejection** of a member name colliding across a variable's bound set.
 
-**Consumer scope: withdrawn, pending S3b and S3c.** Neither `sort` (needs branching, so
-inline, so no monomorph symbol) nor `Map` (generic-struct array-of-own-type-variable field
-gap) is writable today. The multi-method-bound collision rule keeps a consumer regardless,
-since its rejection golden needs only two hand-declared traits and no collection.
+**Consumer scope: withdrawn, pending P7.S3c (rowless quotation-consumer splice).** S3b
+already supplies the branching `sort`'s comparator dispatch needs (`Ordering?` elimination);
+the one remaining wall is calling the comparator quotation itself from inside the poly body.
+`Map` stays separately blocked on the generic-struct array-of-own-type-variable field gap.
+The multi-method-bound collision rule keeps a consumer regardless, since its rejection
+golden needs only two hand-declared traits and no collection.
 
 OQ1 is settled: a per-instantiation dispatch record, populated at check time and read at
 lowering, so "lowering never re-runs resolution" stands. Probing confirmed the key matches

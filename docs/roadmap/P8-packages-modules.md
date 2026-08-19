@@ -55,10 +55,13 @@ program importing what it uses.
 
 **P8.S1 — Packages, manifests, and single-mode imports.** The unit above the file, the
 manifest and its layer field, source-based dependency resolution, the layering
-dependency-direction check, and the deletion of the implicit prelude. Needs its own brief
-before implementation; the ordering question inside it is whether the manifest lands before
-or after the prelude split, since the split is what forces every program to have a manifest
-to name its imports against.
+dependency-direction check, and the deletion of the implicit prelude. Brief written
+(`docs/roadmap/P8/slice1-brief.md`): a manifest constrains `import:` rather than replacing
+it (only cross-package edges are checked), a manifest is optional (a bare `.sth` file with
+no manifest builds as it does today), and the prelude deletion is sequenced first since it
+has no open design question left and doesn't need the manifest to exist. Four questions
+(manifest grammar, multi-file package layout, cross-package qualifier naming, diagnostic
+wording) are left for the spec.
 
 **P8.S2 — The serialisable API description.** "Which words, types, and externs are public"
 is already answered by Phase 4 Slice 5's `export:` list, and answered where it had to be,
@@ -69,7 +72,7 @@ already distinguishes, and emits a file listing every exported signature for the
 compare between versions. That is the remaining prerequisite in
 `docs/dependency-management.md`, and it is a packaging/publishing concern (letting other
 people depend on you with enforced semver) rather than a personal-reuse one, which is why it
-waited. Needs P7.S2 (statics) and P7.S3d (bounds), since a global clause on an exported word
+waited. Needs P7.S2 (statics) and P7.S3e (bounds), since a global clause on an exported word
 is part of that word's exported signature.
 **Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump
 across a two-file change.

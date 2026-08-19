@@ -10,7 +10,7 @@ was rejected outright at `src/check/poly.rs`, which blocked the whole
 eliminate an enum at all.
 
 The consumer is a *concrete* enum eliminated in a polymorphic body, so nothing here
-depends on Phase 6's in-flight work. Trait bounds are P7.S3d; slices are P7.S3c.
+depends on Phase 6's in-flight work. Trait bounds are P7.S3e; slices are P7.S3d.
 
 ## Delivered shape
 
@@ -50,7 +50,7 @@ across arms, never row-unified against an abstract stack. `call`/`branch`/`if`/`
 rejection here.
 
 **D2 No abstract scrutinee.** An abstract scrutinee (a `'T` that is some enum) needs an
-enum-kind bound, which is P7.S3d. Located rejection. No code dependency on P6.S3b in
+enum-kind bound, which is P7.S3e. Located rejection. No code dependency on P6.S3b in
 either direction.
 
 **D3 `PolySlot` struct, `lits` folded in.** `PolySlot { pt, int_val, quot }` replaces the
@@ -192,7 +192,7 @@ back-reference is accurate and stays; that rejection itself is **not** lifted.
 - The array-constructor rejection: a separate gap of the same shape.
 - Materialised / escaping / erased quotations (L2), and the two pre-existing ICEs there.
 - Mid-body unification of type variables (L1).
-- Abstract enum scrutinees / enum-kind bounds: P7.S3d.
+- Abstract enum scrutinees / enum-kind bounds: P7.S3e.
 - Any lowering change.
 
 ## Testing

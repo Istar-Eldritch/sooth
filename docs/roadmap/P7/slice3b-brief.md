@@ -122,7 +122,7 @@ each is inline:
 | `= < > <= >= <>` (`core.sth`) | body needs `u<` on an abstract operand; `poly_delegate_op` only feeds an operator the maximal *concrete* stack suffix (`poly.rs:1437-1451`) | no, different wall |
 | `if` `unless` (`core.sth`) | row-typed, take quotation *parameters* | no, inherently inline |
 | `each` `map` `fold` `filter` `while` `times` | row-typed quotation-parameter combinators | no, inherently inline |
-| `sort` `bin_search` (`arrays.sth`) | comparator parameter *and* index a generic-length `['T 'N]` array | no, two other walls (`'N` indexing is P7.S3c) |
+| `sort` `bin_search` (`arrays.sth`) | comparator parameter *and* index a generic-length `['T 'N]` array | no, two other walls (comparator call is P7.S3c, `'N` indexing is P7.S3d) |
 | `En` `TxEn` `ClkDiv` `TxRdy` (`uart_mmio.sth`) | monomorphic constant pairs, inline as call-avoidance | no, not polymorphic |
 
 **The consumer is enum elimination, and it is available to test today.** Eliminator arms
@@ -240,8 +240,10 @@ disagreement rather than erase it.
 
 ## Out of scope
 
-- Trait bounds (P7.S3d).
-- Slices (P7.S3c).
+- Trait bounds (P7.S3e).
+- Slices (P7.S3d).
+- Calling a rowless quotation parameter (a comparator, no `..a`/`..b`) from a poly body:
+  P7.S3c, inserted after this slice and before the trait-bounds slice.
 - Materialised, escaping, or erased quotations in a polymorphic body (see locked
   decisions); the two pre-existing ICEs in that neighbourhood are not this slice's to fix.
 - Mid-body unification of type variables (see locked decisions).
@@ -250,7 +252,7 @@ disagreement rather than erase it.
 
 ## Ready to spec?
 
-Yes. The consumer question that sank P7.S3d is answered here and answered by a compiling
+Yes. The consumer question that sank P7.S3e is answered here and answered by a compiling
 witness, not an argument: a polymorphic word cannot eliminate an enum, and the failure is
 this wall alone.
 
