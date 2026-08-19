@@ -1,11 +1,24 @@
 # Phase 8 Slice 1: packages, manifests, and single-mode imports (brief)
 
-**Now covers two slices.** The work below was split after probing: **P8.S1** is the
-prelude deletion and single-mode imports (this brief's Recon findings 2-4, resolved recon,
-and Sequencing item 1, all ready to spec), and **P8.S2** is packages, manifests, and the
-layer check (Recon findings 1 and 5, the manifest decisions, every open question, and
-Sequencing items 2-3, which want their own brief before speccing). They share no file, no
-grammar, and no open question.
+**Read the phase file first; parts of this brief are superseded.** The current model lives
+in `docs/roadmap/P8-packages-modules.md`. What still stands here, and is why this file is
+kept, is the **Recon** and **Resolved recon**: source-verified findings about the closure
+walker, the prelude injection sites and mangling exemption, plus five compiled probes of the
+prelude deletion. Those are unaffected by the design changes.
+
+What changed after this brief was written:
+
+- The phase is now three slices. **P8.S1** is everything file-level (prelude deletion, the
+  `intrinsics` module, wildcard import, re-export/hubs, the corpus migration); **P8.S2** is
+  everything manifest-level; **P8.S3** is the API description. The split is on whether a
+  manifest is required, so the corpus is migrated once.
+- **Superseded: "the manifest does not replace `import:`, it constrains it."** A
+  cross-package import names a module, so the manifest participates in resolution.
+- **Superseded: the manifest's `module:` entries carry paths.** Module names derive from
+  the file's path within the package; the manifest declares only which are public, since
+  hubs already provide renaming and two mechanisms for one job is duplication.
+- **Superseded: intrinsics stay ambient.** They are reachable only through an
+  `intrinsics` import, which is what the wildcard form exists to make bearable.
 
 The unit above the file. Today's import model (Phase 4 Slice 5, `docs/roadmap/P4/`) makes
 a single `.sth` file a compilation unit and nothing coarser: `import: q "path.sth"` names

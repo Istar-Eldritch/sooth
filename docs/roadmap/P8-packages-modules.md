@@ -7,158 +7,176 @@ file, resolution is relative to the importing file with an explicit `.sth` and n
 path, and encapsulation came with it (default private, a per-file `export:` list, and the
 Elm-style split between exporting a type name and exporting its constructors). That is
 enough for personal reuse and not enough to structure an ecosystem: there is no unit above
-the file, nothing expresses a dependency between two bodies of code, and the `core` /
-`fixed` / `alloc` / `hosted` layering is a convention about which words someone put in
-which file rather than a checked property.
+the file, nothing expresses a dependency between two bodies of code, the `core` / `fixed` /
+`alloc` / `hosted` layering is a convention about which words someone put in which file
+rather than a checked property, and a program's most-used words arrive without being asked
+for.
 
-This phase adds the unit above the file and makes the layering enforceable. A **package**
-is a directory with a manifest naming the package, its layer, its dependencies, and the
-**modules it exposes**. Dependencies are **source-based**: a dependency resolves to a source
-location (a path, or later a revision), and its sources are compiled into the program
-alongside the consumer's, because Sooth compiles one unit with no per-crate overhead and so
-has no binary artifact to resolve. There is deliberately no search path: a dependency's
-location is written down in the manifest, not discovered by scanning.
+## The model
 
-**A cross-package import names a module, not a file.** A quoted path stays what it is today
-and stays inside one package; an unquoted `pkg::module` names a declared module of a
-declared dependency, resolved through the manifest's own tables:
+**A package is a directory with a manifest.** The manifest declares the package's name, its
+layer, its dependencies, and which of its modules are public:
 
 ```
-import: cmp core::cmp ;            \ cross-package, by module name
-import: d | grow | "detail.sth" ;  \ intra-package, by path
+package: core ;
+layer: core ;
+depends: intrinsics builtin ;
+module: text ;
+module: cmp ;
 ```
 
-A path-based cross-package import would bake the dependency's internal file layout into
-every consumer, so moving a file *inside* a dependency would break its consumers, which
-defeats the boundary the package exists to draw. Naming modules also gives a package a
-second encapsulation level mirroring the first: `export:` decides which names leave a file,
-`module:` decides which modules leave a package, and a file the manifest doesn't declare is
-package-private (reachable by path from inside, unnameable from outside). No file is
-privileged, so there is no root or entry module. The cost is one more resolution rule to
-learn than the single quoted-path form, accepted because the two forms track a real
-boundary.
+**A module is a file, and its name derives from its path within the package.**
+`text/ascii.sth` is the module `text::ascii`; nesting is naming, with no separate mechanism
+behind it. A filename must be a legal module segment, which costs nothing since word names
+already admit `-`. The manifest lists which modules are **public**, by name: visibility
+cannot be derived from a path, so that declaration survives even though the path no longer
+has to be written down. An undeclared module is package-private.
 
-The manifest's **layer** field is what gives the layering teeth. A package may not depend
-on a package in a higher layer, so `core` depending on `alloc` is a build error rather than
-a code-review observation, and DESIGN.md's "tag every stdlib word with the layer it needs"
-stops being discipline and becomes a field with a rule behind it. Phase 9 then builds
-`fixed` / `alloc` / `hosted` as packages that have to pass that check, which is what makes
-its exit criteria mean anything.
+**Imports name modules.** A quoted path survives only for a file belonging to no package
+(the manifest-less scratch case); anything inside a package is named:
 
-**Imports are single-mode: every name a file uses comes from an `import:`, with no
-implicitly present words at all.** `lib/core.sth` is today injected into every program
-unqualified, which is a hole in the resolution model rather than a convenience: prelude
-words are exempted from per-module mangling (`src/resolve.rs:32`, via
-`is_prelude_word_name`), and because they are checked against the whole program's word
-environment they have no hygiene against user names, which is why `if`'s own locals are
-spelled `if--cond`/`if--then-arm` to avoid colliding with any program that defines a word
-`t`. Deleting the special case rather than relocating it is the point: prelude words arrive
-through the same import path as everything else, the mangling exemption shrinks to `main`
-and `drop`, and those locals become plain names. The cost is a visible one: every existing
-`.sth` file gains import lines, and a new file's most likely first error is `unknown word:
-if`, which needs a diagnostic naming the missing import.
+```
+import: a text::ascii ;              \ same package
+import: cmp core::cmp ;              \ another package, via depends:
+import: i | * | intrinsics ;         \ every exported name, unqualified
+import: s | split trim | core::text ; \ two names unqualified, plus the qualifier
+```
 
-That leaves `lib/core.sth` splittable along the boundary its own header draws, but into
-**modules of one package, not two packages**: `bool`, the comparisons, and `if`/`unless` are
-Sooth source, while `branch`, `tag`, and the `u`-prefixed comparisons underneath them are
-entries in `BUILTIN_WORDS` (`src/check/declarations.rs:85-110`) dispatched by
-`is_builtin_word_name` ahead of any environment lookup. There is no intrinsics package to
-depend on, because the intrinsics are not Sooth code; an "intrinsics package" would be an
-empty directory and a fictional dependency edge.
+The qualifier is always bound and is always a single segment, so use sites stay `a::decode`
+regardless of how deeply the module is nested. A path-based cross-package import would bake
+the dependency's internal layout into every consumer, so moving a file inside a dependency
+would break them; naming modules is what stops that.
 
-**The intrinsics stay ambient rather than becoming an importable meta-module.** Single-mode
-imports remove implicitly present *library* words; the builtins are the language surface
-itself, and ambient availability of the language is not the same hole. The prelude was a
-hole precisely because `if` and `=` are written in Sooth while presenting as language.
-Three costs make the meta-module a bad trade today: it works ergonomically only with
-wholesale unqualified import (declined) or a dozen-name import line in every file;
-`BUILTIN_WORDS` does double duty as the guard that stops a bare tail call being read as a
-self-call (`has_self_tail_call`), so moving builtin dispatch behind an environment lookup
-untangles a list serving two purposes; and `src/check/poly.rs:848` already special-cases
-`call`/`branch`/`if`/`times`/`tag` by name. An enumerable, documented intrinsic surface is
-better bought from the auto-generated reference doc in the cross-cutting tooling section.
-Revisit only if a real consumer (the self-hosted compiler reasoning about its own intrinsic
-set) forces it.
+**Modules re-export, so a package curates its own surface.** `export:` accepts a name the
+file imported as readily as one it declared, which makes a hub module: `core` can import
+`intrinsics` and re-export the subset it endorses, and `text.sth` can gather
+`text::ascii`/`text::utf8` behind one public name. This is also the *only* renaming
+mechanism, which is why the manifest carries no path table: a hub that re-exports under a
+chosen name does the same job in Sooth source, where it is greppable and can be deprecated.
+Wildcard re-export is not provided; a hub lists what it promises, so a package's public
+surface stays enumerable for P8.S3's API description.
 
-**Exit:** a program builds from a manifest against a package dependency it names; a package
-declaring a lower layer than its dependency is a located build error; no word is visible
-without an `import:`, and `is_prelude_word_name` and `parser::prelude_words` are gone.
-**Dogfood:** `lib/`'s existing words restructured as packages (a `core` package whose
-modules are the typed core, and a collections/combinators package consuming it by module
-name), with every example and golden program importing what it uses.
+**Nesting names, it does not nest visibility.** Importing `core::text` brings nothing from
+`core::text::utf8`, and no intermediate module exists unless it is declared. An aggregate is
+a hub, per above, so the two features compose rather than overlap.
 
-**P8.S1 — Single-mode imports: delete the implicit prelude.** Every name a file uses comes
-from an `import:`. `parser::prelude_words` and its two injection sites go, the mangling
-exemption shrinks to `main`/`drop`, `lib/core.sth` splits into modules (the compiler's own
-builtins stay ambient, since they are not Sooth code), and every example, golden, and `lib/`
-file gains explicit imports. `if`'s locals lose their `if--` prefixes, since the hygiene problem that
-forced them is the hole this slice closes. Brief written and probe-verified
-(`docs/roadmap/P8/slice1-brief.md`): an imported inline combinator splices correctly
-(qualified and selective), self-tail-to-loop lowering survives an imported `if` at 5M
-iterations, and an inline poly word over imported comparisons monomorphizes at `i64` and
-`f64`. Probing also found the exemption is **load-bearing** rather than a bare-name
-convenience: a non-inline polymorphic word can call the prelude's poly `<` and cannot call
-an imported one, so deleting the prelude exposes the generic-calls-generic gap. No live
-corpus word is in that shape (every poly word over a comparison is `inline`), so the slice
-accepts the narrowing behind a located diagnostic rather than pulling a P7 type-system fix
-into a packaging slice.
-**Split from S2 because they share no file, no grammar, and no open question**: this slice
-is a resolution-model cleanup with a corpus-wide but mechanical diff and no design question
-left, while S2 adds a new file format and carries every remaining open question. Bundled,
-the interesting few hundred lines hide inside the import churn. It stands alone: even if
-manifests were abandoned, the resolution hole is closed and the hygiene hack is gone.
+**The intrinsics are a module too.** `BUILTIN_WORDS` (`src/check/declarations.rs:63-110`,
+40 names: the shuffles, the arithmetic, the `u`-prefixed comparisons, `branch`, `tag`, `.`,
+`fill`, `len`) is reachable only through `import: i | * | intrinsics ;`. It is a
+compiler-provided module, not a package with sources, so `intrinsics` is one reserved name
+resolved without a path. The table itself does not move, and `has_self_tail_call` keeps
+using it unchanged: only *visibility* is gated. `>`-prefixed conversions are claimed by
+prefix rather than by the table and are gated by the same rule.
+
+**Layers are checked.** A package may not depend on one in a higher layer, so `core`
+depending on `alloc` is a located build error rather than a code-review observation, and
+DESIGN.md's "tag every stdlib word with the layer it needs" becomes a field with a rule
+behind it. Phase 9 builds `fixed` / `alloc` / `hosted` as packages that must pass it, which
+is what makes that phase's exit criteria mean anything.
+
+**A manifest is optional.** A bare `.sth` file with no manifest above it belongs to no
+package and builds as it does today, quoted-path imports included. The known cost is that
+such a file is unconstrained and can path-import into another package's private modules;
+accepted, because these checks exist to keep declared packages honest rather than to
+sandbox, and the frictionless scratch file is what the optional manifest is for.
+
+**Exit:** no word resolves without an `import:`, including the intrinsics; a program builds
+against a dependency's module named as `pkg::module`; a module a package does not declare is
+unnameable from outside it; a package declaring a lower layer than its dependency is a
+located build error.
+**Dogfood:** `lib/` restructured as packages, with a `core` package whose hub re-exports a
+curated subset of `intrinsics` and whose modules are the typed core, a collections package
+consuming it by module name, every example and golden importing what it uses, and a
+deliberate layer violation rejected.
+
+## Slices
+
+The split is on whether a manifest is required. Everything file-level lands together in S1,
+because all of it is one corpus-wide migration and doing it in two passes means editing the
+same ~500 sites twice with a red suite in between.
+
+**P8.S1 — Single-mode imports, the intrinsics module, wildcard import, and re-export.**
+Delete `parser::prelude_words` and its two injection sites, shrink the mangling exemption to
+`main`/`drop`, gate `BUILTIN_WORDS` visibility on an `intrinsics` import, add the `| * |`
+wildcard form and re-export through `export:`, split `lib/core.sth` into modules with a hub,
+and migrate every `.sth` file and every inline test source. `if`'s locals lose their `if--`
+prefixes: bodies are checked in their own module's scope now, so the hygiene hack the
+whole-program environment forced is gone for good.
+Brief and probe results in `docs/roadmap/P8/slice1-brief.md`. Probing established that an
+imported inline combinator splices correctly (qualified and selective), that
+self-tail-to-loop lowering survives an imported `if` at 5M iterations, and that an inline
+poly word over imported comparisons monomorphizes at `i64` and `f64`. It also found the
+mangling exemption is **load-bearing** rather than a bare-name convenience: a non-inline
+polymorphic word can call the prelude's poly `<` and cannot call an imported one, so
+deleting the prelude exposes the generic-calls-generic gap. No live corpus word is in that
+shape, so the slice accepts the narrowing behind a located diagnostic rather than pulling a
+P7 type-system fix into a packaging slice.
 **Exit:** no word resolves without an `import:`; `is_prelude_word_name` and
-`parser::prelude_words` are deleted; the corpus builds and every golden still passes; a
-non-inline poly word calling an imported poly word is a located error naming the caller,
-the callee, and the reason.
-**Dogfood:** `examples/gcd.sth` and `factorial.sth` building with explicit imports of the
-words they use, and `lib/core.sth`'s locals spelled plainly.
+`parser::prelude_words` are deleted; a hub module re-exports an imported word and a consumer
+uses it; the corpus builds and every golden passes; a non-inline poly word calling an
+imported poly word is a located error naming the caller, the callee, and the reason.
+**Dogfood:** `examples/gcd.sth` and `factorial.sth` building with explicit imports, and a
+`core` hub re-exporting a curated subset of `intrinsics`.
 
-**P8.S2 — Packages, manifests, and the layer check.** The unit above the file: a package is
-a directory with a manifest declaring its name, its layer, its dependencies (as source
-locations, not binary artifacts), and the modules it exposes. The manifest participates in
-*resolution*, not only checking: an unquoted `pkg::module` import resolves `pkg` through
-`depends:` and `module` through that package's own `module:` declarations, while a quoted
-path keeps today's meaning and stays inside one package. Two checks come with it: naming a
-package no `depends:` entry lists is an error, and a package may not depend on one in a
-higher layer. A manifest stays optional, so a bare `.sth` file with no manifest above it
-belongs to no package and builds exactly as today, path imports included; the known cost is
-that such a file is unconstrained and can path-import into another package's undeclared
-files, accepted because the check exists to keep declared packages honest rather than to
-sandbox. Wants its own brief: the manifest-half recon and open questions are in
+**P8.S2 — Packages, manifests, path-derived module names, and the layer check.** The
+manifest and its parser, package attribution over the discovered closure, module names
+derived from paths, the public-module surface, cross-package `pkg::module` resolution, and
+the two checks (naming a package no `depends:` entry lists; depending on a higher layer).
+Wants its own brief: the manifest-half recon and the open questions are in
 `docs/roadmap/P8/slice1-brief.md`.
 **Exit:** a program builds against a dependency's module named as `pkg::module`; a module a
-package does not declare is unnameable from outside it; a package declaring a lower layer
-than its dependency is a located build error.
-**Dogfood:** `lib/`'s words restructured as packages with the array/combinator words as
-consumers, and a deliberate layer violation rejected.
+package does not declare is unnameable from outside it; a layer violation is a located build
+error.
+**Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
+rejected.
 
 **P8.S3 — The serialisable API description.** "Which words, types, and externs are public"
-is already answered by Phase 4 Slice 5's `export:` list, and answered where it had to be,
-since a type cannot hold an invariant while its generated setters cross the boundary
-unchecked. What is left is one thing, not two: a **serializable API description**, a
-compiler pass that walks the checked AST, filters to the exported declarations Slice 5
-already distinguishes, and emits a file listing every exported signature for the API diff to
-compare between versions. That is the remaining prerequisite in
-`docs/dependency-management.md`, and it is a packaging/publishing concern (letting other
-people depend on you with enforced semver) rather than a personal-reuse one, which is why it
-waited. Needs P7.S2 (statics) and P7.S3e (bounds), since a global clause on an exported word
-is part of that word's exported signature.
+is answered by Phase 4 Slice 5's `export:` list plus S2's public-module surface, and
+answered where it had to be, since a type cannot hold an invariant while its generated
+setters cross the boundary unchecked. What is left is one thing: a compiler pass that walks
+the checked AST, filters to the exported declarations of declared modules, and emits a file
+listing every exported signature for the API diff to compare between versions. That is the
+remaining prerequisite in `docs/dependency-management.md`, and it is a packaging concern
+(letting other people depend on you with enforced semver) rather than a personal-reuse one,
+which is why it waited. Needs P7.S2 (statics) and P7.S3e (bounds), since a global clause on
+an exported word is part of that word's exported signature.
 **Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump
 across a two-file change.
 **Dogfood:** `sooth publish --check` on a two-version bump of a small library, one that adds
 a word (MINOR) and one that removes one (MAJOR).
 
-**Deferred, with reasons.** A **C-ABI export target** (emitting a library other programs
-can link) is codegen work (symbol naming, calling convention, header generation) and
-shares nothing with dependency resolution, so it is not bundled here; it is also the
-prerequisite for **Rust↔Sooth FFI**, which is what a self-hosted compiler module would need
-and which waits on it. **Semver enforcement itself** (the API diff and `sooth publish
---check`) is tooling on top of P8.S3's format, specified in
-`docs/dependency-management.md`. **A user-level manifest** (`$XDG_CONFIG_HOME/sooth`) is
-how the REPL eventually gets a session's imports; a REPL exemption in the compiler is not,
-since that is the special case this phase deletes. **Re-exports, aliasing an import to a
-different local qualifier, wholesale unqualified import, and a `mod.sth` directory
-convention** stay declined per Phase 4 Slice 5. A manifest flag marking a dependency's
-exports visible unqualified package-wide is the sanctioned way to reintroduce prelude
-ergonomics later, and is not built now.
+## Declined and deferred, with reasons
+
+**A Rust-style source-side `mod` declaration.** Declined. `mod foo;` exists in Rust as the
+*discovery* mechanism, because Rust has no manifest-level listing of sources; Sooth
+discovers files by walking the import graph and declares its public surface in the manifest,
+so a source-side mount is a third mechanism for something already handled twice, and it buys
+the `mod`/`use`/`pub use` confusion with it. The declare-versus-use separation it offers is
+already present: the manifest declares, `import:` uses.
+
+**Intra-package visibility levels** (a submodule visible only to its parent, Rust's private
+`mod`). Deferred, and this is what declining `mod` actually costs. Sooth has two levels,
+file (`export:`) and package (`module:`), with everything inside a package mutually
+reachable. Revisit when a package is large enough that its internal structure needs
+defending; none is.
+
+**Manifest path tables** (`module: text::ascii "text/ascii.sth" ;`). Declined once hubs
+existed: a hub re-exporting under a chosen name is already a renaming mechanism, and two
+mechanisms for one job is the duplication this project avoids. The cost accepted with it is
+that directory layout is semantically load-bearing inside a package, so renaming a file
+renames a module. Public surfaces should therefore be hubs, behind which files can move
+freely.
+
+**Wildcard re-export** (`export: | * | ;`). Declined: a hub exists to curate, and an
+implicit public surface is exactly what P8.S3 has to enumerate.
+
+**A C-ABI export target** (emitting a library other programs can link) is codegen work
+(symbol naming, calling convention, header generation) sharing nothing with dependency
+resolution. It is also the prerequisite for **Rust↔Sooth FFI**, which a self-hosted compiler
+module would need, so both wait.
+
+**Semver enforcement itself** (the API diff and `sooth publish --check`) is tooling on top
+of P8.S3's format, specified in `docs/dependency-management.md`. **Git dependencies** are an
+additive grammar extension to `depends:`, not a redesign. **A user-level manifest**
+(`$XDG_CONFIG_HOME/sooth`) is how the REPL eventually gets a session's imports; a REPL
+exemption in the compiler is not, since that is the special case this phase deletes.
