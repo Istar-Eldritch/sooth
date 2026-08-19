@@ -55,7 +55,7 @@ fallback for any file with an ancestor manifest; `--manifest` is a different thi
 override rather than a discovered one, which is why it's exempt from that rule.
 
 **F2. Intra-package module references need a stated base.** `core/text/ascii.sth` says
-`import: c | lt gt | cmp ;`, a sibling named without the package prefix, while the hub says
+`import: cmp c | lt gt | ;`, a sibling named without the package prefix, while the hub says
 `text::ascii`. Both read naturally, and they are only consistent if the rule is *module names
 are package-root-relative inside their own package, and `pkg::`-qualified across packages*.
 That rule is not written down anywhere yet. The alternative (always fully qualified, even

@@ -37,7 +37,7 @@ to resolve `core` against.
    edge to draw. `bool`, `if`/`unless`, and the surface comparisons are ordinary words and
    split cleanly. Gating the builtins behind an `intrinsics` import (rather than leaving
    them ambient) is a design choice made explicit in `../P8-packages-modules.md`: the
-   builtins are the language surface, but "reachable only via `import: | * | intrinsics ;`"
+   builtins are the language surface, but "reachable only via `import: intrinsics | * | ;`"
    is what makes a bare-metal file's intrinsic surface auditable in one line, which is the
    forcing consumer that justifies the gate.
 
@@ -89,10 +89,10 @@ five probes confirmed the plan; one falsified a decision.
   corpus file that still resolves `if` through the deleted prelude is a build failure, and
   the fix is adding the import, not restoring the exemption.
 
-- **The intrinsics are gated behind `import: | * | intrinsics ;`; the wildcard form and
+- **The intrinsics are gated behind `import: intrinsics | * | ;`; the wildcard form and
   re-export are what make that bearable.** Qualified `1 2 i::add` is unreadable in a stack
   language, and a selective list of the ~40 `BUILTIN_WORDS` names per file is worse than
-  the problem. The selective form (`import: | dup drop add | intrinsics ;`) stays available
+  the problem. The selective form (`import: intrinsics | dup drop add | ;`) stays available
   for the case where the intrinsic surface is worth documenting explicitly (a bare-metal
   file proving in source that it never touches `fill`). `export:` accepting a name a file
   imported, not only one it declared, is what makes a hub module: `core` can import

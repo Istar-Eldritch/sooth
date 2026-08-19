@@ -37,21 +37,24 @@ A package's public surface is normally a hub or two rather than every file, so t
 stays short by construction, and a package that finds itself listing many modules is one
 that wants a hub.
 
-**Imports name modules, and that is the only form.** There is no path-based import:
+**Imports name modules, and that is the only form.** There is no path-based import. The
+target comes first; the qualifier is optional and, when omitted, defaults to the module's
+last segment:
 
 ```
-import: a text::ascii ;               \ same package, by path-derived name
-import: cmp core::cmp ;              \ another package, via depends:
-import: i | * | intrinsics ;         \ every exported name, unqualified
-import: s | split trim | core::text ; \ two names unqualified, plus the qualifier
+import: text::ascii a ;               \ same package, by path-derived name, qualifier a
+import: core::cmp ;                  \ another package, qualifier defaults to cmp
+import: intrinsics i | * | ;         \ every exported name, unqualified
+import: core::text s | split trim | ; \ two names unqualified, plus the qualifier
 ```
 
 The qualifier is always bound and is always a single segment, so use sites stay `a::decode`
-regardless of how deeply the module is nested. A path-based import would bake a
-dependency's internal layout into every consumer, so moving a file inside a dependency
-would break them; naming modules is what stops that. Keeping the quoted form for the
-manifest-less case would leave a second resolution rule alive for one consumer, so it is
-deleted from the language and the manifest-less case is answered below instead.
+regardless of how deeply the module is nested; only its spelling in source is optional. A
+path-based import would bake a dependency's internal layout into every consumer, so moving
+a file inside a dependency would break them; naming modules is what stops that. Keeping the
+quoted form for the manifest-less case would leave a second resolution rule alive for one
+consumer, so it is deleted from the language and the manifest-less case is answered below
+instead.
 
 **Modules re-export, so a package curates its own surface.** `export:` accepts a name the
 file imported as readily as one it declared, which makes a hub module: `core` can import
@@ -68,7 +71,7 @@ a hub, per above, so the two features compose rather than overlap.
 
 **The intrinsics are a module too.** `BUILTIN_WORDS` (`src/check/declarations.rs:63-110`,
 40 names: the shuffles, the arithmetic, the `u`-prefixed comparisons, `branch`, `tag`, `.`,
-`fill`, `len`) is reachable only through `import: i | * | intrinsics ;`. It is a
+`fill`, `len`) is reachable only through `import: intrinsics | * | ;`. It is a
 compiler-provided module, not a package with sources, so `intrinsics` is one reserved name
 resolved without a path. The table itself does not move, and `has_self_tail_call` keeps
 using it unchanged: only *visibility* is gated. `>`-prefixed conversions are claimed by

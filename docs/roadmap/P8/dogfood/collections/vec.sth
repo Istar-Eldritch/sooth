@@ -1,6 +1,6 @@
-import: i | * | intrinsics ;
-import: b | if | core::bool ;
-import: c | lt | core::cmp ;
+import: intrinsics i | * | ;
+import: core::bool b | if | ;
+import: core::cmp c | lt | ;
 
 export: Vec sum-to ;
 

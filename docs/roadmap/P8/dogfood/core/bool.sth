@@ -1,7 +1,7 @@
 \ core::bool -- the typed branch. Imports the two control primitives it needs
 \ and nothing else, so a reader can see the whole intrinsic surface this
 \ module touches.
-import: i | branch tag | intrinsics ;
+import: intrinsics i | branch tag | ;
 
 export: if unless ;
 

@@ -1,7 +1,7 @@
 \ core::text -- a hub. It declares no words of its own; it curates the public
 \ face of the two modules beneath it, which stay reachable by their own names
 \ only because the manifest lists `text` and not `text::ascii`/`text::utf8`.
-import: a | upper? lower? | text::ascii ;
-import: u | continuation? | text::utf8 ;
+import: text::ascii a | upper? lower? | ;
+import: text::utf8 u | continuation? | ;
 
 export: upper? lower? continuation? ;

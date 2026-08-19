@@ -1,6 +1,6 @@
-import: i | * | intrinsics ;
-import: t | upper? | core::text ;
-import: v collections::vec ;
+import: intrinsics i | * | ;
+import: core::text t | upper? | ;
+import: collections::vec v ;
 
 : main ( -- )
   65 upper? .

@@ -4,8 +4,8 @@
 \ With no user-level manifest either, this file would be an implicit anonymous
 \ package: `intrinsics` and its own siblings only, and the two lines below
 \ would be located errors naming the missing manifest.
-import: i | * | intrinsics ;
-import: b | if | core::bool ;
-import: t | upper? | core::text ;
+import: intrinsics i | * | ;
+import: core::bool b | if | ;
+import: core::text t | upper? | ;
 
 : main ( -- ) 65 upper? ~[ 1 ] ~[ 0 ] if . ;

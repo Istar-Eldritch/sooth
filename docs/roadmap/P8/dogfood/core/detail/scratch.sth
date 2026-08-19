@@ -1,6 +1,6 @@
 \ core::detail::scratch -- NOT in the manifest's `module:` list, so it is
 \ package-private: importable by its siblings, unnameable by a consumer.
-import: i | * | intrinsics ;
+import: intrinsics i | * | ;
 
 export: clamp-u8 ;
 
