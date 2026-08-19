@@ -15,22 +15,20 @@ for.
 ## The model
 
 **A package is a directory with a manifest.** The manifest declares the package's name, its
-layer, its dependencies, and which of its modules are public:
+layer, and its dependencies, and nothing else:
 
 ```
 package: core ;
 layer: core ;
 depends: intrinsics builtin ;
-module: text ;
-module: cmp ;
 ```
 
 **A module is a file, and its name derives from its path within the package.**
 `text/ascii.sth` is the module `text::ascii`; nesting is naming, with no separate mechanism
 behind it. A filename must be a legal module segment, which costs nothing since word names
-already admit `-`. The manifest lists which modules are **public**, by name: visibility
-cannot be derived from a path, so that declaration survives even though the path no longer
-has to be written down. An undeclared module is package-private.
+already admit `-`. **The manifest lists no modules**: files are discovered by walking the
+import graph, exactly as they are today, so adding a file is adding a file. A module's
+public surface is its own `export:` list and nothing further.
 
 **Imports name modules.** A quoted path survives only for a file belonging to no package
 (the manifest-less scratch case); anything inside a package is named:
@@ -81,9 +79,8 @@ accepted, because these checks exist to keep declared packages honest rather tha
 sandbox, and the frictionless scratch file is what the optional manifest is for.
 
 **Exit:** no word resolves without an `import:`, including the intrinsics; a program builds
-against a dependency's module named as `pkg::module`; a module a package does not declare is
-unnameable from outside it; a package declaring a lower layer than its dependency is a
-located build error.
+against a dependency's module named as `pkg::module`; a package not in `depends:` is
+unnameable; a package declaring a lower layer than its dependency is a located build error.
 **Dogfood:** `lib/` restructured as packages, with a `core` package whose hub re-exports a
 curated subset of `intrinsics` and whose modules are the typed core, a collections package
 consuming it by module name, every example and golden importing what it uses, and a
@@ -120,23 +117,22 @@ imported poly word is a located error naming the caller, the callee, and the rea
 
 **P8.S2 — Packages, manifests, path-derived module names, and the layer check.** The
 manifest and its parser, package attribution over the discovered closure, module names
-derived from paths, the public-module surface, cross-package `pkg::module` resolution, and
-the two checks (naming a package no `depends:` entry lists; depending on a higher layer).
-Wants its own brief: the manifest-half recon and the open questions are in
-`docs/roadmap/P8/slice1-brief.md`.
-**Exit:** a program builds against a dependency's module named as `pkg::module`; a module a
-package does not declare is unnameable from outside it; a layer violation is a located build
-error.
+derived from paths, cross-package `pkg::module` resolution, and the two checks (naming a
+package no `depends:` entry lists; depending on a higher layer). Wants its own brief: the
+manifest-half recon and the open questions are in `docs/roadmap/P8/slice1-brief.md`.
+**Exit:** a program builds against a dependency's module named as `pkg::module`; a package
+absent from `depends:` is unnameable; a layer violation is a located build error.
 **Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
 rejected.
 
 **P8.S3 — The serialisable API description.** "Which words, types, and externs are public"
-is answered by Phase 4 Slice 5's `export:` list plus S2's public-module surface, and
-answered where it had to be, since a type cannot hold an invariant while its generated
-setters cross the boundary unchecked. What is left is one thing: a compiler pass that walks
+is answered by Phase 4 Slice 5's `export:` list, and answered where it had to be, since a
+type cannot hold an invariant while its generated setters cross the boundary unchecked. What is left is one thing: a compiler pass that walks
 the checked AST, filters to the exported declarations of declared modules, and emits a file
-listing every exported signature for the API diff to compare between versions. That is the
-remaining prerequisite in `docs/dependency-management.md`, and it is a packaging concern
+listing every exported signature for the API diff to compare between versions. With no
+manifest module list, that surface is every module's `export:` list, which is the input to
+the `private:` question above. That is the remaining prerequisite in
+`docs/dependency-management.md`, and it is a packaging concern
 (letting other people depend on you with enforced semver) rather than a personal-reuse one,
 which is why it waited. Needs P7.S2 (statics) and P7.S3e (bounds), since a global clause on
 an exported word is part of that word's exported signature.
@@ -169,6 +165,16 @@ freely.
 
 **Wildcard re-export** (`export: | * | ;`). Declined: a hub exists to curate, and an
 implicit public surface is exactly what P8.S3 has to enumerate.
+
+**A manifest list of public modules.** Declined: with names derived from paths, such a list
+buys only package-level privacy and charges a manifest edit per file added, which is the
+friction that stops files being added. Discovery is already the import-graph walk. The
+boundary survives one level up, since a consumer can only name packages in its own
+`depends:`, so internals that must stay hidden become a package the consumer does not depend
+on. The cost accepted with it: every `export:` list is public API, so internal refactoring
+shows up in P8.S3's diff. **Revisit when that diff is noisy in practice**, and then as a
+`private:` *exception* list, naming the few modules that are not public rather than the many
+that are.
 
 **A C-ABI export target** (emitting a library other programs can link) is codegen work
 (symbol naming, calling convention, header generation) sharing nothing with dependency
