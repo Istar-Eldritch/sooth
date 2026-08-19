@@ -8,7 +8,7 @@ exercise; the files are the means.
 
 ## Layout
 
-```
+```text
 core/sooth.pkg              package: core, layer: core, module: bool cmp text
 core/bool.sth               core::bool   -- if/unless over branch/tag
 core/cmp.sth                core::cmp    -- eq/lt/gt/... over the u-prefixed flags
