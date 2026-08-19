@@ -651,7 +651,7 @@ mod tests {
     fn lower_single_output_word_keeps_its_scalar_return() {
         // R2/R15: nothing about the bundle path reaches a word with one
         // output; it returns its scalar directly, as before the slice.
-        let ir = lower_src(": inc ( i64 -- i64 ) 1 + ;");
+        let ir = lower_src(": inc ( i64 -- i64 ) 1 add ;");
         let inc = ir.funcs.iter().find(|f| f.name == "inc").unwrap();
         assert_eq!(inc.ret, Some(IrType::I64));
         assert!(ir.structs.is_empty());

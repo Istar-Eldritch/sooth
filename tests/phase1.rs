@@ -64,21 +64,21 @@ fn alloc_trace_stays_empty_in_a_session_that_never_allocates() {
     // is benign for the same reason the spy's copies are: they wrap libc and hold
     // no state, and the trace's state lives in stdout, not in the module. So a
     // session that constructs no cell prints no trace even with the gate on.
-    let out = run_session_traced(&[": sq ( i64 -- i64 ) | n | n n * ;", "5 sq"], true);
+    let out = run_session_traced(&[": sq ( i64 -- i64 ) | n | n n mul ;", "5 sq"], true);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["defined sq", "stack: 25"]);
 }
 
 #[test]
 fn define_then_call_across_lines() {
-    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n * ;", "5 sq"]);
+    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n mul ;", "5 sq"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["defined sq", "stack: 25"]);
 }
 
 #[test]
 fn stack_persists_across_lines() {
-    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n * ;", "5", "sq", "1 +"]);
+    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n mul ;", "5", "sq", "1 add"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -89,9 +89,9 @@ fn stack_persists_across_lines() {
 #[test]
 fn redefinition_takes_effect_for_later_lines() {
     let out = run_session(&[
-        ": sq ( i64 -- i64 ) | n | n n * ;",
+        ": sq ( i64 -- i64 ) | n | n n mul ;",
         "3 sq",
-        ": sq ( i64 -- i64 ) | n | n n n * * ;",
+        ": sq ( i64 -- i64 ) | n | n n n mul mul ;",
         "3 sq",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -103,7 +103,7 @@ fn redefinition_takes_effect_for_later_lines() {
 
 #[test]
 fn bad_line_reports_and_session_survives() {
-    let out = run_session(&["5", "unknown-word", "1 +"]);
+    let out = run_session(&["5", "unknown-word", "1 add"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
@@ -117,7 +117,7 @@ fn bad_line_reports_and_session_survives() {
 
 #[test]
 fn type_error_line_reports_and_session_survives() {
-    let out = run_session(&["5", "true 1 +", "1 +"]);
+    let out = run_session(&["5", "true 1 add", "1 add"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
@@ -132,9 +132,9 @@ fn type_error_line_reports_and_session_survives() {
 #[test]
 fn failed_redefinition_keeps_old_generation_resident() {
     let out = run_session(&[
-        ": sq ( i64 -- i64 ) | n | n n * ;",
+        ": sq ( i64 -- i64 ) | n | n n mul ;",
         "3 sq",
-        ": sq ( i64 -- i64 ) dup dup * ;",
+        ": sq ( i64 -- i64 ) dup dup mul ;",
         "3 sq",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -149,7 +149,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
     assert!(lines[3].contains("body leaves 2 values"));
     assert!(lines[3].contains("declares 1 outputs"));
     // The failed redefinition never committed: `sq` still resolves to the
-    // original generation (`n n *`), and the stack from the first `3 sq` is
+    // original generation (`n n mul`), and the stack from the first `3 sq` is
     // untouched, so the second `3 sq` appends its own 9.
     assert_eq!(lines[5], "stack: 9 9");
 }
@@ -157,7 +157,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
 #[test]
 fn sign_definable_and_callable_in_repl() {
     let out = run_session(&[
-        ": sign ( i64 -- i64 ) 0 > ~[ 1 ] ~[ 0 ] if ;",
+        ": sign ( i64 -- i64 ) 0 gt ~[ 1 ] ~[ 0 ] if ;",
         "-7 sign",
         "7 sign",
     ]);
@@ -176,12 +176,12 @@ fn bool_residual_displays_as_true_or_false() {
 #[test]
 fn calculator_session_dogfood() {
     let out = run_session(&[
-        ": sq ( i64 -- i64 ) | n | n n * ;",
-        ": neg ( i64 -- i64 ) 0 swap - ;",
+        ": sq ( i64 -- i64 ) | n | n n mul ;",
+        ": neg ( i64 -- i64 ) 0 swap sub ;",
         "3 sq",
         "neg",
-        "10 +",
-        "2 *",
+        "10 add",
+        "2 mul",
         ".",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -209,7 +209,7 @@ fn subword_carried_value_survives_line_boundary() {
     // if the carried slot were never canonicalized on reload, so this pins the
     // actual point of R16/Q2, that the carried `u8` is relabeled/canonicalized
     // across the line boundary, not just carried as an opaque 8-byte value.
-    let out = run_session(&["200 >u8", "100 >u8 +", ">i64 ."]);
+    let out = run_session(&["200 >u8", "100 >u8 add", ">i64 ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -224,7 +224,7 @@ fn subword_carried_value_survives_line_boundary() {
 /// proves the float re-enters as a true float, not a stale integer.
 #[test]
 fn carried_float_survives_line_boundary_and_displays_as_float() {
-    let out = run_session(&["1.5 2.0 +", "1.0 +", "."]);
+    let out = run_session(&["1.5 2.0 add", "1.0 add", "."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -323,17 +323,17 @@ fn struct_declaration_errors_report_and_session_survives() {
 
 /// S8: the `examples/vectors.sth` dogfood, defined and run across REPL lines
 /// (word definitions carrying struct types across the line boundary, then
-/// two calls exercising the nested `Segment>`/`sub`/`len2` span and the
+/// two calls exercising the nested `Segment>`/`vec2-sub`/`len2` span and the
 /// `shift-x` functional setter).
 #[test]
 fn vectors_dogfood_runs_in_repl() {
     let out = run_session(&[
         "type: Vec2 x i64 y i64 ;",
         "type: Segment from Vec2 to Vec2 ;",
-        ": sub ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop - a &y @ swap drop b &y @ swap drop - Vec2 ;",
-        ": len2 ( Vec2 -- i64 ) | v | v &x @ swap drop v &x @ swap drop * v &y @ swap drop v &y @ swap drop * + ;",
-        ": span ( Segment -- Vec2 ) Segment> swap sub ;",
-        ": shift-x ( Vec2 i64 -- Vec2 ) | v dx | v &x @ swap drop dx + | newx | v &!x newx ! ;",
+        ": vec2-sub ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop sub a &y @ swap drop b &y @ swap drop sub Vec2 ;",
+        ": len2 ( Vec2 -- i64 ) | v | v &x @ swap drop v &x @ swap drop mul v &y @ swap drop v &y @ swap drop mul add ;",
+        ": span ( Segment -- Vec2 ) Segment> swap vec2-sub ;",
+        ": shift-x ( Vec2 i64 -- Vec2 ) | v dx | v &x @ swap drop dx add | newx | v &!x newx ! ;",
         "0 0 Vec2 3 4 Vec2 Segment span len2 .",
         "5 6 Vec2 1 shift-x &x @ . drop",
     ]);
@@ -343,7 +343,7 @@ fn vectors_dogfood_runs_in_repl() {
         vec![
             "defined type Vec2",
             "defined type Segment",
-            "defined sub",
+            "defined vec2-sub",
             "defined len2",
             "defined span",
             "defined shift-x",
@@ -361,7 +361,7 @@ fn vectors_dogfood_runs_in_repl() {
 /// program order, on every run.
 #[test]
 fn dot_output_interleaves_before_stack() {
-    let out = run_session(&["5 .", "2 3 + ."]);
+    let out = run_session(&["5 .", "2 3 add ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["5", "stack: (empty)", "5", "stack: (empty)"]);
 }
@@ -408,7 +408,7 @@ fn enum_constructs_and_displays_placeholder_across_lines() {
 fn enum_declared_then_eliminating_word_defined_on_later_lines() {
     let out = run_session(&[
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
-        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup * 3.14159 * ] ~[ ( Rect ) Rect> | w h | w h * ] Shape? ;",
+        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup mul 3.14159 mul ] ~[ ( Rect ) Rect> | w h | w h mul ] Shape? ;",
         "2.0 Circle",
         "area .",
     ]);
@@ -435,7 +435,7 @@ fn shapes_dogfood_runs_full_program_in_repl() {
     let out = run_session(&[
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
         "type: MaybeInt | None | Some v i64 ;",
-        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup * 3.14159 * ] ~[ ( Rect ) Rect> | w h | w h * ] Shape? ;",
+        ": area ( Shape -- f64 ) ~[ ( Circle ) Circle> dup mul 3.14159 mul ] ~[ ( Rect ) Rect> | w h | w h mul ] Shape? ;",
         ": unwrap-or ( i64 MaybeInt -- i64 ) ~[ ( None ) drop ] ~[ ( Some ) Some> swap drop ] MaybeInt? ;",
         "2.0 Circle area .",
         "3.0 4.0 Rect area .",
@@ -488,9 +488,9 @@ fn stack_dogfood_runs_in_repl() {
         "type: Stack items [i64 16] top usize ;",
         "type: Popped rest Stack item i64 ;",
         ": empty ( -- Stack ) 0 16 fill 0 >usize Stack ;",
-        ": push ( Stack i64 -- Stack ) | s x | s &top @ swap drop | i | &!s &!items i &!> x ! s &top @ swap drop 1 + | newtop | s &!top newtop ! ;",
-        ": pop ( Stack -- Popped ) | s | s &top @ swap drop 1 - | i | &s &items i &> @ | v | s &!top i ! v Popped ;",
-        ": peek ( Stack -- Popped ) | s | s &top @ swap drop 1 - | i | &s &items i &> @ | v | s v Popped ;",
+        ": push ( Stack i64 -- Stack ) | s x | s &top @ swap drop | i | &!s &!items i &!> x ! s &top @ swap drop 1 add | newtop | s &!top newtop ! ;",
+        ": pop ( Stack -- Popped ) | s | s &top @ swap drop 1 sub | i | &s &items i &> @ | v | s &!top i ! v Popped ;",
+        ": peek ( Stack -- Popped ) | s | s &top @ swap drop 1 sub | i | &s &items i &> @ | v | s v Popped ;",
         "empty 1 push 2 push 3 push",
         "peek Popped> .",
         "pop Popped> .",
@@ -575,7 +575,7 @@ fn enum_declaration_errors_report_and_session_survives() {
 #[test]
 fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
     let out = run_session(&[
-        ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;",
+        ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;",
         "0 1000000 sum-to .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -599,11 +599,11 @@ fn vm_dogfood_runs_in_repl() {
         "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
         "type: Fetched vm Vm op Op ;",
         "type: VmPop vm Vm val i64 ;",
-        ": vm-push ( Vm i64 -- Vm ) | vm x | vm &sp @ swap drop | i | &!vm &!stack i &!> x ! vm &sp @ swap drop 1 + | newsp | vm &!sp newsp ! ;",
-        ": vm-pop ( Vm -- VmPop ) | vm | vm &sp @ swap drop 1 - | i | &vm &stack i &> @ | x | vm &!sp i ! x VmPop ;",
-        ": bump-pc ( Vm -- Vm ) &pc @ 1 + | newpc | &!pc newpc ! ;",
+        ": vm-push ( Vm i64 -- Vm ) | vm x | vm &sp @ swap drop | i | &!vm &!stack i &!> x ! vm &sp @ swap drop 1 add | newsp | vm &!sp newsp ! ;",
+        ": vm-pop ( Vm -- VmPop ) | vm | vm &sp @ swap drop 1 sub | i | &vm &stack i &> @ | x | vm &!sp i ! x VmPop ;",
+        ": bump-pc ( Vm -- Vm ) &pc @ 1 add | newpc | &!pc newpc ! ;",
         ": fetch ( Vm -- Fetched ) | vm | vm &pc @ swap drop | i | &vm &prog i &> @ | op | vm op Fetched ;",
-        ": run ( Vm Op -- i64 ) ~[ ( Push ) Push> | vm v | vm v vm-push bump-pc fetch Fetched> run ] ~[ ( Add ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b + vm-push bump-pc fetch Fetched> run ] ~[ ( Sub ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b - vm-push bump-pc fetch Fetched> run ] ~[ ( Mul ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b * vm-push bump-pc fetch Fetched> run ] ~[ ( Load ) Load> | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run ] ~[ ( Store ) Store> | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run ] ~[ ( Jz ) Jz> | vm target | vm vm-pop VmPop> 0 = ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run ] ~[ ( Jmp ) Jmp> | vm target | vm &!pc target ! fetch Fetched> run ] ~[ ( Halt ) drop | vm | vm vm-pop VmPop> swap drop ] Op? ;",
+        ": run ( Vm Op -- i64 ) ~[ ( Push ) Push> | vm v | vm v vm-push bump-pc fetch Fetched> run ] ~[ ( Add ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b add vm-push bump-pc fetch Fetched> run ] ~[ ( Sub ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b sub vm-push bump-pc fetch Fetched> run ] ~[ ( Mul ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b mul vm-push bump-pc fetch Fetched> run ] ~[ ( Load ) Load> | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run ] ~[ ( Store ) Store> | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run ] ~[ ( Jz ) Jz> | vm target | vm vm-pop VmPop> 0 eq ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run ] ~[ ( Jmp ) Jmp> | vm target | vm &!pc target ! fetch Fetched> run ] ~[ ( Halt ) drop | vm | vm vm-pop VmPop> swap drop ] Op? ;",
         ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
         "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);
@@ -989,7 +989,7 @@ fn poly_instantiation_freezes_callee_arity_across_a_differing_redefinition() {
     let out = run_session(&[
         ": noise ( -- ) ;",
         ": p ( 'T -- 'T ) noise ;",
-        ": noise ( i64 -- i64 ) | n | n 100 + ;",
+        ": noise ( i64 -- i64 ) | n | n 100 add ;",
         "5 p .",
     ]);
     assert_eq!(
@@ -1125,14 +1125,14 @@ fn redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds() {
 // ordinary env; redefining `id` as ordinary again must take gen2 (past the
 // poly entry), not reset to gen0 and collide with the first body under
 // `RTLD_GLOBAL` first-loaded-wins. Witnessed by the last call observing the
-// *new* body (`+ 2` -> 7), not the shadowed first (`+ 1` -> 6).
+// *new* body (`add 2` -> 7), not the shadowed first (`add 1` -> 6).
 #[test]
 fn ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symbol() {
     let out = run_session(&[
-        ": id ( i64 -- i64 ) | n | n 1 + ;",
+        ": id ( i64 -- i64 ) | n | n 1 add ;",
         "5 id",
         ": id ( 'T -- 'T ) ;",
-        ": id ( i64 -- i64 ) | n | n 2 + ;",
+        ": id ( i64 -- i64 ) | n | n 2 add ;",
         "5 id",
     ]);
     let lines: Vec<&str> = out.lines().collect();

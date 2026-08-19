@@ -175,8 +175,8 @@ fn inline_word_calling_inline_word_splices_transitively() {
     // The inliner walks its own output, so an `inline` word whose body calls
     // another one leaves no residue at either level -- neither a surviving
     // `IrFunc` for the inner word nor a call in the outer one's splice.
-    let src = ": inner inline ( i64 -- i64 ) 2 * ;\n\
-               : outer inline ( i64 -- i64 ) inner 2 * ;\n\
+    let src = ": inner inline ( i64 -- i64 ) 2 mul ;\n\
+               : outer inline ( i64 -- i64 ) inner 2 mul ;\n\
                : main ( -- ) 3 outer . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-transitive", src);
     std::fs::remove_file(&binary).ok();
@@ -230,8 +230,9 @@ fn inline_word_self_nontail_cycle_is_located_error() {
     // R4: an `inline` word inherits the cycle rejection under its reworded
     // umbrella term -- it need not take a quotation, so "a quotation-taking
     // word" no longer names the class the rule covers.
-    let err =
-        check_error(": loopy inline ( i64 -- i64 ) 1 + loopy 2 * ;\n: main ( -- ) 3 loopy . ;\n");
+    let err = check_error(
+        ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;\n: main ( -- ) 3 loopy . ;\n",
+    );
     assert_eq!(
         err,
         "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
@@ -262,17 +263,17 @@ fn inline_on_builtin_operator_overload_is_located_error() {
     // is excluded from. Before the rejection this panicked in
     // `ir/func_builder/calls.rs` ("checked user overload exists").
     let src = "type: A n i64 ;\n\
-               : + inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n\
-               : main ( -- ) 1 A 2 A + . ;\n";
+               : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n\
+               : main ( -- ) 1 A 2 A add . ;\n";
     let err = check_error(src);
     assert_eq!(
         err,
-        "error: `inline` on `+`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
+        "error: `inline` on `add`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
     );
     // The same overload without `inline` builds and runs, so the rejection is
     // the keyword's, not the overload's.
     let (binary, stdout, code) =
-        build_and_run("slice11-op-overload", &src.replace("+ inline", "+"));
+        build_and_run("slice11-op-overload", &src.replace("add inline", "add"));
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "1000\n");
     assert_eq!(code, 0);
@@ -284,7 +285,7 @@ fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     // effect is poly-forced by the parser (`effect_has_variable`) but declares
     // no variable, so it is monomorphic for `inline`'s purposes and runs.
     let src = ": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n\
-               : main ( -- ) 3 ~[ 1 + ] twice . ;\n";
+               : main ( -- ) 3 ~[ 1 add ] twice . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-tilde", src);
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "5\n");
@@ -321,7 +322,7 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     // R4's relaxation, inherited: every self-occurrence in tail position is not
     // a splice-forever cycle, because the loop transform lowers it to a
     // back-edge. `5 down` counts to 0.
-    let src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;\n\
+    let src = ": down inline ( i64 -- i64 ) dup 0 gt ~[ 1 sub down ] ~[ ] if ;\n\
                : main ( -- ) 5 down . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-self-tail", src);
     std::fs::remove_file(&binary).ok();
@@ -484,10 +485,10 @@ fn repl_inline_word_is_retained_not_lowered() {
     // each later line and sees the *current* `helper` (105 then 205), while a
     // lowered one is frozen into its `.so` and would leave `105 105`.
     let transcript = repl_transcript(
-        ": helper ( i64 -- i64 ) 100 + ;\n\
+        ": helper ( i64 -- i64 ) 100 add ;\n\
          : bump inline ( i64 -- i64 ) helper ;\n\
          5 bump\n\
-         : helper ( i64 -- i64 ) 200 + ;\n\
+         : helper ( i64 -- i64 ) 200 add ;\n\
          5 bump\n:quit\n",
     );
     assert_eq!(
@@ -516,9 +517,9 @@ fn combinators_source(quotation_kind: &str) -> String {
 
 : times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
-  from to < ~[
+  from to lt ~[
     from f call
-    from 1 + to f times-helper
+    from 1 add to f times-helper
   ] ~[
   ] if ;
 
@@ -543,7 +544,7 @@ fn combinators_source(quotation_kind: &str) -> String {
 : filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
-          | v | &!arr over >usize &!> v ! 1 +
+          | v | &!arr over >usize &!> v ! 1 add
         ] ~[ drop ] if ] times
   | wf | arr wf >usize ;
 
@@ -565,11 +566,11 @@ fn combinators_main(quotation_kind: &str) -> String {
 : mkarr ( -- [i64 4] ) 0 4 fill ;
 
 : main ( -- )
-  mkarr {quotation_kind}[ 1 + drop ] each
-  mkarr {quotation_kind}[ 2 * ] map {quotation_kind}[ 1 + drop ] each
-  mkarr 0 {quotation_kind}[ + ] fold .
-  mkarr {quotation_kind}[ 2 > ] filter drop drop
-  0 {quotation_kind}[ | n | n 3 < ~[ n 1 + true ] ~[ n false ] if ] while . ;
+  mkarr {quotation_kind}[ 1 add drop ] each
+  mkarr {quotation_kind}[ 2 mul ] map {quotation_kind}[ 1 add drop ] each
+  mkarr 0 {quotation_kind}[ add ] fold .
+  mkarr {quotation_kind}[ 2 gt ] filter drop drop
+  0 {quotation_kind}[ | n | n 3 lt ~[ n 1 add true ] ~[ n false ] if ] while . ;
 "
     )
 }
@@ -617,7 +618,7 @@ fn combinators_retype_stored_quotation_still_rejected() {
     // requires an ordinary `[ ... ]`-typed parameter (7b's territory).
     let src = format!(
         "{}\
-         : give ( -- [ i64 -- ] ) [ 1 + drop ] ;
+         : give ( -- [ i64 -- ] ) [ 1 add drop ] ;
 
          : main ( -- )
   0 4 fill | arr |

@@ -58,7 +58,7 @@ pub struct Module {
     /// lowering. Empty for a program with no polymorphic calls.
     pub instantiations: std::collections::HashMap<Span, CallInst>,
     /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
-    /// overload of a builtin-named word (e.g. `+` on two `Vec2`), keyed by the
+    /// overload of a builtin-named word (e.g. `add` on two `Vec2`), keyed by the
     /// call site's `Span`, valued by the resolved callee's Sooth name. A
     /// sparse map mirroring `instantiations`: lowering consults it before its
     /// name-directed builtin dispatch, so a recorded site emits an
@@ -1164,7 +1164,7 @@ pub enum GlobalMode {
 }
 
 /// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.
-/// `Copy` gates `dup`/`over`; `Ord` gates `>`/`max`. Both are resolved at the
+/// `Copy` gates `dup`/`over`; `Ord` gates `gt`/`max`. Both are resolved at the
 /// concrete instantiation by the existing predicates (`is_copy`, the numeric
 /// tower), Kitten-style, with no trait objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

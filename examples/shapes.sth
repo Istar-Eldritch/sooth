@@ -6,8 +6,8 @@ type: Shape
 type: MaybeInt | None | Some v i64 ;
 
 : area ( Shape -- f64 )
-  ~[ ( Circle ) Circle> dup * 3.14159 * ]
-  ~[ ( Rect )   Rect> | w h | w h * ]
+  ~[ ( Circle ) Circle> dup mul 3.14159 mul ]
+  ~[ ( Rect )   Rect> | w h | w h mul ]
   Shape? ;
 
 : unwrap-or ( i64 MaybeInt -- i64 )

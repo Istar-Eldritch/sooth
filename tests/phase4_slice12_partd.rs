@@ -54,7 +54,7 @@ fn repl_transcript(input: &str) -> String {
 /// run wrong instead of failing.
 #[test]
 fn apply_call_argument_is_a_materialized_quotation() {
-    let src = format!("{APPLY}: main ( -- ) [ 1 + ] 5 apply . ;\n");
+    let src = format!("{APPLY}: main ( -- ) [ 1 add ] 5 apply . ;\n");
     let tokens = lexer::lex(&src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
@@ -93,7 +93,7 @@ fn apply_call_argument_is_a_materialized_quotation() {
 /// `inline_word_mints_no_symbol`: a real call has the symbol a splice lacks).
 #[test]
 fn apply_witness_runs_and_mints_a_symbol() {
-    let src = format!("{APPLY}: main ( -- ) [ 1 + ] 5 apply . ;\n");
+    let src = format!("{APPLY}: main ( -- ) [ 1 add ] 5 apply . ;\n");
     let (binary, stdout, code) = build_and_run("slice12-partd-apply", &src);
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
@@ -119,7 +119,7 @@ fn quotation_through_two_call_levels_and_a_returning_callee_run() {
         "{APPLY}\
          : apply2 ( [ i64 -- i64 ] i64 -- i64 ) apply ;\n\
          : run ( [ -- i64 ] -- i64 ) call ;\n\
-         : main ( -- ) [ 1 + ] 5 apply2 . [ 42 ] run . ;\n"
+         : main ( -- ) [ 1 add ] 5 apply2 . [ 42 ] run . ;\n"
     );
     let (binary, stdout, code) = build_and_run("slice12-partd-levels", &src);
     std::fs::remove_file(&binary).ok();
@@ -148,7 +148,7 @@ fn repl_ordinary_quotation_parameter_word_is_a_located_error() {
 fn repl_still_retains_a_declared_inline_combinator() {
     let transcript = repl_transcript(
         ": apply inline ( ~[ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;\n\
-         ~[ 1 + ] 5 apply\n:quit\n",
+         ~[ 1 add ] 5 apply\n:quit\n",
     );
     assert_eq!(transcript, "defined apply\nstack: 6\n");
 }
@@ -169,7 +169,7 @@ fn repl_import_gate_retains_an_inline_non_quotation_word() {
     ));
     std::fs::write(
         &lib_path,
-        "export: bump ;\n: bump inline ( i64 -- i64 ) 1 + ;\n",
+        "export: bump ;\n: bump inline ( i64 -- i64 ) 1 add ;\n",
     )
     .expect("writing temp library should succeed");
     let transcript = repl_transcript(&format!(
@@ -192,8 +192,8 @@ fn repl_import_gate_retains_an_inline_non_quotation_word() {
 fn tail_recursive_quotation_argument_is_materialized_at_the_back_edge() {
     let src = ": go ( [ i64 -- i64 ] i64 -- i64 )\n\
                  | n | | f |\n\
-                 n 0 = ~[ 7 f call ] ~[ f drop [ 2 * ] n 1 - go ] if ;\n\
-               : main ( -- ) [ 3 * ] 2 go . ;\n";
+                 n 0 eq ~[ 7 f call ] ~[ f drop [ 2 mul ] n 1 sub go ] if ;\n\
+               : main ( -- ) [ 3 mul ] 2 go . ;\n";
 
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
@@ -246,7 +246,7 @@ fn repl_importing_an_ordinary_quotation_parameter_word_is_a_located_error() {
     std::fs::write(&lib_path, format!("export: apply ;\n{APPLY}"))
         .expect("writing temp library should succeed");
     let transcript = repl_transcript(&format!(
-        "import: a \"{}\" ;\n[ 1 + ] 5 a::apply\n:quit\n",
+        "import: a \"{}\" ;\n[ 1 add ] 5 a::apply\n:quit\n",
         lib_path.display()
     ));
     std::fs::remove_file(&lib_path).ok();

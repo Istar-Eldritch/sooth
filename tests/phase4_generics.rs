@@ -51,7 +51,7 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" .
 /// process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+     from to lt ~[ from f call from 1 add to f times-helper ] ~[ ] if ;\n\
      : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -246,8 +246,8 @@ fn two_output_word_result_feeds_another_call() {
     // the next word exactly as any other operands do.
     let (stdout, code) = run_src(
         "chain",
-        ": split ( i64 -- i64 i64 ) dup 1 - ;\n\
-         : main ( -- ) 5 split + . ;\n",
+        ": split ( i64 -- i64 i64 ) dup 1 sub ;\n\
+         : main ( -- ) 5 split add . ;\n",
         false,
     );
     assert_eq!(stdout, "9\n");
@@ -322,9 +322,9 @@ fn two_aggregates_swapped_across_back_edge_stay_correct() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box -- Box )\n\
            | k a b |\n\
-           k 0 = ~[ b ] ~[\n\
+           k 0 eq ~[ b ] ~[\n\
              &a &n @ .\n\
-             k 1 - b a loop\n\
+             k 1 sub b a loop\n\
            ] if ;\n\
          : main ( -- ) 4 1 mk 2 mk loop &n @ . drop ;\n",
         false,
@@ -341,7 +341,7 @@ fn aggregate_carried_loop_runs_in_constant_stack() {
     // no per-iteration stack bump.
     let src = "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
-         : loop ( i64 Box -- Box ) | n b | n 0 = ~[ b ] ~[ n 1 - n mk loop ] if ;\n\
+         : loop ( i64 Box -- Box ) | n b | n 0 eq ~[ b ] ~[ n 1 sub n mk loop ] if ;\n\
          : main ( -- ) 1000000 0 mk loop &n @ . drop ;\n";
     assert_eq!(
         run_stack_bounded_src("aggloop", src),
@@ -361,7 +361,7 @@ fn forwarded_aggregate_reads_its_seeded_value() {
         "seeded",
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
-         : loop ( i64 Box -- Box ) | n prev | n 0 = ~[ prev ] ~[ n 1 - prev loop ] if ;\n\
+         : loop ( i64 Box -- Box ) | n prev | n 0 eq ~[ prev ] ~[ n 1 sub prev loop ] if ;\n\
          : main ( -- ) 3 42 mk loop &n @ . drop ;\n",
         false,
     );
@@ -380,13 +380,13 @@ fn recursive_type_destructor_disposes_right_contents() {
     let (stdout, code) = run_src(
         "listdrop",
         "type: Res n i64 ;\n\
-         : drop ( Res -- ) | r | r Res> 5000 + . ;\n\
+         : drop ( Res -- ) | r | r Res> 5000 add . ;\n\
          : mkres ( i64 -- Res ) | n | n Res ;\n\
          type: List | Nil | Cons v Res next ^List ;\n\
          : push-front ( List Res -- List ) | rest v | v rest ^ Cons ;\n\
          : build ( i64 List -- List )\n\
            | n acc |\n\
-           n 0 = ~[ acc ] ~[ n 1 - acc n mkres push-front build ] if ;\n\
+           n 0 eq ~[ acc ] ~[ n 1 sub acc n mkres push-front build ] if ;\n\
          : main ( -- ) 3 Nil build drop ;\n",
         false,
     );
@@ -408,10 +408,10 @@ fn join_phi_over_carried_aggregate_survives() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | n b |\n\
-           n 0 = ~[ b ] ~[\n\
-             n 3 = ~[ n mk ] ~[ b ] if\n\
+           n 0 eq ~[ b ] ~[\n\
+             n 3 eq ~[ n mk ] ~[ b ] if\n\
              | c |\n\
-             n 1 - c loop\n\
+             n 1 sub c loop\n\
            ] if ;\n\
          : main ( -- ) 5 0 mk loop &n @ . drop ;\n",
         false,
@@ -434,10 +434,10 @@ fn struct_carried_across_back_edge_is_not_aliased() {
          : mk ( i64 -- Box ) | n | n n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
+           n 0 eq ~[ prev ] ~[\n\
              n mk | cur |\n\
              &prev &a @ .\n\
-             n 1 - cur loop\n\
+             n 1 sub cur loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 mk loop &a @ . drop ;\n",
         false,
@@ -456,10 +456,10 @@ fn array_carried_across_back_edge_is_not_aliased() {
         ": mkarr ( i64 -- [i64 4] ) 4 fill ;\n\
          : loop ( i64 [i64 4] -- [i64 4] )\n\
            | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
+           n 0 eq ~[ prev ] ~[\n\
              n mkarr | cur |\n\
              &prev 0 &> @ .\n\
-             n 1 - cur loop\n\
+             n 1 sub cur loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 mkarr loop drop ;\n",
         false,
@@ -481,10 +481,10 @@ fn enum_carried_across_back_edge_is_not_aliased() {
          : get ( E -- i64 ) ~[ ( Wrap ) Wrap> ] E? ;\n\
          : loop ( i64 E -- E )\n\
            | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
+           n 0 eq ~[ prev ] ~[\n\
              n mk | cur |\n\
              prev get .\n\
-             n 1 - cur loop\n\
+             n 1 sub cur loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 mk loop get . ;\n",
         false,
@@ -502,14 +502,14 @@ fn destructor_carried_across_back_edge_disposes_right_contents() {
     let (stdout, code) = run_src(
         "dtoralias",
         "type: Res n i64 ;\n\
-         : drop ( Res -- ) | r | r Res> 1000 + . ;\n\
+         : drop ( Res -- ) | r | r Res> 1000 add . ;\n\
          : mk ( i64 -- Res ) | n | n Res ;\n\
          : loop ( i64 Res -- Res )\n\
            | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
+           n 0 eq ~[ prev ] ~[\n\
              n mk | cur |\n\
              prev drop\n\
-             n 1 - cur loop\n\
+             n 1 sub cur loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 mk loop drop ;\n",
         false,
@@ -528,12 +528,12 @@ fn nested_projection_carried_across_back_edge_is_not_aliased() {
         "nestedproj",
         "type: Vec2 x i64 y i64 ;\n\
          type: Segment from Vec2 to Vec2 ;\n\
-         : mkseg ( i64 -- Segment ) | n | n n Vec2 n 100 * n Vec2 Segment ;\n\
+         : mkseg ( i64 -- Segment ) | n | n n Vec2 n 100 mul n Vec2 Segment ;\n\
          : loop ( i64 Segment Vec2 -- Vec2 )\n\
            | n s v |\n\
-           n 0 = ~[ v ] ~[\n\
+           n 0 eq ~[ v ] ~[\n\
              &v &x @ .\n\
-             n 1 - n mkseg &s &from @ loop\n\
+             n 1 sub n mkseg &s &from @ loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 mkseg 99 99 Vec2 loop &x @ . drop ;\n",
         false,
@@ -553,10 +553,10 @@ fn inline_constructed_aggregate_carried_across_back_edge_is_not_aliased() {
         "type: Vec2 x i64 y i64 ;\n\
          : loop ( i64 Vec2 -- Vec2 )\n\
            | n prev |\n\
-           n 0 = ~[ prev ] ~[\n\
+           n 0 eq ~[ prev ] ~[\n\
              n n Vec2 | cur |\n\
              &prev &x @ .\n\
-             n 1 - cur loop\n\
+             n 1 sub cur loop\n\
            ] if ;\n\
          : main ( -- ) 3 0 0 Vec2 loop &x @ . drop ;\n",
         false,
@@ -584,14 +584,14 @@ fn back_edges_disagreeing_on_a_carried_slot_stage_independently() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | k prev |\n\
-           k 0 = ~[ prev ] ~[\n\
-             k 2 mod 0 = ~[\n\
+           k 0 eq ~[ prev ] ~[\n\
+             k 2 mod 0 eq ~[\n\
                k mk | cur |\n\
                &prev &n @ .\n\
-               k 1 - cur loop\n\
+               k 1 sub cur loop\n\
              ] ~[\n\
                &prev &n @ .\n\
-               k 1 - prev loop\n\
+               k 1 sub prev loop\n\
              ] if\n\
            ] if ;\n\
          : main ( -- ) 4 0 mk loop &n @ . drop ;\n",
@@ -618,10 +618,10 @@ fn zero_size_aggregate_carried_across_back_edge_runs_correctly() {
          : mku ( -- Unit ) Unit ;\n\
          : loop ( i64 Unit -- Unit )\n\
            | n u |\n\
-           n 0 = ~[ u ] ~[\n\
+           n 0 eq ~[ u ] ~[\n\
              u drop\n\
              n .\n\
-             n 1 - mku loop\n\
+             n 1 sub mku loop\n\
            ] if ;\n\
          : main ( -- ) 3 Unit loop drop ;\n",
         false,
@@ -647,9 +647,9 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box Box -- Box )\n\
            | k a b c |\n\
-           k 0 = ~[ a ] ~[\n\
+           k 0 eq ~[ a ] ~[\n\
              &a &n @ . &b &n @ . &c &n @ .\n\
-             k 1 - c a b loop\n\
+             k 1 sub c a b loop\n\
            ] if ;\n\
          : main ( -- ) 2 1 mk 2 mk 3 mk loop &n @ . drop ;\n",
         false,
@@ -662,9 +662,13 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
 
 #[test]
 fn call_of_literal_quotation_fuses_and_runs() {
-    // Criterion 2 (R6/R13): `[ + ] call` type-checks and lowers identically to
-    // writing the body inline, so the fused `+` runs against the live stack.
-    let (stdout, code) = run_src("call-literal", ": main ( -- ) 1 2 [ + ] call . ;\n", false);
+    // Criterion 2 (R6/R13): `[ add ] call` type-checks and lowers identically to
+    // writing the body inline, so the fused `add` runs against the live stack.
+    let (stdout, code) = run_src(
+        "call-literal",
+        ": main ( -- ) 1 2 [ add ] call . ;\n",
+        false,
+    );
     assert_eq!(stdout, "3\n");
     assert_eq!(code, 0);
 }
@@ -676,7 +680,7 @@ fn quotation_forwarded_through_bind_still_calls() {
     // `Slot` reconstruction.
     let (stdout, code) = run_src(
         "call-bind",
-        ": main ( -- ) [ + ] | q | 1 2 q call . ;\n",
+        ": main ( -- ) [ add ] | q | 1 2 q call . ;\n",
         false,
     );
     assert_eq!(stdout, "3\n");
@@ -686,11 +690,11 @@ fn quotation_forwarded_through_bind_still_calls() {
 #[test]
 fn quotation_body_reads_enclosing_local() {
     // Criterion 3b (R6 capture): the spliced body sees the current scope in
-    // lexical extent, so `[ t + ]` reads the enclosing `t` with no capture
+    // lexical extent, so `[ t add ]` reads the enclosing `t` with no capture
     // machinery.
     let (stdout, code) = run_src(
         "call-capture",
-        ": main ( -- ) 7 | t | 1 [ t + ] call . ;\n",
+        ": main ( -- ) 7 | t | 1 [ t add ] call . ;\n",
         false,
     );
     assert_eq!(stdout, "8\n");
@@ -712,7 +716,7 @@ fn different_quotations_at_a_join_are_error() {
     // 10c: the arms are quotation literals passed to a `lib/` word, so the
     // join is located at the first arm rather than at `branch` itself, which
     // sits in library source the user did not write.
-    let err = check_error(": main ( -- ) true ~[ [ 1 + ] ] ~[ [ 1 - ] ] if drop ;\n");
+    let err = check_error(": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n");
     assert!(
         err.contains("these two branches leave different quotations") && err.contains("line 1"),
         "R7 should fire at the join, got: {err}"
@@ -724,7 +728,7 @@ fn quotation_versus_value_at_a_join_is_error() {
     // R7n: one arm leaves a quotation, the other a *real* `cstr`. Their `ty`s
     // are equal (the placeholder is `Cstr`), so the ordinary branch mismatch
     // never fires; the join guard's second phrasing catches it.
-    let err = check_error(": main ( -- ) true ~[ [ 1 + ] ] ~[ \"x\" cstr ] if drop ;\n");
+    let err = check_error(": main ( -- ) true ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n");
     assert!(
         err.contains("one branch of the `if`")
             && err.contains("leaves a quotation and the other does not"),
@@ -736,7 +740,7 @@ fn quotation_versus_value_at_a_join_is_error() {
 fn quotation_stored_in_array_by_fill_is_error() {
     // R8f: a quotation element to `fill` would become a runtime array value.
     // The guard sits strictly above `contains_reference` (R4).
-    let err = check_error(": main ( -- ) [ + ] 8 fill drop ;\n");
+    let err = check_error(": main ( -- ) [ add ] 8 fill drop ;\n");
     assert!(
         err.contains("a quotation cannot be stored"),
         "R8f should reject at `fill`, got: {err}"
@@ -751,7 +755,7 @@ fn quotation_stored_through_a_reference_is_error() {
     // not merely wording.
     let err = check_error(
         "type: Box s cstr ;\n\
-         : main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
+         : main ( -- ) \"hi\" cstr Box | b | &!b &!s [ add ] ! b drop ;\n",
     );
     assert!(
         err.contains("a quotation cannot be stored"),
@@ -763,7 +767,7 @@ fn quotation_stored_through_a_reference_is_error() {
 fn quotation_passed_to_user_word_is_error() {
     // R9: only `call`/`times` accept a quotation this slice; a user `:` word
     // rejects before ordinary unification, naming the word.
-    let err = check_error(": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n");
+    let err = check_error(": foo ( i64 -- i64 ) ;\n: main ( -- ) [ add ] foo drop ;\n");
     assert!(
         err.contains("a quotation cannot be passed to `foo`"),
         "R9 should name the word, got: {err}"
@@ -775,8 +779,9 @@ fn quotation_passed_to_polymorphic_word_is_error() {
     // R9p: `check_poly_call` reads only `.ty`, so a quotation *succeeds*
     // unification and binds `'T` to the placeholder without the guard. Reject
     // before `unify_poly_input`.
-    let err =
-        check_error(": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n");
+    let err = check_error(
+        ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
+    );
     assert!(
         err.contains("a quotation cannot be passed to `dupit`"),
         "R9p should name the polymorphic word, got: {err}"
@@ -793,7 +798,7 @@ fn quotation_left_on_stack_is_output_error() {
     // R10: the output count matches (one output, one quotation), so the new
     // branch must beat the ordinary type mismatch that would leak the `Cstr`
     // placeholder.
-    let err = check_error(": f ( -- i64 ) [ + ] ;\n");
+    let err = check_error(": f ( -- i64 ) [ add ] ;\n");
     assert!(
         err.contains("`f`")
             && err.contains("leaves a quotation on the stack")
@@ -804,11 +809,11 @@ fn quotation_left_on_stack_is_output_error() {
 
 #[test]
 fn quotation_as_operator_operand_is_error() {
-    // R11: a quotation as an operator operand rejects, naming `+`.
-    let err = check_error(": main ( -- ) 1 [ + ] + ;\n");
+    // R11: a quotation as an operator operand rejects, naming `add`.
+    let err = check_error(": main ( -- ) 1 [ add ] add ;\n");
     assert!(
-        err.contains("`+`") && err.contains("cannot take a quotation as an operand"),
-        "R11 should name `+`, got: {err}"
+        err.contains("`add`") && err.contains("cannot take a quotation as an operand"),
+        "R11 should name `add`, got: {err}"
     );
 }
 
@@ -818,7 +823,7 @@ fn quotation_as_if_condition_is_error() {
     // word, never leaking a `bool` mismatch. Slice 10c: `if` is a `lib/` word,
     // so the rejection is the combinator argument guard's rather than the
     // retired `if` arm's own -- same site, same guarantee, different wording.
-    let err = check_error(": main ( -- ) ~[ + ] ~[ 1 . ] ~[ 2 . ] if ;\n");
+    let err = check_error(": main ( -- ) ~[ add ] ~[ 1 . ] ~[ 2 . ] if ;\n");
     assert!(
         err.contains("`if`") && err.contains("a quotation cannot be passed to"),
         "R11if should name `if`, not a bool mismatch, got: {err}"
@@ -833,7 +838,7 @@ fn quotation_as_if_condition_is_error() {
 fn quotation_dropped_is_a_pure_pop() {
     // R11drop: the one legal unguarded consumer. `drop` of a compile-time-only
     // marker discards it with nothing to dispose, so this runs and prints `1`.
-    let (stdout, code) = run_src("drop-quot", ": main ( -- ) 1 [ + ] drop . ;\n", false);
+    let (stdout, code) = run_src("drop-quot", ": main ( -- ) 1 [ add ] drop . ;\n", false);
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
 }
@@ -845,7 +850,7 @@ fn two_calls_of_a_binding_quotation_body_both_run() {
     // reads front-first. Without the fix this prints `4\n4\n`.
     let (stdout, code) = run_src(
         "call-rebind",
-        ": main ( -- ) 2 [ | x | x x + ] call . 3 [ | x | x x + ] call . ;\n",
+        ": main ( -- ) 2 [ | x | x x add ] call . 3 [ | x | x x add ] call . ;\n",
         false,
     );
     assert_eq!(stdout, "4\n6\n");
@@ -874,7 +879,7 @@ fn times_body_constructing_a_quotation_into_the_row_is_error() {
     // gone; the rejection now comes from the branch-join guard inside the
     // spliced `times-helper`, whose tail `if` sees a quotation on one arm only.
     let err = check_error(&format!(
-        "{TIMES_DEF}: main ( -- ) \"x\" cstr 0 ~[ drop drop [ + ] ] times drop ;\n"
+        "{TIMES_DEF}: main ( -- ) \"x\" cstr 0 ~[ drop drop [ add ] ] times drop ;\n"
     ));
     assert!(
         err.contains("leaves a quotation and the other does not")
@@ -888,7 +893,7 @@ fn quotation_left_on_repl_line_is_error() {
     // R19: a REPL line has no declared outputs, so R10's route never runs; the
     // `quot` side channel dies at the boundary while lowering has already pushed
     // a phantom the residual spill would marshal. Reject at the line boundary.
-    let transcript = repl_session(&["1 [ + ]"]);
+    let transcript = repl_session(&["1 [ add ]"]);
     assert!(
         transcript.contains("a quotation cannot be left on the stack at the end of a line"),
         "R19 should reject the residual quotation, got: {transcript}"
@@ -899,12 +904,12 @@ fn quotation_left_on_repl_line_is_error() {
 
 #[test]
 fn times_loop_computes_the_index_sum() {
-    // Criterion 4a (R14/R18): the headline value. `[ + ]` sums the index over
+    // Criterion 4a (R14/R18): the headline value. `[ add ]` sums the index over
     // 0..1e6, so the loop runs exactly `count` iterations passing each index.
     let (stdout, code) = run_src(
         "times-sum",
         &format!(
-            "{}: main ( -- ) 0 1000000 ~[ + ] times . ;\n",
+            "{}: main ( -- ) 0 1000000 ~[ add ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -922,7 +927,7 @@ fn times_loop_runs_in_constant_stack() {
     let code = run_stack_bounded_src(
         "times-sum-bounded",
         &format!(
-            "{}: main ( -- ) 0 1000000 ~[ + ] times . ;\n",
+            "{}: main ( -- ) 0 1000000 ~[ add ] times . ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -938,7 +943,7 @@ fn times_body_constructing_aggregate_computes_expected() {
         "times-aggregate",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop + ] times . ;\n",
+             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop add ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -956,7 +961,7 @@ fn times_body_constructing_aggregate_runs_in_constant_stack() {
         "times-aggregate-bounded",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop + ] times . ;\n",
+             : main ( -- ) 0 1000000 ~[ | i | i i Vec2 &x @ swap drop add ] times . ;\n",
             combinators_import("c | times |")
         ),
     );
@@ -972,7 +977,7 @@ fn times_carrying_an_aggregate_through_the_row_runs() {
         "times-carry-aggregate",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 3 4 Vec2 0 1000000 ~[ drop over &x @ swap drop + ] times . drop ;\n",
+             : main ( -- ) 3 4 Vec2 0 1000000 ~[ drop over &x @ swap drop add ] times . drop ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -989,7 +994,7 @@ fn times_zero_trip_yields_seed_row() {
     let (stdout, code) = run_src(
         "times-zero",
         &format!(
-            "{}: main ( -- ) 7 0 ~[ + ] times . ;\n",
+            "{}: main ( -- ) 7 0 ~[ add ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -1010,7 +1015,7 @@ fn two_sequential_times_in_one_word_both_run() {
         "times-sequential",
         &format!(
             "{}type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 10 ~[ | i | i + ] times . 5 6 Vec2 &x @ . drop 0 10 ~[ | i | i + ] times . ;\n",
+             : main ( -- ) 0 10 ~[ | i | i add ] times . 5 6 Vec2 &x @ . drop 0 10 ~[ | i | i add ] times . ;\n",
             combinators_import("c | times |")
         ),
         false,
@@ -1025,7 +1030,7 @@ fn times_body_consuming_a_linear_local_is_error() {
     // runs N times, so consuming the outer linear `s` would dispose it N times.
     // Named `s`, with the "body runs more than once" wording.
     let err = check_error(&format!(
-        "{TIMES_DEF}{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 ~[ | i | i s drop + ] times . ;\n"
+        "{TIMES_DEF}{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 ~[ | i | i s drop add ] times . ;\n"
     ));
     assert!(
         err.contains(
@@ -1047,7 +1052,7 @@ fn quotation_left_as_a_declared_output_is_error() {
     // `my-times` included) and is recorded in `docs/roadmap/P4/slice10b-spec.md`;
     // this golden pins only what does reject.
     let err = check_error(&format!(
-        "{TIMES_DEF}: main ( -- ) [ + ] 3 ~[ drop ] times ;\n"
+        "{TIMES_DEF}: main ( -- ) [ add ] 3 ~[ drop ] times ;\n"
     ));
     assert!(
         err.contains("leaves a quotation on the stack"),
@@ -1057,10 +1062,10 @@ fn quotation_left_as_a_declared_output_is_error() {
 
 #[test]
 fn times_body_changing_the_row_is_error() {
-    // Criterion R18c (D6 row-effect equality): `[ + 1 ]` leaves the row one
+    // Criterion R18c (D6 row-effect equality): `[ add 1 ]` leaves the row one
     // deeper than it received, so the body's net effect is not identity.
     let err = check_error(&format!(
-        "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ + 1 ] times . ;\n"
+        "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ add 1 ] times . ;\n"
     ));
     assert!(
         err.contains("the quotation passed to `times` was declared `~[ i64 -- ]`")
@@ -1077,7 +1082,7 @@ fn times_body_changing_the_row_is_error() {
 
 #[test]
 fn times_example_matches_hand_threaded_countdown() {
-    // Criterion 7: `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) builds and
+    // Criterion 7: `examples/times.sth` (`0 1000000 [ 1 add add ] times .`) builds and
     // prints the same total as `examples/countdown.sth`'s hand-threaded
     // self-recursive sum 1..1e6, demonstrating parity between the internal loop
     // primitive and the slice 6 self-tail-call -> loop transform rather than a
@@ -1097,14 +1102,14 @@ fn times_example_matches_hand_threaded_countdown() {
 
 #[test]
 fn poly_mymax_runs_at_i64_and_f64() {
-    // T9: `mymax`'s `'T: Copy Ord` body branches on `>`, instantiated at `i64`
+    // T9: `mymax`'s `'T: Copy Ord` body branches on `gt`, instantiated at `i64`
     // and `f64` in one program. Slice 10c: `inline`, because `if` is an
     // ordinary word taking two quotation literals and a non-spliced
     // polymorphic body rejects a quotation outright; the branch runs through
     // the ordinary splice now.
     let (stdout, code) = run_src(
         "poly-mymax",
-        ": mymax inline ( 'T: Copy Ord 'T -- 'T ) over over > ~[ drop ] ~[ swap drop ] if ;\n\
+        ": mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n\
          : main ( -- ) 3 7 mymax . 3.0 7.0 mymax . ;\n",
         false,
     );

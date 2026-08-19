@@ -949,7 +949,7 @@ fn emit_instr(
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
                 BinOp::Mul => "mul",
-                // `div` is emitted only for floats (no integer `/`, R16); it
+                // `div` is emitted only for floats (no integer `div`, R16); it
                 // runs at the operand's `s`/`d` width like the other arms.
                 BinOp::Div => "div",
                 BinOp::Rem if matches!(norm_scalar(ty), IrType::Int { signed: false, .. }) => {
@@ -972,8 +972,8 @@ fn emit_instr(
         }
         Instr::Cmp(v, op, a, b) => {
             // Signedness and operand width come from the operand type (R10),
-            // not the result (always `Bool`/`w`): `<`/`>` pick signed
-            // (`cslt`/`csgt`) vs unsigned (`cult`/`cugt`); `=` is
+            // not the result (always `Bool`/`w`): `CmpOp::Lt`/`Gt` pick signed
+            // (`cslt`/`csgt`) vs unsigned (`cult`/`cugt`); `Eq` is
             // signedness-agnostic (`ceq`). The mnemonic's width suffix is the
             // operand width.
             let operand = ty_of(value_types, *a);
@@ -1399,7 +1399,7 @@ mod tests {
         // would collide with any other name whose own non-alphanumeric
         // characters also collapsed to one underscore.
         let il = emit_src(
-            ": shift-x ( i64 -- i64 ) | n | n 1 + ;
+            ": shift-x ( i64 -- i64 ) | n | n 1 add ;
             : main ( -- ) 5 shift-x . ;",
         );
         assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
@@ -1414,9 +1414,11 @@ mod tests {
         // Regression: qbe_name used to replace every non-alphanumeric
         // character with a bare `_`, so any two names built entirely of
         // non-alphanumeric characters of the same length collapsed onto the
-        // identical symbol -- `+` and `-` both sanitized to `_`. This is the
-        // exact set 8a's overload table is about to make dispatchable, so
-        // every pair in it must be checked, not just one.
+        // identical symbol -- `+` and `-` both sanitized to `_`. These are
+        // unrelated to the retired builtin operators: qbe_name still has to
+        // sanitize a genuinely symbolic *user* word name (`~`, `?`, the
+        // hyphen in `max-total`) injectively, so every pair in this list
+        // must be checked, not just one.
         let ops = [
             "+",
             "-",
@@ -1522,7 +1524,7 @@ mod tests {
 
     #[test]
     fn emit_square_contains_mul_and_ret() {
-        let il = emit_src(": sq ( i64 -- i64 ) | n | n n * ;");
+        let il = emit_src(": sq ( i64 -- i64 ) | n | n n mul ;");
         assert!(il.contains("mul"));
         assert!(il.contains("ret "));
     }
@@ -1810,11 +1812,11 @@ mod tests {
 
     #[test]
     fn emit_comparison_line_stores_bool_via_extension() {
-        // `5 3 u>` from D=0 leaves a 32-bit flag on top; the line-wrapper
+        // `5 3 ugt` from D=0 leaves a 32-bit flag on top; the line-wrapper
         // epilogue must widen it (`extuw`) before the fixed 8-byte `storel`
-        // (R4/RK1). Slice 10c: the *primitive*, since `>` is a `lib/` word now
+        // (R4/RK1). Slice 10c: the *primitive*, since `gt` is a `lib/` word now
         // and this helper lowers a bare line with no word environment.
-        let il = emit_line("5 3 u>", 0);
+        let il = emit_line("5 3 ugt", 0);
         assert!(il.contains("=w csgtl"), "unexpected IL: {il}");
         assert!(il.contains("extuw"), "expected a w->l extension: {il}");
         assert!(il.contains("storel"), "expected a storel: {il}");
@@ -1822,7 +1824,7 @@ mod tests {
 
     #[test]
     fn emit_wrapper_signature_takes_stack_and_top() {
-        let il = emit_line("2 3 +", 0);
+        let il = emit_line("2 3 add", 0);
         assert!(
             il.contains("export function l $sooth_line_0(l %v0, l %v1)"),
             "unexpected signature: {il}"
@@ -1831,8 +1833,8 @@ mod tests {
 
     #[test]
     fn emit_line_wrapper_has_load_and_store() {
-        // `+` from a carried depth of 2 loads the two slots and stores the result.
-        let il = emit_line("+", 2);
+        // `add` from a carried depth of 2 loads the two slots and stores the result.
+        let il = emit_line("add", 2);
         assert!(il.contains("loadl "), "expected a load: {il}");
         assert!(il.contains("storel "), "expected a store: {il}");
     }
@@ -1913,7 +1915,7 @@ mod tests {
 
     #[test]
     fn emit_float_lt_swaps_to_ordered_gt() {
-        // `<` on `f64` operands does NOT emit `cltd`: QBE's amd64 backend
+        // `CmpOp::Lt` on `f64` operands does NOT emit `cltd`: QBE's amd64 backend
         // lowers `cltd` to `comisd`+`setb`, which x86 sets on an unordered
         // (NaN) operand too, so it would report `NaN < x` as true. Swapping
         // operands and reusing `cgtd` (`comisd`+`seta`, which x86 clears on
@@ -1931,7 +1933,7 @@ mod tests {
 
     #[test]
     fn emit_float_eq_masks_unordered_with_cod() {
-        // `=` on floats does NOT rely on a bare `ceqd`: QBE's amd64 backend
+        // `CmpOp::Eq` on floats does NOT rely on a bare `ceqd`: QBE's amd64 backend
         // lowers `ceqd` to `comisd`+`sete`, which x86 also sets on an
         // unordered (NaN) operand, so it would report `NaN = NaN` as true.
         // ANDing with `cod` (ordered, false on NaN) masks that false positive
@@ -1948,8 +1950,8 @@ mod tests {
 
     #[test]
     fn emit_float_le_swaps_to_ordered_ge() {
-        // `<=` on floats reuses the already-NaN-correct `cge` form (`a <= b`
-        // === `b >= a`), the same swap trick as `<` reusing `cgt` (R21).
+        // `CmpOp::Le` on floats reuses the already-NaN-correct `cge` form (`a <= b`
+        // === `b >= a`), the same swap trick as `Lt` reusing `cgt` (R21).
         let il = emit_binary(
             IrType::Float { bits: 64 },
             IrType::Bool,
@@ -1963,7 +1965,7 @@ mod tests {
 
     #[test]
     fn emit_float_ge_uses_direct_cge_no_fix_needed() {
-        // `>=` needs no NaN workaround: x86's `setae` (used by `cge{s,d}`)
+        // `CmpOp::Ge` needs no NaN workaround: x86's `setae` (used by `cge{s,d}`)
         // already clears on an unordered operand (R21).
         let il = emit_binary(
             IrType::Float { bits: 64 },
@@ -1978,7 +1980,7 @@ mod tests {
 
     #[test]
     fn emit_float_ne_ors_unordered_with_cuo() {
-        // `<>` on floats does NOT rely on a bare `cned`: x86's `setne` (used
+        // `CmpOp::Ne` on floats does NOT rely on a bare `cned`: x86's `setne` (used
         // by `cne{s,d}`) is *false* on an unordered operand, but IEEE `!=`
         // must be *true* when either operand is NaN. ORing with `cuod`
         // (unordered, true on NaN) adds the missing true (R21, RISK 1).
@@ -2034,7 +2036,7 @@ mod tests {
 
     #[test]
     fn emit_cmp_ne_is_sign_agnostic() {
-        // `<>` on integers is sign-agnostic, same as `=` (R21).
+        // `CmpOp::Ne` on integers is sign-agnostic, same as `Eq` (R21).
         let il = emit_binary(
             int(32, true),
             IrType::Bool,
@@ -2490,7 +2492,7 @@ mod tests {
             emit_src("type: Shape | Circle r f64 | Rect w f64 h f64 ; : id ( Shape -- Shape ) ;");
         assert!(
             il.contains("export function :Shape $id(:Shape"),
-            "expected an aggregate param + return: {il}"
+            "expected an aggregate param add return: {il}"
         );
     }
 
@@ -2521,7 +2523,7 @@ mod tests {
         // This structural test verifies the loop IL (a header `phi` with a
         // back-edge predecessor, plus the back-edge `jmp`) is valid QBE text.
         let il = emit_src(
-            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;",
+            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;",
         );
         assert!(
             il.contains("phi"),
@@ -2537,7 +2539,7 @@ mod tests {
             .collect();
         assert!(
             jmp_targets.len() >= 2,
-            "expected at least two jmps (entry forward jump + back-edge): {il}"
+            "expected at least two jmps (entry forward jump add back-edge): {il}"
         );
         let target = jmp_targets[0];
         assert!(

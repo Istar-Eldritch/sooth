@@ -39,19 +39,19 @@ type: Decoded vm Vm idx usize ;
   | vm x |
   &vm &sp @ | i |
   &!vm &!stack i &!> x !
-  &vm &sp @ 1 + | newsp |
+  &vm &sp @ 1 add | newsp |
   vm &!sp newsp ! ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  &vm &sp @ 1 - | i |
+  &vm &sp @ 1 sub | i |
   &vm &stack i &> @ | x |
   vm &!sp i !
   x
   VmPop ;
 
 : bump-pc ( Vm -- Vm )
-  &pc @ 1 + | newpc |
+  &pc @ 1 add | newpc |
   &!pc newpc ! ;
 
 : fetch ( Vm -- Fetched )
@@ -143,19 +143,19 @@ type: Decoded vm Vm idx usize ;
 : h-add ( Vm -- Vm )
   vm-pop VmPop> | b |
   vm-pop VmPop>
-  b +
+  b add
   vm-push ;
 
 : h-sub ( Vm -- Vm )
   vm-pop VmPop> | b |
   vm-pop VmPop>
-  b -
+  b sub
   vm-push ;
 
 : h-mul ( Vm -- Vm )
   vm-pop VmPop> | b |
   vm-pop VmPop>
-  b *
+  b mul
   vm-push ;
 
 : h-load ( Vm -- Vm )
@@ -175,7 +175,7 @@ type: Decoded vm Vm idx usize ;
   vm-pop VmPop> | vm target64 |
   target64 >usize | target |
   vm vm-pop VmPop> | vm2 x |
-  x 0 =
+  x 0 eq
   ~[
     vm2 &!pc target !
   ] ~[
@@ -216,7 +216,7 @@ type: Decoded vm Vm idx usize ;
 : dispatch ( Vm [ [ Vm -- Vm ] 9 ] -- i64 )
   | vm0 table |
   vm0 fetch Fetched> decode Decoded> | vm idx |
-  idx 8 >usize =
+  idx 8 >usize eq
   ~[
     vm vm-pop VmPop>
     swap drop

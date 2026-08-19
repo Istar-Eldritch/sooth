@@ -70,7 +70,7 @@ pub(super) fn check_word(
 /// rule that excluded it was a policy one, not a soundness one -- the splice
 /// already handles a variable-bearing body, so lifting it needed no lowering
 /// work -- and slice 10c ships its first consumers: the six comparison words
-/// (`: = inline ( 'T: Copy Ord 'T -- bool ) u= [ true ] [ false ] branch ;`),
+/// (`: eq inline ( 'T: Copy Ord 'T -- bool ) ueq [ true ] [ false ] branch ;`),
 /// which must be both `'T: Copy Ord`-polymorphic, to keep covering the whole
 /// numeric tower, and `inline`, or every comparison in the language becomes a
 /// real call with a frame. The builtin-name rule below is a *soundness* rule
@@ -303,7 +303,9 @@ mod tests {
     }
     #[test]
     fn check_term_word_with_entry_locals_still_ok() {
-        check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
+        // Regression: a plain term word with `| ... |` entry locals is
+        // unaffected by the clause-body path (no enum in scope).
+        check_src(": sq ( i64 -- i64 ) | n | n n mul ;").unwrap();
     }
 
     /// Slice 12 (R-B1, M-B): a `~[ ... ]` parameter without `inline` is a
@@ -355,31 +357,31 @@ mod tests {
     /// The other half of the original pair, a `~`-bearing but variable-free
     /// effect, is unaffected and stays.
     ///
-    /// The witness is a word named `=`, not a neutral name: a neutral name is
+    /// The witness is a word named `eq`, not a neutral name: a neutral name is
     /// claimed by no builtin, so it slips past the *second* (soundness)
     /// `inline` gate, `BUILTIN_TABLE.contains_key`, and would pass whether or
     /// not the real comparison words can ever be `inline`. Restoring the
     /// polymorphic gate rejects with `requires a monomorphic effect`; leaving
     /// the six rows in `BUILTIN_TABLE` under their old names rejects with
-    /// `overlaps a concrete overload of `=``.
+    /// `overlaps a concrete overload of `eq``.
     #[test]
     fn check_inline_polymorphic_signature_is_accepted() {
         check_src(": id inline ( 'T -- 'T ) ;\n: main ( -- ) ;")
             .expect("`inline` on a polymorphic signature is a splice, not a rejection");
-        // The witness is `lib/core.sth`'s own `=`, driven straight through
+        // The witness is `lib/core.sth`'s own `eq`, driven straight through
         // both gates: it cannot be *redeclared* in a test source (that is a
         // duplicate overload of the injected one), and a neutral stand-in
         // would not exercise the builtin-name gate at all.
         let eq = crate::parser::prelude_words()
             .into_iter()
-            .find(|w| w.name == "=")
-            .expect("`lib/core.sth` defines `=`");
-        assert!(eq.declares_inline, "`=` is declared `inline`");
-        let sig = eq.poly.as_ref().expect("`=` is polymorphic");
+            .find(|w| w.name == "eq")
+            .expect("`lib/core.sth` defines `eq`");
+        assert!(eq.declares_inline, "`eq` is declared `inline`");
+        let sig = eq.poly.as_ref().expect("`eq` is polymorphic");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
         check_inline_declaration(&eq)
             .expect("the real witness: a builtin-operator-named polymorphic `inline` word");
-        check_src(": main ( -- ) 1 2 = drop 1 >u32 2 >u32 = drop ;")
+        check_src(": main ( -- ) 1 2 eq drop 1 >u32 2 >u32 eq drop ;")
             .expect("and it resolves across two distinct numeric types");
         check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
             .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
@@ -423,23 +425,23 @@ mod tests {
     /// through to the combinator splice -- so an `inline` overload of one leaves
     /// the checker contradicting itself and lowering panicking. Rejected at the
     /// definition instead. The name is demangled first: `mangle` suffixes an
-    /// operator name per module (`+__m0`), so a raw comparison never matches.
+    /// operator name per module (`add__m0`), so a raw comparison never matches.
     #[test]
     fn check_inline_builtin_operator_overload_is_error() {
         let err = check_src(
             "type: A n i64 ;\n\
-             : + inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
+             : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .unwrap_err();
         assert_eq!(
             err,
-            "error: `inline` on `+`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
+            "error: `inline` on `add`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
         );
         // A non-operator name with the identical shape is accepted, so the
         // rejection is keyed on the name, not on the overload.
         check_src(
             "type: A n i64 ;\n\
-             : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
+             : bump inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .expect("an `inline` word whose name no operator claims is accepted");
     }

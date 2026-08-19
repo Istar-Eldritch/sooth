@@ -3438,7 +3438,7 @@ mod tests {
 
     #[test]
     fn compiled_word_is_dlsymable_and_callable() {
-        let src = ": sq ( i64 -- i64 ) | n | n n * ;";
+        let src = ": sq ( i64 -- i64 ) | n | n n mul ;";
         let tokens = lexer::lex(src).unwrap();
         let mut module = parser::parse(&tokens).unwrap();
         check::check(&mut module).unwrap();
@@ -3465,8 +3465,8 @@ mod tests {
     #[test]
     fn loop_step_maps_commit_abort_eof_expected() {
         assert_eq!(
-            loop_step(editor::Action::Commit("1 2 +".to_string())),
-            LoopStep::Dispatch("1 2 +".to_string())
+            loop_step(editor::Action::Commit("1 2 add".to_string())),
+            LoopStep::Dispatch("1 2 add".to_string())
         );
         assert_eq!(loop_step(editor::Action::Abort), LoopStep::Continue);
         assert_eq!(loop_step(editor::Action::Eof), LoopStep::Quit);
@@ -3495,11 +3495,11 @@ mod tests {
 
     #[test]
     fn continuation_balanced_line_is_complete() {
-        let tokens = lexer::lex(": sq ( i64 -- i64 ) dup * ;").unwrap();
+        let tokens = lexer::lex(": sq ( i64 -- i64 ) dup mul ;").unwrap();
         let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
         assert_eq!(input_is_complete(&toks), Completeness::Complete);
 
-        let tokens = lexer::lex("1 2 +").unwrap();
+        let tokens = lexer::lex("1 2 add").unwrap();
         let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
         assert_eq!(input_is_complete(&toks), Completeness::Complete);
     }
@@ -3524,7 +3524,7 @@ mod tests {
     fn repl_type_prints_effect_without_executing() {
         let mut session = Session::new();
         let mut out = Vec::new();
-        session.eval_type("1 2 +", &mut out).unwrap();
+        session.eval_type("1 2 add", &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "( -- i64 )\n");
         assert!(session.types.is_empty());
         assert_eq!(session.top, 0);
@@ -3817,7 +3817,7 @@ mod tests {
             .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
             .unwrap();
         let err = session
-            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .eval_line(": Shape? ( i64 -- i64 ) 1 add ;", &mut out)
             .unwrap_err();
         assert!(
             err.contains("has the same name as the generated eliminator for enum `Shape`"),
@@ -3826,7 +3826,7 @@ mod tests {
 
         let mut session = Session::new();
         session
-            .eval_line(": Shape? ( i64 -- i64 ) 1 + ;", &mut out)
+            .eval_line(": Shape? ( i64 -- i64 ) 1 add ;", &mut out)
             .unwrap();
         let err = session
             .eval_line("type: Shape | Circle r i64 | Rect w i64 h i64 ;", &mut out)
@@ -4117,8 +4117,8 @@ mod tests {
             "lib.sth",
             "type: P x i64 ;\n\
              type: H y i64 ;\n\
-             : ok? ( i64 -- bool ) 0 > ;\n\
-             : hidden? ( i64 -- bool ) 0 > ;\n\
+             : ok? ( i64 -- bool ) 0 gt ;\n\
+             : hidden? ( i64 -- bool ) 0 gt ;\n\
              export: ok? P ;\n",
         );
         let mut session = Session::new();
@@ -4268,7 +4268,7 @@ mod tests {
         // the `display_name` reversal or the `poly_words` fold inside
         // `word_names()` must fail this test, not just `:words`' listing.
         let d = LibDir::new("word_names");
-        let lib = d.write("lib.sth", ": inc ( i64 -- i64 ) 1 + ;\nexport: inc ;\n");
+        let lib = d.write("lib.sth", ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n");
         let mut session = Session::new();
         let mut out = Vec::new();
         session
@@ -4517,7 +4517,7 @@ mod tests {
         let id = StructId::from_index(0);
         let first = destructor_symbols(&session, Some(id));
         session
-            .eval_line(": drop ( Res -- ) | r | r Res> 100 + . ;", &mut out)
+            .eval_line(": drop ( Res -- ) | r | r Res> 100 add . ;", &mut out)
             .unwrap();
         let second = destructor_symbols(&session, Some(id));
 

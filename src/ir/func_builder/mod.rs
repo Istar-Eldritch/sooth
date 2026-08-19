@@ -164,7 +164,7 @@ pub(super) struct FuncBuilder<'a> {
     /// Slice 8a phase 2 (R7): the call sites the checker resolved to a user
     /// overload of a builtin-named word, span -> resolved callee name.
     /// Consulted before the name-directed builtin dispatch in `lower_call`, so
-    /// a recorded `Vec2 +` site emits an `Instr::Call` to the user word
+    /// a recorded `Vec2 add` site emits an `Instr::Call` to the user word
     /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
     /// checker records nothing there), so their lowering is byte-for-byte.
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
@@ -528,7 +528,7 @@ impl<'a> FuncBuilder<'a> {
             // to the scalar phi branch below -- which needs a defining `Instr`
             // the phantom never has, an undefined-operand crash at the backend
             // (a row-carried quotation ridden through untouched by a self-tail
-            // combinator: `[ + ] 3 [ drop ] times drop`, `while` likewise). A
+            // combinator: `[ add ] 3 [ drop ] times drop`, `while` likewise). A
             // phantom is compile-time-fixed and only ever reachable in one
             // form (no runtime construction without a real materialized
             // closure, which already carries genuine `IrType::Quotation` and
@@ -1034,7 +1034,7 @@ mod tests {
         let ir = lower_src(
             "type: Box n i64 ;\n\
              : mk ( i64 -- Box ) | n | n Box ;\n\
-             : loop ( i64 Box -- Box ) | n prev | n 0 = ~[ prev ] ~[ n 1 - prev loop ] if ;",
+             : loop ( i64 Box -- Box ) | n prev | n 0 eq ~[ prev ] ~[ n 1 sub prev loop ] if ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
         let header = loop_header(f);

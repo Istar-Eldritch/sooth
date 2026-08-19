@@ -16,12 +16,12 @@ through your program.
 This is why the compiler catches this:
 
 ```text
-> 1 "hello" + .
-error: type mismatch: `+` requires two operands of the same numeric
+> 1 "hello" add .
+error: type mismatch: `add` requires two operands of the same numeric
 type, found `i64` and `str`
 ```
 
-`+` requires two operands of the same numeric type. The compiler sees
+`add` requires two operands of the same numeric type. The compiler sees
 `i64` and `str` on top of the stack and refuses before the program runs.
 There is no implicit coercion, no string-to-number conversion, no
 guessing. The types don't match, so it's a compile error.
@@ -33,7 +33,7 @@ from the stack and what it leaves behind. The effect is written in
 parentheses between the word name and its body:
 
 ```sooth
-: square ( i64 -- i64 ) | x | x x * ;
+: square ( i64 -- i64 ) | x | x x mul ;
 ```
 
 Read the effect as a contract: "this word takes one `i64` from the
@@ -44,11 +44,11 @@ produces (outputs, bottom to top).
 Some common shapes:
 
 ```sooth
-: answer ( -- i64 ) 42 ;              \ no inputs, one output
-: print-it ( i64 -- ) . ;             \ one input, no outputs
-: double ( i64 -- i64 ) | x | x 2 * ; \ one in, one out
-: add3 ( i64 i64 i64 -- i64 )          \ three in, one out
-  | a b c | a b + c + ;
+: answer ( -- i64 ) 42 ;                \ no inputs, one output
+: print-it ( i64 -- ) . ;               \ one input, no outputs
+: double ( i64 -- i64 ) | x | x 2 mul ; \ one in, one out
+: add3 ( i64 i64 i64 -- i64 )           \ three in, one out
+  | a b c | a b add c add ;
 ```
 
 A word with no inputs is a constant (or a word that generates a
@@ -63,8 +63,8 @@ in order, bottom to top, just like inputs:
 : dup2 ( i64 -- i64 i64 ) | x | x x ;
 : remainder-range ( i64 i64 -- i64 i64 )
   | a b |
-  a b mod          \ remainder (first output, bottom)
-  a b - a b mod - ; \ difference of remainders (second output, top)
+  a b mod               \ remainder (first output, bottom)
+  a b sub a b mod sub ; \ difference of remainders (second output, top)
 ```
 
 `dup2` takes one value and leaves two copies. `remainder-range` takes
@@ -125,7 +125,7 @@ error: type mismatch in `bad-type` (line 1)
 If you call a word that needs two values but the stack only has one:
 
 ```text
-> : needs-two ( i64 i64 -- i64 ) + ;
+> : needs-two ( i64 i64 -- i64 ) add ;
 > 1 needs-two .
 error: stack underflow: needs 2 values, but the stack holds 1
 ```
@@ -140,7 +140,7 @@ Words compose by stacking their effects. The output of one word
 becomes the input of the next:
 
 ```text
-> : double ( i64 -- i64 ) | x | x 2 * ;
+> : double ( i64 -- i64 ) | x | x 2 mul ;
 > : quadruple ( i64 -- i64 ) double double ;
 > 3 quadruple .
 12

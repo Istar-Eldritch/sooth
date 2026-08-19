@@ -598,7 +598,7 @@ fn check_poly_combinator_args(
     // Slice 10c: a *fresh integer literal* filling a bare type variable is
     // held back and unified last, against whatever the variable resolved to.
     // This is D8's literal coercion, which the comparison operators had for
-    // free as builtin rows (`5 3 >usize <` typed through `unify_pair`'s
+    // free as builtin rows (`5 3 >usize lt` typed through `unify_pair`'s
     // `LiteralSizeType`) and would otherwise lose on becoming `'T: Copy Ord`
     // library words: a bare `5` carries `i64`, so unifying it first pins `'T`
     // to `i64` and the `usize` operand then reads as a conflict.
@@ -628,7 +628,7 @@ fn check_poly_combinator_args(
             // Exactly D8's domain, no wider: a fresh literal fills a `usize`
             // or `isize` position without an explicit conversion, and nothing
             // else. Widening this to every numeric type would accept
-            // `1 >i32 2 <>`, which the builtin rows always rejected.
+            // `1 >i32 2 ne`, which the builtin rows always rejected.
             Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
             _ => stack[base + i].ty,
         };
@@ -795,7 +795,7 @@ mod tests {
         // disjunct to `is_combinator` flips `apply` to `true` and this must fail.
         let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
                    : apply-inline inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-                   : plain ( i64 -- i64 ) 1 + ;\n";
+                   : plain ( i64 -- i64 ) 1 add ;\n";
         let tokens = lex(src).unwrap();
         let module = parse(&tokens).unwrap();
         let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
@@ -855,7 +855,7 @@ mod tests {
     /// back-edge, so it is finite rather than a splice-forever cycle.
     #[test]
     fn check_inline_self_nontail_cycle_is_error() {
-        let src = ": loopy inline ( i64 -- i64 ) 1 + loopy 2 * ;";
+        let src = ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         let err = check(&mut module).unwrap_err();
@@ -864,7 +864,7 @@ mod tests {
             "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
         );
 
-        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;";
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 gt ~[ 1 sub down ] ~[ ] if ;";
         let tokens = lex(tail_src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)

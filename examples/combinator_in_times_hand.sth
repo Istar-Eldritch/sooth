@@ -11,8 +11,8 @@ import: c | times | "../lib/combinators.sth" ;
 : mk ( i64 -- [i64 3] )
   | base | 0 3 fill | s |
   &!s 0 >usize &!> base !
-  &!s 1 >usize &!> base 1 + !
-  &!s 2 >usize &!> base 2 + !
+  &!s 1 >usize &!> base 1 add !
+  &!s 2 >usize &!> base 2 add !
   s ;
 
 : main ( -- )

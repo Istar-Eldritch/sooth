@@ -74,9 +74,9 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n\
 /// self-tail combinator carrying a from/to pair over a row.
 const TIMES_HELPER: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
     \x20 | f | | to | | from |\n\
-    \x20 from to < ~[\n\
+    \x20 from to lt ~[\n\
     \x20   from f call\n\
-    \x20   from 1 + to f times-helper\n\
+    \x20   from 1 add to f times-helper\n\
     \x20 ] ~[\n\
     \x20 ] if ;\n";
 
@@ -126,7 +126,7 @@ fn parked_linear_local_crosses_a_library_style_self_tail_combinator() {
         "{SPY_DEF}{TIMES_HELPER}\
         : main ( -- )\n\
         \x20 7 Spy | sp |\n\
-        \x20 0 0 4 ~[ | i | i + ] times-helper .\n\
+        \x20 0 0 4 ~[ | i | i add ] times-helper .\n\
         \x20 sp drop ;\n"
     );
     let (stdout, code) = run_src("10b_parked_helper", &src);
@@ -142,7 +142,7 @@ fn parked_linear_local_crosses_while() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while .\n\
+         \x20 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while .\n\
          \x20 sp drop ;\n",
         combinators_import("c")
     );
@@ -166,7 +166,7 @@ fn own_frame_linear_bound_before_the_tail_if_is_error() {
         "{SPY_DEF}\
          : while inline ( i64 [ i64 -- i64 bool ] -- i64 )\n\
          \x20 | p | 9 Spy | own | p call ~[ p while ] ~[ ] if ;\n\
-         : main ( -- ) 0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n"
+         : main ( -- ) 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n"
     );
     let err = build_check_error("10b_own_frame_linear", &src);
     assert!(
@@ -198,7 +198,7 @@ fn quotation_consuming_an_enclosing_linear_is_rejected_by_capture_admission() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ sp drop dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ sp drop dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_consume", &src);
@@ -221,7 +221,7 @@ fn quotation_consuming_an_enclosing_linear_on_one_branch_is_rejected() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 < ~[ dup 2 > ~[ sp drop ] ~[ ] if 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ dup 2 gt ~[ sp drop ] ~[ ] if 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_branch", &src);
@@ -240,7 +240,7 @@ fn linear_bound_inside_a_loop_body_and_left_unconsumed_is_rejected() {
     // runs at all, so this rejection is independent of P0 either way.
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
-         \x20 0 ~[ dup 5 < ~[ 5 Spy | tmp | 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ 5 Spy | tmp | 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_body_local", &src);
@@ -264,7 +264,7 @@ fn parked_linear_local_never_disposed_at_all_is_rejected() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_never_disposed", &src);
@@ -286,7 +286,7 @@ fn spliced_body_disposes_a_locally_declared_linear() {
     // are visible in stdout before the final counter.
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
-         \x20 0 ~[ dup 3 < ~[ dup Spy drop 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 3 lt ~[ dup Spy drop 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_r10_accept", &src);
@@ -406,11 +406,11 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 
 #[test]
 fn times_sums_the_index_over_five_iterations() {
-    // The headline value: `[ + ]` adds each 0-based index into the row seed,
+    // The headline value: `[ add ]` adds each 0-based index into the row seed,
     // so 0+1+2+3+4 = 10 -- the library `times` hands the body the same index
     // sequence the intrinsic did.
     let src = format!(
-        "{}: main ( -- ) 0 5 ~[ + ] times . ;\n",
+        "{}: main ( -- ) 0 5 ~[ add ] times . ;\n",
         combinators_import("c | times |")
     );
     let (stdout, code) = run_src("10b_times_sum", &src);
@@ -425,7 +425,7 @@ fn times_runs_one_million_iterations_in_constant_stack() {
     // *printed value* is asserted, not just the exit code: a loop that runs
     // zero iterations also exits 0.
     let src = format!(
-        "{}: main ( -- ) 0 1000000 ~[ drop 1 + ] times . ;\n",
+        "{}: main ( -- ) 0 1000000 ~[ drop 1 add ] times . ;\n",
         combinators_import("c | times |")
     );
     let binary = build_binary("10b_times_1m", &src);
@@ -445,7 +445,7 @@ fn times_carries_an_aggregate_through_the_row() {
     let src = format!(
         "{}: main ( -- )\n\
          \x20 0 4 fill\n\
-         \x20 4 ~[ | i | | a | &!a i >usize &!> i 2 * ! a ] times\n\
+         \x20 4 ~[ | i | | a | &!a i >usize &!> i 2 mul ! a ] times\n\
          \x20 4 ~[ | i | | a | &a i >usize &> @ . a ] times\n\
          \x20 drop ;\n",
         combinators_import("c | times |")
@@ -470,7 +470,7 @@ fn times_carries_an_untouched_quotation_through_the_row() {
     // still the original literal, not a corrupted one.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 ~[ 10 + ] 3 ~[ drop ] times\n\
+         \x20 ~[ 10 add ] 3 ~[ drop ] times\n\
          \x20 5 swap call . ;\n",
         combinators_import("c | times |")
     );
@@ -485,7 +485,7 @@ fn while_carries_an_untouched_quotation_through_the_row() {
     // the counting condition never touches the row-riding quotation below it.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 ~[ 10 + ] 0 ~[ dup 3 < ~[ 1 + true ] ~[ false ] if ] c::while . drop ;\n",
+         \x20 ~[ 10 add ] 0 ~[ dup 3 lt ~[ 1 add true ] ~[ false ] if ] c::while . drop ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_while_row_quotation", &src);
@@ -500,7 +500,7 @@ fn times_nested_inside_times_still_carries_a_row_quotation() {
     // loop level.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 ~[ 100 + ] 2 ~[ drop 3 ~[ drop ] times ] times\n\
+         \x20 ~[ 100 add ] 2 ~[ drop 3 ~[ drop ] times ] times\n\
          \x20 7 swap call . ;\n",
         combinators_import("c | times |")
     );
@@ -528,9 +528,9 @@ fn times_nested_inside_each_map_fold_and_filter_runs() {
          \x20 s ;\n\
          : main ( -- )\n\
          \x20 pair ~[ | v | 2 ~[ drop v . ] c::times ] c::each\n\
-         \x20 pair ~[ 2 ~[ | i | i + ] c::times ] c::map ~[ . ] c::each\n\
-         \x20 pair 0 ~[ | acc v | acc 2 ~[ drop v + ] c::times ] c::fold .\n\
-         \x20 pair ~[ | v | 0 2 ~[ drop 1 + ] c::times drop v 0 > ] c::filter . drop ;\n",
+         \x20 pair ~[ 2 ~[ | i | i add ] c::times ] c::map ~[ . ] c::each\n\
+         \x20 pair 0 ~[ | acc v | acc 2 ~[ drop v add ] c::times ] c::fold .\n\
+         \x20 pair ~[ | v | 0 2 ~[ drop 1 add ] c::times drop v 0 gt ] c::filter . drop ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_times_in_leaves", &src);
@@ -546,8 +546,8 @@ fn times_nested_inside_an_outer_times_runs() {
     // each step while counting to 5.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 0 3 ~[ | i | 2 ~[ | j | 1 + ] c::times ] c::times .\n\
-         \x20 0 ~[ 2 ~[ | i | ] c::times dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 3 ~[ | i | 2 ~[ | j | 1 add ] c::times ] c::times .\n\
+         \x20 0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_times_in_times", &src);

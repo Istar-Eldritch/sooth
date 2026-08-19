@@ -1649,13 +1649,13 @@ mod tests {
         // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
         // both arms (one literal bound before the `if`, read in each) is safe:
         // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
-        let different = check_src(": main ( -- ) true ~[ [ 1 + ] ] ~[ [ 1 - ] ] if drop ;\n")
+        let different = check_src(": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n")
             .expect_err("two different quotations at a join should be rejected");
         assert!(
             different.contains("these two branches leave different quotations"),
             "the join guard should fire, got: {different}"
         );
-        check_src(": main ( -- ) [ + ] | q | true ~[ q ] ~[ q ] if drop ;\n")
+        check_src(": main ( -- ) [ add ] | q | true ~[ q ] ~[ q ] if drop ;\n")
             .expect("the same `Known` id in both arms is safe and must not error");
     }
     #[test]
@@ -1678,7 +1678,7 @@ mod tests {
     #[test]
     fn check_one_output_word_interns_no_bundle() {
         // R2: nothing changes for a word the aggregate ABI does not apply to.
-        let module = checked_module(": inc ( i64 -- i64 ) 1 + ; : main ( -- ) ;");
+        let module = checked_module(": inc ( i64 -- i64 ) 1 add ; : main ( -- ) ;");
         assert!(module.structs.iter().all(|d| !d.is_bundle));
     }
     #[test]
@@ -1800,13 +1800,13 @@ mod tests {
         // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
         // guard that the exact-match table row actually drives dispatch.
         assert_eq!(
-            infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
+            infer_src("5 >u8 3 >u8 add", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
         // Slice 10c: the comparison *primitive*, which is what carries the
-        // per-numeric-type rows now; `<` is a `lib/` word over it and resolves
+        // per-numeric-type rows now; `lt` is a `lib/` word over it and resolves
         // through the word environment this bare-line helper does not build.
-        assert_eq!(infer_src("5 >u8 3 >u8 u<", &[]).unwrap(), vec![Type::U32]);
+        assert_eq!(infer_src("5 >u8 3 >u8 ult", &[]).unwrap(), vec![Type::U32]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
     }
     #[test]
@@ -1824,7 +1824,7 @@ mod tests {
     #[test]
     fn check_second_mention_of_a_copy_local_is_ordinary_reuse() {
         // The move-state tracks linear locals only: a Copy local stays usable.
-        check_src(": w ( i64 -- i64 ) | n | n n + ;").unwrap();
+        check_src(": w ( i64 -- i64 ) | n | n n add ;").unwrap();
     }
     #[test]
     fn check_unconsumed_linear_local_is_error() {
@@ -2075,12 +2075,12 @@ mod tests {
     fn back_edge_produces_ground_declared_outputs() {
         let src = ": my-times inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
                    | f | | to | | from |\n\
-                   from to < ~[\n\
+                   from to lt ~[\n\
                    from f call\n\
-                   from 1 + to f my-times\n\
+                   from 1 add to f my-times\n\
                    ] ~[\n\
                    ] if ;\n\
-                   : main ( -- ) 0 0 5 ~[ + ] my-times . ;\n";
+                   : main ( -- ) 0 0 5 ~[ add ] my-times . ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
     }

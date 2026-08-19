@@ -353,8 +353,8 @@ fn param_binds(terms: &[Term], inputs: usize) -> HashMap<&str, usize> {
 /// `drop` disposes whatever is on top (the dogfood's own
 /// `| f | f File> close drop ;` closes the fd rather than looping), and since
 /// slice 8a made every builtin name overloadable the same applies throughout,
-/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;` ends in the
-/// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
+/// e.g. `: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;` ends in the
+/// *builtin* `lt` on two `i64`s. Treating either as a back-edge opens loop
 /// machinery whose phi operands never arrive, and lowering then panics on the
 /// missing header.
 ///
@@ -407,10 +407,10 @@ pub(super) fn check_tail_call_cycles(
     //
     // Slice 8a generalizes that to every builtin name, for the same reason
     // `drop` needed it: this pass runs before any body is checked, so it has
-    // only names, and a tail-position `<` is far more often the builtin on two
-    // scalars than a call to a `Vec2 <` overload that happens to share the
+    // only names, and a tail-position `lt` is far more often the builtin on two
+    // scalars than a call to a `Vec2 lt` overload that happens to share the
     // name. Crediting it as an edge rejects valid programs outright -- a word
-    // ending in `<` beside any `<` overload was reported as `mutual tail
+    // ending in `lt` beside any `lt` overload was reported as `mutual tail
     // recursion`. The cost is that a real mutual cycle between two
     // builtin-named overloads is no longer rejected here; it compiles as
     // ordinary mutual recursion (correct, but without the tier-1 loop shape,
@@ -1040,7 +1040,7 @@ mod tests {
     }
     #[test]
     fn check_main_copy_effect_is_ok() {
-        check_src(": main ( i64 -- i64 ) 1 + ;").unwrap();
+        check_src(": main ( i64 -- i64 ) 1 add ;").unwrap();
         // The misfire risk is `is_copy`'s recursive struct/enum arms, not the
         // scalar arm: a Copy struct in `main`'s effect must not be rejected.
         check_src("type: P a i64 b i64 ; : main ( P -- ) P> drop drop ;").unwrap();
@@ -1056,10 +1056,13 @@ mod tests {
     }
     #[test]
     fn tail_position_trailing_arithmetic_is_not_tail() {
-        // `rec *`: the final term is `*`, so the self-call is not in tail
+        // `rec mul`: the final term is `mul`, so the self-call is not in tail
         // position (classic non-tail recursion).
-        let w = first_word(": rec ( i64 -- i64 ) rec * ;");
-        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["*"]);
+        let w = first_word(": rec ( i64 -- i64 ) rec mul ;");
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["mul"]
+        );
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
@@ -1084,13 +1087,13 @@ mod tests {
     fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
         // Slice 8a made every builtin name overloadable, so a builtin-named
         // word ending in that same name is resolving against the builtin
-        // table, not recursing: `<` here compares the two extracted `i64`s.
+        // table, not recursing: `lt` here compares the two extracted `i64`s.
         // `tail_position_calls` still reports the name (it is syntactic);
         // only the self-call conclusion changes.
         let w = first_word(
-            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;",
+            "type: Vec2 x i64 y i64 ; : lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;",
         );
-        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["<"]);
+        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["lt"]);
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
@@ -1100,7 +1103,7 @@ mod tests {
         // combinator walk -- `if` is a `lib/` word whose tail-called-parameter
         // set is both branch quotations, seeded from `branch` -- so the index
         // has to carry the real `if`, not be empty.
-        let src = ": rec ( i64 -- i64 ) dup 0 > ~[ rec ] ~[ rec ] if ;";
+        let src = ": rec ( i64 -- i64 ) dup 0 gt ~[ rec ] ~[ rec ] if ;";
         let module = parse(&lex(src).unwrap()).unwrap();
         let combs = combinator_index(module.words.iter());
         let w = module.words.iter().find(|w| w.name == "rec").unwrap();
@@ -1113,7 +1116,7 @@ mod tests {
     fn tail_position_non_terminal_if_self_call_is_not_tail() {
         // The `if` is followed by more terms, so it is non-terminal and its
         // arms are not in tail position.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > ~[ rec ] ~[ 0 ] if drop 5 ;");
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 gt ~[ rec ] ~[ 0 ] if drop 5 ;");
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
         assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
@@ -1193,7 +1196,7 @@ mod tests {
         // the literal inherits `sum-to`'s tail position.
         let words = words_of(&format!(
             "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;\n"
+             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] Bool? ;\n"
         ));
         let combs = combinator_index(&words);
         assert!(has_self_tail_call(named(&words, "sum-to"), &combs));
@@ -1212,7 +1215,7 @@ mod tests {
         // recursion.
         let words = words_of(&format!(
             "{BOOL_D}: sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool!? ;\n"
+             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] Bool!? ;\n"
         ));
         assert!(!has_self_tail_call(
             named(&words, "sum-to"),
@@ -1228,7 +1231,7 @@ mod tests {
         // never correctness.
         let words = words_of(&format!(
             "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | [ acc n + n 1 - sum-to ] | rec | n 0 = [ acc ] rec Bool? ;\n"
+             | n | | acc | [ acc n add n 1 sub sum-to ] | rec | n 0 eq [ acc ] rec Bool? ;\n"
         ));
         assert!(!has_self_tail_call(
             named(&words, "sum-to"),
@@ -1244,7 +1247,7 @@ mod tests {
             "{BOOL_Q}: Bool? inline ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c drop t call e drop ;\n\
              : sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;\n"
+             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] Bool? ;\n"
         ));
         let combs = combinator_index(&words);
         assert!(combs["Bool?"].ambiguous);
@@ -1269,11 +1272,11 @@ mod tests {
         // `docs/roadmap/P4/slice10c-spec.md` before "fixing" a survivor there.
         let recon2 = words_of(&format!(
             "{BOOL_Q}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
-             | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool? ;\n"
+             | f | | n | n 0 eq [ f call ] [ n 1 sub f walk ] Bool? ;\n"
         ));
         let recon4 = words_of(&format!(
             "{BOOL_D}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
-             | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool!? ;\n"
+             | f | | n | n 0 eq [ f call ] [ n 1 sub f walk ] Bool!? ;\n"
         ));
         for (words, expected) in [(recon2, true), (recon4, false)] {
             let combs = combinator_index(&words);
@@ -1299,20 +1302,20 @@ mod tests {
         // here or not at all (the `collect_drop_targets` precedent).
         //
         // Both words end in their own builtin name, so a walk with no refusal
-        // reports a self-tail. `<` resolves against the builtin table, and
+        // reports a self-tail. `lt` resolves against the builtin table, and
         // `branch` is the narrowing that made this live: it is the one builtin
         // sanctioned to take quotation operands (R-P3-1a), so it is also the
         // one that can reach the env combinator lookup a builtin name used to
         // be kept away from.
         for src in [
             "type: Vec2 x i64 y i64 ;\n\
-             : < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;\n",
+             : lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;\n",
             ": branch inline ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c t e branch ;\n",
         ] {
             let words = words_of(src);
             // The word under test is the source's own, at index 0: `words_of`
-            // appends the `lib/core.sth` prelude, which now defines `<` too,
+            // appends the `lib/core.sth` prelude, which now defines `lt` too,
             // so both `last()` and a name lookup can find the wrong one.
             let word = words.first().expect("the builtin-named word");
             let terms = &word.body;
@@ -1353,7 +1356,7 @@ mod tests {
         // place of the `call`, so a self-call at its tail is the back-edge.
         // Lowering threads `tail` through the same splice, so the walk must
         // see it too or the two disagree.
-        let words = words_of(": rec ( i64 -- i64 ) [ 1 - rec ] call ;\n");
+        let words = words_of(": rec ( i64 -- i64 ) [ 1 sub rec ] call ;\n");
         assert!(has_self_tail_call(
             named(&words, "rec"),
             &CombinatorIndex::new()
@@ -1409,11 +1412,11 @@ mod tests {
     }
     #[test]
     fn check_non_tail_mutual_recursion_is_ok() {
-        // Both words call each other only in non-tail position (`x 1 +`), so no
+        // Both words call each other only in non-tail position (`x 1 add`), so no
         // tail-call edge exists and X1 must not fire (R4 no-false-positive).
         check_src(
-            ": a ( i64 -- i64 ) dup 0 > ~[ b 1 + ] ~[ drop 0 ] if ; \
-             : b ( i64 -- i64 ) dup 0 > ~[ a 1 + ] ~[ drop 0 ] if ;",
+            ": a ( i64 -- i64 ) dup 0 gt ~[ b 1 add ] ~[ drop 0 ] if ; \
+             : b ( i64 -- i64 ) dup 0 gt ~[ a 1 add ] ~[ drop 0 ] if ;",
         )
         .unwrap();
     }

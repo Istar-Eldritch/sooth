@@ -71,7 +71,7 @@ fn combinators_import(qualifier: &str) -> String {
 /// word name and this file's goldens routinely declare a word `f`.
 const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | body | | to | | from |\n\
-     from to < ~[ from body call from 1 + to body times-helper ] ~[ ] if ;\n\
+     from to lt ~[ from body call from 1 add to body times-helper ] ~[ ] if ;\n\
      : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | body | | n | 0 n body times-helper ;\n";
 
@@ -162,7 +162,7 @@ fn borrow_of_literal_is_error() {
 fn borrow_of_arithmetic_result_is_error() {
     // Prefix, so the only way to aim a borrow at a computed value is a bare
     // sigil after it. A place is a local name, never "whatever is on top".
-    let err = check_error(": main ( -- )\n  1 2 + & drop ;\n");
+    let err = check_error(": main ( -- )\n  1 2 add & drop ;\n");
     assert!(
         err.contains("`&` does not borrow a place"),
         "expected the non-place diagnostic: {err}"
@@ -330,7 +330,7 @@ fn element_projection_out_of_bounds_still_traps() {
     let (stdout, stderr, code) = run_src_traced(
         "element-projection-oob",
         ": at ( &[u8 4] usize -- u8 ) &> @ ;\n\
-         : main ( -- )\n  0 >u8 4 fill | arr |\n  1 .\n  &arr 4 1 + >usize at .\n  99 . ;\n",
+         : main ( -- )\n  0 >u8 4 fill | arr |\n  1 .\n  &arr 4 1 add >usize at .\n  99 . ;\n",
         false,
     );
     assert_eq!(stdout, "1\n", "the sentinel before the trap should print");
@@ -559,7 +559,7 @@ fn reference_in_effect_input_is_accepted() {
     let (stdout, code) = run_src(
         "reference-input-accepted",
         "type: V x i64 y i64 ;\n\
-         : sum ( &V -- i64 ) | v |\n  v &x @ v &y @ + ;\n\
+         : sum ( &V -- i64 ) | v |\n  v &x @ v &y @ add ;\n\
          : main ( -- )\n  3 4 V | v |\n  &v sum . ;\n",
     );
     assert_eq!(stdout, "7\n");
@@ -779,7 +779,7 @@ fn mutable_borrow_dead_before_an_if_arm_is_accepted() {
         "borrow-dead-before-if-arm",
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
-         n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
+         n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
          &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
@@ -818,7 +818,7 @@ fn mutable_borrow_dead_before_an_if_arm_through_a_projection_is_accepted() {
         "borrow-dead-before-if-arm-through-projection",
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!data &!^ | arr |\n  \
-         arr 0 >usize &!> 7 >u8 !\n  n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
+         arr 0 >usize &!> 7 >u8 !\n  n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
          &!a 0 f\n  &a &data &^ 0 >usize &> @ .\n  \
          &a &len @ .\n  a drop ;\n",
@@ -838,7 +838,7 @@ fn mutable_borrow_used_then_reborrowed_within_one_if_arm_is_accepted() {
         "borrow-used-then-reborrowed-within-one-if-arm",
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
-         n 0 = ~[\n    p @ drop\n    b &!len 1 +!\n  ] ~[\n    p @ drop\n  ] if ;\n\
+         n 0 eq ~[\n    p @ drop\n    b &!len 1 +!\n  ] ~[\n    p @ drop\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
          &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
@@ -856,7 +856,7 @@ fn mutable_borrow_used_after_an_if_term_is_still_error() {
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
-         n 0 = ~[\n    b &!len 1 +!\n  ] ~[\n  ] if\n  p @ drop ;\n\
+         n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if\n  p @ drop ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -894,7 +894,7 @@ fn mutable_borrow_dead_before_two_levels_of_nested_if_arms_is_accepted() {
         "borrow-dead-before-two-levels-of-nested-if-arms",
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
-         n 0 = ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
+         n 0 eq ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
          &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
@@ -910,7 +910,7 @@ fn mutable_borrow_used_after_two_levels_of_nested_if_arms_is_still_error() {
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
-         n 0 = ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
+         n 0 eq ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
          p @ drop ;\n\
          : main ( -- ) ;\n",
     );
@@ -1266,7 +1266,7 @@ fn mutable_borrow_aliased_by_if_join_result_is_error() {
     // bound to the join alias its source silently.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  1 0 = ~[ v ] ~[ v ] if | p |\n  \
+         : main ( -- )\n  1 2 V | v |\n  1 0 eq ~[ v ] ~[ v ] if | p |\n  \
          &!v &!x 40 +!\n  p V> . . ;\n",
     );
     assert!(
@@ -1283,7 +1283,7 @@ fn mutable_borrow_aliased_by_one_if_arm_only_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
-         1 0 > ~[ v ] ~[ v dup swap drop ] if | p |\n  \
+         1 0 gt ~[ v ] ~[ v dup swap drop ] if | p |\n  \
          &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
     );
     assert!(
@@ -1301,7 +1301,7 @@ fn mutable_borrow_aliased_by_the_second_if_arm_only_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
-         0 0 > ~[ v dup swap drop ] ~[ v ] if | p |\n  \
+         0 0 gt ~[ v dup swap drop ] ~[ v ] if | p |\n  \
          &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
     );
     assert!(
@@ -1317,7 +1317,7 @@ fn mutable_borrow_of_a_merge_of_two_aliased_arms_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
-         1 0 > ~[ v ] ~[ w ] if | p |\n  \
+         1 0 gt ~[ v ] ~[ w ] if | p |\n  \
          &!p &!x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
     );
     assert!(
@@ -1336,7 +1336,7 @@ fn mutable_borrow_of_a_place_a_merge_may_denote_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
-         0 0 > ~[ v ] ~[ w ] if | p |\n  \
+         0 0 gt ~[ v ] ~[ w ] if | p |\n  \
          &!w &!x 99 !\n  p V> drop .\n  w V> drop . ;\n",
     );
     assert!(
@@ -1354,7 +1354,7 @@ fn if_join_of_two_named_aggregates_without_a_borrow_is_accepted() {
         "join-no-borrow",
         "type: V x i64 y i64 ;\n\
          : bigger ( V V -- V ) | a b |\n  \
-         a V> drop b V> drop > ~[ a ] ~[ b ] if ;\n\
+         a V> drop b V> drop gt ~[ a ] ~[ b ] if ;\n\
          : main ( -- ) 1 2 V 5 6 V bigger V> . . ;\n",
     );
     assert_eq!(stdout, "6\n5\n", "the larger record's fields, unchanged");
@@ -1415,7 +1415,7 @@ fn mutable_borrow_of_a_place_a_merged_field_projection_may_denote_is_error() {
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
          : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
-         0 0 > ~[ s ] ~[ t ] if &a | inner |\n  \
+         0 0 gt ~[ s ] ~[ t ] if &a | inner |\n  \
          &!t &!a &!x 99 !\n  inner @ V> . .\n  swap drop ;\n",
     );
     assert!(
@@ -1435,7 +1435,7 @@ fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  v | p |\n  \
-         &!p &!x 99 !\n  1 0 > ~[ v V> . . ] ~[ 5 5 . . ] if ;\n",
+         &!p &!x 99 !\n  1 0 gt ~[ v V> . . ] ~[ 5 5 . . ] if ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
@@ -1823,8 +1823,8 @@ type: List | Nil | Cons v i64 next ^List ;
 \
 : push-front ( List i64 -- List )\n  | rest v |\n  v rest ^ Cons ;
 \
-: build ( i64 List -- List )\n  | n acc |\n  n 0 = ~[\n    acc\n  ] ~[\n    \
-n 1 - acc n push-front build\n  ] if ;
+: build ( i64 List -- List )\n  | n acc |\n  n 0 eq ~[\n    acc\n  ] ~[\n    \
+n 1 sub acc n push-front build\n  ] if ;
 \
 : walk ( &!List -- )\n  ~[ ( &!Nil ) drop ]\n  \
 ~[ ( &!Cons ) | c |\n      c &!v 1 +!\n      c &!next &!^ walk ]\n  List? ;
@@ -1861,8 +1861,8 @@ fn reference_to_local_across_back_edge_is_error() {
     // the next iteration (locals rebind at the loop header).
     let err = check_error(
         "type: V x i64 ;\n\
-         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = ~[\n  ] ~[\n    \
-         0 V | x |\n    &!x n 1 - spin\n  ] if ;\n\
+         : spin ( &!V i64 -- )\n  | r n |\n  n 0 eq ~[\n  ] ~[\n    \
+         0 V | x |\n    &!x n 1 sub spin\n  ] if ;\n\
          : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
     );
     assert!(
@@ -1890,8 +1890,8 @@ fn borrowed_local_unused_across_back_edge_is_accepted() {
     let (stdout, code) = run_src(
         "borrowed-local-unused-across-back-edge",
         "type: V x i64 ;\n\
-         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = ~[\n    0 V\n  ] ~[\n    \
-         acc n 1 - spin\n  ] if ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 eq ~[\n    0 V\n  ] ~[\n    \
+         acc n 1 sub spin\n  ] if ;\n\
          : main ( -- ) 1 V 3 spin V> . ;\n",
     );
     assert_eq!(stdout, "0\n");
@@ -1907,8 +1907,8 @@ fn borrowed_local_used_in_tail_arm_before_recursive_call_is_accepted() {
     let (stdout, code) = run_src(
         "borrowed-local-used-before-recursive-call",
         "type: V x i64 ;\n\
-         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = ~[\n    0 V\n  ] ~[\n    \
-         r &!x @ drop\n    acc n 1 - spin\n  ] if ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 eq ~[\n    0 V\n  ] ~[\n    \
+         r &!x @ drop\n    acc n 1 sub spin\n  ] if ;\n\
          : main ( -- ) 1 V 3 spin V> . ;\n",
     );
     assert_eq!(stdout, "0\n");
@@ -1922,8 +1922,8 @@ fn borrowed_local_used_in_tail_arm_after_recursive_call_is_error() {
     // `acc` is renamed -- must still reject regardless of the D6 relaxation.
     let err = check_error(
         "type: V x i64 ;\n\
-         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = ~[\n    0 V\n  ] ~[\n    \
-         acc n 1 - spin\n    r &!x @ drop\n  ] if ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 eq ~[\n    0 V\n  ] ~[\n    \
+         acc n 1 sub spin\n    r &!x @ drop\n  ] if ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -2025,10 +2025,10 @@ fn reference_mode_arm_projects_payload_as_reference() {
         "reference-mode-arm-projects-payload",
         "type: List | Nil | Cons v i64 next ^List ;\n\
          : sum ( i64 &List -- i64 )\n  ~[ ( &Nil ) drop ]\n  \
-         ~[ ( &Cons ) | acc c |\n      acc c &v @ +\n      c &next &^ sum ]\n  List? ;\n\
+         ~[ ( &Cons ) | acc c |\n      acc c &v @ add\n      c &next &^ sum ]\n  List? ;\n\
          : push-front ( List i64 -- List )\n  | rest v |\n  v rest ^ Cons ;\n\
-         : build ( i64 List -- List )\n  | n acc |\n  n 0 = ~[\n    acc\n  ] ~[\n    \
-         n 1 - acc n push-front build\n  ] if ;\n\
+         : build ( i64 List -- List )\n  | n acc |\n  n 0 eq ~[\n    acc\n  ] ~[\n    \
+         n 1 sub acc n push-front build\n  ] if ;\n\
          : main ( -- )\n  5 Nil build\n  | l |\n  0 &l sum .\n  l drop ;\n",
     );
     assert_eq!(stdout, "15\n");

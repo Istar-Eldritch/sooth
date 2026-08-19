@@ -18,12 +18,12 @@ import: c | times | "../lib/combinators.sth" ;
   s ;
 
 : fixpoint ( i64 -- i64 )
-  dup 5 < ~[ 1 + fixpoint ] ~[ ] if ;
+  dup 5 lt ~[ 1 add fixpoint ] ~[ ] if ;
 
 : main ( -- )
   scores | arr |
-  0 5 ~[ | i | &arr i >usize &> @ dup 4 > ~[
-          | v | &!arr over >usize &!> v ! 1 +
+  0 5 ~[ | i | &arr i >usize &> @ dup 4 gt ~[
+          | v | &!arr over >usize &!> v ! 1 add
         ] ~[ drop ] if ] times
   | wf | arr drop
   wf .

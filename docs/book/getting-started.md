@@ -27,7 +27,7 @@ algorithm:
 ```sooth
 : gcd ( i64 i64 -- i64 )
   | a b |
-  b 0 = if
+  b 0 eq if
     a
   else
     b a b mod gcd
@@ -80,7 +80,7 @@ Push two numbers and add them:
 ```text
 > 1 2
 stack: 1 2
-> +
+> add
 stack: 3
 > .
 3
@@ -88,7 +88,7 @@ stack: (empty)
 ```
 
 The REPL shows the stack after each line. `1 2` pushes both numbers.
-`+` pops them and pushes their sum. `.` prints the result.
+`add` pops them and pushes their sum. `.` prints the result.
 
 ## The stack is the program
 
@@ -99,13 +99,13 @@ operations on one shared channel.
 
 This is the concatenative model: programs are *concatenations* of words,
 and the meaning of a program is the composition of the meanings of its
-words. `1 2 +` means: push 1, push 2, add. `42 .` means: push 42, print.
-`1 2 + .` means all three at once.
+words. `1 2 add` means: push 1, push 2, add. `42 .` means: push 42, print.
+`1 2 add .` means all three at once.
 
 Try a longer chain:
 
 ```text
-> 3 4 + 5 + .
+> 3 4 add 5 add .
 12
 stack: (empty)
 ```
@@ -123,25 +123,25 @@ need, then use the names.
 Square a number:
 
 ```text
-> 5 | x | x x * .
+> 5 | x | x x mul .
 25
 stack: (empty)
 ```
 
-`5` pushes the value. `| x |` binds it to the name `x`. Then `x x *`
+`5` pushes the value. `| x |` binds it to the name `x`. Then `x x mul`
 pushes x twice and multiplies, and `.` prints the result. The name `x`
 is available for the rest of the line.
 
 Add three numbers:
 
 ```text
-> 1 2 3 | a b c | a b + c + .
+> 1 2 3 | a b c | a b add c add .
 6
 stack: (empty)
 ```
 
 `| a b c |` binds the top three values: `c` gets 3 (top), `b` gets 2,
-`a` gets 1. Then `a b + c +` adds them left to right.
+`a` gets 1. Then `a b add c add` adds them left to right.
 
 This is the style you will see throughout the book. Instead of
 shuffling values around with stack-manipulation words, you name what

@@ -105,7 +105,7 @@ fn shape_changing_myif_checks_and_runs_with_a_surviving_carried_value() {
     // survives" half of E-P2-2.
     let src = format!(
         "{MYIF}: demo ( i64 i64 bool -- i64 i64 i64 )\n\
-         ~[ dup 10 + ] ~[ dup 20 + ] myif ;\n\
+         ~[ dup 10 add ] ~[ dup 20 add ] myif ;\n\
          : main ( -- ) 99 5 true demo . . . 99 5 false demo . . . ;\n"
     );
     let out = run(&src);
@@ -128,7 +128,7 @@ fn contradicting_branch_output_is_rejected_at_the_argument_site() {
     // spliced.
     let src = format!(
         "{MYIF}: demo ( i64 bool -- i64 )\n\
-         ~[ dup 10 + ] ~[ drop ] myif ;\n"
+         ~[ dup 10 add ] ~[ drop ] myif ;\n"
     );
     let err = check_error(&src);
     assert_eq!(
@@ -144,7 +144,7 @@ fn contradicting_branch_output_is_rejected_at_the_argument_site() {
 fn spliced_self_tail_through_shape_changing_myif_lowers_to_a_back_edge() {
     let src = format!(
         "{MYIF}: sum-to ( i64 i64 -- i64 )\n\
-         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] myif ;\n\
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] myif ;\n\
          : main ( -- ) 0 10 sum-to . ;\n"
     );
     let funcs = lowered(&src);
@@ -162,7 +162,7 @@ fn spliced_self_tail_through_shape_changing_myif_lowers_to_a_back_edge() {
 fn spliced_self_tail_through_shape_changing_myif_runs_one_million_iterations_in_constant_stack() {
     let src = format!(
         "{MYIF}: sum-to ( i64 i64 -- i64 )\n\
-         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] myif ;\n\
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] myif ;\n\
          : main ( -- ) 0 1000000 sum-to . ;\n"
     );
     let binary = build_binary("slice10c-rowgate-1m", &src);

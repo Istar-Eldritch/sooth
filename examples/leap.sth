@@ -2,10 +2,10 @@
 \ `bool`. A year is leap if divisible by 4 and not by 100, or divisible by 400.
 
 : leap ( i64 -- bool )
-  dup 4 mod 0 =
-  over 100 mod 0 = not
+  dup 4 mod 0 eq
+  over 100 mod 0 eq not
   and
-  swap 400 mod 0 =
+  swap 400 mod 0 eq
   or ;
 
 : main ( -- )

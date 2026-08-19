@@ -3,7 +3,7 @@
 //! declared signature.
 //!
 //! Every operand is checked against the type its consumer expects, so a
-//! `bool` where `+` wants an `i64` is a located compile error (Forth's silent
+//! `bool` where `add` wants an `i64` is a located compile error (Forth's silent
 //! coercion failure mode becomes a diagnostic here). Branch join points unify
 //! on both depth and per-slot type: the `then` and `else` arms must leave the
 //! same stack shape.
@@ -130,7 +130,7 @@ struct PolyCtx<'a> {
     env: &'a PolyEnv,
     insts: &'a mut HashMap<Span, CallInst>,
     /// Slice 8a phase 2 (R7): the call sites this walk resolved to a user
-    /// overload of a builtin-named word (`Vec2 +` -> the user `+`), span ->
+    /// overload of a builtin-named word (`Vec2 add` -> the user `add`), span ->
     /// resolved callee name, relayed onto `Module::builtin_overloads` so
     /// lowering emits an `Instr::Call` there instead of the builtin
     /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
@@ -358,7 +358,7 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
 }
 
 /// The result of unifying two `Slot`s for a homogeneous binary operator
-/// (`+ - * = < > <= >= <> mod and or xor`): the operands' common `Type` once
+/// (`add sub mul eq lt gt lte gte ne mod and or xor`): the operands' common `Type` once
 /// D8's literal coercion is applied (a `usize`/`isize` paired with a bare
 /// integer literal unifies to that size type), the X10 diagnostic's target
 /// type for a size type paired with a *computed* `i64` instead, or a plain
@@ -3316,7 +3316,7 @@ mod tests {
     #[test]
     fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
         let src = ": g inline ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
-             : demo ( i64 -- i64 i64 ) true ~[ dup 1 = ] g ;\n";
+             : demo ( i64 -- i64 i64 ) true ~[ dup 1 eq ] g ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("declared") && err.contains("effect"),
@@ -3356,7 +3356,7 @@ mod tests {
         // session seeds this at index 0 (`Session::new`); this bare-line
         // helper mirrors that so a `bool`-producing comparison resolves.
         // Slice 10c (R-P3-4): a session also seeds `lib/core.sth`'s words, so
-        // a line's `<`/`if` resolves to the library definition; without them a
+        // a line's `lt`/`if` resolves to the library definition; without them a
         // bare comparison is an unknown word.
         let bool_enums = [crate::ast::bool_enum_decl()];
         let prelude = crate::parser::prelude_words();
@@ -3435,18 +3435,18 @@ mod tests {
     const ON_DEF: &str = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n";
 
     /// R1/R3: an annotation that describes the body is a no-op confirmation.
-    /// (`dup 10 <` leaves the original `i64` under the `bool`, so its effect
+    /// (`dup 10 lt` leaves the original `i64` under the `bool`, so its effect
     /// is `i64 -- i64 bool`, not `i64 -- bool`.)
     #[test]
     fn check_annotation_matches_body_ok() {
-        check_src(": w ( -- ) [ ( i64 -- i64 bool ) dup 10 < ] drop ;").unwrap();
+        check_src(": w ( -- ) [ ( i64 -- i64 bool ) dup 10 lt ] drop ;").unwrap();
     }
 
     /// R3: the disagreement is located at the annotation and fires with no
     /// consuming parameter anywhere in sight -- the literal is dropped.
     #[test]
     fn check_annotation_disagrees_with_body_is_error() {
-        let err = check_src(": w ( -- ) [ ( i64 -- i64 ) dup 10 < ] drop ;").unwrap_err();
+        let err = check_src(": w ( -- ) [ ( i64 -- i64 ) dup 10 lt ] drop ;").unwrap_err();
         assert_eq!(
             err,
             "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 bool ]` in `w` (line 1)"
@@ -3572,7 +3572,7 @@ mod tests {
         // type mismatch that leaks the `Cstr` placeholder; the dedicated
         // quotation-at-exit branch in `check_outputs` fires first and names the
         // word.
-        let err = check_src(": f ( -- i64 ) [ + ] ;\n")
+        let err = check_src(": f ( -- i64 ) [ add ] ;\n")
             .expect_err("a quotation left on a word's exit should be rejected");
         assert!(
             err.contains("`f`")
@@ -3586,7 +3586,7 @@ mod tests {
         // R19: a REPL line has no declared outputs, so R10's route never runs;
         // the `quot` side channel would die at the line boundary while lowering
         // has already pushed a phantom the residual spill would marshal.
-        let err = infer_src("1 [ + ]", &[])
+        let err = infer_src("1 [ add ]", &[])
             .expect_err("a quotation on a line's residual stack should be rejected");
         assert!(
             err.contains("a quotation cannot be left on the stack at the end of a line"),
@@ -3644,10 +3644,10 @@ mod tests {
     }
     #[test]
     fn check_stack_underflow_is_error() {
-        let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;";
+        let src = ": oops ( i64 -- i64 )\n  | a | a a add add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("oops"));
-        assert!(err.contains("`+`"));
+        assert!(err.contains("`add`"));
         assert!(err.contains("needs 2 values"));
         assert!(err.contains("holds 1"));
         assert!(err.contains("( i64 -- i64 )"));
@@ -3773,8 +3773,8 @@ mod tests {
     }
     #[test]
     fn check_type_propagates_through_body_expected() {
-        // `0 >` yields a bool that `if` consumes; both arms leave an i64.
-        check_src(": sign ( i64 -- i64 ) 0 > ~[ 1 ] ~[ 0 ] if ;").unwrap();
+        // `0 gt` yields a bool that `if` consumes; both arms leave an i64.
+        check_src(": sign ( i64 -- i64 ) 0 gt ~[ 1 ] ~[ 0 ] if ;").unwrap();
     }
     #[test]
     fn check_if_condition_not_bool_is_error() {
@@ -3785,7 +3785,7 @@ mod tests {
     }
     #[test]
     fn check_operand_type_mismatch_is_error() {
-        let src = ": w ( -- i64 ) true 1 + ;";
+        let src = ": w ( -- i64 ) true 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`i64`"), "unexpected message: {err}");
         assert!(err.contains("`bool`"), "unexpected message: {err}");
@@ -3931,15 +3931,15 @@ mod tests {
     }
     #[test]
     fn check_equality_on_array_is_error() {
-        // X7/R13: `=` on arrays reaches the operand guard naming the type.
-        let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill = ;").unwrap_err();
+        // X7/R13: `eq` on arrays reaches the operand guard naming the type.
+        let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill eq ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
     #[test]
     fn check_arithmetic_on_array_is_error() {
-        // X7/R13: `+` on arrays reaches the operand guard naming the type
-        // (the diagnostic covers `=` *and* arithmetic; both are exercised).
-        let err = check_src(": w ( -- [i64 4] ) 0 4 fill 0 4 fill + ;").unwrap_err();
+        // X7/R13: `add` on arrays reaches the operand guard naming the type
+        // (the diagnostic covers `eq` *and* arithmetic; both are exercised).
+        let err = check_src(": w ( -- [i64 4] ) 0 4 fill 0 4 fill add ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
     #[test]
@@ -3969,22 +3969,22 @@ mod tests {
     }
     #[test]
     fn infer_line_net_effect_expected() {
-        assert_eq!(infer_src("2 3 +", &[]).unwrap(), vec![Type::I64]);
+        assert_eq!(infer_src("2 3 add", &[]).unwrap(), vec![Type::I64]);
     }
     #[test]
     fn infer_line_carries_entry_depth() {
-        // `2 +` from a carried `i64`: the literal plus the carried slot are
-        // consumed by `+`, leaving one `i64`.
-        assert_eq!(infer_src("2 +", &[Type::I64]).unwrap(), vec![Type::I64]);
+        // `2 add` from a carried `i64`: the literal plus the carried slot are
+        // consumed by `add`, leaving one `i64`.
+        assert_eq!(infer_src("2 add", &[Type::I64]).unwrap(), vec![Type::I64]);
     }
     #[test]
     fn infer_line_carries_slot_types_expected() {
         // A comparison line leaves a `bool` on the carried stack.
-        assert_eq!(infer_src("5 3 >", &[]).unwrap(), vec![Type::BOOL]);
+        assert_eq!(infer_src("5 3 gt", &[]).unwrap(), vec![Type::BOOL]);
     }
     #[test]
     fn line_underflow_against_carried_stack_is_error() {
-        let err = infer_src("+", &[Type::I64]).unwrap_err();
+        let err = infer_src("add", &[Type::I64]).unwrap_err();
         assert!(err.contains("stack underflow"), "unexpected message: {err}");
         assert!(err.contains("needs 2 values"), "unexpected message: {err}");
         assert!(err.contains("holds 1"), "unexpected message: {err}");
@@ -4091,7 +4091,7 @@ mod tests {
         // across the back-edge, which the loop lowering cannot dispose yet.
         // `SPY_DEF` is two lines, so `spin`'s own line 3 lands on line 5.
         let err = check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = ~[ s drop 0 ] ~[ 9 Spy n 1 - spin ] if ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 eq ~[ s drop 0 ] ~[ 9 Spy n 1 sub spin ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -4106,7 +4106,7 @@ mod tests {
         // Moved *into* the recursive call's arguments, the Spy is forwarded,
         // not stranded, so the R15 guard must not fire.
         check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = ~[ s drop 0 ] ~[ s n 1 - spin ] if ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 eq ~[ s drop 0 ] ~[ s n 1 sub spin ] if ;"
         ))
         .unwrap();
     }
@@ -4138,9 +4138,9 @@ mod tests {
     fn back_edge_rejects_mismatched_self_call_argument() {
         let src = ": loopy inline ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
                    | f | | n | | acc |\n\
-                   n 0 > ~[\n\
+                   n 0 gt ~[\n\
                    acc f call\n\
-                   5 n 1 - f loopy\n\
+                   5 n 1 sub f loopy\n\
                    ] ~[\n\
                    ] if ;\n\
                    : main ( -- ) \"x\" 3 ~[ drop ] loopy ;\n";
@@ -4164,7 +4164,7 @@ mod tests {
         check_src(
             "static: COUNT i64 = 0 ;\n\
              : spin ( &!i64 i64 -- )\n  | c n |\n  c 1 +!\n  \
-             n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;\n\
+             n 0 gt ~[ &!COUNT n 1 sub spin ] ~[ ] if ;\n\
              : main ( -- ) &!COUNT 3 spin ;",
         )
         .expect("a static-rooted reference may cross the back-edge freely");
@@ -4229,7 +4229,7 @@ mod tests {
         // *every* eliminator call would pass all the error tests.
         check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .expect("an exhaustive owning-mode eliminator call type-checks");
@@ -4287,7 +4287,7 @@ mod tests {
     fn check_eliminator_call_arm_output_disagreement_is_error() {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> < ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> lt ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .unwrap_err();
@@ -4315,7 +4315,7 @@ mod tests {
         // discriminates the ordering too.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- bool ) ~[ ( Rect ) Rect> < ] ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : area ( Shape -- bool ) ~[ ( Rect ) Rect> lt ] ~[ ( Circle ) Circle> ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .unwrap_err();
@@ -4358,7 +4358,7 @@ mod tests {
         // above cannot catch (there, pop order and declaration order agree).
         let err = check_src(&format!(
             "{ABC_DECL}\
-             : f ( Abc -- bool ) ~[ ( B ) B> 0 < ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
+             : f ( Abc -- bool ) ~[ ( B ) B> 0 lt ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
              : main ( -- ) 3 A f . ;\n"
         ))
         .unwrap_err();
@@ -4401,7 +4401,7 @@ mod tests {
         // arm slot is the forwarded parameter itself.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) ;\n"
         ))
         .unwrap_err();
@@ -4414,7 +4414,7 @@ mod tests {
         // about the forwarded operand, not about the rest of the word.
         check_src(&format!(
             "{SHAPE_DECL}\
-             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) drop ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : use inline ( Shape ~[ i64 -- i64 ] -- i64 ) drop ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) ;\n"
         ))
         .expect("the same word with the forwarded quotation consumed first is legal");
@@ -4424,7 +4424,7 @@ mod tests {
     fn check_eliminator_call_untagged_literal_arm_is_error() {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : f ( Shape -- i64 ) ~[ 1 ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : f ( Shape -- i64 ) ~[ 1 ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle f . ;\n"
         ))
         .unwrap_err();
@@ -4493,7 +4493,7 @@ mod tests {
         // does not have.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect i64 -- i64 ) &w @ swap &h @ swap drop * ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect i64 -- i64 ) &w @ swap &h @ swap drop mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .unwrap_err();
@@ -4531,7 +4531,7 @@ mod tests {
 
         let src = format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) [ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : area ( Shape -- i64 ) [ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
@@ -4638,7 +4638,7 @@ mod tests {
     fn check_eliminator_call_non_enum_scrutinee_is_a_type_mismatch() {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : f ( i64 -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : f ( i64 -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 f . ;\n"
         ))
         .unwrap_err();
@@ -4660,7 +4660,7 @@ mod tests {
     fn check_eliminator_call_wrong_enum_family_scrutinee_is_a_type_mismatch() {
         let err = check_src(&format!(
             "{SHAPE_DECL}{ABC_DECL}\
-             : f ( Abc -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : f ( Abc -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 A f . ;\n"
         ))
         .unwrap_err();
@@ -4745,7 +4745,7 @@ mod tests {
         // name instead.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : Shape? ( i64 -- i64 ) 1 + ;\n\
+             : Shape? ( i64 -- i64 ) 1 add ;\n\
              : main ( -- ) 5 Shape? . ;\n"
         ))
         .unwrap_err();
@@ -4785,7 +4785,7 @@ mod tests {
         // rather than claiming the arm reaches no eliminator at all.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] 4 drop ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] 4 drop ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .unwrap_err();
@@ -4801,7 +4801,7 @@ mod tests {
         // call must not trip the new outside-a-call check.
         check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;\n\
+             : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .expect("a correctly-formed eliminator call is not flagged as an arm outside a call");

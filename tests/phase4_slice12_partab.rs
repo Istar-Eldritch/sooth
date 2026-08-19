@@ -81,12 +81,12 @@ fn migrated_library_words_are_declared_combinators() {
 fn migrated_library_words_still_run() {
     let src = format!(
         "{}: main ( -- )\n\
-         3 ~[ 1 + drop ] c::times\n\
-         0 4 fill ~[ 1 + drop ] c::each\n\
-         0 4 fill ~[ 1 + ] c::map drop\n\
-         0 4 fill 0 ~[ + ] c::fold drop\n\
-         0 4 fill ~[ 2 > ] c::filter drop drop\n\
-         0 ~[ dup 3 < ~[ 1 + true ] ~[ false ] if ] c::while drop\n\
+         3 ~[ 1 add drop ] c::times\n\
+         0 4 fill ~[ 1 add drop ] c::each\n\
+         0 4 fill ~[ 1 add ] c::map drop\n\
+         0 4 fill 0 ~[ add ] c::fold drop\n\
+         0 4 fill ~[ 2 gt ] c::filter drop drop\n\
+         0 ~[ dup 3 lt ~[ 1 add true ] ~[ false ] if ] c::while drop\n\
          true ~[ 1 ] ~[ 2 ] if drop\n\
          false ~[ 1 ] ~[ 2 ] unless drop ;\n",
         combinators_import("c"),
@@ -110,13 +110,13 @@ fn retyped_array_words_still_run() {
          &!d 2 >usize &!> 1 !\n\
          &!d 3 >usize &!> 3 !\n\
          0 4 fill | s |\n\
-         d s ~[ | x y | x y - ] a::sort\n\
+         d s ~[ | x y | x y sub ] a::sort\n\
          | ra rs | rs drop\n\
          &ra 0 >usize &> @ .\n\
          &ra 1 >usize &> @ .\n\
          &ra 2 >usize &> @ .\n\
          &ra 3 >usize &> @ .\n\
-         ra 3 ~[ | x y | x y - ] a::bin_search | arr i found |\n\
+         ra 3 ~[ | x y | x y sub ] a::bin_search | arr i found |\n\
          found . i >i64 . arr drop ;\n",
         combinators_import("c"),
         arrays_import("a"),

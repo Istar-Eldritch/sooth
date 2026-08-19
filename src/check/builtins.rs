@@ -104,7 +104,7 @@ pub(super) fn int_types() -> Vec<Type> {
     numeric_types().into_iter().filter(|t| t.is_int()).collect()
 }
 
-/// The two float types: the domain of `/` and `max-total`.
+/// The two float types: the domain of `div` and `max-total`.
 pub(super) fn float_types() -> Vec<Type> {
     numeric_types()
         .into_iter()
@@ -129,12 +129,12 @@ pub(super) fn printable_types() -> Vec<Type> {
 /// lowers, named once so the checker table, the operator-name lists and the
 /// lowering dispatch cannot drift apart.
 pub(crate) const COMPARISON_PRIMITIVES: [(&str, crate::ir::CmpOp); 6] = [
-    ("u=", crate::ir::CmpOp::Eq),
-    ("u<", crate::ir::CmpOp::Lt),
-    ("u>", crate::ir::CmpOp::Gt),
-    ("u<=", crate::ir::CmpOp::Le),
-    ("u>=", crate::ir::CmpOp::Ge),
-    ("u<>", crate::ir::CmpOp::Ne),
+    ("ueq", crate::ir::CmpOp::Eq),
+    ("ult", crate::ir::CmpOp::Lt),
+    ("ugt", crate::ir::CmpOp::Gt),
+    ("ulte", crate::ir::CmpOp::Le),
+    ("ugte", crate::ir::CmpOp::Ge),
+    ("une", crate::ir::CmpOp::Ne),
 ];
 
 /// The builtin overload table (slice 8a, Q-A): every concrete row a builtin
@@ -155,15 +155,15 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         });
     };
     for ty in numeric_types() {
-        row("+", vec![ty, ty], vec![ty], BuiltinLower::Add);
-        row("-", vec![ty, ty], vec![ty], BuiltinLower::Sub);
-        row("*", vec![ty, ty], vec![ty], BuiltinLower::Mul);
+        row("add", vec![ty, ty], vec![ty], BuiltinLower::Add);
+        row("sub", vec![ty, ty], vec![ty], BuiltinLower::Sub);
+        row("mul", vec![ty, ty], vec![ty], BuiltinLower::Mul);
         // Slice 10c (R-P3-3): the comparison *primitives*, each yielding the
         // 32-bit flag `branch` consumes. The `u` prefix marks the raw-flag
         // layer, not an unsigned-operand variant: there is exactly one
         // primitive per comparison shape and it derives signed / unsigned /
         // float behaviour from its operand type at lowering, exactly as the
-        // rows it replaces did. `=`/`<`/... are now ordinary `lib/` words over
+        // rows it replaces did. `eq`/`lt`/... are now ordinary `lib/` words over
         // these, so the six surface names have *left* this table -- which is
         // also what lets them be `inline` (`check_inline_declaration`'s
         // builtin-name gate keys on membership here).
@@ -172,7 +172,7 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         }
     }
     for ty in float_types() {
-        row("/", vec![ty, ty], vec![ty], BuiltinLower::DivFloat);
+        row("div", vec![ty, ty], vec![ty], BuiltinLower::DivFloat);
         row("max-total", vec![ty, ty], vec![ty], BuiltinLower::MaxTotal);
     }
     for ty in int_types() {
@@ -380,14 +380,14 @@ mod tests {
     }
     #[test]
     fn builtin_table_plus_has_a_row_per_numeric_type() {
-        // Q-A: `+` resolves by exact operand type, so the table carries one
+        // Q-A: `add` resolves by exact operand type, so the table carries one
         // homogeneous `(T T -- T)` row for every numeric type and nothing
         // else. Anchored to the literal count (12: eight fixed-width ints,
         // usize/isize, two floats) rather than `numeric_types()` itself, so
         // shrinking that function can't shrink both sides of the comparison
         // together and hide a wiring bug.
         let table = builtin_table();
-        let rows = table.get("+").expect("`+` is a builtin operator");
+        let rows = table.get("add").expect("`add` is a builtin operator");
         assert_eq!(rows.len(), 12, "12 numeric rows");
         let mut got: Vec<Type> = rows
             .iter()
@@ -395,7 +395,7 @@ mod tests {
                 assert_eq!(
                     r.inputs,
                     vec![r.outputs[0], r.outputs[0]],
-                    "a `+` row is homogeneous `(T T -- T)`"
+                    "an `add` row is homogeneous `(T T -- T)`"
                 );
                 assert_eq!(r.lower, BuiltinLower::Add);
                 r.outputs[0]
@@ -404,21 +404,21 @@ mod tests {
         let mut want = numeric_types();
         got.sort_by_key(|t| t.name());
         want.sort_by_key(|t| t.name());
-        assert_eq!(got, want, "one `+` row per numeric type, no more");
+        assert_eq!(got, want, "one `add` row per numeric type, no more");
     }
     #[test]
     fn builtin_table_sub_has_a_row_per_numeric_type() {
-        assert_homogeneous_binary_rows("-", numeric_types(), BuiltinLower::Sub);
+        assert_homogeneous_binary_rows("sub", numeric_types(), BuiltinLower::Sub);
     }
     #[test]
     fn builtin_table_mul_has_a_row_per_numeric_type() {
-        assert_homogeneous_binary_rows("*", numeric_types(), BuiltinLower::Mul);
+        assert_homogeneous_binary_rows("mul", numeric_types(), BuiltinLower::Mul);
     }
     #[test]
     fn builtin_table_div_has_a_row_per_float_type() {
-        // `/` is float-only (D7): the integer tower divides via a separate
+        // `div` is float-only (D7): the integer tower divides via a separate
         // hand-written path this table does not cover.
-        assert_homogeneous_binary_rows("/", float_types(), BuiltinLower::DivFloat);
+        assert_homogeneous_binary_rows("div", float_types(), BuiltinLower::DivFloat);
     }
     #[test]
     fn builtin_table_mod_has_a_row_per_int_type() {
@@ -487,7 +487,7 @@ mod tests {
     fn builtin_table_comparisons_have_a_row_per_numeric_type() {
         // Slice 10c (R-P3-3): **retargeted, not deleted**. This is the only
         // thing pinning comparison coverage of the whole numeric tower, and
-        // the tower rows moved wholesale from `=`/`<`/... to the `u`-prefixed
+        // the tower rows moved wholesale from `eq`/`lt`/... to the `u`-prefixed
         // primitives. Deleting it to go green would drop the guard at exactly
         // the moment the slice puts it under strain; the surface names are now
         // `'T: Copy Ord`-polymorphic library words over these rows, whose own
@@ -518,7 +518,7 @@ mod tests {
             want.sort_by_key(|t| t.name());
             assert_eq!(got, want, "one `{op}` row per numeric type, no more");
         }
-        for op in ["=", "<", ">", "<=", ">=", "<>"] {
+        for op in ["eq", "lt", "gt", "lte", "gte", "ne"] {
             assert!(
                 !table.contains_key(op),
                 "`{op}` left `BUILTIN_TABLE` for `lib/`; leaving a row behind \

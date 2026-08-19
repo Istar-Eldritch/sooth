@@ -47,7 +47,7 @@ import: c | times | "../lib/combinators.sth" ;
 
 \ D5: a concrete `[ i64 ; 4 ]` inside a combinator body works for free.
 : withbuf inline ( [ -- i64 ] -- i64 )
-  | f | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop f call z + ;
+  | f | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop f call z add ;
 
 \ A self-tail-recursive word that constructs an array each iteration: the
 \ constructor's loop opens *inside* the word's own self-tail loop, so without
@@ -55,8 +55,8 @@ import: c | times | "../lib/combinators.sth" ;
 \ against the wrong header (a compiler panic). `z` is the zero-init index 0.
 : recur ( i64 -- )
   | n | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop
-  n z + .
-  n 0 > ~[ n 1 - recur ] ~[ ] if ;
+  n z add .
+  n 0 gt ~[ n 1 sub recur ] ~[ ] if ;
 
 : main ( -- )
   dirty probe10 .        \ 0

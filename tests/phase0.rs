@@ -96,8 +96,8 @@ fn rgb_pack_compiles_and_runs() {
 fn signed_vs_unsigned_compare_differ_on_same_bit_pattern() {
     // Same bit pattern (200), compared as `i8` (negative) vs `u8` (positive)
     // against `5`, must give differing results (proves R10 codegen, S4).
-    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < ~[ 1 ] ~[ 0 ] if ;\n\n\
-: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < ~[ 1 ] ~[ 0 ] if ;\n\n\
+    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 lt ~[ 1 ] ~[ 0 ] if ;\n\n\
+: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 lt ~[ 1 ] ~[ 0 ] if ;\n\n\
 : main ( -- )\n  signed_lt .\n  unsigned_lt . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-vs-unsigned-cmp-{}.sth",
@@ -170,7 +170,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
     // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
     // logical unsigned value `65480`, not the sign-extended bit pattern, so
     // comparing it against a clean `u16` `65535` must be `true`.
-    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < ~[ 1 ] ~[ 0 ] if . ;\n";
+    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 lt ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-widen-subword-cmp-golden-{}.sth",
         std::process::id()
@@ -185,9 +185,9 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
 
 #[test]
 fn mixed_width_arithmetic_reports_both_types() {
-    // X1: an `i32` and an `i64` fed to `+` names both differing types, via the
+    // X1: an `i32` and an `i64` fed to `add` names both differing types, via the
     // operand-pair-mismatch diagnostic specifically.
-    let src = ": f ( -- i32 ) 1 >i32 5 + ;";
+    let src = ": f ( -- i32 ) 1 >i32 5 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -202,11 +202,11 @@ fn mixed_width_arithmetic_reports_both_types() {
 
 #[test]
 fn mixed_sign_comparison_reports_both_types() {
-    // X2: `u8` and `i8` fed to `<` names both differing operand types. Slice
-    // 10c: `<` is a `'T: Copy Ord` library word now, so the rejection is its
+    // X2: `u8` and `i8` fed to `lt` names both differing operand types. Slice
+    // 10c: `lt` is a `'T: Copy Ord` library word now, so the rejection is its
     // variable conflict rather than the retired builtin row's operand-pair
     // message; both operand types are still named.
-    let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
+    let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -268,7 +268,7 @@ fn if_condition_not_bool_reports_diagnostic() {
 
 #[test]
 fn operand_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( -- i64 )\n  true 1 + ;\n";
+    let src = ": oops ( -- i64 )\n  true 1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -296,7 +296,7 @@ fn branch_join_type_mismatch_reports_diagnostic() {
 
 #[test]
 fn declared_output_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( i64 -- bool )\n  1 + ;\n";
+    let src = ": oops ( i64 -- bool )\n  1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -318,13 +318,13 @@ fn unknown_type_name_reports_diagnostic() {
 
 #[test]
 fn stack_effect_mismatch_reports_diagnostic() {
-    let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
+    let src = ": oops ( i64 -- i64 )\n  | a | a a add add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("oops"), "error should name the word: {err}");
-    assert!(err.contains('+'), "error should name the operator: {err}");
+    assert!(err.contains("add"), "error should name the operator: {err}");
     assert!(
         err.contains("needs 2 values"),
         "error should state the required arity: {err}"
@@ -341,7 +341,7 @@ fn stack_effect_mismatch_reports_diagnostic() {
 
 #[test]
 fn build_surfaces_checker_error() {
-    let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
+    let src = ": oops ( i64 -- i64 )\n  | a | a a add add ;\n";
     let path = std::env::temp_dir().join(format!("sooth-badsrc-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
 
@@ -367,10 +367,10 @@ fn mean_dogfood_compiles_and_runs() {
 
 #[test]
 fn float_arithmetic_runs_on_both_widths_end_to_end() {
-    // S1/S3: `+ - *` run correctly on `f64` and on `f32` (converted back to
+    // S1/S3: `add sub mul` run correctly on `f64` and on `f32` (converted back to
     // `f64` for `.`, since `.` prints an `f32` by widening to `f64`).
-    let src = ": main ( -- )\n  1.0 2.0 + .\n  5.0 2.0 - .\n  3.0 4.0 * .\n  \
-1.5 >f32 2.5 >f32 + >f64 . ;\n";
+    let src = ": main ( -- )\n  1.0 2.0 add .\n  5.0 2.0 sub .\n  3.0 4.0 mul .\n  \
+1.5 >f32 2.5 >f32 add >f64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-arith-both-widths-{}.sth",
         std::process::id()
@@ -385,13 +385,13 @@ fn float_arithmetic_runs_on_both_widths_end_to_end() {
 
 #[test]
 fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
-    // S3: `1.0 0.0 /` is inf, `0.0 0.0 /` is NaN, with no trap, and NaN is
+    // S3: `1.0 0.0 div` is inf, `0.0 0.0 div` is NaN, with no trap, and NaN is
     // detectable via `x = x` (false only for NaN, D4). `fdiv` runs the
     // division through a real call boundary so QBE cannot constant-fold the
-    // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
-    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
+    // literal `0.0 0.0 div` away (an unrelated compile-time-only restriction).
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
-0.0 0.0 fdiv dup = ~[ 1 ] ~[ 0 ] if . ;\n";
+0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-div-inf-nan-{}.sth",
         std::process::id()
@@ -408,18 +408,18 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
         "expected a NaN rendering: {}",
         lines[1]
     );
-    assert_eq!(lines[2], "0", "NaN = NaN must be false");
+    assert_eq!(lines[2], "0", "NaN eq NaN must be false");
     assert_eq!(code, 0);
 }
 
 #[test]
 fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // S4: an ordered comparison gives the expected boolean, and every
-    // comparison involving a NaN produced by `0.0 0.0 /` is false, including
-    // `<` and `>` against a NaN (not just `=`, RISK 1).
-    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
-: main ( -- )\n  1.0 2.0 < ~[ 1 ] ~[ 0 ] if .\n  2.0 1.0 < ~[ 1 ] ~[ 0 ] if .\n  \
-0.0 0.0 fdiv dup < ~[ 1 ] ~[ 0 ] if .\n  0.0 0.0 fdiv dup > ~[ 1 ] ~[ 0 ] if . ;\n";
+    // comparison involving a NaN produced by `0.0 0.0 div` is false, including
+    // `lt` and `gt` against a NaN (not just `eq`, RISK 1).
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
+: main ( -- )\n  1.0 2.0 lt ~[ 1 ] ~[ 0 ] if .\n  2.0 1.0 lt ~[ 1 ] ~[ 0 ] if .\n  \
+0.0 0.0 fdiv dup lt ~[ 1 ] ~[ 0 ] if .\n  0.0 0.0 fdiv dup gt ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-cmp-ordered-nan-{}.sth",
         std::process::id()
@@ -494,9 +494,9 @@ fn float_to_unsigned_int_conversions_run_end_to_end() {
 
 #[test]
 fn mixed_int_float_arithmetic_reports_diagnostic() {
-    // X1 (headline negative, S8): `+` fed an `i64` and an `f64` names both
+    // X1 (headline negative, S8): `add` fed an `i64` and an `f64` names both
     // differing types via the operand-pair-mismatch diagnostic.
-    let src = ": f ( -- f64 ) 1 3.0 + ;";
+    let src = ": f ( -- f64 ) 1 3.0 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -511,10 +511,10 @@ fn mixed_int_float_arithmetic_reports_diagnostic() {
 
 #[test]
 fn mixed_float_width_comparison_reports_diagnostic() {
-    // X2: `f32` and `f64` fed to `<` names both differing operand types
-    // (slice 10c: through the library `<`'s variable conflict, see
+    // X2: `f32` and `f64` fed to `lt` names both differing operand types
+    // (slice 10c: through the library `lt`'s variable conflict, see
     // `mixed_sign_comparison_reports_both_types`).
-    let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
+    let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -529,13 +529,13 @@ fn mixed_float_width_comparison_reports_diagnostic() {
 
 #[test]
 fn integer_division_reports_diagnostic() {
-    // X3: `/` requires floats; two `i64` operands is an error.
-    let src = ": f ( -- i64 ) 6 2 / ;";
+    // X3: `div` requires floats; two `i64` operands is an error.
+    let src = ": f ( -- i64 ) 6 2 div ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
-    assert!(err.contains('/'), "unexpected message: {err}");
+    assert!(err.contains("div"), "unexpected message: {err}");
     assert!(err.contains("float"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
 }
@@ -724,7 +724,7 @@ fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
     // `1 << 7` in an `i8` is -128 (0x80), which must compare as `< 0`. If the
     // high bits weren't kept canonical within the `i8` width, the comparison
     // could see stale bits instead of the correct sign.
-    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < ~[ 1 . ] ~[ 0 . ] if ;\n";
+    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 lt ~[ 1 . ] ~[ 0 . ] if ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-subword-shift-compare-{}.sth",
         std::process::id()
@@ -742,7 +742,7 @@ fn negative_shift_count_masks_to_type_width() {
     // A negative runtime shift count must mask to the type width rather than
     // trap or invoke UB: -6 mod 8 = 2, so shifting a `u8` by -6 shifts by 2,
     // giving 4.
-    let src = ": main ( -- )\n  1 >u8  0 6 -  shl >i64 . ;\n";
+    let src = ": main ( -- )\n  1 >u8  0 6 sub  shl >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-negative-shift-count-{}.sth",
         std::process::id()
@@ -755,12 +755,12 @@ fn negative_shift_count_masks_to_type_width() {
     assert_eq!(code, 0);
 }
 
-// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `<= >= <>`
+// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `lte gte ne`
 // comparison completion: diagnostics + goldens.
 
 #[test]
 fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
-    let src = ": w ( -- bool ) true false <= ;";
+    let src = ": w ( -- bool ) true false lte ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -821,15 +821,15 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
 #[test]
 fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // The same bit pattern (200) compares differently as `i8` (-56, negative)
-    // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
-    // `<>` stays true either way (not-equal is sign-agnostic like `=`).
+    // vs `u8` (200, positive) against 5: `lte`/`gte` flip with the sign, while
+    // `ne` stays true either way (not-equal is sign-agnostic like `eq`).
     let src = ": main ( -- )\n  \
-  200 >i8 5 >i8 <= ~[ 1 ] ~[ 0 ] if .\n  \
-  200 >u8 5 >u8 <= ~[ 1 ] ~[ 0 ] if .\n  \
-  200 >i8 5 >i8 >= ~[ 1 ] ~[ 0 ] if .\n  \
-  200 >u8 5 >u8 >= ~[ 1 ] ~[ 0 ] if .\n  \
-  200 >i8 5 >i8 <> ~[ 1 ] ~[ 0 ] if .\n  \
-  200 >u8 5 >u8 <> ~[ 1 ] ~[ 0 ] if . ;\n";
+  200 >i8 5 >i8 lte ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 lte ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >i8 5 >i8 gte ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 gte ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >i8 5 >i8 ne ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 ne ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
         std::process::id()
@@ -844,16 +844,16 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
 
 #[test]
 fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
-    // A real NaN (`0.0 0.0 /`, routed through a call so it isn't
+    // A real NaN (`0.0 0.0 div`, routed through a call so it isn't
     // constant-folded away) must report false for the ordered comparisons
-    // `<=`/`>=`/`=`, and true for `<>` (RISK 1): `<>` is the one comparison
-    // where "NaN involved" flips the answer relative to `=`.
-    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
+    // `lte`/`gte`/`eq`, and true for `ne` (RISK 1): `ne` is the one comparison
+    // where "NaN involved" flips the answer relative to `eq`.
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  \
-  0.0 0.0 fdiv dup <= ~[ 1 ] ~[ 0 ] if .\n  \
-  0.0 0.0 fdiv dup >= ~[ 1 ] ~[ 0 ] if .\n  \
-  0.0 0.0 fdiv dup <> ~[ 1 ] ~[ 0 ] if .\n  \
-  0.0 0.0 fdiv dup = ~[ 1 ] ~[ 0 ] if . ;\n";
+  0.0 0.0 fdiv dup lte ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup gte ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup ne ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
@@ -940,7 +940,7 @@ fn print_float_f64_and_f32_via_dot() {
 
 #[test]
 fn print_bool_prints_true_or_false_not_zero_or_one() {
-    let src = ": main ( -- )\n  2 3 < .\n  3 2 < . ;\n";
+    let src = ": main ( -- )\n  2 3 lt .\n  3 2 lt . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-print-bool-true-false-{}.sth",
         std::process::id()
@@ -1027,7 +1027,7 @@ fn struct_survives_word_call_boundary_native() {
     // S5: a struct argument and a struct return cross a word-call boundary
     // (by-value QBE C-ABI), then the returned struct's field is read back.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: shift ( Vec2 i64 -- Vec2 ) | v d |\n  &v &x @ d + &v &y @ Vec2 ;\n\
+: shift ( Vec2 i64 -- Vec2 ) | v d |\n  &v &x @ d add &v &y @ Vec2 ;\n\
 : main ( -- )\n  10 20 Vec2 5 shift &x @ . &y @ . drop ;\n";
     assert_eq!(run_struct_golden("call-boundary", src), "15\n20\n");
 }
@@ -1114,8 +1114,8 @@ fn eliminator_over_three_plus_variant_enum_dispatches_correctly() {
 : run ( i64 Cmd -- i64 )\n\
   ~[ ( Halt ) drop drop 0 ]\n\
   ~[ ( Push ) Push> swap drop ]\n\
-  ~[ ( Add )  drop 1 + ]\n\
-  ~[ ( Dbl )  drop 2 * ]\n\
+  ~[ ( Add )  drop 1 add ]\n\
+  ~[ ( Dbl )  drop 2 mul ]\n\
   Cmd? ;\n\
 : main ( -- )\n  99 Halt run .\n  1 20 Push run .\n  10 Add run .\n  10 Dbl run . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-nway-elim-{}.sth", std::process::id()));
@@ -1183,7 +1183,7 @@ fn eliminator_arm_containing_if_joins_correctly() {
     let src = "type: Item | Zero | NonZero v i64 ;\n\
 : classify ( Item -- i64 )\n\
   ~[ ( Zero )    drop 0 ]\n\
-  ~[ ( NonZero ) NonZero> 0 > ~[ 1 ] ~[ -1 ] if ]\n\
+  ~[ ( NonZero ) NonZero> 0 gt ~[ 1 ] ~[ -1 ] if ]\n\
   Item? ;\n\
 : main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-arm-if-else-{}.sth", std::process::id()));
@@ -1204,11 +1204,11 @@ fn usize_arithmetic_comparison_and_conversion_native() {
     // `usize`->`i64` conversion (`>i64`), type-directed `.` on a `usize`, and
     // a bare literal coercing into a `usize` position without `>usize` (D8).
     let src = ": main ( -- )\n\
-  2 3 + >usize 4 >usize + .\n\
-  10 >usize 3 >usize - .\n\
-  3 >usize 5 >usize < .\n\
-  5 >usize 3 >usize < .\n\
-  7 >usize >i64 1 + .\n\
+  2 3 add >usize 4 >usize add .\n\
+  10 >usize 3 >usize sub .\n\
+  3 >usize 5 >usize lt .\n\
+  5 >usize 3 >usize lt .\n\
+  7 >usize >i64 1 add .\n\
   9 >usize dup . drop ;\n";
     let path = std::env::temp_dir().join(format!("sooth-usize-tower-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -1231,15 +1231,15 @@ fn isize_round_trips_arithmetic_and_conversion() {
     // wrongly-unsigned codegen arm (falling through past `Isize`) would flip
     // the result instead of silently agreeing with the signed answer.
     let src = ": main ( -- )\n\
-  2 3 + >isize 4 >isize + .\n\
-  3 >isize 10 >isize - .\n\
-  3 >isize 5 >isize < .\n\
-  5 >isize 3 >isize < .\n\
-  0 >isize 5 >isize - 1 >isize < .\n\
-  0 >isize 5 >isize - 0 >isize > .\n\
-  0 >isize 8 >isize - 1 shr .\n\
-  0 >isize 7 >isize - 2 >isize mod .\n\
-  7 >isize >i64 1 + .\n\
+  2 3 add >isize 4 >isize add .\n\
+  3 >isize 10 >isize sub .\n\
+  3 >isize 5 >isize lt .\n\
+  5 >isize 3 >isize lt .\n\
+  0 >isize 5 >isize sub 1 >isize lt .\n\
+  0 >isize 5 >isize sub 0 >isize gt .\n\
+  0 >isize 8 >isize sub 1 shr .\n\
+  0 >isize 7 >isize sub 2 >isize mod .\n\
+  7 >isize >i64 1 add .\n\
   9 >isize dup . drop ;\n";
     let path = std::env::temp_dir().join(format!("sooth-isize-tower-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -1278,7 +1278,7 @@ fn in_place_mutation_of_a_duped_array_leaves_the_original_untouched_native() {
     // aliasing.
     let src = ": main ( -- )\n\
   0 4 fill dup | a b |\n\
-  &!a 1 1 + >usize &!> 99 !\n\
+  &!a 1 1 add >usize &!> 99 !\n\
   &a 2 &> @ .\n\
   &a 0 &> @ .\n\
   &b 2 &> @ .\n\
@@ -1334,7 +1334,7 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
     let src = ": main ( -- )\n\
   1 .\n\
   0 4 fill | a |\n\
-  &a 3 4 + >usize &> @ drop\n\
+  &a 3 4 add >usize &> @ drop\n\
   99 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-trap-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -1379,7 +1379,7 @@ fn runtime_index_at_length_boundary_traps_and_aborts_native() {
     let src = ": main ( -- )\n\
   1 .\n\
   0 4 fill | a |\n\
-  &a 2 2 + >usize &> @ drop\n\
+  &a 2 2 add >usize &> @ drop\n\
   99 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-array-trap-boundary-{}.sth",
@@ -1491,10 +1491,10 @@ fn locals_rebind_correctly_across_tail_iterations_native() {
     // deliberately kept separate from the constant-stack goldens above.
     let src = ": digits ( i64 i64 -- i64 )\n\
   | acc n |\n\
-  n 0 = ~[\n\
+  n 0 eq ~[\n\
     acc\n\
   ] ~[\n\
-    acc 10 * n + n 1 - digits\n\
+    acc 10 mul n add n 1 sub digits\n\
   ] if ;\n\
 : main ( -- ) 0 5 digits . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-locals-rebind-{}.sth", std::process::id()));
@@ -1516,13 +1516,13 @@ fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
     // both eliminate, at N large enough to overflow if either didn't.
     let src = ": both-tail ( i64 i64 -- i64 )\n\
   | acc n |\n\
-  n 0 = ~[\n\
+  n 0 eq ~[\n\
     acc\n\
   ] ~[\n\
-    n 500000 > ~[\n\
-      acc n + n 1 - both-tail\n\
+    n 500000 gt ~[\n\
+      acc n add n 1 sub both-tail\n\
     ] ~[\n\
-      acc n + n 1 - both-tail\n\
+      acc n add n 1 sub both-tail\n\
     ] if\n\
   ] if ;\n\
 : main ( -- ) 0 1000000 both-tail . ;\n";
@@ -1543,8 +1543,8 @@ fn eliminator_multi_tail_runs_in_constant_stack_native() {
     // contributes its own back-edge).
     let src = "type: Parity | Even | Odd ;\n\
 : sum-parity ( i64 i64 Parity -- i64 )\n\
-  ~[ ( Even ) drop | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Odd sum-parity ] if ]\n\
-  ~[ ( Odd )  drop | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Even sum-parity ] if ]\n\
+  ~[ ( Even ) drop | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub Odd sum-parity ] if ]\n\
+  ~[ ( Odd )  drop | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub Even sum-parity ] if ]\n\
   Parity? ;\n\
 : main ( -- ) 0 1000000 Even sum-parity . ;\n";
     let path =
@@ -1568,7 +1568,7 @@ fn mixed_eliminator_back_edge_and_base_case_runs_in_constant_stack_native() {
     // predecessors must stay disjoint for this to compile and run correctly.
     let src = "type: Step | Go | Halt ;\n\
 : run-mix ( i64 i64 Step -- i64 )\n\
-  ~[ ( Go )   drop | acc n | n 0 = ~[ acc n Halt run-mix ] ~[ acc n + n 1 - Go run-mix ] if ]\n\
+  ~[ ( Go )   drop | acc n | n 0 eq ~[ acc n Halt run-mix ] ~[ acc n add n 1 sub Go run-mix ] if ]\n\
   ~[ ( Halt ) drop | acc n | acc ]\n\
   Step? ;\n\
 : main ( -- ) 0 1000000 Go run-mix . ;\n";
@@ -1596,14 +1596,14 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
     // (a conversion word on a `bool` is a checker error), and `fetch` reads
     // the enum through a reference (`&>` then `@`) rather than `get`.
     let src = "type: Op | Step | Stop ;\n\
-: idx ( i64 -- usize ) | count | count 0 = ~[ 1 ] ~[ 0 ] if >usize ;\n\
+: idx ( i64 -- usize ) | count | count 0 eq ~[ 1 ] ~[ 0 ] if >usize ;\n\
 : fetch ( [Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
 : run ( [Op 2] i64 i64 Op -- i64 )\n\
   ~[ ( Step ) drop | prog count acc |\n\
       prog\n\
-      count 1 -\n\
-      acc 1 +\n\
-      prog count 1 - idx fetch\n\
+      count 1 sub\n\
+      acc 1 add\n\
+      prog count 1 sub idx fetch\n\
       run ]\n\
   ~[ ( Stop ) drop | prog count acc | acc ]\n\
   Op? ;\n\
@@ -1657,17 +1657,17 @@ type: VmPop vm Vm val i64 ;\n\
   | vm x |\n\
   &vm &sp @ | i |\n\
   &!vm &!stack i &!> x !\n\
-  &vm &sp @ 1 + | newsp |\n\
+  &vm &sp @ 1 add | newsp |\n\
   vm &!sp newsp ! ;\n\
 : vm-pop ( Vm -- VmPop )\n\
   | vm |\n\
-  &vm &sp @ 1 - | i |\n\
+  &vm &sp @ 1 sub | i |\n\
   &vm &stack i &> @ | x |\n\
   vm &!sp i !\n\
   x\n\
   VmPop ;\n\
 : bump-pc ( Vm -- Vm )\n\
-  &pc @ 1 + | newpc |\n\
+  &pc @ 1 add | newpc |\n\
   &!pc newpc ! ;\n\
 : fetch ( Vm -- Fetched )\n\
   | vm |\n\
@@ -1686,7 +1686,7 @@ type: VmPop vm Vm val i64 ;\n\
     vm vm-pop VmPop>\n\
     | b |\n\
     vm-pop VmPop>\n\
-    b +\n\
+    b add\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
@@ -1696,7 +1696,7 @@ type: VmPop vm Vm val i64 ;\n\
     vm vm-pop VmPop>\n\
     | b |\n\
     vm-pop VmPop>\n\
-    b -\n\
+    b sub\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
@@ -1706,7 +1706,7 @@ type: VmPop vm Vm val i64 ;\n\
     vm vm-pop VmPop>\n\
     | b |\n\
     vm-pop VmPop>\n\
-    b *\n\
+    b mul\n\
     vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
@@ -1730,7 +1730,7 @@ type: VmPop vm Vm val i64 ;\n\
   ~[ ( Jz )\n\
     Jz> | vm target |\n\
     vm vm-pop VmPop>\n\
-    0 =\n\
+    0 eq\n\
     ~[\n\
       &!pc target !\n\
     ] ~[\n\
@@ -1801,8 +1801,8 @@ fn vm_dispatch_loop_runs_in_constant_stack() {
 
 #[test]
 fn non_tail_factorial_still_a_real_call_native() {
-    // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
-    // *`) has a self-call followed by `*`, so it is deliberately not in tail
+    // Criterion 5: the existing `examples/factorial.sth` (`dup 1 sub factorial
+    // mul`) has a self-call followed by `mul`, so it is deliberately not in tail
     // position and stays a real, un-eliminated `Call` (R10); it still
     // computes correctly at small N. The over-eager-miscompile boundary
     // (self-call inside a non-terminal `if`) is covered by the
@@ -1988,7 +1988,7 @@ fn linear_across_loop_back_edge_is_located_error() {
     // is two lines, so `spin`'s own line 3 lands on line 5.
     let err = linear_check_error(&format!(
         "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n\
-  n 0 = ~[ s drop 0 ] ~[ 9 Spy n 1 - spin ] if ;\n"
+  n 0 eq ~[ s drop 0 ] ~[ 9 Spy n 1 sub spin ] if ;\n"
     ));
     assert!(
         err.contains("not supported yet"),
@@ -2004,7 +2004,7 @@ fn copy_loop_still_compiles() {
     // by the back-edge guard.
     let stdout = run_linear_golden(
         "copy-loop",
-        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 = ~[ 0 ] ~[ n 1 - countdown ] if ;\n\
+        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 eq ~[ 0 ] ~[ n 1 sub countdown ] if ;\n\
 : main ( -- )\n  100 countdown . ;\n",
     );
     assert_eq!(stdout, "0\n");
@@ -2588,7 +2588,7 @@ fn owned_alloc_dispose_loop_stays_within_memory_bound() {
     // tail-call -> loop shape (constant stack), so the outer loop itself
     // never grows memory; only a broken `free` (a real leak, or a fake one)
     // would.
-    let src = ": loop-owned ( i64 -- )\n  dup 0 = ~[\n    drop\n  ] ~[\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  ] if ;\n\
+    let src = ": loop-owned ( i64 -- )\n  dup 0 eq ~[\n    drop\n  ] ~[\n    0 >u8 1024 fill ^ drop\n    1 sub loop-owned\n  ] if ;\n\
 : main ( -- )\n  100000 loop-owned ;\n";
     let code = run_owned_memory_bounded_golden("mem-bound", src, 65536);
     assert_eq!(
@@ -2605,7 +2605,7 @@ fn peek_owned_copy_payload_keeps_cell_live() {
     // unchanged across them), and the transcript shows exactly one `free`.
     let stdout = run_owned_traced_golden(
         "peek-twice",
-        ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . = . drop ;\n",
+        ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . eq . drop ;\n",
     );
     assert_eq!(stdout, "alloc 8\n5\ntrue\nfree 8\n");
 }
@@ -2761,10 +2761,10 @@ fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
 const DEEP_LIST_SRC: &str = "type: List | Nil | Cons v i64 next ^List ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - n acc ^ Cons build\n  \
+    n 1 sub n acc ^ Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
 
@@ -2849,7 +2849,7 @@ fn recursive_destructor_reads_node_before_overwriting_slot() {
             "{SPY_DEF}type: L | Nil | Cons next ^L a Spy b Spy ;\n\
 : push-front ( L i64 -- L )\n  \
   | rest v |\n  \
-  rest ^ v Spy v 1 + Spy Cons ;\n\
+  rest ^ v Spy v 1 add Spy Cons ;\n\
 : main ( -- )\n  \
   Nil 5 push-front 3 push-front 1 push-front drop ;\n"
         ),
@@ -3044,10 +3044,10 @@ fn deep_right_leaning_tree_disposes_in_constant_stack() {
     let src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
 : build ( i64 Tree -- Tree )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - Leaf ^ acc ^ Node build\n  \
+    n 1 sub Leaf ^ acc ^ Node build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Leaf build drop ;\n";
     assert_eq!(
@@ -3074,10 +3074,10 @@ fn mutually_recursive_types_dispose_in_constant_stack() {
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 -\n    \
+    n 1 sub\n    \
     n Spy acc ^ BCons ^\n    \
     n Spy swap ACons\n    \
     build\n  \
@@ -3097,10 +3097,10 @@ drop 3\nfree 24\ndrop 3\nfree 24\n"
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 -\n    \
+    n 1 sub\n    \
     n Spy acc ^ BCons ^\n    \
     n Spy swap ACons\n    \
     build\n  \
@@ -3127,10 +3127,10 @@ fn wrapper_indirection_disposes_in_constant_stack_left_leaning_tree_stays_depth_
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - n acc ^ Wrap Cons build\n  \
+    n 1 sub n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
     assert_eq!(
@@ -3143,10 +3143,10 @@ type: List | Nil | Cons w Wrap ;\n\
     let left_leaning_src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
 : build ( i64 Tree -- Tree )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - acc ^ Leaf ^ Node build\n  \
+    n 1 sub acc ^ Leaf ^ Node build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Leaf build drop ;\n";
     assert_ne!(
@@ -3229,12 +3229,12 @@ type: A | ANil | ACons next ^B tag Spy ;\n\
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 -\n    \
+    n 1 sub\n    \
     n Spy acc ^ BCons ^\n    \
-    n 10 * Spy ACons\n    \
+    n 10 mul Spy ACons\n    \
     build\n  \
   ] if ;\n";
 
@@ -3317,13 +3317,13 @@ fn deep_multi_variant_enum_disposes_in_constant_stack() {
     let src = "type: T | Nil | X next ^T v i64 | Y v i64 next ^T ;\n\
 : build ( i64 T -- T )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 2 mod 0 = ~[\n      \
-      n 1 - acc ^ n X build\n    \
+    n 2 mod 0 eq ~[\n      \
+      n 1 sub acc ^ n X build\n    \
     ] ~[\n      \
-      n 1 - n acc ^ Y build\n    \
+      n 1 sub n acc ^ Y build\n    \
     ] if\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
@@ -3412,10 +3412,10 @@ fn deep_wrapper_struct_list_disposes_in_constant_stack() {
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - n acc ^ Wrap Cons build\n  \
+    n 1 sub n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
     assert_eq!(
@@ -3435,10 +3435,10 @@ fn deep_double_cell_list_disposes_in_constant_stack() {
     let src = "type: L | Nil | Cons next ^^L v i64 ;\n\
 : build ( i64 L -- L )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - acc ^ ^ n Cons build\n  \
+    n 1 sub acc ^ ^ n Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
     assert_eq!(
@@ -3455,12 +3455,12 @@ const DEEP_MUTUAL_CHAIN_TYPES: &str = "type: A | ANil | ACons next ^B tag i64 ;\
 type: B | BNil | BCons tag i64 next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 -\n    \
+    n 1 sub\n    \
     n acc ^ BCons ^\n    \
-    n 10 * ACons\n    \
+    n 10 mul ACons\n    \
     build\n  \
   ] if ;\n";
 
@@ -3510,17 +3510,17 @@ fn deep_recursive_chain_disposes_within_bounded_memory() {
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = ~[\n    \
+  n 0 eq ~[\n    \
     acc\n  \
   ] ~[\n    \
-    n 1 - n acc ^ Wrap Cons build\n  \
+    n 1 sub n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : churn ( i64 -- )\n  \
-  dup 0 = ~[\n    \
+  dup 0 eq ~[\n    \
     drop\n  \
   ] ~[\n    \
     10000 Nil build drop\n    \
-    1 - churn\n  \
+    1 sub churn\n  \
   ] if ;\n\
 : main ( -- )\n  1000 churn ;\n";
     let code = run_owned_memory_bounded_golden("deep-mem-bound", src, 8192);
@@ -3546,16 +3546,17 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     // Regression: the QBE backend's symbol sanitizer (`qbe_name`) used to
     // replace every character outside `[A-Za-z0-9_.]` with a bare `_`, so
     // two distinct word names built entirely of such characters could
-    // collapse onto the identical symbol. `+` and `-` are both ordinary `:`
-    // definitions, overloading the builtin operators on a struct type (so
-    // R1's builtin-collision check, slice 8a, does not itself reject them --
-    // the point here is purely the symbol sanitizer) -- and both used to
-    // sanitize to `_`, failing at the assembler with `symbol `_' is already
-    // defined` well before either word could ever be called.
-    let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: - ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: main ( -- ) ;\n";
+    // collapse onto the identical symbol, failing at the assembler with
+    // `symbol `_' is already defined` well before either word could be called.
+    //
+    // The fixture must stay *symbolic*: with the operators-as-words rename
+    // `+`/`-` are no longer builtin names but ordinary user words, which is
+    // exactly what keeps them a valid subject here. Migrating them to
+    // `add`/`sub` made this a placebo -- neither name contains a character
+    // `qbe_name` touches, so no sanitizer behaviour was reachable at all.
+    let src = ": + ( i64 i64 -- i64 ) drop ;\n\
+: - ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) 1 2 + . 3 4 - . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-qbe-name-injective-{}.sth",
         std::process::id()
@@ -3563,10 +3564,24 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let built = driver::build(&path);
     std::fs::remove_file(&path).ok();
+    let binary = built.expect("two distinctly-sanitized word names build cleanly");
 
+    let nm = std::process::Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_file(&binary).ok();
+    let symbols = String::from_utf8_lossy(&nm.stdout);
+    let names: Vec<&str> = symbols
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .collect();
+    // The injectivity itself, not merely "it linked": `+` is codepoint 0x2b and
+    // `-` is 0x2d, so the two own visibly different symbols. Collapsing both to
+    // `_` (the old scheme) satisfies neither.
     assert!(
-        built.is_ok(),
-        "two colliding-under-the-old-scheme word names should build cleanly: {built:?}"
+        names.contains(&".2b.__m0") && names.contains(&".2d.__m0"),
+        "each symbolic word owns its own escaped symbol; nm found:\n{symbols}"
     );
 }
 
@@ -3592,15 +3607,15 @@ fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
 
 #[test]
 fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
-    // `foo` ends in the builtin `<` on two `i64`s. The tail-call cycle pass
+    // `foo` ends in the builtin `lt` on two `i64`s. The tail-call cycle pass
     // runs before any body is checked, so it saw only the name and credited
-    // an edge `foo -> <` to the `Vec2` overload, closing a cycle with that
+    // an edge `foo -> lt` to the `Vec2` overload, closing a cycle with that
     // overload's tail call to `foo` and rejecting this valid program as
     // `mutual tail recursion`.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: foo ( i64 i64 -- bool ) < ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ foo ;\n\
-: main ( -- ) 1 0 Vec2 5 0 Vec2 < . ;\n";
+: foo ( i64 i64 -- bool ) lt ;\n\
+: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ foo ;\n\
+: main ( -- ) 1 0 Vec2 5 0 Vec2 lt . ;\n";
     let (stdout, code) = run_overload_src("tail-cycle-builtin", src);
     assert_eq!(stdout, "true\n");
     assert_eq!(code, 0);
@@ -3647,7 +3662,7 @@ fn overloads_of_a_combinator_name_are_both_reachable() {
     // exactly as env's Sig did before B1 (and poly_env did for a poly word).
     let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
 : apply inline ( bool [ bool -- bool ] -- bool ) call ;\n\
-: main ( -- ) 5 [ 2 * ] apply . true [ not ] apply . ;\n";
+: main ( -- ) 5 [ 2 mul ] apply . true [ not ] apply . ;\n";
     let (stdout, code) = run_overload_src("combinator-overload", src);
     assert_eq!(stdout, "10\nfalse\n");
     assert_eq!(code, 0);
@@ -3787,8 +3802,8 @@ fn overloads_of_an_ordinary_word_name_get_distinct_symbols() {
     // bodies here are distinguishable at runtime, so a collision that kept
     // only one body would print the wrong pair.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: mag ( i64 -- i64 ) 10 * ;\n\
-: mag ( Vec2 -- i64 ) | v | &v &x @ &v &y @ + ;\n\
+: mag ( i64 -- i64 ) 10 mul ;\n\
+: mag ( Vec2 -- i64 ) | v | &v &x @ &v &y @ add ;\n\
 : main ( -- ) 7 mag . 3 4 Vec2 mag . ;\n";
     let (stdout, code) = run_overload_src("user-name-symbols", src);
     assert_eq!(stdout, "70\n7\n");
@@ -3821,15 +3836,15 @@ fn a_call_matching_no_overload_names_the_candidates() {
 #[test]
 fn overload_vec2_plus_dispatches_to_user_word() {
     // `Module::builtin_overloads` records this call site's resolution to the
-    // user `+` overload, but before the fix `lower_call`'s name-directed
+    // user `add` overload, but before the fix `lower_call`'s name-directed
     // `"+" | "-" | ...` arm never consulted it, so it always emitted
     // `Instr::Bin(Add)` on the two `Vec2` struct pointers (an address add),
     // producing a garbage pointer that segfaulted on the following field
     // reads. `lower_call` must check `builtin_overloads` first and emit an
     // `Instr::Call` to the user word instead.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
-: main ( -- ) 1 2 Vec2 3 4 Vec2 + &x @ . &y @ . drop ;\n";
+: add ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add Vec2 ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 add &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("plus", src);
     assert_eq!(stdout, "4\n6\n");
     assert_eq!(code, 0);
@@ -3837,12 +3852,12 @@ fn overload_vec2_plus_dispatches_to_user_word() {
 
 #[test]
 fn overload_vec2_minus_dispatches_to_user_word() {
-    // Same bug, `-`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
+    // Same bug, `sub`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
     // subtracts addresses rather than fields, yielding a bogus pointer whose
     // field reads then segfault.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: - ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ - &a &y @ &b &y @ - Vec2 ;\n\
-: main ( -- ) 5 6 Vec2 1 2 Vec2 - &x @ . &y @ . drop ;\n";
+: sub ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ sub &a &y @ &b &y @ sub Vec2 ;\n\
+: main ( -- ) 5 6 Vec2 1 2 Vec2 sub &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("minus", src);
     assert_eq!(stdout, "4\n4\n");
     assert_eq!(code, 0);
@@ -3850,15 +3865,15 @@ fn overload_vec2_minus_dispatches_to_user_word() {
 
 #[test]
 fn overload_vec2_lt_dispatches_to_user_word() {
-    // Same bug, `<`: unfixed, `Instr::Cmp(Lt)` compares the two struct
+    // Same bug, `lt`: unfixed, `Instr::Cmp(Lt)` compares the two struct
     // pointers' addresses rather than dispatching to the user overload, so
     // the printed boolean tracks allocation order, not the operands' values.
     // Negative coordinates whose semantic sum is negative (so the correct
     // answer is `false`) still allocate `a` before `b` (a lower address), so
     // the old pointer-compare silently printed `true` here.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + + 0 > ;\n\
-: main ( -- ) -3 -4 Vec2 -1 -2 Vec2 < . ;\n";
+: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add add 0 gt ;\n\
+: main ( -- ) -3 -4 Vec2 -1 -2 Vec2 lt . ;\n";
     let (stdout, code) = run_overload_src("lt", src);
     assert_eq!(stdout, "false\n");
     assert_eq!(code, 0);
@@ -3866,16 +3881,16 @@ fn overload_vec2_lt_dispatches_to_user_word() {
 
 #[test]
 fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
-    // The tail term `<` shares the enclosing word's name but resolves to the
-    // *builtin* `<` on two `i64` fields, not to a recursive call. Before the
+    // The tail term `lt` shares the enclosing word's name but resolves to the
+    // *builtin* `lt` on two `i64` fields, not to a recursive call. Before the
     // fix `has_self_tail_call` matched on the bare name, so the word was
     // treated as self-tail-recursive: lowering opened loop machinery, the
     // back-edge pushed the two `i64`s as phi operands for a header expecting
     // two `Vec2`s, and the compiler panicked on the missing header block
     // (`expect("header block")`) rather than emitting a comparison.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: < ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ < ;\n\
-: main ( -- ) 1 2 Vec2 3 4 Vec2 < . ;\n";
+: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 lt . ;\n";
     let (stdout, code) = run_overload_src("lt-tail-self-name", src);
     assert_eq!(stdout, "true\n");
     assert_eq!(code, 0);
@@ -3897,15 +3912,15 @@ fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
 #[test]
 fn overload_from_poly_body_dispatches_to_user_word() {
     // Slice 8a fix 2: a genuinely polymorphic word (`pair-sum`, generic in
-    // `'T` for an unrelated passthrough slot) whose body calls `+` on two
+    // `'T` for an unrelated passthrough slot) whose body calls `add` on two
     // *concretely*-typed `Vec2` operands from its own signature. Before the
-    // fix, `poly_call_term`'s env-based dispatch intercepted `+` by name
+    // fix, `poly_call_term`'s env-based dispatch intercepted `add` by name
     // alone and never recorded the call site, so lowering fell through to
     // the builtin `Instr::Bin(Add)` arm on the two struct pointers and
     // segfaulted, identically to the monomorphic bug fix 1 addresses.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: + ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ + &a &y @ &b &y @ + Vec2 ;\n\
-: pair-sum ( 'T Vec2 Vec2 -- 'T Vec2 ) + ;\n\
+: add ( Vec2 Vec2 -- Vec2 ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add Vec2 ;\n\
+: pair-sum ( 'T Vec2 Vec2 -- 'T Vec2 ) add ;\n\
 : main ( -- ) 42 1 2 Vec2 3 4 Vec2 pair-sum swap drop &x @ . &y @ . drop ;\n";
     let (stdout, code) = run_overload_src("poly-plus", src);
     assert_eq!(stdout, "4\n6\n");
@@ -3916,18 +3931,18 @@ fn overload_from_poly_body_dispatches_to_user_word() {
 fn overload_exact_type_beats_numeric_coercion_at_the_call_site() {
     // R2: the resolver runs an exact-input-type pass across every candidate
     // (builtin rows and user overloads) before numeric coercion ever runs.
-    // `+ ( usize i64 -- usize )` is a legal overload (its mixed input types
-    // match no homogeneous builtin row, R1), and `5 >usize 3 +` presents
+    // `add ( usize i64 -- usize )` is a legal overload (its mixed input types
+    // match no homogeneous builtin row, R1), and `5 >usize 3 add` presents
     // exactly those operand types (a `usize` and an unconverted `i64`
     // literal) -- without this overload, that same call site would coerce
-    // the literal into the builtin homogeneous `usize +` (`unify_pair`'s
+    // the literal into the builtin homogeneous `usize add` (`unify_pair`'s
     // literal-coercion arm) and print `8`. The overload must win instead:
     // if a later addition ever let coercion run first, or ran it whenever an
     // exact candidate merely *exists* without checking the operands first,
     // this site would silently start printing `8` instead of the
     // overload's sentinel.
-    let src = ": + ( usize i64 -- usize ) drop drop 999 ;\n\
-: main ( -- ) 5 >usize 3 + . ;\n";
+    let src = ": add ( usize i64 -- usize ) drop drop 999 ;\n\
+: main ( -- ) 5 >usize 3 add . ;\n";
     let (stdout, code) = run_overload_src("exact-beats-coercion", src);
     assert_eq!(stdout, "999\n");
     assert_eq!(code, 0);

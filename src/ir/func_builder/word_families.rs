@@ -1331,17 +1331,17 @@ mod tests {
     /// what keeps `u &stats &hp` from stranding an intermediate reference on
     /// the stack at every level.
     ///
-    /// The `+` beneath the chain is what makes the emitted code witness the
+    /// The `add` beneath the chain is what makes the emitted code witness the
     /// pop: the chain's own `PtrOffset`s look identical either way (a
     /// non-consuming lowering would orphan the intermediates rather than
     /// re-base anything), but a stranded reference shifts everything under it,
-    /// so `+` would add the fetched field to `&stats` instead of to the `5`.
+    /// so `add` would add the fetched field to `&stats` instead of to the `5`.
     #[test]
     fn ref_receiver_projection_consumes_receiver() {
         let ir = lower_src(
             "type: Stats hp i64 mp i64 ;\n\
              type: Unit tag i64 stats Stats ;\n\
-             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ + . u drop ;",
+             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ add . u drop ;",
         );
         let w = &ir.funcs[0];
         let five = instrs(w)

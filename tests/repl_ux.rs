@@ -38,7 +38,7 @@ fn run_session(lines: &[&str]) -> String {
 /// joined, successful definition.
 #[test]
 fn piped_multiline_def_keeps_per_line_errors() {
-    let out = run_session(&[": sq ( i64 -- i64 )", "dup * ;"]);
+    let out = run_session(&[": sq ( i64 -- i64 )", "dup mul ;"]);
     let error_lines: Vec<&str> = out.lines().filter(|l| l.contains("parse error")).collect();
     assert_eq!(
         error_lines.len(),
@@ -63,7 +63,7 @@ fn repl_help_lists_meta_commands() {
 /// #23: `:words` lists defined words with their declared signatures.
 #[test]
 fn repl_words_lists_words_with_signatures() {
-    let out = run_session(&[": sq ( i64 -- i64 ) dup * ;", ":words"]);
+    let out = run_session(&[": sq ( i64 -- i64 ) dup mul ;", ":words"]);
     assert!(
         out.contains("sq ( i64 -- i64 )"),
         "`:words` should list `sq` with its signature, got: {out}"
@@ -75,8 +75,8 @@ fn repl_words_lists_words_with_signatures() {
 #[test]
 fn repl_words_shows_redefined_word_at_new_generation() {
     let out = run_session(&[
-        ": sq ( i64 -- i64 ) dup * ;",
-        ": sq ( i64 i64 -- i64 ) * ;",
+        ": sq ( i64 -- i64 ) dup mul ;",
+        ": sq ( i64 i64 -- i64 ) mul ;",
         ":words",
     ]);
     let sq_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("sq ")).collect();
@@ -94,7 +94,7 @@ fn repl_words_shows_user_facing_name_for_imported_word() {
     let dir = std::env::temp_dir().join(format!("sooth-replux-import-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let lib = dir.join("m.sth");
-    std::fs::write(&lib, ": inc ( i64 -- i64 ) 1 + ;\nexport: inc ;\n").unwrap();
+    std::fs::write(&lib, ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n").unwrap();
 
     let out = run_session(&[&format!("import: m \"{}\" ;", lib.display()), ":words"]);
 
@@ -123,7 +123,7 @@ fn repl_words_lists_polymorphic_word() {
 /// #24: `:type` prints the resulting stack effect and executes nothing.
 #[test]
 fn repl_type_prints_effect_without_executing() {
-    let out = run_session(&[":type 1 2 +", ":stack"]);
+    let out = run_session(&[":type 1 2 add", ":stack"]);
     assert!(
         out.contains("( -- i64 )"),
         "`:type` should print the checked effect, got: {out}"
@@ -137,7 +137,7 @@ fn repl_type_prints_effect_without_executing() {
 /// #26: `:stack` prints the residual stack without pushing or consuming.
 #[test]
 fn repl_stack_prints_without_mutating() {
-    let out = run_session(&["1 2", ":stack", "+"]);
+    let out = run_session(&["1 2", ":stack", "add"]);
     let stack_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("stack:")).collect();
     assert_eq!(
         stack_lines.len(),
@@ -167,7 +167,7 @@ fn repl_clear_disposes_then_resets() {
         "7 Res",
         ":clear",
         ":stack",
-        ": sq ( i64 -- i64 ) dup * ;",
+        ": sq ( i64 -- i64 ) dup mul ;",
         "3 sq",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -196,7 +196,7 @@ fn repl_clear_disposes_then_resets() {
 fn repl_missing_inline_on_tilde_parameter_is_error() {
     let out = run_session(&[
         ": twice ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;",
-        "5 [ 1 + ] twice",
+        "5 [ 1 add ] twice",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -227,8 +227,8 @@ fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
     let out = run_session(&[
         ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
         "type: Bx v i64 ;",
-        ": drop ( Bx -- ) Bx> [ 1 + ] twice . ;",
-        ": helper ( i64 -- i64 ) 1 + ;",
+        ": drop ( Bx -- ) Bx> [ 1 add ] twice . ;",
+        ": helper ( i64 -- i64 ) 1 add ;",
         "1 Bx drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();

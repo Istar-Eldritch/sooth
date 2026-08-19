@@ -792,7 +792,7 @@ pub(super) fn poly_call_term(
     }
     // Comparisons: on a bare variable they need `Ord` (X8); on two concrete
     // operands they delegate to the ordinary operator check below.
-    if matches!(name, "=" | "<" | ">" | "<=" | ">=" | "<>") {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
         let n = stack.len();
         if n >= 2 {
             let a = stack[n - 2].pt.clone();
@@ -821,7 +821,7 @@ pub(super) fn poly_call_term(
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
     // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
-    // of an operator, e.g. `+`) does not intercept here on a *mismatch* --
+    // of an operator, e.g. `add`) does not intercept here on a *mismatch* --
     // unlike an ordinary word, a builtin name also has `BUILTIN_TABLE` to
     // fall back to, so a mismatched candidate defers to `poly_delegate_op`
     // below instead of erroring outright. An exact match still wins here
@@ -884,7 +884,7 @@ pub(super) fn poly_call_term(
     //
     // The window is the *whole* operand run, not the top slot: a binary
     // operator reads `stack[n - 2]` too, so a marker parked there is an
-    // operand of it just as much (`1 ~[ .. ] swap +`). This is the concrete
+    // operand of it just as much (`1 ~[ .. ] swap add`). This is the concrete
     // path's own rule -- `check_operator` guards the top and, for a
     // non-unary name, the slot beneath it. Arity comes from `BUILTIN_TABLE`,
     // whose rows for one name all agree on it; a name with no row (an
@@ -1922,8 +1922,8 @@ pub(super) fn poly_delegate_op(
         })
         .collect();
     // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
-    // calling module exactly like the concrete path; `None` (REPL /
-    // single-module) falls back to the flat `env.get(name)`.
+    // calling module exactly like the concrete path; `None` (the REPL, which
+    // runs no mangling pass) falls back to the flat `env.get(name)`.
     let scoped_ops = scoped_operator_overloads(ctx, env, name);
     let op_candidates = match &scoped_ops {
         Some(v) => Some(&v[..]),
@@ -2129,8 +2129,8 @@ pub(super) fn poly_sig_could_match(
         }
         // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
         // (`is_ord` is `is_numeric` and nothing else), and the bound is what
-        // keeps `lib/core.sth`'s `: < ( 'T: Copy Ord 'T -- bool )` from
-        // claiming a call site meant for a user's `: < ( Vec2 Vec2 -- bool )`.
+        // keeps `lib/core.sth`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
         // library word swallows every operand type.
         if let PolyType::Var(v) = &sig.inputs[i] {
@@ -3510,7 +3510,7 @@ mod tests {
         // before `unify_poly_input` is what makes the R9 rejection reachable.
         let err = check_src(
             ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
-             : main ( -- ) [ + ] dupit drop drop ;\n",
+             : main ( -- ) [ add ] dupit drop drop ;\n",
         )
         .expect_err("a quotation passed to a polymorphic word should be rejected");
         assert!(
@@ -3640,8 +3640,8 @@ mod tests {
             check_src(&format!(
                 "{SHAPE}\
                  : pick ( 'T Shape -- 'T )\n\
-                   ~[ ( Rect )   Rect> * drop ]\n\
-                   ~[ ( Circle ) Circle> dup * 3 * drop ]\n\
+                   ~[ ( Rect )   Rect> mul drop ]\n\
+                   ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
                    Shape? ;\n\
                  : main ( -- ) 1 5 Circle pick . ;\n"
             ))
@@ -3819,7 +3819,7 @@ mod tests {
     fn check_poly_ord_word_accepts_comparison_body() {
         // R7: a `'T: Ord` variable may be compared; the body and a numeric
         // instantiation both check.
-        check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+        check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) 3 4 less drop ;").unwrap();
     }
     #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
@@ -3870,7 +3870,7 @@ mod tests {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
         let err =
-            check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) true false less drop ;")
+            check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) true false less drop ;")
                 .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
@@ -3885,8 +3885,8 @@ mod tests {
     }
     #[test]
     fn check_x8_compare_of_unbounded_variable_requires_ord() {
-        // X8: `>` on an unbounded `'T` inside a body requires an `Ord` bound.
-        let err = check_src(": bad ( 'T 'T -- bool ) > ;\n: main ( -- ) ;").unwrap_err();
+        // X8: `gt` on an unbounded `'T` inside a body requires an `Ord` bound.
+        let err = check_src(": bad ( 'T 'T -- bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -4560,7 +4560,7 @@ mod tests {
         // is false at the representation the backend emits even though the
         // type system still refuses the borrow.
         let err = check_src(
-            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 + ] ap . ;\n",
+            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 add ] ap . ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -4871,7 +4871,7 @@ mod tests {
     fn poly_body_can_borrow_a_module_static() {
         check_src(
             "static: COUNT i64 = 0 ;\n\
-             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 + &!COUNT swap ! v ;\n\
+             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 add &!COUNT swap ! v ;\n\
              : main ( -- ) 5 bump drop ;",
         )
         .unwrap();

@@ -231,7 +231,7 @@ impl<'a> FuncBuilder<'a> {
         // Slice 8a phase 4 (R7): a call site the checker resolved to a user
         // overload of a builtin-named word must dispatch to that word, not
         // the name-directed builtin arms below (a literal name match like
-        // "+" would otherwise always win) nor the self-tail/back-edge checks
+        // "add" would otherwise always win) nor the self-tail/back-edge checks
         // further down (a word named `.` overloading print must not be
         // miscategorized as a self-tail call on `.`). Same env-lookup +
         // resolve + bundle-unpack shape as the ordinary user-word path in the
@@ -405,12 +405,12 @@ impl<'a> FuncBuilder<'a> {
                 self.stack[n - 2] = self.stack[n - 1];
                 self.stack[n - 1] = a;
             }
-            "+" | "-" | "*" | "/" | "mod" | "and" | "or" | "xor" | "shl" | "shr" => {
+            "add" | "sub" | "mul" | "div" | "mod" | "and" | "or" | "xor" | "shl" | "shr" => {
                 let op = match name {
-                    "+" => BinOp::Add,
-                    "-" => BinOp::Sub,
-                    "*" => BinOp::Mul,
-                    "/" => BinOp::Div,
+                    "add" => BinOp::Add,
+                    "sub" => BinOp::Sub,
+                    "mul" => BinOp::Mul,
+                    "div" => BinOp::Div,
                     "mod" => BinOp::Rem,
                     "and" => BinOp::And,
                     "or" => BinOp::Or,
@@ -457,10 +457,10 @@ impl<'a> FuncBuilder<'a> {
             }
             // Slice 10c (R-P3-3): the comparison primitives. Same
             // `Instr::Cmp`, same operands, same operand-type-driven signed /
-            // unsigned / float dispatch at the backend as the `=`/`<`/... rows
+            // unsigned / float dispatch at the backend as the `eq`/`lt`/... rows
             // they replace; only the result's `IrType` changed, from the
             // 32-bit `Bool` to the 32-bit `u32` flag `branch` consumes, which
-            // is the same `w` register. `=`/`<`/... are `lib/` words that wrap
+            // is the same `w` register. `eq`/`lt`/... are `lib/` words that wrap
             // these and construct a `bool`.
             _ if crate::check::COMPARISON_PRIMITIVES
                 .iter()
@@ -495,7 +495,7 @@ impl<'a> FuncBuilder<'a> {
             // `total_cmp` bit-pattern rule (map each operand's IEEE bits to a
             // monotone unsigned key — flip every bit if the sign bit is set,
             // else flip only the sign bit — then integer-compare the keys),
-            // so no float `>` is ever emitted.
+            // so no float `gt` is ever emitted.
             "max-total" => {
                 let rhs = self.stack.pop().expect("max-total: rhs");
                 let lhs = self.stack.pop().expect("max-total: lhs");
@@ -799,7 +799,7 @@ mod tests {
                 statics: empty_statics(),
             },
         );
-        let term = &line_terms("[ + ]")[0];
+        let term = &line_terms("[ add ]")[0];
         assert!(matches!(term.kind, TermKind::Quotation(_, _, _)));
         b.lower_term(term, false);
         assert!(
@@ -818,10 +818,10 @@ mod tests {
 
     #[test]
     fn call_of_literal_emits_no_call_instr() {
-        // Criterion 6b (R13): `[ + ] call` fuses in place, so lowered `main`
+        // Criterion 6b (R13): `[ add ] call` fuses in place, so lowered `main`
         // contains no `Instr::Call`; the phantom quotation never becomes a
         // runtime code value.
-        let module = lower_src(": main ( -- ) 1 2 [ + ] call . ;");
+        let module = lower_src(": main ( -- ) 1 2 [ add ] call . ;");
         let main = func(&module, "main");
         assert_eq!(count(main, is_call_instr), 0);
         assert_eq!(
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn lower_square_has_one_mul() {
-        let ir = lower_src(": sq ( i64 -- i64 ) | n | n n * ;");
+        let ir = lower_src(": sq ( i64 -- i64 ) | n | n n mul ;");
         let sq = &ir.funcs[0];
         let mul_count = instrs(sq)
             .iter()
@@ -930,8 +930,8 @@ mod tests {
 
     #[test]
     fn lower_dup_reuses_value_id() {
-        // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
-        let ir = lower_src(": w ( i64 -- i64 ) dup + ;");
+        // `dup add` squares: both operands must be the same SSA value, dup emits nothing.
+        let ir = lower_src(": w ( i64 -- i64 ) dup add ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         assert!(is.iter().all(|i| !matches!(i, Instr::Const(..))));
@@ -950,8 +950,8 @@ mod tests {
         // R10: a binding is a compile-time rebinding of SSA values, so binding
         // the operands and mentioning them lowers to the same instructions as
         // leaving them on the stack. No `Instr` variant was added.
-        let bound = lower_src(": w ( -- i64 ) 1 2 | a b | a b - ;");
-        let plain = lower_src(": w ( -- i64 ) 1 2 - ;");
+        let bound = lower_src(": w ( -- i64 ) 1 2 | a b | a b sub ;");
+        let plain = lower_src(": w ( -- i64 ) 1 2 sub ;");
         assert_eq!(
             format!("{:?}", instrs(&bound.funcs[0])),
             format!("{:?}", instrs(&plain.funcs[0]))
@@ -960,9 +960,9 @@ mod tests {
 
     #[test]
     fn lower_swap_reorders_without_instr() {
-        // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
-        let swapped = lower_src(": w ( i64 i64 -- i64 ) swap - ;");
-        let plain = lower_src(": w ( i64 i64 -- i64 ) - ;");
+        // `swap sub` computes b - a instead of a - b, and swap itself emits no instr.
+        let swapped = lower_src(": w ( i64 i64 -- i64 ) swap sub ;");
+        let plain = lower_src(": w ( i64 i64 -- i64 ) sub ;");
         let operands = |ir: &IrModule| {
             instrs(&ir.funcs[0])
                 .iter()
@@ -1028,7 +1028,7 @@ mod tests {
         // op over the same operands as the retired `>` builtin row did; only
         // the result type changed, from the 32-bit `Bool` to the 32-bit
         // unsigned flag `branch` consumes.
-        let ir = lower_src(": w ( i64 i64 -- u32 ) u> ;");
+        let ir = lower_src(": w ( i64 i64 -- u32 ) ugt ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
             .iter()
@@ -1119,8 +1119,8 @@ mod tests {
 
     #[test]
     fn lower_float_div_routes_to_div_op() {
-        // `/` lowers to `BinOp::Div` whose result carries the float operand type.
-        let ir = lower_src(": w ( -- f64 ) 1.0 2.0 / ;");
+        // `div` lowers to `BinOp::Div` whose result carries the float operand type.
+        let ir = lower_src(": w ( -- f64 ) 1.0 2.0 div ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
             .iter()
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn lower_le_ge_ne_route_to_matching_cmpop() {
-        let ir = lower_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;");
+        let ir = lower_src(": w ( -- bool bool bool ) 1 2 lte 1 2 gte 1 2 ne ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         for op in [CmpOp::Le, CmpOp::Ge, CmpOp::Ne] {
@@ -1312,7 +1312,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+", Span::default(), false);
+        b.lower_call("add", Span::default(), false);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }
@@ -1349,7 +1349,7 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 gt ~[ 1 sub go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1376,9 +1376,9 @@ mod tests {
         // shape would diverge from the one below instead of both trivially
         // satisfying the same hard-coded numbers.
         let with_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ | x | 1 - x go ] ~[ drop ] if ;");
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 gt ~[ | x | 1 sub x go ] ~[ drop ] if ;");
         let without_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 gt ~[ 1 sub go ] ~[ drop ] if ;");
         let f1 = &with_binding.funcs[0];
         let f2 = &without_binding.funcs[0];
         let header1 = loop_header(f1);
@@ -1394,9 +1394,10 @@ mod tests {
 
     #[test]
     fn non_tail_self_call_stays_a_call() {
-        // R10: a self-call followed by more work (`fact *`) is not in tail
+        // R10: a self-call followed by more work (`fact mul`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = ~[ drop 1 ] ~[ dup 1 - fact * ] if ;");
+        let ir =
+            lower_src(": fact ( i64 -- i64 ) dup 0 eq ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;");
         let f = &ir.funcs[0];
         assert_eq!(
             count(f, is_call_instr),
@@ -1414,7 +1415,7 @@ mod tests {
         // R10 over-eager boundary: the `if` is followed by more terms
         // (`drop 5`), so it is non-terminal and its arms are not in tail
         // position; the self-call stays a real `Instr::Call`.
-        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > ~[ w ] ~[ drop 0 ] if drop 5 ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 gt ~[ w ] ~[ drop 0 ] if drop 5 ;");
         let f = &ir.funcs[0];
         assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
@@ -1425,7 +1426,7 @@ mod tests {
         // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
         // arm of a terminal `if` back-edges, so the single header phi gains two
         // back-edge arms on top of the entry arm (three total).
-        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ 1 + go ] if ;");
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 gt ~[ 1 sub go ] ~[ 1 add go ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1444,7 +1445,7 @@ mod tests {
         let ir = lower_src(
             "type: Flag | Go | Stop ; \
              : loop2 ( i64 Flag -- i64 ) \
-             ~[ ( Go ) drop 1 - Go loop2 ] ~[ ( Stop ) drop 1 + Stop loop2 ] Flag? ;",
+             ~[ ( Go ) drop 1 sub Go loop2 ] ~[ ( Stop ) drop 1 add Stop loop2 ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
         let header = loop_header(f);
@@ -1468,7 +1469,7 @@ mod tests {
         let ir = lower_src(
             "type: Flag | Go | Stop ; \
              : run ( i64 Flag -- i64 ) \
-             ~[ ( Go ) drop 1 - Stop run ] ~[ ( Stop ) drop ] Flag? ;",
+             ~[ ( Go ) drop 1 sub Stop run ] ~[ ( Stop ) drop ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         let header = loop_header(f);
@@ -1522,7 +1523,7 @@ mod tests {
         let ir = lower_src(
             "type: Flag | Go | Stop n i64 ; \
              : run ( i64 Flag -- i64 ) \
-             ~[ ( Go ) drop 1 - dup Stop run ] ~[ ( Stop ) Stop> drop ] Flag? ;",
+             ~[ ( Go ) drop 1 sub dup Stop run ] ~[ ( Stop ) Stop> drop ] Flag? ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         let header = loop_header(f);
@@ -1548,13 +1549,13 @@ mod tests {
     fn quotation_taking_word_emits_no_call_and_no_irfunc() {
         // Criterion 3b/R20: a monomorphic quotation-taking word is inlined, so
         // it mints no `IrFunc` and its caller emits no `Instr::Call`. The
-        // lowered `main` is just `1 +` (the spliced literal over `3`), a pure
+        // lowered `main` is just `1 add` (the spliced literal over `3`), a pure
         // arithmetic body. Deleting the `combinator_indices` filter would put
         // an `apply` func back, and deleting the `lower_call` inline branch
         // would leave an `Instr::Call apply` in `main`.
         let ir = lower_src(
             ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-             : main ( -- ) 3 [ 1 + ] apply . ;\n",
+             : main ( -- ) 3 [ 1 add ] apply . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "apply"),
@@ -1590,7 +1591,7 @@ mod tests {
         let ir = lower_src(
             ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
              : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
-             : main ( -- ) 7 [ 1 + . ] outer ;\n",
+             : main ( -- ) 7 [ 1 add . ] outer ;\n",
         );
         assert!(
             ir.funcs
@@ -1616,7 +1617,7 @@ mod tests {
     // other pins it against `lib/combinators.sth`.
     const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | to | | from |\n\
-         from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+         from to lt ~[ from f call from 1 add to f times-helper ] ~[ ] if ;\n\
          : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | n | 0 n f times-helper ;\n";
 
@@ -1656,7 +1657,7 @@ mod tests {
         );
         assert!(
             matches!(hblock.term, Terminator::Jnz(..)),
-            "the header is sealed with a Jnz (index < count), got {:?}",
+            "the header is sealed with a Jnz (index lt count), got {:?}",
             hblock.term
         );
         let entry_id = main.blocks[0].id;
@@ -1716,7 +1717,7 @@ mod tests {
         // unit needs no import closure.
         let ir = lower_src(
             ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n",
+             : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

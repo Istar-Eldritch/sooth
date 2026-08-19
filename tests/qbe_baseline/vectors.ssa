@@ -14,7 +14,7 @@ data $strfmt = { b "%.*s", b 0 }
 type :Vec2 = { l, l }
 type :Segment = { :Vec2, :Vec2 }
 
-export function :Vec2 $sub__m0(:Vec2 %v0, :Vec2 %v1) {
+export function :Vec2 $vec2.2d.sub__m0(:Vec2 %v0, :Vec2 %v1) {
 @start
 	%v2 =l add %v0, 0
 	%v3 =l add %v2, 0
@@ -62,7 +62,7 @@ export function :Vec2 $span__m0(:Segment %v0) {
 @start
 	%v1 =l add %v0, 0
 	%v2 =l add %v0, 16
-	%v3 =:Vec2 call $sub__m0(:Vec2 %v2, :Vec2 %v1)
+	%v3 =:Vec2 call $vec2.2d.sub__m0(:Vec2 %v2, :Vec2 %v1)
 	ret %v3
 }
 

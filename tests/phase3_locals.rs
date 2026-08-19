@@ -81,7 +81,7 @@ fn mid_body_binding_consumes_from_the_stack() {
     // beneath them on the stack for the term after the binding's users.
     let (stdout, code) = run_src(
         "mid-body-binding-consumes",
-        ": main ( -- )\n  1 2 3\n  | a b |\n  a b + .\n  . ;\n",
+        ": main ( -- )\n  1 2 3\n  | a b |\n  a b add .\n  . ;\n",
     );
     assert_eq!(stdout, "5\n1\n");
     assert_eq!(code, 0);
@@ -114,7 +114,7 @@ fn name_bound_in_one_arm_can_be_rebound_in_sibling_arm() {
     // happens (each arm's locals truncate at its exit).
     let (stdout, code) = run_src(
         "sibling-arm-rebind",
-        ": pick ( bool -- i64 )\n  ~[ 1 | v | v 10 * ] ~[ 2 | v | v 100 * ] if ;\n\n\
+        ": pick ( bool -- i64 )\n  ~[ 1 | v | v 10 mul ] ~[ 2 | v | v 100 mul ] if ;\n\n\
 : main ( -- )\n  true pick .\n  false pick . ;\n",
     );
     assert_eq!(stdout, "10\n200\n");
@@ -134,7 +134,7 @@ fn rebinding_a_name_in_scope_is_error() {
 #[test]
 fn binding_more_values_than_frame_holds_is_error() {
     // Criterion 6: the existing needs-N-holds-M shape, naming the binding.
-    let err = check_error(": w ( i64 -- i64 )\n  5 | a b c |\n  a b c + + ;\n");
+    let err = check_error(": w ( i64 -- i64 )\n  5 | a b c |\n  a b c add add ;\n");
     assert!(
         err.contains("`| a b c |` needs 3 values, but the stack holds 2"),
         "unexpected message: {err}"
@@ -147,7 +147,7 @@ fn binding_cannot_reach_beneath_declared_inputs() {
     // Criterion 7: `inner`'s frame is its one declared input, so its binding
     // cannot reach beneath it, regardless of what a caller might have left on
     // the stack (checking is per-word, so no caller is needed to prove this).
-    let err = check_error(": inner ( i64 -- i64 )\n  1 drop | a b |\n  a b + ;\n");
+    let err = check_error(": inner ( i64 -- i64 )\n  1 drop | a b |\n  a b add ;\n");
     assert!(
         err.contains("`| a b |` needs 2 values, but the stack holds 1"),
         "unexpected message: {err}"
@@ -253,7 +253,7 @@ fn mid_body_binding_in_eliminator_arm_binds() {
     let (stdout, code) = run_src(
         "mid-body-binding-in-eliminator-arm",
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
-: area ( Shape -- f64 )\n  ~[ ( Circle )\n  Circle>\n  dup\n  | r |\n  r * ]\n  ~[ ( Rect )\n  Rect>\n  | w h |\n  w h * ]\n  Shape? ;\n\n\
+: area ( Shape -- f64 )\n  ~[ ( Circle )\n  Circle>\n  dup\n  | r |\n  r mul ]\n  ~[ ( Rect )\n  Rect>\n  | w h |\n  w h mul ]\n  Shape? ;\n\n\
 : main ( -- )\n  2.0 Circle area .\n  3.0 4.0 Rect area . ;\n",
     );
     assert_eq!(stdout, "4\n12\n");
@@ -263,7 +263,7 @@ fn mid_body_binding_in_eliminator_arm_binds() {
 #[test]
 fn repl_line_binds_a_local() {
     // Criterion 17: a REPL line binds a local and uses it within the line.
-    let out = run_session(&["5 | a | a a * ."]);
+    let out = run_session(&["5 | a | a a mul ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["25", "stack: (empty)"]);
 }
@@ -272,7 +272,7 @@ fn repl_line_binds_a_local() {
 fn repl_line_binding_reaches_earlier_line_values() {
     // Criterion 18 (R7/D6): the frame floor at a REPL line is the session
     // stack depth, so a binding may consume values an earlier line left.
-    let out = run_session(&["1 2 3", "| a b | a b + ."]);
+    let out = run_session(&["1 2 3", "| a b | a b add ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["stack: 1 2 3", "5", "stack: 1"]);
 }
@@ -297,7 +297,7 @@ fn repl_line_binding_more_than_the_session_stack_holds_is_error() {
 fn failed_repl_line_after_binding_leaves_stack_intact() {
     // Criterion 19: existing REPL transactionality (a failing line never
     // commits) still holds once the line binds a name before failing.
-    let out = run_session(&["1 2 3", "| a b | a b + unknown-word", "1 2 3"]);
+    let out = run_session(&["1 2 3", "| a b | a b add unknown-word", "1 2 3"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3, "unexpected output:\n{out}");
     assert_eq!(lines[0], "stack: 1 2 3");
@@ -339,10 +339,10 @@ fn mid_body_binding_in_self_tail_recursive_word_loops_correctly() {
     let (stdout, code) = run_src(
         "mid-body-binding-self-tail",
         ": sum-to ( i64 i64 -- i64 )\n\
-  dup 0 > ~[\n\
+  dup 0 gt ~[\n\
     | acc n |\n\
-    acc n +\n\
-    n 1 -\n\
+    acc n add\n\
+    n 1 sub\n\
     sum-to\n\
   ] ~[\n\
     drop\n\

@@ -2,8 +2,9 @@
 //! build used to emit unmangled symbols, so a user word whose bare name equalled
 //! a libc symbol (or a runtime shim's callee) silently hijacked it at link time.
 //! Native builds now mangle even a one-file closure (`resolve::resolve_modules`
-//! forced on via `driver::assemble_module`'s `always_mangle`), so `main` and
-//! `drop` aside, every user word is `name__m0` and can no longer collide.
+//! forced on via `driver::assemble_module`'s `always_mangle`), so `main`,
+//! `drop` and the `lib/core.sth` prelude words aside, every user word is
+//! `name__m0` and can no longer collide.
 //!
 //! Each test asserts exact stdout and exit code, not merely "does not crash":
 //! before the fix each program produced observably different output (mode 1
@@ -102,4 +103,60 @@ fn single_file_word_named_free_does_not_hijack_heap_shim() {
         "only the explicit `42 free` prints; the heap shim reaches libc free"
     );
     assert_eq!(code, Some(0));
+}
+
+/// Mode 3: a user word overloading a builtin *operator* name that libc also
+/// defines. `div` is the only one of the operators-as-words spellings that is a
+/// libc function, and an operator decl used to be exempt from mangling in a
+/// one-file build so `check_operator`'s bare-name candidate scan could find it.
+/// The exemption handed the word the bare `div` symbol: a strong definition in
+/// the executable, which interposes libc's `div` for every shared library
+/// linked in (observably, a library's `div(17, 5)` returned garbage).
+///
+/// Asserted on the symbol table rather than through a C caller, since nothing
+/// in a Sooth program calls libc `div`. The exact-stdout half keeps the fix
+/// honest in the other direction: mangling the decl must not cost the
+/// operand-type dispatch, so the `V` pair still reaches the overload and the
+/// `f64` pair still reaches the builtin.
+#[test]
+fn single_file_operator_overload_named_div_does_not_own_the_libc_symbol() {
+    let prog = Scratch::write(
+        "div-collision",
+        "type: V x f64 ;\n\
+         : div ( V V -- V ) drop ;\n\
+         : main ( -- ) 6.0 V 2.0 V div &x @ swap drop . 9.0 3.0 div . ;\n",
+    );
+    let binary = driver::build(prog.path()).expect("program should build");
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    let nm = std::process::Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_file(&binary).ok();
+
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "6\n3\n",
+        "the `V` pair dispatched to the overload (6), the `f64` pair to the builtin (3)"
+    );
+    assert_eq!(output.status.code(), Some(0));
+
+    let symbols = String::from_utf8_lossy(&nm.stdout);
+    // The name field only: `div__m0` contains `div`, so a substring test would
+    // pass on the broken output too.
+    let names: Vec<&str> = symbols
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .collect();
+    assert!(
+        !names.contains(&"div"),
+        "the user word must not define libc `div`; nm found:\n{symbols}"
+    );
+    assert!(
+        names.contains(&"div__m0"),
+        "sanity: the overload is in this binary under its mangled name, so the \
+         assertion above is not vacuous; nm found:\n{symbols}"
+    );
 }

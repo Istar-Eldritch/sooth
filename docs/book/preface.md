@@ -38,7 +38,7 @@ Code blocks show Sooth source on their own, or REPL sessions with the
 `stack:` prompt line that the REPL prints after each evaluation:
 
 ```text
-> 1 2 + .
+> 1 2 add .
 3
 stack: (empty)
 ```

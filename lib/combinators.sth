@@ -29,9 +29,9 @@ export: each map fold filter while times times-helper ;
 \ exported words, and every caller of `times` splices its body.
 : times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
-  from to < ~[
+  from to lt ~[
     from f call
-    from 1 + to f times-helper
+    from 1 add to f times-helper
   ] ~[ ] if ;
 
 : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
@@ -63,7 +63,7 @@ export: each map fold filter while times times-helper ;
 : filter inline ( ['T: Copy 'N] ~[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
-          | v | &!arr over >usize &!> v ! 1 +
+          | v | &!arr over >usize &!> v ! 1 add
         ] ~[ drop ] if ] times
   | wf | arr wf >usize ;
 

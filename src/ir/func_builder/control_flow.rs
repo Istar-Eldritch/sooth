@@ -329,7 +329,7 @@ mod tests {
     /// whole.
     #[test]
     fn lower_branch_on_a_raw_flag_emits_jnz_and_join() {
-        let ir = lower_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;");
+        let ir = lower_src(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;");
         let w = &ir.funcs[0];
         assert!(
             instrs(w).iter().any(|i| matches!(i, Instr::Phi(..))),
@@ -360,7 +360,7 @@ mod tests {
     fn lower_branch_with_both_arms_back_edging_elides_the_join() {
         let ir = lower_src(
             ": spin ( i64 -- i64 )\n  \
-             dup 0 u= [ 1 - spin ] [ 1 - spin ] branch ;",
+             dup 0 ueq [ 1 sub spin ] [ 1 sub spin ] branch ;",
         );
         let w = &ir.funcs[0];
         assert!(
@@ -382,7 +382,7 @@ mod tests {
             "type: Cmd | Halt | Push v i64 | Add | Dbl ;
              : run ( i64 Cmd -- i64 )
                ~[ ( Halt ) drop drop 0 ] ~[ ( Push ) Push> swap drop ]
-               ~[ ( Add ) drop 1 + ] ~[ ( Dbl ) drop 2 * ] Cmd? ;",
+               ~[ ( Add ) drop 1 add ] ~[ ( Dbl ) drop 2 mul ] Cmd? ;",
         );
         let run = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         // Three `Cmp(Eq)` compares for four variants (the last falls through).
@@ -422,7 +422,7 @@ mod tests {
         let ir = lower_src(
             "type: Shape | Circle r i64 | Rect w i64 h i64 ;
              : area ( Shape -- i64 )
-               ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> * ] Shape? ;",
+               ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;",
         );
         let area = ir.funcs.iter().find(|f| f.name == "area").unwrap();
         assert_eq!(
@@ -475,8 +475,8 @@ mod tests {
         let ir = lower_src(
             "type: N | Zero | Succ v i64 ;
              : g ( i64 N -- i64 )
-               ~[ ( Zero ) Zero> ] ~[ ( Succ ) Succ> drop 1 + Zero g ]
-               N? 1 + dup 10 < ~[ Zero g ] ~[ ] if ;",
+               ~[ ( Zero ) Zero> ] ~[ ( Succ ) Succ> drop 1 add Zero g ]
+               N? 1 add dup 10 lt ~[ Zero g ] ~[ ] if ;",
         );
         let g = ir.funcs.iter().find(|f| f.name == "g").unwrap();
         assert!(
@@ -495,7 +495,7 @@ mod tests {
         let ir = lower_src(
             "type: Shape | Circle r i64 | Rect w i64 h i64 ;
              : area ( &Shape -- i64 )
-               ~[ ( &Circle ) &r @ ] ~[ ( &Rect ) dup &w @ swap &h @ * ] Shape? ;",
+               ~[ ( &Circle ) &r @ ] ~[ ( &Rect ) dup &w @ swap &h @ mul ] Shape? ;",
         );
         let area = ir.funcs.iter().find(|f| f.name == "area").unwrap();
         assert_eq!(

@@ -163,7 +163,7 @@ fn diamond_import_dedupes_by_canonical_path() {
     );
     let entry = c.write(
         "main.sth",
-        "import: l \"left.sth\" ;\nimport: r \"right.sth\" ;\n: main ( -- ) l::lf r::rt + . ;\n",
+        "import: l \"left.sth\" ;\nimport: r \"right.sth\" ;\n: main ( -- ) l::lf r::rt add . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "200\n");
@@ -180,7 +180,7 @@ fn prelude_word_called_from_an_imported_module_resolves() {
     let c = Closure::new("prelude-import");
     c.write(
         "parity.sth",
-        ": parity ( i64 -- i64 ) 2 mod 0 = ~[ 10 ] ~[ 20 ] if ;\nexport: parity ;\n",
+        ": parity ( i64 -- i64 ) 2 mod 0 eq ~[ 10 ] ~[ 20 ] if ;\nexport: parity ;\n",
     );
     let entry = c.write(
         "main.sth",
@@ -504,7 +504,7 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) [ 1 + ] lib::with . ;\n",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) [ 1 add ] lib::with . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(
@@ -522,8 +522,8 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
 
 #[test]
 fn own_module_operator_overload_reachable_bare_in_multi_module() {
-    // R13: `main` declares `+` for its own `Vec2`, with `lib` in the closure
-    // forcing the operator decl to mangle to `+__m{k}`. The bare `+` now
+    // R13: `main` declares `add` for its own `Vec2`, with `lib` in the closure
+    // forcing the operator decl to mangle to `add__m{k}`. The bare `add` now
     // resolves to the own overload; before the fix `env.get("+")` missed it and
     // the call fell to the builtin, which rejects the struct operands.
     let c = Closure::new("own-operator-multi");
@@ -533,14 +533,14 @@ fn own_module_operator_overload_reachable_bare_in_multi_module() {
         concat!(
             "import: lib \"lib.sth\" ;\n",
             "type: Vec2 x i64 y i64 ;\n",
-            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 + &x @ . drop ;\n",
+            ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 add &x @ . drop ;\n",
         ),
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(
         stdout, "0\n1\n",
-        "the own `+` overload dispatched, keeping the first operand's x"
+        "the own `add` overload dispatched, keeping the first operand's x"
     );
     assert_eq!(code, 0);
 }
@@ -550,9 +550,9 @@ fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
     // R13: same fix, exercised through `poly_delegate_op` (the poly-body
     // operator path) rather than `check_term`'s concrete path. `probe` is
     // polymorphic (`'T`), so its body is checked by `check_poly_body`; the
-    // `+` call inside it is on a fully-concrete suffix (two `Vec2`s), so it
+    // `add` call inside it is on a fully-concrete suffix (two `Vec2`s), so it
     // still needs the calling module's scoped candidates to find `main`'s
-    // own mangled `+` overload.
+    // own mangled `add` overload.
     let c = Closure::new("own-operator-multi-poly");
     c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
     let entry = c.write(
@@ -560,8 +560,8 @@ fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
         concat!(
             "import: lib \"lib.sth\" ;\n",
             "type: Vec2 x i64 y i64 ;\n",
-            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 + Vec2> drop ;\n",
+            ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 add Vec2> drop ;\n",
             ": main ( -- ) lib::p . 42 probe . . ;\n",
         ),
     );
@@ -574,9 +574,37 @@ fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
 }
 
 #[test]
+fn single_module_operator_overload_from_poly_body_dispatches() {
+    // The single-module half of the poly-body operator path, whose only golden
+    // was the >=2-module one above. R10 routes a one-module closure through
+    // `scoped_operator_overloads` as well, so `poly_delegate_op` now receives a
+    // `Some(candidates)` set where it used to fall back to the flat
+    // `env.get(name)` -- and its `UserOverload` arm looks the chosen symbol back
+    // up in that same set, `expect`-ing a hit. Restoring the `modules.len() < 2`
+    // bail makes the set empty and the overload invisible, failing this test.
+    let c = Closure::new("single-operator-poly");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "type: Vec2 x i64 y i64 ;\n",
+            ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 add Vec2> drop ;\n",
+            ": main ( -- ) 42 probe . . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "1\n42\n",
+        "the own `add` overload dispatched inside the poly body, keeping the \
+         first operand's x, and the passthrough `'T` survived"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn selectively_imported_operator_does_not_hijack_unrelated_module() {
     // R13: `main` imports `x`'s type qualified-only, so it holds `x::XT` values
-    // but never imported `x`'s `+` by name. A bare `+` on two XT operands is the
+    // but never imported `x`'s `add` by name. A bare `add` on two XT operands is the
     // ordinary operand-mismatch error, not a silent dispatch to `x`'s word.
     let c = Closure::new("operator-no-hijack");
     c.write(
@@ -584,7 +612,7 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
         concat!(
             "type: XT v i64 ;\n",
             ": mk ( i64 -- XT ) XT ;\n",
-            ": + ( XT XT -- XT ) drop ;\n",
+            ": add ( XT XT -- XT ) drop ;\n",
             "export: XT mk ;\n",
         ),
     );
@@ -592,13 +620,13 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
         "main.sth",
         concat!(
             "import: x \"x.sth\" ;\n",
-            ": main ( -- ) 1 x::mk 2 x::mk + &v @ swap drop . ;\n",
+            ": main ( -- ) 1 x::mk 2 x::mk add &v @ swap drop . ;\n",
         ),
     );
     let err = build_err(&entry);
     assert!(
-        err.contains("`+` requires two operands of the same numeric type"),
-        "the bare `+` falls to the builtin, not x's overload: {err}"
+        err.contains("`add` requires two operands of the same numeric type"),
+        "the bare `add` falls to the builtin, not x's overload: {err}"
     );
     assert!(
         err.contains("found `XT` and `XT`"),
@@ -608,11 +636,11 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
 
 #[test]
 fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
-    // Regression: `main` selectively imports `v`'s `+` overload for `Vec2`
-    // *and* uses plain `+` on two `i64`s elsewhere. Before the fix, the
-    // selective-import rewrite branch mangled every bare `+` in `main` to
+    // Regression: `main` selectively imports `v`'s `add` overload for `Vec2`
+    // *and* uses plain `add` on two `i64`s elsewhere. Before the fix, the
+    // selective-import rewrite branch mangled every bare `add` in `main` to
     // `v`'s overload unconditionally (no `is_operator_dispatch_name` guard,
-    // unlike the own-module branch), so the plain `i64 +` failed a type
+    // unlike the own-module branch), so the plain `i64 add` failed a type
     // mismatch expecting `Vec2`. Both uses must now resolve correctly: the
     // `Vec2` pair to `v`'s overload, the `i64` pair to the builtin.
     let c = Closure::new("operator-selective-no-self-hijack");
@@ -620,21 +648,21 @@ fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
         "v.sth",
         concat!(
             "type: Vec2 x i64 y i64 ;\n",
-            ": + ( Vec2 Vec2 -- Vec2 )\n",
+            ": add ( Vec2 Vec2 -- Vec2 )\n",
             "  | a b |\n",
-            "  a &x @ swap drop b &x @ swap drop +\n",
-            "  a &y @ swap drop b &y @ swap drop +\n",
+            "  a &x @ swap drop b &x @ swap drop add\n",
+            "  a &y @ swap drop b &y @ swap drop add\n",
             "  Vec2 ;\n",
-            "export: Vec2 + ;\n",
+            "export: Vec2 add ;\n",
         ),
     );
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: v | Vec2 + | \"v.sth\" ;\n",
+            "import: v | Vec2 add | \"v.sth\" ;\n",
             ": main ( -- )\n",
-            "  1 2 Vec2 3 4 Vec2 + &x @ swap drop .\n",
-            "  1 2 + . ;\n",
+            "  1 2 Vec2 3 4 Vec2 add &x @ swap drop .\n",
+            "  1 2 add . ;\n",
         ),
     );
     let (stdout, code) = build_and_run(&entry);
@@ -647,22 +675,23 @@ fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
 
 #[test]
 fn single_module_operator_overload_unchanged() {
-    // R13 (regression / mutation guard): a single-file program overloading `+`
-    // on a struct compiles and runs exactly as before. The decl is left bare in
-    // a single-module build, so the assembly degenerates to the flat
-    // `env.get("+")` via the `modules.len() < 2` fallback -- deleting that
-    // branch would seek `+__m0` (which does not exist) and fail this test.
+    // R13 (regression / mutation guard): a single-file program overloading
+    // `add` on a struct compiles and runs exactly as before. Its decl is
+    // mangled like any other (`add__m0`, so the word cannot own a bare libc
+    // symbol) while the call site stays bare, so this passes only if
+    // `scoped_operator_overloads` assembles the candidate under the mangled
+    // key for a one-module closure as well as a multi-module one.
     let c = Closure::new("single-operator");
     let entry = c.write(
         "main.sth",
         concat!(
             "type: Vec2 x i64 y i64 ;\n",
-            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
-            ": main ( -- ) 1 2 Vec2 3 4 Vec2 + &x @ swap drop . ;\n",
+            ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) 1 2 Vec2 3 4 Vec2 add &x @ swap drop . ;\n",
         ),
     );
     let (stdout, code) = build_and_run(&entry);
-    assert_eq!(stdout, "1\n", "the single-file `+` overload dispatched");
+    assert_eq!(stdout, "1\n", "the single-file `add` overload dispatched");
     assert_eq!(code, 0);
 }
 
@@ -766,29 +795,29 @@ fn selective_import_of_type_exposes_members_unqualified() {
 
 #[test]
 fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
-    // Phase 4 slice 8a, R4 (import mirror): `lib` overloads `+` unary on
-    // `Vec2`, but the builtin `+` is binary; nothing else forbids this
-    // import outright (no local `+`, no other selective import of `+`), so
+    // Phase 4 slice 8a, R4 (import mirror): `lib` overloads `add` unary on
+    // `Vec2`, but the builtin `add` is binary; nothing else forbids this
+    // import outright (no local `add`, no other selective import of `add`), so
     // the arity mismatch against the builtin is the only thing left to
     // reject it, at the import site rather than surfacing as an ambiguity
     // at a call site.
     let c = Closure::new("selective-arity-clash");
     c.write(
         "lib.sth",
-        "type: Vec2 x i64 y i64 ;\n: + ( Vec2 -- Vec2 ) ;\nexport: + Vec2 ;\n",
+        "type: Vec2 x i64 y i64 ;\n: add ( Vec2 -- Vec2 ) ;\nexport: add Vec2 ;\n",
     );
     let entry = c.write(
         "main.sth",
-        "import: lib | + | \"lib.sth\" ;\n: main ( -- ) ;\n",
+        "import: lib | add | \"lib.sth\" ;\n: main ( -- ) ;\n",
     );
     let err = build_err(&entry);
     assert!(
-        err.contains("selective import of `+`") && err.contains("lib"),
+        err.contains("selective import of `add`") && err.contains("lib"),
         "unexpected message: {err}"
     );
     assert!(
         err.contains("takes 1 input")
-            && err.contains("the builtin `+` takes 2")
+            && err.contains("the builtin `add` takes 2")
             && err.contains("agree on input count"),
         "unexpected message: {err}"
     );
@@ -797,24 +826,24 @@ fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
 #[test]
 fn qualified_call_to_builtin_named_overload_dispatches_to_user_word() {
     // A module-boundary counterpart to slice 8a's builtin-name overloading:
-    // `lib` overloads `+` on `Vec2` and its own body sums the two fields with
-    // the plain `i64` `+` -- a bare use of the builtin from *inside* the
+    // `lib` overloads `add` on `Vec2` and its own body sums the two fields with
+    // the plain `i64` `add` -- a bare use of the builtin from *inside* the
     // overload's own declaring module. The resolver must leave that bare use
     // unrewritten (deferring to `check_operator`'s operand-type dispatch) even
-    // though it eagerly rewrites `main`'s qualified `v::+` to the mangled
+    // though it eagerly rewrites `main`'s qualified `v::add` to the mangled
     // overload; rewriting the bare use too would force it onto the `Vec2`
     // signature and misreport the `i64` operands as a type mismatch.
     let c = Closure::new("qualified-builtin-overload");
     c.write(
         "lib.sth",
-        "export: Vec2 + ;\n\
+        "export: Vec2 add ;\n\
          type: Vec2 x i64 y i64 ;\n\
-         : + ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop + a &y @ swap drop b &y @ swap drop + Vec2 ;\n",
+         : add ( Vec2 Vec2 -- Vec2 ) | a b | a &x @ swap drop b &x @ swap drop add a &y @ swap drop b &y @ swap drop add Vec2 ;\n",
     );
     let entry = c.write(
         "main.sth",
         "import: v | Vec2 | \"lib.sth\" ;\n\
-         : main ( -- ) 1 2 Vec2 3 4 Vec2 v::+ &x @ swap drop . ;\n",
+         : main ( -- ) 1 2 Vec2 3 4 Vec2 v::add &x @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "4\n");

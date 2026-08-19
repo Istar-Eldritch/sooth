@@ -66,21 +66,21 @@ rather than the whole word:
 ```forth
 : gcd ( int int -- int )
   | a b |
-  b 0 = [
+  b 0 eq ~[
     a
-  ] [
+  ] ~[
     b  a b mod  gcd
   ] if ;
 ```
 
 Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
-one- or two-value words stay point-free (`square`, below, is just `dup *`). Reach for
+one- or two-value words stay point-free (`square`, below, is just `dup mul`). Reach for
 `| … |` only when shuffling would read worse than names, typically three-plus live
 values reused out of order, like a formula:
 
 ```forth
 : lerp ( int int int -- int )   \ a + (b - a) * t
-  | a b t | b a - t * a + ;
+  | a b t | b a sub t mul a add ;
 ```
 
 `gcd` above sits on the line: two values, each reused and reordered in the recursive
@@ -94,14 +94,14 @@ error.
 
 ```forth
 : oops ( int -- int )
-  | a | a a + + ;
+  | a | a a add add ;
 ```
 
 ```
 error: stack effect mismatch in `oops`
   declared ( int -- int ), but body has net effect ( int -- ⊥ )
-  a a + +
-        ^ `+` needs 2 values, stack holds 1 here (one `+` too many)
+  a a add add
+          ^ `add` needs 2 values, stack holds 1 here (one `add` too many)
 ```
 
 Types and names live in different places, never both at once: the effect comment
@@ -117,7 +117,7 @@ Plain data is `Copy`: reuse is free and `dup` is ordinary.
 
 ```forth
 : square ( int -- int )
-  dup * ;                \ int is Copy, so `dup` just copies the bits
+  dup mul ;               \ int is Copy, so `dup` just copies the bits
 ```
 
 A value is *moved* by default, and a resource is *linear*, not `Copy`. `dup` on
@@ -472,13 +472,13 @@ flag taking two inline quotations (`( ..a u32 ~[ ..a -- ..b ] ~[ ..a -- ..b ] --
 nonzero is true, and the single builtin exempt from the quotation-operand default-deny);
 `tag`, which reads a payload-free enum's discriminant as that flag and is a register
 relabel because such a value already *is* its discriminant; and the six comparison
-primitives `u=`/`u<`/`u>`/`u<=`/`u>=`/`u<>`, one per comparison shape, each deriving
+primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`, one per comparison shape, each deriving
 signed / unsigned / float behaviour from its operand type.
 
 Everything typed is a library word over them, in `lib/core.sth`, injected into every
 program as `bool` itself is. `if` and `unless` are term-body combinators
 (`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
-condition's discriminant with `tag` and `branch`es on the flag); `=`/`<`/`>`/`<=`/`>=`/`<>`
+condition's discriminant with `tag` and `branch`es on the flag); `eq`/`lt`/`gt`/`lte`/`gte`/`ne`
 are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
 their `bool` by branching and naming a variant. That last detail is the point rather than
 an implementation accident: there is deliberately no operation turning a machine word
@@ -519,8 +519,8 @@ Quotations: the literal `[ ... ]` and `call`. A quotation's body is checked wher
 spliced, so a library word cannot defer code the way `call` does; no word below them
 can express either.
 
-The operator words: arithmetic (`+ - * / mod`), bitwise (`and or xor not shl shr`),
-the comparison primitives (`u= u< u> u<= u>= u<>`, plus `max`/`max-total`), the two
+The operator words: arithmetic (`add sub mul div mod`), bitwise (`and or xor not shl shr`),
+the comparison primitives (`ueq ult ugt ulte ugte une`, plus `max`/`max-total`), the two
 control primitives (`branch`, `tag`), printing (`.`), and the `>T` conversions.
 Each bottoms out in a machine operation or a type-directed conversion; there is nothing
 in the language to compose them from.

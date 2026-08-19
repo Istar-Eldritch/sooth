@@ -16,7 +16,7 @@ data $strd0 = { l $strb0, l 6 }
 data $strb1 = { b 116, b 114, b 117, b 101, b 10, b 0 }
 data $strd1 = { l $strb1, l 5 }
 
-export function $.2e.(w %v0) {
+export function $.2e.__m0(w %v0) {
 @start
 	%v3 =w copy 0
 	%v4 =w ceqw %v0, %v3
@@ -91,13 +91,13 @@ export function $sooth_main() {
 @start
 	%v0 =l copy 2000
 	%v1 =w call $leap__m0(l %v0)
-	call $.2e.(w %v1)
+	call $.2e.__m0(w %v1)
 	%v2 =l copy 1900
 	%v3 =w call $leap__m0(l %v2)
-	call $.2e.(w %v3)
+	call $.2e.__m0(w %v3)
 	%v4 =l copy 2024
 	%v5 =w call $leap__m0(l %v4)
-	call $.2e.(w %v5)
+	call $.2e.__m0(w %v5)
 	ret
 }
 

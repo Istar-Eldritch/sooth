@@ -922,13 +922,14 @@ pub(super) fn is_name_visible_to_module(
 
 /// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
 /// module. `None` means "module scoping does not apply -- use the flat
-/// `env.get(name)`": the REPL path (`ctx.modules()` is `None`) and a
-/// single-module build, where `resolve_modules` leaves an operator decl bare
-/// (`+`, not `+__m0`) so the flat lookup already finds the own overload. In a
-/// multi-module build every operator decl is mangled per module, so a bare
-/// lookup of `+` is `None`; assemble the caller's own overload (under
-/// `mangle(name, M)`) plus one it selectively imported, membership decided by
-/// `is_name_visible_to_module` (R1), never re-derived.
+/// `env.get(name)`": only the REPL path, where `ctx.modules()` is `None`.
+/// Every operator decl is mangled per module, so a bare lookup of `add` is
+/// `None`; assemble the caller's own overload (under `mangle(name, M)`) plus
+/// one it selectively imported, membership decided by
+/// `is_name_visible_to_module` (R1), never re-derived. This holds for a
+/// single-module build too: its lone decl is `add__m0`, and routing it through
+/// the same lookup is what lets `resolve_modules` mangle it rather than leave
+/// it owning the bare (possibly libc) symbol.
 pub(super) fn scoped_operator_overloads(
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -943,9 +944,6 @@ pub(super) fn scoped_operator_overloads(
         return None;
     }
     let modules = ctx.modules()?;
-    if modules.len() < 2 {
-        return None;
-    }
     let caller = ctx.module();
     let mut defining = vec![caller];
     if let Some(&k) = modules[caller as usize].selective.get(name) {
@@ -954,7 +952,8 @@ pub(super) fn scoped_operator_overloads(
     let mut out: Vec<Overload> = Vec::new();
     for d in defining {
         if is_name_visible_to_module(modules, caller, d, name) {
-            if let Some(cands) = env.get(&crate::resolve::mangle(name, d)) {
+            let mangled = crate::resolve::mangle(name, d);
+            if let Some(cands) = env.get(&mangled) {
                 out.extend(cands.iter().cloned());
             }
         }
@@ -1505,7 +1504,7 @@ mod tests {
         // FIX 2 (verified, no row): the only `check_operator` op that would
         // accept a `Cstr` operand if its guard were removed is `.` (print, whose
         // printable set includes `Str`/`Cstr`), and it already has the `.` row.
-        // Every comparison (`=`/`<`/`>`/...), like every arithmetic/bitwise/
+        // Every comparison (`eq`/`lt`/`gt`/...), like every arithmetic/bitwise/
         // shift op, requires `is_numeric`/`is_int`/`is_float` and rejects a
         // `cstr` outright, so there is no silent-accept comparison path to row.
         struct Row {
@@ -1531,61 +1530,61 @@ mod tests {
         };
         let rows = [
             // check_operator, both operand positions, plus print.
-            op(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
-            op(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
-            op(": main ( -- ) [ + ] . ;\n", "`.`"),
+            op(": main ( -- ) 1 [ add ] add ;\n", "`add`"),
+            op(": main ( -- ) [ add ] 1 sub . ;\n", "`sub`"),
+            op(": main ( -- ) [ add ] . ;\n", "`.`"),
             // Slice 10c: the branch condition, before the flag mismatch.
             // `if` is a `lib/` word now, so the audited site is the primitive
             // it wraps -- the one builtin exempt from the quotation-operand
             // default-deny for its *branch* operands, but not for its
             // condition.
-            op(": main ( -- ) [ + ] [ 1 . ] [ 2 . ] branch ;\n", "`branch`"),
+            op(": main ( -- ) [ add ] [ 1 . ] [ 2 . ] branch ;\n", "`branch`"),
             // check_str_word (`len`/`cstr`).
-            op(": main ( -- ) [ + ] len ;\n", "`len`"),
-            op(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
+            op(": main ( -- ) [ add ] len ;\n", "`len`"),
+            op(": main ( -- ) [ add ] cstr ;\n", "`cstr`"),
             // check_array_word: the `fill` count operand and the stored element.
-            op(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
+            op(": main ( -- ) 5 [ add ] fill ;\n", "`fill`"),
             w(
-                ": main ( -- ) [ + ] 8 fill drop ;\n",
+                ": main ( -- ) [ add ] 8 fill drop ;\n",
                 "a quotation cannot be stored",
                 "escaping quotations are slice 7",
             ),
             // check_array_index, reached through the `&>` reference word.
             op(
-                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &x [ + ] &> drop drop ;\n",
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &x [ add ] &> drop drop ;\n",
                 "`&>`",
             ),
             // check_owned_cell_word.
-            op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
+            op(": main ( -- ) [ add ] ^ ;\n", "`^`"),
             // check_reference_word's `&q` prefix-borrow-of-a-local form.
-            op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
+            op(": main ( -- ) [ add ] | q | &q drop ;\n", "`&q`"),
             // check_access_word's store paths: the value and the receiver.
             w(
-                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!s [ + ] ! b drop ;\n",
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!s [ add ] ! b drop ;\n",
                 "a quotation cannot be stored",
                 "escaping quotations are slice 7",
             ),
-            op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
+            op(": main ( -- ) [ add ] 1 ! ;\n", "`!`"),
             // the env argument loop and check_poly_call's input loop (R9/R9p).
             w(
-                ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
+                ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ add ] foo drop ;\n",
                 "passed to `foo`",
                 "only `call` accepts one",
             ),
             w(
-                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
+                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
                 "passed to `dupit`",
                 "only `call` accepts one",
             ),
             // check_outputs (R10).
             w(
-                ": f ( -- i64 ) [ + ] ;\n",
+                ": f ( -- i64 ) [ add ] ;\n",
                 "declared output",
                 "leaves a quotation on the stack",
             ),
             // the REPL residual (R19), checked through `infer_line`.
             Row {
-                source: "1 [ + ]",
+                source: "1 [ add ]",
                 site: "end of a line",
                 phrase: "a quotation cannot be left on the stack",
                 is_line: true,
@@ -1966,8 +1965,8 @@ mod tests {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
              type: V x i64 ;\n\
-             : spin ( &!V i64 -- )\n  | r n |\n  n 0 = ~[\n  ] ~[\n    \
-             0 V | COUNT |\n    &!COUNT n 1 - spin\n  ] if ;\n\
+             : spin ( &!V i64 -- )\n  | r n |\n  n 0 eq ~[\n  ] ~[\n    \
+             0 V | COUNT |\n    &!COUNT n 1 sub spin\n  ] if ;\n\
              : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
         )
         .unwrap_err();
@@ -2138,7 +2137,7 @@ mod tests {
         let err = check_src(
             "type: A n i64 ;\n\
              type: B tag i64 n bool ;\n\
-             : sum ( i64 i64 -- i64 ) + ;\n\
+             : sum ( i64 i64 -- i64 ) add ;\n\
              : main ( -- ) 2 true B &n @ 1 sum . drop ;",
         )
         .unwrap_err();

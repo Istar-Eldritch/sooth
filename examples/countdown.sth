@@ -1,9 +1,9 @@
 : sum-to ( i64 i64 -- i64 )
   | acc n |
-  n 0 = ~[
+  n 0 eq ~[
     acc
   ] ~[
-    acc n + n 1 - sum-to
+    acc n add n 1 sub sum-to
   ] if ;
 
 : main ( -- )

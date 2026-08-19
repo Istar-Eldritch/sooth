@@ -27,7 +27,7 @@ const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
 fn sum_to(branch: &str, iterations: u32) -> String {
     format!(
         "{branch}: sum-to ( i64 i64 -- i64 )\n\
-         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] {caller} ;\n\
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] {caller} ;\n\
          : main ( -- ) 0 {iterations} sum-to . ;\n",
         caller = if branch == BOOL_Q { "Bool?" } else { "Bool!?" }
     )
@@ -213,8 +213,8 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n\
         : spin ( &!V i64 -- )\n\
         | r n |\n\
-        ~[ 0 V | x | &!x n 1 - spin ] | rec |\n\
-        n 0 = ~[ ] rec Bool? ;\n\
+        ~[ 0 V | x | &!x n 1 sub spin ] | rec |\n\
+        n 0 eq ~[ ] rec Bool? ;\n\
         : main ( -- )\n\
         0 V | v | &!v 3 spin ;\n";
     let funcs = lowered(src);
@@ -247,7 +247,7 @@ fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
         ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
          | e | | t | | c | c ~[ t call ] ~[ e call ] if ;",
         ": sum-to ( i64 i64 -- i64 ) \
-         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] Bool? ;",
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] Bool? ;",
         "0 1000000 sum-to",
     ]);
     assert!(
@@ -270,7 +270,7 @@ fn linear_value_across_the_spliced_back_edge_is_error() {
          : drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n\
          {BOOL_Q}: spin ( i64 -- i64 )\n\
          | n | 9 Spy | s |\n\
-         n 0 = ~[ 0 ] ~[ n 1 - spin ] Bool? ;\n\
+         n 0 eq ~[ 0 ] ~[ n 1 sub spin ] Bool? ;\n\
          : main ( -- ) 3 spin . ;\n"
     );
     let err = check_error(&src);
@@ -292,7 +292,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
         : Bool? inline ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n\
         : spin ( Spy i64 -- i64 )\n\
-        | n | n 0 = ~[ | s | s drop 0 ] ~[ | s | s n 1 - spin ] Bool? ;\n\
+        | n | n 0 eq ~[ | s | s drop 0 ] ~[ | s | s n 1 sub spin ] Bool? ;\n\
         : main ( -- ) 0 Spy 3 spin . ;\n";
     let funcs = lowered(src);
     let spin = func(&funcs, "spin");
