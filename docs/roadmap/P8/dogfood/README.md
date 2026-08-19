@@ -26,7 +26,7 @@ global_sooth.pkg            stands in for $XDG_CONFIG_HOME/sooth/global_sooth.pk
 
 What each piece is there to exercise: path-derived nested names (`text/ascii.sth` is
 `text::ascii`, with no manifest entry of its own), a hub curating two children, a
-package-private module the manifest omits, both import modes (`| * |` for leaf code,
+package-private module the manifest omits, both import modes (bare `*` for leaf code,
 an explicit list where the intrinsic surface is worth reading), the layer ladder
 core -> fixed -> hosted, and a file with no ancestor manifest falling back to the
 user-level manifest. It is written in the model's *final* shape (P8.S1's packages already
@@ -76,8 +76,8 @@ before committing to it rather than after migrating 500 sites.
 **F5. Both import modes earn their place, which was not obvious in the abstract.**
 `core/bool.sth` naming `| branch tag |` explicitly documents its entire intrinsic surface in
 one line, which is exactly the bare-metal auditability argument for the intrinsics module.
-Leaf code like `text/ascii.sth` using `| * |` would be unreadable spelled out. Neither form
-is redundant.
+Leaf code like `text/ascii.sth` using bare `*` for `intrinsics` would be unreadable spelled
+out. Neither form is redundant.
 
 **F6. `intrinsics` takes no `depends:` entry.** No manifest here declares it, on the grounds
 that it is compiler-provided rather than resolved to a source location. That was decided by

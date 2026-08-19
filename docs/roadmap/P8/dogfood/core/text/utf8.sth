@@ -1,5 +1,5 @@
 \ core::text::utf8
-import: intrinsics i | * | ;
+import: intrinsics * ;
 import: bool b | if | ;
 
 export: continuation? ;

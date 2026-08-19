@@ -148,10 +148,14 @@ ceremony, it doesn't remove the freedom.
 
 Parsing is unambiguous: after the target, the parser sees either `|` (selective list, no
 explicit qualifier), a bare word (the qualifier, optionally followed by `| ... |`), or `;`
-(default qualifier, no selective list). The wildcard form benefits most from the default:
-`import: intrinsics | * | ;` needs no qualifier at all when every name is already coming in
-unqualified via `*`, whereas the old grammar forced one (`import: i | * | intrinsics ;`)
-purely to satisfy the parser.
+(default qualifier, no selective list). A bare `*` immediately after the target, with
+nothing but `;` following, is a fourth case reserved for S2's wildcard import
+(`import: intrinsics * ;`) rather than an ordinary qualifier named `*`; this slice's parser
+change recognizes the position (target, then `*`, then `;`, no `|`) so S2 doesn't have to
+reopen the grammar, but the wildcard's semantics (bringing every exported name in
+unqualified) are S2's to implement. `*` is never special inside `| ... |`: a selective list
+naming `*` imports the literal word `*` (already a live word name for multiplication in
+this symbol-operator style), so the two forms never collide.
 
 The `pkg` segment of `pkg::module` in the import target is not the qualifier; it resolves
 against `depends:` by exact package name match and is distinct from the binding.
@@ -407,14 +411,21 @@ pub struct ModuleName {
 ```
 
 `parser::parse_import` is rewritten for the new token order: `<target> [<qualifier>]
-[ | <name>... | ] ;`. It parses the target first (a quoted string for the still-supported
-manifest-less path form, or a bare identifier / `::`-joined sequence for a module name).
-After the target, it peeks: a `Pipe` token means no explicit qualifier, jump straight to
-the selective list; a `Word` token means an explicit qualifier, consume it and then check
-for a following `Pipe`; a `Semicolon` means neither, and the qualifier defaults. The default
-is computed immediately (not deferred): `ModuleName::last_segment()` for a module target,
-or the file stem for a quoted-path target, so `Import.qualifier: String` is always a
-concrete bound value downstream — no optionality leaks past the parser.
+[ | <name>... | ] ;`, plus S2's wildcard shape `<target> * ;`. It parses the target first (a
+quoted string for the still-supported manifest-less path form, or a bare identifier /
+`::`-joined sequence for a module name). After the target, it peeks: a `Pipe` token means
+no explicit qualifier, jump straight to the selective list; the literal word `*` followed
+immediately by `Semicolon` (no `Pipe`) is the wildcard marker, recorded on `Import` as a
+distinct flag rather than a qualifier — this is the one hardcoded exception to "any word in
+this slot is a qualifier," scoped to exactly this shape so it can never shadow a real
+qualifier named `*` or a selectively-imported word named `*`; any other `Word` token is an
+explicit qualifier, consumed and then checked for a following `Pipe`; a `Semicolon` alone
+means neither, and the qualifier defaults. The default is computed immediately (not
+deferred): `ModuleName::last_segment()` for a module target, or the file stem for a
+quoted-path target, so `Import.qualifier: String` is always a concrete bound value
+downstream when the wildcard flag isn't set — no optionality leaks past the parser. Setting
+the wildcard flag's *effect* (gating which names are visible) is S2's job; this slice only
+makes the token parse and land on `Import` unambiguously.
 
 `parser::scan_imports` is updated to populate `ImportTarget` based on whether the leading
 token (now the target, not the qualifier) is a quoted string or a bare identifier / `::`
@@ -426,8 +437,10 @@ import tests):
 - `parse_import_explicit_qualifier_binds_given_name`: `import: core::cmp c ;` binds `c`.
 - `parse_import_omitted_qualifier_defaults_to_last_segment`: `import: core::cmp ;` binds
   `cmp`.
-- `parse_import_wildcard_with_omitted_qualifier_ok`: `import: intrinsics | * | ;` parses
-  with qualifier defaulted to `intrinsics` and the selective list `["*"]`.
+- `parse_import_bare_wildcard_sets_flag_no_qualifier`: `import: intrinsics * ;` sets the
+  wildcard flag and binds no qualifier at all.
+- `parse_import_selective_list_star_is_literal_word`: `import: core::cmp | * | ;` parses
+  `*` as an ordinary selective-import name, not the wildcard, and does not set the flag.
 - `parse_import_selective_with_explicit_qualifier_ok`: `import: core::text s | split trim |
   ;` binds `s` and the two-name selective list.
 - `parse_import_quoted_path_target_still_parses`: the manifest-less quoted-path form still

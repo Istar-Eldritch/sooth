@@ -44,9 +44,18 @@ last segment:
 ```
 import: text::ascii a ;               \ same package, by path-derived name, qualifier a
 import: core::cmp ;                  \ another package, qualifier defaults to cmp
-import: intrinsics i | * | ;         \ every exported name, unqualified
+import: intrinsics * ;               \ every exported name, unqualified, no qualifier bound
 import: core::text s | split trim | ; \ two names unqualified, plus the qualifier
 ```
+
+`*` is only recognized as the wildcard keyword in the position right after the target, with
+nothing else following but `;` — it never appears inside `| ... |`. This keeps it from
+colliding with an actual word named `*` (already in use for multiplication in this
+symbol-operator style): inside the pipes, every token is an ordinary selective-import name,
+so `import: mod | * | ;` selectively imports the word called `*`, not a wildcard. Wildcard
+and selective import are mutually exclusive on one `import:` line; wanting both a wildcard
+and a bound qualifier for redundant qualified access is not supported, since it added
+nothing a full wildcard didn't already give.
 
 The qualifier is always bound and is always a single segment, so use sites stay `a::decode`
 regardless of how deeply the module is nested; only its spelling in source is optional. A
@@ -71,7 +80,7 @@ a hub, per above, so the two features compose rather than overlap.
 
 **The intrinsics are a module too.** `BUILTIN_WORDS` (`src/check/declarations.rs:63-110`,
 40 names: the shuffles, the arithmetic, the `u`-prefixed comparisons, `branch`, `tag`, `.`,
-`fill`, `len`) is reachable only through `import: intrinsics | * | ;`. It is a
+`fill`, `len`) is reachable only through `import: intrinsics * ;`. It is a
 compiler-provided module, not a package with sources, so `intrinsics` is one reserved name
 resolved without a path. The table itself does not move, and `has_self_tail_call` keeps
 using it unchanged: only *visibility* is gated. `>`-prefixed conversions are claimed by
@@ -167,7 +176,7 @@ failure names its own remedy.
 
 **P8.S2 — Single-mode imports, the intrinsics module, wildcard import, and re-export.**
 Delete `parser::prelude_words` and its two injection sites, shrink the mangling exemption to
-`main`/`drop`, gate `BUILTIN_WORDS` visibility on an `intrinsics` import, add the `| * |`
+`main`/`drop`, gate `BUILTIN_WORDS` visibility on an `intrinsics` import, add the bare `*`
 wildcard form and re-export through `export:`, split `lib/core.sth` into modules with a hub,
 and migrate every `.sth` file and every inline test source to module names now that S1a
 gives them something to name and S1b gives fixtures a manifest to name it against. `if`'s

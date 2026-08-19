@@ -3,7 +3,7 @@
 **Split from a single, now-stale brief** (`slice1-brief.md`'s history, and
 `../P8-packages-modules.md` is authoritative). This slice deletes the compiler-baked
 prelude that every program silently depends on today, gates the compiler's own builtins
-behind an `intrinsics` import, and adds the `| * |` wildcard import form and re-export
+behind an `intrinsics` import, and adds the bare `*` wildcard import form and re-export
 through `export:` — the two things that make single-mode imports and a gated intrinsics
 module bearable rather than punishing. It lands after S1/S1b because, with the quoted-path
 import form deleted from the language, there is no spelling for a cross-file import before
@@ -37,8 +37,8 @@ to resolve `core` against.
    edge to draw. `bool`, `if`/`unless`, and the surface comparisons are ordinary words and
    split cleanly. Gating the builtins behind an `intrinsics` import (rather than leaving
    them ambient) is a design choice made explicit in `../P8-packages-modules.md`: the
-   builtins are the language surface, but "reachable only via `import: intrinsics | * | ;`"
-   is what makes a bare-metal file's intrinsic surface auditable in one line, which is the
+   builtins are the language surface, but "reachable only via `import: intrinsics * ;`" is
+   what makes a bare-metal file's intrinsic surface auditable in one line, which is the
    forcing consumer that justifies the gate.
 
 ## Resolved recon (probe-verified against the built compiler, 2026-08-19, `main` at
@@ -89,7 +89,7 @@ five probes confirmed the plan; one falsified a decision.
   corpus file that still resolves `if` through the deleted prelude is a build failure, and
   the fix is adding the import, not restoring the exemption.
 
-- **The intrinsics are gated behind `import: intrinsics | * | ;`; the wildcard form and
+- **The intrinsics are gated behind `import: intrinsics * ;`; the wildcard form and
   re-export are what make that bearable.** Qualified `1 2 i::add` is unreadable in a stack
   language, and a selective list of the ~40 `BUILTIN_WORDS` names per file is worse than
   the problem. The selective form (`import: intrinsics | dup drop add | ;`) stays available
@@ -97,6 +97,17 @@ five probes confirmed the plan; one falsified a decision.
   file proving in source that it never touches `fill`). `export:` accepting a name a file
   imported, not only one it declared, is what makes a hub module: `core` can import
   `intrinsics` and re-export only the subset it endorses.
+
+- **The wildcard's grammar is `<target> * ;`, mutually exclusive with a selective list, and
+  binds no qualifier.** `*` is only the wildcard keyword in this exact position (right
+  after the target, nothing following but `;`); inside `| ... |` it is always an ordinary
+  word, so `import: mod | * | ;` selectively imports the word literally named `*` (already
+  live for multiplication in this symbol-operator style, alongside `+`/`-`/`<`/`>`), not a
+  wildcard. A reused sentinel there would collide with a real, plausible word name; reusing
+  the qualifier slot instead costs nothing, since nobody plausibly wants an import
+  qualifier literally named `*`. Wanting both a wildcard and a bound qualifier for
+  redundant qualified access is not supported: it added nothing a full wildcard didn't
+  already give, since everything is already reachable unqualified.
 
 - **The migration is mechanical for the live corpus but is not purely mechanical, and the
   spec must rule on the difference** (resolved recon, finding 4). Deleting the exemption
@@ -138,8 +149,10 @@ five probes confirmed the plan; one falsified a decision.
 
 ## Sequencing
 
-1. Add the `| * |` wildcard import form and re-export through `export:` (needed before the
-   migration below, since intrinsics-heavy files depend on the wildcard to stay readable).
+1. Add the bare `*` wildcard import form (parsed and its `*`/`| * |` disambiguation already
+   in place per S1a; this step implements the visibility semantics) and re-export through
+   `export:` (needed before the migration below, since intrinsics-heavy files depend on the
+   wildcard to stay readable).
 2. Delete the compiler-baked prelude (`parser::prelude_words`, both call sites, the
    `is_prelude_word_name` exemption), gate `BUILTIN_WORDS` visibility behind an
    `intrinsics` import, and add the narrowing diagnostic and its rejection test.

@@ -1,4 +1,4 @@
-import: intrinsics i | * | ;
+import: intrinsics * ;
 import: core::bool b | if | ;
 import: core::cmp c | lt | ;
 

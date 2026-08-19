@@ -1,4 +1,4 @@
-import: intrinsics i | * | ;
+import: intrinsics * ;
 import: core::text t | upper? | ;
 import: collections::vec v ;
 
