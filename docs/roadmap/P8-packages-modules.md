@@ -128,8 +128,9 @@ rejected.
 **P8.S3 — The serialisable API description.** "Which words, types, and externs are public"
 is answered by Phase 4 Slice 5's `export:` list, and answered where it had to be, since a
 type cannot hold an invariant while its generated setters cross the boundary unchecked.
-What is left is one thing: a compiler pass that walks the checked AST, filters to the exported declarations of declared modules, and emits a file
-listing every exported signature for the API diff to compare between versions. With no
+What is left is one thing: a compiler pass that walks the checked AST, filters to the
+exported declarations, and emits a file listing every exported signature for the API diff
+to compare between versions. With no
 manifest module list, that surface is every module's `export:` list, which is the input to
 the `private:` question above. That is the remaining prerequisite in
 `docs/dependency-management.md`, and it is a packaging concern
