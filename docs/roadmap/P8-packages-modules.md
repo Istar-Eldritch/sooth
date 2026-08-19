@@ -21,8 +21,7 @@ layer, its dependencies, and which modules it makes public:
 package: core ;
 layer: core ;
 depends: intrinsics builtin ;
-module: text ;
-module: cmp ;
+module: text cmp ;
 ```
 
 **A module is a file, and its name derives from its path within the package.**
@@ -31,10 +30,12 @@ behind it. A filename must be a legal module segment, which costs nothing since 
 already admit `-`. **Discovery and visibility are separate concerns**: files are still
 discovered by walking the import graph, exactly as they are today, and the manifest's
 `module:` list adds nothing to that. What it does is name the modules reachable from
-*outside* the package. An undeclared module is package-private: importable by name from
-its siblings, unnameable by a consumer. A package's public surface is normally a hub or
-two rather than every file, so the list stays short by construction, and a package that
-finds itself listing many modules is one that wants a hub.
+*outside* the package, and its lines accumulate exactly as `export:`'s do, since a
+manifest's `module:` is to a package what a file's `export:` is to a file. An undeclared
+module is package-private: importable by name from its siblings, unnameable by a consumer.
+A package's public surface is normally a hub or two rather than every file, so the list
+stays short by construction, and a package that finds itself listing many modules is one
+that wants a hub.
 
 **Imports name modules.** A quoted path survives only for a file belonging to no package
 (the manifest-less scratch case); anything inside a package is named:
