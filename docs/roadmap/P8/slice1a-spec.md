@@ -112,7 +112,7 @@ directory. Every file that is a descendant of that directory (transitively) belo
 package, and its module name is derived from its path relative to the manifest's directory.
 
 **Subdirectory nesting.** Fully allowed. `text/ascii.sth` in a package whose manifest is at
-`core/sooth.pkg` is the module `text::ascii`. Nesting depth is not bounded. A filename
+`core/sooth.pkg` is the module `text::ascii`. Nesting depth is not bounded. A module-name
 segment must lex, on its own, as a single `Token::Word` (`src/lexer.rs`): run the segment
 through `lexer::lex` and require exactly one token, of that variant. This is a token-level
 rule, not a character list, and it decides every case in one pass: a segment containing a
@@ -122,6 +122,18 @@ exactly `\` lexes as a comment marker, not a word; a purely numeric segment (`42
 must satisfy the same constraint, since it becomes a module-name segment. A bare `*` segment
 is excluded by a separate rule below it (it lexes as an ordinary `Token::Word`, so the
 token-level rule alone would admit it).
+
+**Where the rule is enforced: the import target, not a path-to-name derivation.**
+Resolution goes name → path (join the package root with the segments, append `.sth`), never
+path → name, so there is no derivation step to reject a badly named file at. The rule is
+checked on the segments of a module-name import target instead, before the join
+(`packages::segment_defect`). The observable outcome is the same one this ruling wants: a
+file whose name breaks the rule is *unnameable*, since the only spelling that would reach
+it is rejected. Its located error is the OQ4 import header plus the offending segment and
+the rule it broke. Consequence worth stating: an unimportable file is not itself an error,
+because nothing ever looks at it -- `42.sth` may sit in a package unmolested as long as no
+import names it. Under a path → name derivation over the discovered closure the same was
+true, since an unimported file was never in that list either.
 
 **Manifest locality.** A file's package is always its *nearest* ancestor manifest. Two
 manifest files may nest (a monorepo with packages inside packages): the inner manifest wins
@@ -135,23 +147,23 @@ name-derivation rule handles both correctly since `text.sth` derives `text` and
 **Why `:` is excluded even though it lexes as one word.** The single-`Token::Word` rule
 above does not by itself exclude `:`: the lexer's word character set is `:`-permissive
 (`self::text::ascii` lexes as one word), so a segment containing `:` passes the token-level
-test. `derive_module_name` rejects it anyway, as an explicit additional rule: without it, a
-file named `text::ascii.sth` would derive the same module name as `text/ascii.sth`, and
-`segments -> name` would no longer be injective. This is the one collision in the whole
+test. It is rejected anyway, as an explicit additional rule: `::` is the segment separator,
+so a `:` surviving inside a segment would mean two spellings of one name and a
+`name <-> path` map that is no longer one-to-one. This is the one collision in the whole
 scheme, and this is the rule that closes it.
 
-**`.` is not excluded.** `derive_module_name` strips exactly one trailing `.sth`, so a
-segment containing `.` (e.g. `ascii.io.sth` deriving `ascii.io`) does not collide with
-anything: the map stays injective. There is no rationale for excluding it, so this slice
-doesn't.
+**`.` is not excluded.** Exactly one `.sth` is appended to the last segment, so a segment
+containing `.` (e.g. `ascii.io`, naming `ascii.io.sth`) collides with nothing: the map
+stays one-to-one. There is no rationale for excluding it, so this slice doesn't. Note the
+implementation consequence: the extension is *appended*, not `set_extension`ed, which would
+silently rewrite `ascii.io` to `ascii.sth`.
 
-**Why a bare `*` segment is excluded.** `*.sth` derives the module `*`, and `*` lexes as an
-ordinary `Token::Word`, so the token-level rule admits it. `derive_module_name` rejects it
-anyway: OQ3 reserves a bare `*` in the target position for S2's wildcard import
-(`import: intrinsics * ;`), and a real module literally named `*` would be unreachable as
-an ordinary target (`import: pkg::* ;` would parse as the wildcard shape, never as a module
-named `*`). A file whose name violates the `Token::Word` rule, the `:` rule, or the `*` rule
-is a located `derive_module_name` error.
+**Why a bare `*` segment is excluded.** `*` lexes as an ordinary `Token::Word`, so the
+token-level rule admits it. It is rejected anyway: OQ3 reserves a bare `*` in the target
+position for S2's wildcard import (`import: intrinsics * ;`), and a module literally named
+`*` would be unreachable as an ordinary target (`import: pkg::* ;` would parse as the
+wildcard shape, never as a module named `*`). A target segment violating the `Token::Word`
+rule, the `:` rule, or the `*` rule is a located error at the `import:`.
 
 ### OQ3: Whether the local import qualifier stays freely chosen
 
@@ -252,9 +264,9 @@ sub-case is recorded for a later pass: `check_package_graph` never sees either, 
 are pure file-attribution questions with no `depends:`/`module:` cross-package data
 involved.
 
-**D1: the module does not exist at all.** The importer's package (SelfPackage anchor) or
-the named dependency's package (Dependency anchor) has no file that derives the named
-module (checked against its `ModuleTable`). This is the case the F6 ruling leans on for
+**D1: the module does not exist at all.** Nothing is at the path the module name joins to
+inside the importer's package (SelfPackage anchor) or inside the named dependency's package
+(Dependency anchor). This is the case the F6 ruling leans on for
 `self::intrinsics`: `intrinsics` is a reserved Dependency-anchor name and never matches a
 `self::` target, so `self::intrinsics` resolves like any other own-package module name and
 hits D1 when no `intrinsics.sth` exists.
@@ -306,6 +318,40 @@ the `self::` prefix: without this check it would report "no `depends:` entry for
 technically correct if no such dependency exists but a confusing remedy for what is
 actually a missing module segment. No separate handling is needed for it; the "names a
 package, not a module" wording already covers both cases.
+
+**Ill-formed module-name segment (OQ2).** A module-name target whose segment breaks the
+OQ2 naming rule, checked before the path join and under either anchor:
+
+```
+error: import `<target>` at line L, col C in <importer>:
+  module-name segment `<seg>` is not a single identifier
+```
+
+with `is reserved for the wildcard import target` and ``contains `:`, which is reserved for
+the `::` separator`` as the second line's other two forms.
+
+**Module name outside any package.** A file with no ancestor manifest has no package root
+to join to and no `depends:` table to look in, so a module-name target there names nothing.
+Silently declining to resolve it would leave the import unbound with no message, so:
+
+```
+error: import `<target>` at line L, col C in <importer>:
+  <importer> has no `sooth.pkg` ancestor, so a module name has no package to resolve against
+  add a manifest, or use a quoted-path import for now
+```
+
+This is the mirror of the quoted-path-inside-a-package error: each form is rejected exactly
+where the other one is the answer. Both are S1b's to revisit, since a user-level manifest
+gives manifest-less files a `depends:` table.
+
+**`depends:` entry pointing where no manifest is.** Located to the entry in the declaring
+manifest, not to the import that tripped over it: the manifest is what is wrong, and the
+same broken entry would fail for every importer.
+
+```
+error: `depends:` entry `<pkg>` at line L, col C in <manifest>:
+  no manifest at <path-tried>
+```
 
 ### OQ5: `depends:` version/revision field
 
@@ -423,105 +469,115 @@ Unit tests in `src/manifest.rs` under `#[cfg(test)] mod tests`:
 
 ### New file: `src/packages.rs`
 
-Owns the package-attribution pass and the module-name derivation. `packages.rs` has no
-dependency on `driver::Closure`; it operates on plain data the driver extracts and passes
-in, making it unit-testable without constructing a `Closure`.
+Owns package boundaries and module-name import resolution. `packages.rs` depends on `ast`,
+`lexer`, and `manifest` only, never on `driver`: the driver hands one `Import` in at a time
+and gets a path back, so `Closure` and the walk that builds it stay the driver's concern.
+(An earlier draft of this section said `packages.rs` "never sees an `ImportTarget`". That
+was a proxy for the constraint that matters -- no `driver` dependency, so the module is
+unit-testable without constructing a `Closure` -- and resolution reading an `Import`
+does not weaken it.)
+
+**Resolution is name → path, not path → name.** A module name is resolved by joining the
+package root with its segments and appending `.sth` to the last, then re-checking that the
+resulting file's own nearest-ancestor manifest is still the package the import named. There
+is no `PackageGraph`, no `ModuleTable`, and no `attribute_packages`/`derive_module_name`
+enumeration of a package's files. The reasons this shape wins:
+
+- Forward references cost nothing. Path-joining does not care whether BFS has reached the
+  target yet, so the deferred-edge pass an earlier draft of this spec called for is not
+  needed, and with it goes the ordering hazard of adding edges after `reject_cycles`.
+- One pass, not two. Nothing has to know a package's full file list before the first import
+  in it can resolve.
+- No enumeration means no directory walk, so a package's private files are never read.
+
+What the eager join gives up, and how it is paid for: nothing derives a module name from a
+file path any more, so OQ2's naming rule has no derivation to fire at. It is enforced on the
+import target's segments instead (see OQ2 above) -- same observable rule, checked one step
+earlier.
 
 Responsible for:
 
-- `PackageAttribution`: a mapping from canonical file path to its owning `Manifest` (and
-  manifest path). For files with no ancestor manifest, the attribution is `None`.
-- `attribute_packages(files: &[PathBuf]) -> Result<PackageGraph, String>`: for each file
-  path, walk upward to locate a `sooth.pkg`, derive its module name, and build the
-  `PackageGraph`. Takes only paths, no import data: phase 2 builds this module-table
-  skeleton before `ImportTarget` exists (phase 3), and edge resolution reads the returned
-  `PackageGraph` as a lookup table rather than being threaded through this call. The driver
-  owns `Closure`, walks it, passes the plain path list, receives a graph, and writes
-  resolutions back itself.
-- `derive_module_name(file: &Path, pkg_root: &Path) -> Result<String, String>`: strips the
-  package root and the `.sth` extension, replaces `/` with `::`. Returns an error for a
-  file not under `pkg_root` or for a path segment that is not a valid Sooth identifier.
-- `ModuleTable`: for one package, a map from module name (`String`) to canonical file path.
-  Built by `attribute_packages`.
-- `PackageGraph`: result type from `attribute_packages`, carrying all `ModuleTable`s,
-  manifests, and their locations. No "unresolved reasons" field is added to it:
-  `attribute_packages` still takes only paths (above) and is built before any import
-  exists, so it stays exactly the shape that call returns.
-- `UnresolvedImport { importer_pkg: String, importer_manifest: PathBuf, pkg: String,
-  module: Vec<String>, span: Span, kind: UnresolvedKind }` with `UnresolvedKind {
-  MissingDepends, PrivateModule }`: a plain record type `packages.rs` defines but never
-  constructs. Failure modes A and C are import-triggered -- their wording (OQ4-A, OQ4-C)
-  names the specific offending `import:` -- so `check_package_graph` needs to know which
-  cross-package imports were actually attempted and how each one failed. That data cannot
-  live on `PackageGraph` for the reason above, so it is threaded as a second argument
-  instead: the driver builds a `Vec<UnresolvedImport>` during `discover_closure`'s
-  resolution walk (phase 3, `src/driver.rs`; see the `discover_closure` extension below)
-  and passes it to `check_package_graph` alongside the graph (phase 4, one call site).
-- `check_package_graph(graph: &PackageGraph, unresolved: &[UnresolvedImport]) ->
-  Result<(), String>`: runs four checks:
-  - Missing `depends:` for a cross-package import (OQ4-A): for each `unresolved` entry of
-    kind `MissingDepends`, the importer's manifest has no `depends:` naming `pkg` --
-    confirmed against `graph`, and turned into the OQ4-A diagnostic.
-  - Public-module violation on a cross-package import (OQ4-C): for each `unresolved` entry
-    of kind `PrivateModule`, `module` is absent from `pkg`'s `module:` list in `graph`,
-    turned into the OQ4-C diagnostic.
-  - Layer violation in any `depends:` entry (OQ4-B): walks every `depends:` entry in every
-    manifest in `graph` directly. No `unresolved` entry is involved: this check is
-    manifest-declared and fires whether or not anything actually imports across the
-    dependency (see Golden 2 below).
-  - `depends:` name mismatch: a `depends:` entry naming `foo` but `foo`'s manifest
-    declares `package: bar`. Also manifest-declared, no `unresolved` entry involved.
-    Diagnostic:
+- `find_package_root(file: &Path) -> Option<PathBuf>`: the nearest ancestor directory
+  holding a `sooth.pkg` (OQ2 manifest locality, so an inner manifest wins over an outer).
+- `PackageSite { manifest_path, root, manifest }`: one package as resolution sees it, with
+  `module_file(segments)` doing the path join. The extension is appended, not
+  `set_extension`ed, so a `.` inside a segment survives.
+- `ManifestCache`: `find_package_root` plus a `HashMap<PathBuf, Manifest>`, so each manifest
+  is read and parsed at most once per build however many files it owns.
+- `segment_defect(seg) -> Option<String>`: OQ2's naming rule, and the reason a segment
+  breaks it.
+- `resolve_import(...) -> Result<Option<PathBuf>, String>`: one import to the file it names.
+  `Ok(None)` means the import adds no closure edge (the reserved `intrinsics` name, or a
+  cross-package import recorded as unresolved). Owns every OQ4 located diagnostic except the
+  duplicate qualifier, which fires where `import_map` is built (`driver.rs`).
+- `UnresolvedImport { importer_pkg: String, importer_manifest: PathBuf, importer: PathBuf,
+  pkg: String, module: Vec<String>, span: Span, kind: UnresolvedKind }` with
+  `UnresolvedKind { MissingDepends, PrivateModule }`. Failure modes A and C are
+  import-triggered -- their wording (OQ4-A, OQ4-C) names the specific offending `import:` --
+  so `check_package_graph` needs to know which cross-package imports were attempted and how
+  each failed. Resolution pushes one of these and adds no edge, rather than raising the
+  diagnostic itself.
+
+**Phase 4's inputs (changed by the above; read this before starting phase 4).**
+
+- `check_package_graph` no longer has a `PackageGraph` to take. Its inputs are the closure's
+  `Vec<UnresolvedImport>` and a `ManifestCache` (which by then holds every manifest the walk
+  touched): `check_package_graph(unresolved: &[UnresolvedImport], manifests: &mut
+  ManifestCache) -> Result<(), String>`. The importer's manifest path is on each
+  `UnresolvedImport`, so OQ4-A and OQ4-C need no other lookup.
+- The layer check and the `depends:` name-mismatch check are manifest-triggered, and nothing
+  in phase 3 reads the manifest of a `depends:` target that no import names -- the cache is
+  populated by resolution, which only loads a dependency's manifest when an import reaches
+  for it. Phase 4 must therefore walk `depends:` entries and load their manifests itself,
+  starting from the entry file's package. Golden 2b (a higher-layer `depends:` with no
+  import) is exactly the test that fails if it doesn't.
+- The four checks are otherwise unchanged:
+  - Missing `depends:` for a cross-package import (OQ4-A): each `MissingDepends` entry.
+  - Public-module violation (OQ4-C): each `PrivateModule` entry.
+  - Layer violation (OQ4-B): every `depends:` entry of every reachable manifest, whether or
+    not anything imports across it.
+  - `depends:` name mismatch: an entry naming `foo` where `foo`'s manifest declares
+    `package: bar`. Diagnostic:
 
     ```
     error: `depends:` entry names `<foo>` at line L, col C in <manifest>:
       that package declares `package: <bar>` -- rename the entry to match
     ```
 
-Deferred intra-package edges are resolved BEFORE `closure.reject_cycles()` runs
-(`src/driver.rs:110`). Rationale: intra-package cycles must be detectable by the
-cycle checker; a cycle that exists only in deferred edges goes undetected if those edges
-are added to the closure graph after the check.
-
-Cross-package import resolution is threaded into the existing `discover_closure` walk (see
-below) rather than a separate pass. A missing `depends:` entry or a private-module target
-is not raised as a diagnostic at the point resolution finds it: resolution pushes an
-`UnresolvedImport` (recording which case, which names, which span) and adds no closure edge
-for that import, then continues the walk. `check_package_graph` (scheduled after discovery,
-before `assemble_module`) is the only place that turns a recorded `UnresolvedImport` into
-the OQ4-A/OQ4-C diagnostic text. Nothing before `check_package_graph` can raise either
-error, so a mutation test against its wording exercises a reachable path rather than a
-guard whose message is also produced earlier in the walk. (Failure mode D is different: it
-is a locate failure, not an audit failure, and is raised inline in `discover_closure`
-itself -- see OQ4 and the `discover_closure` extension below.)
+`check_package_graph` (scheduled after discovery, before `assemble_module`) is the only
+place that turns a recorded `UnresolvedImport` into OQ4-A/OQ4-C text. Nothing before it can
+raise either error, so a mutation test against its wording exercises a reachable path rather
+than a guard whose message is also produced earlier in the walk. (Failure mode D is
+different: a locate failure, not an audit failure, raised inline during resolution -- see
+OQ4.)
 
 Unit tests in `src/packages.rs` under `#[cfg(test)] mod tests`:
 
-- `derive_module_name_top_level`: `foo.sth` at pkg root → `foo`.
-- `derive_module_name_nested_one`: `text/ascii.sth` → `text::ascii`.
-- `derive_module_name_nested_two`: `a/b/c.sth` → `a::b::c`.
-- `derive_module_name_invalid_segment_is_error`: a filename containing a character that is
-  not a valid Sooth identifier segment (e.g. a space) lexes as more than one token, and is
-  rejected.
-- `derive_module_name_non_word_segment_is_error`: three cases that each pass the raw
-  character check but fail the single-`Token::Word` rule: a segment that is exactly `\`
-  (lexes as a comment marker), a purely numeric segment like `42` (lexes as `Token::Int`),
-  and a float-shaped segment like `3.5` (lexes as `Token::Float`). One test per case or one
-  table-driven test covering all three; either is fine as long as all three are covered.
-- `derive_module_name_colon_in_filename_is_error`: a segment containing `:` (e.g.
-  `text::ascii.sth`) is rejected, since `:` lexes as part of an ordinary `Token::Word` (it
-  passes the single-`Token::Word` rule) and would let this filename derive the same module
-  name as `text/ascii.sth` if it were allowed.
-- `derive_module_name_star_segment_is_error`: a segment that is exactly `*` (e.g. `*.sth`)
-  is rejected, since it too lexes as an ordinary `Token::Word` and would otherwise collide
-  with the reserved wildcard target position (OQ2, OQ3).
-- `derive_module_name_dot_in_filename_is_ok`: a segment containing `.` (e.g.
-  `ascii.io.sth`) is accepted and derives `ascii.io`; `.` is not excluded, since
-  `derive_module_name` strips exactly one trailing `.sth` and the map stays injective.
-- `derive_module_name_not_under_root_is_error`: a file outside the package root returns an
-  error.
-- `attribute_packages_no_manifest_returns_none`: a file list with no ancestor manifest; its
-  attribution is `None`.
+- `find_package_root_no_manifest_returns_none`: a file with no ancestor `sooth.pkg`.
+- `find_package_root_nested_manifest_inner_wins`: OQ2 manifest locality, the inner of two
+  nesting manifests owns the file beneath it.
+- `module_file_joins_segments_under_the_root`: `text::ascii` is `<root>/text/ascii.sth`.
+- `module_file_appends_extension_keeping_a_dotted_segment`: `ascii.io` is `ascii.io.sth`,
+  not `ascii.sth`. Guards the append-vs-`set_extension` choice, which is silent otherwise.
+- `module_segment_single_word_is_ok`: the segments that lex as one `Token::Word` are legal,
+  `ascii.io` among them (OQ2's `.` ruling).
+- `module_segment_non_word_is_rejected`: table-driven over the cases that pass a raw
+  character check but fail the single-`Token::Word` rule -- `\` (a comment marker), `42`
+  (`Token::Int`), `3.5` (`Token::Float`) -- plus the multi-token cases (`my file`, `a;b`,
+  `(`, a quoted string).
+- `module_segment_colon_is_rejected`: `:` lexes inside an ordinary word, so only the
+  explicit rule excludes it.
+- `module_segment_star_is_rejected`: a bare `*` likewise, reserved for the wildcard target.
+
+The three segment tests above are mutation-tested by deleting their clause; the two
+end-to-end witnesses that the rule is *reached* (with the offending file actually present,
+so a not-found error cannot stand in for the naming rule) are
+`import_target_non_word_segment_is_error` and `import_target_star_segment_is_error` in
+`src/driver.rs`, mutation-tested by deleting the `check_module_name` call.
+
+Phase 4's own unit tests, unchanged from this spec's original list except that they run
+against `check_package_graph`'s revised inputs (above), not a `PackageGraph`:
+
 - `check_package_graph_missing_depends_is_error`: consumer importing `pkg::mod` with no
   `depends:` for `pkg` produces a located error matching the OQ4-A wording. Test must pin
   the exact message substring including line/col and both package names. Mutation-test by
@@ -585,62 +641,50 @@ error). The resolution path for module names in `discover_closure`:
 2. Otherwise the `Import`'s `ImportAnchor` distinguishes SelfPackage (own package, `self::`
    prefix) from Dependency (bare first segment names a `depends:` entry). Resolution is by
    anchor, not inference.
-3. For SelfPackage: look up `ModuleName::segments` in the current file's package
-   `ModuleTable` (built by `attribute_packages` before the walk begins, or via deferred
-   edge resolution, see below).
+3. For SelfPackage: path-join the importer's package root with `ModuleName::segments`,
+   then re-check the resulting file's own nearest-ancestor manifest (D2, below).
 4. For Dependency: look up the first segment in the current package's `depends:` entries.
    If absent, resolution stops here and records an `UnresolvedImport { kind:
    MissingDepends, .. }` (below) rather than raising OQ4-A itself; there is no path to
    join to, so this is the one point where resolution's own bookkeeping, not a diagnostic,
-   is the visible effect. If present, resolve the path to the dependency's manifest and
-   look up the remaining segments in that dependency's `ModuleTable` (built by
-   `attribute_packages` over every file in that package, not filtered by its `module:`
-   public list -- a private file still physically exists and still needs to be locatable
-   here) to get a candidate file. If no such module exists in the `ModuleTable` at all,
-   that is failure mode D1 ("no module `<module>`"), raised inline, same as the SelfPackage
-   case. If the module exists in the `ModuleTable` but not in the dependency's `module:`
-   public list, resolution records an `UnresolvedImport { kind: PrivateModule, .. }`
-   (OQ4-C is import-triggered, an audit check, not a locate failure). If the module is
-   public, re-check that the candidate file's own nearest-ancestor manifest is still that
-   same dependency manifest; if a nested inner manifest claims the file first, that is
-   failure mode D2, raised inline with its own wording (see OQ4).
+   is the visible effect. If present, resolve the entry's path to the dependency's manifest
+   (a path with no manifest at it is its own located error, see OQ4) and path-join the
+   dependency's root with the remaining segments. The join is not filtered by the
+   dependency's `module:` public list -- a private file still physically exists and still
+   needs to be locatable here. If nothing is at the joined path, that is failure mode D1
+   ("no module `<module>`"), raised inline, same as the SelfPackage case. If the file
+   exists but the module is not in the dependency's `module:` public list, resolution
+   records an `UnresolvedImport { kind: PrivateModule, .. }` (OQ4-C is import-triggered, an
+   audit check, not a locate failure). If the module is public, re-check that the file's
+   own nearest-ancestor manifest is still that same dependency manifest; if a nested inner
+   manifest claims the file first, that is failure mode D2, raised inline with its own
+   wording (see OQ4).
 
-The driver owns `Closure`, walks it, passes the plain path list to
-`packages::attribute_packages`, receives a `PackageGraph`, and resolves each file's
-`ImportTarget`s against that graph itself, writing resolutions back into the closure.
-`packages.rs` has no `use crate::driver` dependency and never sees an `ImportTarget`.
+The driver owns `Closure` and walks it, handing `packages::resolve_import` one `Import` at
+a time along with the importer's path and package, and writing the returned resolutions
+back into the closure. `packages.rs` has no `use crate::driver` dependency.
 
-**Two-pass structure in `discover_closure`.**
+**`discover_closure` stays single-pass.**
 
-The existing walk is single-pass (BFS from the entry). Module-name resolution requires
-knowing which package a file belongs to before its imports can be resolved; and knowing the
-package requires reading the manifest. The approach:
+The walk is BFS from the entry, as before. Module-name resolution needs to know which
+package a file belongs to before its imports can be resolved, and that means reading a
+manifest: when the walk reaches a file, its nearest ancestor manifest is located from its
+canonical path and loaded through `ManifestCache`, so each manifest is parsed at most once
+per build however many files it owns.
 
-1. First, before the BFS walk begins, scan for the ancestor manifest of the entry file and
-   load it. This seeds the package context.
-2. During the BFS walk, when `make_node` reads a file, its ancestor manifest is located
-   from its canonical path (walking up from its directory). Manifests are cached in a
-   `HashMap<PathBuf, Manifest>` keyed by manifest path so each manifest is read at most
-   once.
-3. Intra-package module-name resolution: the package's `ModuleTable` is built lazily. When
-   the first file from a package is processed, its manifest is read and its package root is
-   noted; `ModuleTable` entries are added as files are discovered (BFS order means all
-   files in a package may not have been found yet, so forward references within one package
-   require a second resolution pass or deferred edge resolution).
+No second pass and no deferred edges: path-joining does not care whether BFS has reached
+the target yet, so a forward reference to a sibling inside the same package resolves the
+first time it is seen. Every edge is therefore in the graph before `reject_cycles` runs,
+which removes the ordering hazard a deferred pass would have introduced (a cycle existing
+only in deferred edges goes undetected if those edges land after the check).
 
-**Deferred edge resolution for intra-package imports.** To avoid a two-full-pass design,
-use deferred resolution: when a module-name import target is not yet in the `ModuleTable`,
-record it as an unresolved edge. After the BFS walk completes, resolve all deferred edges
-(all files have been attributed by then). This is safe because `discover_closure` already
-dedupes by canonical path; intra-package edges resolve to a canonical path by joining the
-package root with the module path segments, then appending `.sth`. Path-joining alone is
-not sufficient: a package may nest another package inside it (manifest locality, OQ2), so
-after joining, resolution re-checks that the candidate file's own nearest-ancestor manifest
-is still the importer's package manifest. If an inner manifest claims the file first, the
-`self::` target does not name a module of the importer's package at all; resolution raises
-failure mode D2 directly, inline, naming the inner manifest that actually owns the file
-(see OQ4), rather than silently resolving across the boundary. This is what keeps `self::`
-from reaching into a nested package's private modules or around its layer check.
+Path-joining alone is not sufficient: a package may nest another package inside it
+(manifest locality, OQ2), so after joining, resolution re-checks that the candidate file's
+own nearest-ancestor manifest is still the manifest the import named. If an inner manifest
+claims the file first, the target does not name a module of that package at all; resolution
+raises failure mode D2 inline, naming the inner manifest that actually owns the file (see
+OQ4), rather than silently resolving across the boundary. This is what keeps `self::` from
+reaching into a nested package's private modules or around its layer check.
 
 **Interaction with `assemble_module`.** `assemble_module` receives a `Closure` whose
 `import_targets` are already resolved to module indices. No change to `assemble_module` is
@@ -648,9 +692,9 @@ required for this slice's package-graph logic; `check_package_graph` runs betwee
 `discover_closure` and `assemble_module` and produces errors before assembly begins. Its
 call site is a phase 4 change, not phase 3: phase 3 only extends `discover_closure` and
 `Closure` (adding the `unresolved_imports: Vec<packages::UnresolvedImport>` field described
-under `src/packages.rs` above); phase 4 adds the one-line call to `check_package_graph` in
-the orchestration function that already holds both the `PackageGraph` (from
-`attribute_packages`) and the closure it built, so nothing in phase 3 references a function
+under `src/packages.rs` above); phase 4 adds the call to `check_package_graph` in the
+orchestration function that already holds the closure and the walk's `ManifestCache` (see
+"Phase 4's inputs" under `src/packages.rs`), so nothing in phase 3 references a function
 that does not exist yet.
 
 **Quoted-path imports inside a package.** A file inside a package (has an ancestor
@@ -679,8 +723,9 @@ binding at parse time.
 
 Unit tests in `src/driver.rs` under `#[cfg(test)] mod tests`:
 
-- `discover_closure_deferred_intra_package_edge_resolves`: a file with a forward reference
-  to a sibling not yet seen in BFS order resolves correctly after the deferred pass.
+- `discover_closure_intra_package_forward_reference_resolves`: a file with a forward
+  reference to a sibling not yet seen in BFS order resolves on the spot, and every edge is
+  in the graph before `reject_cycles` runs.
 - `discover_closure_manifest_cache_reads_once`: two files in the same package trigger only
   one `sooth.pkg` file read (verify by counting `fs::read_to_string` calls or wrapping IO).
 - `discover_closure_inner_manifest_wins`: a file closer to an inner manifest is attributed
@@ -712,6 +757,16 @@ Unit tests in `src/driver.rs` under `#[cfg(test)] mod tests`:
 - `resolve_bare_package_name_no_module_is_error`: `import: core ;` (no segments past the
   package name) produces the "names a package, not a module" located error rather than a
   missing-`depends:` error, even when `core` has no `depends:` entry.
+- `import_target_non_word_segment_is_error` and `import_target_star_segment_is_error`:
+  OQ2's naming rule reached through a real import. The offending file (`42.sth`, `*.sth`)
+  is written in the fixture, so a D1 not-found error cannot stand in for the naming rule.
+  Mutation-test by deleting the `check_module_name` call.
+- `module_import_outside_a_package_is_error`: a module-name target in a file with no
+  ancestor manifest. Pin exact wording; mutation-test by returning `Ok(None)` in place of
+  the error, which would otherwise leave the import silently unbound.
+- `depends_entry_with_no_manifest_is_error`: a `depends:` path with no `sooth.pkg` at it is
+  located to the entry in the declaring manifest, not to the import. Pin exact wording;
+  mutation-test by replacing the message with the raw IO error.
 - `resolve_intrinsics_precedes_depends_lookup`: `import: intrinsics * ;` in a package whose
   manifest has no `depends:` at all resolves without error and adds no closure edge,
   proving the reserved name is matched before the `depends:` lookup rather than falling
@@ -877,11 +932,18 @@ The manifest-parsing and package-attribution logic is genuinely new responsibili
 distinct dependencies from `driver.rs`'s orchestration. Two new files are warranted:
 
 - `src/manifest.rs`: manifest data type and parser. Depends on `lexer`, `ast::Span`.
-- `src/packages.rs`: package attribution, module naming, graph checks. Depends on
-  `manifest`, `ast`. No dependency on `driver::Closure` (driver passes plain data in,
-  receives `PackageGraph` out).
+- `src/packages.rs`: package boundaries, module-name resolution, the naming rule, and the
+  graph checks. Depends on `manifest`, `ast`, `lexer`. No dependency on `driver` (the
+  driver hands one `Import` in and gets a path back), so it is unit-testable without
+  constructing a `Closure`.
 
-`driver.rs` imports both. No further split is needed at this slice's scope.
+`driver.rs` imports both, and keeps only what owns the `Closure`: the BFS walk, cycle
+rejection, assembly, and build/run orchestration. Re-checking CLAUDE.md's split signals at
+phase 3's exit is what put resolution here rather than leaving it in `driver.rs`, where it
+was first written: with it there, `driver.rs` did discovery *and* attribution *and* manifest
+IO *and* assembly *and* process orchestration, with the import divergence (`manifest`,
+`lexer`, `packages` against `Command`, `ExitStatus`) and the never-call-each-other function
+clusters to match. No further split is needed at this slice's scope.
 
 ---
 
@@ -923,6 +985,11 @@ stays) still fails with the identical OQ4-B message. If this test and Golden 2 e
 disagree, the layer check has silently become import-triggered.
 
 Test name: `layer_violation_fires_without_an_import`.
+
+Both Golden 2 tests depend on phase 4 having walked `depends:` entries and loaded their
+manifests itself: resolution only loads a dependency's manifest when an import reaches for
+one, so an unimported `depends:` target's `layer:` is otherwise never read. See "Phase 4's
+inputs" under `src/packages.rs`.
 
 **Golden 3: private module is a located error.**  
 A consumer importing `core::detail` where `core`'s manifest lists `module: cmp ;` but not
@@ -970,13 +1037,13 @@ Test name: `cross_package_import_no_depends_is_error`.
     },
     {
       "phase": 2,
-      "focus": "packages.rs: PackageGraph, derive_module_name, attribute_packages, ModuleTable, unit tests",
+      "focus": "packages.rs: find_package_root, PackageSite path-join, ManifestCache, the OQ2 segment rule, unit tests",
       "effort": "M",
       "difficulty": "standard"
     },
     {
       "phase": 3,
-      "focus": "ast.rs + parser.rs (ImportAnchor, ImportBinding, grammar rewrite) + driver.rs (two-pass discover_closure, deferred intra-package edges, manifest cache, REPL rejection) + repl.rs consumer updates + mechanical corpus migration (125 import sites); one compile-green commit",
+      "focus": "ast.rs + parser.rs (ImportAnchor, ImportBinding, grammar rewrite) + packages.rs resolve_import (eager path-join, nested-manifest re-check, manifest cache) wired into discover_closure + REPL rejection + repl.rs consumer updates + mechanical corpus migration (125 import sites); one compile-green commit",
       "effort": "L",
       "difficulty": "hard"
     },
