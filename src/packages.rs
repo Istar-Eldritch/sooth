@@ -180,19 +180,21 @@ pub(crate) fn select_site(
 ) -> Result<Option<PackageSite>, String> {
     if file == entry {
         if let Some(path) = &config.manifest_override {
+            // Canonicalized before the cache sees it: `ManifestCache` keys on
+            // the path it is handed, so `--manifest p/../p/sooth.pkg` beside
+            // an ancestor lookup of the same manifest would parse and audit it
+            // twice under two keys. Errors still name the path as typed.
+            let canon = std::fs::canonicalize(path)
+                .map_err(|e| format!("`--manifest {}`: {e}", path.display()))?;
             // Loaded through the cache, not parsed standalone: that is what
             // puts the flag manifest in `known_manifest_paths()`, so
             // `check_package_graph` audits its layer and its `depends:` names
             // exactly as it audits an ancestor manifest (F1).
             let manifest = manifests
-                .load(path)
+                .load(&canon)
                 .map_err(|e| format!("`--manifest {}`: {e}", path.display()))?
                 .clone();
-            return Ok(Some(PackageSite::new(
-                path.clone(),
-                manifest,
-                SiteOrigin::Flag,
-            )));
+            return Ok(Some(PackageSite::new(canon, manifest, SiteOrigin::Flag)));
         }
     }
     if let Some(site) = manifests.package_of(file)? {
@@ -1166,6 +1168,52 @@ mod tests {
                 flag.display(),
                 flag.display()
             )
+        );
+    }
+
+    /// R4/F1: the `ManifestCache` keys on the path it is handed, so a
+    /// non-canonical `--manifest` path must be canonicalized before the load
+    /// or the same manifest is parsed twice and audited twice by
+    /// `check_package_graph`. Mutation-test by dropping the `canonicalize`.
+    #[test]
+    fn select_site_non_canonical_flag_path_parses_the_manifest_once() {
+        let sb = Sandbox::new("flag-non-canonical");
+        let manifest = sb.write("p/sooth.pkg", "package: p ; layer: hosted ;");
+        let sibling = sb.write("p/lib.sth", "");
+        let entry = sb.write("scratch/main.sth", "");
+        let typed = sb.0.join("p/../p/sooth.pkg");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&typed), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        assert_eq!(site.manifest_path, manifest);
+        select_site(
+            &sibling,
+            &entry,
+            &config(Some(&typed), None),
+            &mut manifests,
+        )
+        .expect("the sibling resolves against its own ancestor manifest");
+        assert_eq!(manifests.parses, 1, "one manifest, one parse");
+        assert_eq!(manifests.known_manifest_paths(), vec![manifest]);
+    }
+
+    /// R5: a `--manifest` naming no readable file is an error (unlike an
+    /// absent user-level manifest, which is tier 4), and it names the flag.
+    /// Mutation-test by dropping the prefix on the `canonicalize` error.
+    #[test]
+    fn select_site_absent_flag_manifest_names_the_flag() {
+        let sb = Sandbox::new("flag-absent");
+        let entry = sb.write("scratch/main.sth", "");
+        let absent = sb.0.join("q/sooth.pkg");
+        let mut manifests = ManifestCache::default();
+        let err = match select_site(&entry, &entry, &config(Some(&absent), None), &mut manifests) {
+            Ok(_) => panic!("a `--manifest` naming no file is an error"),
+            Err(e) => e,
+        };
+        assert!(
+            err.starts_with(&format!("`--manifest {}`: ", absent.display())),
+            "unexpected message: {err}"
         );
     }
 

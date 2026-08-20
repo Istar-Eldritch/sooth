@@ -292,11 +292,16 @@ Extend `usage()` to document `--manifest <path>`.
   `resolve_dependency_module` (`src/packages.rs:577`) is also `Ancestor` — it is a real
   package.
 - `select_site(file, entry, config, manifests) -> Result<Option<PackageSite>, String>`:
-  1. If `file == entry` and `config.manifest_override` is `Some(p)`: load `p` through the
-     cache (`manifests.load(p)`, which parses via `parse_manifest`), return a `Flag` site
-     rooted at `p`'s dir. Loading (not a standalone `parse_manifest`) is what seeds the
-     flag manifest into `known_manifest_paths()`, so `check_package_graph` audits its layer
-     and `depends:` name-mismatch exactly as for an ancestor (F1).
+  1. If `file == entry` and `config.manifest_override` is `Some(p)`: **canonicalize `p`**,
+     then load it through the cache (`manifests.load`, which parses via `parse_manifest`),
+     and return a `Flag` site rooted at the canonical path's dir. Loading (not a standalone
+     `parse_manifest`) is what seeds the flag manifest into `known_manifest_paths()`, so
+     `check_package_graph` audits its layer and `depends:` name-mismatch exactly as for an
+     ancestor (F1). Canonicalizing first is what keeps that audit single: the cache keys on
+     the path it is handed, so an as-typed `--manifest ./pkg/sooth.pkg` (the expected
+     invocation shape) beside an ancestor lookup of the same file would parse and walk one
+     manifest twice under two keys. A canonicalize failure (no such file) is an error, not a
+     fall-through to tier 2, and names the path as the invoker typed it (R5).
   2. Else `package_of(file)?` → `Some` returns the `Ancestor` site.
   3. Else if `config.user_manifest` is `Some(p)` and it exists: parse via
      `parse_user_manifest`, return a `UserLevel` site rooted at `p`'s dir (synthesizing a
@@ -443,7 +448,11 @@ the golden non-hermetic on any machine that has one.
 
 1. `flag_resolves_entry_outside_its_package_tree` — an entry `.sth` in directory A, a
    package manifest in directory B whose `depends:` grants the import; `build entry.sth
-   --manifest B/sooth.pkg` builds, runs, exits clean. This is the S2 fixture pattern.
+   --manifest B/sooth.pkg` builds, runs, exits clean. This is the S2 fixture pattern. The
+   "runs" half must exec the path `build_with_manifest` returns, not call
+   `run`/`run_with_manifest`: those exec the output by bare name (`Command::new("main")`,
+   a PATH lookup that ENOENTs), a pre-existing defect this slice does not fix (Phase 3
+   review).
 2. `flag_overrides_ancestor_manifest_silently` — the entry file sits inside package P
    (ancestor manifest present) but `--manifest Q/sooth.pkg` is given; resolves against Q,
    with no conflict diagnostic emitted.
@@ -531,7 +540,7 @@ threshold.
     },
     {
       "phase": 4,
-      "focus": "packages.rs: per-tier diagnostics (delete module_import_without_manifest_error, add anonymous_package_error, user_manifest_missing_depends_error, and self_import_under_flag_manifest_error, tier-1 reuse of A/C/D1), rewrite the changed S1a tests, unit tests pinning each message",
+      "focus": "packages.rs: per-tier diagnostics (delete module_import_without_manifest_error, add anonymous_package_error, user_manifest_missing_depends_error, and self_import_under_flag_manifest_error, tier-1 reuse of A/C/D1), rewrite the changed S1a tests, unit tests pinning each message. Also add driver.rs's discover_closure_configured_anonymous_fallback, which Phase 3 deferred here because the tier-4 diagnostic it must pin is this phase's work (Phase 3 review, item 3)",
       "effort": "M",
       "difficulty": "standard"
     },
