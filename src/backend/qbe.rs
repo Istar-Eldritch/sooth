@@ -22,7 +22,19 @@ const OOM_TRAP_SYMBOL: &str = "sooth_oom_trap";
 /// single `{ l, l }` layout: the element type is erased at the backend, exactly
 /// as it is for the `Ptr` every `&T` becomes, so the `SliceId` in an
 /// `IrType::Slice` is a frontend/lowering discriminator with no ABI content.
-const SLICE_TYPE_SYMBOL: &str = "slice";
+///
+/// Deliberately not the bare word `slice`: a user struct is free to be named
+/// `slice`, and its own `type :slice = { … }` would then collide with this
+/// one. QBE accepts a duplicate `type` declaration silently (exit 0) and keeps
+/// only the last one, so whichever aggregate lost the race would pass/return
+/// as the other's shape with no diagnostic. This symbol is emitted verbatim
+/// (not through `qbe_name`), so it can pick a spelling `qbe_name` itself could
+/// never produce: `qbe_name` escapes every non-alnum/underscore character to
+/// `.{hex}.`, always contributing an *even* number of `.` (one opening, one
+/// closing, per escaped character). A symbol with an *odd* count of literal
+/// dots is therefore unreachable as `qbe_name(name)` for any user identifier
+/// `name`, however it is spelled.
+const SLICE_TYPE_SYMBOL: &str = "sooth.slice";
 
 /// Shared by both halves of the allocator so the gate is decided in exactly
 /// one place. Backend-private for the same reason as `OOM_TRAP_SYMBOL`.
@@ -136,8 +148,10 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     }
     // P7 slice 3c (R2.1): the shared `{ ptr, len }` slice aggregate, emitted
     // only when the module actually holds a slice so a slice-free program's
-    // QBE text stays byte-identical. Self-contained like the array and
-    // quotation types, so a struct member of slice type sees it declared.
+    // QBE text stays byte-identical. R5 bans a slice from every field
+    // position, so unlike the array/quotation types above there is no struct
+    // member to declare it ahead of; emission order relative to structs is
+    // therefore not load-bearing.
     if module_has_slice(ir) {
         writeln!(out, "type :{SLICE_TYPE_SYMBOL} = {{ l, l }}").unwrap();
     }
@@ -236,9 +250,12 @@ fn emit_array_type(out: &mut String, idx: usize, layout: &ArrayLayout) {
 }
 
 /// Whether any function in the module mentions a slice, in a param, a return,
-/// or a value: the gate on emitting the shared `:slice` aggregate type. A scan
+/// or a value: the gate on emitting the shared slice aggregate type. A scan
 /// rather than a registry length, because every slice shares one layout, so
-/// there is nothing per-`SliceId` for the backend to tabulate.
+/// there is nothing per-`SliceId` for the backend to tabulate. Scans only
+/// `params`/`ret`/`value_types`, not struct field layouts: R5 bans a slice
+/// from every field position, so there is no member-position slice this scan
+/// needs to (and does not) see.
 fn module_has_slice(ir: &IrModule) -> bool {
     ir.funcs.iter().any(|f| {
         f.params
@@ -360,7 +377,7 @@ fn width(ty: IrType, layouts: Layouts) -> &'static str {
         IrType::Code | IrType::Quotation(_) => "l",
         // P7 slice 3c (R2.2): a slice value is a pointer to its two-slot
         // `{ptr, len}` storage in a register, like every other aggregate; its
-        // `:slice` type is only spelled in ABI/member positions.
+        // `SLICE_TYPE_SYMBOL` type is only spelled in ABI/member positions.
         IrType::Slice(_) => "l",
     }
 }
@@ -379,9 +396,9 @@ fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
         // P7 slice 3c (R3): the soundness-critical wildcard. A slice crossing
         // a param/return/argument boundary is a 16-byte aggregate, so it must
-        // be spelled `:slice` for QBE to apply its by-value classification;
-        // falling through to `width()` would spell it `l` and silently pass
-        // one word of a two-word value.
+        // be spelled `:{SLICE_TYPE_SYMBOL}` for QBE to apply its by-value
+        // classification; falling through to `width()` would spell it `l` and
+        // silently pass one word of a two-word value.
         IrType::Slice(_) => format!(":{SLICE_TYPE_SYMBOL}"),
         _ => width(ty, layouts).to_string(),
     }
@@ -2844,7 +2861,7 @@ type: Counter n i64 ;
     }
 
     /// P7 slice 3c (R3): the soundness wildcard. A slice in an ABI position is
-    /// the shared `:slice` aggregate, so QBE applies its by-value
+    /// the shared `SLICE_TYPE_SYMBOL` aggregate, so QBE applies its by-value
     /// classification to all 16 bytes; the wildcard's `width()` answer (`l`)
     /// would pass a single register and lose the length. Driven end-to-end
     /// through `emit` so the spelled type is one the module actually declares.
@@ -2858,7 +2875,10 @@ type: Counter n i64 ;
             width(slice, empty_layouts()),
             "a slice must not fall through to a register width"
         );
-        assert_eq!(qbe_abi_ty(slice, empty_layouts()), ":slice");
+        assert_eq!(
+            qbe_abi_ty(slice, empty_layouts()),
+            format!(":{SLICE_TYPE_SYMBOL}")
+        );
         // In a register it is still one pointer to its storage, like every
         // other aggregate.
         assert_eq!(width(slice, empty_layouts()), "l");
@@ -2880,16 +2900,78 @@ type: Counter n i64 ;
         })
         .unwrap();
         assert!(
-            il.contains("type :slice = { l, l }"),
+            il.contains(&format!("type :{SLICE_TYPE_SYMBOL} = {{ l, l }}")),
             "the module declares the shared slice aggregate: {il}"
         );
         assert!(
-            il.contains("function $t(:slice %v0)"),
+            il.contains(&format!("function $t(:{SLICE_TYPE_SYMBOL} %v0)")),
             "the param is spelled as the aggregate: {il}"
         );
         // A slice-free module emits no slice type, so every existing program's
         // QBE text is byte-identical.
-        assert!(!emit_src(": main ( -- ) 1 . ;").contains("type :slice"));
+        assert!(!emit_src(": main ( -- ) 1 . ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
+    }
+
+    /// Review finding (Phase 2): a user struct literally named `slice` used to
+    /// collide with the backend's own reserved `:slice` aggregate -- QBE
+    /// accepts a duplicate `type` declaration silently and keeps only the
+    /// last one, so whichever type lost the race would cross a param/return
+    /// boundary as the other's shape with no diagnostic. `SLICE_TYPE_SYMBOL`
+    /// now spells a name (`sooth.slice`) `qbe_name` can never produce for any
+    /// user identifier, so the two aggregates always emit under distinct
+    /// names.
+    #[test]
+    fn user_struct_named_slice_does_not_collide_with_slice_aggregate() {
+        let mut slices = Vec::new();
+        let slice =
+            crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        let user_struct = StructLayout {
+            name: "slice",
+            size: 8,
+            align: 8,
+            fields: vec![crate::ir::FieldLayout {
+                offset: 0,
+                ty: IrType::Int {
+                    bits: 64,
+                    signed: true,
+                },
+                size: 8,
+                align: 8,
+            }],
+            is_linear: false,
+            has_drop_overload: false,
+            bundle: false,
+            drop_generation: None,
+        };
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![slice],
+            ret: None,
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: Vec::new(),
+                term: Terminator::Ret(None),
+            }],
+            value_types: vec![slice],
+        };
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            structs: vec![user_struct],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            il.contains(&format!("type :{SLICE_TYPE_SYMBOL} = {{ l, l }}")),
+            "the shared slice aggregate keeps its own reserved name: {il}"
+        );
+        assert!(
+            il.contains("type :slice = { l }"),
+            "the user struct named `slice` keeps its own single-field shape: {il}"
+        );
+        assert!(
+            !il.contains("type :slice = { l, l }"),
+            "the user struct's declaration must not be overwritten by the shared aggregate's shape: {il}"
+        );
     }
 
     #[test]
