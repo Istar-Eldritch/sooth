@@ -1,5 +1,5 @@
 \ core::cmp -- the typed comparisons over the raw flag primitives.
-import: intrinsics i | ueq ult ugt ulte ugte une | ;
+import: intrinsics i | ueq ult ugt ulte ugte une branch | ;
 
 export: eq lt gt lte gte ne ;
 

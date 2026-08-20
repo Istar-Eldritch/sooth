@@ -54,13 +54,13 @@ inheriting a developer's global config is a reproducibility hole, and the model 
 fallback for any file with an ancestor manifest; `--manifest` is a different thing, a named
 override rather than a discovered one, which is why it's exempt from that rule.
 
-**F2. Intra-package module references need a stated base.** `core/text/ascii.sth` says
-`import: cmp c | lt gt | ;`, a sibling named without the package prefix, while the hub says
-`text::ascii`. Both read naturally, and they are only consistent if the rule is *module names
-are package-root-relative inside their own package, and `pkg::`-qualified across packages*.
-That rule is not written down anywhere yet. The alternative (always fully qualified, even
-internally) is more uniform and more verbose, and would make moving a package harder for no
-gain.
+**F2. Import anchors are syntactic, not inferred.** The rule: a `self::` prefix marks the
+importing file's own package, package-root-relative; a bare first segment always names a
+dependency package. `core/text/ascii.sth` says `import: self::cmp c | lt gt | ;` and the
+hub says `import: self::text::ascii a | upper? lower? | ;`, both unambiguous by the prefix,
+not by absence of `::`. Cross-package imports keep their bare first segment: `import:
+core::bool b | if | ;` in `collections/vec.sth` names the `core` dependency. A dependency
+named `text` and a local `text/` directory coexist without a precedence rule.
 
 **F3. Is `text.sth` beside `text/` legal?** The hub pattern needs it: `core::text` is a file
 and `core::text::ascii` is a file in a directory of the same name. Nothing in the design

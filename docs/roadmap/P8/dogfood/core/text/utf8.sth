@@ -1,6 +1,6 @@
 \ core::text::utf8
 import: intrinsics * ;
-import: bool b | if | ;
+import: self::cmp c | eq | ;
 
 export: continuation? ;
 

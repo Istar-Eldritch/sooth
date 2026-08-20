@@ -1,7 +1,6 @@
 \ core::text::ascii -- name derives from the path, not from a manifest entry.
 import: intrinsics * ;
-import: cmp c | lt gt | ;
-import: bool b | if | ;
+import: self::cmp c | gte lte | ;
 
 export: upper? lower? ;
 

@@ -20,9 +20,13 @@ layer, its dependencies, and which modules it makes public:
 ```
 package: core ;
 layer: core ;
-depends: intrinsics builtin ;
 module: text cmp ;
 ```
+
+`intrinsics` is compiler-provided and needs no `depends:` entry: every package may use it
+implicitly, so declaring it carries no information. Attempting `depends: intrinsics ...` in
+any form is a parse-time error. The per-file `import: intrinsics * ;` is where the
+auditability argument applies.
 
 **A module is a file, and its name derives from its path within the package.**
 `text/ascii.sth` is the module `text::ascii`; nesting is naming, with no separate mechanism
@@ -42,11 +46,16 @@ target comes first; the qualifier is optional and, when omitted, defaults to the
 last segment:
 
 ```
-import: text::ascii a ;               \ same package, by path-derived name, qualifier a
-import: core::cmp ;                  \ another package, qualifier defaults to cmp
-import: intrinsics * ;               \ every exported name, unqualified, no qualifier bound
-import: core::text s | split trim | ; \ two names unqualified, plus the qualifier
+import: self::text::ascii a ;          \ own package, path-derived name, qualifier a
+import: core::cmp ;                   \ dependency package, qualifier defaults to cmp
+import: intrinsics * ;                \ every exported name, unqualified, no qualifier bound
+import: core::text s | split trim | ; \ dependency, two names plus qualifier
 ```
+
+The anchor is syntactic: a `self::` prefix names the importing file's own package,
+package-root-relative. A bare first segment always names a dependency package. There is no
+inference and no ambiguity: a dependency named `text` and a local `text/` directory coexist
+fine.
 
 `*` is only recognized as the wildcard keyword in the position right after the target, with
 nothing else following but `;` — it never appears inside `| ... |`. This keeps it from
@@ -80,7 +89,7 @@ a hub, per above, so the two features compose rather than overlap.
 
 **The intrinsics are a module too.** `BUILTIN_WORDS` (`src/check/declarations.rs:63-110`,
 40 names: the shuffles, the arithmetic, the `u`-prefixed comparisons, `branch`, `tag`, `.`,
-`fill`, `len`) is reachable only through `import: intrinsics * ;`. It is a
+`fill`, `len`) is reachable only through an `import: intrinsics ...` line. It is a
 compiler-provided module, not a package with sources, so `intrinsics` is one reserved name
 resolved without a path. The table itself does not move, and `has_self_tail_call` keeps
 using it unchanged: only *visibility* is gated. `>`-prefixed conversions are claimed by
@@ -228,6 +237,12 @@ already present: the manifest declares, `import:` uses.
 file (`export:`) and package (`module:`), with everything inside a package mutually
 reachable. Revisit when a package is large enough that its internal structure needs
 defending; none is.
+
+**`super::` (parent-module-relative) imports.** Deferred. `self::` is package-root-absolute
+and already names every module in the package, so `super::` adds nothing at the one-or-two
+nesting levels everything here occupies. It only pays for wholesale subtree moves at three-
+plus levels of nesting, and it is purely additive with no migration cost when that need
+arises.
 
 **Manifest path tables** (`module: text::ascii "text/ascii.sth" ;`). Declined once hubs
 existed: a hub re-exporting under a chosen name is already a renaming mechanism, and two
