@@ -4718,6 +4718,37 @@ mod tests {
             .expect_err("a bare type variable is not an offset");
     }
 
+    /// Call-site witness for `check_poly_slice_offset`: the direct-call test
+    /// above proves the function's own logic, but not that the three sites
+    /// wiring it in (`subslice`'s start and length, `&>`'s index) actually
+    /// call it. A computed (non-literal) `i64` operand at each site must be
+    /// rejected the same way a bare direct call is.
+    #[test]
+    fn poly_slice_offset_sites_reject_a_computed_i64() {
+        let err = check_src(
+            ": f ( Slice[i64] i64 'T -- usize 'T ) | x | | k | k 2 >usize subslice len x ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`subslice` mixes `usize` with a computed `i64`"),
+            "unexpected message: {err}"
+        );
+        let err = check_src(
+            ": f ( Slice[i64] i64 'T -- usize 'T ) | x | | k | 0 >usize k subslice len x ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`subslice` mixes `usize` with a computed `i64`"),
+            "unexpected message: {err}"
+        );
+        let err =
+            check_src(": f ( Slice[i64] i64 'T -- i64 'T ) | x | | k | k &> @ x ;\n").unwrap_err();
+        assert!(
+            err.contains("`&>` mixes `usize` with a computed `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
     /// R12 (poly half): a mutable view is exclusivity-tracked in a generic
     /// body too -- but by the poly walk's *move* tracking, not by a reborrow:
     /// a non-`Copy` local is consumed on read there, so a mutable view is

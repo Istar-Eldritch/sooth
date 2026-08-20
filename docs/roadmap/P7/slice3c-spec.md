@@ -10,8 +10,9 @@ two warts of today's only working spelling: a fixed length in the type (`&[i64 5
 threaded-length second parameter (`( &[i64 5] usize -- i64 )`).
 
 A slice is **second-class, input-only, non-owning**: constructing one consumes nothing,
-no user word may return one, and the declaration-level output ban
-(`stored_reference_output_error`) covers it exactly as it covers `&T`. Element access
+no non-`inline` user word may return one, and the declaration-level output ban
+(`stored_reference_output_error`) covers it exactly as it covers `&T` (an `inline` word
+is exempt from that ban for both, the same pre-existing carve-out either way). Element access
 keeps the existing runtime out-of-bounds trap; there is **no** fallible `Option`/`Result`
 accessor in this slice (see R9 and the roadmap correction in R10).
 
@@ -733,10 +734,13 @@ carries the bit (R1.1) and the `SliceId` registry is keyed on it (R1.2), while a
 lowers to the opaque `IrType::Ptr` that says nothing about it. `FuncBuilder::ref_mutable`
 carries it per `Value` beside `ref_inner`, both filled by one `record_reference` helper so
 they cannot drift, and seeded at every route a reference reaches `slice` by: a prefix
-borrow or projection (the name says it), a declared parameter (`Type::Ref`'s own bool), a
-branch join (`Phi`), and a materialized quotation's env capture. All four are golden-
-covered; the alternative (looking the shape up by element alone) is not merely untidy --
-a program holding only a mutable view has no shared row to find, so it panics.
+borrow or field/variant-field projection (the name says it), an array-element projection
+(`&>`, reachable only through a *nested* array, the one element shape that is itself
+sliceable), an owned-cell payload projection (`&^`), a declared parameter (`Type::Ref`'s
+own bool), a branch join (`Phi`), and a materialized quotation's env capture -- six routes,
+not four. All six are golden-covered; the alternative (looking the shape up by element
+alone) is not merely untidy -- a program holding only a mutable view has no shared row to
+find, so it panics.
 
 **Phase 4 exit notes (the poly-path rule R11 asked for, and one gap left as found):**
 
@@ -758,15 +762,16 @@ a program holding only a mutable view has no shared row to find, so it panics.
   ``&> is not permitted on `&[i64 3]` ``) -- and closing it means threading `refs` into the
   poly walk to resolve a `RefId`, which would move an existing diagnostic. Left as found.
 
-**Phase 4 mutation-tested guards (11, all killed):** the `borrow_mutability` slice arm
+**Phase 4 mutation-tested guards (13, all killed):** the `borrow_mutability` slice arm
 deleted (the two-live-mutable-subslices golden flips to accept), `slice` interning a
 shared view off a `&!` receiver (mono and poly, separately), the poly `&>` slice-receiver
 mutability guard stubbed, the poly `slice` generic-element gate opened, the poly
-`subslice` arm deleted, `check_poly_slice_offset` made permissive, the parser interning
-`!Slice[T]` as shared, `!Slice` dropped from the reserved names, and the lowering
-mutability lookup hardcoded shared at each of its four seeding routes
-(`reference_is_mutable` at the `slice` arm, the prefix borrow, the declared parameter, the
-branch join, the env capture).
+`subslice` arm deleted, `check_poly_slice_offset` made permissive at its own three call
+sites (`subslice`'s two operands, `&>`'s one), the parser interning `!Slice[T]` as shared,
+`!Slice` dropped from the reserved names, and the lowering mutability lookup hardcoded
+shared at each of its six seeding routes (the prefix borrow/projection, the array-element
+projection, the owned-cell payload projection, the declared parameter, the branch join,
+the env capture).
 
 ### Phase 5: roadmap correction, regression sweep, growth-signal re-check  *(standard)*
 

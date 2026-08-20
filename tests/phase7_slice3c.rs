@@ -530,3 +530,40 @@ type: W a [i64 4] b [i64 4] ;
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
 }
+
+/// R12: two more routes a reference reaches `slice` by, beyond the four the
+/// exit notes name -- `&>`'s array-element projection (a nested array, the
+/// only shape where that projection can feed `slice` at all) and `&^`'s
+/// owned-cell payload projection. Both derive a fresh reference whose
+/// mutability is the sigil's own, same as a prefix borrow, but through a
+/// different `push_reference` call site; each half writes through its view
+/// and reads back through the original owner to prove the view really
+/// aliases it.
+#[test]
+fn a_view_built_from_a_nested_array_element_or_owned_cell_payload_writes_through() {
+    let src = "\
+: main ( -- )
+  0 2 fill 2 fill | n |
+  &!n 0 >usize &!> slice 0 >usize &!> 7 !
+  &!n 0 >usize &!> slice 0 >usize &!> @ .
+;
+";
+    let prog = Scratch::write("nestedarray", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+
+    let src = "\
+type: Buf data ^[i64 4] ;
+: main ( -- )
+  0 4 fill ^ Buf | b |
+  &!b &!data &!^ slice 0 >usize &!> 9 !
+  &!b &!data &!^ slice 0 >usize &!> @ .
+  b drop
+;
+";
+    let prog = Scratch::write("ownedcell", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+}
