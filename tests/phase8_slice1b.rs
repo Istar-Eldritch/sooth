@@ -1,15 +1,14 @@
 //! P8.S1b goldens: the `--manifest` CLI flag and the fallback chain past it
 //! (user-level manifest, then the implicit anonymous package). Every
 //! negative golden pins the exact diagnostic substring, never a bare
-//! `is_err()`. Driven through `driver::build_with_manifest`/`emit_ssa` on a
-//! fixture tree, never `select_site`/`resolve_import` directly (S1a's
-//! lesson: a direct-call test leaves the CLI wiring unguarded).
+//! `is_err()`. Every golden spawns the real `sooth` binary (never
+//! `driver::build_with_manifest`/`select_site`/`resolve_import` directly):
+//! a direct-call test would prove the library honours the flag without
+//! proving `main` ever passes it along (S1a's lesson, generalized).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
-
-use sooth::driver;
 
 /// A scratch tree of packages (each its own directory with a `sooth.pkg` and
 /// `.sth` files), removed on drop.
@@ -41,13 +40,27 @@ impl Drop for Tree {
     }
 }
 
-/// Build and run the entry file under a `--manifest` override, returning
-/// `(stdout, exit_code)`.
+/// Build the entry file through the real `sooth build --manifest` CLI
+/// invocation (matching the exit criterion literally, not
+/// `driver::build_with_manifest` called directly), then run the resulting
+/// binary and return `(stdout, exit_code)`. Spawning the binary pins
+/// `main`'s own wiring of the flag on the `build` arm, not just the
+/// library's handling of it once wired.
 fn build_and_run_with_manifest(entry: &Path, manifest: &Path) -> (String, i32) {
-    let binary = driver::build_with_manifest(entry, Some(manifest)).expect("build should succeed");
-    let output = std::process::Command::new(&binary)
+    let build_output = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(entry)
+        .arg("--manifest")
+        .arg(manifest)
         .output()
-        .expect("binary should run");
+        .expect("sooth build should spawn");
+    assert!(
+        build_output.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+    let binary = entry.with_extension("");
+    let output = Command::new(&binary).output().expect("binary should run");
     std::fs::remove_file(&binary).ok();
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
