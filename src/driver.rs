@@ -1197,6 +1197,32 @@ mod tests {
         check::check(&mut module).expect("checks");
     }
 
+    /// R1 tier 4: neither `--manifest` nor a user-level manifest is present,
+    /// so a manifest-less entry falls all the way to the implicit anonymous
+    /// package -- a quoted-path sibling still resolves there. Driven through
+    /// an explicit `ResolutionConfig` with both fields `None`, never through
+    /// `ResolutionConfig::from_env()`, so the assertion can't be at the mercy
+    /// of the test machine's real `$XDG_CONFIG_HOME`.
+    #[test]
+    fn discover_closure_configured_anonymous_fallback() {
+        let s = Sandbox::new("anonymous-fallback");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\n",
+        );
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: None,
+        };
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("a quoted-path sibling resolves under an anonymous package");
+        assert_eq!(closure.nodes.len(), 2, "entry and b.sth");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
     fn os(s: &str) -> Option<OsString> {
         Some(OsString::from(s))
     }
