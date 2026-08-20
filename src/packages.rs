@@ -4,6 +4,7 @@
 //! passes the plain path list here, and gets back a `PackageGraph` to
 //! resolve imports against.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -29,9 +30,9 @@ pub struct PackageInfo {
 }
 
 /// Result of `attribute_packages`: every discovered package, keyed by its
-/// canonical manifest path, plus each input file's attribution. Carries
-/// only path-derived data, with no import data; cross-package import
-/// resolution reads this as a lookup table.
+/// manifest path, plus each input file's attribution. Carries only
+/// path-derived data, with no import data; cross-package import resolution
+/// reads this as a lookup table.
 #[derive(Debug, Clone, Default)]
 pub struct PackageGraph {
     pub packages: HashMap<PathBuf, PackageInfo>,
@@ -47,12 +48,13 @@ impl PackageGraph {
     }
 }
 
-fn find_ancestor_manifest(file: &Path) -> Option<PathBuf> {
+/// The nearest ancestor directory of `file` holding a `sooth.pkg`, i.e. the
+/// package root.
+fn find_package_root(file: &Path) -> Option<PathBuf> {
     let mut dir = file.parent();
     while let Some(d) = dir {
-        let candidate = d.join("sooth.pkg");
-        if candidate.is_file() {
-            return Some(candidate);
+        if d.join("sooth.pkg").is_file() {
+            return Some(d.to_path_buf());
         }
         dir = d.parent();
     }
@@ -62,42 +64,38 @@ fn find_ancestor_manifest(file: &Path) -> Option<PathBuf> {
 /// For each file path, walk upward to locate a `sooth.pkg`, derive its
 /// module name relative to that manifest's package root, and accumulate the
 /// result into a `PackageGraph`. Takes only paths, no import data.
+///
+/// Paths in and out are used verbatim: keys are canonical only if `files`
+/// is canonical, so callers keying into the result must pass the same form
+/// of path they later look up.
 pub fn attribute_packages(files: &[PathBuf]) -> Result<PackageGraph, String> {
     let mut graph = PackageGraph::default();
     for file in files {
-        let manifest_path = find_ancestor_manifest(file);
+        let root = find_package_root(file);
+        let manifest_path = root.as_ref().map(|r| r.join("sooth.pkg"));
         graph
             .attribution
             .insert(file.clone(), manifest_path.clone());
-        let Some(manifest_path) = manifest_path else {
+        let (Some(root), Some(manifest_path)) = (root, manifest_path) else {
             continue;
         };
-        if !graph.packages.contains_key(&manifest_path) {
-            let src = std::fs::read_to_string(&manifest_path)
-                .map_err(|e| format!("reading manifest {}: {e}", manifest_path.display()))?;
-            let manifest = manifest::parse_manifest(&src, &manifest_path)?;
-            let root = manifest_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            graph.packages.insert(
-                manifest_path.clone(),
-                PackageInfo {
+        let info = match graph.packages.entry(manifest_path) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let manifest_path = e.key().clone();
+                let src = std::fs::read_to_string(&manifest_path)
+                    .map_err(|e| format!("reading manifest {}: {e}", manifest_path.display()))?;
+                let manifest = manifest::parse_manifest(&src, &manifest_path)?;
+                e.insert(PackageInfo {
                     manifest,
-                    manifest_path: manifest_path.clone(),
-                    root,
+                    manifest_path,
+                    root: root.clone(),
                     modules: ModuleTable::new(),
-                },
-            );
-        }
-        let root = graph.packages[&manifest_path].root.clone();
+                })
+            }
+        };
         let module_name = derive_module_name(file, &root)?;
-        graph
-            .packages
-            .get_mut(&manifest_path)
-            .expect("just inserted or already present above")
-            .modules
-            .insert(module_name, file.clone());
+        info.modules.insert(module_name, file.clone());
     }
     Ok(graph)
 }
@@ -277,6 +275,16 @@ mod tests {
         let sb = Sandbox::new("dot");
         let name = derive_module_name(&sb.0.join("ascii.io.sth"), &sb.0).unwrap();
         assert_eq!(name, "ascii.io");
+    }
+
+    #[test]
+    fn derive_module_name_without_sth_extension_is_error() {
+        let sb = Sandbox::new("noext");
+        let err = derive_module_name(&sb.0.join("foo.txt"), &sb.0).unwrap_err();
+        assert!(
+            err.contains("does not end in `.sth`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
