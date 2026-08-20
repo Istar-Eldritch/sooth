@@ -1082,8 +1082,15 @@ rows, no borrow analysis needed to write the compiler in it.
   it, and an invariant a later slice must revoke is worse than one never claimed. Slicing a fixed
   array into a general view landed as `Slice[T]` (shared) / `!Slice[T]` (mutable), its own
   second-class, input-only type built from a `&[T N]` / `&![T N]` array reference, indexed with a
-  runtime bounds trap rather than the fallible accessor once sketched (Phase 7 Slice 3c); slicing
-  `str` itself into a substring view stays deferred, see Open / deferred.
+  runtime bounds trap and no fallible accessor (Phase 7 Slice 3c); slicing `str` itself into a
+  substring view stays deferred, see Open / deferred.
+- Storage and view are two types with two costs, permanently. The length lives in the *storage*
+  type (`[T N]`: statically sized, so it can be a struct field and needs no allocator, which is
+  what makes the `fixed` layer possible at all) and is carried at runtime by the *view* type
+  (`Slice[T]`). So `len` on storage folds to a compile-time constant read off the type and leaves
+  the array in place, while `len` on a view is a runtime load of the descriptor's second word and
+  consumes the view. `'N` length polymorphism is how a word stays generic over storage without
+  taking a view, which is why it monomorphizes per length rather than erasing it.
 - A user-supplied destructor is an overload of `drop` for a concrete type, not a new
   declaration form, and defining one *forces* that type linear regardless of what its fields
   would otherwise imply. `Copy` and a user destructor are mutually exclusive, for the reason
@@ -1213,11 +1220,16 @@ that were argued out rather than assumed.
   (Phase 3 Slice 1 defers loop-carried linear values).
 - **Slicing `str` into a substring view.** Phase 7 Slice 3c delivered the general case for a
   fixed array (see Memory model): `Slice[T]` / `!Slice[T]`, resolved as its own `Type`/`IrType`
-  variant rather than a `&`-prefixed borrow of the storage type, so no new answer was needed from
-  `contains_reference`, `is_copy`, or `is_ref`. `str` was probed as a source for the same
-  mechanism and found closed for now, not by design but by a prerequisite gap: a `str` *local*
-  cannot be borrowed at all (the scalar-local gate names `str` explicitly in its rejection), so
-  the only `&str` obtainable today is a `str` *static*, and even then a `str`'s `{bytes_ptr, len}`
+  variant rather than a `&`-prefixed borrow of the storage type, which is what kept `str` and
+  `cstr` from having to grow a rooting bit: no *existing* type's answer changed. The new variant
+  answers all three predicates itself, and those answers are the soundness core -- `is_ref` true
+  (a view is legal input, is not move-tracked, and is owed no `drop`), `is_copy` false for the
+  mutable view (duplicating it would put two names through one exclusive borrow), and
+  `contains_reference` true (so the no-declared-output-reference rule keeps covering a view).
+  `str` was probed as a source for the same mechanism and found closed for now, not by design
+  but by a prerequisite gap: a `str` *local* cannot be borrowed at all (the scalar-local gate
+  names `str` explicitly in its rejection), so the only `&str` obtainable today is a `str`
+  *static*, and even then a `str`'s `{bytes_ptr, len}`
   descriptor is built statically per literal (`emit_str_literal`, `src/backend/qbe.rs`), a
   representation a view sliced out of it at runtime cannot reuse without materializing a fresh
   descriptor. Revisit once a `str` local (or a struct-typed `static:`, also undeclarable today)

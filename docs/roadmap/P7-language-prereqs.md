@@ -139,7 +139,7 @@ run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
 **P7.S3c — Slicing a buffer into a view.** `[ done ]` DESIGN.md lists slices among
 `core`'s concrete types but defers the mechanism ("Slicing a buffer into a view is
 deferred"); `str` is already the pattern's one instance, a pointer plus a runtime
-length. A general `Slice['T]` view over an array carries its length at runtime, which is
+length. A general `Slice[T]` view over an array carries its length at runtime, which is
 what makes it the right answer to a problem the alternatives handle badly: a word over a
 slice needs no length variable in its signature, so it never asks the checker to prove an
 index against an abstract `'N`. Indexing a slice keeps the existing runtime
@@ -159,14 +159,16 @@ every exit criterion below is exercised by a *concrete* consumer — an array-re
 parameter, a runtime `usize` index, a bounds guard, a runtime trap on miss, and a
 recursive divide-and-conquer consumer, none of which needs a row or a quotation splice.
 Only a comparator-taking consumer (`sort`/`bin_search`) needs S3d's quotation splice.
-**Exit:** a buffer can be sliced into a view; a word takes `Slice['T]` without naming a
-length variable; indexing traps at runtime on an out-of-range index, with no
-`Option`/`Result` accessor (deferred to P7.S3e). Landed as `Type::Slice(SliceId, bool)` /
-`IrType::Slice`, a second-class, input-only, non-owning view interned per `(element,
-mutable)` and lowered as a 16-byte `{ptr, len}` aggregate, with `slice`/`subslice`
-constructing one from a `&[T N]`/`&![T N]` array reference and `&>`/`&!>`/`len` dispatching
-on it alongside their existing array arms (`docs/roadmap/P7/slice3c-spec.md`,
-`tests/phase7_slice3c.rs`).
+**Exit:** a buffer can be sliced into a view; a word takes `Slice[T]` over a *concrete*
+element type without naming a length variable (a generic element -- `Slice` over the word's
+own type variable -- is a locked non-goal, blocked on
+generic-instantiation-over-own-variable and rejected by name); indexing traps at runtime on
+an out-of-range index, with no `Option`/`Result` accessor (deferred to P7.S3e). Landed as
+`Type::Slice(SliceId, bool)` / `IrType::Slice`, a second-class, input-only, non-owning
+view interned per `(element, mutable)` and lowered as a 16-byte `{ptr, len}` aggregate, with
+`slice`/`subslice` constructing one from a `&[T N]`/`&![T N]` array reference and
+`&>`/`&!>`/`len` dispatching on it alongside their existing array arms
+(`docs/roadmap/P7/slice3c-spec.md`, `tests/phase7_slice3c.rs`).
 
 **P7.S3d — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
 quotation marker only where an enum eliminator collects it; every other consumer is

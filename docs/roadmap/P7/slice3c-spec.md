@@ -3,9 +3,10 @@
 ## Goal
 
 Add `Type::Slice(SliceId, bool)`: a borrowed, length-carrying view over a buffer. A
-non-`inline` word can take `Slice['T]` as a parameter and index it without naming a
-length variable, so the checker never has to prove an index against an abstract `'N`.
-This is the signature shape the trait-bounds consumers (P7.S3e) want, and it removes the
+non-`inline` word can take `Slice[T]` over a concrete element type as a parameter and index
+it without naming a length variable, so the checker never has to prove an index against an
+abstract `'N`. This is the signature shape the trait-bounds consumers (P7.S3e) want, and it
+removes the
 two warts of today's only working spelling: a fixed length in the type (`&[i64 5]`) and a
 threaded-length second parameter (`( &[i64 5] usize -- i64 )`).
 
@@ -284,7 +285,7 @@ not quietly restated anywhere.
       that prints `25` today).
 - [ ] A recursive `rec ( Slice[i64] -- i64 )` doing divide-and-conquer over `subslice`
       halves compiles and runs (golden).
-- [ ] `( -- Slice['T] )` as a declared user output is rejected with
+- [ ] `( -- Slice[i64] )` as a declared user output is rejected with
       `stored_reference_output_error` (`a reference cannot be stored`) — the output ban
       covers slices (asserts R5).
 - [ ] `dup` on a `&!` (mutable) slice is a located error; `dup` on a shared slice is
@@ -812,6 +813,22 @@ warnings`, and the full `cargo test` (1290+ tests, every suite including
 `tests/phase7_slice3a.rs`, `tests/phase7_slice3b.rs`, `tests/qbe_baseline.rs`) are green
 unmodified -- the phased work left nothing for this sweep to fix.
 
+**Phase 5 exit notes (known limitation, recorded not fixed):** capturing a slice *value* into
+a materialized quotation ICEs at `backend/qbe.rs:521` (``an aggregate field is copied by blit,
+not scalar-stored``). Pre-existing and not slice-specific -- capturing an array or a struct
+value panics identically -- so Phase 2's `IrType::Slice` arm there is right and the gap is in
+the env bundle's one-word-per-capture shape. Capturing the *reference* and slicing inside the
+body works (`a_materialized_quotation_slices_a_captured_mutable_reference`). Fixing it is out
+of bounds for this sweep, which is docs-only.
+
+**Phase 5 exit notes (test name overclaims, recorded not fixed):**
+`len_over_a_slice_answers_runtime_length` (`src/check/word_families.rs`) is a bare
+`check_src(...).unwrap()`, so it proves `len` *typechecks* on a slice receiver and yields
+`usize`, not that it answers a runtime length. The runtime claim is genuinely carried by the
+`sum_over_a_slice_noninline_prints_twentyfive` golden, so this is a name/assertion mismatch
+rather than a coverage hole; renaming it to `len_over_a_slice_typechecks_to_usize` is a code
+change, which this docs-only sweep puts out of bounds.
+
 **Phase 5 exit notes (growth-signal re-check, echoing slice3b's deferred `poly.rs`
 split):** re-run against the four files this slice grew the most
 (`src/check/poly.rs` +471/-3 to 5456 lines, `src/backend/qbe.rs` +295/-4 to 3120,
@@ -828,7 +845,7 @@ the other four are at and are not re-checked here):
   `poly_call_term` -> `poly_eliminator_call` -> `poly_walk` -> `poly_call_term` across a
   file boundary. This slice's additions are mostly not a fifth concern bolted alongside
   the existing ones -- most arms land inside a predicate or walk function the file
-  already has (`poly_is_copy`, `is_reference_slot`, `check_poly_reference_word`'s
+  already has (`poly_is_copy`, `is_reference_slot`, `poly_reference_word`'s
   receiver dispatch, `poly_walk`'s array/slice-element arms) -- but it does add two new
   top-level functions, `check_poly_slice_offset` and `poly_slice_generic_element_error`,
   each a helper beside the arm that calls it rather than a new axis of concern. No second
