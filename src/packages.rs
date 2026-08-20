@@ -836,6 +836,110 @@ mod tests {
         check_package_graph(&mut manifests, &[]).expect("equal-layer depends is legal");
     }
 
+    /// The audit is a worklist, not a one-shot pass over the manifests
+    /// `discover_closure` had already loaded: `app` `depends:` on `mid`, and
+    /// `mid` (loaded only because this check loads it) itself `depends:` on
+    /// `hi`, a layer violation nothing ever imports across. Mutation-test by
+    /// reverting the worklist to a single pass over the initial snapshot.
+    #[test]
+    fn check_package_graph_audits_a_depends_entry_two_hops_from_the_walk() {
+        let sb = Sandbox::new("two-hop");
+        sb.write(
+            "app/sooth.pkg",
+            r#"package: app ; layer: hosted ; depends: mid path "../mid" ;"#,
+        );
+        let app_main = sb.write("app/main.sth", "");
+        let mid_manifest = sb.write(
+            "mid/sooth.pkg",
+            r#"package: mid ; layer: core ; depends: hi path "../hi" ;"#,
+        );
+        sb.write("hi/sooth.pkg", "package: hi ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        manifests.package_of(&app_main).unwrap();
+        let err = check_package_graph(&mut manifests, &[]).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "error: layer violation in {}, line 1, col 30:\n\
+                 \x20 package `mid` is layer `core` but depends on `hi` which is layer `hosted`\n\
+                 \x20 a `core` package may only depend on packages at the same layer or below",
+                mid_manifest.display()
+            )
+        );
+    }
+
+    /// A manifest-declared layer violation on a `depends:` entry is the root
+    /// cause when the same boundary crossing also produced an import failure
+    /// (here, a `PrivateModule` entry recorded against the same dependency);
+    /// it must be reported instead of the import error it masks. Mutation-test
+    /// by checking `unresolved` before the manifest walk.
+    #[test]
+    fn check_package_graph_layer_violation_is_reported_ahead_of_an_import_error() {
+        let sb = Sandbox::new("layer-violation-masks-import");
+        sb.write(
+            "core/sooth.pkg",
+            r#"package: core ; layer: core ; depends: app path "../app" ;"#,
+        );
+        let core_main = sb.write("core/main.sth", "");
+        sb.write("app/sooth.pkg", "package: app ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        manifests.package_of(&core_main).unwrap();
+        let u = unresolved(
+            UnresolvedKind::PrivateModule,
+            "core",
+            "app",
+            &["util"],
+            Span {
+                line: 1,
+                col: 1,
+                module: 0,
+            },
+            Some("/irrelevant/sooth.pkg"),
+        );
+        let err = check_package_graph(&mut manifests, &[u]).unwrap_err();
+        assert!(
+            err.starts_with("error: layer violation"),
+            "manifest check should win over the import error it masks: {err}"
+        );
+    }
+
+    /// `ManifestCache`'s walk order must not depend on `HashMap` iteration:
+    /// two `core`-layer packages each `depends:` on the same `hosted`-layer
+    /// package must report the identical error every run. Mutation-test by
+    /// reverting `ManifestCache`'s map to a `HashMap`.
+    #[test]
+    fn check_package_graph_error_choice_is_deterministic_across_runs() {
+        let sb = Sandbox::new("determinism");
+        sb.write(
+            "a/sooth.pkg",
+            r#"package: a ; layer: core ; depends: hosted_dep path "../hosted_dep" ;"#,
+        );
+        let a_main = sb.write("a/main.sth", "");
+        sb.write(
+            "z/sooth.pkg",
+            r#"package: z ; layer: core ; depends: hosted_dep path "../hosted_dep" ;"#,
+        );
+        let z_main = sb.write("z/main.sth", "");
+        sb.write(
+            "hosted_dep/sooth.pkg",
+            "package: hosted_dep ; layer: hosted ;",
+        );
+        let run = || {
+            let mut manifests = ManifestCache::default();
+            manifests.package_of(&a_main).unwrap();
+            manifests.package_of(&z_main).unwrap();
+            check_package_graph(&mut manifests, &[]).unwrap_err()
+        };
+        let first = run();
+        for _ in 0..20 {
+            assert_eq!(
+                run(),
+                first,
+                "error choice must be deterministic across runs"
+            );
+        }
+    }
+
     /// A `depends:` entry naming `foo` whose own manifest declares `package:
     /// bar` never resolves to anything -- resolution matches on the declared
     /// name, not the entry's spelling. Mutation-test by deleting the check.
