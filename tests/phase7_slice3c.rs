@@ -174,8 +174,22 @@ fn subslice_past_the_end_traps_at_runtime() {
     assert_eq!(stdout, "");
     assert_eq!(
         stderr,
-        "sooth: array index out of range (line 3)\n  index 6 is out of bounds for length 4\n"
+        "sooth: array index out of range (line 3)\n  index 3 is out of bounds for length 1\n"
     );
+    assert_eq!(code, 1);
+}
+
+/// The range check must not compute `start + len` (that addition can wrap
+/// past `usize::MAX`, e.g. from `0 1 sub` underflowing to `usize::MAX`, and
+/// pass a naive `end <= recv_len` check): a wrapped `start` would mint a view
+/// whose base pointer sits *before* the buffer it was cut from.
+#[test]
+fn subslice_start_plus_len_overflow_traps_instead_of_wrapping() {
+    let src = "\
+: main ( -- )\n  7 4 fill | buf |\n  &buf slice 0 1 sub >usize 5 >usize subslice | s |\n  s len .\n  buf drop\n;\n";
+    let prog = Scratch::write("wrap", src);
+    let (stdout, _stderr, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "");
     assert_eq!(code, 1);
 }
 

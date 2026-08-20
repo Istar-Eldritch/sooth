@@ -607,11 +607,13 @@ pub fn check_types(
     generic_enums: &[GenericEnumDecl],
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
+    slices: &[SliceDecl],
 ) -> Result<(), String> {
     check_duplicate_type_names(structs, enums, generic_structs, generic_enums)?;
     check_recursion(structs, enums, arrays)?;
     check_no_stored_references(structs, enums, arrays, cells)?;
     check_no_linear_array_elements(structs, enums, arrays)?;
+    check_slice_element_gate(structs, enums, arrays, slices)?;
     Ok(())
 }
 
@@ -725,7 +727,44 @@ fn check_no_linear_array_elements(
 /// The struct-only projection of `check_types` (no enums/arrays/generics), for
 /// callers that don't yet declare any of them.
 pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
-    check_types(structs, &[], &[], &[], &[], &[])
+    check_types(structs, &[], &[], &[], &[], &[], &[])
+}
+
+/// P7 slice 3c (R1.2, phase 3 review fix): a slice's element must be
+/// concrete and `Copy` -- the rule the exit notes claimed was unreachable
+/// because `slice`'s only *construction* source is an array reference, which
+/// misses the *type spelling* route: `Slice[T]` interns straight from the
+/// parser (`intern_slice_type`), so `Slice[Slice[i64]]`, `Slice[&i64]`,
+/// `Slice[&!i64]`, and `Slice[^i64]` all reach this registry with no array in
+/// sight. Mirrors the two array sweeps above over `module.slices` instead of
+/// `module.arrays`: `contains_reference` catches a reference or nested-slice
+/// element (a slice is itself reference-shaped, `contains_reference`'s
+/// `Type::Slice(..) => true` arm), `is_copy` catches a linear one (a cell or a
+/// linear struct/enum). Without this, a disallowed element reaches
+/// `slice_layout`/`scalar_size_align` uncaught and the layout builder panics.
+pub(crate) fn check_slice_element_gate(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    slices: &[SliceDecl],
+) -> Result<(), String> {
+    for decl in slices {
+        if contains_reference(decl.element, structs, enums, arrays) {
+            return Err(stored_reference_error(
+                &format!("element of slice type `{}`", decl.name_static),
+                decl.element,
+                None,
+            ));
+        }
+        if !is_copy(decl.element, structs, enums, arrays) {
+            return Err(format!(
+                "error: linear slice elements are not supported yet: slice type `{}` has element `{}`, which is linear and has no `Copy` instance",
+                decl.name_static,
+                decl.element.name(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type. R12
@@ -2834,6 +2873,44 @@ mod tests {
     #[test]
     fn check_no_linear_array_elements_copy_element_is_ok() {
         check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
+    }
+    /// P7 slice 3c (R1.2 phase 3 review fix): unlike `array_of_owned_is_error`,
+    /// this element reaches `module.slices` through the *type spelling*
+    /// (`Slice[^i64]` interned straight from the parser), with no `slice`
+    /// construction call and no array in sight -- the route the original
+    /// exit notes missed.
+    #[test]
+    fn check_slice_element_gate_owned_element_is_error() {
+        let err = check_src(": w ( Slice[^i64] -- usize ) len ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear slice elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_slice_element_gate_reference_element_is_error() {
+        for elem in ["&i64", "&!i64"] {
+            let src = format!(": w ( Slice[{elem}] -- usize ) len ; : main ( -- ) 0 . ;");
+            let err = check_src(&src).unwrap_err();
+            assert!(
+                err.contains("a reference cannot be stored"),
+                "unexpected message for {elem}: {err}"
+            );
+        }
+    }
+    #[test]
+    fn check_slice_element_gate_nested_slice_element_is_error() {
+        let err =
+            check_src(": w ( Slice[Slice[i64]] -- usize ) len ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("a reference cannot be stored"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_slice_element_gate_copy_element_is_ok() {
+        check_src(": w ( Slice[i64] -- usize ) len ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
     fn array_of_owned_is_error() {

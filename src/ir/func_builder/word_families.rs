@@ -466,12 +466,18 @@ impl<'a> FuncBuilder<'a> {
                     unreachable!("checked: `subslice`'s receiver is a slice")
                 };
                 let (ptr, recv_len) = self.load_slice_parts(recv);
-                // The sub-range must fit: `start + len` past the end traps
-                // through the same helper an out-of-range index does, so the
-                // view can never outreach the buffer it was cut from.
-                let end = self.fresh_value(IrType::Usize);
-                self.push_instr(Instr::Bin(end, BinOp::Add, start, len));
-                self.bounds_check_dynamic(CmpOp::Le, end, recv_len, span.line);
+                // The sub-range must fit, checked without computing `start +
+                // len`: that addition can wrap past `usize::MAX` (a huge
+                // `start`, e.g. from an underflowed subtraction), which would
+                // pass a naive `end <= recv_len` check and mint a view outside
+                // the buffer. `start <= recv_len` first, then `len <=
+                // recv_len - start` (sound because the first check already
+                // proved the subtraction does not underflow), traps on the
+                // same out-of-range range with no addition to wrap.
+                self.bounds_check_dynamic(CmpOp::Le, start, recv_len, span.line);
+                let remaining = self.fresh_value(IrType::Usize);
+                self.push_instr(Instr::Bin(remaining, BinOp::Sub, recv_len, start));
+                self.bounds_check_dynamic(CmpOp::Le, len, remaining, span.line);
                 let stride = self.slices.stride[id.index()];
                 let base = self.elem_addr(ptr, start, stride);
                 let view = self.build_slice_value(id, base, len);

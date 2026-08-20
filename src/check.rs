@@ -53,8 +53,9 @@ pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
     check_exported_signatures, check_no_word_shadows_eliminator, check_selective_imports,
-    check_static_decls, check_types, enum_generated_sigs, selective_not_exported_error,
-    struct_generated_sigs, variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
+    check_slice_element_gate, check_static_decls, check_types, enum_generated_sigs,
+    selective_not_exported_error, struct_generated_sigs, variant_generated_sigs,
+    word_shadows_eliminator_error, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
@@ -542,6 +543,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         &module.generic_enums,
         &module.arrays,
         &module.owned_cells,
+        &module.slices,
     )?;
 
     // R7a: a quotation type is legal only as a direct word parameter this

@@ -588,13 +588,24 @@ a slice is never a field or element of anything, so it takes no part in the layo
 
 **Phase 3 exit notes (three inherited items, resolved):**
 
-- The `Copy`-element gate the Phase 2 notes said `intern_slice_type` owed is **not**
-  written: no array can hold a non-`Copy` element in the first place (a linear one is
-  refused as `linear array elements are not supported yet`, a reference one as `a
-  reference cannot be stored`), and `slice`'s only source is an array reference. A gate
-  here would be unreachable code. The claim is pinned instead by
-  `slice_element_copy_rule_is_enforced_by_the_array_gate`, which fails if either array
-  rule is loosened.
+- The `Copy`-element gate the Phase 2 notes said `intern_slice_type` owed **is** needed
+  after all, over the *type-spelling* route rather than the construction one. `slice`'s
+  own construction route indeed needs no gate: no array can hold a non-`Copy` element
+  (a linear one is refused as `linear array elements are not supported yet`, a reference
+  one as `a reference cannot be stored`), so `slice`'s only source is already clean; that
+  narrower claim is pinned by `slice_element_copy_rule_is_enforced_by_the_array_gate`,
+  unchanged. But `Slice[T]` interns straight from the parser (`intern_slice_type`),
+  independent of any array or `slice` call, so `Slice[Slice[i64]]`, `Slice[&i64]`,
+  `Slice[&!i64]`, and `Slice[^i64]` all reached `module.slices` ungated (found by phase-3
+  review, reproduced as a compiler panic in `slice_layout`/`scalar_size_align` in both
+  `build` and the REPL). Fixed by `check_slice_element_gate` (`check/declarations.rs`),
+  a sweep over `module.slices` beside the two array sweeps: `contains_reference` on the
+  element catches a reference or nested-slice element (a slice is itself
+  reference-shaped), `is_copy` catches a linear one (a cell or a linear struct/enum).
+  Wired into `check_types` for the native build path and into the REPL's per-line
+  dispatch (`eval_expr_or_def_line`, beside the quotation-type audit) for the REPL, since
+  a word signature mints a `Slice[T]` type before any of `eval_def`/`eval_combinator_def`/
+  `eval_poly_def` runs.
 - `poly_reference_scrutinee_error`'s stale wording is fixed by *not reaching* it: a slice
   scrutinee in a generic body now gets the plain type mismatch, the same message the
   concrete path already gives it, rather than advice to "pass the owned `Enum` instead"

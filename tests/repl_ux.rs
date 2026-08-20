@@ -60,6 +60,25 @@ fn repl_help_lists_meta_commands() {
     }
 }
 
+/// P7 slice 3c (R1.2, phase 3 review fix): a disallowed slice element
+/// (nested slice, reference, owned cell) is a located error, not a panic --
+/// `Slice[T]` interns straight from the parser, with no `slice` construction
+/// call and no array in sight, so the array-declaration Copy-element rule
+/// never reaches it. Without this gate the REPL used to crash the process at
+/// `src/ir/layout.rs`'s `scalar_size_align`.
+#[test]
+fn repl_disallowed_slice_element_is_error_not_a_crash() {
+    let out = run_session(&[": f ( Slice[Slice[i64]] -- usize ) len ;"]);
+    assert!(
+        out.contains("a reference cannot be stored"),
+        "expected a located rejection, got: {out}"
+    );
+    assert!(
+        !out.contains("defined f"),
+        "a disallowed element must not be accepted: {out}"
+    );
+}
+
 /// #23: `:words` lists defined words with their declared signatures.
 #[test]
 fn repl_words_lists_words_with_signatures() {

@@ -2694,10 +2694,13 @@ mod tests {
         assert!(err.contains("Slice[i64]"), "unexpected message: {err}");
     }
 
-    /// R1.2: the registry interns `Copy` elements only, and `slice` needs no
-    /// gate of its own for it -- the array declaration rule is what makes a
-    /// non-`Copy` element unreachable, by both routes. This test is that
-    /// claim: loosen either array rule and `slice` inherits the hole, here.
+    /// R1.2: `slice`'s *construction* route needs no Copy-element gate of
+    /// its own -- the array declaration rule already makes a non-`Copy`
+    /// element unreachable through it, by both routes. This test is that
+    /// narrower claim: loosen either array rule and `slice` inherits the hole,
+    /// here. It does not cover the *type-spelling* route (`Slice[T]` interned
+    /// straight from the parser, with no array in sight); that is
+    /// `check_slice_element_gate_*` in `declarations.rs`.
     #[test]
     fn slice_element_copy_rule_is_enforced_by_the_array_gate() {
         let linear =

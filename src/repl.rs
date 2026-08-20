@@ -1501,11 +1501,13 @@ impl Session {
         let arrays_len = self.arrays.len();
         let cells_len = self.owned_cells.len();
         let refs_len = self.refs.len();
+        let slices_len = self.slices.len();
         let result = self.eval_expr_or_def_line(&tokens, writer);
         if result.is_err() {
             self.arrays.truncate(arrays_len);
             self.owned_cells.truncate(cells_len);
             self.refs.truncate(refs_len);
+            self.slices.truncate(slices_len);
         }
         result
     }
@@ -1544,6 +1546,13 @@ impl Session {
         // reach `ir_type_of`'s `unreachable!` arm and brick the session. The
         // native `check` runs this after `check_types`; the REPL's per-line
         // `check_types` path skipped it (`type:` lines run their own copy).
+        // P7 slice 3c (R1.2, phase 3 review fix): a signature's `Slice[T]`
+        // interns into `self.slices` at parse time above, on every dispatch
+        // path below (ordinary def, combinator, poly, quotation-param
+        // rejection alike) -- reject a disallowed element here, before any of
+        // them can reach `slice_layout`/`scalar_size_align` and brick the
+        // session, mirroring the quotation-type audit just above.
+        check::check_slice_element_gate(&self.structs, &self.enums, &self.arrays, &self.slices)?;
         check::audit_quotation_type_registries(
             &self.structs,
             &self.enums,
@@ -1670,6 +1679,7 @@ impl Session {
                 &[],
                 &self.arrays,
                 &self.owned_cells,
+                &self.slices,
             )?;
             // R7a (item 2): a quotation-typed struct field never reaches the
             // native `unreachable!` because the native `check` audits it; the
@@ -1763,6 +1773,7 @@ impl Session {
                 &[],
                 &self.arrays,
                 &self.owned_cells,
+                &self.slices,
             )?;
             // R7a (item 2): a quotation-typed enum-variant payload, same hazard.
             check::audit_quotation_type_registries(
