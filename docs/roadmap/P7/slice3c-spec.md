@@ -807,6 +807,36 @@ significantly (notably `src/check/word_families.rs`, `src/backend/qbe.rs`, and
   body works (`a_materialized_quotation_slices_a_captured_mutable_reference`).
 - Out of bounds: any code change beyond fmt/clippy fixes surfaced by the sweep.
 
+**Phase 5 exit notes (regression sweep):** `cargo fmt --check`, `cargo clippy -- -D
+warnings`, and the full `cargo test` (1290+ tests, every suite including
+`tests/phase7_slice3a.rs`, `tests/phase7_slice3b.rs`, `tests/qbe_baseline.rs`) are green
+unmodified -- the phased work left nothing for this sweep to fix.
+
+**Phase 5 exit notes (growth-signal re-check, echoing slice3b's deferred `poly.rs`
+split):** re-run against the three files this slice grew the most
+(`word_families.rs` +358, `qbe.rs` +299, `poly.rs` +474 lines):
+
+- `poly.rs`: still the deferred call from `project_poly_rs_split_deferred` --
+  [[project_poly_rs_split_deferred]] in memory. This slice's additions are not a fifth
+  concern bolted alongside the existing ones; every slice arm lands inside a predicate or
+  walk function the file already has (`poly_is_copy`, `is_reference_slot`,
+  `check_poly_reference_word`'s receiver dispatch, `poly_walk`'s array/slice-element
+  arms), the same shape every prior slice's poly arms took. No second quotation consumer
+  was added (that trigger, named in the deferred note, still hasn't fired), so the two
+  available splits are still wrong for the same reason recorded before. Deferred, again.
+- `word_families.rs`: the new `slice`/`subslice`/`&>`/`&!>` arms sit beside the array-word
+  and reference-word families they extend (`check_array_word`, `check_reference_word`),
+  each with its own adjacent error helper (`check_slice_offset`), matching the file's
+  existing per-family-plus-helpers grouping. No import divergence, no orphaned function:
+  every new arm is called from the same dispatch its sibling array/reference arms are.
+  Growing, not diverging -- no split indicated.
+- `qbe.rs`: the new aggregate-classification and index-emit arms land beside the existing
+  per-`IrType` match arms they extend (register class, load/store op, `qbe_abi_ty`,
+  `emit_oob_trap` reuse), not in a new section. High- and low-level code were already
+  mixed here before this slice (ABI classification beside instruction emission is the
+  file's existing shape); this slice does not introduce that mixing, just extends it. No
+  split indicated.
+
 ## Testing
 
 Per CLAUDE.md: every stage function gets a unit test beside it (happy path + one

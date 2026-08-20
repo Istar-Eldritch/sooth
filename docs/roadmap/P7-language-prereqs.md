@@ -136,16 +136,18 @@ parallel `lits` vector beside it, a `QuotRef` index over a per-body literal inte
 run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
 `tests/phase7_slice3b.rs`).
 
-**P7.S3c — Slicing a buffer into a view.** DESIGN.md lists slices among `core`'s concrete
-types but defers the mechanism ("Slicing a buffer into a view is deferred"); `str` is
-already the pattern's one instance, a pointer plus a runtime length. A general
-`Slice['T]` view over an array carries its length at runtime, which is what makes it the
-right answer to a problem the alternatives handle badly: a word over a slice needs no
-length variable in its signature, so it never asks the checker to prove an index against
-an abstract `'N`. Indexing a slice is *fallible* rather than provable — it reports through
-an `Option`/`Result` and the must-consume rule forces the caller to handle the miss — so
-the compile-time guarantee is kept without a runtime panic and without index refinement.
-**Length arithmetic is explicitly not the answer here and is not in scope**: `'N` is a
+**P7.S3c — Slicing a buffer into a view.** `[ done ]` DESIGN.md lists slices among
+`core`'s concrete types but defers the mechanism ("Slicing a buffer into a view is
+deferred"); `str` is already the pattern's one instance, a pointer plus a runtime
+length. A general `Slice['T]` view over an array carries its length at runtime, which is
+what makes it the right answer to a problem the alternatives handle badly: a word over a
+slice needs no length variable in its signature, so it never asks the checker to prove an
+index against an abstract `'N`. Indexing a slice keeps the existing runtime
+out-of-bounds trap, the same one array indexing already uses — a fallible,
+`Option`/`Result`-returning accessor is deferred to P7.S3e, which is what will give a
+user a declarable failure carrier to report through; until then, the trap is the
+compile-time guarantee that would otherwise cost a decision procedure it does not have
+yet. **Length arithmetic is explicitly not the answer here and is not in scope**: `'N` is a
 length variable usable only as an array count, with no arithmetic (`src/parser.rs:2253`
 admits a decimal literal or a bare `'N`), and relating lengths in a signature
 (`['T 'N+'M]`) would mean unifying arithmetic terms and owning a decision procedure, the
@@ -154,12 +156,12 @@ constraint checked at monomorphization against concrete literals, not arithmetic
 type language. Ordered after S3b, ahead of S3d, and before S3e, whose consumers want
 slice-shaped signatures rather than fixed-length ones. **It does not depend on S3d**:
 every exit criterion below is exercised by a *concrete* consumer — an array-reference
-parameter, a runtime `usize` index, a bounds guard, an `Option`-returning access, and a
-caller-side eliminator on both arms all compile today. Only a comparator-taking consumer
-(`sort`/`bin_search`) needs S3d's quotation splice.
+parameter, a runtime `usize` index, a bounds guard, a runtime trap on miss, and a
+recursive divide-and-conquer consumer all compile today. Only a comparator-taking
+consumer (`sort`/`bin_search`) needs S3d's quotation splice.
 **Exit:** a buffer can be sliced into a view; a word takes `Slice['T]` without naming a
-length variable; indexing reports failure through an `Option`/`Result` the caller must
-handle, with no runtime panic path.
+length variable; indexing traps at runtime on an out-of-range index, with no
+`Option`/`Result` accessor (deferred to P7.S3e).
 
 **P7.S3d — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
 quotation marker only where an enum eliminator collects it; every other consumer is
