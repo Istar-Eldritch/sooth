@@ -2,7 +2,10 @@
 //! `sooth.pkg` lookup (OQ2 manifest locality), the path-join from a module name
 //! to the file it names, and the located diagnostics resolution raises.
 //!
-//! Depends on `ast`, `lexer`, and `manifest` only. The driver hands one
+//! Depends on `ast`, `lexer`, and `manifest`, plus the driver's
+//! `ResolutionConfig` (a plain record of the two paths the fallback chain
+//! needs; reading them from the process environment stays in `driver.rs`, so
+//! this module has no env dependency of its own). The driver hands one
 //! `Import` in at a time and gets a path back, so `Closure` and the walk that
 //! builds it stay entirely the driver's concern.
 
@@ -10,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Import, ImportAnchor, ImportTarget, ModuleName, Span};
+use crate::driver::ResolutionConfig;
 use crate::lexer::{self, Token};
 use crate::manifest::{self, DependsEntry, Manifest, PackageLayer};
 
@@ -51,16 +55,30 @@ pub(crate) fn find_package_root(file: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Which tier of the fallback chain (R1) produced a site. `Ancestor` and
+/// `Flag` are both *real packages* -- a manifest declaring `package:` and
+/// `layer:`, loaded through the `ManifestCache` and so audited by
+/// `check_package_graph` -- and behave identically in resolution.
+/// `UserLevel` is not: it is a `depends:` table with no package identity and
+/// no layer, so it never declares anything the layer check could inspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SiteOrigin {
+    Ancestor,
+    Flag,
+    UserLevel,
+}
+
 /// One package as import resolution sees it: where its manifest is, the root
 /// its module names are relative to, and what that manifest declares.
 pub(crate) struct PackageSite {
     manifest_path: PathBuf,
     root: PathBuf,
     manifest: Manifest,
+    origin: SiteOrigin,
 }
 
 impl PackageSite {
-    fn new(manifest_path: PathBuf, manifest: Manifest) -> PackageSite {
+    fn new(manifest_path: PathBuf, manifest: Manifest, origin: SiteOrigin) -> PackageSite {
         let root = manifest_path
             .parent()
             .unwrap_or(Path::new("."))
@@ -69,6 +87,7 @@ impl PackageSite {
             manifest_path,
             root,
             manifest,
+            origin,
         }
     }
 
@@ -129,8 +148,76 @@ impl ManifestCache {
         };
         let manifest_path = root.join("sooth.pkg");
         let manifest = self.load(&manifest_path)?.clone();
-        Ok(Some(PackageSite::new(manifest_path, manifest)))
+        Ok(Some(PackageSite::new(
+            manifest_path,
+            manifest,
+            SiteOrigin::Ancestor,
+        )))
     }
+}
+
+/// R1/R4: which manifest resolves `file`'s module-name imports, first tier
+/// that applies winning. `--manifest` (tier 1) is consulted for the entry
+/// file only (R3): a transitively imported file re-derives its own package,
+/// so a dependency's `depends:` table and layer never depend on the caller's
+/// flag. Tiers 2-4 apply per file.
+pub(crate) fn select_site(
+    file: &Path,
+    entry: &Path,
+    config: &ResolutionConfig,
+    manifests: &mut ManifestCache,
+) -> Result<Option<PackageSite>, String> {
+    if file == entry {
+        if let Some(path) = &config.manifest_override {
+            // Loaded through the cache, not parsed standalone: that is what
+            // puts the flag manifest in `known_manifest_paths()`, so
+            // `check_package_graph` audits its layer and its `depends:` names
+            // exactly as it audits an ancestor manifest (F1).
+            let manifest = manifests
+                .load(path)
+                .map_err(|e| format!("`--manifest {}`: {e}", path.display()))?
+                .clone();
+            return Ok(Some(PackageSite::new(
+                path.clone(),
+                manifest,
+                SiteOrigin::Flag,
+            )));
+        }
+    }
+    if let Some(site) = manifests.package_of(file)? {
+        return Ok(Some(site));
+    }
+    match &config.user_manifest {
+        // A missing user-level manifest is tier 4, not an error.
+        Some(path) if path.is_file() => Ok(Some(user_level_site(path)?)),
+        _ => Ok(None),
+    }
+}
+
+/// Tier 3: the user-level manifest as a site. Deliberately *not* loaded
+/// through the `ManifestCache`: it declares no `package:` and no `layer:`, so
+/// it is not a package `check_package_graph`'s walk could audit, and seeding
+/// it there would make a scratch file's manifest a declaring package in the
+/// layer check. The dependencies it names still load their own real
+/// manifests, which do enter the walk.
+fn user_level_site(path: &Path) -> Result<PackageSite, String> {
+    let src = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading user-level manifest {}: {e}", path.display()))?;
+    let depends = manifest::parse_user_manifest(&src, path)?;
+    let manifest = Manifest {
+        // A user-level manifest is `depends:`-only, so neither field has a
+        // value to carry: the layer is inert (a `UserLevel` site never enters
+        // the layer check) and the name is empty (it identifies no package).
+        package: String::new(),
+        layer: PackageLayer::Hosted,
+        depends,
+        modules: Vec::new(),
+    };
+    Ok(PackageSite::new(
+        path.to_path_buf(),
+        manifest,
+        SiteOrigin::UserLevel,
+    ))
 }
 
 /// R5: a resolved import path that does not exist or cannot be read is an error
@@ -462,7 +549,11 @@ pub(crate) fn resolve_import(
 ) -> Result<Option<PathBuf>, String> {
     let name = match &imp.target {
         ImportTarget::Path(path) => {
-            if let Some(site) = site {
+            // A user-level site is not a real package (R4), so it does not
+            // trigger the in-package rejection: a manifest-less file reaches
+            // its siblings by quoted path whether or not a user-level
+            // manifest happens to exist.
+            if let Some(site) = site.filter(|s| s.origin != SiteOrigin::UserLevel) {
                 return Err(quoted_path_in_package_error(
                     importer,
                     imp,
@@ -574,7 +665,12 @@ fn resolve_dependency_module(
     let tried_manifest = site.root.join(&entry.path).join("sooth.pkg");
     let dep_manifest = std::fs::canonicalize(&tried_manifest)
         .map_err(|_| depends_manifest_missing_error(&site.manifest_path, entry, &tried_manifest))?;
-    let dep = PackageSite::new(dep_manifest.clone(), manifests.load(&dep_manifest)?.clone());
+    // A dependency is a real package however the importing site was chosen.
+    let dep = PackageSite::new(
+        dep_manifest.clone(),
+        manifests.load(&dep_manifest)?.clone(),
+        SiteOrigin::Ancestor,
+    );
     let tried = dep.module_file(segments);
     let file = existing_module_file(&tried).ok_or_else(|| {
         module_not_found_error(importer, imp, &dep.manifest.package, &module, &tried)
@@ -609,6 +705,7 @@ fn resolve_dependency_module(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::ImportBinding;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct Sandbox(PathBuf);
@@ -660,6 +757,7 @@ mod tests {
             PathBuf::from("/pkg/sooth.pkg"),
             manifest::parse_manifest("package: p ; layer: core ;", Path::new("/pkg/sooth.pkg"))
                 .unwrap(),
+            SiteOrigin::Ancestor,
         );
         assert_eq!(
             site.module_file(&["text".to_string(), "ascii".to_string()]),
@@ -675,6 +773,7 @@ mod tests {
             PathBuf::from("/pkg/sooth.pkg"),
             manifest::parse_manifest("package: p ; layer: core ;", Path::new("/pkg/sooth.pkg"))
                 .unwrap(),
+            SiteOrigin::Ancestor,
         );
         assert_eq!(
             site.module_file(&["ascii.io".to_string()]),
@@ -963,6 +1062,196 @@ mod tests {
                 "error choice must be deterministic across runs"
             );
         }
+    }
+
+    fn config(manifest_override: Option<&Path>, user_manifest: Option<&Path>) -> ResolutionConfig {
+        ResolutionConfig {
+            manifest_override: manifest_override.map(Path::to_path_buf),
+            user_manifest: user_manifest.map(Path::to_path_buf),
+        }
+    }
+
+    fn import(target: ImportTarget) -> Import {
+        Import {
+            target,
+            binding: ImportBinding::Qualified {
+                qualifier: "q".to_string(),
+                selective: Vec::new(),
+            },
+            span: Span {
+                line: 1,
+                col: 1,
+                module: 0,
+            },
+        }
+    }
+
+    fn dependency_import(segments: &[&str]) -> Import {
+        import(ImportTarget::Module(ModuleName {
+            anchor: ImportAnchor::Dependency,
+            segments: segments.iter().map(|s| s.to_string()).collect(),
+        }))
+    }
+
+    /// R1 tier 1: `--manifest` beats the entry file's own ancestor manifest,
+    /// silently. Mutation-test by dropping the override branch, which falls
+    /// back to the ancestor.
+    #[test]
+    fn select_site_flag_overrides_entry_ancestor() {
+        let sb = Sandbox::new("flag-overrides");
+        sb.write("p/sooth.pkg", "package: p ; layer: hosted ;");
+        let entry = sb.write("p/main.sth", "");
+        let flag = sb.write("q/sooth.pkg", "package: q ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        assert_eq!(site.origin, SiteOrigin::Flag);
+        assert_eq!(site.manifest_path, flag);
+        assert_eq!(site.manifest.package, "q");
+    }
+
+    /// R3: the override answers "which manifest resolves this invocation's
+    /// entry file", so a transitively imported file still re-derives its own
+    /// package. Mutation-test by applying the override to every file.
+    #[test]
+    fn select_site_flag_ignored_for_non_entry_file() {
+        let sb = Sandbox::new("flag-entry-only");
+        sb.write("p/sooth.pkg", "package: p ; layer: hosted ;");
+        let imported = sb.write("p/lib.sth", "");
+        let entry = sb.write("scratch/main.sth", "");
+        let flag = sb.write("q/sooth.pkg", "package: q ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(
+            &imported,
+            &entry,
+            &config(Some(&flag), None),
+            &mut manifests,
+        )
+        .expect("the imported file's own manifest loads")
+        .expect("an ancestor site");
+        assert_eq!(site.origin, SiteOrigin::Ancestor);
+        assert_eq!(site.manifest.package, "p");
+    }
+
+    /// R5: a `--manifest` naming an unparseable manifest surfaces
+    /// `parse_manifest`'s located error, prefixed to name the flag rather than
+    /// leaving the invoker to guess which manifest the build even read.
+    /// Mutation-test by dropping the prefix.
+    #[test]
+    fn select_site_flag_manifest_parse_error_names_the_flag() {
+        let sb = Sandbox::new("flag-parse-error");
+        let entry = sb.write("scratch/main.sth", "");
+        let flag = sb.write("q/sooth.pkg", "package: q ;");
+        let mut manifests = ManifestCache::default();
+        let err = match select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests) {
+            Ok(_) => panic!("a manifest with no `layer:` does not parse"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err,
+            format!(
+                "`--manifest {}`: manifest error: `layer:` is required, missing at end of file (line 1, col 13) in {}",
+                flag.display(),
+                flag.display()
+            )
+        );
+    }
+
+    /// A tier-3 fixture: a manifest-less scratch entry, a user-level manifest
+    /// beside it, and a real `core` package the manifest may or may not name.
+    fn user_level_fixture(sb: &Sandbox, depends: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let user_manifest = sb.write("cfg/global_sooth.pkg", depends);
+        sb.write(
+            "core/sooth.pkg",
+            "package: core ; layer: core ;\nmodule: bool ;",
+        );
+        let module = sb.write("core/bool.sth", "");
+        let entry = sb.write("scratch/main.sth", "");
+        (entry, user_manifest, module)
+    }
+
+    /// R1 tier 3: a manifest-less file resolves a dependency module against
+    /// the user-level manifest's `depends:` table, whose relative paths are
+    /// read from the user-level manifest's own directory. Mutation-test by
+    /// making the tier-3 branch return `Ok(None)`, which leaves the import
+    /// unresolvable.
+    #[test]
+    fn select_site_user_manifest_resolves_dependency() {
+        let sb = Sandbox::new("user-level-resolves");
+        let (entry, user_manifest, module) =
+            user_level_fixture(&sb, "depends: core path \"../core\" ;");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(
+            &entry,
+            &entry,
+            &config(None, Some(&user_manifest)),
+            &mut manifests,
+        )
+        .expect("the user-level manifest parses")
+        .expect("a user-level site");
+        assert_eq!(site.origin, SiteOrigin::UserLevel);
+        let mut unresolved = Vec::new();
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &dependency_import(&["core", "bool"]),
+            Some(&site),
+            &mut manifests,
+            &mut unresolved,
+        )
+        .expect("`core::bool` resolves through the user-level `depends:` entry");
+        assert_eq!(resolved, Some(std::fs::canonicalize(&module).unwrap()));
+        assert!(
+            unresolved.is_empty(),
+            "nothing deferred: {}",
+            unresolved.len()
+        );
+    }
+
+    /// R4: a user-level site is not a real package, so it does not turn a
+    /// manifest-less file's quoted-path imports into the in-package rejection
+    /// -- a scratch file reaches its siblings by quoted path whether or not
+    /// the user happens to have a user-level manifest. Mutation-test by
+    /// dropping the `UserLevel` exemption in `resolve_import`'s path arm.
+    #[test]
+    fn user_level_site_still_allows_a_quoted_path_import() {
+        let sb = Sandbox::new("user-level-quoted-path");
+        let (entry, user_manifest, _) = user_level_fixture(&sb, "");
+        let sibling = sb.write("scratch/sib.sth", "");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(
+            &entry,
+            &entry,
+            &config(None, Some(&user_manifest)),
+            &mut manifests,
+        )
+        .unwrap()
+        .expect("a user-level site");
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &import(ImportTarget::Path("sib.sth".to_string())),
+            Some(&site),
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .expect("a quoted-path sibling still resolves under a user-level site");
+        assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
+    }
+
+    /// R6: a user-level manifest that is not there is tier 4, not a read
+    /// error. Mutation-test by dropping the existence check, which turns the
+    /// missing file into a failed read.
+    #[test]
+    fn select_site_absent_user_manifest_falls_through_to_tier_four() {
+        let sb = Sandbox::new("user-level-absent");
+        let entry = sb.write("scratch/main.sth", "");
+        let absent = sb.0.join("cfg/global_sooth.pkg");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(None, Some(&absent)), &mut manifests)
+            .expect("a missing user-level manifest is not an error");
+        assert!(site.is_none(), "no user-level manifest means no site");
     }
 
     /// A `depends:` entry naming `foo` whose own manifest declares `package:

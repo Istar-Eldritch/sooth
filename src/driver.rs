@@ -71,8 +71,6 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
 /// (CLAUDE.md growth structure: `packages.rs` stays env-free).
 pub(crate) struct ResolutionConfig {
     pub(crate) manifest_override: Option<PathBuf>,
-    // Read by `packages::select_site`, added in the next phase.
-    #[allow(dead_code)]
     pub(crate) user_manifest: Option<PathBuf>,
 }
 
@@ -127,19 +125,17 @@ fn discover_closure_audited(entry: &Path, config: &ResolutionConfig) -> Result<C
 
 /// `discover_closure` over a caller-supplied manifest cache and resolution
 /// config, so a test can see how many manifests the walk actually parsed and
-/// point the fallback tiers at a fixture (R6). Phase 2 still resolves each
-/// file's site via `package_of` alone (tier 2 only); phase 3 replaces that
-/// call with `packages::select_site`, which is what makes `config` load-bearing.
+/// point the fallback tiers at a fixture (R6).
 pub(crate) fn discover_closure_configured(
     entry: &Path,
-    _config: &ResolutionConfig,
+    config: &ResolutionConfig,
     manifests: &mut ManifestCache,
 ) -> Result<Closure, String> {
     let entry_canon =
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
     id_of.insert(entry_canon.clone(), 0);
-    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon, 0)?];
+    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon.clone(), 0)?];
     let mut unresolved_imports = Vec::new();
 
     let mut i = 0;
@@ -147,9 +143,11 @@ pub(crate) fn discover_closure_configured(
         let dir = nodes[i].dir.clone();
         let canon = nodes[i].canon.clone();
         let imports = nodes[i].imports.clone();
-        // Every file's own package, from its canonical path: manifests are
-        // parsed once each however many files they own.
-        let site = manifests.package_of(&canon)?;
+        // Every file's own site, from its canonical path: the `--manifest`
+        // override for the entry file (R3), else the fallback chain from its
+        // nearest ancestor manifest down (R1). Manifests are parsed once each
+        // however many files they own.
+        let site = packages::select_site(&canon, &entry_canon, config, manifests)?;
         let mut targets = Vec::with_capacity(imports.len());
         for imp in &imports {
             let resolved = packages::resolve_import(
@@ -1127,6 +1125,71 @@ mod tests {
             manifests.parses, 1,
             "one manifest owns both files, so it is parsed once"
         );
+    }
+
+    /// R3, end to end through the closure walk: `--manifest` resolves the
+    /// entry file's dependency import, while the file that import pulls in
+    /// resolves its own `self::` sibling against its *own* ancestor manifest.
+    /// Mutation-test by applying the override to every file in the closure:
+    /// `lib.sth`'s `self::helper` then joins the flag manifest's root, where
+    /// nothing is.
+    #[test]
+    fn discover_closure_configured_flag_override_entry_only() {
+        let s = Sandbox::new("flag-entry-only");
+        pkg(
+            &s,
+            "flag/",
+            "package: flagpkg ; layer: hosted ;\ndepends: dep path \"../dep\" ;",
+        );
+        pkg(&s, "dep/", "package: dep ; layer: hosted ;\nmodule: lib ;");
+        s.write("dep/helper.sth", ": hw ( -- i64 ) 7 ;\nexport: hw ;\n");
+        s.write(
+            "dep/lib.sth",
+            "import: self::helper h ;\n: lw ( -- i64 ) h::hw ;\nexport: lw ;\n",
+        );
+        let entry = s.write(
+            "scratch/main.sth",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+        );
+        let mut config = ResolutionConfig::from_env();
+        config.manifest_override = Some(s.0.join("flag/sooth.pkg"));
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("the flag resolves the entry, the dependency resolves itself");
+        assert_eq!(
+            closure.nodes.len(),
+            3,
+            "entry, dep::lib, and dep's own self::helper"
+        );
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
+    /// R1 tier 3: a manifest-less entry file with no `--manifest` resolves a
+    /// dependency module against the user-level manifest, pointed at a fixture
+    /// rather than at a real `$XDG_CONFIG_HOME` (R6). Mutation-test by making
+    /// `select_site`'s tier-3 branch return `Ok(None)`: the import then has no
+    /// `depends:` table to resolve against.
+    #[test]
+    fn discover_closure_configured_user_manifest_fallback() {
+        let s = Sandbox::new("user-level-fallback");
+        let user_manifest = s.write("cfg/global_sooth.pkg", "depends: dep path \"../dep\" ;");
+        pkg(&s, "dep/", "package: dep ; layer: hosted ;\nmodule: lib ;");
+        s.write("dep/lib.sth", ": lw ( -- i64 ) 7 ;\nexport: lw ;\n");
+        let entry = s.write(
+            "scratch/main.sth",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+        );
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: Some(user_manifest),
+        };
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("the user-level manifest resolves the dependency");
+        assert_eq!(closure.nodes.len(), 2, "entry and dep::lib");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
     }
 
     fn os(s: &str) -> Option<OsString> {
