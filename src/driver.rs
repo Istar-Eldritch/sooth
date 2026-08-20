@@ -64,6 +64,38 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
     })
 }
 
+/// Which manifest resolves an invocation: the `--manifest` override (tier 1,
+/// entry file only, R3), and the user-level manifest (tier 3), read once at
+/// the entry point rather than from `std::env` deep inside `packages.rs`
+/// (CLAUDE.md growth structure: `packages.rs` stays env-free).
+pub(crate) struct ResolutionConfig {
+    pub(crate) manifest_override: Option<PathBuf>,
+    // Read by `packages::select_site`, added in the next phase.
+    #[allow(dead_code)]
+    pub(crate) user_manifest: Option<PathBuf>,
+}
+
+impl ResolutionConfig {
+    /// `manifest_override` empty (the flag is threaded in by the caller);
+    /// `user_manifest` populated from `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`,
+    /// falling back to `$HOME/.config/sooth/global_sooth.pkg` (R6), but only
+    /// when that file actually exists — a missing file is tier 4, not tier 3.
+    pub(crate) fn from_env() -> Self {
+        ResolutionConfig {
+            manifest_override: None,
+            user_manifest: xdg_global_manifest_path().filter(|p| p.is_file()),
+        }
+    }
+}
+
+fn xdg_global_manifest_path() -> Option<PathBuf> {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("sooth").join("global_sooth.pkg"))
+}
+
 /// R2/R3: discover the whole import closure from the entry file. A quoted-path
 /// import (manifest-less files only) resolves relative to the importing file's
 /// directory; a module name resolves against its package, by its anchor. Both
@@ -72,14 +104,22 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
 /// missing file with a located error (R5).
 pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
     let mut manifests = ManifestCache::default();
-    let closure = discover_closure_with(entry, &mut manifests)?;
+    let closure =
+        discover_closure_configured(entry, &ResolutionConfig::from_env(), &mut manifests)?;
     packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
     Ok(closure)
 }
 
-/// `discover_closure` over a caller-supplied manifest cache, so a test can see
-/// how many manifests the walk actually parsed.
-fn discover_closure_with(entry: &Path, manifests: &mut ManifestCache) -> Result<Closure, String> {
+/// `discover_closure` over a caller-supplied manifest cache and resolution
+/// config, so a test can see how many manifests the walk actually parsed and
+/// point the fallback tiers at a fixture (R6). Phase 2 still resolves each
+/// file's site via `package_of` alone (tier 2 only); phase 3 replaces that
+/// call with `packages::select_site`, which is what makes `config` load-bearing.
+pub(crate) fn discover_closure_configured(
+    entry: &Path,
+    _config: &ResolutionConfig,
+    manifests: &mut ManifestCache,
+) -> Result<Closure, String> {
     let entry_canon =
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
@@ -462,7 +502,18 @@ pub(crate) fn check_no_main_in_closure(
 /// baseline golden asserts this stays byte-identical across the slice-8a
 /// builtin-table refactor.
 pub fn emit_ssa(path: &Path) -> Result<String, String> {
-    let closure = discover_closure(path)?;
+    emit_ssa_with_manifest(path, None)
+}
+
+/// `emit_ssa` with a `--manifest` override (tier 1, R1): resolves the entry
+/// file's dependency-anchored imports against `manifest` instead of an
+/// ancestor manifest (R3), the other fallback tiers unaffected.
+pub fn emit_ssa_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<String, String> {
+    let mut config = ResolutionConfig::from_env();
+    config.manifest_override = manifest.map(PathBuf::from);
+    let mut manifests = ManifestCache::default();
+    let closure = discover_closure_configured(path, &config, &mut manifests)?;
+    packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
     let mut module = assemble_module(&closure, true)?;
     check::check(&mut module)?;
     // R14/D4 (native-build fix): only the entry file (module 0) may declare
@@ -475,7 +526,12 @@ pub fn emit_ssa(path: &Path) -> Result<String, String> {
 
 /// Compile a source file to a native binary. Returns the binary's path.
 pub fn build(path: &Path) -> Result<PathBuf, String> {
-    let ssa = emit_ssa(path)?;
+    build_with_manifest(path, None)
+}
+
+/// `build` with a `--manifest` override; see `emit_ssa_with_manifest`.
+pub fn build_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<PathBuf, String> {
+    let ssa = emit_ssa_with_manifest(path, manifest)?;
 
     let dir = tempfile_dir()?;
     let ssa_path = dir.join("out.ssa");
@@ -501,7 +557,12 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
 /// Compile and run a source file, returning the child's exit status. The caller
 /// decides how to propagate it (`main` mirrors it as its own exit code).
 pub fn run(path: &Path) -> Result<ExitStatus, String> {
-    let binary = build(path)?;
+    run_with_manifest(path, None)
+}
+
+/// `run` with a `--manifest` override; see `emit_ssa_with_manifest`.
+pub fn run_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<ExitStatus, String> {
+    let binary = build_with_manifest(path, manifest)?;
     Command::new(&binary)
         .status()
         .map_err(|e| format!("running {binary:?}: {e}"))
@@ -1047,7 +1108,8 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
         let mut manifests = ManifestCache::default();
-        discover_closure_with(&entry, &mut manifests).expect("closure resolves");
+        discover_closure_configured(&entry, &ResolutionConfig::from_env(), &mut manifests)
+            .expect("closure resolves");
         assert_eq!(
             manifests.parses, 1,
             "one manifest owns both files, so it is parsed once"
