@@ -2,20 +2,31 @@
 //! `sooth.pkg` lookup (OQ2 manifest locality), the path-join from a module name
 //! to the file it names, and the located diagnostics resolution raises.
 //!
-//! Depends on `ast`, `lexer`, and `manifest`, plus the driver's
-//! `ResolutionConfig` (a plain record of the two paths the fallback chain
-//! needs; reading them from the process environment stays in `driver.rs`, so
-//! this module has no env dependency of its own). The driver hands one
-//! `Import` in at a time and gets a path back, so `Closure` and the walk that
-//! builds it stay entirely the driver's concern.
+//! Depends on `ast`, `lexer`, and `manifest`. `ResolutionConfig` (a plain
+//! record of the two paths the fallback chain needs) is declared here rather
+//! than in `driver.rs`, so this module has no upward dependency on the
+//! driver; reading the two paths from the process environment is still
+//! `driver.rs`'s concern (`ResolutionConfig::from_env`), so this module stays
+//! env-free. The driver hands one `Import` in at a time and gets a path back,
+//! so `Closure` and the walk that builds it stay entirely the driver's
+//! concern.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Import, ImportAnchor, ImportTarget, ModuleName, Span};
-use crate::driver::ResolutionConfig;
 use crate::lexer::{self, Token};
 use crate::manifest::{self, DependsEntry, Manifest, PackageLayer};
+
+/// Which manifest resolves an invocation: the `--manifest` override (tier 1,
+/// entry file only, R3), and the user-level manifest (tier 3), read once at
+/// the entry point rather than from `std::env` deep inside this module's
+/// resolution logic (CLAUDE.md growth structure: `from_env`, which does the
+/// actual reading, lives in `driver.rs` instead).
+pub(crate) struct ResolutionConfig {
+    pub(crate) manifest_override: Option<PathBuf>,
+    pub(crate) user_manifest: Option<PathBuf>,
+}
 
 /// A cross-package import that resolution declined to turn into a closure
 /// edge, recorded so `check_package_graph` can report it against the
@@ -1271,6 +1282,62 @@ mod tests {
         let err = check_package_graph(&mut manifests, &[]).unwrap_err();
         assert!(
             err.contains("`depends:` entry names `text`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("that package declares `package: nottext`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F1: `select_site`'s `Flag` branch loads the flag manifest *through the
+    /// cache* (`manifests.load`, not a standalone `parse_manifest`), which is
+    /// what seeds it into `known_manifest_paths()` and so into
+    /// `check_package_graph`'s walk -- a `--manifest` site is audited exactly
+    /// as an ancestor site is. Mutation-test by replacing `manifests.load` in
+    /// `select_site`'s `Flag` arm with a standalone `read_to_string` +
+    /// `parse_manifest`: the flag manifest never enters `known_manifest_paths`,
+    /// this layer violation goes uncaught, and the test fails.
+    #[test]
+    fn select_site_flag_manifest_layer_violation_is_audited() {
+        let sb = Sandbox::new("flag-layer-violation");
+        let flag = sb.write(
+            "flag/sooth.pkg",
+            r#"package: flagpkg ; layer: core ; depends: dep path "../dep" ;"#,
+        );
+        sb.write("dep/sooth.pkg", "package: dep ; layer: hosted ;");
+        let entry = sb.write("scratch/main.sth", "");
+        let mut manifests = ManifestCache::default();
+        select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        let err = check_package_graph(&mut manifests, &[]).unwrap_err();
+        assert!(
+            err.contains("layer"),
+            "expected a layer-violation error, got: {err}"
+        );
+    }
+
+    /// F1, the `depends:` name-mismatch half: a `--manifest`'s `depends:`
+    /// entry naming a package under a path whose own manifest declares a
+    /// different `package:` name. Same mutation as above: a standalone parse
+    /// leaves the flag manifest out of the walk and this goes uncaught.
+    #[test]
+    fn select_site_flag_manifest_depends_name_mismatch_is_audited() {
+        let sb = Sandbox::new("flag-name-mismatch");
+        let flag = sb.write(
+            "flag/sooth.pkg",
+            r#"package: flagpkg ; layer: hosted ; depends: dep path "../dep" ;"#,
+        );
+        sb.write("dep/sooth.pkg", "package: nottext ; layer: hosted ;");
+        let entry = sb.write("scratch/main.sth", "");
+        let mut manifests = ManifestCache::default();
+        select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        let err = check_package_graph(&mut manifests, &[]).unwrap_err();
+        assert!(
+            err.contains("`depends:` entry names `dep`"),
             "unexpected message: {err}"
         );
         assert!(

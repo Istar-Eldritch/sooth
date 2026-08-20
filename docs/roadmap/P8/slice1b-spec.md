@@ -49,8 +49,12 @@ Every entry checked against the live source, not the brief's line numbers.
 | `PackageSite` = `{ manifest_path, root, manifest }`, `module_file` joins root + segments + `.sth` | `src/packages.rs:56-88` |
 
 S1a keeps quoted-path imports legal for manifest-less files (`resolve_import`'s
-`ImportTarget::Path` arm, `src/packages.rs:463-475`). That is unchanged here: a scratch
-file's siblings are reached by quoted path.
+`ImportTarget::Path` arm, `src/packages.rs:463-475`). The *invariant* is unchanged here (a
+scratch file's siblings are still reached by quoted path), but the arm's condition is not:
+it gains a `SiteOrigin::UserLevel` exemption (`site.filter(|s| s.origin !=
+SiteOrigin::UserLevel)`), because tier 3 now hands a manifest-less file a `Some(site)`
+where S1a always saw `None`. Without the exemption, any file sitting under a user-level
+manifest would newly trip the in-package quoted-path rejection.
 
 ---
 
@@ -273,9 +277,12 @@ Extend `usage()` to document `--manifest <path>`.
   replaces that one `package_of` line with
   `packages::select_site(&canon, &entry_canon, config, manifests)?`, which applies R3
   (entry-only override) and R4 (tier selection).
-- `ResolutionConfig` and `ResolutionConfig::from_env()` live in `driver.rs` (they own
-  process/env concerns, which `packages.rs` must not import — CLAUDE.md growth structure);
-  `select_site` lives in `packages.rs` (pure resolution).
+- `ResolutionConfig` (the plain two-field record) lives in `packages.rs`, beside
+  `select_site`, so `packages.rs` never imports from `driver.rs` (a `driver.rs`-declared
+  struct that `select_site` takes by reference would be an upward dependency — CLAUDE.md
+  growth structure). `ResolutionConfig::from_env()`, which reads `std::env`, stays in
+  `driver.rs` as an `impl` block over the `packages.rs`-declared type; `driver.rs` imports
+  `ResolutionConfig` from `packages` alongside `ManifestCache`.
 
 ### `src/packages.rs`
 
@@ -296,9 +303,13 @@ Extend `usage()` to document `--manifest <path>`.
      `Manifest` with an empty package name and `depends` from the file; it is never seeded
      into `check_package_graph`).
   4. Else `Ok(None)` (tier 4).
-- `resolve_import`: the `intrinsics` short-circuit and the `ImportTarget::Path` arm are
-  unchanged. Replace the `let Some(site) = site else { … }` branch and the `MissingDepends`
-  handling so origin drives the diagnostic:
+- `resolve_import`: the `intrinsics` short-circuit is unchanged; the `ImportTarget::Path`
+  arm gains a `SiteOrigin::UserLevel` exemption on its existing `if let Some(site) = site`
+  guard (`site.filter(|s| s.origin != SiteOrigin::UserLevel)`) so a tier-3 site does not
+  newly trip the in-package quoted-path rejection S1a wrote for a real package (see Recon:
+  before this slice a manifest-less file always saw `site == None`, so the guard never had
+  reason to distinguish origins). Replace the `let Some(site) = site else { … }` branch and
+  the `MissingDepends` handling so origin drives the diagnostic:
   - **tier 4** (`None`): a module name → R2(c) `anonymous_package_error`.
   - **`SelfPackage` on a `UserLevel` site** → R2(c) form as well (a `self::` name has no
     package identity under the user-level manifest; render `<pkg-or-self>` as the target).
@@ -362,6 +373,14 @@ path, and each mutation-tested by deleting the branch it guards:
   guards the unchanged arms).
 - `flag_manifest_missing_depends_reuses_ancestor_diagnostic` — a `--manifest` whose
   manifest lacks the imported package produces S1a's A wording with the flag's path (R2a).
+- `select_site_flag_manifest_layer_violation_is_audited`,
+  `select_site_flag_manifest_depends_name_mismatch_is_audited` — F1: after `select_site`
+  hands back a `Flag` site, `check_package_graph` on the same `ManifestCache` catches a
+  layer violation and a `depends:`-name mismatch in the flag manifest's own dependency
+  graph, exactly as it would for an ancestor manifest. Mutate: replace `select_site`'s
+  `manifests.load(path)` with a standalone `read_to_string` + `parse_manifest` → the flag
+  manifest never enters `known_manifest_paths()`, `check_package_graph` never visits it,
+  and both tests fail.
 
 `manifest.rs`: `parse_user_manifest_depends_only_ok`,
 `parse_user_manifest_rejects_package_line`, `_rejects_layer_line`,
@@ -376,6 +395,24 @@ path, and each mutation-tested by deleting the branch it guards:
 `discover_closure_configured_anonymous_fallback` — each via a fixture tree on disk through
 `discover_closure_configured` with an explicit `ResolutionConfig` (never mutating process
 env), so tier 3 is exercised without an XDG env race.
+
+Since `select_site` is what makes `config.user_manifest` load-bearing, every existing
+located-error test that goes through the bare `discover_closure(&entry)` wrapper (which
+builds its config from `ResolutionConfig::from_env()`) can now resolve differently on a
+machine that happens to have a real `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`: a
+manifest-less fixture's expected tier-4 error can silently become a tier-3 resolution (or a
+different error) instead (R6). The shared `driver.rs` test helper `discover_err` (used by
+all ~11 located-error tests across this module) is changed to call `discover_closure_audited`
+with an explicit `ResolutionConfig { manifest_override: None, user_manifest: None }` rather
+than `discover_closure`, pinning every one of its callers to tier 4 regardless of the
+invoking machine's real config. This is a one-site fix (the helper, not each call site) and
+changes no test's expected message.
+
+(A tier-3 re-fixture is exempt from this: `user_level_site` deliberately re-reads and
+re-parses the user-level manifest for every manifest-less file it sees, rather than caching
+it like `ManifestCache` does for real packages -- correct behaviour, just outside
+`ManifestCache`'s one-parse-per-manifest discipline test, and not worth a cache of its own
+for what is normally one file per closure.)
 
 S1a test churn (behaviour changed, not placebos):
 
@@ -438,12 +475,15 @@ the golden non-hermetic on any machine that has one.
 
 ## Growth structure (CLAUDE.md)
 
-`select_site` is resolution, so it lives in `packages.rs` beside `package_of`;
-`ResolutionConfig`/`from_env` own the flag and the XDG lookup, which are process/env
-concerns, so they live in `driver.rs` (which already imports `std::env`/`Command`).
-`packages.rs` must not gain an env dependency — that is the import-divergence signal S1a's
-split was drawn to avoid. No new file: this slice adds one function to each of three
-existing modules and a parser entry point, well under a split threshold.
+`select_site` is resolution, so it lives in `packages.rs` beside `package_of`, and
+`ResolutionConfig` (the plain record) lives there too, so `packages.rs` never imports from
+`driver.rs` (an upward dependency the split was drawn to avoid). `from_env`, which owns the
+flag and the XDG lookup, is a genuine process/env concern, so it stays in `driver.rs`
+(which already imports `std::env`/`Command`) as an `impl` over the `packages.rs`-declared
+type. `packages.rs` must not gain an env dependency of its own — that is the
+import-divergence signal S1a's split was drawn to avoid. No new file: this slice adds one
+function to each of three existing modules and a parser entry point, well under a split
+threshold.
 
 ---
 

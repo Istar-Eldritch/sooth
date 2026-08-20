@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{Import, Module, ModuleInfo, Span};
 use crate::lexer::Token;
-use crate::packages::{ManifestCache, UnresolvedImport};
+use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
 
 const C_SHIM: &str = "extern void sooth_main(void);\nint main(void) { sooth_main(); return 0; }\n";
@@ -65,20 +65,14 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
     })
 }
 
-/// Which manifest resolves an invocation: the `--manifest` override (tier 1,
-/// entry file only, R3), and the user-level manifest (tier 3), read once at
-/// the entry point rather than from `std::env` deep inside `packages.rs`
-/// (CLAUDE.md growth structure: `packages.rs` stays env-free).
-pub(crate) struct ResolutionConfig {
-    pub(crate) manifest_override: Option<PathBuf>,
-    pub(crate) user_manifest: Option<PathBuf>,
-}
-
 impl ResolutionConfig {
     /// `manifest_override` empty (the flag is threaded in by the caller);
     /// `user_manifest` populated from `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`,
     /// falling back to `$HOME/.config/sooth/global_sooth.pkg` (R6), but only
     /// when that file actually exists — a missing file is tier 4, not tier 3.
+    /// Kept here rather than beside the struct in `packages.rs`: reading the
+    /// process environment is `driver.rs`'s concern, not `packages.rs`'s
+    /// (CLAUDE.md growth structure).
     pub(crate) fn from_env() -> Self {
         ResolutionConfig {
             manifest_override: None,
@@ -1074,8 +1068,19 @@ mod tests {
 
     /// The located error a closure discovery is expected to fail with.
     /// `Closure` is not `Debug`, so `expect_err` is not available.
+    /// `discover_closure` with both fallback tiers pinned off (R6): a bare
+    /// `discover_closure(&entry)` reads the invoking machine's real
+    /// `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`, which can turn a
+    /// manifest-less fixture's expected tier-4 error into a tier-3 resolution
+    /// (or a different error) on any machine that has one. Every
+    /// `discover_err` caller pins a located *error*, so an explicit,
+    /// user-manifest-free config keeps them reproducible everywhere.
     fn discover_err(entry: &Path) -> String {
-        match discover_closure(entry) {
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: None,
+        };
+        match discover_closure_audited(entry, &config) {
             Ok(_) => panic!("expected a located error from {}", entry.display()),
             Err(e) => e,
         }
