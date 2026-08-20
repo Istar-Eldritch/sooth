@@ -85,15 +85,16 @@ fn cross_package_import_public_module_builds() {
 
 /// Golden 2: `core` (layer `core`) `depends:` on `app` (layer `hosted`), a
 /// strictly higher layer. The build fails with the OQ4-B error, pinning both
-/// package names and both layer values.
+/// package names and both layer values, and separately the located `depends:`
+/// entry -- placed off (1, 1) so a de-located diagnostic can't pass by
+/// coincidence.
 #[test]
 fn layer_violation_core_depends_on_hosted_is_error() {
     let t = Tree::new("layer-violation");
     t.write(
         "core/sooth.pkg",
-        r#"package: core ; layer: core ; depends: app path "../app" ;"#,
+        "package: core ;\n  layer: core ;\n  depends: app path \"../app\" ;\n",
     );
-    t.write("core/util.sth", ": uw ( -- i64 ) 1 ;\nexport: uw ;\n");
     t.write(
         "app/sooth.pkg",
         "package: app ; layer: hosted ; module: util ;",
@@ -108,6 +109,10 @@ fn layer_violation_core_depends_on_hosted_is_error() {
         err.contains("package `core` is layer `core` but depends on `app` which is layer `hosted`"),
         "unexpected message: {err}"
     );
+    assert!(
+        err.contains("line 3, col 3"),
+        "expected the offending `depends:` entry's location in: {err}"
+    );
 }
 
 /// Golden 2b: the identical fixture as Golden 2 but with the `import:
@@ -119,7 +124,7 @@ fn layer_violation_fires_without_an_import() {
     let t = Tree::new("layer-violation-no-import");
     t.write(
         "core/sooth.pkg",
-        r#"package: core ; layer: core ; depends: app path "../app" ;"#,
+        "package: core ;\n  layer: core ;\n  depends: app path \"../app\" ;\n",
     );
     t.write("app/sooth.pkg", "package: app ; layer: hosted ;");
     let entry = t.write("core/main.sth", ": main ( -- ) 0 . ;\n");
@@ -128,11 +133,17 @@ fn layer_violation_fires_without_an_import() {
         err.contains("package `core` is layer `core` but depends on `app` which is layer `hosted`"),
         "unexpected message: {err}"
     );
+    assert!(
+        err.contains("line 3, col 3"),
+        "expected the offending `depends:` entry's location in: {err}"
+    );
 }
 
 /// Golden 3: a consumer imports `core::detail`, but `core`'s manifest lists
 /// only `module: cmp ;`, not `detail`. The build fails with the OQ4-C error,
-/// pinning both package name and module name.
+/// pinning both package name and module name, and separately the located
+/// import site -- placed off (1, 1) so a de-located diagnostic can't pass by
+/// coincidence.
 #[test]
 fn cross_package_import_private_module_is_error() {
     let t = Tree::new("private-module");
@@ -140,7 +151,6 @@ fn cross_package_import_private_module_is_error() {
         "core/sooth.pkg",
         "package: core ; layer: core ; module: cmp ;",
     );
-    t.write("core/cmp.sth", ": lt ( -- i64 ) 1 ;\nexport: lt ;\n");
     t.write("core/detail.sth", ": dw ( -- i64 ) 2 ;\nexport: dw ;\n");
     t.write(
         "app/sooth.pkg",
@@ -148,12 +158,16 @@ fn cross_package_import_private_module_is_error() {
     );
     let entry = t.write(
         "app/main.sth",
-        "import: core::detail d ;\n: main ( -- ) d::dw . ;\n",
+        "\n  import: core::detail d ;\n: main ( -- ) d::dw . ;\n",
     );
     let err = build_err(&entry);
     assert!(
         err.contains("module `detail` is not in `core`'s public `module:` list"),
         "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("line 2, col 3"),
+        "expected the offending import's location in: {err}"
     );
 }
 

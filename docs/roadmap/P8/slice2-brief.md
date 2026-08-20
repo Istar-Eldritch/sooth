@@ -157,7 +157,10 @@ five probes confirmed the plan; one falsified a decision.
    `is_prelude_word_name` exemption), gate `BUILTIN_WORDS` visibility behind an
    `intrinsics` import, and add the narrowing diagnostic and its rejection test.
 3. Split `lib/core.sth` into modules with a hub (recon finding 3), and migrate every corpus
-   file and inline test source to explicit imports of it and of `intrinsics`.
+   file and inline test source to explicit imports of it and of `intrinsics`. This step also
+   carries S1a's `lib/`-as-layered-packages dogfood: a manifest over `lib/` rejects
+   `arrays.sth`'s quoted-path import, so `lib/` cannot be packaged until its imports are
+   module names.
 
 ## Exit
 
