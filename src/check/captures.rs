@@ -166,7 +166,12 @@ pub(super) fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) ->
         // local is frame-rooted; a `&T` parameter carries no deriv (or a
         // reborrow with no owned root) and is outer-rooted by construction,
         // matching `check_reference_across_back_edge`'s own `deriv` handling.
-        Type::Ref(..) => {
+        //
+        // P7 slice 3c (R8.1): a slice is a borrow too, and takes this arm
+        // rather than the scalar wildcard below -- a captured view analysed as
+        // a scalar would be snapshotted into the env and admitted at every
+        // materialization boundary, including one it can outlive.
+        Type::Ref(..) | Type::Slice(..) => {
             if ref_root_is_in_frame(b.deriv, prov, scope) {
                 CaptureClass::FrameRooted
             } else {
@@ -502,6 +507,41 @@ mod tests {
         let param_ref = capture_binding("r", ref_ty, Some(d));
         assert!(matches!(
             classify_capture(&param_ref, &prov, &empty),
+            CaptureClass::OuterRooted
+        ));
+    }
+
+    /// P7 slice 3c (R8.1): a captured slice takes the borrow arm, not the
+    /// scalar wildcard. Both roots are exercised, since "not `Scalar`" alone
+    /// would pass on a single arm answering `FrameRooted` unconditionally.
+    #[test]
+    fn classify_capture_slice_is_reference_not_scalar() {
+        let mut arrays = Vec::new();
+        let mut slices = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let slice_ty = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+
+        // Rooted in a current-frame local: the view dies with the storage it
+        // views, so it may not escape.
+        let mut prov = Provenance::default();
+        let d = prov.borrow("arr", true, false, span);
+        let mut framed = Scope::default();
+        framed.bound.push(capture_binding("arr", arr_ty, None));
+        let framed_view = capture_binding("s", slice_ty, Some(d));
+        assert!(matches!(
+            classify_capture(&framed_view, &prov, &framed),
+            CaptureClass::FrameRooted
+        ));
+
+        // The same view whose root is not this frame's: outer-rooted, so it
+        // outlives the closure's calls.
+        assert!(matches!(
+            classify_capture(&framed_view, &prov, &Scope::default()),
             CaptureClass::OuterRooted
         ));
     }

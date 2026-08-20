@@ -368,7 +368,11 @@ poly-path measurement (R11). Deliver R1 (including the R1.4 `is_ref` arm), R4, R
 R8.1, R8.3, and the R7 checker
 guards (operators printable set, extern boundary). No construction word yet, so soundness
 is unit-tested by minting a `SliceId` directly and asserting each predicate. The output
-ban (R5-backed) is testable end-to-end: a declared `( -- Slice['T] )` output is rejected.
+ban (R5-backed) is unit-tested the same way, driven directly rather than end-to-end:
+`check_reference_free_signature` is called on a hand-built `StackEffect` declaring a
+`Slice['T]` output, because there is no surface spelling to write a source golden against
+until Phase 3's construction words exist (`slice_output_is_rejected_and_slice_input_is_admitted`,
+`src/check/word_entry.rs`).
 
 **Scope:**
 
@@ -381,6 +385,20 @@ ban (R5-backed) is testable end-to-end: a declared `( -- Slice['T] )` output is 
   `is_reference_slot`, `poly_type_str`, poly `len` at `:783`).
 - Out of bounds: any `IrType` change (Phase 2), construction/index words (Phase 3), borrow
   tracking (Phase 4).
+
+**Phase 1 exit notes (R11 measurement):** the poly-path extent was walked over every
+`Type`/`PolyType` match site a slice can reach in a generic body: `poly_is_copy`,
+`is_reference_slot`, poly `len`, `poly_type_str`, the eliminator-arm escape check, quotation-
+parameter folding, and array-ref-parts derivation. Every site either delegates to the
+monomorphic predicate through `PolyType::Concrete(Type::Slice(..))` (a slice element is
+concrete by construction, R1.2) or does not distinguish a slice at all. No poly-path
+capability was found that requires re-opening a locked non-goal (generic elements, row
+unification); the predicate twins delivered here (R8.3) are the full Phase 1 poly
+surface. The one capability the measurement finds genuinely absent — tracking a *mutable*
+slice as an exclusivity place inside a poly body — is out of scope by design, not by gap:
+`PolyBorrow` (`check/poly.rs:96`) has no borrow arm for anything yet (its `place` is a
+bare `String` with no `projected` flag), and that arm is already scheduled for Phase 4
+alongside R12's exclusivity guard, so it is not owed until a mutable slice can exist.
 
 ### Phase 2: `IrType::Slice` variant, 16-byte aggregate lowering and ABI  *(hard)*
 
@@ -407,7 +425,17 @@ R10: `slice` producing a **shared** `Slice[T]` from a shared `&[T N]`, **shared*
 bounds-checked against the runtime length with the existing OOB trap on miss. The `sum`
 exit golden (a shared slice) lands here. Mutable construction (`slice` from a `&![T N]`),
 mutable `subslice`, and `&!>` are deferred to Phase 4 so a mutable slice never exists in a
-build before its exclusivity guard (R12) is active.
+build before its exclusivity guard (R12) is active. The output-ban golden
+`declared_slice_output_is_stored_reference_error` also becomes writable here, once a
+signature can spell `Slice[T]` at all; Phase 1 only proves the same claim by a direct call
+(see Phase 1's exit notes). Phase 1's widened `is_ref()` also makes two diagnostics
+reachable for the first time once a slice value exists: `&s` on a slice local reaches
+`borrow_of_reference_local_error` (`word_families.rs`, defensible — a slice is a
+reference-shaped local, so the message is accurate), and a slice used as an eliminator
+scrutinee reaches `poly_reference_scrutinee_error` (`poly.rs`), whose "eliminates a
+reference … pass the owned `Enum` instead" wording was written for a `&Enum` and reads
+confusingly for a `Slice[T]`; give that second message its own wording here, when a slice
+scrutinee is first actually reachable, rather than leaving stale text live.
 
 **Scope:**
 
@@ -463,7 +491,8 @@ guards are mutation-tested (delete the arm, the test must fail).
 - `recursive_divide_and_conquer_over_subslices_runs`.
 - `slice_out_of_range_index_traps_at_runtime` (asserts the located OOB message, no
   `Option`/`Result`).
-- `declared_slice_output_is_stored_reference_error`.
+- `declared_slice_output_is_stored_reference_error` (lands in Phase 3, once a signature
+  can spell `Slice[T]`; Phase 1 proves the same claim by direct call, see its exit notes).
 - `two_simultaneous_mutable_subslices_is_error`.
 - `dup_on_mutable_slice_is_error` / `dup_on_shared_slice_ok` (the error case asserts the
   **exact** located diagnostic string, per CLAUDE.md, not merely that an error occurs).
@@ -485,6 +514,9 @@ guards are mutation-tested (delete the arm, the test must fail).
   printability decision, matching the REPL/print renderers).
 - `src/check/declarations.rs`: `extern_boundary_rejects_slice_with_located_error` (asserts
   the exact located FFI-rejection diagnostic).
+- `src/check/word_entry.rs`: `slice_output_is_rejected_and_slice_input_is_admitted`
+  (R1.4/R5, Phase 1) — driven directly against `check_reference_free_signature`, since no
+  surface spelling exists yet to write this as source.
 - `src/repl.rs`: `remap_type_rebases_sliceid_across_modules`, `format_stack_renders_slice`.
 - `src/ir/layout.rs`: `slice_field_width_is_sixteen`,
   `carried_slot_bytes_slice_is_aligned_aggregate`.

@@ -339,6 +339,13 @@ pub(super) fn check_operator(
                 return Err(need(".", 1, n));
             }
             let a = stack[n - 1];
+            // P7 slice 3c (R7): the printable set is an allowlist, and a slice
+            // stays out of it deliberately. `.` prints one value with no
+            // element loop and no separator policy; printing a view means
+            // printing N elements and choosing delimiters, which is a library
+            // word's decision, not an operator's. So a slice reaches
+            // `print_requires_printable_error` here, and the print/REPL
+            // renderers match that with their own "not printable" arms.
             if !a.ty.is_numeric() && !a.ty.is_bool() && !matches!(a.ty, Type::Str | Type::Cstr) {
                 return Err(print_requires_printable_error(ctx, span, a.ty));
             }
@@ -548,6 +555,35 @@ mod tests {
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    /// P7 slice 3c (R7): the printability ruling. A slice is **not**
+    /// printable: `.` prints one value with no element loop and no separator
+    /// policy, so rendering a view is a library word's job. Encoded by the
+    /// allowlist, asserted here as the exact located diagnostic so the
+    /// print/REPL renderers have a decision to match.
+    #[test]
+    fn dot_printable_set_slice_decision() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        assert!(
+            !crate::check::builtins::printable_types().contains(&slice),
+            "a slice is deliberately outside the `.` allowlist"
+        );
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let mut stack = vec![Slot::computed(slice)];
+        let Err(err) = check_operator(".", Span::default(), &mut stack, &ctx, None) else {
+            panic!("`.` on a slice must be rejected");
+        };
+        assert_eq!(
+            err,
+            "error: type mismatch: `.` requires a printable scalar, found `Slice[i64]`"
+        );
+    }
+
     #[test]
     fn check_symbolic_plus_is_unknown_word() {
         // Operators-as-words: `+` no longer aliases `add`. Restoring `"+"` to

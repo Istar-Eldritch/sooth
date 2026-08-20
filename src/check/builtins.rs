@@ -248,6 +248,14 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
         // A shared reference is freely duplicated and discarded; a mutable one
         // is not (the exclusivity rule, which `dup`'s Copy gate already enforces).
         Type::Ref(_, mutable, _) => !mutable,
+        // P7 slice 3c (R4): a slice splits by mutability exactly as a
+        // reference does, and for the same reason -- duplicating a mutable view
+        // would let two names mutate through one exclusive borrow. The
+        // element's own `Copy`-ness is irrelevant (the view owns nothing), so
+        // there is no registry lookup here. The `_ => true` wildcard below
+        // would make a `!Slice[T]` freely duplicable and break exclusivity
+        // outright, which is why this arm is anchored rather than left to it.
+        Type::Slice(_, mutable, _) => !mutable,
         _ => true,
     }
 }
@@ -284,6 +292,13 @@ pub(super) fn contains_reference(
 ) -> bool {
     match ty {
         Type::Ref(..) => true,
+        // P7 slice 3c (R5): a slice carries a borrow, so it is
+        // reference-bearing. This is what keeps the declaration-level output
+        // ban covering slices: reported reference-free, a user word could
+        // declare `( -- Slice[T] )` and hand back a view of its own dead
+        // frame. The element is not followed -- it is concrete and owns
+        // nothing the view could nest a reference through.
+        Type::Slice(..) => true,
         Type::Struct(id, _) => structs[id.index()]
             .fields
             .iter()
@@ -749,5 +764,32 @@ mod tests {
             &module.enums,
             &module.arrays
         ));
+    }
+
+    /// P7 slice 3c (R4): the mutability split, in both directions. The
+    /// `_ => true` wildcard would answer `true` for both, making a mutable
+    /// view freely `dup`-able and breaking exclusivity outright.
+    #[test]
+    fn is_copy_shared_slice_is_copy_mutable_slice_is_not() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        assert!(is_copy(shared, &[], &[], &[]));
+        assert!(!is_copy(mutable, &[], &[], &[]));
+        // Neither is *linear* either: a view owns nothing, so it expires
+        // silently and is owed no `drop` (R12, via `is_ref`).
+        assert!(!is_linear(shared, &[], &[], &[]));
+        assert!(!is_linear(mutable, &[], &[], &[]));
+    }
+
+    /// P7 slice 3c (R5): what keeps the declaration-level output ban covering
+    /// slices. Reported reference-free, `( -- Slice[i64] )` would be admitted.
+    #[test]
+    fn contains_reference_true_for_slice() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        assert!(contains_reference(shared, &[], &[], &[]));
+        assert!(contains_reference(mutable, &[], &[], &[]));
     }
 }

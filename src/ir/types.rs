@@ -261,6 +261,16 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // an access is tracked per-`Value` (`FuncBuilder::ref_inner`), not in
         // the type.
         Type::Ref(..) => IrType::Ptr,
+        // P7 slice 3c phase 1: a slice is two words (an element pointer and a
+        // runtime length), so it is emphatically *not* `IrType::Ptr` -- every
+        // existing `Ptr` site assumes one word, which is why the type is its
+        // own variant rather than a fat `Type::Ref`. Phase 2 gives it
+        // `IrType::Slice`, the 16-byte `{ptr, len}` aggregate. Until then no
+        // parsed module can hold one: the type has no surface spelling and no
+        // constructor, so it exists only in the checker's own unit tests.
+        Type::Slice(..) => {
+            unreachable!("a `Slice` has no surface spelling or constructor yet (P7.S3c phase 1)")
+        }
         Type::Usize => IrType::Usize,
         Type::Isize => IrType::Isize,
         Type::Str => IrType::Str,

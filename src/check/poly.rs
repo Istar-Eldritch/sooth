@@ -15,6 +15,12 @@ pub(super) fn is_ord(ty: Type) -> bool {
 /// R7: whether a `PolyType` slot is `Copy`. A bare variable answers *only*
 /// from its bound set (never a concrete-type predicate), a concrete slot
 /// delegates to `is_copy`, and an array is `Copy` iff its element is.
+///
+/// P7 slice 3c (R8.3): a slice needs no arm of its own here. Its element is
+/// concrete by construction (a generic element is out of scope), so it only
+/// ever arrives as `PolyType::Concrete(Type::Slice(..))` and inherits R4's
+/// mutability split through the delegation above -- a shared view is `Copy`, a
+/// mutable one is not. Pinned by `poly_is_copy_mutable_slice_is_not`.
 pub(super) fn poly_is_copy(
     pt: &PolyType,
     sig: &PolySig,
@@ -199,6 +205,11 @@ impl PolyScope {
 /// Whether a `PolyType` slot holds a reference: a poly one (`&['T 4]`, from a
 /// body borrow) or a fully concrete one (`&[i64 4]`, from a declared input).
 /// Both keep a borrow observable, so both count for `prune_dead_borrows`.
+///
+/// P7 slice 3c (R8.3): a slice counts too, and needs no arm of its own -- it
+/// arrives as `Concrete(Type::Slice(..))` and `Type::is_ref` reports it (R1.4).
+/// That is the answer `prune_dead_borrows` wants: a live view keeps the borrow
+/// it was built from observable exactly as a `&T` does.
 fn is_reference_slot(pt: &PolyType) -> bool {
     match pt {
         PolyType::Ref(..) => true,
@@ -780,7 +791,15 @@ pub(super) fn poly_call_term(
                     // Non-consuming: the array stays, `len` folds to `usize`.
                     stack.push(PolySlot::new(PolyType::Concrete(Type::Usize)));
                 }
-                PolyType::Concrete(Type::Str) => {
+                // P7 slice 3c (R9.1): a slice answers its *carried* runtime
+                // length, never a scan -- and consumes the slot, like `str`
+                // and unlike the array arms above. `len` on an array reads a
+                // place that stays where it is; a slice is a value on the
+                // stack, so leaving it there would strand a residual slot
+                // (`0 s len >i64` must fold to `0 usize`). Nothing is lost:
+                // a slice is never move-tracked (`is_linear` is false for
+                // it), so the local it came from can be named again.
+                PolyType::Concrete(Type::Str | Type::Slice(..)) => {
                     stack.pop();
                     stack.push(PolySlot::new(PolyType::Concrete(Type::Usize)));
                 }
@@ -4318,6 +4337,136 @@ mod tests {
         let module = parse(&tokens).unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(poly_type_str(&sig.outputs[0], sig), "&['T 4]");
+    }
+
+    /// P7 slice 3c (R8.3): a slice inside a polymorphic body is the point of
+    /// the type, so each poly predicate is pinned over one. All four answer
+    /// through `PolyType::Concrete` delegation -- the element is concrete by
+    /// construction, so a slice never takes a poly shape of its own -- and
+    /// that delegation is exactly what these guard: deleting the monomorphic
+    /// `is_copy`/`is_ref` slice arms breaks the poly path too, silently.
+    #[test]
+    fn poly_is_copy_mutable_slice_is_not() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        let sig = bare_sig();
+        assert!(poly_is_copy(
+            &PolyType::Concrete(shared),
+            &sig,
+            &[],
+            &[],
+            &[]
+        ));
+        assert!(!poly_is_copy(
+            &PolyType::Concrete(mutable),
+            &sig,
+            &[],
+            &[],
+            &[]
+        ));
+        // The gate `dup`/`over` run: a mutable view is refused with the
+        // exclusivity wording, not the linear-ownership wording, since a view
+        // owns nothing.
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let err = poly_copy_gate(
+            &PolyType::Concrete(mutable),
+            "dup",
+            &sig,
+            &ctx,
+            Span::default(),
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `dup` a value of type `!Slice[i64]`: `!Slice[i64]` is exclusive: at most one may be live for a place, so copying it would make a second one; use it where it is, or borrow again once it is consumed"
+        );
+        poly_copy_gate(
+            &PolyType::Concrete(shared),
+            "dup",
+            &sig,
+            &ctx,
+            Span::default(),
+            &[],
+            &[],
+            &[],
+        )
+        .expect("a shared view is `Copy`");
+    }
+
+    /// P7 slice 3c (R8.3): a live slice keeps the borrow it was built from
+    /// observable, so `prune_dead_borrows` must not forget that borrow while
+    /// one is on the stack.
+    #[test]
+    fn is_reference_slot_true_for_slice() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        assert!(is_reference_slot(&PolyType::Concrete(shared)));
+        assert!(is_reference_slot(&PolyType::Concrete(mutable)));
+        assert!(!is_reference_slot(&PolyType::Concrete(Type::I64)));
+    }
+
+    /// P7 slice 3c (R8.3): the poly renderer spells a slice the way the
+    /// signature does, so a diagnostic naming one is copy-pasteable source.
+    #[test]
+    fn poly_type_str_renders_slice() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        let sig = bare_sig();
+        assert_eq!(
+            poly_type_str(&PolyType::Concrete(shared), &sig),
+            "Slice[i64]"
+        );
+        assert_eq!(
+            poly_type_str(&PolyType::Concrete(mutable), &sig),
+            "!Slice[i64]"
+        );
+    }
+
+    /// P7 slice 3c (R9.1, poly half): `len` answers a slice's carried length
+    /// and consumes the slot, like `str` and unlike the array arms -- an array
+    /// is a place that stays put, a slice is a value on the stack, so leaving
+    /// it would strand a residual slot in `0 s len >i64`.
+    #[test]
+    fn poly_len_over_a_slice_ok() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let sig = bare_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let mut overloads = HashMap::new();
+        let stack = poly_term(
+            &Term {
+                kind: TermKind::Call("len".to_string()),
+                span: Span::default(),
+            },
+            vec![PolySlot::new(PolyType::Concrete(shared))],
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut overloads,
+        )
+        .expect("`len` answers a slice");
+        assert_eq!(
+            stack.iter().map(|s| s.pt.clone()).collect::<Vec<_>>(),
+            vec![PolyType::Concrete(Type::Usize)]
+        );
     }
 
     #[test]

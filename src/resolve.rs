@@ -1098,6 +1098,7 @@ mod tests {
             arrays,
             owned_cells,
             refs,
+            slices: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generics: crate::ast::GenericTypes::default(),

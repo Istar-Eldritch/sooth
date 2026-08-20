@@ -176,6 +176,9 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if matches!(slot.ty, Type::Str) {
             return Err(extern_str_input_error(decl));
         }
+        if matches!(slot.ty, Type::Slice(..)) {
+            return Err(extern_slice_input_error(decl, slot.ty));
+        }
         if !is_extern_boundary_scalar(slot.ty) {
             return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
         }
@@ -204,6 +207,19 @@ fn extern_str_input_error(decl: &ExternDecl) -> String {
     format!(
         "error: `extern: {}` declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",
         decl.name, decl.span.line, decl.span.col
+    )
+}
+
+/// P7 slice 3c (R7): a slice input at the FFI boundary, for the same reason
+/// `str` has its own message -- it is a two-word aggregate view, not a scalar
+/// or a single opaque `Ptr`, so C would receive a pointer to a descriptor
+/// rather than the element pointer it wants. Only the input direction needs an
+/// arm: `check_reference_free_signature` runs first and rejects a slice
+/// *output* through the ordinary no-stored-reference ban (R5).
+fn extern_slice_input_error(decl: &ExternDecl, ty: Type) -> String {
+    format!(
+        "error: `extern: {}` declares the input `{}` (line {}, col {})\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`",
+        decl.name, ty, decl.span.line, decl.span.col
     )
 }
 
@@ -1172,6 +1188,11 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // every field position
         // anyway.
         Type::Ref(..) => None,
+        // P7 slice 3c (R1.3): a slice is reference-shaped -- it views storage
+        // it does not own, so it holds no inline copy of its element and
+        // closes no size cycle. The same no-stored-reference rule keeps it out
+        // of every field position too (`contains_reference` reports it).
+        Type::Slice(..) => None,
         // `bool` is `Type::Enum` and so caught by the arm above; a zero-payload
         // enum has no fields, hence no containment edges, so it is a leaf.
         Type::Int(_)
@@ -1539,6 +1560,59 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::parse;
 
+    /// P7 slice 3c (R7): a slice at the FFI boundary is rejected with its own
+    /// located message, not silently classified as a scalar and not
+    /// mis-described as an "owned aggregate" (a view owns nothing). Only the
+    /// input direction reaches here: `check_extern_decls` runs
+    /// `check_reference_free_signature` first, which rejects a slice *output*
+    /// through the ordinary no-stored-reference ban (R5).
+    #[test]
+    fn extern_boundary_rejects_slice_with_located_error() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let decl = ExternDecl {
+            name: "consume".to_string(),
+            symbol: "consume".to_string(),
+            effect: StackEffect {
+                inputs: vec![TypedSlot {
+                    name: None,
+                    ty: slice,
+                }],
+                outputs: Vec::new(),
+            },
+            span: Span {
+                line: 3,
+                col: 1,
+                module: 0,
+            },
+            module: 0,
+        };
+        assert_eq!(
+            check_extern_boundary_types(&decl).unwrap_err(),
+            "error: `extern: consume` declares the input `Slice[i64]` (line 3, col 1)\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`"
+        );
+        // The reference it views crosses fine, which is what the message
+        // directs the reader to.
+        let mut refs = Vec::new();
+        let ok = ExternDecl {
+            effect: StackEffect {
+                inputs: vec![
+                    TypedSlot {
+                        name: None,
+                        ty: crate::ast::intern_ref_type(&mut refs, Type::I64, false),
+                    },
+                    TypedSlot {
+                        name: None,
+                        ty: Type::Usize,
+                    },
+                ],
+                outputs: Vec::new(),
+            },
+            ..decl
+        };
+        check_extern_boundary_types(&ok).expect("`&i64` plus a `usize` length is a C prototype");
+    }
+
     #[test]
     fn enum_eliminator_sig_is_two_rows_over_concrete_variant_arms() {
         // R2/OQ3: the generated signature's only free variables are the two
@@ -1744,6 +1818,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            slices: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generics: crate::ast::GenericTypes::default(),
@@ -1810,6 +1885,7 @@ mod tests {
                 arrays: Vec::new(),
                 owned_cells: Vec::new(),
                 refs: Vec::new(),
+                slices: Vec::new(),
                 generic_structs: Vec::new(),
                 generic_enums: Vec::new(),
                 generics: crate::ast::GenericTypes::default(),

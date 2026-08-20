@@ -557,6 +557,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         arrays,
         owned_cells,
         refs,
+        slices: Vec::new(),
         generic_structs: generics.structs.clone(),
         generic_enums: generics.enums.clone(),
         externs: bodies.externs,

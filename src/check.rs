@@ -429,7 +429,11 @@ fn find_zero_unsafe_element(
     arrays: &[ArrayDecl],
 ) -> Option<(Type, Vec<String>)> {
     match ty {
-        Type::Str | Type::Cstr | Type::Quotation(_) => Some((ty, Vec::new())),
+        // P7 slice 3c (R6): a slice is pointer-shaped like the three above, so
+        // an all-zero one is a null element pointer with a zero length, not an
+        // empty view of anything. Named explicitly because the wildcard below
+        // treats what it does not name as zero-*safe*.
+        Type::Str | Type::Cstr | Type::Quotation(_) | Type::Slice(..) => Some((ty, Vec::new())),
         Type::Struct(id, _) => {
             for (fname, fty) in &structs[id.index()].fields {
                 if let Some((bad, mut path)) =
@@ -674,6 +678,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         arrays,
         owned_cells,
         refs,
+        slices: _,
         generic_structs: _,
         generic_enums: _,
         externs: _,
@@ -3282,6 +3287,66 @@ mod tests {
                 "mismatch for ref_mutable={ref_mutable:?}"
             );
         }
+    }
+
+    /// P7 slice 3c (R6): a slice is in the *explicit* zero-unsafe set, since
+    /// the wildcard below it treats what it does not name as zero-**safe** --
+    /// an all-zero slice is a null element pointer with a zero length, not an
+    /// empty view. Asserted through the located diagnostic the array
+    /// constructor renders, both directly and one level down a struct field so
+    /// the path is built.
+    ///
+    /// Second line of defence, deliberately: in `check_array_element_gate`
+    /// today, R5's `contains_reference` rejects a slice-bearing element before
+    /// this predicate is consulted at all. The arm is not redundant -- a
+    /// future zero-safety caller that has no reference check to run in front of
+    /// it would otherwise admit an all-zero view.
+    #[test]
+    fn find_zero_unsafe_element_names_slice() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let structs = vec![StructDecl {
+            name: "View".to_string(),
+            name_static: "View",
+            fields: vec![("s".to_string(), slice)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let view = Type::Struct(StructId::from_index(0), "View");
+        let (bad, path) =
+            find_zero_unsafe_element(slice, &structs, &[], &[]).expect("a slice is zero-unsafe");
+        assert_eq!(bad, slice);
+        assert!(path.is_empty());
+        assert_eq!(
+            array_constructor_zero_unsafe_element_error(
+                &Ctx::Line {
+                    structs: &structs,
+                    enums: &[],
+                },
+                Span::default(),
+                slice,
+                bad,
+                &path
+            ),
+            "error: cannot zero-initialize a `Slice[i64]`: it transitively contains `Slice[i64]` (directly), which is pointer-shaped and would zero to a null pointer"
+        );
+        let (bad, path) = find_zero_unsafe_element(view, &structs, &[], &[])
+            .expect("a struct reaching a slice is zero-unsafe");
+        assert_eq!(
+            array_constructor_zero_unsafe_element_error(
+                &Ctx::Line {
+                    structs: &structs,
+                    enums: &[],
+                },
+                Span::default(),
+                view,
+                bad,
+                &path
+            ),
+            "error: cannot zero-initialize a `View`: it transitively contains `Slice[i64]` (via field `s`), which is pointer-shaped and would zero to a null pointer"
+        );
     }
 
     #[test]

@@ -301,6 +301,44 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    /// P7 slice 3c (R5 + R1.4): the two halves of this function answer a slice
+    /// oppositely, and both answers are load-bearing. The output loop tests
+    /// `contains_reference` alone, so a declared `( -- Slice[i64] )` is
+    /// rejected with the ordinary stored-reference wording; the input loop
+    /// guards that test with `is_ref`, so `( Slice[i64] -- i64 )` -- the whole
+    /// point of the type -- is admitted. Driven directly rather than through
+    /// source: the type has no surface spelling until its construction words
+    /// land.
+    #[test]
+    fn slice_output_is_rejected_and_slice_input_is_admitted() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let out = StackEffect {
+            inputs: Vec::new(),
+            outputs: vec![TypedSlot {
+                name: None,
+                ty: slice,
+            }],
+        };
+        let err = check_reference_free_signature("mk", &out, &[], &[], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `mk` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+        let inp = StackEffect {
+            inputs: vec![TypedSlot {
+                name: None,
+                ty: slice,
+            }],
+            outputs: vec![TypedSlot {
+                name: None,
+                ty: Type::I64,
+            }],
+        };
+        check_reference_free_signature("sum", &inp, &[], &[], &[])
+            .expect("a slice *input* is legal: it borrows the caller's storage");
+    }
+
     #[test]
     fn check_term_word_with_entry_locals_still_ok() {
         // Regression: a plain term word with `| ... |` entry locals is

@@ -41,6 +41,11 @@ pub struct Module {
     /// structurally. Mirrors `owned_cells`, with mutability as a second key
     /// component so `&T` and `&!T` are separate entries.
     pub refs: Vec<RefDecl>,
+    /// P7 slice 3c (R1.2): the per-program interned slice registry, one entry
+    /// per distinct `(element, mutable)` shape, indexed by `SliceId`. Keyed on
+    /// mutability like `refs` rather than on a count like `arrays`: a slice's
+    /// length is a runtime component of the value, never part of its type.
+    pub slices: Vec<SliceDecl>,
     /// Phase 5 slice 1 (R1): every `type:` declaration whose header bound one
     /// or more type variables, parsed but not yet monomorphized. Empty for a
     /// program with no generic `type:` declaration.
@@ -1070,6 +1075,62 @@ pub fn intern_ref_type(refs: &mut Vec<RefDecl>, referent: Type, mutable: bool) -
     Type::Ref(id, mutable, name_static)
 }
 
+/// A registered slice type: the element it views, whether the view is
+/// mutable (`!Slice[T]`) or shared (`Slice[T]`), and the leaked `&'static
+/// str` spelling every `Type::Slice` naming it carries directly. Deduped
+/// structurally by `(element, mutable)`, mirroring `RefDecl`: a slice views
+/// storage it does not own, so like a reference there is nothing to free.
+/// There is no count -- the length is a runtime component of the value, which
+/// is the whole difference from `ArrayDecl`.
+#[derive(Debug)]
+pub struct SliceDecl {
+    pub element: Type,
+    pub mutable: bool,
+    pub name_static: &'static str,
+}
+
+/// A small `Copy` index into `Module::slices`, mirroring `RefId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SliceId(pub(crate) usize);
+
+impl SliceId {
+    /// Mint a `SliceId` for a registry position; crate-internal so an id is
+    /// always tied to a real `slices` registry entry.
+    pub(crate) fn from_index(idx: usize) -> SliceId {
+        SliceId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// Intern an `(element, mutable)` slice shape into `slices`, deduping
+/// structurally. Keyed on mutability like `intern_ref_type` and unlike
+/// `intern_array_type`, so a shared and a mutable view of the same element
+/// are distinct types, each byte-identical to its own kind.
+pub fn intern_slice_type(slices: &mut Vec<SliceDecl>, element: Type, mutable: bool) -> Type {
+    if let Some(idx) = slices
+        .iter()
+        .position(|d| d.element == element && d.mutable == mutable)
+    {
+        return Type::Slice(SliceId::from_index(idx), mutable, slices[idx].name_static);
+    }
+    let name = format!(
+        "{}Slice[{}]",
+        if mutable { "!" } else { "" },
+        element.name()
+    );
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let id = SliceId::from_index(slices.len());
+    slices.push(SliceDecl {
+        element,
+        mutable,
+        name_static,
+    });
+    Type::Slice(id, mutable, name_static)
+}
+
 /// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
 /// Two `Type::Array` values are equal iff they name the same interned shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1547,6 +1608,21 @@ pub enum Type {
     /// registry; the referent, asked only where a projection or access is
     /// being typed, stays behind the id so `Type` remains `Copy`.
     Ref(RefId, bool, &'static str),
+    /// P7 slice 3c (R1.1): a borrowed, length-carrying view over a buffer,
+    /// `Slice[T]` (shared) or `!Slice[T]` (mutable): a `SliceId` into the
+    /// interned `(element, mutable)` registry, the mutability, and the leaked
+    /// spelling. Its own variant rather than a fat `Type::Ref`, so every rule a
+    /// reference gets for free must be ported deliberately -- and every
+    /// representation site that assumed one word (`IrType::Ptr`) fails to
+    /// compile instead of silently mis-lowering a two-word value.
+    ///
+    /// Mutability is carried inline for the same reason `Type::Ref` carries it:
+    /// it is the *classification* bit (`is_copy`, linearity), asked at sites
+    /// that hold no registry. The element, asked only where an access is being
+    /// typed, stays behind the id so `Type` remains `Copy`. Second-class:
+    /// non-owning, input-only, and banned from a declared output by
+    /// `contains_reference` exactly as a `&T` is.
+    Slice(SliceId, bool, &'static str),
     /// The target-width unsigned integer (D7): distinct from every fixed-width
     /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
     /// parameter (IR-side, Phase 3), never a hardcoded width here. The
@@ -1804,9 +1880,16 @@ impl Type {
         *self == Type::BOOL
     }
 
-    /// Whether this type is a reference (`&T` or `&!T`).
+    /// Whether this type is a reference (`&T` or `&!T`), or the other
+    /// borrowed, second-class, non-owning shape: a `Slice[T]` view (R1.4).
+    /// Load-bearing in both directions for a slice. It is what makes a slice
+    /// *input* legal (`check_reference_free_signature` only rejects a
+    /// reference-bearing type that is not itself one), and what keeps a slice
+    /// out of move tracking (`is_linear`), so a view expires silently and is
+    /// owed no `drop`. A slice *output* stays rejected regardless: that loop
+    /// tests `contains_reference` alone.
     pub fn is_ref(&self) -> bool {
-        matches!(self, Type::Ref(..))
+        matches!(self, Type::Ref(..) | Type::Slice(..))
     }
 
     /// Whether a value of this type lives in memory rather than in an SSA
@@ -1844,6 +1927,7 @@ impl Type {
             Type::Array(_, name) => name,
             Type::OwnedCell(_, name) => name,
             Type::Ref(_, _, name) => name,
+            Type::Slice(_, _, name) => name,
             Type::Usize => "usize",
             Type::Isize => "isize",
             Type::Str => "str",
@@ -2254,6 +2338,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            slices: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generics: GenericTypes::default(),
@@ -2377,6 +2462,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            slices: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generics: GenericTypes::default(),
@@ -2448,6 +2534,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            slices: Vec::new(),
             generic_structs: Vec::new(),
             generic_enums: Vec::new(),
             generics: GenericTypes::default(),
@@ -2489,6 +2576,60 @@ mod tests {
             other => panic!("expected Type::Array, got {other:?}"),
         }
         assert_eq!(a.to_string(), "[i64 4]");
+    }
+
+    /// P7 slice 3c (R1.1/R1.3): the two spellings, and that `Type::name`
+    /// renders the element rather than an opaque tag.
+    #[test]
+    fn slice_type_name_renders_element() {
+        let mut slices = Vec::new();
+        let shared = intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = intern_slice_type(&mut slices, Type::I64, true);
+        assert_eq!(shared.name(), "Slice[i64]");
+        assert_eq!(mutable.name(), "!Slice[i64]");
+        assert_eq!(shared.to_string(), "Slice[i64]");
+    }
+
+    /// P7 slice 3c (R1.4): the arm that makes a slice *input* legal at
+    /// declaration and keeps a slice out of move tracking. Delete it and the
+    /// slice's whole consumer shape is rejected by
+    /// `check_reference_free_signature`.
+    #[test]
+    fn is_ref_true_for_slice() {
+        let mut slices = Vec::new();
+        let shared = intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = intern_slice_type(&mut slices, Type::I64, true);
+        assert!(shared.is_ref());
+        assert!(mutable.is_ref());
+        // ...and it is not an aggregate: it has no address of its own to
+        // borrow, so `&s` never forms a reference to a view.
+        assert!(!shared.is_aggregate());
+    }
+
+    /// P7 slice 3c (R1.2): the registry key is `(element, mutable)`, like
+    /// `intern_ref_type` and unlike `intern_array_type` -- a shared and a
+    /// mutable view of one element are distinct types, and a repeated spelling
+    /// of either dedups to one entry.
+    #[test]
+    fn slice_interns_by_element_and_mutability() {
+        let mut slices = Vec::new();
+        let a = intern_slice_type(&mut slices, Type::I64, false);
+        let b = intern_slice_type(&mut slices, Type::I64, false);
+        let m = intern_slice_type(&mut slices, Type::I64, true);
+        let other = intern_slice_type(&mut slices, Type::F64, false);
+        assert_eq!(a, b);
+        assert_ne!(a, m);
+        assert_ne!(a, other);
+        assert_eq!(slices.len(), 3);
+        match a {
+            Type::Slice(id, mutable, name) => {
+                assert_eq!(id, SliceId(0));
+                assert!(!mutable);
+                assert_eq!(name, "Slice[i64]");
+            }
+            other => panic!("expected Type::Slice, got {other:?}"),
+        }
+        assert_eq!(slices[2].element, Type::F64);
     }
 
     #[test]

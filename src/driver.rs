@@ -445,6 +445,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         arrays,
         owned_cells,
         refs,
+        slices: Vec::new(),
         generic_structs: generics.structs.clone(),
         generic_enums: generics.enums.clone(),
         externs,
