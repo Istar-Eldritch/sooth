@@ -175,6 +175,17 @@ pub enum IrType {
     /// Spelled `:Q{id}` in ABI positions and `l` in a register, like
     /// `Struct`/`Enum`/`Array`.
     Quotation(QuotSigId),
+    /// P7 slice 3c (R2.1): a borrowed view `Slice[T]`, keyed by the `SliceId`
+    /// of its interned `(element, mutable)` shape so `IrType` stays `Copy`,
+    /// like `Struct`/`Enum`/`Array`. At runtime a genuine **two-word
+    /// aggregate** `{ ptr, len }` (`slice_layout`): an opaque element pointer
+    /// plus a target-width length computed at runtime. `Str`'s single-word
+    /// shape deliberately does not carry -- a `str` is the address of a
+    /// *statically built* descriptor, and a slice has no static descriptor to
+    /// point at -- so a slice is spelled as an aggregate in ABI positions and
+    /// `l` (a pointer to its storage) in a register, and is blit-copied rather
+    /// than scalar-loaded.
+    Slice(SliceId),
 }
 
 /// Slice 7a (R1/Q2): the identity of a quotation's declared effect. A `Copy`
@@ -215,6 +226,28 @@ pub fn quotation_layout(word_width: u32) -> QuotLayout {
     QuotLayout {
         code_offset: 0,
         env_offset: word_width,
+        size: 2 * word_width,
+        align: word_width,
+    }
+}
+
+/// P7 slice 3c (R2.1): the fixed two-slot layout every slice value shares,
+/// every figure word-width-derived (backend-neutral invariant): the element
+/// `ptr` at offset 0, the runtime `len` at offset `word_width`, size `2 *
+/// word_width`, align `word_width`. Shaped like `QuotLayout` rather than like
+/// `str`'s static descriptor: both slots are live, runtime-computed values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliceLayout {
+    pub ptr_offset: u32,
+    pub len_offset: u32,
+    pub size: u32,
+    pub align: u32,
+}
+
+pub fn slice_layout(word_width: u32) -> SliceLayout {
+    SliceLayout {
+        ptr_offset: 0,
+        len_offset: word_width,
         size: 2 * word_width,
         align: word_width,
     }
@@ -261,16 +294,14 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // an access is tracked per-`Value` (`FuncBuilder::ref_inner`), not in
         // the type.
         Type::Ref(..) => IrType::Ptr,
-        // P7 slice 3c phase 1: a slice is two words (an element pointer and a
-        // runtime length), so it is emphatically *not* `IrType::Ptr` -- every
-        // existing `Ptr` site assumes one word, which is why the type is its
-        // own variant rather than a fat `Type::Ref`. Phase 2 gives it
-        // `IrType::Slice`, the 16-byte `{ptr, len}` aggregate. Until then no
-        // parsed module can hold one: the type has no surface spelling and no
-        // constructor, so it exists only in the checker's own unit tests.
-        Type::Slice(..) => {
-            unreachable!("a `Slice` has no surface spelling or constructor yet (P7.S3c phase 1)")
-        }
+        // P7 slice 3c (R1.3/R2.1): a slice is two words (an element pointer
+        // and a runtime length), so it is emphatically *not* `IrType::Ptr` --
+        // every existing `Ptr` site assumes one word, which is why the type is
+        // its own variant rather than a fat `Type::Ref`. The element shape a
+        // lowering needs stays behind the `SliceId`, so `IrType` remains
+        // `Copy`; the mutability is frontend-only, exactly as it is for a
+        // `Type::Ref` mapping to `Ptr`.
+        Type::Slice(id, _, _) => IrType::Slice(id),
         Type::Usize => IrType::Usize,
         Type::Isize => IrType::Isize,
         Type::Str => IrType::Str,
@@ -500,6 +531,36 @@ mod tests {
         assert_eq!(
             ir_type_of(Type::Array(ArrayId::from_index(0), "[i64 4]")),
             IrType::Array(ArrayId::from_index(0))
+        );
+    }
+
+    /// P7 slice 3c (R1.3/R2.1): the `Type::Slice` -> `IrType::Slice` mapping,
+    /// carrying the `SliceId` through, and the two-word layout it lowers to.
+    /// The failure this guards is the tempting one: mapping a slice to a
+    /// one-word `Ptr`/`Str`, which compiles everywhere and truncates the
+    /// length.
+    #[test]
+    fn ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer() {
+        let mut slices = Vec::new();
+        let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::F64, true);
+        let ir = ir_type_of(shared);
+        assert!(matches!(ir, IrType::Slice(_)), "got {ir:?}");
+        assert_ne!(ir, IrType::Ptr);
+        assert_ne!(ir, IrType::Str);
+        // The element/mutability distinction survives into the IR through the
+        // `SliceId`, so two different views are two different `IrType`s.
+        assert_ne!(ir, ir_type_of(mutable));
+
+        // Two words, the length at the second: `{ ptr, len }`, every figure
+        // derived from the word-width parameter rather than a literal.
+        let l = slice_layout(WORD_WIDTH);
+        assert_eq!((l.ptr_offset, l.len_offset, l.size, l.align), (0, 8, 16, 8));
+        let narrow = slice_layout(4);
+        assert_eq!(
+            (narrow.len_offset, narrow.size, narrow.align),
+            (4, 8, 4),
+            "the layout derives from the word width, not a hardcoded 8"
         );
     }
 

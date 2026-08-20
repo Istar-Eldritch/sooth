@@ -520,6 +520,12 @@ pub fn lower_line(
             IrType::Code | IrType::Quotation(_) => {
                 unreachable!("a bare quotation/code is never a REPL carried slot")
             }
+            // P7 slice 3c (R2.2): a slice takes the `Ptr` arm's route, not the
+            // aggregate-blit one -- the residual-stack check above rejects a
+            // line leaving a slice on the stack by the very same
+            // `contains_reference` rule that rejects a `&T` (R5), so a slice
+            // never reaches the carried-slot buffer either.
+            IrType::Slice(_) => unreachable!("a slice can never be a carried slot"),
         }
         in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums, b.arrays);
     }

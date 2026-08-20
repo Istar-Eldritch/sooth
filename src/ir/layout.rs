@@ -311,6 +311,14 @@ pub(super) fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Quotation(_) => {
             unreachable!("a quotation value resolves via `quotation_layout`, not a scalar")
         }
+        // P7 slice 3c (R2.1): a slice is two words, not one, and its align is
+        // a word rather than its size -- so it cannot be answered by this
+        // function's `(bytes, bytes)` contract at all. Its figures come from
+        // `slice_layout`, exactly as a quotation value's come from
+        // `quotation_layout`. Mistaking a slice for `Str`'s single opaque word
+        // is the specific failure the separate `IrType` variant exists to make
+        // impossible, so this arm refuses rather than guesses.
+        IrType::Slice(_) => unreachable!("a slice value resolves via `slice_layout`, not a scalar"),
     };
     (bytes, bytes)
 }
@@ -328,6 +336,10 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         // A quotation value is a two-slot aggregate; it marshals like any
         // aggregate, its size rounded up so the next slot stays 8-aligned.
         IrType::Quotation(_) => round_up(quotation_layout(WORD_WIDTH).size, 8),
+        // P7 slice 3c (R2.2): a slice marshals as its two-slot `{ptr, len}`
+        // aggregate, like `Quotation` and unlike the 8-byte scalar arm below
+        // -- `Str`'s one-word answer would truncate the length.
+        IrType::Slice(_) => round_up(slice_layout(WORD_WIDTH).size, 8),
         IrType::Int { .. }
         | IrType::Float { .. }
         | IrType::Bool
@@ -1081,6 +1093,42 @@ mod tests {
             ),
             8
         );
+    }
+
+    /// P7 slice 3c (R2.2): a carried slice slot is its whole 16-byte
+    /// `{ptr, len}` aggregate, not the 8-byte scalar cell `Str` gets. Getting
+    /// this wrong shifts every slot above it in the carried buffer.
+    #[test]
+    fn carried_slot_bytes_slice_is_aligned_aggregate() {
+        let mut slices = Vec::new();
+        let slice = match ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false)) {
+            IrType::Slice(id) => IrType::Slice(id),
+            other => panic!("expected an IrType::Slice, got {other:?}"),
+        };
+        assert_eq!(
+            carried_slot_bytes(
+                slice,
+                &Structs::default(),
+                &Enums::default(),
+                &Arrays::default()
+            ),
+            16
+        );
+        // ...and the figure comes from `slice_layout`, which is two words
+        // wide, so it is 16 for the same reason a two-`i64` struct is.
+        assert_eq!(slice_layout(WORD_WIDTH).size, 16);
+    }
+
+    /// P7 slice 3c (R2.1): the scalar sizer refuses a slice rather than
+    /// guessing. It cannot answer one: its `(bytes, bytes)` contract would
+    /// report a 16-byte align for a value aligned to a word, and the *tempting*
+    /// wrong answer (`Str`'s single opaque word) silently drops the length.
+    #[test]
+    #[should_panic(expected = "a slice value resolves via `slice_layout`, not a scalar")]
+    fn scalar_size_align_refuses_a_slice() {
+        let mut slices = Vec::new();
+        let slice = ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        scalar_size_align(slice);
     }
 
     #[test]

@@ -15,8 +15,8 @@ use std::path::Path;
 use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, ImportTarget, Line, OwnedCellDecl, OwnedCellId,
-    PolySig, PolyType, RefDecl, RefId, Span, StackEffect, StructDecl, StructId, Term, TermKind,
-    Type, TypedSlot, VariantDecl, WordDef,
+    PolySig, PolyType, RefDecl, RefId, SliceDecl, SliceId, Span, StackEffect, StructDecl, StructId,
+    Term, TermKind, Type, TypedSlot, VariantDecl, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -199,6 +199,7 @@ fn remap_type(
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
+    slice_base: usize,
 ) -> Type {
     match ty {
         Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
@@ -217,6 +218,13 @@ fn remap_type(
             Type::OwnedCell(OwnedCellId::from_index(id.index() + cell_base), n)
         }
         Type::Ref(id, m, n) => Type::Ref(RefId::from_index(id.index() + ref_base), m, n),
+        // P7 slice 3c (R8.2): a `SliceId` indexes a per-module registry like
+        // every id above, so an imported slice must shift into session space
+        // too. Left in the `other => other` wildcard it would keep the
+        // imported module's index and silently name whatever session slice sits
+        // at that position -- the id-collision class of bug that a per-module
+        // id landing in session space always is.
+        Type::Slice(id, m, n) => Type::Slice(SliceId::from_index(id.index() + slice_base), m, n),
         other => other,
     }
 }
@@ -232,6 +240,7 @@ fn remap_poly_type(
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
+    slice_base: usize,
 ) -> PolyType {
     match p {
         PolyType::Concrete(t) => PolyType::Concrete(remap_type(
@@ -241,6 +250,7 @@ fn remap_poly_type(
             array_base,
             cell_base,
             ref_base,
+            slice_base,
         )),
         PolyType::Var(id) => PolyType::Var(*id),
         // P7 slice 3b: a body-only marker, never in a declared signature.
@@ -253,6 +263,7 @@ fn remap_poly_type(
                 array_base,
                 cell_base,
                 ref_base,
+                slice_base,
             )),
             len.clone(),
         ),
@@ -267,18 +278,35 @@ fn remap_poly_type(
                 array_base,
                 cell_base,
                 ref_base,
+                slice_base,
             )),
             *mutable,
         ),
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
             ins.iter()
                 .map(|q| {
-                    remap_poly_type(q, struct_base, enum_base, array_base, cell_base, ref_base)
+                    remap_poly_type(
+                        q,
+                        struct_base,
+                        enum_base,
+                        array_base,
+                        cell_base,
+                        ref_base,
+                        slice_base,
+                    )
                 })
                 .collect(),
             outs.iter()
                 .map(|q| {
-                    remap_poly_type(q, struct_base, enum_base, array_base, cell_base, ref_base)
+                    remap_poly_type(
+                        q,
+                        struct_base,
+                        enum_base,
+                        array_base,
+                        cell_base,
+                        ref_base,
+                        slice_base,
+                    )
                 })
                 .collect(),
             *is_inline,
@@ -301,7 +329,15 @@ fn remap_poly_type(
             args: args
                 .iter()
                 .map(|a| {
-                    remap_poly_type(a, struct_base, enum_base, array_base, cell_base, ref_base)
+                    remap_poly_type(
+                        a,
+                        struct_base,
+                        enum_base,
+                        array_base,
+                        cell_base,
+                        ref_base,
+                        slice_base,
+                    )
                 })
                 .collect(),
             name,
@@ -358,6 +394,7 @@ fn remap_imported_combinator(
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
+    slice_base: usize,
 ) -> WordDef {
     let remap_slot = |s: &TypedSlot| TypedSlot {
         name: s.name.clone(),
@@ -368,6 +405,7 @@ fn remap_imported_combinator(
             array_base,
             cell_base,
             ref_base,
+            slice_base,
         ),
     };
     let effect = StackEffect {
@@ -379,12 +417,32 @@ fn remap_imported_combinator(
         sig.inputs = sig
             .inputs
             .iter()
-            .map(|p| remap_poly_type(p, struct_base, enum_base, array_base, cell_base, ref_base))
+            .map(|p| {
+                remap_poly_type(
+                    p,
+                    struct_base,
+                    enum_base,
+                    array_base,
+                    cell_base,
+                    ref_base,
+                    slice_base,
+                )
+            })
             .collect();
         sig.outputs = sig
             .outputs
             .iter()
-            .map(|p| remap_poly_type(p, struct_base, enum_base, array_base, cell_base, ref_base))
+            .map(|p| {
+                remap_poly_type(
+                    p,
+                    struct_base,
+                    enum_base,
+                    array_base,
+                    cell_base,
+                    ref_base,
+                    slice_base,
+                )
+            })
             .collect();
         Box::new(sig)
     });
@@ -609,6 +667,15 @@ pub fn format_stack(
                 vals.push("<cstr>".to_string());
                 cell += 1;
             }
+            // P7 slice 3c (R7): a slice renders as its `<Slice[T]>` type
+            // placeholder, like the aggregates above, and advances the buffer
+            // by its two-slot cell span -- getting that span wrong would
+            // misread every slot above it, which is why it is not folded into
+            // the one-cell scalar arm below.
+            Type::Slice(_, _, name) => {
+                vals.push(format!("<{name}>"));
+                cell += (ir::slice_layout(ir::WORD_WIDTH).size as usize).div_ceil(8);
+            }
             _ => {
                 let v = buf[cell];
                 vals.push(match ty {
@@ -668,6 +735,9 @@ fn rich_value_size(
         // fixed two-slot layout (only reached as a struct/enum/array field).
         ir::IrType::Code => ir::WORD_WIDTH as usize,
         ir::IrType::Quotation(_) => ir::quotation_layout(ir::WORD_WIDTH).size as usize,
+        // P7 slice 3c (R2.2): a slice spans its whole two-slot layout, not one
+        // word -- the `Str` answer above would under-read by the length slot.
+        ir::IrType::Slice(_) => ir::slice_layout(ir::WORD_WIDTH).size as usize,
         ir::IrType::Struct(id) => layouts[id.index()].size as usize,
         ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
         ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
@@ -721,6 +791,13 @@ fn render_rich_value(
         // quotation on the residual is rejected before rendering).
         ir::IrType::Code => "<code>".to_string(),
         ir::IrType::Quotation(_) => "<quotation>".to_string(),
+        // P7 slice 3c (R2.2/R7): a placeholder, matching the checker's ruling
+        // that a slice is not printable (`.`'s allowlist excludes it): showing
+        // the elements would need an element loop and a separator policy this
+        // renderer has no business choosing. A rendering path never panics, so
+        // this is a placeholder rather than an `unreachable!`, even though the
+        // residual-stack reference ban keeps a slice out of a rendered value.
+        ir::IrType::Slice(_) => "<slice>".to_string(),
         ir::IrType::Struct(id) => {
             let layout = &layouts[id.index()];
             let fields: Vec<String> = layout
@@ -878,6 +955,12 @@ pub struct Session {
     /// reference can never *survive* a line, but a word defined at the
     /// REPL may take one as an input.
     refs: Vec<RefDecl>,
+    /// P7 slice 3c: the interned slice registry, mirroring `refs`: a
+    /// `(element, mutable)` view shape per entry, persisting across lines so a
+    /// `SliceId` keeps naming the same shape. Grown only by an import splice
+    /// today; no session line can mint one until a slice has a surface
+    /// spelling.
+    slices: Vec<SliceDecl>,
     /// R11: every `drop` overload the session has seen, keyed the way
     /// destructor synthesis is keyed (by `StructId`, never by the shared
     /// literal name), holding the `override_epoch` it was last defined at and
@@ -1000,6 +1083,7 @@ impl Session {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            slices: Vec::new(),
             drop_overloads: HashMap::new(),
             drop_dropped_sites: HashMap::new(),
             poly_words: HashMap::new(),
@@ -1898,8 +1982,18 @@ impl Session {
         let array_base = self.arrays.len();
         let cell_base = self.owned_cells.len();
         let ref_base = self.refs.len();
-        let remap =
-            |ty: Type| remap_type(ty, struct_base, enum_base, array_base, cell_base, ref_base);
+        let slice_base = self.slices.len();
+        let remap = |ty: Type| {
+            remap_type(
+                ty,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+                slice_base,
+            )
+        };
         // Module 0's export list (words and types), the only names that cross
         // into callable session state (R8).
         let exports0: HashSet<&str> = module.modules[0]
@@ -1939,6 +2033,18 @@ impl Session {
                 referent: remap(r.referent),
                 mutable: r.mutable,
                 name_static: r.name_static,
+            });
+        }
+        // P7 slice 3c (R8.2): slices append like refs, so a `SliceId` shifts
+        // by a constant base and `remap_type`'s rebase has a registry to land
+        // in. Empty for every module today (no surface spelling mints one), but
+        // the append has to exist for the base to be a real length rather than
+        // a hardcoded zero.
+        for sl in &module.slices {
+            self.slices.push(SliceDecl {
+                element: remap(sl.element),
+                mutable: sl.mutable,
+                name_static: sl.name_static,
             });
         }
 
@@ -2178,6 +2284,7 @@ impl Session {
                 array_base,
                 cell_base,
                 ref_base,
+                slice_base,
             );
             self.combinators.insert(internal.clone(), stored);
             self.import_aliases
@@ -3674,6 +3781,46 @@ mod tests {
             format_stack(&[0, 99], &[Type::Cstr, Type::I64], &[], &[], &[]),
             "stack: <cstr> 99"
         );
+    }
+
+    /// P7 slice 3c (R7/R2.2): a slice slot renders as its `<Slice[T]>`
+    /// placeholder (matching the checker's ruling that a slice is not
+    /// printable) and spans **two** cells, so the scalar above it reads the
+    /// cell past the length word rather than the length word itself.
+    #[test]
+    fn format_stack_renders_slice() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        assert_eq!(
+            format_stack(&[0, 5, 99], &[slice, Type::I64], &[], &[], &[]),
+            "stack: <Slice[i64]> 99"
+        );
+        // The rich renderer agrees on both the span and the placeholder.
+        let ir_ty = ir::ir_type_of(slice);
+        assert_eq!(rich_value_size(ir_ty, &[], &[], &[]), 16);
+        assert_eq!(
+            render_rich_value(ir_ty, &[0u8; 16], &[], &[], &[], &[]),
+            "<slice>"
+        );
+    }
+
+    /// P7 slice 3c (R8.2): the soundness wildcard. An imported `SliceId`
+    /// indexes the *imported* module's registry, so it must shift by the
+    /// session's registry length like every other id; left in `other => other`
+    /// it would silently name whichever session slice sits at that index. The
+    /// mutability and spelling ride along untouched, as they do for a `Ref`.
+    #[test]
+    fn remap_type_rebases_sliceid_across_modules() {
+        let mut slices = Vec::new();
+        let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        let Type::Slice(id, m, name) = remap_type(mutable, 0, 0, 0, 0, 0, 3) else {
+            panic!("a remapped slice is still a slice");
+        };
+        assert_eq!(id.index(), 3, "the id shifted by the session's slice base");
+        assert!(m, "mutability rides along");
+        assert_eq!(name, "!Slice[i64]");
+        // A zero base is the identity, so a slice-free session is unaffected.
+        assert_eq!(remap_type(mutable, 9, 9, 9, 9, 9, 0), mutable);
     }
 
     #[test]

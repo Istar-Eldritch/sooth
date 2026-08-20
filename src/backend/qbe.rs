@@ -17,6 +17,13 @@ use crate::ir::{
 /// `OOB_TRAP_SYMBOL` the IR never names it and it stays backend-private.
 const OOM_TRAP_SYMBOL: &str = "sooth_oom_trap";
 
+/// P7 slice 3c (R2.1/R3): the one QBE aggregate type every slice value is
+/// spelled with. Unlike a quotation's per-effect `:Q{n}`, all slices share a
+/// single `{ l, l }` layout: the element type is erased at the backend, exactly
+/// as it is for the `Ptr` every `&T` becomes, so the `SliceId` in an
+/// `IrType::Slice` is a frontend/lowering discriminator with no ABI content.
+const SLICE_TYPE_SYMBOL: &str = "slice";
+
 /// Shared by both halves of the allocator so the gate is decided in exactly
 /// one place. Backend-private for the same reason as `OOM_TRAP_SYMBOL`.
 const TRACE_EVENT_SYMBOL: &str = "sooth_trace_event";
@@ -127,6 +134,13 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     for idx in 0..ir.quot_sigs.len() {
         writeln!(out, "type :Q{idx} = {{ l, l }}").unwrap();
     }
+    // P7 slice 3c (R2.1): the shared `{ ptr, len }` slice aggregate, emitted
+    // only when the module actually holds a slice so a slice-free program's
+    // QBE text stays byte-identical. Self-contained like the array and
+    // quotation types, so a struct member of slice type sees it declared.
+    if module_has_slice(ir) {
+        writeln!(out, "type :{SLICE_TYPE_SYMBOL} = {{ l, l }}").unwrap();
+    }
     for idx in topo_sorted_structs(&ir.structs) {
         emit_struct_type(&mut out, &ir.structs[idx], layouts);
     }
@@ -219,6 +233,20 @@ fn emit_array_type(out: &mut String, idx: usize, layout: &ArrayLayout) {
         layout.size.max(1)
     )
     .unwrap();
+}
+
+/// Whether any function in the module mentions a slice, in a param, a return,
+/// or a value: the gate on emitting the shared `:slice` aggregate type. A scan
+/// rather than a registry length, because every slice shares one layout, so
+/// there is nothing per-`SliceId` for the backend to tabulate.
+fn module_has_slice(ir: &IrModule) -> bool {
+    ir.funcs.iter().any(|f| {
+        f.params
+            .iter()
+            .chain(f.ret.iter())
+            .chain(f.value_types.iter())
+            .any(|ty| matches!(ty, IrType::Slice(_)))
+    })
 }
 
 /// The QBE aggregate symbol for array `idx`: the `[T N]` spelling is not a
@@ -330,6 +358,10 @@ fn width(ty: IrType, layouts: Layouts) -> &'static str {
         // register; the quotation's `:Q{n}` aggregate type is only spelled in
         // ABI/member positions.
         IrType::Code | IrType::Quotation(_) => "l",
+        // P7 slice 3c (R2.2): a slice value is a pointer to its two-slot
+        // `{ptr, len}` storage in a register, like every other aggregate; its
+        // `:slice` type is only spelled in ABI/member positions.
+        IrType::Slice(_) => "l",
     }
 }
 
@@ -345,6 +377,12 @@ fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
+        // P7 slice 3c (R3): the soundness-critical wildcard. A slice crossing
+        // a param/return/argument boundary is a 16-byte aggregate, so it must
+        // be spelled `:slice` for QBE to apply its by-value classification;
+        // falling through to `width()` would spell it `l` and silently pass
+        // one word of a two-word value.
+        IrType::Slice(_) => format!(":{SLICE_TYPE_SYMBOL}"),
         _ => width(ty, layouts).to_string(),
     }
 }
@@ -374,6 +412,9 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
+        // P7 slice 3c (R2.2): a slice member is its whole two-slot aggregate,
+        // spelled by the type every slice shares.
+        IrType::Slice(_) => format!(":{SLICE_TYPE_SYMBOL}"),
     }
 }
 
@@ -403,7 +444,14 @@ fn field_load_op(ty: IrType, layouts: Layouts) -> (&'static str, &'static str) {
         IrType::Code => ("l", "loadl"),
         // Slice 9 (R1): a zero-payload enum loads exactly like `Bool` did.
         IrType::Enum(id) if layouts.enums[id.index()].is_scalar => ("w", "loadub"),
-        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
+        // P7 slice 3c (R2.2): a slice joins the aggregates -- a two-word value
+        // has no single load op, and reading only its pointer word (what a
+        // `Str`-shaped `loadl` would do) drops the length.
+        IrType::Struct(_)
+        | IrType::Enum(_)
+        | IrType::Array(_)
+        | IrType::Quotation(_)
+        | IrType::Slice(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
     }
@@ -427,7 +475,13 @@ fn field_store_op(ty: IrType, layouts: Layouts) -> &'static str {
         IrType::Code => "storel",
         // Slice 9 (R1): a zero-payload enum stores exactly like `Bool` did.
         IrType::Enum(id) if layouts.enums[id.index()].is_scalar => "storeb",
-        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
+        // P7 slice 3c (R2.2): a slice joins the aggregates, for the same reason
+        // it does on the load side.
+        IrType::Struct(_)
+        | IrType::Enum(_)
+        | IrType::Array(_)
+        | IrType::Quotation(_)
+        | IrType::Slice(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
     }
@@ -1208,6 +1262,13 @@ fn emit_instr(
             }
             IrType::Code | IrType::Quotation(_) => {
                 unreachable!("a quotation/code is not a printable scalar; checker rejects it")
+            }
+            // P7 slice 3c (R2.2/R7): the checker's `.` allowlist deliberately
+            // excludes a slice (printing a view means an element loop and a
+            // separator policy, a library word's decision), so `Instr::Print`
+            // over one is a checker bug, not an input.
+            IrType::Slice(_) => {
+                unreachable!("a slice is not a printable scalar; checker rejects it")
             }
         },
         Instr::PtrOffset(dst, base, bytes) => {
@@ -2780,6 +2841,55 @@ type: Counter n i64 ;
             il.contains("=l copy $f"),
             "a `Code` handle is a copy of the symbol: {il}"
         );
+    }
+
+    /// P7 slice 3c (R3): the soundness wildcard. A slice in an ABI position is
+    /// the shared `:slice` aggregate, so QBE applies its by-value
+    /// classification to all 16 bytes; the wildcard's `width()` answer (`l`)
+    /// would pass a single register and lose the length. Driven end-to-end
+    /// through `emit` so the spelled type is one the module actually declares.
+    #[test]
+    fn qbe_abi_ty_slice_is_aggregate_not_scalar_width() {
+        let mut slices = Vec::new();
+        let slice =
+            crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        assert_ne!(
+            qbe_abi_ty(slice, empty_layouts()),
+            width(slice, empty_layouts()),
+            "a slice must not fall through to a register width"
+        );
+        assert_eq!(qbe_abi_ty(slice, empty_layouts()), ":slice");
+        // In a register it is still one pointer to its storage, like every
+        // other aggregate.
+        assert_eq!(width(slice, empty_layouts()), "l");
+
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![slice],
+            ret: None,
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: Vec::new(),
+                term: Terminator::Ret(None),
+            }],
+            value_types: vec![slice],
+        };
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            il.contains("type :slice = { l, l }"),
+            "the module declares the shared slice aggregate: {il}"
+        );
+        assert!(
+            il.contains("function $t(:slice %v0)"),
+            "the param is spelled as the aggregate: {il}"
+        );
+        // A slice-free module emits no slice type, so every existing program's
+        // QBE text is byte-identical.
+        assert!(!emit_src(": main ( -- ) 1 . ;").contains("type :slice"));
     }
 
     #[test]
