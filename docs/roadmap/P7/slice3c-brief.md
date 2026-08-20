@@ -173,6 +173,30 @@ exclusivity-tracked, non-escaping, and banned from outputs exactly as a `&T` is.
 consumes nothing, and no word may return one. This follows from the declaration-level
 output ban, which has no exception mechanism to relax.
 
+**The representation is `Type::Slice(SliceId)`, its own variant, not a fat flavour of
+`Type::Ref`.** Reuse would inherit the soundness rules for free (`contains_reference`'s
+`Type::Ref => true`, the output ban, exclusivity) but breaks an explicit, documented
+uniformity invariant: `ir/types.rs:263` collapses every reference to `IrType::Ptr`, and
+`layout.rs:377` states it outright ("Every reference lowers to `IrType::Ptr`"). Making
+one flavour 16 bytes would leave every existing `IrType::Ptr` site compiling and wrong,
+with no compile error to find them, and that failure set is diffuse. The separate
+variant's failure set is enumerable instead: the ~6 wildcard sites listed above. `str`
+also already occupies this shape as its own variant, so reuse would give Sooth two
+unrelated mechanisms for pointer-plus-length; and partial struct projection, the future
+beneficiary reuse would serve, wants a field-set rather than a length and so would not
+share the mechanism anyway.
+
+**The price of that choice is that every rule `Type::Ref` gets automatically must be
+ported deliberately**, and each port needs a test that fails when its arm is missing.
+The `Copy` classification is the sharpest of them: `is_copy` answers `Type::Ref(_,
+mutable, _) => !mutable` (`builtins.rs:250`), so a slice must mirror that split — a
+shared slice is `Copy`, a mutable one is not — where the `_ => true` wildcard would make
+a `&!` slice freely duplicable and break exclusivity outright. The others are
+`contains_reference` reporting true so the output ban keeps covering slices, exclusivity
+tracking, and the non-escaping rule. A slice that silently inherits `str`'s answers is
+the failure mode this decision accepts in exchange for loud representation errors, so it
+is the spec's main test obligation.
+
 **Construction and sub-ranging are compiler-known words, not user-declarable ones.** They
 produce a reference-shaped value, which no user signature may declare as an output. `&>`
 is the precedent: a checker word family arm, dispatched by name, exempt from the signature
@@ -202,41 +226,26 @@ every Sooth-side use and is never recovered by scanning.
 
 ## Open questions
 
-1. **`Type::Slice(SliceId)` or a new fat flavour of `Type::Ref`? Unruled, and it is the
-   spec's first decision.** Reuse inherits the soundness rules for free —
-   `contains_reference`'s `Type::Ref => true`, the output ban, exclusivity — which is
-   precisely where a separate variant is silently wrong. But reuse breaks an explicit,
-   documented uniformity invariant: `ir/types.rs:263` collapses every reference to
-   `IrType::Ptr`, and `layout.rs:377` states it outright ("Every reference lowers to
-   `IrType::Ptr`"). Making one flavour 16 bytes leaves every existing `IrType::Ptr` site
-   compiling and wrong, with no compile error to find them. The recommendation is the
-   **separate variant**, on the grounds that its failure set is enumerable (the ~6
-   wildcard sites above, already listed) while reuse's is diffuse (every "a reference is
-   one pointer" assumption in IR and backend); that `str` already occupies this shape as
-   its own variant, so reuse would give Sooth two unrelated mechanisms for
-   pointer-plus-length; and that partial struct projection, the cited future beneficiary,
-   wants a field-set rather than a length and so would not share the mechanism anyway. The
-   counter-case is real and the spec must rule explicitly.
-2. **What is sliceable?** A fixed array through `&`/`&!` is the obvious source. A `static:`
+1. **What is sliceable?** A fixed array through `&`/`&!` is the obvious source. A `static:`
    place and a `str` are candidates; each needs a ruling rather than falling out of the
    implementation.
-3. **Can a slice be sub-ranged again?** The recursive consumer above requires it, so the
+2. **Can a slice be sub-ranged again?** The recursive consumer above requires it, so the
    answer is presumably yes, but it makes the reborrow chain longer and the mechanism must
    be stated rather than assumed.
-4. **Naming.** `subslice` is a placeholder. The longer-term intent recorded for projections
+3. **Naming.** `subslice` is a placeholder. The longer-term intent recorded for projections
    is a distinct prefix-sigil form consistent with `&`, rather than word-shaped spellings;
    this slice should pick names that do not fight that later change.
-5. **Reborrow chain depth is where a bug should be expected.** `&!buffer` -> `&!Slice` ->
+4. **Reborrow chain depth is where a bug should be expected.** `&!buffer` -> `&!Slice` ->
    `&!sub-slice` -> `&!element` is three or four reborrow hops off a reference local.
    Depth-1 tests will all pass and prove nothing; a prior forwarding fix in this codebase
    passed every depth-1 test while a two-hop chain let `drop` strand a live reference. The
    spec must require a test that mutates through the innermost hop while the outer hops are
    live.
-6. **Does the poly path need its own arms?** `PolyBorrow` is coarser than `Deriv` (no
+5. **Does the poly path need its own arms?** `PolyBorrow` is coarser than `Deriv` (no
    `projected` flag) and poly `len` is a separate match (`poly.rs:783`). A slice used inside
    a polymorphic body is the point of the slice, so the poly twins are not optional, but
    their extent is unmeasured.
-7. **Is a slice accepted where a quotation parameter is expected?** Unverified, and
+6. **Is a slice accepted where a quotation parameter is expected?** Unverified, and
    load-bearing for the parallel combinators this slice is meant to leave room for, though
    not for anything inside this slice.
 
@@ -258,9 +267,9 @@ every Sooth-side use and is never recovered by scanning.
 
 ## Ready to spec?
 
-Yes, with open question 1 ruled first, since the representation choice determines which
-failure mode the implementation is exposed to and therefore what the spec's tests must
-guard.
+Yes. The representation is ruled (`Type::Slice(SliceId)`), which fixes what the spec's
+tests must guard: the ported soundness rules, since this choice trades silent unsoundness
+for loud representation errors.
 
 The consumer is probe-established rather than argued: a non-`inline` word over a buffer of
 unfixed length cannot be written today, by either available spelling, and the two errors
