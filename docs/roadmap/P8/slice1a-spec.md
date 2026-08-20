@@ -502,8 +502,11 @@ Responsible for:
 - `PackageSite { manifest_path, root, manifest }`: one package as resolution sees it, with
   `module_file(segments)` doing the path join. The extension is appended, not
   `set_extension`ed, so a `.` inside a segment survives.
-- `ManifestCache`: `find_package_root` plus a `HashMap<PathBuf, Manifest>`, so each manifest
-  is read and parsed at most once per build however many files it owns.
+- `ManifestCache`: `find_package_root` plus a `BTreeMap<PathBuf, Manifest>`, so each manifest
+  is read and parsed at most once per build however many files it owns. Ordered, not hashed:
+  phase 4's audit walk is seeded from the cache's key set and reports the first defect it
+  finds, so a `HashMap` would make *which* of several defects a build names depend on hash
+  order.
 - `segment_defect(seg) -> Option<String>`: OQ2's naming rule, and the reason a segment
   breaks it.
 - `resolve_import(...) -> Result<Option<PathBuf>, String>`: one import to the file it names.
@@ -522,8 +525,8 @@ Responsible for:
 
 - `check_package_graph` no longer has a `PackageGraph` to take. Its inputs are the closure's
   `Vec<UnresolvedImport>` and a `ManifestCache` (which by then holds every manifest the walk
-  touched): `check_package_graph(unresolved: &[UnresolvedImport], manifests: &mut
-  ManifestCache) -> Result<(), String>`. The importer's manifest path is on each
+  touched): `check_package_graph(manifests: &mut ManifestCache, unresolved:
+  &[UnresolvedImport]) -> Result<(), String>`. The importer's manifest path is on each
   `UnresolvedImport`, so OQ4-A and OQ4-C need no other lookup.
 - The layer check and the `depends:` name-mismatch check are manifest-triggered, and nothing
   in phase 3 reads the manifest of a `depends:` target that no import names -- the cache is
@@ -543,6 +546,16 @@ Responsible for:
     error: `depends:` entry names `<foo>` at line L, col C in <manifest>:
       that package declares `package: <bar>` -- rename the entry to match
     ```
+
+**Audit order.** The manifest walk (layer, name mismatch) runs to completion before any
+`unresolved` entry is reported, so a layer violation anywhere in the reachable graph
+masks an OQ4-A/OQ4-C import error. That is the intended order: a `depends:` entry that is
+both an unimported layer violation and the source of an import that cannot resolve has
+the layer violation as its root cause, and reporting the manifest defect first is what
+makes Golden 2 and Golden 2b agree regardless of whether the fixture's `import:` line is
+present. The manifest walk itself is BFS, seeded from the cache's key order (see
+`ManifestCache` above) and then declaration order within each manifest, so the defect a
+build names is a function of the source tree alone.
 
 `check_package_graph` (scheduled after discovery, before `assemble_module`) is the only
 place that turns a recorded `UnresolvedImport` into OQ4-A/OQ4-C text. Nothing before it can
@@ -955,6 +968,15 @@ diagnostic message substring including line/col and both relevant names (package
 layer values, module names). An assertion of `result.is_err()` alone is a placebo; this
 project has shipped placebo tests five times. Mutation-test each guard by deleting the
 checked code and confirming the test fails.
+
+**Entry point: through the driver, not through `check_package_graph`.** Goldens 2, 2b, 3
+and 4 must reach the check via `driver::build` (or `driver::discover_closure`) on a fixture
+tree on disk, never by calling `packages::check_package_graph` directly. Phase 4's unit
+tests all call it directly, which leaves the single call site in `discover_closure`
+unguarded: deleting that line passes the whole suite. These four goldens are the only tests
+that can close that hole, so the mutation test for them is deleting the
+`packages::check_package_graph(...)` call in `discover_closure` -- each of the four must
+fail with it gone, in addition to failing when the individual check it pins is deleted.
 
 **Golden 1: cross-package build succeeds.**  
 A minimal two-package tree: a `core` package with one public module (`cmp`) and a consumer
