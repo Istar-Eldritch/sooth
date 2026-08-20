@@ -2,7 +2,7 @@
 
 ## Goal
 
-Add `Type::Slice(SliceId)`: a borrowed, length-carrying view over a buffer. A
+Add `Type::Slice(SliceId, bool)`: a borrowed, length-carrying view over a buffer. A
 non-`inline` word can take `Slice['T]` as a parameter and index it without naming a
 length variable, so the checker never has to prove an index against an abstract `'N`.
 This is the signature shape the trait-bounds consumers (P7.S3e) want, and it removes the
@@ -32,7 +32,7 @@ compiler; its "Locked decisions" are binding and are not re-opened here.
   `STR_LEN_OFFSET = 8` at `:724`). A slice's pointer and length are computed at runtime,
   so that static-descriptor trick does not carry: a slice needs a genuinely two-word
   value at the IR and ABI level.
-- **Key issues:** The representation is `Type::Slice(SliceId)`, its own variant. That
+- **Key issues:** The representation is `Type::Slice(SliceId, bool)`, its own variant. That
   choice trades silent unsoundness (reusing a fat `Type::Ref` would leave every existing
   `IrType::Ptr` site compiling and wrong, a diffuse failure set) for an *enumerable*
   failure set: a fixed list of forced match arms plus nine wildcard sites that must be
@@ -44,25 +44,45 @@ compiler; its "Locked decisions" are binding and are not re-opened here.
 Each requirement is an independently verifiable claim. Anchors pair `path:line` with a
 symbol name; line numbers may drift, so re-locate by symbol.
 
-### R1 `Type::Slice(SliceId)` exists as its own variant with an interned registry
+### R1 `Type::Slice(SliceId, bool)` exists as its own variant with an interned registry
 
-- **R1.1** A new `Type::Slice(SliceId, &'static str)` variant in `src/ast.rs:1437`
-  (`enum Type`), modelled on `Type::Array(ArrayId, &'static str)` at `ast.rs:1451`:
-  a small `Copy` `SliceId` index into a per-module interned registry keyed by element
-  type, plus a leaked `Slice[T]` display spelling so two slices of the same element
-  compare byte-identical. The `SliceId` newtype mirrors `ArrayId` (`ast.rs:991`) with a
-  crate-internal `from_index`.
-- **R1.2** The registry interns by element `Type` (one `SliceId` per concrete element),
-  mirroring the array interner (`ast.rs:1006-1020`). Element types are **concrete and
-  `Copy` only** (locked): a generic element (`Slice['T]` over a word's own variable) is
-  out of scope, blocked on generic-instantiation-over-own-variable, and a linear element
-  has no buffer to view (`linear array elements are not supported yet`).
+- **R1.1** A new `Type::Slice(SliceId, bool, &'static str)` variant in `src/ast.rs:1437`
+  (`enum Type`), modelled on `Type::Ref(RefId, bool, &'static str)` at `ast.rs:1462` —
+  **not** `Type::Array`, which has no mutability. The `bool` carries the view's mutability
+  (shared vs mutable) **inline**, because it is the *classification* bit (`is_copy`,
+  linearity), asked at sites that hold no registry, exactly as `Type::Ref`'s doc comment
+  (`ast.rs:1454-1461`) explains. The `SliceId` is a small `Copy` index into a per-module
+  interned registry keyed by `(element, mutable)`; the leaked display spelling is
+  `Slice[T]` (shared) / `!Slice[T]` (mutable), mirroring the `!` mutability marker in
+  `&!T`, so a shared and a mutable slice of the same element are distinct, each
+  byte-identical to its own kind. The `SliceId` newtype mirrors `ArrayId` (`ast.rs:991`)
+  with a crate-internal `from_index`.
+- **R1.2** The registry interns by `(element, mutable)` (one `SliceId` per concrete
+  element + mutability pair), mirroring how `intern_ref_type` (`ast.rs:970`) dedups on
+  `d.referent == referent && d.mutable == mutable` — not the array interner, which has no
+  mutability. Element types are **concrete and `Copy` only** (locked): a generic element
+  (`Slice['T]` over a word's own variable) is out of scope, blocked on
+  generic-instantiation-over-own-variable, and a linear element has no buffer to view
+  (`linear array elements are not supported yet`).
 - **R1.3** The three compile-forced exhaustive `Type` matches each gain a deliberate
   arm, no `_ =>` catch-all: `Type::name` (`ast.rs:1764`) renders `Slice[T]`;
   `ir_type_of` (`ir/types.rs:266`, beside the `Type::Str => IrType::Str` arm) maps to
   the new `IrType::Slice` (R2); the value-containment graph
   (`check/declarations.rs:1181`) treats a slice as reference-shaped (contains a
   reference, never owns storage).
+- **R1.4** `is_ref()` (`src/ast.rs:1723`, today `matches!(self, Type::Ref(..))`) gains a
+  `Type::Slice(..) => true` arm. Without it, R5 makes `contains_reference` true while
+  `is_ref()` stays false — exactly the condition the input-signature gate
+  `check_reference_free_signature` rejects (`src/check/word_entry.rs:170`,
+  `!slot.ty.is_ref() && contains_reference(...)`, "a reference … nested inside an
+  aggregate") — so a `Slice` **input** parameter (the whole point, including the `sum`
+  exit golden `( Slice[i64] -- i64 )`) would be rejected at declaration. The output ban is
+  unaffected: the same function's output loop tests `contains_reference` **alone** with no
+  `is_ref` guard (`word_entry.rs:166`), so a declared `Slice` output stays rejected
+  regardless (R5). This arm also makes `is_linear` (`check/builtins.rs`,
+  `!ty.is_ref() && !is_copy(...)`) correctly non-linear for **both** shared and mutable
+  slices, matching the "second-class, non-owning, expires silently" model (R12) rather
+  than dragging a mutable slice into move-tracking and owing it a `drop`.
 
 ### R2 `IrType::Slice(SliceId)` exists, lowered as a 16-byte `{ptr, len}` aggregate
 
@@ -162,11 +182,19 @@ Each an anchored, deliberate arm (functional gaps, not soundness holes, but none
   `check_array_word` `len` arm (`word_families.rs:775`) with the slice receiver.
 - **R9.2** The index ops `&>` (shared) and `&!>` (mutable) accept a slice receiver and
   produce an element reference (`&T` / `&!T`) bounds-checked against the **runtime**
-  length. An out-of-range index traps at runtime via the existing `emit_oob_trap`
-  (`backend/qbe.rs:796`), with the same located message array indexing produces. `&>`
-  already produces a `&T` output today and is exempt from the signature audit, so no new
-  grammar is required. A `&!>` element reference off a mutable slice is exclusivity- and
-  extent-tracked exactly as an array element reference is (R12).
+  length. The slice-receiver branch lives in `check_reference_word`
+  (`src/check/word_families.rs:12`, the `>` arm at `:35`), which handles every
+  `&`-prefixed name and is dispatched **before** `check_array_word` (`terms.rs:357` ahead
+  of `:478`); today its `>` arm calls `ref_parts(stack[n-2].ty, refs)`, assuming a
+  `Type::Ref` receiver whose referent is an array. A `Slice` receiver is **not** a
+  `Type::Ref`, so it needs its own branch matching the receiver as a bare `Type::Slice`
+  **before** the `ref_parts` extraction, not a fallback inside it. An out-of-range index
+  traps at runtime via the existing `emit_oob_trap` (`backend/qbe.rs:796`), with the same
+  located message array indexing produces. `&>` already produces a `&T` output today and
+  is exempt from the signature audit, so no new grammar is required. A `&!>` element
+  reference off a mutable slice is exclusivity- and extent-tracked exactly as an array
+  element reference is (R12). The shared `&>` receiver lands in Phase 3; the mutable `&!>`
+  receiver lands in Phase 4 with R12's exclusivity guard.
 
 ### R10 Construction and sub-ranging as compiler-known words
 
@@ -175,7 +203,10 @@ Each an anchored, deliberate arm (functional gaps, not soundness holes, but none
   **`subslice`**: `( Slice[T] usize usize -- Slice[T] )` taking a start offset and a
   length. Both are compiler-known arms in the array-word family (`check_array_word`,
   `word_families.rs:716`), dispatched by name, exempt from the signature audit exactly as
-  `&>` is. **No new grammar.**
+  `&>` is. **No new grammar.** The **shared** forms (`slice` from a shared `&[T N]`,
+  shared `subslice`) land in Phase 3; the **mutable** forms (`slice` from a `&![T N]`,
+  mutable `subslice`) land in Phase 4 alongside R12's exclusivity guard, so a mutable
+  slice never exists in a build before its guard is active.
 - **R10.2** (naming decision, OQ2 resolved) `slice`/`subslice` are ordinary word-shaped
   names, deliberately **not** sigil-shaped. The recorded longer-term intent for
   projections is a distinct `&`-consistent prefix-sigil form; keeping these two as plain
@@ -203,8 +234,10 @@ rationale, and the concrete-element poly consumer is what ships.
 
 ### R12 Borrow rules ported: exclusivity, non-escaping, output ban
 
-A slice is exclusivity-tracked, non-escaping, and banned from outputs exactly as a `&T`
-is. The output ban is already covered by R5 (`contains_reference` true). Exclusivity: a
+A slice is exclusivity-tracked, non-escaping, non-linear, and banned from outputs exactly
+as a `&T` is. The output ban is already covered by R5 (`contains_reference` true); a slice
+is non-linear via R1.4's `is_ref()` arm (`is_linear`'s `!ty.is_ref()` clause), so it
+expires silently and is owed no `drop`. Exclusivity: a
 mutable slice participates in the coarse per-place borrow table (`Deriv`,
 `check/engine.rs:55`; `PolyBorrow`, `check/poly.rs:96`) so at most one `&!` view is live
 and a `&` cannot coexist with a `&!`, matching array/struct-field behaviour. Range-aware
@@ -277,8 +310,9 @@ not quietly restated anywhere.
 
 | Location | Symbol | Role in this work |
 |----------|--------|-------------------|
-| `src/ast.rs:1437` | `enum Type` | add `Type::Slice(SliceId, &'static str)` (R1.1) |
-| `src/ast.rs:991` / `:1006` | `ArrayId` / array interner | pattern for `SliceId` + element-keyed registry (R1.2) |
+| `src/ast.rs:1437` | `enum Type` | add `Type::Slice(SliceId, bool, &'static str)`, mutability inline like `Type::Ref` (R1.1) |
+| `src/ast.rs:991` / `:970` | `ArrayId` / `intern_ref_type` | `SliceId` newtype; registry keys on `(element, mutable)` like `intern_ref_type` (R1.2) |
+| `src/ast.rs:1723` | `is_ref` | **soundness predicate** `matches!(Type::Ref(..))`: add slice arm so a slice input is legal + non-linear (R1.4) |
 | `src/ast.rs:1764` | `Type::name` | forced arm: render `Slice[T]` (R1.3) |
 | `src/ir/types.rs:96` | `enum IrType` | add `IrType::Slice(SliceId)` (R2.1) |
 | `src/ir/types.rs:266` | `ir_type_of` | forced arm beside `Type::Str => IrType::Str` (R1.3) |
@@ -292,6 +326,7 @@ not quietly restated anywhere.
 | `src/check/builtins.rs:250`/`:251` | `is_copy` | **soundness wildcard** `_ => true`: mutability split (R4) |
 | `src/check/builtins.rs:279`/`:299` | `contains_reference` | **soundness wildcard** `_ => false`: true for slice (R5) |
 | `src/check/builtins.rs:311` | `stored_reference_output_error` | output ban, kept covering slices via R5 |
+| `src/check/word_entry.rs:166`/`:170` | `check_reference_free_signature` | output ban (`contains_reference` alone) vs input gate (`is_ref` guard) (R1.4, R5) |
 | `src/check.rs:425` | `find_zero_unsafe_element` | **soundness wildcard**: name slice zero-unsafe (R6) |
 | `src/check/captures.rs:144`/`:169` | `classify_capture` | **soundness wildcard** `_ => Scalar`: reference class (R8.1) |
 | `src/repl.rs:195`/`:219` | `remap_type` | **soundness wildcard** `other => other`: rebase `SliceId` (R8.2) |
@@ -301,7 +336,8 @@ not quietly restated anywhere.
 | `src/check/poly.rs` | `poly_is_copy`, `is_reference_slot`, `poly_type_str` | poly predicate twins (R8.3) |
 | `src/check/poly.rs:96` | `PolyBorrow` | poly borrow tracking (R11, R12) |
 | `src/check/engine.rs:55` | `Deriv` | per-place borrow tracking (R12) |
-| `src/check/word_families.rs:716` | `check_array_word` | `slice`/`subslice`/`len`/index arms (R9, R10) |
+| `src/check/word_families.rs:716` | `check_array_word` | `slice`/`subslice`/`len` arms (R9.1, R10) |
+| `src/check/word_families.rs:12`/`:35` | `check_reference_word` | `&>`/`&!>` slice-receiver branch, before `ref_parts` (R9.2) |
 | `src/check/word_families.rs:685`/`:775` | `len`/`cstr` guards, `len` arm | slice `len` behaviour (R9.1) |
 | `src/check/declarations.rs:1181` | value-containment graph | forced reference-shaped arm (R1.3) |
 | `src/check/declarations.rs:176`/`:187` | `extern` boundary | reject a slice at FFI (R7) |
@@ -328,15 +364,16 @@ since no value can be constructed yet); the first end-to-end golden lands in Pha
 ### Phase 1: `Type::Slice` variant, forced `Type` arms, checker soundness ports  *(hard)*
 
 The type exists and every check-level predicate answers it correctly. Begin with the OQ4
-poly-path measurement (R11). Deliver R1, R4, R5, R6, R8.1, R8.3, and the R7 checker
+poly-path measurement (R11). Deliver R1 (including the R1.4 `is_ref` arm), R4, R5, R6,
+R8.1, R8.3, and the R7 checker
 guards (operators printable set, extern boundary). No construction word yet, so soundness
 is unit-tested by minting a `SliceId` directly and asserting each predicate. The output
 ban (R5-backed) is testable end-to-end: a declared `( -- Slice['T] )` output is rejected.
 
 **Scope:**
 
-- Modify: `src/ast.rs:1437` (`enum Type`), `:991`/`:1006` (`SliceId` + interner), `:1764`
-  (`Type::name`).
+- Modify: `src/ast.rs:1437` (`enum Type`), `:991`/`:970` (`SliceId` + interner keyed on
+  `(element, mutable)`), `:1764` (`Type::name`), `:1723` (`is_ref` slice arm, R1.4).
 - Modify: `src/check/builtins.rs:250` (`is_copy`), `:279` (`contains_reference`);
   `src/check.rs:425` (`find_zero_unsafe_element`); `src/check/captures.rs:144`
   (`classify_capture`); `src/check/operators.rs:342`; `src/check/declarations.rs:176`/`:187`
@@ -362,30 +399,41 @@ not scalar-load).
   (renderers).
 - Out of bounds: construction/index semantics (Phase 3).
 
-### Phase 3: construction, sub-ranging, `len`, and indexed access with a runtime bound  *(hard)*
+### Phase 3: shared construction, sub-ranging, `len`, and shared indexed access  *(hard)*
 
-The first end-to-end golden. Deliver R9 and R10: `slice`/`subslice` compiler-known words,
-`len` answering a runtime length, `&>`/`&!>` over a slice bounds-checked against the
-runtime length with the existing OOB trap on miss. The `sum` exit golden lands here.
-
-**Scope:**
-
-- Modify: `src/check/word_families.rs:716` (`check_array_word`: `slice`, `subslice`, `len`
-  at `:775`, index dispatch), `:685` guard.
-- Modify: lowering for the two new words and the slice-receiver index op (the `ir/driver.rs`
-  / `backend/qbe.rs` index-emit path that reuses `emit_oob_trap`, `qbe.rs:796`).
-- Out of bounds: exclusivity/non-escape tracking beyond what `&>` already enforces (Phase 4).
-
-### Phase 4: borrow rules ported, poly borrow arms, reborrow-chain-depth test  *(hard)*
-
-Deliver R12 and the poly borrow-tracking arms deferred from R11, plus the R13 reborrow
-chain test. A mutable slice is exclusivity-tracked in `Deriv`/`PolyBorrow`; the recursive
-`rec` divide-and-conquer golden lands here.
+The first end-to-end golden, **shared views only**. Deliver the shared halves of R9 and
+R10: `slice` producing a **shared** `Slice[T]` from a shared `&[T N]`, **shared**
+`subslice`, `len` answering a runtime length, and the **shared** `&>` receiver
+bounds-checked against the runtime length with the existing OOB trap on miss. The `sum`
+exit golden (a shared slice) lands here. Mutable construction (`slice` from a `&![T N]`),
+mutable `subslice`, and `&!>` are deferred to Phase 4 so a mutable slice never exists in a
+build before its exclusivity guard (R12) is active.
 
 **Scope:**
 
-- Modify: `src/check/engine.rs:55` (`Deriv` handling for a slice place),
-  `src/check/poly.rs:96` (`PolyBorrow`).
+- Modify: `src/check/word_families.rs:716` (`check_array_word`: shared `slice`, shared
+  `subslice`, `len` at `:775`), `:12`/`:35` (`check_reference_word`: shared `&>`
+  slice-receiver branch), `:685` guard.
+- Modify: lowering for the two new words and the shared slice-receiver index op (the
+  `ir/driver.rs` / `backend/qbe.rs` index-emit path that reuses `emit_oob_trap`,
+  `qbe.rs:796`).
+- Out of bounds: mutable construction/`subslice`/`&!>` and all exclusivity/non-escape
+  tracking (Phase 4).
+
+### Phase 4: mutable views, borrow rules ported, poly borrow arms, reborrow test  *(hard)*
+
+Deliver mutable-slice construction (`slice` from a `&![T N]`), mutable `subslice`, and the
+`&!>` mutable-element receiver, landing **together with** R12's exclusivity tracking and
+the poly borrow-tracking arms deferred from R11, plus the R13 reborrow chain test — so a
+mutable slice never exists without its guard. A mutable slice is exclusivity-tracked in
+`Deriv`/`PolyBorrow`; the recursive `rec` divide-and-conquer golden (which takes one
+mutable half at a time) lands here.
+
+**Scope:**
+
+- Modify: `src/check/word_families.rs:716`/`:12` (mutable `slice`/`subslice`/`&!>` arms),
+  `src/check/engine.rs:55` (`Deriv` handling for a slice place), `src/check/poly.rs:96`
+  (`PolyBorrow`).
 - Out of bounds: range-aware / disjoint concurrent mutable sub-slices (locked out of scope).
 
 ### Phase 5: roadmap correction, regression sweep, growth-signal re-check  *(standard)*
@@ -417,23 +465,35 @@ guards are mutation-tested (delete the arm, the test must fail).
   `Option`/`Result`).
 - `declared_slice_output_is_stored_reference_error`.
 - `two_simultaneous_mutable_subslices_is_error`.
-- `dup_on_mutable_slice_is_error` / `dup_on_shared_slice_ok`.
+- `dup_on_mutable_slice_is_error` / `dup_on_shared_slice_ok` (the error case asserts the
+  **exact** located diagnostic string, per CLAUDE.md, not merely that an error occurs).
+- `slice_through_a_declared_quotation_parameter_row_runs` — a non-`inline` word whose
+  parameter row is `~[ Slice[i64] -- ]`, exercising the brief's locked
+  quotation-parameter-input-row decision (distinct from the `sum` golden, which captures a
+  slice into a quotation *literal*).
 
 **Unit tests beside their stage:**
 
-- `src/ast.rs`: `slice_type_name_renders_element`, `slice_interns_by_element`.
+- `src/ast.rs`: `slice_type_name_renders_element`, `is_ref_true_for_slice` (R1.4),
+  `slice_interns_by_element_and_mutability`.
 - `src/check/builtins.rs`: `is_copy_shared_slice_is_copy_mutable_slice_is_not`,
   `contains_reference_true_for_slice`.
-- `src/check.rs`: `find_zero_unsafe_element_names_slice`.
+- `src/check.rs`: `find_zero_unsafe_element_names_slice` (asserts the exact located
+  diagnostic string, not merely that an element is flagged).
 - `src/check/captures.rs`: `classify_capture_slice_is_reference_not_scalar`.
-- `src/repl.rs`: `remap_type_rebases_sliceid_across_modules`.
+- `src/check/operators.rs`: `dot_printable_set_slice_decision` (asserts the R7
+  printability decision, matching the REPL/print renderers).
+- `src/check/declarations.rs`: `extern_boundary_rejects_slice_with_located_error` (asserts
+  the exact located FFI-rejection diagnostic).
+- `src/repl.rs`: `remap_type_rebases_sliceid_across_modules`, `format_stack_renders_slice`.
 - `src/ir/layout.rs`: `slice_field_width_is_sixteen`,
   `carried_slot_bytes_slice_is_aligned_aggregate`.
 - `src/backend/qbe.rs`: `qbe_abi_ty_slice_is_aggregate_not_scalar_width`.
 - `src/check/word_families.rs`: `len_over_a_slice_answers_runtime_length`,
   `slice_constructs_a_view_from_an_array_reference`,
   `subslice_rederives_a_fresh_slice_not_a_nested_borrow`.
-- `src/check/poly.rs`: `poly_is_copy_mutable_slice_is_not`, `poly_len_over_a_slice_ok`.
+- `src/check/poly.rs`: `poly_is_copy_mutable_slice_is_not`, `poly_len_over_a_slice_ok`,
+  `is_reference_slot_true_for_slice`, `poly_type_str_renders_slice`.
 
 **R13 (OQ3) reborrow chain, named explicitly:**
 `mutate_innermost_hop_of_buffer_slice_subslice_element_chain_while_outer_live` — mutates
@@ -441,10 +501,11 @@ through the innermost `&!element` of a `&!buffer -> &!Slice -> &!sub-slice -> &!
 chain with the outer hops still live, the one shape the brief's reborrow probe did not
 cover.
 
-**Mutation-tested guards (delete the arm → test fails):** R4 mutability split (both
-directions), R5 `contains_reference` (the output-ban golden must flip to accept), R6
-zero-unsafe arm, R8.1 `classify_capture`, R8.2 `remap_type`, R3 `qbe_abi_ty`, and the R9.2
-bounds-trap.
+**Mutation-tested guards (delete the arm → test fails):** R1.4 `is_ref` slice arm (delete
+→ the `sum` golden's `Slice` input is rejected at declaration), R4 mutability split (both
+directions) at both `is_copy` and its poly twin `poly_is_copy`, R5 `contains_reference`
+(the output-ban golden must flip to accept), R6 zero-unsafe arm, R8.1 `classify_capture`,
+R8.2 `remap_type`, R3 `qbe_abi_ty`, and the R9.2 bounds-trap.
 
 **Regression, green and untouched:** `tests/phase7_slice3a.rs`, `tests/phase7_slice3b.rs`,
 `tests/qbe_baseline.rs`, the poly-reference and array suites.
@@ -472,8 +533,8 @@ bounds-trap.
   "phases": [
     { "phase": 1, "focus": "Type::Slice variant, forced Type arms, checker soundness ports", "effort": "M", "difficulty": "hard" },
     { "phase": 2, "focus": "IrType::Slice variant, 16-byte aggregate lowering and ABI", "effort": "M", "difficulty": "hard" },
-    { "phase": 3, "focus": "slice/subslice construction words, len, indexed access with runtime bound", "effort": "M", "difficulty": "hard" },
-    { "phase": 4, "focus": "borrow rules ported, poly borrow arms, reborrow-chain-depth test", "effort": "M", "difficulty": "hard" },
+    { "phase": 3, "focus": "shared slice/subslice construction, len, shared indexed access", "effort": "M", "difficulty": "hard" },
+    { "phase": 4, "focus": "mutable views, borrow rules ported, poly borrow arms, reborrow-chain-depth test", "effort": "M", "difficulty": "hard" },
     { "phase": 5, "focus": "roadmap exit-criterion correction, regression sweep, growth-signal re-check", "effort": "S", "difficulty": "standard" }
   ]
 }
