@@ -449,6 +449,53 @@ not scalar-load).
   (renderers).
 - Out of bounds: construction/index semantics (Phase 3).
 
+**Phase 2 exit notes (three anchors that did not survive contact):**
+
+- There is no `field_width` in `ir/layout.rs`; the anchored line is
+  `scalar_size_align_ww`, whose `(bytes, bytes)` return contract cannot express a slice at
+  all -- a slice is 16 bytes wide but word-*aligned*, so any answer it gave would be
+  wrong in one component. Its arm therefore refuses (`unreachable!`, like `Quotation`'s),
+  and R2.2's "a slice is 16 bytes, not 8" is delivered where the figures are real:
+  `slice_layout` and `carried_slot_bytes`, both guarded.
+- `ir/driver.rs`'s forced arm is not a general load-vs-blit dispatch but the **REPL
+  carried-slot prologue**. A slice cannot reach it: the residual-stack check rejects a line
+  leaving one on the stack through the very same `contains_reference` call that rejects a
+  `&T` (R5). The arm joins `IrType::Ptr`'s `unreachable!` rather than blitting. The
+  epilogue store beside it (a `_ =>` scalar-`Store` wildcard) is unreachable for that one
+  same reason and is deliberately left unarmed, so the residual check stays the single
+  place the claim is made.
+- The backend spells every slice with **one shared `:slice = { l, l }`** aggregate, not the
+  per-`SliceId` IR layout registry R2.1 imagined. All slices have an identical layout: the
+  element type is erased at the backend exactly as it is for the `Ptr` every `&T` becomes,
+  so a per-id registry would hold N byte-identical rows. The `SliceId` stays a
+  frontend/lowering discriminator with no ABI content, and `IrType` stays `Copy` either
+  way. The type is emitted only when a module holds a slice, so every existing program's
+  QBE text is byte-identical (`tests/qbe_baseline.rs` untouched).
+
+**Phase 2 exit notes (what Phase 3 inherits):** the first slice *value* makes four
+wildcards reachable that Phase 2 deliberately did not arm, because what they should answer
+depends on how construction lowers:
+
+- `func_builder/mod.rs`'s `is_aggregate` returns `false` for a slice, so a loop-carried
+  slice would take the header-`Phi` path rather than the stable-slot + staged-back-edge
+  blit an aggregate gets. Phase 3/4 must decide this deliberately; a two-word value on the
+  wrong path is the `project_aggregate_return_aliasing` shape.
+- `alloc_aggregate`'s `_ => unreachable!("not an aggregate IrType")` needs a slice arm the
+  moment `slice` allocates a `{ptr, len}` frame slot.
+- `value_size` (`func_builder/word_families.rs`) and `LayoutBuilder::size_align` both route
+  a slice into `scalar_size_align_ww`'s refusal via their wildcards. That is the correct
+  *behaviour* today (a slice is banned from every field and element position by R5), so
+  neither is armed; a Phase 3 caller that legitimately needs a slice's byte size adds the
+  arm at its first use.
+- `Session::slices` exists so `remap_type`'s rebase has a real base to shift by, but it is
+  not threaded into the checker: no session line can intern a slice until there is a
+  surface spelling, which is Phase 3's business.
+
+**Phase 2 mutation-tested guards (7, all killed):** the `qbe_abi_ty` arm deleted (R3), the
+`remap_type` arm deleted (R8.2), `carried_slot_bytes` answering 8, `ir_type_of` mapping to
+`IrType::Ptr`, the `format_stack` arm deleted, `rich_value_size` answering 8, and
+`render_rich_value`'s placeholder changed.
+
 ### Phase 3: shared construction, sub-ranging, `len`, and shared indexed access  *(hard)*
 
 The first end-to-end golden, **shared views only**. Deliver the shared halves of R9 and
@@ -562,8 +609,12 @@ guards are mutation-tested (delete the arm, the test must fail).
   (R1.4/R5 poly twin, Phase 1) — the same two claims as the `word_entry.rs` test, on the
   poly path, driven against a hand-built `PolySig`.
 - `src/repl.rs`: `remap_type_rebases_sliceid_across_modules`, `format_stack_renders_slice`.
-- `src/ir/layout.rs`: `slice_field_width_is_sixteen`,
-  `carried_slot_bytes_slice_is_aligned_aggregate`.
+- `src/ir/layout.rs`: `carried_slot_bytes_slice_is_aligned_aggregate` and
+  `scalar_size_align_refuses_a_slice` (Phase 2; the planned
+  `slice_field_width_is_sixteen` has no `field_width` to test -- see Phase 2's exit
+  notes -- so the 16-byte claim is asserted through `slice_layout` in
+  `ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer` and the carried-slot test).
+- `src/ir/types.rs`: `ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer` (R1.3/R2.1).
 - `src/backend/qbe.rs`: `qbe_abi_ty_slice_is_aggregate_not_scalar_width`.
 - `src/check/word_families.rs`: `len_over_a_slice_answers_runtime_length`,
   `slice_constructs_a_view_from_an_array_reference`,
