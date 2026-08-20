@@ -8,13 +8,26 @@ wording per fallback tier) doesn't touch any of S1's five. The design is in
 `../P8-packages-modules.md`, under "A manifest is optional, and resolution falls back three
 ways."
 
-## Recon (measured against the built compiler, 2026-08-19, `main` at `c1a0883`)
+## Recon (re-measured against the built compiler, 2026-08-20, `main` at `415fb60`, after S1a merged)
 
-1. **The CLI takes a bare entry file, not a project root.** `main.rs:16-35` dispatches
-   `build <file.sth>` / `run <file.sth>` straight to `driver::build`/`driver::run`, both
-   typed `&Path` to a single file (`driver.rs:403`). There is no existing notion of "the
-   current package" or "a named manifest" for either to resolve against, and no flag
-   parsing beyond positional arguments today.
+1. **The CLI still takes a bare entry file, not a project root, and still has no flag
+   parsing.** `main.rs:16-35` dispatches `build <file.sth>` / `run <file.sth>` straight to
+   `driver::build`/`driver::run`, both typed `&Path` to a single file. Nothing here changed
+   in S1a; a `--manifest <path>` flag is still net-new work.
+
+2. **Tiers 2 and 4 of the fallback chain already exist, built by S1a — this narrows S1b's
+   actual scope.** `packages::ManifestCache::package_of` (`packages.rs:126-133`) calls
+   `find_package_root` and returns `Ok(None)` when no ancestor manifest is found, which is
+   already exactly the tier-4 implicit-anonymous-package baseline (an intrinsics-only,
+   dependency-less resolution). `discover_closure_with` (`driver.rs:73-121`) already calls
+   `package_of` per file and threads its `Option<PackageSite>` into `resolve_import`. So
+   S1b's actual net-new surface is narrower than a from-scratch fallback chain: it's tier 1
+   (the `--manifest` flag) and tier 3 (the user-level manifest at
+   `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), plus how a tier-1 override composes with the
+   existing per-file `package_of` call across a multi-directory closure (today every
+   transitively-discovered file re-derives its own ancestor manifest independently; an
+   override needs a ruling on whether it replaces `package_of` for every file in the
+   closure or only the entry file's own site), plus the per-tier diagnostic wording.
 
 ## Decisions (settled here, not reopened by the spec)
 
@@ -52,6 +65,12 @@ ways."
   a `depends:` line to it). The implicit-anonymous-package case must name itself in the
   error, or the user is told a package is missing without being told why their file isn't
   in one.
+- **Whether `--manifest` overrides `package_of` for every file in the closure, or only the
+  entry file's own site** (recon item 2). A closure can span multiple directories with
+  their own ancestor manifests (nested packages, S1a); the decisions section already rules
+  the flag beats an ancestor manifest, but doesn't say whether that's a global override for
+  the whole build or a per-file one that a nested package's own manifest could still win
+  back for its own files.
 
 ## Out of scope
 
