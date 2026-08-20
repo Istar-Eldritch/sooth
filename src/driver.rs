@@ -1,13 +1,14 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{Import, Module, ModuleInfo, Span};
 use crate::lexer::Token;
-use crate::packages::{ManifestCache, UnresolvedImport};
+use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
 
 const C_SHIM: &str = "extern void sooth_main(void);\nint main(void) { sooth_main(); return 0; }\n";
@@ -64,6 +65,38 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
     })
 }
 
+impl ResolutionConfig {
+    /// `manifest_override` empty (the flag is threaded in by the caller);
+    /// `user_manifest` populated from `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`,
+    /// falling back to `$HOME/.config/sooth/global_sooth.pkg` (R6), but only
+    /// when that file actually exists — a missing file is tier 4, not tier 3.
+    /// Kept here rather than beside the struct in `packages.rs`: reading the
+    /// process environment is `driver.rs`'s concern, not `packages.rs`'s
+    /// (CLAUDE.md growth structure).
+    pub(crate) fn from_env() -> Self {
+        ResolutionConfig {
+            manifest_override: None,
+            user_manifest: user_manifest_path(
+                std::env::var_os("XDG_CONFIG_HOME"),
+                std::env::var_os("HOME"),
+            )
+            .filter(|p| p.is_file()),
+        }
+    }
+}
+
+/// Where the user-level manifest lives (tier 3, R6), as a function of the two
+/// environment values that decide it rather than of `std::env` itself: the
+/// branches are then testable without mutating process-wide state, which R6
+/// forbids. An empty `XDG_CONFIG_HOME` counts as unset (the XDG spec).
+fn user_manifest_path(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let config_home = config_home
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")))?;
+    Some(config_home.join("sooth").join("global_sooth.pkg"))
+}
+
 /// R2/R3: discover the whole import closure from the entry file. A quoted-path
 /// import (manifest-less files only) resolves relative to the importing file's
 /// directory; a module name resolves against its package, by its anchor. Both
@@ -71,20 +104,32 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
 /// Rejects a cycle and a self-import with a located both-files error (R4) and a
 /// missing file with a located error (R5).
 pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
+    discover_closure_audited(entry, &ResolutionConfig::from_env())
+}
+
+/// `discover_closure_configured` over a fresh `ManifestCache`, followed by the
+/// package-graph audit — the shared body of `discover_closure` and
+/// `emit_ssa_with_manifest`, so the two entry points can't drift apart.
+fn discover_closure_audited(entry: &Path, config: &ResolutionConfig) -> Result<Closure, String> {
     let mut manifests = ManifestCache::default();
-    let closure = discover_closure_with(entry, &mut manifests)?;
+    let closure = discover_closure_configured(entry, config, &mut manifests)?;
     packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
     Ok(closure)
 }
 
-/// `discover_closure` over a caller-supplied manifest cache, so a test can see
-/// how many manifests the walk actually parsed.
-fn discover_closure_with(entry: &Path, manifests: &mut ManifestCache) -> Result<Closure, String> {
+/// `discover_closure` over a caller-supplied manifest cache and resolution
+/// config, so a test can see how many manifests the walk actually parsed and
+/// point the fallback tiers at a fixture (R6).
+pub(crate) fn discover_closure_configured(
+    entry: &Path,
+    config: &ResolutionConfig,
+    manifests: &mut ManifestCache,
+) -> Result<Closure, String> {
     let entry_canon =
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
     id_of.insert(entry_canon.clone(), 0);
-    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon, 0)?];
+    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon.clone(), 0)?];
     let mut unresolved_imports = Vec::new();
 
     let mut i = 0;
@@ -92,9 +137,11 @@ fn discover_closure_with(entry: &Path, manifests: &mut ManifestCache) -> Result<
         let dir = nodes[i].dir.clone();
         let canon = nodes[i].canon.clone();
         let imports = nodes[i].imports.clone();
-        // Every file's own package, from its canonical path: manifests are
-        // parsed once each however many files they own.
-        let site = manifests.package_of(&canon)?;
+        // Every file's own site, from its canonical path: the `--manifest`
+        // override for the entry file (R3), else the fallback chain from its
+        // nearest ancestor manifest down (R1). Manifests are parsed once each
+        // however many files they own.
+        let site = packages::select_site(&canon, &entry_canon, config, manifests)?;
         let mut targets = Vec::with_capacity(imports.len());
         for imp in &imports {
             let resolved = packages::resolve_import(
@@ -462,7 +509,16 @@ pub(crate) fn check_no_main_in_closure(
 /// baseline golden asserts this stays byte-identical across the slice-8a
 /// builtin-table refactor.
 pub fn emit_ssa(path: &Path) -> Result<String, String> {
-    let closure = discover_closure(path)?;
+    emit_ssa_with_manifest(path, None)
+}
+
+/// `emit_ssa` with a `--manifest` override (tier 1, R1): resolves the entry
+/// file's dependency-anchored imports against `manifest` instead of an
+/// ancestor manifest (R3), the other fallback tiers unaffected.
+pub fn emit_ssa_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<String, String> {
+    let mut config = ResolutionConfig::from_env();
+    config.manifest_override = manifest.map(PathBuf::from);
+    let closure = discover_closure_audited(path, &config)?;
     let mut module = assemble_module(&closure, true)?;
     check::check(&mut module)?;
     // R14/D4 (native-build fix): only the entry file (module 0) may declare
@@ -475,7 +531,12 @@ pub fn emit_ssa(path: &Path) -> Result<String, String> {
 
 /// Compile a source file to a native binary. Returns the binary's path.
 pub fn build(path: &Path) -> Result<PathBuf, String> {
-    let ssa = emit_ssa(path)?;
+    build_with_manifest(path, None)
+}
+
+/// `build` with a `--manifest` override; see `emit_ssa_with_manifest`.
+pub fn build_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<PathBuf, String> {
+    let ssa = emit_ssa_with_manifest(path, manifest)?;
 
     let dir = tempfile_dir()?;
     let ssa_path = dir.join("out.ssa");
@@ -501,7 +562,12 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
 /// Compile and run a source file, returning the child's exit status. The caller
 /// decides how to propagate it (`main` mirrors it as its own exit code).
 pub fn run(path: &Path) -> Result<ExitStatus, String> {
-    let binary = build(path)?;
+    run_with_manifest(path, None)
+}
+
+/// `run` with a `--manifest` override; see `emit_ssa_with_manifest`.
+pub fn run_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<ExitStatus, String> {
+    let binary = build_with_manifest(path, manifest)?;
     Command::new(&binary)
         .status()
         .map_err(|e| format!("running {binary:?}: {e}"))
@@ -1002,8 +1068,19 @@ mod tests {
 
     /// The located error a closure discovery is expected to fail with.
     /// `Closure` is not `Debug`, so `expect_err` is not available.
+    /// `discover_closure` with both fallback tiers pinned off (R6): a bare
+    /// `discover_closure(&entry)` reads the invoking machine's real
+    /// `$XDG_CONFIG_HOME/sooth/global_sooth.pkg`, which can turn a
+    /// manifest-less fixture's expected tier-4 error into a tier-3 resolution
+    /// (or a different error) on any machine that has one. Every
+    /// `discover_err` caller pins a located *error*, so an explicit,
+    /// user-manifest-free config keeps them reproducible everywhere.
     fn discover_err(entry: &Path) -> String {
-        match discover_closure(entry) {
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: None,
+        };
+        match discover_closure_audited(entry, &config) {
             Ok(_) => panic!("expected a located error from {}", entry.display()),
             Err(e) => e,
         }
@@ -1047,11 +1124,136 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
         let mut manifests = ManifestCache::default();
-        discover_closure_with(&entry, &mut manifests).expect("closure resolves");
+        discover_closure_configured(&entry, &ResolutionConfig::from_env(), &mut manifests)
+            .expect("closure resolves");
         assert_eq!(
             manifests.parses, 1,
             "one manifest owns both files, so it is parsed once"
         );
+    }
+
+    /// R3, end to end through the closure walk: `--manifest` resolves the
+    /// entry file's dependency import, while the file that import pulls in
+    /// resolves its own `self::` sibling against its *own* ancestor manifest.
+    /// Mutation-test by applying the override to every file in the closure:
+    /// `lib.sth`'s `self::helper` then joins the flag manifest's root, where
+    /// nothing is.
+    #[test]
+    fn discover_closure_configured_flag_override_entry_only() {
+        let s = Sandbox::new("flag-entry-only");
+        pkg(
+            &s,
+            "flag/",
+            "package: flagpkg ; layer: hosted ;\ndepends: dep path \"../dep\" ;",
+        );
+        pkg(&s, "dep/", "package: dep ; layer: hosted ;\nmodule: lib ;");
+        s.write("dep/helper.sth", ": hw ( -- i64 ) 7 ;\nexport: hw ;\n");
+        s.write(
+            "dep/lib.sth",
+            "import: self::helper h ;\n: lw ( -- i64 ) h::hw ;\nexport: lw ;\n",
+        );
+        let entry = s.write(
+            "scratch/main.sth",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+        );
+        let mut config = ResolutionConfig::from_env();
+        config.manifest_override = Some(s.0.join("flag/sooth.pkg"));
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("the flag resolves the entry, the dependency resolves itself");
+        assert_eq!(
+            closure.nodes.len(),
+            3,
+            "entry, dep::lib, and dep's own self::helper"
+        );
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
+    /// R1 tier 3: a manifest-less entry file with no `--manifest` resolves a
+    /// dependency module against the user-level manifest, pointed at a fixture
+    /// rather than at a real `$XDG_CONFIG_HOME` (R6). Mutation-test by making
+    /// `select_site`'s tier-3 branch return `Ok(None)`: the import then has no
+    /// `depends:` table to resolve against.
+    #[test]
+    fn discover_closure_configured_user_manifest_fallback() {
+        let s = Sandbox::new("user-level-fallback");
+        let user_manifest = s.write("cfg/global_sooth.pkg", "depends: dep path \"../dep\" ;");
+        pkg(&s, "dep/", "package: dep ; layer: hosted ;\nmodule: lib ;");
+        s.write("dep/lib.sth", ": lw ( -- i64 ) 7 ;\nexport: lw ;\n");
+        let entry = s.write(
+            "scratch/main.sth",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+        );
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: Some(user_manifest),
+        };
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("the user-level manifest resolves the dependency");
+        assert_eq!(closure.nodes.len(), 2, "entry and dep::lib");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
+    /// R1 tier 4: neither `--manifest` nor a user-level manifest is present,
+    /// so a manifest-less entry falls all the way to the implicit anonymous
+    /// package -- a quoted-path sibling still resolves there. Driven through
+    /// an explicit `ResolutionConfig` with both fields `None`, never through
+    /// `ResolutionConfig::from_env()`, so the assertion can't be at the mercy
+    /// of the test machine's real `$XDG_CONFIG_HOME`.
+    #[test]
+    fn discover_closure_configured_anonymous_fallback() {
+        let s = Sandbox::new("anonymous-fallback");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\n",
+        );
+        let config = ResolutionConfig {
+            manifest_override: None,
+            user_manifest: None,
+        };
+        let mut manifests = ManifestCache::default();
+        let closure = discover_closure_configured(&entry, &config, &mut manifests)
+            .expect("a quoted-path sibling resolves under an anonymous package");
+        assert_eq!(closure.nodes.len(), 2, "entry and b.sth");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn user_manifest_path_prefers_xdg_config_home() {
+        assert_eq!(
+            user_manifest_path(os("/x/cfg"), os("/home/u")),
+            Some(PathBuf::from("/x/cfg/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_empty_xdg_falls_back_to_home() {
+        assert_eq!(
+            user_manifest_path(os(""), os("/home/u")),
+            Some(PathBuf::from("/home/u/.config/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_unset_xdg_falls_back_to_home() {
+        assert_eq!(
+            user_manifest_path(None, os("/home/u")),
+            Some(PathBuf::from("/home/u/.config/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_neither_set_is_none() {
+        assert_eq!(user_manifest_path(None, None), None);
     }
 
     /// OQ2 manifest locality: a file's package is its *nearest* ancestor
@@ -1352,10 +1554,10 @@ mod tests {
         );
     }
 
-    /// A module name outside any package has no root to join to and no
-    /// `depends:` table to look in, so it is a located error rather than a
-    /// silent miss. (The quoted-path form still works there; S1b gives these
-    /// files a user-level manifest.)
+    /// A module name outside any package, with no user-level manifest either
+    /// (S1b R2(c)), is an implicit anonymous package: `self::` names no
+    /// package identity there, so it is the same located error as any other
+    /// module name would get. (The quoted-path form still works there.)
     #[test]
     fn module_import_outside_a_package_is_error() {
         let s = Sandbox::new("no-manifest");
@@ -1364,7 +1566,10 @@ mod tests {
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::b` at line 1, col 1 in")
-                && err.contains("has no `sooth.pkg` ancestor, so a module name has no package"),
+                && err.contains(
+                    "has no ancestor `sooth.pkg` and no user-level manifest, so it is an implicit anonymous package"
+                )
+                && err.contains("`self` cannot be resolved"),
             "unexpected message: {err}"
         );
     }
