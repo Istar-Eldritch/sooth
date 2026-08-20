@@ -59,6 +59,14 @@ fn build_and_run_with_manifest(entry: &Path, manifest: &Path) -> (String, i32) {
         "build should succeed; stderr: {}",
         String::from_utf8_lossy(&build_output.stderr)
     );
+    // A clean build writes nothing to stderr, so this pins the "silently" half
+    // of Golden 2: a conflict diagnostic about `--manifest` shadowing an
+    // ancestor manifest would fail here rather than pass unnoticed.
+    assert!(
+        build_output.stderr.is_empty(),
+        "build should emit no diagnostics; stderr: {}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
     let binary = entry.with_extension("");
     let output = Command::new(&binary).output().expect("binary should run");
     std::fs::remove_file(&binary).ok();
@@ -137,6 +145,47 @@ fn flag_overrides_ancestor_manifest_silently() {
     let (stdout, code) = build_and_run_with_manifest(&entry, &manifest);
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
+}
+
+/// Golden 2b: the exit criterion names `build`/`run`, and `run` is a second,
+/// independently-wired call site in `main`. The other goldens all reach the
+/// flag through the `build` arm and then execute the produced binary
+/// directly, so none of them notice if the `run` arm drops the flag. This one
+/// goes through `sooth run --manifest` end to end.
+#[test]
+fn flag_wires_through_the_run_subcommand() {
+    let t = Tree::new("flag-through-run");
+    t.write(
+        "dep/sooth.pkg",
+        "package: dep ; layer: hosted ; module: lib ;",
+    );
+    t.write("dep/lib.sth", ": lw ( -- i64 ) 3 ;\nexport: lw ;\n");
+    let manifest = t.write(
+        "flag/sooth.pkg",
+        r#"package: flagpkg ; layer: hosted ; depends: dep path "../dep" ;"#,
+    );
+    let entry = t.write(
+        "scratch/main.sth",
+        "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("run")
+        .arg(&entry)
+        .arg("--manifest")
+        .arg(&manifest)
+        .output()
+        .expect("sooth run should spawn");
+    assert!(
+        output.status.success(),
+        "run should succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "3\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Golden 3: a manifest-less entry resolves a dependency-anchored import
