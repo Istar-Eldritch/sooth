@@ -400,6 +400,34 @@ slice as an exclusivity place inside a poly body — is out of scope by design, 
 bare `String` with no `projected` flag), and that arm is already scheduled for Phase 4
 alongside R12's exclusivity guard, so it is not owed until a mutable slice can exist.
 
+**Phase 1 exit notes (R1.4 `is_ref()` reroute inventory):** `is_ref()` has seven
+non-test consumers. Three are the widening's *intended* effects, each delivered and
+tested here: `is_linear` (`builtins.rs`, a slice is non-linear), `is_reference_slot`
+(`poly.rs`, R8.3), and the input gate in `check_reference_free_signature`
+(`word_entry.rs`, `slice_output_is_rejected_and_slice_input_is_admitted`). The other four
+are diagnostics the widening *reroutes*, and two of them are covered in Phase 1:
+
+- `audit_poly_reference_free_signature`'s `top_level_ref` (`check/audits.rs`) — the poly
+  twin of the input gate, tested by
+  `poly_slice_output_is_rejected_and_poly_slice_input_is_admitted`. It earns its own test
+  rather than inheriting the mono one: a slice in a generic body is the point of the type
+  (R11), and the poly path admits a slice input by a different clause
+  (`Concrete(t) if t.is_ref()`) than the one that rejects a slice output
+  (`contains_poly_reference`'s `Concrete` delegation), so the two claims travel separately.
+- `cannot_copy_error` (`check.rs`) picks the exclusivity wording (rather than the
+  ownership wording) off `is_ref()`, which is correct for a mutable slice; asserted
+  incidentally by `poly_is_copy_mutable_slice_is_not`'s exact-message check.
+
+The remaining two (`borrow_of_reference_local_error`, `poly_reference_scrutinee_error`)
+need a slice *value* to be reachable at all, so they are scoped to Phase 3 below.
+
+**Phase 1 exit notes (arms that are forced but unobservable):** the containment-graph arm
+`type_node`'s `Type::Slice(..) => None` (`check/declarations.rs`) is compile-forced, so it
+cannot be missing, but its *value* is unobservable and it is therefore **not** a guarded
+arm: `contains_reference` (R5) bans a slice from every field position, so the containment
+walk never reaches a slice and returning any other `TypeNode` survives the whole suite. It
+is not counted in Phase 1's mutation-tested tally.
+
 ### Phase 2: `IrType::Slice` variant, 16-byte aggregate lowering and ABI  *(hard)*
 
 The representation lowers as a genuine two-word aggregate. Deliver R2, R3, R8.2, and the
@@ -410,7 +438,11 @@ not scalar-load).
 
 **Scope:**
 
-- Modify: `src/ir/types.rs:96` (`enum IrType`), `:266` (`ir_type_of`); `src/ir/layout.rs:307`
+- Modify: `src/ir/types.rs:96` (`enum IrType`), `:266` (`ir_type_of`) — Phase 1 left
+  `ir_type_of`'s slice arm an `unreachable!()` placeholder rather than mint a premature
+  `IrType`; it is genuinely unreachable there (no non-test caller of `intern_slice_type`),
+  and replacing that `unreachable!()` with the real `IrType::Slice` mapping is what
+  discharges R1.3's `ir_type_of` half. `src/ir/layout.rs:307`
   (`field_width`), `:323` (`carried_slot_bytes`); `src/ir/driver.rs:507`.
 - Modify: `src/backend/qbe.rs:311`/`:360`/`:365`/`:399`/`:423` (classification), `:341`
   (`qbe_abi_ty`), `:1125` (`Instr::Print`); `src/repl.rs:195` (`remap_type`), `:604` region
@@ -428,8 +460,9 @@ mutable `subslice`, and `&!>` are deferred to Phase 4 so a mutable slice never e
 build before its exclusivity guard (R12) is active. The output-ban golden
 `declared_slice_output_is_stored_reference_error` also becomes writable here, once a
 signature can spell `Slice[T]` at all; Phase 1 only proves the same claim by a direct call
-(see Phase 1's exit notes). Phase 1's widened `is_ref()` also makes two diagnostics
-reachable for the first time once a slice value exists: `&s` on a slice local reaches
+(see Phase 1's exit notes). Phase 1's widened `is_ref()` also makes the remaining two of
+its four rerouted diagnostics (see Phase 1's reroute inventory) reachable for the first
+time once a slice value exists: `&s` on a slice local reaches
 `borrow_of_reference_local_error` (`word_families.rs`, defensible — a slice is a
 reference-shaped local, so the message is accurate), and a slice used as an eliminator
 scrutinee reaches `poly_reference_scrutinee_error` (`poly.rs`), whose "eliminates a
@@ -445,6 +478,14 @@ scrutinee is first actually reachable, rather than leaving stale text live.
 - Modify: lowering for the two new words and the shared slice-receiver index op (the
   `ir/driver.rs` / `backend/qbe.rs` index-emit path that reuses `emit_oob_trap`,
   `qbe.rs:796`).
+- Also required, inherited from Phase 1: the monomorphic `len` arm must **consume** its
+  slice receiver, matching the consumption semantics Phase 1's poly `len` arm already
+  encodes for `Concrete(Type::Str | Type::Slice(..))` (unlike the array arms, which leave
+  the receiver). Diverging here would make the two checker paths differ in permissiveness.
+- Also required, inherited from Phase 1: `intern_slice_type` (`ast.rs`) enforces nothing
+  about R1.2's **concrete and `Copy` element** rule — correct while it has no non-test
+  caller, but the `slice` construction word is its first real caller and owes that gate
+  with a located rejection for a generic or non-`Copy` element.
 - Out of bounds: mutable construction/`subslice`/`&!>` and all exclusivity/non-escape
   tracking (Phase 4).
 
@@ -517,6 +558,9 @@ guards are mutation-tested (delete the arm, the test must fail).
 - `src/check/word_entry.rs`: `slice_output_is_rejected_and_slice_input_is_admitted`
   (R1.4/R5, Phase 1) — driven directly against `check_reference_free_signature`, since no
   surface spelling exists yet to write this as source.
+- `src/check/audits.rs`: `poly_slice_output_is_rejected_and_poly_slice_input_is_admitted`
+  (R1.4/R5 poly twin, Phase 1) — the same two claims as the `word_entry.rs` test, on the
+  poly path, driven against a hand-built `PolySig`.
 - `src/repl.rs`: `remap_type_rebases_sliceid_across_modules`, `format_stack_renders_slice`.
 - `src/ir/layout.rs`: `slice_field_width_is_sixteen`,
   `carried_slot_bytes_slice_is_aligned_aggregate`.
@@ -537,7 +581,9 @@ cover.
 → the `sum` golden's `Slice` input is rejected at declaration), R4 mutability split (both
 directions) at both `is_copy` and its poly twin `poly_is_copy`, R5 `contains_reference`
 (the output-ban golden must flip to accept), R6 zero-unsafe arm, R8.1 `classify_capture`,
-R8.2 `remap_type`, R3 `qbe_abi_ty`, and the R9.2 bounds-trap.
+R8.2 `remap_type`, R3 `qbe_abi_ty`, the R9.2 bounds-trap, and both poly-signature routes
+(`top_level_ref`'s concrete-reference clause and `contains_poly_reference`'s `Concrete`
+delegation).
 
 **Regression, green and untouched:** `tests/phase7_slice3a.rs`, `tests/phase7_slice3b.rs`,
 `tests/qbe_baseline.rs`, the poly-reference and array suites.

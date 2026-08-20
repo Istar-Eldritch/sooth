@@ -579,6 +579,73 @@ mod tests {
             .expect("a top-level concrete reference input is legal");
     }
 
+    /// P7 slice 3c (R1.4/R5, poly twin): the poly path answers a slice the
+    /// same way `slice_output_is_rejected_and_slice_input_is_admitted`
+    /// (`word_entry.rs`) proves the monomorphic path does, and it gets there
+    /// by two different routes: the output loop through
+    /// `contains_poly_reference`'s `Concrete` delegation, the input loop
+    /// through `top_level_ref`'s `Concrete(t) if t.is_ref()` clause. A slice
+    /// inside a generic body is the point of the type (R11), so both routes
+    /// are load-bearing rather than inherited by accident. Built directly:
+    /// the type has no surface spelling until its construction words land.
+    #[test]
+    fn poly_slice_output_is_rejected_and_poly_slice_input_is_admitted() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mk = |inputs: Vec<PolyType>, outputs: Vec<PolyType>| WordDef {
+            name: "w".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            body: Vec::new(),
+            poly: Some(Box::new(PolySig {
+                row_in: None,
+                inputs,
+                outputs,
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: vec!["'T".to_string()],
+                len_var_names: Vec::new(),
+                row_var_names: Vec::new(),
+            })),
+            declares_inline: false,
+            module: 0,
+            span: Span::default(),
+            declared_globals: None,
+        };
+        let out = mk(
+            vec![PolyType::Var(0)],
+            vec![PolyType::Concrete(slice), PolyType::Var(0)],
+        );
+        let err = audit_poly_reference_free_signature(&out, "w", &[], &[], &[]).unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `w` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+        let inp = mk(
+            vec![PolyType::Concrete(slice), PolyType::Var(0)],
+            vec![PolyType::Var(0)],
+        );
+        audit_poly_reference_free_signature(&inp, "w", &[], &[], &[])
+            .expect("a slice *input* is legal in a poly signature too");
+        // The nested-aggregate ban is not widened by the top-level
+        // admission: a slice carried inside an array is still rejected.
+        let nested = mk(
+            vec![PolyType::Array(
+                Box::new(PolyType::Concrete(slice)),
+                crate::ast::Len::Concrete(4),
+            )],
+            Vec::new(),
+        );
+        let nested_err = audit_poly_reference_free_signature(&nested, "w", &[], &[], &[])
+            .expect_err("a slice nested inside an aggregate input is still rejected");
+        assert!(
+            nested_err.contains("which contains a reference"),
+            "nested slice input hits the containment wording: {nested_err}"
+        );
+    }
+
     /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
     /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
     /// `~` slip past silently. Constructed directly.
