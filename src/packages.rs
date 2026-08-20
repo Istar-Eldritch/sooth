@@ -314,13 +314,55 @@ fn quoted_path_in_package_error(importer: &Path, imp: &Import, pkg: &str) -> Str
     )
 }
 
-/// A module name has no package to resolve against outside a package: there is
-/// no `depends:` table and no package root to join to.
-fn module_import_without_manifest_error(importer: &Path, imp: &Import) -> String {
+/// R2(c): tier 4, or a `self::` name under a `UserLevel` site (which has no
+/// package identity of its own, R4). `name` picks the rendered
+/// `<pkg-or-self>`: the first segment for a dependency-anchored target, or
+/// `self` for a `self::` one, since that anchor names no package at all.
+fn anonymous_package_error(importer: &Path, imp: &Import, name: &ModuleName) -> String {
+    let pkg_or_self = match name.anchor {
+        ImportAnchor::SelfPackage => "self".to_string(),
+        ImportAnchor::Dependency => name.segments.first().cloned().unwrap_or_default(),
+    };
     format!(
-        "{}\n  {} has no `sooth.pkg` ancestor, so a module name has no package to resolve against\n  add a manifest, or use a quoted-path import for now",
+        "{}\n  {} has no ancestor `sooth.pkg` and no user-level manifest, so it is an implicit anonymous package that can only import `intrinsics` and its own quoted-path siblings\n  `{pkg_or_self}` cannot be resolved; write $XDG_CONFIG_HOME/sooth/global_sooth.pkg with a `depends:` entry, add an ancestor `sooth.pkg`, or pass `--manifest <path>`",
         import_header(importer, imp),
         importer.display()
+    )
+}
+
+/// R2(b): a `UserLevel` site whose `depends:` table has no entry for the
+/// dependency named. Raised inline at resolution, not recorded for
+/// `check_package_graph`: a user-level site is not a real package (R4), so
+/// there is no layer graph to defer to.
+fn user_manifest_missing_depends_error(
+    importer: &Path,
+    imp: &Import,
+    pkg: &str,
+    user_manifest_path: &Path,
+) -> String {
+    format!(
+        "{}\n  {} resolves against the user-level manifest {}, which has no `depends:` entry for `{pkg}`\n  add `depends: {pkg} path \"<path>\" ;` to {}",
+        import_header(importer, imp),
+        importer.display(),
+        user_manifest_path.display(),
+        user_manifest_path.display()
+    )
+}
+
+/// F2/R3: a `self::` import from an entry file resolved via `--manifest` (a
+/// `Flag` site). `self::` names a module of the importing file's own
+/// package, an identity a manifest named at the call site does not supply --
+/// raised ahead of `resolve_self_module`'s owner guard so it never reaches it.
+fn self_import_under_flag_manifest_error(
+    importer: &Path,
+    imp: &Import,
+    flag_manifest_path: &Path,
+) -> String {
+    format!(
+        "{}\n  {} resolves against `--manifest {}`, which names no package identity for a `self::` import\n  add an ancestor `sooth.pkg` to resolve `self::` here, or rewrite the import as dependency-anchored (`<pkg>::<name>`)",
+        import_header(importer, imp),
+        importer.display(),
+        flag_manifest_path.display()
     )
 }
 
@@ -590,10 +632,18 @@ pub(crate) fn resolve_import(
         return Ok(None);
     }
     let Some(site) = site else {
-        return Err(module_import_without_manifest_error(importer, imp));
+        return Err(anonymous_package_error(importer, imp, name));
     };
     match name.anchor {
-        ImportAnchor::SelfPackage => resolve_self_module(importer, imp, name, site),
+        ImportAnchor::SelfPackage => match site.origin {
+            SiteOrigin::UserLevel => Err(anonymous_package_error(importer, imp, name)),
+            SiteOrigin::Flag => Err(self_import_under_flag_manifest_error(
+                importer,
+                imp,
+                &site.manifest_path,
+            )),
+            SiteOrigin::Ancestor => resolve_self_module(importer, imp, name, site),
+        },
         ImportAnchor::Dependency => {
             resolve_dependency_module(importer, imp, name, site, manifests, unresolved)
         }
@@ -672,6 +722,17 @@ fn resolve_dependency_module(
         .iter()
         .find(|d| d.pkg_name == *dep_name)
     else {
+        // R2(b): a `UserLevel` site is not a real package, so a missing
+        // `depends:` entry is raised inline rather than recorded for
+        // `check_package_graph` -- there is no layer graph to defer to.
+        if site.origin == SiteOrigin::UserLevel {
+            return Err(user_manifest_missing_depends_error(
+                importer,
+                imp,
+                dep_name,
+                &site.manifest_path,
+            ));
+        }
         record(UnresolvedKind::MissingDepends, None);
         return Ok(None);
     };
@@ -1390,6 +1451,208 @@ mod tests {
         );
         assert!(
             err.contains("that package declares `package: nottext`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    fn self_import(segments: &[&str]) -> Import {
+        import(ImportTarget::Module(ModuleName {
+            anchor: ImportAnchor::SelfPackage,
+            segments: segments.iter().map(|s| s.to_string()).collect(),
+        }))
+    }
+
+    /// R2(b): a `UserLevel` site whose `depends:` table lacks the imported
+    /// package pins the user-manifest path in the remedy line, raised inline
+    /// rather than recorded. Mutation-test by deleting the inline raise (which
+    /// falls back to recording `MissingDepends`, deferring past the point
+    /// `check_package_graph` would ever see it for a `UserLevel` site).
+    #[test]
+    fn user_manifest_missing_depends_is_error() {
+        let sb = Sandbox::new("user-manifest-missing-depends");
+        let (entry, user_manifest, _) = user_level_fixture(&sb, "");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(
+            &entry,
+            &entry,
+            &config(None, Some(&user_manifest)),
+            &mut manifests,
+        )
+        .unwrap()
+        .expect("a user-level site");
+        let mut unresolved = Vec::new();
+        let err = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &dependency_import(&["core", "bool"]),
+            Some(&site),
+            &mut manifests,
+            &mut unresolved,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("error: import `core::bool` at line 1, col 1 in")
+                && err.contains(&format!(
+                    "resolves against the user-level manifest {}, which has no `depends:` entry for `core`",
+                    user_manifest.display()
+                ))
+                && err.contains(&format!(
+                    "add `depends: core path \"<path>\" ;` to {}",
+                    user_manifest.display()
+                )),
+            "unexpected message: {err}"
+        );
+        assert!(unresolved.is_empty(), "raised inline, nothing deferred");
+    }
+
+    /// R2(c): tier 4, a manifest-less entry with no user-level manifest
+    /// either, importing a dependency module. Mutation-test by returning
+    /// `Ok(None)`, which would leave the import silently unbound.
+    #[test]
+    fn anonymous_package_module_import_is_error() {
+        let sb = Sandbox::new("anonymous-module-import");
+        let entry = sb.write("scratch/main.sth", "");
+        let err = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &dependency_import(&["core", "bool"]),
+            None,
+            &mut ManifestCache::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("error: import `core::bool` at line 1, col 1 in")
+                && err.contains(
+                    "has no ancestor `sooth.pkg` and no user-level manifest, so it is an implicit anonymous package"
+                )
+                && err.contains("`core` cannot be resolved"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R2(c)'s `self::` form: an anonymous package has no package identity at
+    /// all, so `self::` fails the same way a dependency name does.
+    #[test]
+    fn anonymous_package_self_import_is_error() {
+        let sb = Sandbox::new("anonymous-self-import");
+        let entry = sb.write("scratch/main.sth", "");
+        let err = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &self_import(&["util"]),
+            None,
+            &mut ManifestCache::default(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("error: import `self::util` at line 1, col 1 in")
+                && err.contains(
+                    "has no ancestor `sooth.pkg` and no user-level manifest, so it is an implicit anonymous package"
+                )
+                && err.contains("`self` cannot be resolved"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F2/R3: a `self::` import from an entry file resolved via `--manifest`
+    /// (a `Flag` site) is a located error, not a resolution against the flag
+    /// manifest's root -- `self::` names a module of the file's own package,
+    /// an identity a manifest named at the call site does not supply.
+    /// Mutation-test by deleting the `Flag`+`SelfPackage` check, which falls
+    /// through to `resolve_self_module` and wrongly resolves (or trips the
+    /// owner guard) against the flag root.
+    #[test]
+    fn self_import_under_flag_manifest_is_error() {
+        let sb = Sandbox::new("self-under-flag");
+        let flag = sb.write("flag/sooth.pkg", "package: flagpkg ; layer: hosted ;");
+        let entry = sb.write("scratch/main.sth", "");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        let err = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &self_import(&["util"]),
+            Some(&site),
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("error: import `self::util` at line 1, col 1 in")
+                && err.contains(&format!(
+                    "resolves against `--manifest {}`, which names no package identity for a `self::` import",
+                    flag.display()
+                )),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Regression fence, no killed mutant (guards the unchanged arms): tier 4
+    /// still resolves a quoted-path sibling and `intrinsics`.
+    #[test]
+    fn anonymous_package_quoted_path_and_intrinsics_still_resolve() {
+        let sb = Sandbox::new("anonymous-still-resolves");
+        let entry = sb.write("scratch/main.sth", "");
+        let sibling = sb.write("scratch/sib.sth", "");
+        let mut manifests = ManifestCache::default();
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &import(ImportTarget::Path("sib.sth".to_string())),
+            None,
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .expect("a quoted-path sibling still resolves under an anonymous package");
+        assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &dependency_import(&["intrinsics"]),
+            None,
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .expect("`intrinsics` still resolves under an anonymous package");
+        assert_eq!(resolved, None);
+    }
+
+    /// R2(a): a `--manifest` site is a real package (R4), so a missing
+    /// `depends:` entry reuses S1a's `missing_depends_error` verbatim (via
+    /// `check_package_graph`), not a new diagnostic -- only the manifest path
+    /// named in the remedy line changes.
+    #[test]
+    fn flag_manifest_missing_depends_reuses_ancestor_diagnostic() {
+        let sb = Sandbox::new("flag-missing-depends");
+        let flag = sb.write("flag/sooth.pkg", "package: flagpkg ; layer: hosted ;");
+        let entry = sb.write("scratch/main.sth", "");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        let mut unresolved = Vec::new();
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &dependency_import(&["core", "bool"]),
+            Some(&site),
+            &mut manifests,
+            &mut unresolved,
+        )
+        .expect("a missing `depends:` entry is recorded, not raised inline");
+        assert_eq!(resolved, None);
+        let err = check_package_graph(&mut manifests, &unresolved).unwrap_err();
+        assert!(
+            err.contains("error: import `core::bool` at line 1, col 1 in")
+                && err.contains("package `flagpkg` has no `depends:` entry for `core`")
+                && err.contains(&format!(
+                    "add `depends: core path \"<path>\" ;` to {}",
+                    flag.display()
+                )),
             "unexpected message: {err}"
         );
     }

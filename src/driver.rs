@@ -1528,10 +1528,10 @@ mod tests {
         );
     }
 
-    /// A module name outside any package has no root to join to and no
-    /// `depends:` table to look in, so it is a located error rather than a
-    /// silent miss. (The quoted-path form still works there; S1b gives these
-    /// files a user-level manifest.)
+    /// A module name outside any package, with no user-level manifest either
+    /// (S1b R2(c)), is an implicit anonymous package: `self::` names no
+    /// package identity there, so it is the same located error as any other
+    /// module name would get. (The quoted-path form still works there.)
     #[test]
     fn module_import_outside_a_package_is_error() {
         let s = Sandbox::new("no-manifest");
@@ -1540,7 +1540,10 @@ mod tests {
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::b` at line 1, col 1 in")
-                && err.contains("has no `sooth.pkg` ancestor, so a module name has no package"),
+                && err.contains(
+                    "has no ancestor `sooth.pkg` and no user-level manifest, so it is an implicit anonymous package"
+                )
+                && err.contains("`self` cannot be resolved"),
             "unexpected message: {err}"
         );
     }
