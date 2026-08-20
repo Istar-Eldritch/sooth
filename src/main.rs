@@ -34,6 +34,8 @@ fn parse_entry_and_manifest(args: &[String]) -> Result<(PathBuf, Option<PathBuf>
             let path = args.get(i + 1).ok_or(())?;
             manifest = Some(PathBuf::from(path));
             i += 2;
+        } else if args[i].starts_with("--") {
+            return Err(());
         } else {
             if entry.is_some() {
                 return Err(());
@@ -133,5 +135,11 @@ mod tests {
     #[test]
     fn duplicate_entry_file_is_usage_error() {
         assert!(parse_entry_and_manifest(&args(&["a.sth", "b.sth"])).is_err());
+    }
+
+    #[test]
+    fn unrecognized_flag_is_usage_error() {
+        assert!(parse_entry_and_manifest(&args(&["--verbose"])).is_err());
+        assert!(parse_entry_and_manifest(&args(&["a.sth", "--verbose"])).is_err());
     }
 }

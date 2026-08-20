@@ -387,11 +387,20 @@ S1a test churn (behaviour changed, not placebos):
 
 ## Golden tests (`tests/phase8_slice1b.rs`)
 
-Through `driver::build_with_manifest`/`emit_ssa_with_manifest` (goldens 1-2, which carry a
-`--manifest`) or `driver::build`/`emit_ssa` (goldens 3-5, which don't) on a fixture tree,
-never `select_site`/`resolve_import` directly (S1a's lesson: a direct-call test leaves the
-CLI wiring unguarded). Every error golden pins the exact message substring with line/col;
-`is_err()` alone is a placebo.
+Goldens 1-2 (which carry a `--manifest`) live in `tests/phase8_slice1b.rs` through the
+`pub` `driver::build_with_manifest`/`emit_ssa_with_manifest`. **Goldens 3-5 (which don't)
+live in `driver.rs`'s own `#[cfg(test)]` module instead**, driven through
+`discover_closure_configured` with an explicit `ResolutionConfig` — `discover_closure_configured`
+and `ResolutionConfig` are `pub(crate)` (Phase 2 review, item 2), so an external
+`tests/*.rs` file cannot reach them; widening that visibility to fit the golden there would
+undercut the growth-structure argument R6 rests on. Never `select_site`/`resolve_import`
+directly (S1a's lesson: a direct-call test leaves the CLI wiring unguarded). Every error
+golden pins the exact message substring with line/col; `is_err()` alone is a placebo.
+
+Golden 5 must build its `ResolutionConfig` explicitly with `user_manifest: None` (Phase 2
+review, item 3) rather than going through `driver::build`/`emit_ssa`'s `from_env()`, which
+reads the invoking machine's real `$XDG_CONFIG_HOME/sooth/global_sooth.pkg` and would make
+the golden non-hermetic on any machine that has one.
 
 1. `flag_resolves_entry_outside_its_package_tree` — an entry `.sth` in directory A, a
    package manifest in directory B whose `depends:` grants the import; `build entry.sth
@@ -474,7 +483,7 @@ existing modules and a parser entry point, well under a split threshold.
     },
     {
       "phase": 3,
-      "focus": "packages.rs: SiteOrigin on PackageSite, select_site (entry-only flag override loading the flag manifest through the cache, tier 2/3/4 selection), replace the package_of line in discover_closure_configured with select_site; unit tests including the entry-only mutation guard",
+      "focus": "packages.rs: SiteOrigin on PackageSite, select_site (entry-only flag override loading the flag manifest through the cache, tier 2/3/4 selection), replace the package_of line in discover_closure_configured with select_site; unit tests including the entry-only mutation guard; once select_site reads config.user_manifest, remove ResolutionConfig::user_manifest's #[allow(dead_code)] (driver.rs) and add a test that reaches select_site's tier-3 branch through build_with_manifest/emit_ssa_with_manifest, not only through a direct select_site call (Phase 2 review, item 1: the field is currently write-only and unguarded end-to-end)",
       "effort": "M",
       "difficulty": "hard"
     },

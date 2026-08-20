@@ -103,9 +103,15 @@ fn xdg_global_manifest_path() -> Option<PathBuf> {
 /// Rejects a cycle and a self-import with a located both-files error (R4) and a
 /// missing file with a located error (R5).
 pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
+    discover_closure_audited(entry, &ResolutionConfig::from_env())
+}
+
+/// `discover_closure_configured` over a fresh `ManifestCache`, followed by the
+/// package-graph audit — the shared body of `discover_closure` and
+/// `emit_ssa_with_manifest`, so the two entry points can't drift apart.
+fn discover_closure_audited(entry: &Path, config: &ResolutionConfig) -> Result<Closure, String> {
     let mut manifests = ManifestCache::default();
-    let closure =
-        discover_closure_configured(entry, &ResolutionConfig::from_env(), &mut manifests)?;
+    let closure = discover_closure_configured(entry, config, &mut manifests)?;
     packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
     Ok(closure)
 }
@@ -511,9 +517,7 @@ pub fn emit_ssa(path: &Path) -> Result<String, String> {
 pub fn emit_ssa_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<String, String> {
     let mut config = ResolutionConfig::from_env();
     config.manifest_override = manifest.map(PathBuf::from);
-    let mut manifests = ManifestCache::default();
-    let closure = discover_closure_configured(path, &config, &mut manifests)?;
-    packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
+    let closure = discover_closure_audited(path, &config)?;
     let mut module = assemble_module(&closure, true)?;
     check::check(&mut module)?;
     // R14/D4 (native-build fix): only the entry file (module 0) may declare
