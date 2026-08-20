@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::{Import, ImportAnchor, ImportTarget, ModuleName, Span};
 use crate::lexer::{self, Token};
-use crate::manifest::{self, DependsEntry, Manifest};
+use crate::manifest::{self, DependsEntry, Manifest, PackageLayer};
 
 /// A cross-package import that resolution declined to turn into a closure
 /// edge, recorded so `check_package_graph` can report it against the
@@ -96,6 +96,12 @@ pub(crate) struct ManifestCache {
 }
 
 impl ManifestCache {
+    /// Every manifest path the cache has already parsed, snapshotted so
+    /// `check_package_graph` can walk them while also loading new ones.
+    fn known_manifest_paths(&self) -> Vec<PathBuf> {
+        self.manifests.keys().cloned().collect()
+    }
+
     fn load(&mut self, manifest_path: &Path) -> Result<&Manifest, String> {
         if !self.manifests.contains_key(manifest_path) {
             let src = std::fs::read_to_string(manifest_path)
@@ -216,7 +222,7 @@ fn module_import_without_manifest_error(importer: &Path, imp: &Import) -> String
 
 /// A `depends:` entry whose path holds no manifest, located to the entry.
 fn depends_manifest_missing_error(
-    site: &PackageSite,
+    manifest_path: &Path,
     entry: &DependsEntry,
     tried: &Path,
 ) -> String {
@@ -225,9 +231,119 @@ fn depends_manifest_missing_error(
         entry.pkg_name,
         entry.span.line,
         entry.span.col,
-        site.manifest_path.display(),
+        manifest_path.display(),
         tried.display()
     )
+}
+
+/// OQ4-A: a cross-package import naming a package the importer's manifest has
+/// no `depends:` entry for. Import-triggered, so it is worded from the
+/// recorded `UnresolvedImport` rather than the manifest graph alone.
+fn missing_depends_error(u: &UnresolvedImport) -> String {
+    format!(
+        "error: import `{}::{}` at line {}, col {} in {}:\n  package `{}` has no `depends:` entry for `{}`",
+        u.pkg,
+        u.module.join("::"),
+        u.span.line,
+        u.span.col,
+        u.importer.display(),
+        u.importer_pkg,
+        u.pkg
+    )
+}
+
+/// OQ4-C: a cross-package import naming a module the target package has not
+/// listed in its `module:` public list.
+fn private_module_error(u: &UnresolvedImport) -> String {
+    let module = u.module.join("::");
+    format!(
+        "error: import `{}::{module}` at line {}, col {} in {}:\n  module `{module}` is not in `{}`'s public `module:` list",
+        u.pkg,
+        u.span.line,
+        u.span.col,
+        u.importer.display(),
+        u.pkg
+    )
+}
+
+/// OQ4-B: a `depends:` entry naming a package in a strictly higher layer.
+/// Manifest-declared: fires from the `depends:` line itself, whether or not
+/// anything actually imports across it.
+fn layer_violation_error(
+    importer_pkg: &str,
+    importer_layer: PackageLayer,
+    dep_pkg: &str,
+    dep_layer: PackageLayer,
+) -> String {
+    format!(
+        "error: package `{importer_pkg}` is layer `{}` but depends on `{dep_pkg}` which is layer `{}`",
+        importer_layer.name(),
+        dep_layer.name()
+    )
+}
+
+/// A `depends:` entry naming a package whose own manifest declares a different
+/// `package:` name: the entry's name never resolves to anything, since
+/// resolution matches on the declared name, not the entry's spelling.
+fn depends_name_mismatch_error(
+    manifest_path: &Path,
+    entry: &DependsEntry,
+    actual_pkg: &str,
+) -> String {
+    format!(
+        "error: `depends:` entry names `{}` at line {}, col {} in {}:\n  that package declares `package: {actual_pkg}` -- rename the entry to match",
+        entry.pkg_name,
+        entry.span.line,
+        entry.span.col,
+        manifest_path.display()
+    )
+}
+
+/// Audits the whole package graph a build's `discover_closure` walk touched:
+/// every cross-package import resolution declined to turn into an edge
+/// (`unresolved`, OQ4-A/OQ4-C), and every `depends:` entry of every manifest
+/// the walk loaded (OQ4-B, and the `depends:` name-mismatch case), whether or
+/// not anything actually imports across it. Runs after `discover_closure`,
+/// before `assemble_module`.
+pub(crate) fn check_package_graph(
+    manifests: &mut ManifestCache,
+    unresolved: &[UnresolvedImport],
+) -> Result<(), String> {
+    if let Some(u) = unresolved.first() {
+        return match u.kind {
+            UnresolvedKind::MissingDepends => Err(missing_depends_error(u)),
+            UnresolvedKind::PrivateModule => Err(private_module_error(u)),
+        };
+    }
+    for importer_path in manifests.known_manifest_paths() {
+        let importer = manifests.manifests[&importer_path].clone();
+        let importer_root = importer_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        for entry in &importer.depends {
+            let tried = importer_root.join(&entry.path).join("sooth.pkg");
+            let dep_manifest_path = std::fs::canonicalize(&tried)
+                .map_err(|_| depends_manifest_missing_error(&importer_path, entry, &tried))?;
+            let dep = manifests.load(&dep_manifest_path)?.clone();
+            if dep.package != entry.pkg_name {
+                return Err(depends_name_mismatch_error(
+                    &importer_path,
+                    entry,
+                    &dep.package,
+                ));
+            }
+            if dep.layer > importer.layer {
+                return Err(layer_violation_error(
+                    &importer.package,
+                    importer.layer,
+                    &dep.package,
+                    dep.layer,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// OQ2: why a module-name segment cannot name a module, or `None` if it can.
@@ -407,7 +523,7 @@ fn resolve_dependency_module(
     };
     let tried_manifest = site.root.join(&entry.path).join("sooth.pkg");
     let dep_manifest = std::fs::canonicalize(&tried_manifest)
-        .map_err(|_| depends_manifest_missing_error(site, entry, &tried_manifest))?;
+        .map_err(|_| depends_manifest_missing_error(&site.manifest_path, entry, &tried_manifest))?;
     let dep = PackageSite::new(dep_manifest.clone(), manifests.load(&dep_manifest)?.clone());
     let tried = dep.module_file(segments);
     let file = existing_module_file(&tried).ok_or_else(|| {
@@ -556,6 +672,139 @@ mod tests {
         assert!(
             defect.contains("is reserved for the wildcard import target"),
             "unexpected reason: {defect}"
+        );
+    }
+
+    fn unresolved(
+        kind: UnresolvedKind,
+        importer_pkg: &str,
+        pkg: &str,
+        module: &[&str],
+        span: Span,
+    ) -> UnresolvedImport {
+        UnresolvedImport {
+            importer_pkg: importer_pkg.to_string(),
+            importer_manifest: PathBuf::from("/irrelevant/sooth.pkg"),
+            importer: PathBuf::from("/irrelevant/main.sth"),
+            pkg: pkg.to_string(),
+            module: module.iter().map(|s| s.to_string()).collect(),
+            span,
+            kind,
+        }
+    }
+
+    /// OQ4-A: a consumer importing `pkg::mod` where the importer's manifest
+    /// has no `depends:` entry for `pkg`. Mutation-test by deleting the check.
+    #[test]
+    fn check_package_graph_missing_depends_is_error() {
+        let u = unresolved(
+            UnresolvedKind::MissingDepends,
+            "app",
+            "collections",
+            &["vec"],
+            Span {
+                line: 3,
+                col: 5,
+                module: 0,
+            },
+        );
+        let mut manifests = ManifestCache::default();
+        let err = check_package_graph(&mut manifests, &[u]).unwrap_err();
+        assert!(
+            err.contains("package `app` has no `depends:` entry for `collections`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 3, col 5"), "unlocated message: {err}");
+    }
+
+    /// OQ4-C: a consumer importing `pkg::private` where `private` is absent
+    /// from `pkg`'s `module:` list. Mutation-test by deleting the check.
+    #[test]
+    fn check_package_graph_private_module_is_error() {
+        let u = unresolved(
+            UnresolvedKind::PrivateModule,
+            "app",
+            "core",
+            &["detail"],
+            Span {
+                line: 2,
+                col: 1,
+                module: 0,
+            },
+        );
+        let mut manifests = ManifestCache::default();
+        let err = check_package_graph(&mut manifests, &[u]).unwrap_err();
+        assert!(
+            err.contains("module `detail` is not in `core`'s public `module:` list"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 2, col 1"), "unlocated message: {err}");
+    }
+
+    /// OQ4-B: a `core`-layer package `depends:` on a `hosted`-layer package,
+    /// manifest-declared -- fires whether or not anything imports across it,
+    /// so no import is involved in this fixture. Mutation-test by deleting
+    /// the check.
+    #[test]
+    fn check_package_graph_layer_violation_is_error() {
+        let sb = Sandbox::new("layer-violation");
+        sb.write(
+            "core/sooth.pkg",
+            r#"package: core ; layer: core ; depends: app path "../app" ;"#,
+        );
+        let core_main = sb.write("core/main.sth", "");
+        sb.write("app/sooth.pkg", "package: app ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        manifests.package_of(&core_main).unwrap();
+        let err = check_package_graph(&mut manifests, &[]).unwrap_err();
+        assert!(
+            err.contains(
+                "package `core` is layer `core` but depends on `app` which is layer `hosted`"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ4-B's boundary: two `core`-layer packages depending on each other is
+    /// legal. Not a guard-deletion test (deleting the layer check entirely
+    /// still leaves this passing); its only real mutation is `>` flipped to
+    /// `>=`.
+    #[test]
+    fn check_package_graph_layer_equal_is_ok() {
+        let sb = Sandbox::new("layer-equal");
+        sb.write(
+            "core/sooth.pkg",
+            r#"package: core ; layer: core ; depends: sibling path "../sibling" ;"#,
+        );
+        let core_main = sb.write("core/main.sth", "");
+        sb.write("sibling/sooth.pkg", "package: sibling ; layer: core ;");
+        let mut manifests = ManifestCache::default();
+        manifests.package_of(&core_main).unwrap();
+        check_package_graph(&mut manifests, &[]).expect("equal-layer depends is legal");
+    }
+
+    /// A `depends:` entry naming `foo` whose own manifest declares `package:
+    /// bar` never resolves to anything -- resolution matches on the declared
+    /// name, not the entry's spelling. Mutation-test by deleting the check.
+    #[test]
+    fn check_package_graph_depends_name_mismatch_is_error() {
+        let sb = Sandbox::new("name-mismatch");
+        sb.write(
+            "core/sooth.pkg",
+            r#"package: core ; layer: core ; depends: text path "../other" ;"#,
+        );
+        let core_main = sb.write("core/main.sth", "");
+        sb.write("other/sooth.pkg", "package: nottext ; layer: core ;");
+        let mut manifests = ManifestCache::default();
+        manifests.package_of(&core_main).unwrap();
+        let err = check_package_graph(&mut manifests, &[]).unwrap_err();
+        assert!(
+            err.contains("`depends:` entry names `text`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("that package declares `package: nottext`"),
+            "unexpected message: {err}"
         );
     }
 }

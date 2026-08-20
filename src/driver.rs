@@ -34,13 +34,9 @@ struct FileNode {
 /// (entry is id 0, R10).
 pub(crate) struct Closure {
     nodes: Vec<FileNode>,
-    /// Cross-package imports resolution declined to turn into an edge, for
-    /// `packages::check_package_graph` to audit against the `depends:` and
-    /// `module:` tables.
-    #[expect(
-        dead_code,
-        reason = "read by `packages::check_package_graph`, whose call site is the next phase"
-    )]
+    /// Cross-package imports resolution declined to turn into an edge, audited
+    /// by `packages::check_package_graph` against the `depends:` and
+    /// `module:` tables before `discover_closure` returns.
     unresolved_imports: Vec<UnresolvedImport>,
 }
 
@@ -75,7 +71,10 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
 /// Rejects a cycle and a self-import with a located both-files error (R4) and a
 /// missing file with a located error (R5).
 pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
-    discover_closure_with(entry, &mut ManifestCache::default())
+    let mut manifests = ManifestCache::default();
+    let closure = discover_closure_with(entry, &mut manifests)?;
+    packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
+    Ok(closure)
 }
 
 /// `discover_closure` over a caller-supplied manifest cache, so a test can see
