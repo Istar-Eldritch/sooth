@@ -5,6 +5,7 @@ pub mod driver;
 pub mod editor;
 pub mod ir;
 pub mod lexer;
+pub mod manifest;
 pub mod parser;
 pub mod repl;
 pub mod resolve;
