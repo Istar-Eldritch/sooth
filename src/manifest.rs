@@ -48,6 +48,10 @@ pub struct DependsEntry {
     /// The raw quoted path string, unresolved: interpreting it relative to
     /// the declaring manifest's directory is a caller concern (`packages.rs`).
     pub path: PathBuf,
+    /// `span.module` is always `0`: manifests are never part of the
+    /// `.sth` module closure, so there is no real module id to stamp.
+    /// Do not route this span through a module-id-keyed lookup (e.g. a
+    /// closure's `path_of`) -- it would silently resolve to module 0's file.
     pub span: Span,
 }
 
@@ -349,8 +353,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_manifest_duplicate_layer_is_error() {
+        let src = "package: core ; layer: core ; layer: fixed ;";
+        let err = parse_manifest(src, &p()).unwrap_err();
+        assert!(
+            err.contains("duplicate `layer:`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_depends_missing_path_keyword_is_error() {
+        let src = r#"package: core ; layer: core ; depends: text foo "../text" ;"#;
+        let err = parse_manifest(src, &p()).unwrap_err();
+        assert!(
+            err.contains("expected `path` after dependency name `text`, found `foo`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_unknown_declaration_is_error() {
+        let src = "package: core ; layer: core ; version: 1 ;";
+        let err = parse_manifest(src, &p()).unwrap_err();
+        assert!(
+            err.contains("unknown declaration `version:`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn package_layer_ordering_core_lt_fixed() {
         assert!(PackageLayer::Core < PackageLayer::Fixed);
         assert!(PackageLayer::Hosted > PackageLayer::Alloc);
+        assert_eq!(PackageLayer::Core.name(), "core");
+        assert_eq!(PackageLayer::Fixed.name(), "fixed");
+        assert_eq!(PackageLayer::Alloc.name(), "alloc");
+        assert_eq!(PackageLayer::Hosted.name(), "hosted");
     }
 }
