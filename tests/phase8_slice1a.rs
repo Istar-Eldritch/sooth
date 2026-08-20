@@ -160,14 +160,15 @@ fn cross_package_import_private_module_is_error() {
 /// Golden 4: `app` imports `collections::vec` with no `depends: collections
 /// ...` entry in its manifest. The build fails with the OQ4-A error, pinning
 /// both package names in one substring, and separately asserts the located
-/// import site (`line 1, col 1`).
+/// import site (`line 2, col 3`) -- placed off (1, 1) so a de-located
+/// diagnostic (e.g. a stray `Span::default()`) can't pass by coincidence.
 #[test]
 fn cross_package_import_no_depends_is_error() {
     let t = Tree::new("no-depends");
     t.write("app/sooth.pkg", "package: app ; layer: hosted ;");
     let entry = t.write(
         "app/main.sth",
-        "import: collections::vec v ;\n: main ( -- ) 0 . ;\n",
+        "\n  import: collections::vec v ;\n: main ( -- ) 0 . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -175,7 +176,7 @@ fn cross_package_import_no_depends_is_error() {
         "unexpected message: {err}"
     );
     assert!(
-        err.contains("line 1, col 1"),
+        err.contains("line 2, col 3"),
         "expected the offending import's location in: {err}"
     );
 }
