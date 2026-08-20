@@ -19,9 +19,9 @@ fn usage() -> ! {
 /// Split `build`/`run`'s trailing arguments into the entry file and an
 /// optional `--manifest <path>` (which may appear before or after the entry
 /// file). `Err` for a `--manifest` with no following path, a second
-/// `--manifest`, a second entry file, or no entry file at all: each is a
-/// usage error at the call site, kept out of this function so it stays
-/// testable without exiting the process.
+/// `--manifest`, any other `--flag`, a second entry file, or no entry file at
+/// all: each is a usage error at the call site, kept out of this function so
+/// it stays testable without exiting the process.
 fn parse_entry_and_manifest(args: &[String]) -> Result<(PathBuf, Option<PathBuf>), ()> {
     let mut entry: Option<PathBuf> = None;
     let mut manifest: Option<PathBuf> = None;

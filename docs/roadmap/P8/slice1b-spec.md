@@ -243,8 +243,10 @@ Extend `usage()` to document `--manifest <path>`.
   the same way the existing three do (`run` → `build` → `emit_ssa` →
   `discover_closure`, `src/driver.rs:503,494,465`): `run_with_manifest` calls
   `build_with_manifest`, which calls `emit_ssa_with_manifest`, which calls
-  `discover_closure_configured` directly — never dropping down to the `None`-only wrappers,
-  or the flag would be lost before it reaches resolution.
+  `discover_closure_audited` — a small shared helper that pairs
+  `discover_closure_configured` with the `check_package_graph` audit and carries `config`
+  through, so it is also what `discover_closure` calls. `emit_ssa_with_manifest` never drops
+  down to a `None`-only wrapper, or the flag would be lost before it reaches resolution.
 - `discover_closure_configured(entry: &Path, config: &ResolutionConfig, manifests: &mut
   ManifestCache) -> Result<Closure, String>` is a **3-argument** rename of today's
   `discover_closure_with(entry, manifests)` (`src/driver.rs:82`): same body, same
@@ -483,7 +485,7 @@ existing modules and a parser entry point, well under a split threshold.
     },
     {
       "phase": 3,
-      "focus": "packages.rs: SiteOrigin on PackageSite, select_site (entry-only flag override loading the flag manifest through the cache, tier 2/3/4 selection), replace the package_of line in discover_closure_configured with select_site; unit tests including the entry-only mutation guard; once select_site reads config.user_manifest, remove ResolutionConfig::user_manifest's #[allow(dead_code)] (driver.rs) and add a test that reaches select_site's tier-3 branch through build_with_manifest/emit_ssa_with_manifest, not only through a direct select_site call (Phase 2 review, item 1: the field is currently write-only and unguarded end-to-end)",
+      "focus": "packages.rs: SiteOrigin on PackageSite, select_site (entry-only flag override loading the flag manifest through the cache, tier 2/3/4 selection), replace the package_of line in discover_closure_configured with select_site; unit tests including the entry-only mutation guard; once select_site reads config.user_manifest, remove ResolutionConfig::user_manifest's #[allow(dead_code)] (driver.rs) and add a test that reaches select_site's tier-3 branch through build_with_manifest/emit_ssa_with_manifest, not only through a direct select_site call (Phase 2 review, item 1: the field is currently write-only and unguarded end-to-end). Also delete the two phase-2 placeholder comments this phase makes false (driver.rs: the \"Read by packages::select_site, added in the next phase\" note above ResolutionConfig::user_manifest, and the \"Phase 2 still resolves ... phase 3 replaces that call\" paragraph in discover_closure_configured's doc comment), and note that entry_canon is moved into make_node, so the select_site call needs a clone of it (or an i == 0 test)",
       "effort": "M",
       "difficulty": "hard"
     },

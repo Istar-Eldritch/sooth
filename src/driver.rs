@@ -1,6 +1,7 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,16 +84,24 @@ impl ResolutionConfig {
     pub(crate) fn from_env() -> Self {
         ResolutionConfig {
             manifest_override: None,
-            user_manifest: xdg_global_manifest_path().filter(|p| p.is_file()),
+            user_manifest: user_manifest_path(
+                std::env::var_os("XDG_CONFIG_HOME"),
+                std::env::var_os("HOME"),
+            )
+            .filter(|p| p.is_file()),
         }
     }
 }
 
-fn xdg_global_manifest_path() -> Option<PathBuf> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+/// Where the user-level manifest lives (tier 3, R6), as a function of the two
+/// environment values that decide it rather than of `std::env` itself: the
+/// branches are then testable without mutating process-wide state, which R6
+/// forbids. An empty `XDG_CONFIG_HOME` counts as unset (the XDG spec).
+fn user_manifest_path(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let config_home = config_home
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+        .or_else(|| home.map(|home| PathBuf::from(home).join(".config")))?;
     Some(config_home.join("sooth").join("global_sooth.pkg"))
 }
 
@@ -1118,6 +1127,39 @@ mod tests {
             manifests.parses, 1,
             "one manifest owns both files, so it is parsed once"
         );
+    }
+
+    fn os(s: &str) -> Option<OsString> {
+        Some(OsString::from(s))
+    }
+
+    #[test]
+    fn user_manifest_path_prefers_xdg_config_home() {
+        assert_eq!(
+            user_manifest_path(os("/x/cfg"), os("/home/u")),
+            Some(PathBuf::from("/x/cfg/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_empty_xdg_falls_back_to_home() {
+        assert_eq!(
+            user_manifest_path(os(""), os("/home/u")),
+            Some(PathBuf::from("/home/u/.config/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_unset_xdg_falls_back_to_home() {
+        assert_eq!(
+            user_manifest_path(None, os("/home/u")),
+            Some(PathBuf::from("/home/u/.config/sooth/global_sooth.pkg"))
+        );
+    }
+
+    #[test]
+    fn user_manifest_path_neither_set_is_none() {
+        assert_eq!(user_manifest_path(None, None), None);
     }
 
     /// OQ2 manifest locality: a file's package is its *nearest* ancestor
