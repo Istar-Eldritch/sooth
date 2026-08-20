@@ -17,9 +17,10 @@
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, Import, Len, Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig,
-    PolyType, QuotAnnot, RefDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
+    GlobalMode, Import, ImportAnchor, ImportBinding, ImportTarget, Len, Line, Module, ModuleInfo,
+    ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, Span,
+    StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl,
+    VariantTag, VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -571,6 +572,37 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         }],
         statics: bodies.statics,
     })
+}
+
+/// Split an import target word into its anchor and `::`-joined segments (F2).
+/// A `self::` prefix is the SelfPackage anchor; anything else is
+/// Dependency-anchored, its first segment naming a `depends:` entry. Bare
+/// `self` with no `::` is an ordinary package name, not the prefix.
+fn parse_module_name(word: &str, span: Span) -> Result<ModuleName, String> {
+    let (anchor, rest) = match word.strip_prefix("self::") {
+        Some(rest) => (ImportAnchor::SelfPackage, rest),
+        None => (ImportAnchor::Dependency, word),
+    };
+    let segments: Vec<String> = rest.split("::").map(str::to_string).collect();
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(format!(
+            "parse error: import target `{word}` has an empty module-name segment at line {}, col {}",
+            span.line, span.col
+        ));
+    }
+    Ok(ModuleName { anchor, segments })
+}
+
+/// The qualifier an import binds when its source elides one (OQ3): a module
+/// target's last segment, or a quoted path's file stem.
+fn default_qualifier(target: &ImportTarget) -> Option<String> {
+    match target {
+        ImportTarget::Module(m) => m.segments.last().cloned(),
+        ImportTarget::Path(p) => std::path::Path::new(p)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string),
+    }
 }
 
 /// Scan a file's tokens for its `import:` forms (R2), parsing each in place so
@@ -1361,7 +1393,7 @@ struct Parser<'t> {
     exports: &'t [Vec<(String, Span)>],
     /// Phase 4 slice 5a phase 4 (R20/R15c): this module's selectively-imported
     /// unqualified names, each mapping to the target module it resolves in. A
-    /// bare `Type` (or word) exposed by `import: q | Type | "..."` resolves
+    /// bare `Type` (or word) exposed by `import: "..." q | Type | ` resolves
     /// here after the own-module lookup fails (own-module-first, R11). Empty
     /// for a single-file program and every REPL line.
     selective: &'t std::collections::HashMap<String, u32>,
@@ -1483,22 +1515,70 @@ impl<'t> Parser<'t> {
         })
     }
 
-    /// Parse one `import:` form (R6): `import: <qualifier> [ | <name>... | ]
-    /// "<path>" ;`. The optional `| ... |` clause is the selective import list
-    /// (recorded, enforced in phase 4). `self.pos` must point at `import:`.
+    /// Parse one `import:` form (R6, regrammared by P8 slice 1a OQ3):
+    /// `import: <target> [<qualifier>] [ | <name>... | ] ;`, plus the wildcard
+    /// shape `import: <target> * ;`. The target comes first so the common case
+    /// (no renaming) needs no qualifier at all. `self.pos` must point at
+    /// `import:`.
     fn parse_import(&mut self) -> Result<Import, String> {
         let span = self.expect_word("import:")?;
-        // R9: the qualifier, path string, and terminating `;` each fail with a
+        // R9: the target, qualifier, and terminating `;` each fail with a
         // located error naming `import:` and the missing part, not the generic
         // token-level message (which would say `expected a word` or wrongly
         // name the C symbol borrowed from `extern:`).
+        let target = match self.peek() {
+            Some((Token::Str(s), _)) => {
+                let s = s.clone();
+                self.pos += 1;
+                ImportTarget::Path(s)
+            }
+            Some((Token::Word(w), wspan)) => {
+                let w = w.clone();
+                let wspan = *wspan;
+                self.pos += 1;
+                ImportTarget::Module(parse_module_name(&w, wspan)?)
+            }
+            _ => {
+                return Err(self
+                    .form_error("an import target: a module name, or a quoted path in `import:`"))
+            }
+        };
+        let binding = self.parse_import_binding(&target)?;
+        match self.peek() {
+            Some((Token::Semicolon, _)) => self.pos += 1,
+            _ => return Err(self.form_error("`;` terminating `import:`")),
+        }
+        Ok(Import {
+            target,
+            binding,
+            span,
+        })
+    }
+
+    /// The part of an `import:` after its target: an optional qualifier, an
+    /// optional `| name... |` selective list, or the bare `*` wildcard. The
+    /// qualifier is defaulted here rather than left optional, so nothing past
+    /// the parser has to know it was elided.
+    fn parse_import_binding(&mut self, target: &ImportTarget) -> Result<ImportBinding, String> {
+        // A bare `*` in the qualifier position with nothing but `;` after it is
+        // the wildcard shape (OQ3). `*` before a `|` is an ordinary qualifier,
+        // and `*` inside `| ... |` is the multiplication word being selectively
+        // imported, so the two forms never collide.
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w == "*")
+            && matches!(self.tokens.get(self.pos + 1), Some((Token::Semicolon, _)))
+        {
+            self.pos += 1;
+            return Ok(ImportBinding::Wildcard);
+        }
         let qualifier = match self.peek() {
             Some((Token::Word(w), _)) => {
                 let w = w.clone();
                 self.pos += 1;
                 w
             }
-            _ => return Err(self.form_error("a qualifier naming the imported module in `import:`")),
+            _ => default_qualifier(target).ok_or_else(|| {
+                self.form_error("a qualifier in `import:` (the target has no name to default to)")
+            })?,
         };
         let mut selective = Vec::new();
         if matches!(self.peek(), Some((Token::Pipe, _))) {
@@ -1511,23 +1591,9 @@ impl<'t> Parser<'t> {
             }
             self.expect(Token::Pipe)?;
         }
-        let path = match self.peek() {
-            Some((Token::Str(s), _)) => {
-                let s = s.clone();
-                self.pos += 1;
-                s
-            }
-            _ => return Err(self.form_error("the import path as a quoted string in `import:`")),
-        };
-        match self.peek() {
-            Some((Token::Semicolon, _)) => self.pos += 1,
-            _ => return Err(self.form_error("`;` terminating `import:`")),
-        }
-        Ok(Import {
+        Ok(ImportBinding::Qualified {
             qualifier,
             selective,
-            path,
-            span,
         })
     }
 
@@ -3406,7 +3472,7 @@ impl<'t> Parser<'t> {
 
     /// R15c: the module a bare generic name is declared in -- this one, or,
     /// when this one declares no such header, the module the name is
-    /// selectively imported from (`import: q | Box | "box.sth"`). Own module
+    /// selectively imported from (`import: "box.sth" q | Box | `). Own module
     /// first, exactly as `resolve_type_name_in_module` orders the two for a
     /// concrete name, so a local header shadows a selectively imported one.
     fn bare_generic_owner(&self, name: &str) -> u32 {
@@ -3702,19 +3768,40 @@ mod tests {
         parse(&tokens)
     }
 
+    /// The qualifier and selective names of a `Qualified` import, for the
+    /// import-parsing tests below.
+    fn qualified(imp: &Import) -> (&str, Vec<&str>) {
+        match &imp.binding {
+            ImportBinding::Qualified {
+                qualifier,
+                selective,
+            } => (
+                qualifier.as_str(),
+                selective.iter().map(|(n, _)| n.as_str()).collect(),
+            ),
+            ImportBinding::Wildcard => panic!("expected a qualified import, got a wildcard"),
+        }
+    }
+
+    fn scan_one_import(src: &str) -> Import {
+        let tokens = lex(src).unwrap();
+        let mut imports = scan_imports(&tokens).unwrap();
+        assert_eq!(imports.len(), 1, "one import in {src:?}");
+        imports.pop().unwrap()
+    }
+
     /// U11 (R6/R7): the `import:` and `export:` forms parse into their records,
-    /// including the optional selective-import name list.
+    /// including the optional selective-import name list. P8 slice 1a (OQ3):
+    /// the target leads the form, the qualifier follows it.
     #[test]
     fn import_and_export_forms_parse() {
         let tokens =
-            lex("import: queue | push pop | \"lib/queue.sth\" ;\nexport: Queue drain ;\n").unwrap();
+            lex("import: \"lib/queue.sth\" queue | push pop | ;\nexport: Queue drain ;\n").unwrap();
         let imports = scan_imports(&tokens).unwrap();
         assert_eq!(imports.len(), 1);
         let imp = &imports[0];
-        assert_eq!(imp.qualifier, "queue");
-        assert_eq!(imp.path, "lib/queue.sth");
-        let selective: Vec<&str> = imp.selective.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(selective, vec!["push", "pop"]);
+        assert_eq!(imp.target, ImportTarget::Path("lib/queue.sth".to_string()));
+        assert_eq!(qualified(imp), ("queue", vec!["push", "pop"]));
         assert_eq!(imp.span.line, 1, "the import span locates `import:`");
 
         let mut arrays = Vec::new();
@@ -3774,12 +3861,116 @@ mod tests {
         assert_eq!(generics.enums[0].module, 7);
     }
 
-    /// R9: a malformed `import:` (no path string) is a located parse error.
+    /// R9: a malformed `import:` (nothing at all after the keyword) is a
+    /// located parse error. `import: q ;` is not the witness under the OQ3
+    /// grammar: that is a legal Dependency-anchored import of module `q`.
     #[test]
-    fn malformed_import_missing_path_is_located_error() {
-        let tokens = lex("import: q ;\n").unwrap();
+    fn malformed_import_missing_target_is_located_error() {
+        let tokens = lex("import: ;\n").unwrap();
         let err = scan_imports(&tokens).unwrap_err();
         assert!(err.contains("parse error"), "located parse error: {err}");
+        assert!(err.contains("line 1"), "located parse error: {err}");
+    }
+
+    /// OQ3: an explicit qualifier after the target binds the given name.
+    #[test]
+    fn parse_import_explicit_qualifier_binds_given_name() {
+        let imp = scan_one_import("import: core::cmp c ;\n");
+        assert_eq!(qualified(&imp), ("c", vec![]));
+    }
+
+    /// OQ3: an elided qualifier defaults to the target's last segment.
+    #[test]
+    fn parse_import_omitted_qualifier_defaults_to_last_segment() {
+        let imp = scan_one_import("import: core::cmp ;\n");
+        assert_eq!(qualified(&imp), ("cmp", vec![]));
+    }
+
+    /// F2: a `self::` prefix records the SelfPackage anchor; the remaining
+    /// segments are package-root-relative.
+    #[test]
+    fn parse_import_self_prefix_sets_self_anchor() {
+        let imp = scan_one_import("import: self::text::ascii a ;\n");
+        assert_eq!(
+            imp.target,
+            ImportTarget::Module(ModuleName {
+                anchor: ImportAnchor::SelfPackage,
+                segments: vec!["text".to_string(), "ascii".to_string()],
+            })
+        );
+        assert_eq!(qualified(&imp), ("a", vec![]));
+    }
+
+    #[test]
+    fn parse_import_omitted_qualifier_self_defaults_to_last_segment() {
+        let imp = scan_one_import("import: self::text::ascii ;\n");
+        assert_eq!(qualified(&imp), ("ascii", vec![]));
+    }
+
+    /// A bare first segment is Dependency-anchored: bare `self` (no `::`) is
+    /// an ordinary package name, not the prefix.
+    #[test]
+    fn parse_import_bare_first_segment_is_dependency_anchored() {
+        let imp = scan_one_import("import: self ;\n");
+        assert_eq!(
+            imp.target,
+            ImportTarget::Module(ModuleName {
+                anchor: ImportAnchor::Dependency,
+                segments: vec!["self".to_string()],
+            })
+        );
+    }
+
+    /// OQ3: target, then `*`, then `;` is the wildcard shape.
+    #[test]
+    fn parse_import_bare_wildcard_builds_wildcard_variant() {
+        let imp = scan_one_import("import: intrinsics * ;\n");
+        assert_eq!(imp.binding, ImportBinding::Wildcard);
+    }
+
+    /// OQ3: `*` inside `| ... |` is the ordinary multiplication word being
+    /// selectively imported, never the wildcard.
+    #[test]
+    fn parse_import_selective_list_star_is_literal_word() {
+        let imp = scan_one_import("import: core::cmp | * | ;\n");
+        assert_eq!(qualified(&imp), ("cmp", vec!["*"]));
+    }
+
+    /// OQ3: `*` followed by a `|` is an ordinary qualifier named `*`, not the
+    /// wildcard shape -- the wildcard test above requires `*` then `;` with
+    /// nothing between, so this and that test guard both halves of the
+    /// disambiguation.
+    #[test]
+    fn parse_import_qualifier_star_before_selective_list_is_literal_qualifier() {
+        let imp = scan_one_import("import: core::cmp * | a b | ;\n");
+        assert_eq!(qualified(&imp), ("*", vec!["a", "b"]));
+    }
+
+    #[test]
+    fn parse_import_selective_with_explicit_qualifier_ok() {
+        let imp = scan_one_import("import: core::text s | split trim | ;\n");
+        assert_eq!(qualified(&imp), ("s", vec!["split", "trim"]));
+    }
+
+    /// The manifest-less quoted-path form still parses, with the path moved to
+    /// first position; an elided qualifier defaults to the file stem.
+    #[test]
+    fn parse_import_quoted_path_target_parses() {
+        let imp = scan_one_import("import: \"lib/queue.sth\" ;\n");
+        assert_eq!(imp.target, ImportTarget::Path("lib/queue.sth".to_string()));
+        assert_eq!(qualified(&imp), ("queue", vec![]));
+    }
+
+    /// An empty `::` segment names no module and is a located parse error
+    /// rather than an unresolvable target the driver has to describe.
+    #[test]
+    fn malformed_import_empty_segment_is_located_error() {
+        let tokens = lex("import: core:: ;\n").unwrap();
+        let err = scan_imports(&tokens).unwrap_err();
+        assert!(
+            err.contains("empty module-name segment") && err.contains("line 1"),
+            "located parse error: {err}"
+        );
     }
 
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler

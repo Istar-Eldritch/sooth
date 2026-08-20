@@ -15,7 +15,7 @@
 \ run-descriptor stack for its power-based merge-order policy -- and a
 \ three-array call site for an ordinary `sort` call was judged not worth it.
 
-import: c | times | "combinators.sth" ;
+import: "combinators.sth" c | times | ;
 
 export: bin_search sort ;
 

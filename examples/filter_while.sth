@@ -6,7 +6,7 @@
 \ from the producer word into `filter`, never bound to a local first, so this
 \ does not trip 6a's bind-then-pass alias limitation.
 
-import: c "../lib/combinators.sth" ;
+import: "../lib/combinators.sth" c ;
 
 : scores ( -- [i64 5] )
   0 5 fill | s |

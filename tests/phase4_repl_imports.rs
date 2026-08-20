@@ -63,11 +63,11 @@ fn repl_in(input: &str, cwd: Option<&Path>) -> String {
 }
 
 fn import_line(qualifier: &str, path: &Path) -> String {
-    format!("import: {qualifier} \"{}\" ;", path.display())
+    format!("import: \"{}\" {qualifier} ;", path.display())
 }
 
 fn selective_import_line(qualifier: &str, names: &str, path: &Path) -> String {
-    format!("import: {qualifier} | {names} | \"{}\" ;", path.display())
+    format!("import: \"{}\" {qualifier} | {names} | ;", path.display())
 }
 
 /// Phase 2: a session driven one line at a time, reading back each line's own
@@ -230,7 +230,7 @@ fn repl_import_path_is_relative_to_cwd() {
     // process cwd (a relative path, resolved against the child's cwd).
     let d = LibDir::new("cwd");
     d.write("lib.sth", ": w ( -- i64 ) 7 ;\nexport: w ;\n");
-    let out = repl_in("import: q \"lib.sth\" ;\nq::w\n", Some(&d.0));
+    let out = repl_in("import: \"lib.sth\" q ;\nq::w\n", Some(&d.0));
     assert!(out.contains("imported q"), "relative path resolves: {out}");
     assert!(out.contains("7"), "the qualified word runs: {out}");
 }
@@ -242,7 +242,7 @@ fn repl_transitive_reexport_stays_closed() {
     d.write("base.sth", ": deep ( -- i64 ) 9 ;\nexport: deep ;\n");
     let lib = d.write(
         "lib.sth",
-        "import: base \"base.sth\" ;\n: shallow ( -- i64 ) base::deep ;\nexport: shallow ;\n",
+        "import: \"base.sth\" base ;\n: shallow ( -- i64 ) base::deep ;\nexport: shallow ;\n",
     );
     let out = repl(&format!(
         "{}\nq::shallow\nq::deep\n",
@@ -262,8 +262,8 @@ fn repl_transitive_reexport_stays_closed() {
 fn repl_import_cycle_and_missing_are_located() {
     // Criterion 7: a cycle and a missing file reuse the located native errors.
     let d = LibDir::new("cycle");
-    let a = d.write("a.sth", "import: b \"b.sth\" ;\n: aw ( -- i64 ) 1 ;\n");
-    d.write("b.sth", "import: a \"a.sth\" ;\n: bw ( -- i64 ) 2 ;\n");
+    let a = d.write("a.sth", "import: \"b.sth\" b ;\n: aw ( -- i64 ) 1 ;\n");
+    d.write("b.sth", "import: \"a.sth\" a ;\n: bw ( -- i64 ) 2 ;\n");
     let cyc = repl(&format!("{}\n", import_line("q", &a)));
     assert!(
         cyc.contains("cycle"),
@@ -281,7 +281,9 @@ fn repl_import_cycle_and_missing_are_located() {
 #[test]
 fn repl_malformed_import_is_located_error() {
     // Criterion 8: a malformed `import:` at the REPL is R9's located error.
-    let out = repl("import: q ;\n");
+    // `import: q ;` is not the witness under the P8 slice 1a grammar: that is a
+    // legal module-name import, which the REPL rejects for a different reason.
+    let out = repl("import: ;\n");
     assert!(
         out.contains("line 1") && out.contains("import:"),
         "the malformed form is a located, construct-naming error: {out}"

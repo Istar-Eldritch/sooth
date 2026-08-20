@@ -545,13 +545,30 @@ carried by quotations, `call` and the self-tail-call transform alone.
 
 ## Modules and encapsulation
 
-A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b).
-`import: q "path.sth" ;` binds a qualifier to another file, resolved relative to the
-*importing* file, with an explicit `.sth` and no search path (consistent with
-`extern:` naming its C symbol verbatim: no implicit extension is one fewer resolution
-rule to learn). `export: name... ;` (lines accumulate) is the only way a name leaves
-its file; a module with none exports nothing, so every pre-5a example is unaffected
-— it exports nothing and stays a program, not a library.
+A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b), and
+a directory tree under a `sooth.pkg` manifest is a **package**. `export: name... ;`
+(lines accumulate) is the only way a name leaves its file; a module with none exports
+nothing, so every pre-5a example is unaffected — it exports nothing and stays a
+program, not a library.
+
+**Inside a package an import names a module, not a file.** `import: <target> [<q>]
+[ | name... | ] ;` puts the target first and the qualifier last, because the common
+case wants no renaming at all: an elided qualifier defaults to the target's last
+segment, so `import: self::text::ascii ;` binds `ascii`. The target's anchor is
+syntactic and never inferred — a `self::` prefix is the importing file's own package,
+package-root-absolute (`self::text::ascii` is `text/ascii.sth` under the package
+root), and a bare first segment names a dependency the manifest's `depends:` lists
+(`import: core::cmp c ;`). A dependency named `text` and a local `text/` directory
+therefore coexist with no precedence rule and no ambiguity error. A module-name
+segment must lex as a single word, which keeps the file-to-module-name map
+one-to-one; `::` and a bare `*` are reserved for the separator and the wildcard
+target, so `42.sth` and `*.sth` are simply unnameable.
+
+A file with no ancestor manifest keeps the quoted-path form, `import: "path.sth" q ;`,
+resolved relative to the *importing* file with an explicit `.sth` and no search path
+(consistent with `extern:` naming its C symbol verbatim: no implicit extension is one
+fewer resolution rule to learn). Inside a package that form is a located error naming
+the module-name spelling to use instead: one file, one way to name it.
 
 **Why resolution has to happen as one merged pass, not a parse-then-merge.** The
 parser resolves every type name in a pre-pass over raw tokens *before any word body
@@ -638,13 +655,13 @@ deferred there, not decided here.
 word whose stack effect names a private, non-primitive type of its own module is
 rejected at the `export:` declaration itself (the module author's bug, not the
 consumer's), naming the word and the private type; exporting the type satisfies it.
-Selective import, `import: q | a b | "path.sth" ;`, is additive to the qualifier: `q`
-is always bound, and the listed names are *additionally* exposed unqualified (a
-selectively-imported type brings its generated words unqualified too, one unit as
-ever). The collision rule is deliberately dumb, with no precedence and no use-site
-disambiguation: two selective imports exposing the same unqualified name is an error at
-the second, naming both modules, and a selectively-exposed name colliding with a local
-definition is the same error.
+Selective import, `import: core::text s | split trim | ;`, is additive to the
+qualifier: `s` is always bound, and the listed names are *additionally* exposed
+unqualified (a selectively-imported type brings its generated words unqualified too,
+one unit as ever). The collision rule is deliberately dumb, with no precedence and no
+use-site disambiguation: two selective imports exposing the same unqualified name is
+an error at the second, naming both modules, and a selectively-exposed name colliding
+with a local definition is the same error.
 
 **REPL imports (Slice 5b) answer what an import means in a live session by treating it
 as an ordinary redefinition event applied to a batch of names, not a new rule.** The

@@ -6,7 +6,7 @@
 //!
 //! A cross-module eliminator needs the variant names in scope as arm tags, so
 //! each library file exports its variants and each importer names them in a
-//! selective import list (`import: r | Ok Err | "..." ;`); the dispatch call
+//! selective import list (`import: "..." r | Ok Err | ;`); the dispatch call
 //! itself is the unqualified `Result?`, keyed by the generic's surface name.
 
 fn build_and_run(name: &str, src: &str) -> (String, i32) {
@@ -84,7 +84,7 @@ fn option_constructs_monomorphizes_and_eliminates_both_arms() {
     let (stdout, code) = build_and_run(
         "slice2-option-i64",
         &format!(
-            "import: o | Some None | \"{}/lib/option.sth\" ;\n\
+            "import: \"{}/lib/option.sth\" o | Some None | ;\n\
              : unwrap-or ( i64 o::Option[i64] -- i64 )\n\
                ~[ ( Some ) Some> swap drop ]\n\
                ~[ ( None ) drop ]\n\
@@ -128,7 +128,7 @@ fn option_instantiates_over_a_pointer_type() {
 /// correctly.
 fn result_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} | Ok Err | \"{}/lib/result.sth\" ;\n",
+        "import: \"{}/lib/result.sth\" {qualifier} | Ok Err | ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -202,11 +202,11 @@ fn result_cross_module_application_resolves_in_either_discovery_order() {
     );
 
     let applier_first = format!(
-        "import: u \"use.sth\" ;\n{}: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        "import: \"use.sth\" u ;\n{}: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
         result_import("r")
     );
     let owner_first = format!(
-        "{}import: u \"use.sth\" ;\n: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        "{}import: \"use.sth\" u ;\n: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
         result_import("r")
     );
 

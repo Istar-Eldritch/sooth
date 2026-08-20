@@ -1603,7 +1603,7 @@ mod tests {
         // R5: the exact located diagnostic, not merely that it fails.
         assert_eq!(
             err,
-            "error: cannot `drop` a value of type `lib::Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in module `lib`, which this module has not imported by name\n  note: add `Res` to the import (`import: lib | Res | \"...\"`), or dispose it in a module that declares `Res`"
+            "error: cannot `drop` a value of type `lib::Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in module `lib`, which this module has not imported by name\n  note: add `Res` to the import (`import: \"...\" lib | Res | ;`), or dispose it in a module that declares `Res`"
         );
     }
     #[test]

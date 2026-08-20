@@ -129,14 +129,14 @@ fn retyped_array_words_still_run() {
 
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
 
 fn arrays_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/arrays.sth\" ;\n",
+        "import: \"{}/lib/arrays.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

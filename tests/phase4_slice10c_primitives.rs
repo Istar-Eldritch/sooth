@@ -519,7 +519,7 @@ fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
 #[test]
 fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
     let src = format!(
-        "import: c \"{}/lib/combinators.sth\" ;\n\
+        "import: \"{}/lib/combinators.sth\" c ;\n\
                : classify ( i64 -- i64 ) dup 10 lt ~[ 1 ] ~[ 2 ] if swap drop ;\n\
                : countdown ( i64 i64 -- i64 )\n  \
                | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub countdown ] if ;\n\

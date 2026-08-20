@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{Import, Module, ModuleInfo, Span};
 use crate::lexer::Token;
-use crate::{backend, check, ir, lexer, parser, resolve};
+use crate::packages::{ManifestCache, UnresolvedImport};
+use crate::{backend, check, ir, lexer, packages, parser, resolve};
 
 const C_SHIM: &str = "extern void sooth_main(void);\nint main(void) { sooth_main(); return 0; }\n";
 
@@ -18,19 +19,25 @@ fn binary_path(source: &Path) -> PathBuf {
 }
 
 /// One file in the import closure (R2). `import_targets` is aligned with
-/// `imports`: the module id the qualifier at that position binds to.
+/// `imports`: the module id the qualifier at that position binds to, or `None`
+/// for an import that adds no closure edge (the reserved `intrinsics` name, and
+/// a cross-package import recorded as unresolved).
 struct FileNode {
     canon: PathBuf,
     dir: PathBuf,
     tokens: Vec<(Token, Span)>,
     imports: Vec<Import>,
-    import_targets: Vec<u32>,
+    import_targets: Vec<Option<u32>>,
 }
 
 /// The whole import closure, one `FileNode` per file, indexed by module id
 /// (entry is id 0, R10).
 pub(crate) struct Closure {
     nodes: Vec<FileNode>,
+    /// Cross-package imports resolution declined to turn into an edge, audited
+    /// by `packages::check_package_graph` against the `depends:` and
+    /// `module:` tables before `discover_closure` returns.
+    unresolved_imports: Vec<UnresolvedImport>,
 }
 
 /// Read, lex, and scan one file's imports into a `FileNode` (R2). The path is
@@ -57,56 +64,70 @@ fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
     })
 }
 
-/// R5: a resolved import path that does not exist or cannot be read is an error
-/// naming the importing site (the `import:` line/col) and the path, distinct
-/// from a lex/parse error on the target file.
-fn missing_import_error(importer: &Path, imp: &Import) -> String {
-    format!(
-        "error: cannot read import `{}` at line {}, col {} (imported by {})",
-        imp.path,
-        imp.span.line,
-        imp.span.col,
-        importer.display()
-    )
+/// R2/R3: discover the whole import closure from the entry file. A quoted-path
+/// import (manifest-less files only) resolves relative to the importing file's
+/// directory; a module name resolves against its package, by its anchor. Both
+/// canonicalize and dedupe by canonical path (a diamond imports a file once).
+/// Rejects a cycle and a self-import with a located both-files error (R4) and a
+/// missing file with a located error (R5).
+pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
+    let mut manifests = ManifestCache::default();
+    let closure = discover_closure_with(entry, &mut manifests)?;
+    packages::check_package_graph(&mut manifests, &closure.unresolved_imports)?;
+    Ok(closure)
 }
 
-/// R2/R3: discover the whole import closure from the entry file. Resolves each
-/// import relative to the importing file's directory, canonicalizes, and
-/// dedupes by canonical path (a diamond imports a file once). Rejects a cycle
-/// and a self-import with a located both-files error (R4) and a missing file
-/// with a located error (R5).
-pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
+/// `discover_closure` over a caller-supplied manifest cache, so a test can see
+/// how many manifests the walk actually parsed.
+fn discover_closure_with(entry: &Path, manifests: &mut ManifestCache) -> Result<Closure, String> {
     let entry_canon =
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
     id_of.insert(entry_canon.clone(), 0);
     let mut nodes: Vec<FileNode> = vec![make_node(entry_canon, 0)?];
+    let mut unresolved_imports = Vec::new();
 
     let mut i = 0;
     while i < nodes.len() {
         let dir = nodes[i].dir.clone();
+        let canon = nodes[i].canon.clone();
         let imports = nodes[i].imports.clone();
+        // Every file's own package, from its canonical path: manifests are
+        // parsed once each however many files they own.
+        let site = manifests.package_of(&canon)?;
         let mut targets = Vec::with_capacity(imports.len());
         for imp in &imports {
-            let raw = dir.join(&imp.path);
-            let canon = std::fs::canonicalize(&raw)
-                .map_err(|_| missing_import_error(&nodes[i].canon, imp))?;
-            let id = match id_of.get(&canon) {
+            let resolved = packages::resolve_import(
+                &canon,
+                &dir,
+                imp,
+                site.as_ref(),
+                manifests,
+                &mut unresolved_imports,
+            )?;
+            let Some(file) = resolved else {
+                targets.push(None);
+                continue;
+            };
+            let id = match id_of.get(&file) {
                 Some(&id) => id,
                 None => {
                     let id = nodes.len() as u32;
-                    id_of.insert(canon.clone(), id);
-                    nodes.push(make_node(canon, id)?);
+                    id_of.insert(file.clone(), id);
+                    nodes.push(make_node(file, id)?);
                     id
                 }
             };
-            targets.push(id);
+            targets.push(Some(id));
         }
         nodes[i].import_targets = targets;
         i += 1;
     }
 
-    let closure = Closure { nodes };
+    let closure = Closure {
+        nodes,
+        unresolved_imports,
+    };
     closure.reject_cycles()?;
     Ok(closure)
 }
@@ -135,7 +156,7 @@ impl Closure {
 
     fn dfs_detect(&self, u: usize, state: &mut [u8]) -> Result<(), String> {
         state[u] = 1;
-        for &v in &self.nodes[u].import_targets {
+        for &v in self.nodes[u].import_targets.iter().flatten() {
             let v = v as usize;
             if state[v] == 1 {
                 let importer = self.nodes[u].canon.display();
@@ -155,6 +176,32 @@ impl Closure {
         state[u] = 2;
         Ok(())
     }
+}
+
+/// P8 slice 1a: two imports in one file binding the same qualifier is a located
+/// error at the second, naming where the first bound it. No shadowing and no
+/// precedence: the second binding is always the error.
+fn duplicate_qualifier_error(file: &Path, qualifier: &str, at: Span, first: Span) -> String {
+    format!(
+        "error: duplicate import qualifier `{qualifier}` at line {}, col {} in {}:\n  qualifier `{qualifier}` was first bound at line {}, col {}",
+        at.line,
+        at.col,
+        file.display(),
+        first.line,
+        first.col
+    )
+}
+
+/// P8 slice 1a: a wildcard import binds no qualifier, and nothing here gives
+/// it a visibility effect to splice in -- a compiled build rejects it
+/// outright, exactly as the REPL does, rather than silently binding nothing.
+fn wildcard_import_is_error(file: &Path, at: Span) -> String {
+    format!(
+        "error: wildcard import at line {}, col {} in {}:\n  a wildcard import binds no names in this build\n  use a qualified import instead",
+        at.line,
+        at.col,
+        file.display()
+    )
 }
 
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
@@ -208,13 +255,40 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         let mut import_map: HashMap<String, u32> = HashMap::new();
         let mut selective_map: HashMap<String, u32> = HashMap::new();
         let mut selective_entries: Vec<check::SelectiveName> = Vec::new();
-        for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
-            import_map.insert(imp.qualifier.clone(), target);
-            for (name, span) in &imp.selective {
+        // P8 slice 1a: where each qualifier was first bound, so a second
+        // import binding the same one is a located error at that second import
+        // rather than a silent shadow. Both an explicit qualifier and a
+        // defaulted last segment bind concretely, so both collide.
+        let mut bound_at: HashMap<&str, Span> = HashMap::new();
+        for (imp, target) in node.imports.iter().zip(&node.import_targets) {
+            let qualifier = match imp.qualifier() {
+                Some(q) => q,
+                // The reserved `intrinsics` wildcard (F6) is the one wildcard
+                // shape that adds no closure edge and needs no qualifier; any
+                // other wildcard binds no names and is rejected outright.
+                None if target.is_none() => continue,
+                None => return Err(wildcard_import_is_error(&node.canon, imp.span)),
+            };
+            if let Some(first) = bound_at.insert(qualifier, imp.span) {
+                return Err(duplicate_qualifier_error(
+                    &node.canon,
+                    qualifier,
+                    imp.span,
+                    first,
+                ));
+            }
+            // The reserved `intrinsics` name and an import recorded as
+            // unresolved add no closure edge, so they bind no qualifier to a
+            // module id here.
+            let Some(&target) = target.as_ref() else {
+                continue;
+            };
+            import_map.insert(qualifier.to_string(), target);
+            for (name, span) in imp.selective() {
                 selective_map.insert(name.clone(), target);
                 selective_entries.push(check::SelectiveName {
                     name: name.clone(),
-                    qualifier: imp.qualifier.clone(),
+                    qualifier: qualifier.to_string(),
                     target,
                     span: *span,
                 });
@@ -550,15 +624,15 @@ mod tests {
         s.write("base.sth", ": b ( -- i64 ) 1 ;\n");
         s.write(
             "left.sth",
-            "import: base \"base.sth\" ;\n: lf ( -- i64 ) base::b ;\n",
+            "import: \"base.sth\" base ;\n: lf ( -- i64 ) base::b ;\n",
         );
         s.write(
             "right.sth",
-            "import: base \"base.sth\" ;\n: rt ( -- i64 ) base::b ;\n",
+            "import: \"base.sth\" base ;\n: rt ( -- i64 ) base::b ;\n",
         );
         let entry = s.write(
             "main.sth",
-            "import: l \"left.sth\" ;\nimport: r \"right.sth\" ;\n: main ( -- ) 0 . ;\n",
+            "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) 0 . ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         assert_eq!(closure.nodes.len(), 4, "base deduped: one node per file");
@@ -579,8 +653,8 @@ mod tests {
     #[test]
     fn import_cycle_detected_with_both_files() {
         let s = Sandbox::new("cycle");
-        s.write("a.sth", "import: b \"b.sth\" ;\n: main ( -- ) 0 . ;\n");
-        s.write("b.sth", "import: a \"a.sth\" ;\n: q ( -- i64 ) 1 ;\n");
+        s.write("a.sth", "import: \"b.sth\" b ;\n: main ( -- ) 0 . ;\n");
+        s.write("b.sth", "import: \"a.sth\" a ;\n: q ( -- i64 ) 1 ;\n");
         let entry = s.0.join("a.sth");
         let err = match discover_closure(&entry) {
             Ok(_) => panic!("a cycle must be rejected"),
@@ -600,7 +674,7 @@ mod tests {
         s.write("lib.sth", ": helper ( -- i64 ) 1 ;\nexport: helper ;\n");
         let entry = s.write(
             "main.sth",
-            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -626,7 +700,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: c \"lib.sth\" ;\n\
+            "import: \"lib.sth\" c ;\n\
              static: COUNT i64 = 0 ;\n\
              : main ( -- ) ~[ &!COUNT 1 +! ] c::apply &COUNT @ drop ;\n",
         );
@@ -648,7 +722,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -677,7 +751,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
         );
         let err = build(&entry).expect_err("an imported `main` must reject the native build");
         assert!(err.contains("main"), "names the word: {err}");
@@ -701,7 +775,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: o \"other.sth\" ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
+            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -763,7 +837,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: o \"other.sth\" ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[^P] b Box[^o::P] c Box[[P 2]] d Box[[o::P 2]] ;\n: main ( -- ) ;\n",
+            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[^P] b Box[^o::P] c Box[[P 2]] d Box[[o::P 2]] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -801,7 +875,7 @@ mod tests {
         s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
         s.write(
             "use.sth",
-            "import: b \"box.sth\" ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
+            "import: \"box.sth\" b ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
              : show ( i64 -- ) Box unwrap . ;\nexport: show ;\n",
         );
         let entry = s.write("main.sth", entry_src);
@@ -810,9 +884,9 @@ mod tests {
     }
 
     const APPLIER_FIRST: &str =
-        "import: u \"use.sth\" ;\nimport: b \"box.sth\" ;\n: main ( -- ) 7 u::show ;\n";
+        "import: \"use.sth\" u ;\nimport: \"box.sth\" b ;\n: main ( -- ) 7 u::show ;\n";
     const OWNER_FIRST: &str =
-        "import: b \"box.sth\" ;\nimport: u \"use.sth\" ;\n: main ( -- ) 7 u::show ;\n";
+        "import: \"box.sth\" b ;\nimport: \"use.sth\" u ;\n: main ( -- ) 7 u::show ;\n";
 
     /// Slice 2 (OQ1): a qualified cross-module generic application resolves and
     /// monomorphizes whichever order discovery reached the two files in. The
@@ -861,7 +935,7 @@ mod tests {
         s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
         let entry = s.write(
             "main.sth",
-            "import: b | Box | \"box.sth\" ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
+            "import: \"box.sth\" b | Box | ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
              : main ( -- ) 7 Box unwrap . ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -885,7 +959,7 @@ mod tests {
         s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
         let entry = s.write(
             "main.sth",
-            "import: b | Box | \"box.sth\" ;\ntype: Box 'T val 'T tag i64 ;\n\
+            "import: \"box.sth\" b | Box | ;\ntype: Box 'T val 'T tag i64 ;\n\
              type: W f Box[i64] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -909,7 +983,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: o \"other.sth\" ;\ntype: Box 'T val 'T p o::P ;\n\
+            "import: \"other.sth\" o ;\ntype: Box 'T val 'T p o::P ;\n\
              type: W b Box[i64] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -924,6 +998,401 @@ mod tests {
             panic!("the imported field is a struct: {p_field:?}")
         };
         assert_eq!(module.structs[id.index()].name_static, "P");
+    }
+
+    /// The located error a closure discovery is expected to fail with.
+    /// `Closure` is not `Debug`, so `expect_err` is not available.
+    fn discover_err(entry: &Path) -> String {
+        match discover_closure(entry) {
+            Ok(_) => panic!("expected a located error from {}", entry.display()),
+            Err(e) => e,
+        }
+    }
+
+    /// A package fixture: `sooth.pkg` at the sandbox root, plus whatever files
+    /// the caller writes under it.
+    fn pkg(sb: &Sandbox, dir: &str, manifest: &str) {
+        sb.write(&format!("{dir}sooth.pkg"), manifest);
+    }
+
+    /// P8 slice 1a: an intra-package `self::` import resolves by path-joining
+    /// the package root, so a file naming a sibling BFS has not reached yet
+    /// still lands on it -- and every edge is in the graph before
+    /// `reject_cycles` runs.
+    #[test]
+    fn discover_closure_intra_package_forward_reference_resolves() {
+        let s = Sandbox::new("selfimport");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        s.write(
+            "a.sth",
+            "import: self::b ;\n: aw ( -- i64 ) b::bw ;\nexport: aw ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: self::a ;\nimport: self::b ;\n: main ( -- ) a::aw b::bw add . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("the self-anchored imports resolve");
+        assert_eq!(closure.nodes.len(), 3, "b is discovered once, not twice");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("checks");
+    }
+
+    /// Two files of one package parse that package's manifest once, not once
+    /// per file.
+    #[test]
+    fn discover_closure_manifest_cache_reads_once() {
+        let s = Sandbox::new("manifest-cache");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
+        let mut manifests = ManifestCache::default();
+        discover_closure_with(&entry, &mut manifests).expect("closure resolves");
+        assert_eq!(
+            manifests.parses, 1,
+            "one manifest owns both files, so it is parsed once"
+        );
+    }
+
+    /// OQ2 manifest locality: a file's package is its *nearest* ancestor
+    /// manifest, so an inner package's own `self::leaf` is the inner file even
+    /// when the outer package holds a `leaf.sth` of its own.
+    #[test]
+    fn discover_closure_inner_manifest_wins() {
+        let s = Sandbox::new("inner-wins");
+        pkg(&s, "", "package: outer ; layer: hosted ;");
+        pkg(&s, "inner/", "package: inner ; layer: hosted ;");
+        s.write("leaf.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
+        s.write("inner/leaf.sth", ": lw ( -- i64 ) 2 ;\nexport: lw ;\n");
+        let entry = s.write(
+            "inner/main.sth",
+            "import: self::leaf ;\n: main ( -- ) leaf::lw . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        assert!(
+            closure.path_of(1).ends_with("inner/leaf.sth"),
+            "the inner package's own leaf, not the outer one: {}",
+            closure.path_of(1).display()
+        );
+    }
+
+    /// A file inside a package names its imports by module name; the
+    /// quoted-path form survives only outside a package.
+    #[test]
+    fn discover_closure_quoted_path_inside_package_is_error() {
+        let s = Sandbox::new("quoted-in-package");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: quoted-path import at line 1, col 1 in")
+                && err.contains("file is in package `app`: use a module name"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P8 slice 1a: a wildcard import binds no qualifier and gets no
+    /// visibility effect until S2 -- so a compiled build rejects it outright,
+    /// exactly as the REPL does, rather than silently binding no names.
+    #[test]
+    fn driver_wildcard_import_is_error() {
+        let s = Sandbox::new("wildcard-build");
+        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
+        let entry = s.write("main.sth", "import: \"lib.sth\" * ;\n: main ( -- ) 0 . ;\n");
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let err = assemble_module(&closure, true).expect_err("a wildcard import is rejected");
+        assert!(
+            err.contains("error: wildcard import at line 1, col 1 in")
+                && err.contains("a wildcard import binds no names in this build")
+                && err.contains("use a qualified import instead"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F6: `intrinsics` is the one wildcard shape a compiled build accepts --
+    /// it adds no closure edge and needs no qualifier, so it must reach
+    /// `assemble_module` without tripping the wildcard rejection above.
+    #[test]
+    fn driver_intrinsics_wildcard_import_builds() {
+        let s = Sandbox::new("intrinsics-wildcard-build");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n: main ( -- ) 1 1 add . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("the reserved name needs no depends:");
+        assemble_module(&closure, true).expect("intrinsics wildcard import must still build");
+    }
+
+    /// P8 slice 1a: two imports binding the same qualifier -- here both
+    /// defaulting to their last segment -- is a located error at the second,
+    /// naming where the first bound it. No shadowing, no precedence.
+    #[test]
+    fn driver_duplicate_import_qualifier_is_error() {
+        let s = Sandbox::new("dup-qualifier");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("text/ascii.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
+        s.write("bin/ascii.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::text::ascii ;\nimport: self::bin::ascii ;\n: main ( -- ) 0 . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("both targets resolve");
+        let err = assemble_module(&closure, true).expect_err("the second binding is an error");
+        assert!(
+            err.contains("error: duplicate import qualifier `ascii` at line 2, col 1 in")
+                && err.contains("qualifier `ascii` was first bound at line 1, col 1"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ4 failure mode D2, `self::` side: path-joining lands on a real file
+    /// that a nested inner manifest owns, so it is not a module of the
+    /// importer's package at all. This re-check is what keeps `self::` from
+    /// reaching into a nested package and around its layer check.
+    #[test]
+    fn self_anchored_import_into_nested_package_is_error() {
+        let s = Sandbox::new("self-into-nested");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        pkg(&s, "inner/", "package: inner ; layer: hosted ;");
+        s.write("inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::inner::thing ;\n: main ( -- ) thing::tw . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::inner::thing` at line 1, col 1 in")
+                && err.contains("package `app` has no module `inner::thing`")
+                && err.contains("belongs to the nested package rooted at")
+                && err.contains("inner/sooth.pkg`, not `app`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ4 failure mode D2, dependency side: the dependency publishes the
+    /// module, but its own nested manifest owns the file the name joins to.
+    #[test]
+    fn dependency_anchored_import_into_nested_package_is_error() {
+        let s = Sandbox::new("dep-into-nested");
+        pkg(
+            &s,
+            "app/",
+            "package: app ; layer: hosted ;\ndepends: dep path \"../dep\" ;",
+        );
+        pkg(
+            &s,
+            "dep/",
+            "package: dep ; layer: hosted ;\nmodule: inner::thing ;",
+        );
+        pkg(&s, "dep/inner/", "package: depinner ; layer: hosted ;");
+        s.write("dep/inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
+        let entry = s.write(
+            "app/main.sth",
+            "import: dep::inner::thing ;\n: main ( -- ) thing::tw . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `dep::inner::thing` at line 1, col 1 in")
+                && err.contains("package `dep` has no module `inner::thing`")
+                && err.contains("belongs to the nested package rooted at")
+                && err.contains("dep/inner/sooth.pkg`, not `dep`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F6: `intrinsics` is reserved only as a bare Dependency-anchored name.
+    /// `self::intrinsics` is an ordinary own-package module name, so with no
+    /// `intrinsics.sth` in the package it is D1, not the reserved fast path.
+    #[test]
+    fn self_intrinsics_is_not_the_reserved_name() {
+        let s = Sandbox::new("self-intrinsics");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        let entry = s.write(
+            "main.sth",
+            "import: self::intrinsics ;\n: main ( -- ) 0 . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::intrinsics` at line 1, col 1 in")
+                && err.contains("package `app` has no module `intrinsics` (looked for ")
+                && err.contains("intrinsics.sth)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F6: the reserved name is matched ahead of the `depends:` lookup, so it
+    /// resolves in a package with no `depends:` at all -- and adds no closure
+    /// edge, having no file.
+    #[test]
+    fn resolve_intrinsics_precedes_depends_lookup() {
+        let s = Sandbox::new("intrinsics-reserved");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        let entry = s.write("main.sth", "import: intrinsics * ;\n: main ( -- ) 0 . ;\n");
+        let closure = discover_closure(&entry).expect("the reserved name needs no `depends:`");
+        assert_eq!(closure.nodes.len(), 1, "the reserved name adds no edge");
+    }
+
+    /// OQ4: a Dependency-anchored target with no segments past the package
+    /// name names a package, not a module -- checked ahead of the `depends:`
+    /// lookup, so the message says what is actually wrong.
+    #[test]
+    fn resolve_bare_package_name_no_module_is_error() {
+        let s = Sandbox::new("bare-package");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        let entry = s.write("main.sth", "import: core ;\n: main ( -- ) 0 . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `core` at line 1, col 1 in")
+                && err.contains(
+                    "`core` names a package, not a module -- import one of its `module:` entries"
+                ),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("depends:"),
+            "the bare-name check precedes the `depends:` lookup: {err}"
+        );
+    }
+
+    /// F2: `module:` visibility is never consulted for a `self::` anchor --
+    /// every module of the importer's own package stays reachable. A
+    /// regression fence against a future accidental coupling, not a
+    /// killed-mutant guard: nothing on this path reads `module:` by design.
+    #[test]
+    fn self_import_of_non_public_module_is_ok() {
+        let s = Sandbox::new("self-private");
+        pkg(&s, "", "package: app ; layer: hosted ;\nmodule: other ;");
+        s.write("secret.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::secret ;\n: main ( -- ) secret::sw . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("`module:` does not gate a `self::` import");
+        assert_eq!(closure.nodes.len(), 2);
+    }
+
+    /// OQ2: a segment that does not lex as a single `Token::Word` names no
+    /// module. The file is written, so the rejection is the naming rule and
+    /// not a not-found error standing in for it.
+    #[test]
+    fn import_target_non_word_segment_is_error() {
+        let s = Sandbox::new("non-word-segment");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("42.sth", ": nw ( -- i64 ) 1 ;\nexport: nw ;\n");
+        let entry = s.write("main.sth", "import: self::42 q ;\n: main ( -- ) 0 . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::42` at line 1, col 1 in")
+                && err.contains("module-name segment `42` is not a single identifier"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ2/OQ3: a bare `*` segment lexes as an ordinary word, so only the
+    /// reserved-target rule keeps `*.sth` from being importable.
+    #[test]
+    fn import_target_star_segment_is_error() {
+        let s = Sandbox::new("star-segment");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("*.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
+        let entry = s.write("main.sth", "import: self::* q ;\n: main ( -- ) 0 . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::*` at line 1, col 1 in")
+                && err.contains("module-name segment `*` is reserved for the wildcard import"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ2: `..` is rejected at the segment-validity stage, so a `self::`
+    /// import cannot spell the same file two different ways (here,
+    /// `self::sub::..::sub::y` alongside `self::sub::y`).
+    #[test]
+    fn import_target_dotdot_segment_is_error() {
+        let s = Sandbox::new("dotdot-segment");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("sub/y.sth", ": yw ( -- i64 ) 1 ;\nexport: yw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::sub::..::sub::y` at line 1, col 1 in")
+                && err.contains(
+                    "module-name segment `..` is reserved for directory navigation, not a module name"
+                ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// `existing_module_file` checks `is_file` before canonicalizing exactly so
+    /// a directory cannot resolve as a module. `module_file` joins segments
+    /// under directories and appends `.sth` only to the last one, so the path
+    /// that can collide with a directory is one literally named `<segment>.sth`
+    /// -- here a directory `text.sth/` (holding further modules), with no file
+    /// `text.sth` beside it. `import: self::text ;` must fail D1, not resolve
+    /// into the directory.
+    #[test]
+    fn import_target_directory_is_not_a_module() {
+        let s = Sandbox::new("directory-as-module");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("text.sth/ascii.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
+        let entry = s.write("main.sth", "import: self::text ;\n: main ( -- ) 0 . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::text` at line 1, col 1 in")
+                && err.contains("package `app` has no module `text` (looked for ")
+                && err.contains("text.sth)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A module name outside any package has no root to join to and no
+    /// `depends:` table to look in, so it is a located error rather than a
+    /// silent miss. (The quoted-path form still works there; S1b gives these
+    /// files a user-level manifest.)
+    #[test]
+    fn module_import_outside_a_package_is_error() {
+        let s = Sandbox::new("no-manifest");
+        s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
+        let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::b` at line 1, col 1 in")
+                && err.contains("has no `sooth.pkg` ancestor, so a module name has no package"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A `depends:` path pointing where no manifest is, located to the entry
+    /// in the declaring manifest rather than to the import that tripped over
+    /// it: the manifest is what is wrong.
+    #[test]
+    fn depends_entry_with_no_manifest_is_error() {
+        let s = Sandbox::new("depends-no-manifest");
+        pkg(
+            &s,
+            "app/",
+            "package: app ; layer: hosted ;\ndepends: dep path \"../dep\" ;",
+        );
+        s.write("dep/cmp.sth", ": lt ( -- i64 ) 1 ;\nexport: lt ;\n");
+        let entry = s.write(
+            "app/main.sth",
+            "import: dep::cmp c ;\n: main ( -- ) c::lt . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: `depends:` entry `dep` at line 2, col 1 in")
+                && err.contains("app/sooth.pkg:")
+                && err.contains("no manifest at")
+                && err.contains("dep/sooth.pkg"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -964,7 +1433,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: l \"lib.sth\" ;\n",
+            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");

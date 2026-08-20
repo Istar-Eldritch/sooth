@@ -7,7 +7,7 @@
 \ internal `times` loop while already inside an outer `times` body, which R18
 \ rejected before this slice lifted the limit.
 
-import: c "../lib/combinators.sth" ;
+import: "../lib/combinators.sth" c ;
 
 : mk ( i64 -- [i64 3] )
   | base | 0 3 fill | s |

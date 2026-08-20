@@ -14,7 +14,7 @@ use std::path::Path;
 
 use crate::ast::Module;
 use crate::ast::{
-    ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, Import, Line, OwnedCellDecl, OwnedCellId,
+    ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, ImportTarget, Line, OwnedCellDecl, OwnedCellId,
     PolySig, PolyType, RefDecl, RefId, Span, StackEffect, StructDecl, StructId, Term, TermKind,
     Type, TypedSlot, VariantDecl, WordDef,
 };
@@ -1758,10 +1758,29 @@ impl Session {
             .into_iter()
             .next()
             .ok_or_else(|| "parse error: expected an `import:` form".to_string())?;
+        // P8 slice 1a: resolving a module-name import needs a manifest to
+        // resolve it against, and nothing in `assemble_module` supplies one
+        // for the REPL -- so it is rejected outright rather than falling
+        // through to a resolution it cannot do.
+        let ImportTarget::Path(path) = &import.target else {
+            return Err(format!(
+                "error: module-name import at line {}, col {} in <repl>:\n  the REPL cannot resolve a module-name import yet\n  use a quoted-path import instead",
+                import.span.line, import.span.col
+            ));
+        };
+        // A wildcard import binds no qualifier, and nothing here gives it a
+        // visibility effect to splice in: it would bring in nothing at all,
+        // silently.
+        let Some(qualifier) = import.qualifier() else {
+            return Err(format!(
+                "error: wildcard import at line {}, col {} in <repl>:\n  a wildcard import binds no names in the REPL\n  use a qualified import instead",
+                import.span.line, import.span.col
+            ));
+        };
         // R3: the REPL's own top-level path resolves relative to the process
         // cwd; every transitive import inside the closure keeps 5a's
         // importer-relative rule (inside `discover_closure`).
-        let closure = driver::discover_closure(Path::new(&import.path))?;
+        let closure = driver::discover_closure(Path::new(path))?;
         let mut module = driver::assemble_module(&closure, false)?;
         check::check(&mut module)?;
         // R14/D4: an imported closure declaring `main` (in any of its files,
@@ -1803,20 +1822,16 @@ impl Session {
         // `check::check_selective_imports`, validates a module's own selective
         // imports against its own locals, the wrong scope for the REPL's,
         // which has no module of its own to be local to).
-        for (name, span) in &import.selective {
+        for (name, span) in import.selective() {
             if !module.modules[0].exports.iter().any(|(n, _)| n == name) {
-                return Err(check::selective_not_exported_error(
-                    name,
-                    &import.qualifier,
-                    *span,
-                ));
+                return Err(check::selective_not_exported_error(name, qualifier, *span));
             }
         }
         // R12: a selectively-exposed name colliding with an existing session
         // name (a locally-defined word/type, or a prior selective import's
         // unqualified name) is a located error at the second, naming both
         // sources -- 5a R21's dumb collision rule extended to session scope.
-        self.check_session_selective_collisions(&import.qualifier, &import.selective)?;
+        self.check_session_selective_collisions(qualifier, import.selective())?;
         // R6/R9: read (do not yet advance) this event's epoch and module-id
         // base, so every fallible step below leaves `self` untouched (R16).
         let epoch = self.import_epoch;
@@ -1829,9 +1844,8 @@ impl Session {
         self.import_epoch += 1;
         self.next_import_module += n_modules;
         self.libs.push(lib);
-        self.splice_import(&import, &module, epoch, module_base);
-        writeln!(writer, "imported {}", import.qualifier)
-            .map_err(|e| format!("writing stdout: {e}"))
+        self.splice_import(qualifier, import.selective(), &module, epoch, module_base);
+        writeln!(writer, "imported {qualifier}").map_err(|e| format!("writing stdout: {e}"))
     }
 
     /// R8/R9/R15: splice module 0's exports into the session. Infallible: every
@@ -1840,8 +1854,15 @@ impl Session {
     /// with its event module id and epoch `.name` (R8a/R8b), binds exported
     /// words into `self.env` under their import-epoch symbol, records the
     /// qualifier's aliases / private names / export lists.
-    fn splice_import(&mut self, import: &Import, module: &Module, epoch: u64, module_base: u32) {
-        let q = &import.qualifier;
+    fn splice_import(
+        &mut self,
+        qualifier: &str,
+        selective: &[(String, Span)],
+        module: &Module,
+        epoch: u64,
+        module_base: u32,
+    ) {
+        let q = qualifier;
         // R13: a rebind (`q` already bound, same path or a different one)
         // must not leave a stale alias from the old epoch's export set that
         // this splice doesn't recreate -- e.g. the old file exported `foo`
@@ -1871,8 +1892,7 @@ impl Session {
         if let Some(&old_module) = self.import_qualifier_module.get(q) {
             self.import_selective_module.retain(|_, m| *m != old_module);
         }
-        let selective_names: HashSet<&str> =
-            import.selective.iter().map(|(n, _)| n.as_str()).collect();
+        let selective_names: HashSet<&str> = selective.iter().map(|(n, _)| n.as_str()).collect();
         let struct_base = self.structs.len();
         let enum_base = self.enums.len();
         let array_base = self.arrays.len();
@@ -2194,11 +2214,12 @@ impl Session {
             private.insert(t.to_string());
             private.insert(format!("{t}>"));
         }
-        self.import_private.insert(q.clone(), private);
+        self.import_private.insert(q.to_string(), private);
 
         // R8a/R8d: bind the qualifier to module 0's session id and record every
         // event-module's export list, the parser's type-position resolver maps.
-        self.import_qualifier_module.insert(q.clone(), module_base);
+        self.import_qualifier_module
+            .insert(q.to_string(), module_base);
         while self.import_exports.len() < (module_base + module.modules.len() as u32) as usize {
             self.import_exports.push(Vec::new());
         }
@@ -4016,7 +4037,7 @@ mod tests {
     }
 
     fn import_line(qualifier: &str, path: &std::path::Path) -> String {
-        format!("import: {qualifier} \"{}\" ;", path.display())
+        format!("import: \"{}\" {qualifier} ;", path.display())
     }
 
     #[test]
@@ -4311,7 +4332,7 @@ mod tests {
             .unwrap();
         let err = session
             .eval_line(
-                &format!("import: q | shared | \"{}\" ;", lib_a.display()),
+                &format!("import: \"{}\" q | shared | ;", lib_a.display()),
                 &mut out,
             )
             .unwrap_err();
@@ -4326,13 +4347,13 @@ mod tests {
 
         session
             .eval_line(
-                &format!("import: r | other | \"{}\" ;", lib_c.display()),
+                &format!("import: \"{}\" r | other | ;", lib_c.display()),
                 &mut out,
             )
             .unwrap();
         let err = session
             .eval_line(
-                &format!("import: s | other | \"{}\" ;", lib_b.display()),
+                &format!("import: \"{}\" s | other | ;", lib_b.display()),
                 &mut out,
             )
             .unwrap_err();
@@ -4595,6 +4616,40 @@ mod tests {
         // that drops a `Holder`), and it calls `Res`'s pinned symbol; `Res`'s
         // own destructor is not re-emitted.
         assert_eq!(later_line, vec!["sooth_struct_drop_1__gen0".to_string()]);
+    }
+
+    /// P8 slice 1a: a module-name import at the REPL has no manifest to
+    /// resolve against and is wired into nothing the REPL runs -- so it is
+    /// rejected outright, not silently accepted.
+    #[test]
+    fn repl_module_name_import_is_rejected() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("import: core::cmp c ;", &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: module-name import at line 1, col 1 in <repl>:\n  the REPL cannot resolve a module-name import yet\n  use a quoted-path import instead"
+        );
+    }
+
+    /// P8 slice 1a: a wildcard import binds no qualifier, and nothing gives
+    /// it a visibility effect here -- so it is rejected outright at the REPL
+    /// rather than silently splicing in nothing. The target is a quoted path
+    /// (not a module name), so it is the wildcard rejection that fires here,
+    /// not the module-name one above.
+    #[test]
+    fn repl_wildcard_import_is_rejected() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("import: \"lib/queue.sth\" * ;", &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: wildcard import at line 1, col 1 in <repl>:\n  a wildcard import binds no names in the REPL\n  use a qualified import instead"
+        );
     }
 
     #[test]

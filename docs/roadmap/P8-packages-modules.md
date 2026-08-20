@@ -166,8 +166,9 @@ migrate the corpus to without it. Brief: `docs/roadmap/P8/slice1-brief.md`.
 **Exit:** a program builds against a dependency's module named as `pkg::module`; a
 package-private module is unnameable from outside; a layer violation is a located build
 error.
-**Dogfood:** `lib/`'s modules restructured as layered packages, with a deliberate violation
-rejected.
+**Dogfood:** a layered two-package tree with a deliberate violation rejected. `lib/`'s own
+restructuring is S2's: a `sooth.pkg` over `lib/` makes `arrays.sth`'s quoted-path import a
+hard error, so it moves with the corpus migration to module names.
 
 **P8.S1b — The `--manifest` CLI flag and the fallback chain.** `sooth build`/`run` gain an
 explicit `--manifest <path>` flag ranked above discovery, then the nearest ancestor

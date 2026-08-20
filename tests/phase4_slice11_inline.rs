@@ -149,7 +149,7 @@ fn inline_word_imported_across_modules_is_spliced() {
     let (binary, stdout, code) = build_and_run_closure(
         "slice11-cross-module",
         ": Fast inline ( -- i64 ) 7 ;\n: slow ( -- i64 ) 5 ;\nexport: Fast slow ;\n",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::Fast . lib::slow . ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) lib::Fast . lib::slow . ;\n",
     );
     assert_eq!(stdout, "7\n5\n");
     assert_eq!(code, 0);

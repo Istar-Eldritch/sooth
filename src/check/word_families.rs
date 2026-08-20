@@ -908,7 +908,7 @@ pub(super) fn check_owned_cell_word(
 /// R1 (slice 8b, D2): the sole authority on whether a scoped name is visible to
 /// a module. A name owned by `defining` is visible to `caller` iff `defining` is
 /// the caller's own module, or the caller selectively imported that bare name
-/// from that module. A qualified-only import (`import: lib "lib.sth"`) makes
+/// from that module. A qualified-only import (`import: "lib.sth" lib ;`) makes
 /// nothing visible by bare name, so it is not a route here. Consumed by D1's
 /// `drop` gate and (phase 3) 8a's operator fix; neither invents its own rule.
 pub(super) fn is_name_visible_to_module(
@@ -1032,7 +1032,7 @@ fn drop_import_visibility_error(
         Some(qualifier) => (
             format!("{qualifier}::{source}"),
             format!(
-                "disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name\n  note: add `{source}` to the import (`import: {qualifier} | {source} | \"...\"`), or dispose it in a module that declares `{source}`"
+                "disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name\n  note: add `{source}` to the import (`import: \"...\" {qualifier} | {source} | ;`), or dispose it in a module that declares `{source}`"
             ),
         ),
         None => (
