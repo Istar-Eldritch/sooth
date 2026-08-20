@@ -179,7 +179,11 @@ Each an anchored, deliberate arm (functional gaps, not soundness holes, but none
 
 - **R9.1** `len` over a slice answers its **runtime** length (the carried length, never
   rediscovered by scanning), where `len` refuses a reference today. Dispatched in the
-  `check_array_word` `len` arm (`word_families.rs:775`) with the slice receiver.
+  `check_array_word` `len` arm (`word_families.rs:775`) with the slice receiver. `len` is
+  **receiver-dependent**: it *consumes* a slice (matching `str`) where it leaves an array
+  in place, so `s len` ends the view `s`. A shared view is `Copy`, so a named local
+  reborrows and this is invisible; a Phase 4 mutable view is not, which is where the
+  asymmetry becomes visible.
 - **R9.2** The index ops `&>` (shared) and `&!>` (mutable) accept a slice receiver and
   produce an element reference (`&T` / `&!T`) bounds-checked against the **runtime**
   length. The slice-receiver branch lives in `check_reference_word`
@@ -218,7 +222,11 @@ Each an anchored, deliberate arm (functional gaps, not soundness holes, but none
   reference to produce an element reference. It is **never** a reference-to-a-reference:
   references cannot nest (probed closed on all four forms), so `s 0 mid subslice` is a
   re-derivation, not a re-borrow. The recursive consumer's `s 0 mid subslice rec` shape is
-  valid only under this reading, and the spec states it.
+  valid only under this reading, and the spec states it. An out-of-range sub-range gets
+  its **own** runtime trap (`sooth_subslice_trap`), not R9.2's index message: a range
+  failure has no index, so it reports the requested start and length against the length of
+  the view being cut. The three numbers print unsigned, so an underflowed start reads as
+  itself rather than as a `-1` the source never wrote.
 
 ### R11 (OQ4) Poly-path extent measured, then scoped
 
@@ -640,6 +648,20 @@ Probe: `7 4 fill W &a slice swap W> drop len .` compiled, while its element-refe
   (`recursive_divide_and_conquer_over_shared_subslices_runs`), since shared `subslice` is
   Phase 3's; Phase 4 still owes the mutable-half twin the spec assigns it.
 
+**Phase 3 exit notes (two review fixes):**
+
+- `dup_on_shared_slice_ok` landed here, not in Phase 4: R4's shared half is first
+  observable the moment a slice value exists, so leaving it unwritten would have left a
+  success criterion unasserted for a whole phase. Its `dup_on_mutable_slice_is_error` twin
+  stays Phase 4's, since no mutable view can be written in this build at all.
+- `subslice` stopped borrowing R9.2's index trap. Reusing it printed
+  `index 3 is out of bounds for length 1` for `3 >usize 3 >usize subslice` over a length-4
+  view: "index 3" was the *length* argument and "length 1" the computed remainder, so
+  every number named something the source had not written. R9.2 specifies message reuse
+  for the *index* op only, and R10.3 had left `subslice`'s trap unruled. It now has its
+  own (`sooth_subslice_trap`, `ir/types.rs`; `emit_subslice_trap`, `backend/qbe.rs`),
+  gated on the module holding a slice so a slice-free program's IL stays byte-identical.
+
 **Phase 3 exit notes (deferred to Phase 4, with rationale):** a slice inside a
 *polymorphic* body can be `len`'d (Phase 1 armed the poly `len` arm) but can be neither
 built nor indexed: `slice`/`subslice` are unknown words on the poly walk, and
@@ -651,14 +673,18 @@ consumer" does not ship until Phase 4, which is where the poly work
 `slice`/`subslice`/`&>` arms alongside it, threading `slices` into the poly walk the way
 this phase threaded it into the concrete one.
 
-**Phase 3 mutation-tested guards (13, all killed):** the `&>` runtime bounds trap deleted,
+**Phase 3 mutation-tested guards (16, all killed):** the `&>` runtime bounds trap deleted,
 the `subslice` range trap deleted, `len`'s slice arm made non-consuming, the `&>`
 slice-receiver mutability guard stubbed, `slice`'s mutable-receiver refusal deleted, the
 `is_aggregate` slice arm removed, the reserved-`Slice` name check stubbed, the poly
 slice-scrutinee arm removed, `slice_id_of` matching on the element alone (half the
 interning key), `build_slices`'s stride skewed off the array's, the parser interning a
 mutable view, `overlapping_projection` blind to a slice again, and `slice` dropping its
-receiver's region.
+receiver's region. Three more with the review fixes: the range message's `%lu` reverted to
+`%ld` (killed by the overflow golden, which is the test that can see the difference), the
+`is_copy` shared-slice arm forced to non-`Copy` (killed by `dup_on_shared_slice_ok`, and by
+nothing else), and the trap emission's slice gate forced open (killed by the byte-identity
+baseline).
 
 ### Phase 4: mutable views, borrow rules ported, poly borrow arms, reborrow test  *(hard)*
 
@@ -674,6 +700,12 @@ mutable half at a time) lands here.
 - Modify: `src/check/word_families.rs:716`/`:12` (mutable `slice`/`subslice`/`&!>` arms),
   `src/check/engine.rs:55` (`Deriv` handling for a slice place), `src/check/poly.rs:96`
   (`PolyBorrow`).
+- Inherited from Phase 3: `len` consumes its slice receiver (R9.1), and a mutable view
+  is not `Copy`, so `s len` ends the only view of the buffer. Monomorphically a named
+  local reborrows and the view survives the call; in a *polymorphic* body a `&!` local is
+  move-tracked per binding, so the mutable poly consumer must take its length before
+  deriving the view, or re-derive after. Rule on this here rather than discovering it in a
+  golden.
 - Out of bounds: range-aware / disjoint concurrent mutable sub-slices (locked out of scope).
 
 ### Phase 5: roadmap correction, regression sweep, growth-signal re-check  *(standard)*

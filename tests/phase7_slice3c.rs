@@ -156,9 +156,11 @@ fn slice_out_of_range_index_traps_at_runtime() {
     assert_eq!(code, 1);
 }
 
-/// The same trap guards `subslice`'s range: a sub-view may not reach past the
-/// end of the view it is cut from. `3 + 3` over a length-4 buffer traps rather
-/// than minting a view onto memory the buffer does not own.
+/// `subslice` gets its own trap, not the index one: a sub-view may not reach
+/// past the end of the view it is cut from, and the failure has no index to
+/// report -- the message names the requested start and length against the
+/// view's length. `3 + 3` over a length-4 buffer traps rather than minting a
+/// view onto memory the buffer does not own.
 #[test]
 fn subslice_past_the_end_traps_at_runtime() {
     let src = "\
@@ -174,7 +176,7 @@ fn subslice_past_the_end_traps_at_runtime() {
     assert_eq!(stdout, "");
     assert_eq!(
         stderr,
-        "sooth: array index out of range (line 3)\n  index 3 is out of bounds for length 1\n"
+        "sooth: subslice out of range (line 3)\n  start 3 length 3 exceeds view length 4\n"
     );
     assert_eq!(code, 1);
 }
@@ -182,15 +184,42 @@ fn subslice_past_the_end_traps_at_runtime() {
 /// The range check must not compute `start + len` (that addition can wrap
 /// past `usize::MAX`, e.g. from `0 1 sub` underflowing to `usize::MAX`, and
 /// pass a naive `end <= recv_len` check): a wrapped `start` would mint a view
-/// whose base pointer sits *before* the buffer it was cut from.
+/// whose base pointer sits *before* the buffer it was cut from. The reported
+/// start is the unwrapped `usize::MAX`, which is what makes the message
+/// evidence that no addition happened.
 #[test]
 fn subslice_start_plus_len_overflow_traps_instead_of_wrapping() {
     let src = "\
 : main ( -- )\n  7 4 fill | buf |\n  &buf slice 0 1 sub >usize 5 >usize subslice | s |\n  s len .\n  buf drop\n;\n";
     let prog = Scratch::write("wrap", src);
-    let (stdout, _stderr, code) = build_and_run(prog.path());
+    let (stdout, stderr, code) = build_and_run(prog.path());
     assert_eq!(stdout, "");
+    assert_eq!(
+        stderr,
+        "sooth: subslice out of range (line 3)\n  \
+         start 18446744073709551615 length 5 exceeds view length 4\n"
+    );
     assert_eq!(code, 1);
+}
+
+/// R4: a **shared** view is `Copy`, so `dup` on one is accepted and both
+/// copies stay usable -- the second `len` reads the same carried length as the
+/// first. Phase 4 owes the `dup_on_mutable_slice_is_error` twin: a mutable
+/// view cannot be written in this build at all.
+#[test]
+fn dup_on_shared_slice_ok() {
+    let src = "\
+: main ( -- )
+  7 4 fill | buf |
+  &buf slice | s |
+  s dup len . len .
+  buf drop
+;
+";
+    let prog = Scratch::write("dup", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "4\n4\n");
+    assert_eq!(code, 0);
 }
 
 /// R5/R12: the declaration-level output ban covers a slice exactly as it

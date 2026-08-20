@@ -18,6 +18,13 @@ pub const WORD_WIDTH: u32 = 8;
 /// both sides agree on one symbol.
 pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
 
+/// P7 slice 3c (R10.3): `subslice`'s own runtime range trap. It does not
+/// reuse `OOB_TRAP_SYMBOL` because a sub-range failure has no index to report:
+/// its three numbers are the requested start, the requested length, and the
+/// length of the view being cut, and reporting them as "index N out of bounds
+/// for length M" names quantities the source never wrote.
+pub const SUBSLICE_TRAP_SYMBOL: &str = "sooth_subslice_trap";
+
 /// The heap allocator's acquire half: `allocate(n) -> ptr`, a compiler-emitted
 /// shim over `malloc` that traps on a NULL return and requests `max(n, 1)`
 /// bytes. The language never sees libc, only this interface.

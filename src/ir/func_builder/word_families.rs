@@ -35,7 +35,7 @@ impl<'a> FuncBuilder<'a> {
                 // view points at, bounds-checked against the carried length.
                 if let IrType::Slice(id) = self.value_type(base) {
                     let (ptr, len) = self.load_slice_parts(base);
-                    self.bounds_check_dynamic(CmpOp::Lt, index, len, line);
+                    self.bounds_check_dynamic(index, len, line);
                     let stride = self.slices.stride[id.index()];
                     let addr = self.elem_addr(ptr, index, stride);
                     self.push_reference(addr, self.slices.elem[id.index()]);
@@ -474,10 +474,10 @@ impl<'a> FuncBuilder<'a> {
                 // recv_len - start` (sound because the first check already
                 // proved the subtraction does not underflow), traps on the
                 // same out-of-range range with no addition to wrap.
-                self.bounds_check_dynamic(CmpOp::Le, start, recv_len, span.line);
+                self.subslice_range_check(start, recv_len, (start, len, recv_len), span.line);
                 let remaining = self.fresh_value(IrType::Usize);
                 self.push_instr(Instr::Bin(remaining, BinOp::Sub, recv_len, start));
-                self.bounds_check_dynamic(CmpOp::Le, len, remaining, span.line);
+                self.subslice_range_check(len, remaining, (start, len, recv_len), span.line);
                 let stride = self.slices.stride[id.index()];
                 let base = self.elem_addr(ptr, start, stride);
                 let view = self.build_slice_value(id, base, len);
@@ -842,12 +842,11 @@ impl<'a> FuncBuilder<'a> {
     /// `bounds_check`, against a **runtime** length rather than a compile-time
     /// count -- a slice carries its length, so a literal index has nothing to
     /// have been verified against and there is no const-index skip here.
-    /// `index op len` continues (`Lt` for an element index, `Le` for a
-    /// sub-range's end); anything else calls the same `emit_oob_trap` helper
-    /// array indexing calls, with the same located message.
-    fn bounds_check_dynamic(&mut self, op: CmpOp, index: Value, len: Value, line: u32) {
+    /// `index < len` continues; anything else calls the same `emit_oob_trap`
+    /// helper array indexing calls, with the same located message.
+    fn bounds_check_dynamic(&mut self, index: Value, len: Value, line: u32) {
         let cond = self.fresh_value(IrType::Bool);
-        self.push_instr(Instr::Cmp(cond, op, index, len));
+        self.push_instr(Instr::Cmp(cond, CmpOp::Lt, index, len));
         let ok = self.fresh_block();
         let trap = self.fresh_block();
         self.seal_block(Terminator::Jnz(cond, ok, trap));
@@ -859,6 +858,39 @@ impl<'a> FuncBuilder<'a> {
             None,
             OOB_TRAP_SYMBOL.to_string(),
             vec![line_v, index, len],
+        ));
+        self.seal_block(Terminator::Jmp(ok));
+
+        self.start_block(ok);
+    }
+
+    /// P7 slice 3c (R10.3): one half of `subslice`'s range guard --
+    /// `lhs <= rhs` continues, otherwise the trap reports the *range* the
+    /// source asked for (`start`, `len`) against the view it was cut from
+    /// (`view_len`). Both halves report the same three numbers, so which
+    /// comparison failed does not change the message: the requested range is
+    /// out of the view either way.
+    fn subslice_range_check(
+        &mut self,
+        lhs: Value,
+        rhs: Value,
+        range: (Value, Value, Value),
+        line: u32,
+    ) {
+        let cond = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(cond, CmpOp::Le, lhs, rhs));
+        let ok = self.fresh_block();
+        let trap = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, ok, trap));
+
+        self.start_block(trap);
+        let line_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(line_v, i64::from(line)));
+        let (start, len, view_len) = range;
+        self.push_instr(Instr::Call(
+            None,
+            SUBSLICE_TRAP_SYMBOL.to_string(),
+            vec![line_v, start, len, view_len],
         ));
         self.seal_block(Terminator::Jmp(ok));
 

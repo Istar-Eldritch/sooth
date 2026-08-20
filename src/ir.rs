@@ -31,8 +31,8 @@ use self::types::QuotId;
 pub use self::types::{
     ir_type_of, quot_input_slots, quotation_layout, slice_layout, Arity, BinOp, Block, BlockId,
     CmpOp, Instr, IrFunc, IrModule, IrType, QuotSigId, QuotSigLayout, Resolver, StaticData,
-    StaticValue, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV,
-    WORD_WIDTH,
+    StaticValue, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL,
+    SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 pub(crate) use self::layout::{

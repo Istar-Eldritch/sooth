@@ -10,7 +10,7 @@ use crate::ast::BOOL_ENUM_ID;
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
     QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value, ALLOC_SYMBOL,
-    FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    FREE_SYMBOL, OOB_TRAP_SYMBOL, SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -85,6 +85,16 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
     );
+    // `subslice`'s range message, kept behind the same slice gate as the trap
+    // helper below so a slice-free program's IL stays byte-identical. All
+    // three range numbers are `usize`, so they print through `%lu`: an
+    // underflowed start reaching this trap is a huge positive number, and
+    // `%ld` would render it as a `-1` the source never wrote.
+    if module_has_slice(ir) {
+        out.push_str(
+            "data $subslicefmt = { b \"sooth: subslice out of range (line %ld)\\n  start %lu length %lu exceeds view length %lu\\n\", b 0 }\n",
+        );
+    }
     // Both trace lines go through the same `printf` path as `.`, so program
     // order equals transcript order in a golden.
     out.push_str("data $allocfmt = { b \"alloc %ld\\n\", b 0 }\n");
@@ -163,6 +173,9 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         emit_func(&mut out, func, layouts, &str_lits);
     }
     emit_oob_trap(&mut out);
+    if module_has_slice(ir) {
+        emit_subslice_trap(&mut out);
+    }
     emit_alloc_shim(&mut out);
     emit_free_shim(&mut out);
     emit_oom_trap(&mut out);
@@ -878,6 +891,25 @@ fn emit_oob_trap(out: &mut String) {
     .unwrap();
     out.push_str("@start\n");
     out.push_str("\tcall $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)\n");
+    out.push_str("\tcall $exit(w 1)\n");
+    out.push_str("\thlt\n");
+    out.push_str("}\n");
+}
+
+/// P7 slice 3c (R10.3): `subslice`'s range trap, the same stderr-then-`exit`
+/// shape as `emit_oob_trap` but reporting the requested start and length
+/// against the view's length -- a sub-range failure has no index, so borrowing
+/// the index message would name a quantity the source never wrote.
+fn emit_subslice_trap(out: &mut String) {
+    writeln!(
+        out,
+        "\nfunction ${SUBSLICE_TRAP_SYMBOL}(l %line, l %start, l %len, l %viewlen) {{"
+    )
+    .unwrap();
+    out.push_str("@start\n");
+    out.push_str(
+        "\tcall $dprintf(w 2, l $subslicefmt, l %line, l %start, l %len, l %viewlen, ...)\n",
+    );
     out.push_str("\tcall $exit(w 1)\n");
     out.push_str("\thlt\n");
     out.push_str("}\n");
@@ -1890,6 +1922,39 @@ mod tests {
         assert!(
             il.contains("call $sooth_oob_trap("),
             "guard must call the trap helper: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_subslice_trap_helper_is_distinct_from_the_index_trap_and_gated_on_a_slice() {
+        // P7 slice 3c (R10.3): a failed sub-range calls its *own* helper, whose
+        // message names the requested start/length and the view's length --
+        // there is no index in a range failure. The numbers print unsigned, so
+        // an underflowed start reads as itself rather than as `-1`. Both the
+        // helper and its message data are gated on the module holding a slice
+        // at all, so a slice-free program's IL is unchanged by their existence.
+        let il = emit_src(": w ( Slice[i64] usize usize -- usize ) subslice len ;");
+        assert!(
+            il.contains("call $sooth_subslice_trap("),
+            "the range guard calls the subslice trap: {il}"
+        );
+        assert!(
+            il.contains("data $subslicefmt") && il.contains("start %lu"),
+            "missing the unsigned range message: {il}"
+        );
+        assert!(
+            !il.contains("call $sooth_oob_trap("),
+            "a sub-range failure never reports as an index: {il}"
+        );
+        assert!(
+            il.contains("$dprintf(w 2,") && il.contains("$exit(w 1)") && il.contains("hlt"),
+            "the range trap aborts like the index trap: {il}"
+        );
+
+        let no_slice = emit_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
+        assert!(
+            !no_slice.contains("sooth_subslice_trap") && !no_slice.contains("subslicefmt"),
+            "a slice-free module emits neither the range helper nor its data: {no_slice}"
         );
     }
 
