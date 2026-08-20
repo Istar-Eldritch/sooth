@@ -145,9 +145,9 @@ slice needs no length variable in its signature, so it never asks the checker to
 index against an abstract `'N`. Indexing a slice keeps the existing runtime
 out-of-bounds trap, the same one array indexing already uses — a fallible,
 `Option`/`Result`-returning accessor is deferred to P7.S3e, which is what will give a
-user a declarable failure carrier to report through; until then, the trap is the
-compile-time guarantee that would otherwise cost a decision procedure it does not have
-yet. **Length arithmetic is explicitly not the answer here and is not in scope**: `'N` is a
+user a declarable failure carrier to report through; until then, an index is not proven
+in range at compile time, and the runtime trap is the consequence of that. **Length
+arithmetic is explicitly not the answer here and is not in scope**: `'N` is a
 length variable usable only as an array count, with no arithmetic (`src/parser.rs:2253`
 admits a decimal literal or a bare `'N`), and relating lengths in a signature
 (`['T 'N+'M]`) would mean unifying arithmetic terms and owning a decision procedure, the
@@ -157,11 +157,16 @@ type language. Ordered after S3b, ahead of S3d, and before S3e, whose consumers 
 slice-shaped signatures rather than fixed-length ones. **It does not depend on S3d**:
 every exit criterion below is exercised by a *concrete* consumer — an array-reference
 parameter, a runtime `usize` index, a bounds guard, a runtime trap on miss, and a
-recursive divide-and-conquer consumer all compile today. Only a comparator-taking
-consumer (`sort`/`bin_search`) needs S3d's quotation splice.
+recursive divide-and-conquer consumer, none of which needs a row or a quotation splice.
+Only a comparator-taking consumer (`sort`/`bin_search`) needs S3d's quotation splice.
 **Exit:** a buffer can be sliced into a view; a word takes `Slice['T]` without naming a
 length variable; indexing traps at runtime on an out-of-range index, with no
-`Option`/`Result` accessor (deferred to P7.S3e).
+`Option`/`Result` accessor (deferred to P7.S3e). Landed as `Type::Slice(SliceId, bool)` /
+`IrType::Slice`, a second-class, input-only, non-owning view interned per `(element,
+mutable)` and lowered as a 16-byte `{ptr, len}` aggregate, with `slice`/`subslice`
+constructing one from a `&[T N]`/`&![T N]` array reference and `&>`/`&!>`/`len` dispatching
+on it alongside their existing array arms (`docs/roadmap/P7/slice3c-spec.md`,
+`tests/phase7_slice3c.rs`).
 
 **P7.S3d — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
 quotation marker only where an enum eliminator collects it; every other consumer is
@@ -244,7 +249,7 @@ rejection or specify obligation propagation.
 against a library implementation. `bool` is already exactly this shape — a library-declared
 enum the compiler knows by a reserved registry position (`src/ast.rs:779`) with its `.`
 overload injected (`:816`). A `Fallible`-style bound satisfied by `Result`/`Option` would
-let fallible slice indexing (S3c), a failing allocator (P9.S2), and P9.S4's fallible push share
+let fallible slice indexing (deferred from S3c), a failing allocator (P9.S2), and P9.S4's fallible push share
 one desugaring. **Test before designing it as a trait:** if there is only ever one carrier
 type and users cannot add their own, this wants to be a lang *type* like `bool`, not a
 lang trait — a trait earns its keep only with two or more carriers.

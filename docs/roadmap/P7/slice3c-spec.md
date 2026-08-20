@@ -813,29 +813,48 @@ warnings`, and the full `cargo test` (1290+ tests, every suite including
 unmodified -- the phased work left nothing for this sweep to fix.
 
 **Phase 5 exit notes (growth-signal re-check, echoing slice3b's deferred `poly.rs`
-split):** re-run against the three files this slice grew the most
-(`word_families.rs` +358, `qbe.rs` +299, `poly.rs` +474 lines):
+split):** re-run against the four files this slice grew the most
+(`src/check/poly.rs` +471/-3 to 5456 lines, `src/backend/qbe.rs` +295/-4 to 3120,
+`src/check/word_families.rs` +354/-4 to 2860, `src/ir/func_builder/word_families.rs`
++281/-13 to 1683 -- the last one is the lowering twin of the third, a same-named file in a
+different module, and statistically level with the two above it; smaller adds
+(`repl.rs` +184, `check/declarations.rs` +154, `ir/layout.rs` +149) don't cross the size
+the other four are at and are not re-checked here):
 
-- `poly.rs`: still the deferred call from `project_poly_rs_split_deferred` --
-  [[project_poly_rs_split_deferred]] in memory. This slice's additions are not a fifth
-  concern bolted alongside the existing ones; every slice arm lands inside a predicate or
-  walk function the file already has (`poly_is_copy`, `is_reference_slot`,
-  `check_poly_reference_word`'s receiver dispatch, `poly_walk`'s array/slice-element
-  arms), the same shape every prior slice's poly arms took. No second quotation consumer
-  was added (that trigger, named in the deferred note, still hasn't fired), so the two
-  available splits are still wrong for the same reason recorded before. Deferred, again.
-- `word_families.rs`: the new `slice`/`subslice`/`&>`/`&!>` arms sit beside the array-word
-  and reference-word families they extend (`check_array_word`, `check_reference_word`),
-  each with its own adjacent error helper (`check_slice_offset`), matching the file's
-  existing per-family-plus-helpers grouping. No import divergence, no orphaned function:
-  every new arm is called from the same dispatch its sibling array/reference arms are.
-  Growing, not diverging -- no split indicated.
-- `qbe.rs`: the new aggregate-classification and index-emit arms land beside the existing
-  per-`IrType` match arms they extend (register class, load/store op, `qbe_abi_ty`,
-  `emit_oob_trap` reuse), not in a new section. High- and low-level code were already
-  mixed here before this slice (ABI classification beside instruction emission is the
-  file's existing shape); this slice does not introduce that mixing, just extends it. No
-  split indicated.
+- `poly.rs`: still the deferred call from `project_poly_rs_split_deferred` (recorded in
+  agent memory, restated here so this doc stands on its own): the two available splits
+  are a `poly/diagnostics.rs` layer-split with no precedent elsewhere in the checker, and
+  a `poly/eliminator.rs` split that would cut the mutual recursion
+  `poly_call_term` -> `poly_eliminator_call` -> `poly_walk` -> `poly_call_term` across a
+  file boundary. This slice's additions are mostly not a fifth concern bolted alongside
+  the existing ones -- most arms land inside a predicate or walk function the file
+  already has (`poly_is_copy`, `is_reference_slot`, `check_poly_reference_word`'s
+  receiver dispatch, `poly_walk`'s array/slice-element arms) -- but it does add two new
+  top-level functions, `check_poly_slice_offset` and `poly_slice_generic_element_error`,
+  each a helper beside the arm that calls it rather than a new axis of concern. No second
+  quotation consumer was added (the deferred note's named trigger still hasn't fired), so
+  both splits above are still wrong for the reason recorded before. Deferred, again.
+- `word_families.rs` (`src/check`): the new `slice`/`subslice`/`&>`/`&!>` arms sit beside
+  the array-word and reference-word families they extend (`check_array_word`,
+  `check_reference_word`), each with its own adjacent error helper (`check_slice_offset`),
+  matching the file's existing per-family-plus-helpers grouping. No import divergence, no
+  orphaned function: every new arm is called from the same dispatch its sibling
+  array/reference arms are. Growing, not diverging -- no split indicated.
+- `word_families.rs` (`src/ir/func_builder`, the lowering twin of the checker file above --
+  missed by this sweep's first pass, since the two files share a basename): every new
+  method (`lower_borrow`, `slice_id_of`, `load_slice_parts`, `build_slice_value`,
+  `bounds_check_dynamic`, `subslice_range_check`) is added to the file's one
+  `impl<'a> FuncBuilder<'a>` block, in the same per-method style as the reference/array/
+  owned-cell/struct-field primitives already there (per the file's own header comment).
+  No import divergence, no orphaned function, no layer mixing introduced. Growing, not
+  diverging -- no split indicated.
+- `qbe.rs`: the new aggregate-classification and index-emit functions
+  (`module_has_slice`, `emit_subslice_trap`) are new top-level functions, not arms added
+  to an existing one, but they sit beside the existing per-`IrType` match arms they extend
+  (register class, load/store op, `qbe_abi_ty`, `emit_oob_trap` reuse), not in a new
+  section. High- and low-level code were already mixed here before this slice (ABI
+  classification beside instruction emission is the file's existing shape); this slice
+  does not introduce that mixing, just extends it. No split indicated.
 
 ## Testing
 
