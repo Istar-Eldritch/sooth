@@ -29,10 +29,9 @@ pub struct PackageInfo {
 }
 
 /// Result of `attribute_packages`: every discovered package, keyed by its
-/// canonical manifest path, plus each input file's attribution. Built
-/// before any import exists (phase 2), so it carries only path-derived
-/// data; cross-package import resolution reads this as a lookup table
-/// (phase 3+).
+/// canonical manifest path, plus each input file's attribution. Carries
+/// only path-derived data, with no import data; cross-package import
+/// resolution reads this as a lookup table.
 #[derive(Debug, Clone, Default)]
 pub struct PackageGraph {
     pub packages: HashMap<PathBuf, PackageInfo>,
@@ -62,8 +61,7 @@ fn find_ancestor_manifest(file: &Path) -> Option<PathBuf> {
 
 /// For each file path, walk upward to locate a `sooth.pkg`, derive its
 /// module name relative to that manifest's package root, and accumulate the
-/// result into a `PackageGraph`. Takes only paths, no import data: this is
-/// the module-table skeleton built before any `ImportTarget` exists.
+/// result into a `PackageGraph`. Takes only paths, no import data.
 pub fn attribute_packages(files: &[PathBuf]) -> Result<PackageGraph, String> {
     let mut graph = PackageGraph::default();
     for file in files {
@@ -293,9 +291,22 @@ mod tests {
     fn attribute_packages_no_manifest_returns_none() {
         let sb = Sandbox::new("nomanifest");
         let file = sb.write("foo.sth", "");
-        let graph = attribute_packages(&[file.clone()]).unwrap();
+        let graph = attribute_packages(std::slice::from_ref(&file)).unwrap();
         assert_eq!(graph.attribution.get(&file), Some(&None));
         assert!(graph.package_for_file(&file).is_none());
+    }
+
+    #[test]
+    fn attribute_packages_nested_manifest_inner_wins() {
+        let sb = Sandbox::new("nested");
+        sb.write("sooth.pkg", "package: outer ; layer: core ;");
+        sb.write("inner/sooth.pkg", "package: inner ; layer: core ;");
+        let file = sb.write("inner/foo.sth", "");
+        let graph = attribute_packages(std::slice::from_ref(&file)).unwrap();
+
+        let pkg = graph.package_for_file(&file).unwrap();
+        assert_eq!(pkg.manifest.package, "inner");
+        assert_eq!(pkg.manifest_path, sb.0.join("inner/sooth.pkg"));
     }
 
     #[test]
