@@ -40,7 +40,7 @@ pub enum UnresolvedKind {
 
 /// The nearest ancestor directory of `file` holding a `sooth.pkg`, i.e. the
 /// package root.
-pub fn find_package_root(file: &Path) -> Option<PathBuf> {
+pub(crate) fn find_package_root(file: &Path) -> Option<PathBuf> {
     let mut dir = file.parent();
     while let Some(d) = dir {
         if d.join("sooth.pkg").is_file() {
@@ -391,11 +391,15 @@ pub(crate) fn check_package_graph(
 /// A segment must lex, on its own, as a single `Token::Word`, so the file it
 /// path-joins to carries a name Sooth can actually write: not a comment marker
 /// (`\`), not an int or float literal (`42`, `3.5`), not several tokens (a
-/// delimiter or whitespace inside it). Two further exclusions the token rule
-/// admits on its own: `:`, which `::` already claims as the segment separator,
-/// and a bare `*`, reserved for the wildcard import target (OQ3). A `.` is
-/// deliberately not excluded: `ascii.io` names `ascii.io.sth` and collides with
-/// nothing, since only one trailing `.sth` is ever appended.
+/// delimiter or whitespace inside it). Three further exclusions the token rule
+/// admits on its own: `:`, which `::` already claims as the segment separator;
+/// a bare `*`, reserved for the wildcard import target (OQ3); and bare `.` /
+/// `..`, reserved so a segment can never mean "here" or "parent directory" --
+/// otherwise one file gets more than one valid module-name spelling (`self::
+/// sub::..::sub::y` alongside `self::sub::y`), and `..` can path-join outside
+/// the package root. A `.` *inside* a segment is unaffected: `ascii.io` names
+/// `ascii.io.sth` and collides with nothing, since only one trailing `.sth` is
+/// ever appended.
 fn segment_defect(seg: &str) -> Option<String> {
     if seg.contains(':') {
         return Some(format!(
@@ -405,6 +409,11 @@ fn segment_defect(seg: &str) -> Option<String> {
     if seg == "*" {
         return Some(format!(
             "module-name segment `{seg}` is reserved for the wildcard import target"
+        ));
+    }
+    if seg == "." || seg == ".." {
+        return Some(format!(
+            "module-name segment `{seg}` is reserved for directory navigation, not a module name"
         ));
     }
     match lexer::lex(seg).as_deref() {
@@ -717,6 +726,22 @@ mod tests {
             defect.contains("is reserved for the wildcard import target"),
             "unexpected reason: {defect}"
         );
+    }
+
+    /// OQ2: `.` and `..` lex as ordinary words too, so without their own
+    /// exclusion `self::sub::..::sub::y` would resolve alongside `self::sub::y`
+    /// (one file, two names) and `self::..::outside` could path-join outside
+    /// the package root.
+    #[test]
+    fn module_segment_dot_and_dotdot_are_rejected() {
+        for seg in [".", ".."] {
+            let defect =
+                segment_defect(seg).unwrap_or_else(|| panic!("segment `{seg}` should be rejected"));
+            assert!(
+                defect.contains("is reserved for directory navigation, not a module name"),
+                "unexpected reason: {defect}"
+            );
+        }
     }
 
     fn unresolved(

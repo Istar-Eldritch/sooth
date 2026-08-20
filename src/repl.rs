@@ -1758,21 +1758,22 @@ impl Session {
             .into_iter()
             .next()
             .ok_or_else(|| "parse error: expected an `import:` form".to_string())?;
-        // P8 slice 1a: a module-name import resolves against the user-level
-        // manifest, which is S1b's work, and nothing in `assemble_module`
-        // enforces it -- so the REPL rejects it outright rather than falling
+        // P8 slice 1a: resolving a module-name import needs a manifest to
+        // resolve it against, and nothing in `assemble_module` supplies one
+        // for the REPL -- so it is rejected outright rather than falling
         // through to a resolution it cannot do.
         let ImportTarget::Path(path) = &import.target else {
             return Err(format!(
-                "error: module-name import at line {}, col {} in <repl>:\n  REPL imports resolve against the user-level manifest, which is S1b's work\n  use a quoted-path import for now, or add `--manifest` support (S1b)",
+                "error: module-name import at line {}, col {} in <repl>:\n  the REPL cannot resolve a module-name import yet\n  use a quoted-path import instead",
                 import.span.line, import.span.col
             ));
         };
-        // A wildcard import binds no qualifier, and its visibility effect is
-        // S2's work: splicing one now would bring in nothing at all, silently.
+        // A wildcard import binds no qualifier, and nothing here gives it a
+        // visibility effect to splice in: it would bring in nothing at all,
+        // silently.
         let Some(qualifier) = import.qualifier() else {
             return Err(format!(
-                "error: wildcard import at line {}, col {} in <repl>:\n  a wildcard import brings in no names until S2 gives it its visibility effect\n  use a qualified import for now",
+                "error: wildcard import at line {}, col {} in <repl>:\n  a wildcard import binds no names in the REPL\n  use a qualified import instead",
                 import.span.line, import.span.col
             ));
         };
@@ -4617,9 +4618,9 @@ mod tests {
         assert_eq!(later_line, vec!["sooth_struct_drop_1__gen0".to_string()]);
     }
 
-    /// P8 slice 1a: a module-name import at the REPL resolves against the
-    /// user-level manifest, which is S1b's work and is wired into nothing the
-    /// REPL runs -- so it is rejected outright, not silently accepted.
+    /// P8 slice 1a: a module-name import at the REPL has no manifest to
+    /// resolve against and is wired into nothing the REPL runs -- so it is
+    /// rejected outright, not silently accepted.
     #[test]
     fn repl_module_name_import_is_rejected() {
         let mut session = Session::new();
@@ -4629,15 +4630,15 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "error: module-name import at line 1, col 1 in <repl>:\n  REPL imports resolve against the user-level manifest, which is S1b's work\n  use a quoted-path import for now, or add `--manifest` support (S1b)"
+            "error: module-name import at line 1, col 1 in <repl>:\n  the REPL cannot resolve a module-name import yet\n  use a quoted-path import instead"
         );
     }
 
-    /// P8 slice 1a: a wildcard import binds no qualifier, and its visibility
-    /// effect is S2's work -- so it is rejected outright at the REPL rather
-    /// than silently splicing in nothing. The target is a quoted path (not a
-    /// module name), so it is the wildcard rejection that fires here, not
-    /// the module-name one above.
+    /// P8 slice 1a: a wildcard import binds no qualifier, and nothing gives
+    /// it a visibility effect here -- so it is rejected outright at the REPL
+    /// rather than silently splicing in nothing. The target is a quoted path
+    /// (not a module name), so it is the wildcard rejection that fires here,
+    /// not the module-name one above.
     #[test]
     fn repl_wildcard_import_is_rejected() {
         let mut session = Session::new();
@@ -4647,7 +4648,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "error: wildcard import at line 1, col 1 in <repl>:\n  a wildcard import brings in no names until S2 gives it its visibility effect\n  use a qualified import for now"
+            "error: wildcard import at line 1, col 1 in <repl>:\n  a wildcard import binds no names in the REPL\n  use a qualified import instead"
         );
     }
 

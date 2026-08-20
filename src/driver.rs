@@ -192,6 +192,18 @@ fn duplicate_qualifier_error(file: &Path, qualifier: &str, at: Span, first: Span
     )
 }
 
+/// P8 slice 1a: a wildcard import binds no qualifier, and nothing here gives
+/// it a visibility effect to splice in -- a compiled build rejects it
+/// outright, exactly as the REPL does, rather than silently binding nothing.
+fn wildcard_import_is_error(file: &Path, at: Span) -> String {
+    format!(
+        "error: wildcard import at line {}, col {} in {}:\n  a wildcard import binds no names in this build\n  use a qualified import instead",
+        at.line,
+        at.col,
+        file.display()
+    )
+}
+
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
@@ -249,8 +261,13 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         // defaulted last segment bind concretely, so both collide.
         let mut bound_at: HashMap<&str, Span> = HashMap::new();
         for (imp, target) in node.imports.iter().zip(&node.import_targets) {
-            let Some(qualifier) = imp.qualifier() else {
-                continue;
+            let qualifier = match imp.qualifier() {
+                Some(q) => q,
+                // The reserved `intrinsics` wildcard (F6) is the one wildcard
+                // shape that adds no closure edge and needs no qualifier; any
+                // other wildcard binds no names and is rejected outright.
+                None if target.is_none() => continue,
+                None => return Err(wildcard_import_is_error(&node.canon, imp.span)),
             };
             if let Some(first) = bound_at.insert(qualifier, imp.span) {
                 return Err(duplicate_qualifier_error(
@@ -1078,6 +1095,38 @@ mod tests {
         );
     }
 
+    /// P8 slice 1a: a wildcard import binds no qualifier and gets no
+    /// visibility effect until S2 -- so a compiled build rejects it outright,
+    /// exactly as the REPL does, rather than silently binding no names.
+    #[test]
+    fn driver_wildcard_import_is_error() {
+        let s = Sandbox::new("wildcard-build");
+        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
+        let entry = s.write("main.sth", "import: \"lib.sth\" * ;\n: main ( -- ) 0 . ;\n");
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let err = assemble_module(&closure, true).expect_err("a wildcard import is rejected");
+        assert!(
+            err.contains("error: wildcard import at line 1, col 1 in")
+                && err.contains("a wildcard import binds no names in this build")
+                && err.contains("use a qualified import instead"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// F6: `intrinsics` is the one wildcard shape a compiled build accepts --
+    /// it adds no closure edge and needs no qualifier, so it must reach
+    /// `assemble_module` without tripping the wildcard rejection above.
+    #[test]
+    fn driver_intrinsics_wildcard_import_builds() {
+        let s = Sandbox::new("intrinsics-wildcard-build");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n: main ( -- ) 1 1 add . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("the reserved name needs no depends:");
+        assemble_module(&closure, true).expect("intrinsics wildcard import must still build");
+    }
+
     /// P8 slice 1a: two imports binding the same qualifier -- here both
     /// defaulting to their last segment -- is a located error at the second,
     /// naming where the first bound it. No shadowing, no precedence.
@@ -1255,6 +1304,50 @@ mod tests {
         assert!(
             err.contains("error: import `self::*` at line 1, col 1 in")
                 && err.contains("module-name segment `*` is reserved for the wildcard import"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// OQ2: `..` is rejected at the segment-validity stage, so a `self::`
+    /// import cannot spell the same file two different ways (here,
+    /// `self::sub::..::sub::y` alongside `self::sub::y`).
+    #[test]
+    fn import_target_dotdot_segment_is_error() {
+        let s = Sandbox::new("dotdot-segment");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("sub/y.sth", ": yw ( -- i64 ) 1 ;\nexport: yw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 . ;\n",
+        );
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::sub::..::sub::y` at line 1, col 1 in")
+                && err.contains(
+                    "module-name segment `..` is reserved for directory navigation, not a module name"
+                ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// `existing_module_file` checks `is_file` before canonicalizing exactly so
+    /// a directory cannot resolve as a module. `module_file` joins segments
+    /// under directories and appends `.sth` only to the last one, so the path
+    /// that can collide with a directory is one literally named `<segment>.sth`
+    /// -- here a directory `text.sth/` (holding further modules), with no file
+    /// `text.sth` beside it. `import: self::text ;` must fail D1, not resolve
+    /// into the directory.
+    #[test]
+    fn import_target_directory_is_not_a_module() {
+        let s = Sandbox::new("directory-as-module");
+        pkg(&s, "", "package: app ; layer: hosted ;");
+        s.write("text.sth/ascii.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
+        let entry = s.write("main.sth", "import: self::text ;\n: main ( -- ) 0 . ;\n");
+        let err = discover_err(&entry);
+        assert!(
+            err.contains("error: import `self::text` at line 1, col 1 in")
+                && err.contains("package `app` has no module `text` (looked for ")
+                && err.contains("text.sth)"),
             "unexpected message: {err}"
         );
     }

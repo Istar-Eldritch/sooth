@@ -67,15 +67,20 @@ itself: `42.sth` may sit in a package untouched as long as no import names it.
 
 A segment must lex, on its own, as exactly one `Token::Word`. That single rule covers
 delimiters and whitespace (multi-token), `\` (comment marker), `42` (`Token::Int`), `3.5`
-(`Token::Float`). Two explicit exclusions the token rule admits on its own:
+(`Token::Float`). Four explicit exclusions the token rule admits on its own:
 
 - **`:`** — the lexer's word set is `:`-permissive, and `::` is the segment separator, so a
   surviving `:` would give one name two spellings.
 - **bare `*`** — reserved for S2's wildcard target position; a module named `*` would be
   unreachable as an ordinary target.
+- **bare `.`** and **bare `..`** — both lex as an ordinary word, so without their own
+  exclusion a segment could mean "here" or "parent directory": `self::sub::..::sub::y` would
+  resolve alongside `self::sub::y` (one file, two spellings), and `self::..::outside` could
+  path-join outside the package root.
 
-**`.` is not excluded.** The extension is *appended*, never `set_extension`ed, so `ascii.io`
-names `ascii.io.sth` (not `ascii.sth`) and the name ↔ path map stays one-to-one.
+**A `.` inside a segment is not excluded.** The extension is *appended*, never
+`set_extension`ed, so `ascii.io` names `ascii.io.sth` (not `ascii.sth`) and the name ↔ path
+map stays one-to-one. Only the bare `.`/`..` segments are reserved, not the character.
 
 ### OQ3 / F2: import grammar and anchors
 
@@ -167,7 +172,8 @@ of the `depends:` lookup so a typo does not get a confusing "no `depends:` entry
 
 **Ill-formed segment** (OQ2, either anchor, before the join): the shared header plus one of
 ``module-name segment `<seg>` is not a single identifier`` / ``… is reserved for the wildcard
-import target`` / ``… contains `:`, which is reserved for the `::` separator``.
+import target`` / ``… contains `:`, which is reserved for the `::` separator`` / ``… is
+reserved for directory navigation, not a module name`` (bare `.`/`..`).
 
 **Module name outside any package** (mirror of the next one; each form is rejected exactly
 where the other is the answer, both revisited by S1b):
@@ -207,6 +213,16 @@ is always the error, for explicit and defaulted qualifiers alike):
 ```
 error: duplicate import qualifier `<q>` at line L, col C in <file>:
   qualifier `<q>` was first bound at line L2, col C2
+```
+
+**Wildcard import** (in `driver.rs`'s qualifier loop, shared by `driver::build` and the REPL):
+its visibility effect is undecided until S2, so both entry points reject it rather than
+silently binding no names:
+
+```
+error: wildcard import at line L, col C in <file>:
+  a wildcard import binds no names in this build
+  use a qualified import instead
 ```
 
 ---
@@ -294,7 +310,10 @@ Tests: `find_package_root_no_manifest_returns_none`, `_nested_manifest_inner_win
 `module_file_appends_extension_keeping_a_dotted_segment` (guards append vs `set_extension`,
 silent otherwise), `module_segment_single_word_is_ok`, `_non_word_is_rejected` (table-driven
 over `\`, `42`, `3.5`, `my file`, `a;b`, `(`, a quoted string), `_colon_is_rejected`,
-`_star_is_rejected`, plus `check_package_graph_missing_depends_is_error`,
+`_star_is_rejected`, `_dot_and_dotdot_are_rejected`, and
+`driver::import_target_dotdot_segment_is_error` (a `self::` import shaped as
+`self::sub::..::sub::y`, rejected at the segment-validity stage rather than resolving
+alongside `self::sub::y`), plus `check_package_graph_missing_depends_is_error`,
 `_private_module_is_error`, `_layer_violation_is_error`, `_depends_name_mismatch_is_error`
 (each pinning the exact message with line/col and both names, each mutation-tested by
 deleting its check) and `_layer_equal_is_ok` (not a guard-deletion test; its only real
@@ -309,23 +328,32 @@ A **module-name import at the REPL is rejected** with a located error: REPL impo
 against the user-level manifest, which is S1b's work, and anything not wired into
 `assemble_module` is unenforced at the REPL, so silent fall-through is not an option.
 
-`assemble_module` is unchanged: it receives a closure whose `import_targets` are already
-resolved, and `check_package_graph` errors before assembly.
+`assemble_module` receives a closure whose `import_targets` are already resolved, and
+`check_package_graph` errors before assembly; its own qualifier-binding loop is where a
+`Wildcard` binding is rejected (above), shared by both `driver::build` and the REPL. The one
+exception is the reserved `intrinsics` target (F6): it adds no closure edge, so its `Wildcard`
+binding is recognized by that absent edge and reaches `assemble_module` without tripping the
+rejection, exactly as a package with no `depends:` entry for it builds clean.
 
 Tests in `driver.rs`: `discover_closure_intra_package_forward_reference_resolves`,
 `_manifest_cache_reads_once`, `_inner_manifest_wins` (mutate: invert the nearest-ancestor
 walk), `_quoted_path_inside_package_is_error`, `driver_duplicate_import_qualifier_is_error`,
+`driver_wildcard_import_is_error`, `driver_intrinsics_wildcard_import_builds`,
 `self_anchored_import_into_nested_package_is_error` (mutate: delete the ownership re-check),
 `dependency_anchored_import_into_nested_package_is_error`,
 `self_intrinsics_is_not_the_reserved_name`, `resolve_bare_package_name_no_module_is_error`,
-`import_target_non_word_segment_is_error` and `import_target_star_segment_is_error` (the
-offending file is written in the fixture, so a D1 error cannot stand in for the naming rule;
-mutate: delete the `check_module_name` call), `module_import_outside_a_package_is_error`
+`import_target_non_word_segment_is_error`, `import_target_star_segment_is_error` and
+`import_target_dotdot_segment_is_error` (the offending file is written in the fixture, so a
+D1 error cannot stand in for the naming rule; mutate: delete the `check_module_name` call),
+`module_import_outside_a_package_is_error`
 (mutate: return `Ok(None)`, which would leave the import silently unbound),
-`depends_entry_with_no_manifest_is_error`, `resolve_intrinsics_precedes_depends_lookup`, and
-`self_import_of_non_public_module_is_ok` — explicitly a regression fence, not a killed-mutant
-guard: nothing in the SelfPackage path reads `module:`, so there is no guard to delete.
-`repl_module_name_import_is_rejected` in `repl.rs`.
+`depends_entry_with_no_manifest_is_error`, `resolve_intrinsics_precedes_depends_lookup`,
+`import_target_directory_is_not_a_module` (mutate: `existing_module_file`'s `is_file` check
+to `exists`; a directory literally named `<segment>.sth` must still fail D1, not resolve),
+and `self_import_of_non_public_module_is_ok` — explicitly a regression fence, not a
+killed-mutant guard: nothing in the SelfPackage path reads `module:`, so there is no guard to
+delete. `repl_module_name_import_is_rejected` and `repl_wildcard_import_is_rejected` in
+`repl.rs`.
 
 ### `src/ast.rs`, `src/parser.rs`
 
@@ -346,9 +374,16 @@ immediately, so no optionality leaks past the parser.
 Every `.qualifier`/`.selective` read in `driver.rs` and `repl.rs` becomes an `ImportBinding`
 match. The `Qualified` arm keeps today's behaviour; the `Wildcard` arm carries neither field
 and is a no-op wherever the site iterates per-name (selective loops, collision/export checks,
-the splice's alias install). The two sites keying on qualifier text: `import_map.insert`
-inserts no entry, and the REPL prints `imported <target> (wildcard)`. Arms exist so matches
-are exhaustive; they gate no names.
+the splice's alias install). Arms exist so matches are exhaustive; they gate no names.
+
+**A wildcard import is a located build error, in both `driver::build` and the REPL** (this
+slice, not S2): its visibility effect -- which names it binds -- is undecided until S2, and a
+build that silently accepted it would bind nothing while looking like it bound everything.
+`assemble_module`'s qualifier loop (shared by both entry points) rejects a `Wildcard` binding
+where it would otherwise read `imp.qualifier()`, before `import_map.insert` or the
+duplicate-qualifier check ever runs. The REPL additionally rejects it earlier, at parse time,
+for its own top-level import line -- `assemble_module`'s check is the one that also catches a
+wildcard import inside a transitively-imported file.
 
 `word_families.rs`'s `drop`-visibility remedy teaches the import order to real users and was
 re-worded for target-first, along with the expectations pinning it.
