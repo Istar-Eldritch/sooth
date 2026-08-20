@@ -213,6 +213,15 @@ fn user_level_manifest_resolves_scratch_file() {
         "build should succeed; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary).output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "5\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
 
 /// Golden 4: same shape as Golden 3, but the user-level manifest has no
