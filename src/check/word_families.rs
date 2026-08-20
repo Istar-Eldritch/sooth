@@ -18,6 +18,7 @@ pub(super) fn check_reference_word(
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
     refs: &mut Vec<RefDecl>,
+    slices: &[SliceDecl],
     prov: &mut Provenance,
     live: &Liveness,
     at: usize,
@@ -41,6 +42,36 @@ pub(super) fn check_reference_word(
                 return Err(reject_quotation_operand(ctx, span, name));
             }
             let index = stack[n - 1];
+            // R9.2: a slice receiver is *not* a `Type::Ref`, so it is matched
+            // here, ahead of the `ref_parts` extraction below, rather than as
+            // a fallback inside it. The element reference it yields is bounds-
+            // checked against the view's runtime length, not a compile-time
+            // count, so nothing is decided here about a literal index.
+            if let Type::Slice(id, recv_mut, _) = stack[n - 2].ty {
+                if recv_mut != mutable {
+                    return Err(reference_word_operand_error(
+                        ctx,
+                        span,
+                        name,
+                        if mutable {
+                            "a mutable slice"
+                        } else {
+                            "a slice"
+                        },
+                        stack[n - 2].ty,
+                    ));
+                }
+                check_slice_offset(index, ctx, span, name)?;
+                let out = intern_ref_type(refs, slices[id.index()].element, mutable);
+                let deriv = prov.project(stack[n - 2].deriv);
+                let alias = stack[n - 2].alias;
+                stack.truncate(n - 2);
+                stack.push(Slot {
+                    alias,
+                    ..Slot::derived(out, deriv)
+                });
+                return Ok(Some(std::mem::take(stack)));
+            }
             let Some((referent, recv_mut)) = ref_parts(stack[n - 2].ty, refs) else {
                 return Err(reference_word_operand_error(
                     ctx,
@@ -427,8 +458,14 @@ pub(super) fn overlapping_projection<'a>(
     mutable: bool,
 ) -> Option<AliasOrigin<'a>> {
     let conflicts = |ty: Type, alias: Option<AliasSetId>| {
-        let Type::Ref(_, other_mutable, _) = ty else {
-            return false;
+        // P7 slice 3c (R1.4/R12): a slice is a live reference into its
+        // region exactly as a `&T` is, so it counts here too. This site
+        // matches the shape directly rather than through `is_ref()` (it
+        // needs the mutability bit), so the widening does not reach it on
+        // its own -- and without the arm a view keeps nothing borrowed.
+        let other_mutable = match ty {
+            Type::Ref(_, m, _) | Type::Slice(_, m, _) => m,
+            _ => return false,
         };
         (mutable || other_mutable) && alias.is_some_and(|other| prov.alias_sets_overlap(set, other))
     };
@@ -467,7 +504,7 @@ pub(super) fn consumed_place_conflict<'a>(
     live: &Liveness,
     at: usize,
 ) -> Option<AliasOrigin<'a>> {
-    if matches!(consumed.ty, Type::Ref(..)) {
+    if matches!(consumed.ty, Type::Ref(..) | Type::Slice(..)) {
         return None;
     }
     overlapping_projection(others, scope, prov, live, at, consumed.alias?.set, true)
@@ -713,15 +750,104 @@ pub(super) fn check_str_word(
     Ok(Some(std::mem::take(stack)))
 }
 
+/// The array-word family, plus P7 slice 3c's two slice-construction words.
+/// `slice`/`subslice` live here rather than in their own family because they
+/// are dispatched by exact name off the same operand-typed receiver `fill` and
+/// `len` are, and because `len` itself has to answer all three receivers
+/// (array, `str` via `check_str_word` above, slice) from one place.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_array_word(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    refs: &[RefDecl],
+    slices: &mut Vec<SliceDecl>,
+    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
+        // R10.1: `slice ( &[T N] -- Slice[T] )`. The view carries the source
+        // array's length at runtime, so the receiver's compile-time `N` is
+        // read here and never named again. The receiver is consumed and its
+        // region forwarded onto the view exactly as `&>` forwards it onto an
+        // element reference: the view keeps the buffer borrowed for as long as
+        // it is live.
+        "slice" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("slice", 1, n));
+            }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "slice"));
+            }
+            let recv = stack[n - 1];
+            let Some((Type::Array(id, _), recv_mut)) = ref_parts(recv.ty, refs) else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    "slice",
+                    "a reference to an array",
+                    recv.ty,
+                ));
+            };
+            // Phase 3 builds shared views only: a mutable one is not
+            // exclusivity-tracked until Phase 4, so it must not be
+            // constructible before its guard exists.
+            if recv_mut {
+                return Err(mutable_slice_unsupported_error(ctx, span, "slice"));
+            }
+            // R1.2 (the `Copy`-element rule) needs no gate here: `slice`'s
+            // only source is an array reference, and no array can hold a
+            // non-`Copy` element in the first place -- a linear one is refused
+            // as `linear array elements are not supported yet`, a reference
+            // one as `a reference cannot be stored`. Pinned by
+            // `slice_element_copy_rule_is_enforced_by_the_array_gate`.
+            let element = arrays[id.index()].element;
+            let out = intern_slice_type(slices, element, false);
+            let deriv = prov.project(recv.deriv);
+            let alias = recv.alias;
+            stack.truncate(n - 1);
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(out, deriv)
+            });
+        }
+        // R10.3: `subslice ( Slice[T] usize usize -- Slice[T] )` re-derives a
+        // *fresh* view from the receiver's pointer and length -- offset by
+        // `start`, of length `len` -- and is never a reference to a reference.
+        // The receiver is an ordinary consumed input, as it is for `&>`.
+        "subslice" => {
+            let n = stack.len();
+            if n < 3 {
+                return Err(need("subslice", 3, n));
+            }
+            if stack[n - 3..].iter().any(|s| s.quot.is_some()) {
+                return Err(reject_quotation_operand(ctx, span, "subslice"));
+            }
+            let recv = stack[n - 3];
+            let Type::Slice(_, recv_mut, _) = recv.ty else {
+                return Err(reference_word_operand_error(
+                    ctx, span, "subslice", "a slice", recv.ty,
+                ));
+            };
+            if recv_mut {
+                return Err(mutable_slice_unsupported_error(ctx, span, "subslice"));
+            }
+            // Both offsets are runtime `usize`; unlike an array index there is
+            // no compile-time bound to check a literal against, so the range
+            // check is entirely the runtime trap's job.
+            check_slice_offset(stack[n - 2], ctx, span, "subslice")?;
+            check_slice_offset(stack[n - 1], ctx, span, "subslice")?;
+            let deriv = prov.project(recv.deriv);
+            let alias = recv.alias;
+            stack.truncate(n - 3);
+            stack.push(Slot {
+                alias,
+                ..Slot::derived(recv.ty, deriv)
+            });
+        }
         "fill" => {
             let n = stack.len();
             if n < 2 {
@@ -779,6 +905,15 @@ pub(super) fn check_array_word(
             }
             if stack[n - 1].quot.is_some() {
                 return Err(reject_quotation_operand(ctx, span, "len"));
+            }
+            // R9.1: a slice answers its *runtime* length, so unlike the array
+            // fold below it consumes its receiver -- matching the `str` arm in
+            // `check_str_word` and the poly twin's `Concrete(Str | Slice(..))`
+            // arm, both of which read a carried length rather than a type.
+            if matches!(stack[n - 1].ty, Type::Slice(..)) {
+                stack.pop();
+                stack.push(Slot::computed(Type::Usize));
+                return Ok(Some(std::mem::take(stack)));
             }
             if !matches!(stack[n - 1].ty, Type::Array(..)) {
                 return Err(array_word_operand_error(ctx, span, "len", stack[n - 1].ty));
@@ -1132,6 +1267,39 @@ fn check_array_index(
     }
 }
 
+/// P7 slice 3c (R9.2/R10.1): a slice offset operand -- `subslice`'s start and
+/// length, and a slice index. The array twin `check_array_index` bounds a
+/// literal against the compile-time count; a slice's length is a runtime
+/// value, so there is nothing here to check a literal against and the range
+/// check is left entirely to the runtime trap.
+fn check_slice_offset(operand: Slot, ctx: &Ctx, span: Span, op: &str) -> Result<(), String> {
+    match match_slot(operand, Type::Usize) {
+        SlotMatch::Exact | SlotMatch::LiteralSizeType => Ok(()),
+        SlotMatch::NeedsSizeConversion => {
+            Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
+        }
+        SlotMatch::NeedsStrToCstrConversion | SlotMatch::Mismatch => {
+            Err(type_mismatch_error(ctx, span, op, Type::Usize, operand.ty))
+        }
+    }
+}
+
+/// P7 slice 3c: a mutable view (`slice` off a `&![T N]`, or `subslice` of
+/// one) reached before Phase 4's exclusivity tracking exists. Refused rather
+/// than admitted untracked: a mutable slice must never exist in a build whose
+/// borrow table cannot see it.
+fn mutable_slice_unsupported_error(ctx: &Ctx, span: Span, op: &str) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` builds shared views only; a mutable slice is not supported yet\n  note: declared {}",
+            name, span.line, op, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: type mismatch: `{op}` builds shared views only; a mutable slice is not supported yet"
+        ),
+    }
+}
+
 /// `cstr` applied to something other than `str` (R7): the only legal source
 /// for the discard-the-length conversion, so the error names it by name
 /// rather than as a generic type mismatch.
@@ -1438,6 +1606,7 @@ mod tests {
             &terms,
             entry,
             &HashMap::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -1750,6 +1919,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
             &module.structs,
             &module.enums,
             &HashMap::new(),
@@ -1889,6 +2059,7 @@ mod tests {
             &[],
             &[],
             &mut refs,
+            &[],
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
@@ -2209,6 +2380,7 @@ mod tests {
             &[],
             &[],
             &mut refs,
+            &[],
             &mut prov,
             &Liveness::scan(&[], &HashSet::new(), false),
             0,
@@ -2504,6 +2676,149 @@ mod tests {
             err.contains(
                 "`Outer>` consumes a value while a reference derived from it is still live"
             ),
+            "unexpected message: {err}"
+        );
+    }
+
+    // --- P7 slice 3c (R9/R10): the shared slice words. ---
+
+    /// R10.1: `slice` turns a shared array reference into a view, consuming
+    /// the reference. Both claims ride the declared effect: a leftover
+    /// receiver or a wrong output type is an arity/type error, not a silent
+    /// pass.
+    #[test]
+    fn slice_constructs_a_view_from_an_array_reference() {
+        check_src(": f ( &[i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap();
+        // ...and the view it builds really is `Slice[i64]`, named as such.
+        let err = check_src(": f ( &[i64 3] -- i64 ) slice ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(err.contains("Slice[i64]"), "unexpected message: {err}");
+    }
+
+    /// R1.2: the registry interns `Copy` elements only, and `slice` needs no
+    /// gate of its own for it -- the array declaration rule is what makes a
+    /// non-`Copy` element unreachable, by both routes. This test is that
+    /// claim: loosen either array rule and `slice` inherits the hole, here.
+    #[test]
+    fn slice_element_copy_rule_is_enforced_by_the_array_gate() {
+        let linear =
+            check_src(": f ( &[^i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            linear.contains("linear array elements are not supported yet"),
+            "unexpected message: {linear}"
+        );
+        for elem in ["&i64", "&!i64"] {
+            let src = format!(": f ( &[{elem} 3] -- usize ) slice len ;\n: main ( -- ) ;\n");
+            let err = check_src(&src).unwrap_err();
+            assert!(
+                err.contains("a reference cannot be stored"),
+                "unexpected message for {elem}: {err}"
+            );
+        }
+    }
+
+    /// Phase 3 ships shared views only: a mutable one is not
+    /// exclusivity-tracked until Phase 4, so `slice` refuses a `&!` receiver
+    /// rather than minting a view the borrow table cannot see.
+    #[test]
+    fn slice_over_a_mutable_reference_is_error() {
+        let err =
+            check_src(": f ( &![i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `f` (line 1)\n  \
+             `slice` builds shared views only; a mutable slice is not supported yet\n  \
+             note: declared ( &![i64 3] -- usize )"
+        );
+    }
+
+    /// R9.1: `len` over a slice answers the carried length and **consumes**
+    /// the receiver, unlike the array fold. The declared effect is the whole
+    /// witness: a non-consuming arm leaves a residual `Slice[i64]` the output
+    /// row does not have.
+    #[test]
+    fn len_over_a_slice_answers_runtime_length() {
+        check_src(": f ( Slice[i64] -- usize ) len ;\n: main ( -- ) ;\n").unwrap();
+    }
+
+    /// R10.3: `subslice` re-derives a *fresh* `Slice[T]`, never a reference to
+    /// one -- so its result is itself a legal `len`/`&>` receiver, and its own
+    /// receiver is consumed like any other input.
+    #[test]
+    fn subslice_rederives_a_fresh_slice_not_a_nested_borrow() {
+        check_src(
+            ": f ( Slice[i64] -- usize ) 0 >usize 2 >usize subslice len ;\n: main ( -- ) ;\n",
+        )
+        .unwrap();
+        // A nested borrow would be a *different* type; the fresh view is
+        // interned to the very type the signature names, so it is returnable
+        // to a `Slice[i64]` position (here: as `subslice`'s own receiver).
+        check_src(
+            ": f ( Slice[i64] -- usize )\n  \
+               0 >usize 2 >usize subslice 0 >usize 1 >usize subslice len ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap();
+    }
+
+    /// R9.2: `&>` accepts a slice receiver and yields an element reference.
+    /// The mutable spelling does not: a Phase 3 slice is always shared, and
+    /// the mismatch says so rather than silently handing out a `&!`.
+    #[test]
+    fn shared_index_of_a_slice_yields_an_element_reference() {
+        check_src(": f ( Slice[i64] -- i64 ) 0 >usize &> @ ;\n: main ( -- ) ;\n").unwrap();
+        let err =
+            check_src(": f ( Slice[i64] -- i64 ) 0 >usize &!> @ ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("`&!>` expected a mutable slice, found `Slice[i64]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R12: a live view keeps the buffer it was cut from borrowed. `slice`
+    /// forwards its receiver's region onto the view exactly as `&>` forwards
+    /// it onto an element reference, so consuming the storage underneath a
+    /// live slice is the same error consuming it underneath a live element
+    /// reference is. The receiver here is *anonymous* (a projection off a
+    /// stack value, not a named local), which is the only shape the
+    /// region-keyed check can see: a named local's frame slot outlives every
+    /// borrow of it, so dropping the name is not a place ending.
+    #[test]
+    fn consuming_the_buffer_under_a_live_slice_is_error() {
+        let err = check_src(
+            "type: W a [i64 4] ;\n\
+             : main ( -- ) 7 4 fill W &a slice swap W> drop len . ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`W>` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {err}"
+        );
+        // The element-reference twin, which was already an error before
+        // slices existed: the two shapes must agree, and this row is what
+        // says the slice row above is not merely inheriting some unrelated
+        // rejection.
+        let twin = check_src(
+            "type: W a [i64 4] ;\n\
+             : main ( -- ) 7 4 fill W &a 0 >usize &> swap W> drop @ . ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            twin.contains("`W>` consumes a value while a reference derived from it is still live"),
+            "unexpected message: {twin}"
+        );
+    }
+
+    /// The index is a `usize` like an array's, and unlike an array's it is
+    /// never bounds-checked at compile time: a slice's length is a runtime
+    /// value, so a literal index has nothing to be checked against here.
+    #[test]
+    fn slice_index_needs_a_usize_and_a_literal_is_not_range_checked() {
+        // 99 is far past any plausible length, and still admitted: the check
+        // is the runtime trap's, not this function's.
+        check_src(": f ( Slice[i64] -- i64 ) 99 >usize &> @ ;\n: main ( -- ) ;\n").unwrap();
+        let err = check_src(": f ( Slice[i64] f64 -- i64 ) &> @ ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("`&>` expected `usize`, found `f64`"),
             "unexpected message: {err}"
         );
     }

@@ -1051,6 +1051,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut owned_cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
         let mut imports0: HashMap<String, u32> = HashMap::new();
         imports0.insert("lib".to_string(), 1);
@@ -1070,6 +1071,7 @@ mod tests {
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -1084,6 +1086,7 @@ mod tests {
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();

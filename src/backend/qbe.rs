@@ -1348,6 +1348,12 @@ fn emit_instr(
             let (w, op) = match ty_of(value_types, *dst) {
                 IrType::Float { bits: 32 } => ("s", "loads"),
                 IrType::Float { .. } => ("d", "loadd"),
+                // P7 slice 3c (R2.2): a scalar load of a slice would fetch
+                // one word of the two. A slice value is an interior pointer
+                // to its `{ptr, len}` frame slot, so it is copied by `Blit`
+                // like every other aggregate and never reaches this
+                // instruction; the arm refuses rather than truncating.
+                IrType::Slice(_) => unreachable!("a slice is blit-copied, never scalar-loaded"),
                 _ => ("l", "loadl"),
             };
             writeln!(out, "\t{} ={w} {op} {}", val(*dst), val(*ptr))
@@ -1362,6 +1368,9 @@ fn emit_instr(
             let ty = ty_of(value_types, *v);
             match ty {
                 IrType::Float { bits: 32 } => writeln!(out, "\tstores {}, {}", val(*v), val(*ptr)),
+                // P7 slice 3c (R2.2): the store twin of the load refusal
+                // above -- one word of a two-word value, silently.
+                IrType::Slice(_) => unreachable!("a slice is blit-copied, never scalar-stored"),
                 IrType::Float { .. } => writeln!(out, "\tstored {}, {}", val(*v), val(*ptr)),
                 _ if width(ty, layouts) == "w" => {
                     let signed = matches!(ty, IrType::Int { signed: true, .. });
@@ -1413,7 +1422,8 @@ mod tests {
     use crate::ast::Type;
     use crate::check::check;
     use crate::ir::{
-        empty_statics, lower, lower_line, Arrays, Cells, Enums, IrModule, Refs, Registries, Structs,
+        empty_slices, empty_statics, lower, lower_line, Arrays, Cells, Enums, IrModule, Refs,
+        Registries, Structs,
     };
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
@@ -1457,6 +1467,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             &std::collections::HashMap::new(),
@@ -1827,6 +1838,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             &std::collections::HashMap::new(),

@@ -349,6 +349,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut slices = Vec::new();
     // Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected
     // ahead of every file's own words exactly as `bool_enum_decl` injects
     // the enum it dispatches over. Slice 10c (R-P3-4) puts `if`/`unless` and
@@ -381,6 +382,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )?;
     }
@@ -399,6 +401,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )?;
         for (k, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
@@ -445,7 +448,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         arrays,
         owned_cells,
         refs,
-        slices: Vec::new(),
+        slices,
         generic_structs: generics.structs.clone(),
         generic_enums: generics.enums.clone(),
         externs,

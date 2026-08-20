@@ -1440,6 +1440,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
+            &mut Vec::new(),
             &[],
             &bool_enums,
             &HashMap::new(),
@@ -1461,6 +1462,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
         parse_bodies(
             &a,
@@ -1473,6 +1475,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -1487,6 +1490,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -1725,6 +1729,7 @@ mod tests {
             &terms,
             &[struct_ty(&module, "File")],
             &HashMap::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),

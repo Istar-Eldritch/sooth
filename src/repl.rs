@@ -1274,6 +1274,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            &mut self.slices,
             ctx,
         )?;
         let terms = match line {
@@ -1297,6 +1298,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            &mut self.slices,
             &self.structs,
             &self.enums,
             &poly_env,
@@ -1528,6 +1530,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            &mut self.slices,
             ctx,
         )?;
         // R8c: rewrite body-position `q::w` / `q::T>` calls to their
@@ -2561,6 +2564,7 @@ impl Session {
                 &mut self.arrays,
                 &mut self.owned_cells,
                 &mut self.refs,
+                &mut self.slices,
                 &self.structs,
                 &HashMap::new(),
                 &combinators,
@@ -2597,12 +2601,14 @@ impl Session {
             &self.refs,
         );
         self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            slices: &slices,
             statics: ir::empty_statics(),
         };
         let funcs = {
@@ -2780,6 +2786,7 @@ impl Session {
                 &mut self.arrays,
                 &mut self.owned_cells,
                 &mut self.refs,
+                &mut self.slices,
                 &self.structs,
                 &poly_env,
                 &combinators,
@@ -2795,6 +2802,7 @@ impl Session {
                 &mut self.arrays,
                 &mut self.owned_cells,
                 &mut self.refs,
+                &mut self.slices,
                 &self.structs,
                 &poly_env,
                 &combinators,
@@ -2892,6 +2900,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            &mut self.slices,
             &self.structs,
             &poly_env,
             &combinators,
@@ -2925,12 +2934,14 @@ impl Session {
             &self.refs,
         );
         self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            slices: &slices,
             statics: ir::empty_statics(),
         };
         let mut funcs = {
@@ -3093,6 +3104,7 @@ impl Session {
                 &mut self.arrays,
                 &mut self.owned_cells,
                 &mut self.refs,
+                &mut self.slices,
                 &self.structs,
                 &self.enums,
                 &poly_env,
@@ -3117,12 +3129,14 @@ impl Session {
             &self.refs,
         );
         self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            slices: &slices,
             statics: ir::empty_statics(),
         };
         let (func, quot_funcs, m, out_bytes, aggregate_destructors) = {
@@ -4112,12 +4126,14 @@ mod tests {
             &session.refs,
         );
         session.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        let slices = ir::build_slices(&session.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            slices: &slices,
             statics: ir::empty_statics(),
         };
         let env = ir_arity_env(&session.typed_env());

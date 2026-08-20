@@ -248,6 +248,7 @@ pub(super) fn check_poly_combinator_standalone(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     structs: &[StructDecl],
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
@@ -306,6 +307,7 @@ pub(super) fn check_poly_combinator_standalone(
         arrays,
         cells,
         refs,
+        slices,
         structs,
         statics,
         modules,
@@ -331,6 +333,7 @@ pub(crate) fn check_poly_combinator_repl(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     structs: &[StructDecl],
     poly_env: &PolyEnv,
     combinators: &CombinatorEnv,
@@ -361,6 +364,7 @@ pub(crate) fn check_poly_combinator_repl(
         arrays,
         cells,
         refs,
+        slices,
         structs,
         &[],
         None,
@@ -1082,7 +1086,12 @@ fn poly_eliminator_call(
     }
     match &scrutinee.pt {
         PolyType::Concrete(Type::Enum(found, _)) if *found == id => {}
-        PolyType::Concrete(t) if !t.is_ref() => {
+        // P7 slice 3c (R1.4): a slice reaches the `Concrete(_)` reference arm
+        // below through the widened `is_ref()`, but the advice there ("pass
+        // the owned `Enum` instead") names nothing real for a view over a
+        // buffer. It gets the plain mismatch instead -- the same message the
+        // concrete path already gives a slice scrutinee.
+        PolyType::Concrete(t) if !t.is_ref() || matches!(t, Type::Slice(..)) => {
             return Err(type_mismatch_error(
                 ctx,
                 span,
@@ -4715,6 +4724,28 @@ mod tests {
         assert_eq!(
             err,
             "error: cannot borrow the local `f` of type `[ 'T -- 'T ]` in `ap` (line 1, col 42)\n  a quotation is not borrowable in a generic body"
+        );
+    }
+
+    /// P7 slice 3c (R1.4): the widened `is_ref()` routes a slice scrutinee
+    /// into the *reference*-scrutinee arm, whose advice ("pass the owned
+    /// `Enum` instead") names nothing real for a view over a buffer. It gets
+    /// the plain mismatch instead -- the very message the concrete path
+    /// already gives the same scrutinee, so the two paths agree.
+    #[test]
+    fn poly_eliminator_with_a_slice_scrutinee_reports_a_plain_mismatch() {
+        let err = check_src(
+            "type: Shape | Circle r i64 | Square s i64 ;\n\
+             : g ( 'T Slice[i64] -- 'T )\n  \
+               ~[ ( Circle ) Circle> drop ] ~[ ( Square ) Square> drop ] Shape? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `g` (line 3)\n  \
+             `Shape?` expected `Shape`, found `Slice[i64]`\n  \
+             note: declared ( -- )"
         );
     }
 

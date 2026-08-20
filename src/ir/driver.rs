@@ -154,12 +154,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             .unwrap_or_else(|| name.to_string())
     };
     let (statics, static_data) = build_statics(&module.statics, &enums);
+    let slices = build_slices(&module.slices, &structs, &enums, &arrays);
     let regs = Registries {
         structs: &structs,
         enums: &enums,
         arrays: &arrays,
         cells: &cells,
         refs: &refs,
+        slices: &slices,
         statics: &statics,
     };
 
@@ -882,6 +884,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -914,6 +917,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -995,6 +999,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1034,6 +1039,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1076,6 +1082,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1124,6 +1131,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1175,6 +1183,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1216,6 +1225,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),
@@ -1278,6 +1288,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             empty_instantiations(),

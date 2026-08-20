@@ -16,6 +16,7 @@ pub(super) fn check_terms(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
@@ -29,6 +30,7 @@ pub(super) fn check_terms(
         arrays,
         cells,
         refs,
+        slices,
         prov,
         scope,
         tail,
@@ -56,6 +58,7 @@ pub(super) fn check_terms_relaxed(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
@@ -81,6 +84,7 @@ pub(super) fn check_terms_relaxed(
             arrays,
             cells,
             refs,
+            slices,
             prov,
             scope,
             tail && i == last,
@@ -104,6 +108,7 @@ fn check_term(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
@@ -270,6 +275,7 @@ fn check_term(
                     arrays,
                     cells,
                     refs,
+                    slices,
                     prov,
                     scope,
                     tail,
@@ -340,8 +346,8 @@ fn check_term(
                     at,
                 );
                 stack = check_terms_relaxed(
-                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, tail, poly, &granted,
-                    true,
+                    &body, stack, ctx, env, arrays, cells, refs, slices, prov, scope, tail, poly,
+                    &granted, true,
                 )?;
                 leave_block(
                     ctx,
@@ -363,6 +369,7 @@ fn check_term(
                 arrays,
                 cells,
                 refs,
+                slices,
                 prov,
                 live,
                 at,
@@ -391,8 +398,8 @@ fn check_term(
                         let qspan = prov.quotations[id.0].span;
                         let escaping = !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope);
                         stack[vi] = materialize_quotation_at_boundary(
-                            id, eff, escaping, name, qspan, ctx, env, arrays, cells, refs, prov,
-                            scope, poly,
+                            id, eff, escaping, name, qspan, ctx, env, arrays, cells, refs, slices,
+                            prov, scope, poly,
                         )?;
                     }
                 }
@@ -475,7 +482,9 @@ fn check_term(
             if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
+            if let Some(stack) =
+                check_array_word(name, span, &mut stack, ctx, arrays, refs, slices, prov)?
+            {
                 return Ok(stack);
             }
             if let Some(stack) = check_owned_cell_word(
@@ -502,8 +511,8 @@ fn check_term(
                     at,
                 );
                 return check_eliminator_call(
-                    enum_id, name, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
-                    &granted, tail,
+                    enum_id, name, span, stack, ctx, env, arrays, cells, refs, slices, prov, scope,
+                    poly, &granted, tail,
                 );
             }
             // R6-R9: a tail-position call, inside a self-tail combinator
@@ -642,8 +651,8 @@ fn check_term(
                             at,
                         );
                         return inline_combinator(
-                            &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
-                            &granted, tail,
+                            &chosen, span, stack, ctx, env, arrays, cells, refs, slices, prov,
+                            scope, poly, &granted, tail,
                         );
                     }
                     None if fall_through_to_env => {}
@@ -730,8 +739,8 @@ fn check_term(
                 if let Type::Quotation(eff) = *want {
                     if let Some(QuotRef::Known(id)) = found.quot {
                         stack[base + i] = materialize_quotation_at_boundary(
-                            id, eff, false, name, span, ctx, env, arrays, cells, refs, prov, scope,
-                            poly,
+                            id, eff, false, name, span, ctx, env, arrays, cells, refs, slices,
+                            prov, scope, poly,
                         )?;
                         continue;
                     }
@@ -851,8 +860,8 @@ fn check_term(
                     // against the real stack.
                     match &resolved.variant_tag {
                         None => check_literal_against_annotation(
-                            &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov,
-                            scope, poly,
+                            &resolved, body, *is_inline, ctx, env, arrays, cells, refs, slices,
+                            prov, scope, poly,
                         )?,
                         // Review fix (Phase 6 slice 3, finding 3): the arm
                         // above skips the standalone annotation check entirely
@@ -1115,6 +1124,7 @@ fn check_branch_join(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
@@ -1151,6 +1161,7 @@ fn check_branch_join(
         arrays,
         cells,
         refs,
+        slices,
         prov,
         &mut then_scope,
         tail,
@@ -1175,6 +1186,7 @@ fn check_branch_join(
         arrays,
         cells,
         refs,
+        slices,
         prov,
         &mut else_scope,
         tail,
@@ -1284,6 +1296,7 @@ fn check_branch_join(
                             arrays,
                             cells,
                             refs,
+                            slices,
                             prov,
                             scope,
                             poly,
@@ -1308,6 +1321,7 @@ fn check_branch_join(
                             arrays,
                             cells,
                             refs,
+                            slices,
                             prov,
                             scope,
                             poly,
@@ -1421,6 +1435,7 @@ fn check_branch(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
@@ -1469,6 +1484,7 @@ fn check_branch(
                 arrays,
                 cells,
                 refs,
+                slices,
                 prov,
                 scope,
                 tail,

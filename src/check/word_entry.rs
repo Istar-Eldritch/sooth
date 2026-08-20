@@ -12,6 +12,7 @@ pub(super) fn check_word(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     structs: &[StructDecl],
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
@@ -53,8 +54,8 @@ pub(super) fn check_word(
     }
     let terms = &word.body;
     check_terms_word(
-        word, enums, terms, env, arrays, cells, refs, structs, statics, modules, dropped, poly,
-        generics,
+        word, enums, terms, env, arrays, cells, refs, slices, structs, statics, modules, dropped,
+        poly, generics,
     )
 }
 
@@ -187,6 +188,7 @@ fn check_terms_word(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     structs: &[StructDecl],
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
@@ -232,7 +234,7 @@ fn check_terms_word(
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
     let mut final_stack = check_terms(
-        terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, true, poly,
+        terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, true, poly,
     )?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
@@ -247,8 +249,8 @@ fn check_terms_word(
             if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
                 let span = prov.quotations[id.0].span;
                 final_stack[i] = materialize_quotation_at_boundary(
-                    id, eff, true, &word.name, span, &ctx, env, arrays, cells, refs, &mut prov,
-                    &mut scope, poly,
+                    id, eff, true, &word.name, span, &ctx, env, arrays, cells, refs, slices,
+                    &mut prov, &mut scope, poly,
                 )?;
             }
         }

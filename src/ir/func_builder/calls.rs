@@ -547,7 +547,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Tag(dst, v));
                 self.stack.push(dst);
             }
-            "fill" => self.lower_array_word(name),
+            "fill" | "slice" | "subslice" => self.lower_array_word(name, span),
             "len" => {
                 let top = *self.stack.last().expect("len: operand");
                 if self.value_type(top) == IrType::Str {
@@ -559,7 +559,7 @@ impl<'a> FuncBuilder<'a> {
                     self.push_instr(Instr::StrLen(v, top));
                     self.stack.push(v);
                 } else {
-                    self.lower_array_word(name);
+                    self.lower_array_word(name, span);
                 }
             }
             "cstr" => {
@@ -796,6 +796,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );
@@ -858,6 +859,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );
@@ -1305,6 +1307,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             "w".to_string(),

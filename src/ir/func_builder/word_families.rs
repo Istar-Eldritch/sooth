@@ -31,6 +31,16 @@ impl<'a> FuncBuilder<'a> {
             ">" => {
                 let index = self.stack.pop().expect("&>: index");
                 let base = self.stack.pop().expect("&>: array reference");
+                // P7 slice 3c (R9.2): a slice receiver indexes the buffer the
+                // view points at, bounds-checked against the carried length.
+                if let IrType::Slice(id) = self.value_type(base) {
+                    let (ptr, len) = self.load_slice_parts(base);
+                    self.bounds_check_dynamic(CmpOp::Lt, index, len, line);
+                    let stride = self.slices.stride[id.index()];
+                    let addr = self.elem_addr(ptr, index, stride);
+                    self.push_reference(addr, self.slices.elem[id.index()]);
+                    return;
+                }
                 let IrType::Array(id) = self.referent_of(base) else {
                     unreachable!("checked: `&>`'s receiver references an array")
                 };
@@ -267,6 +277,21 @@ impl<'a> FuncBuilder<'a> {
         ArrayId::from_index(idx)
     }
 
+    /// The `SliceId` of the interned `(element, mutability)` view shape:
+    /// `slice`'s target, already interned by the checker (R10.1), found by
+    /// structural match on the registry exactly as `array_id_of` finds
+    /// `fill`'s.
+    fn slice_id_of(&self, elem: IrType, mutable: bool) -> SliceId {
+        let idx = self
+            .slices
+            .elem
+            .iter()
+            .zip(&self.slices.mutable)
+            .position(|(e, m)| *e == elem && *m == mutable)
+            .expect("slice's view shape is interned by the checker");
+        SliceId::from_index(idx)
+    }
+
     /// The exact byte size of a value of `ty` (an aggregate's whole size, a
     /// scalar's width) — the blit length for a `fill` aggregate element.
     pub(in crate::ir) fn value_size(&self, ty: IrType) -> u32 {
@@ -275,8 +300,35 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) => self.enums.layouts[id.index()].size,
             IrType::Array(id) => self.arrays.layouts[id.index()].size,
             IrType::Quotation(_) => quotation_layout(WORD_WIDTH).size,
+            // P7 slice 3c (R2.2): the whole two-word view, so a loop-carried
+            // slice blits both slots. `scalar_size_align`'s wildcard below
+            // refuses a slice rather than answering one word.
+            IrType::Slice(_) => slice_layout(WORD_WIDTH).size,
             other => scalar_size_align(other).0,
         }
+    }
+
+    /// P7 slice 3c: the `{ptr, len}` pair a slice value's frame slot holds.
+    fn load_slice_parts(&mut self, view: Value) -> (Value, Value) {
+        let layout = slice_layout(WORD_WIDTH);
+        let ptr_at = self.field_ptr(view, layout.ptr_offset);
+        let ptr = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::FieldLoad(ptr, ptr_at));
+        let len_at = self.field_ptr(view, layout.len_offset);
+        let len = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::FieldLoad(len, len_at));
+        (ptr, len)
+    }
+
+    /// P7 slice 3c: a fresh `{ptr, len}` frame slot holding `ptr` and `len`.
+    fn build_slice_value(&mut self, id: SliceId, ptr: Value, len: Value) -> Value {
+        let layout = slice_layout(WORD_WIDTH);
+        let view = self.alloc_aggregate(IrType::Slice(id));
+        let ptr_at = self.field_ptr(view, layout.ptr_offset);
+        self.push_instr(Instr::FieldStore(ptr_at, ptr));
+        let len_at = self.field_ptr(view, layout.len_offset);
+        self.push_instr(Instr::FieldStore(len_at, len));
+        view
     }
 
     /// `dst = base + index*stride`, a `Ptr` (R17): a `FieldLoad`/`FieldStore`
@@ -313,7 +365,7 @@ impl<'a> FuncBuilder<'a> {
     /// (slice 6h; was N unrolled stores, which was QBE-quadratic on one large
     /// straight-line block); `len` = a constant `usize` from the layout,
     /// non-consuming.
-    pub(super) fn lower_array_word(&mut self, name: &str) {
+    pub(super) fn lower_array_word(&mut self, name: &str, span: Span) {
         match name {
             // Slice 6h (D4): one `Instr::Alloc` plus a `begin_loop`/
             // `finalize_loop`-bounded loop storing the `Copy` seed `n` times
@@ -388,9 +440,55 @@ impl<'a> FuncBuilder<'a> {
 
                 self.restore_loop_state(saved_loop_state);
             }
+            // P7 slice 3c (R10.1): `slice` reads the receiver's compile-time
+            // count once, here, and writes it into the view as a runtime
+            // length; from then on nothing rediscovers it.
+            "slice" => {
+                let base = self.stack.pop().expect("slice: array reference");
+                let IrType::Array(id) = self.referent_of(base) else {
+                    unreachable!("checked: `slice`'s receiver references an array")
+                };
+                let (_, _, count) = self.array_parts(id);
+                let len = self.fresh_value(IrType::Usize);
+                self.push_instr(Instr::Const(len, i64::from(count)));
+                let slice_id = self.slice_id_of(self.arrays.layouts[id.index()].elem, false);
+                let view = self.build_slice_value(slice_id, base, len);
+                self.stack.push(view);
+            }
+            // P7 slice 3c (R10.3): a *re-derivation*, never a nested borrow --
+            // the receiver's pointer advanced by `start` elements and the new
+            // length written into a fresh view.
+            "subslice" => {
+                let len = self.stack.pop().expect("subslice: length");
+                let start = self.stack.pop().expect("subslice: start");
+                let recv = self.stack.pop().expect("subslice: slice");
+                let IrType::Slice(id) = self.value_type(recv) else {
+                    unreachable!("checked: `subslice`'s receiver is a slice")
+                };
+                let (ptr, recv_len) = self.load_slice_parts(recv);
+                // The sub-range must fit: `start + len` past the end traps
+                // through the same helper an out-of-range index does, so the
+                // view can never outreach the buffer it was cut from.
+                let end = self.fresh_value(IrType::Usize);
+                self.push_instr(Instr::Bin(end, BinOp::Add, start, len));
+                self.bounds_check_dynamic(CmpOp::Le, end, recv_len, span.line);
+                let stride = self.slices.stride[id.index()];
+                let base = self.elem_addr(ptr, start, stride);
+                let view = self.build_slice_value(id, base, len);
+                self.stack.push(view);
+            }
             "len" => {
+                // P7 slice 3c (R9.1): a slice answers its carried length and
+                // is consumed doing so, unlike the array fold below.
+                let top = *self.stack.last().expect("len: operand");
+                if matches!(self.value_type(top), IrType::Slice(_)) {
+                    self.stack.pop();
+                    let (_, len) = self.load_slice_parts(top);
+                    self.stack.push(len);
+                    return;
+                }
                 // Non-consuming (R10): the array stays; the constant folds in.
-                let array = *self.stack.last().expect("len: array");
+                let array = top;
                 let id = match self.value_type(array) {
                     IrType::Array(id) => id,
                     _ => unreachable!("checked: len's operand is an array"),
@@ -400,7 +498,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, count as i64));
                 self.stack.push(v);
             }
-            _ => unreachable!("lower_array_word only handles fill/len"),
+            _ => unreachable!("lower_array_word only handles fill/len/slice/subslice"),
         }
     }
 
@@ -428,6 +526,15 @@ impl<'a> FuncBuilder<'a> {
             IrType::Quotation(sig) => {
                 let layout = quotation_layout(WORD_WIDTH);
                 let v = self.fresh_value(IrType::Quotation(sig));
+                self.push_alloc(Instr::Alloc(v, layout.size, layout.align));
+                v
+            }
+            // P7 slice 3c (R2.1): `slice`/`subslice` each build a fresh
+            // `{ptr, len}` frame slot, so a slice value is an interior
+            // pointer to its own storage exactly like every other aggregate.
+            IrType::Slice(id) => {
+                let layout = slice_layout(WORD_WIDTH);
+                let v = self.fresh_value(IrType::Slice(id));
                 self.push_alloc(Instr::Alloc(v, layout.size, layout.align));
                 v
             }
@@ -725,6 +832,33 @@ impl<'a> FuncBuilder<'a> {
         self.start_block(ok);
     }
 
+    /// P7 slice 3c (R9.2): the same runtime out-of-bounds guard as
+    /// `bounds_check`, against a **runtime** length rather than a compile-time
+    /// count -- a slice carries its length, so a literal index has nothing to
+    /// have been verified against and there is no const-index skip here.
+    /// `index op len` continues (`Lt` for an element index, `Le` for a
+    /// sub-range's end); anything else calls the same `emit_oob_trap` helper
+    /// array indexing calls, with the same located message.
+    fn bounds_check_dynamic(&mut self, op: CmpOp, index: Value, len: Value, line: u32) {
+        let cond = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(cond, op, index, len));
+        let ok = self.fresh_block();
+        let trap = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, ok, trap));
+
+        self.start_block(trap);
+        let line_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(line_v, i64::from(line)));
+        self.push_instr(Instr::Call(
+            None,
+            OOB_TRAP_SYMBOL.to_string(),
+            vec![line_v, index, len],
+        ));
+        self.seal_block(Terminator::Jmp(ok));
+
+        self.start_block(ok);
+    }
+
     /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
     pub(in crate::ir) fn field_ptr(&mut self, base: Value, offset: u32) -> Value {
         let p = self.fresh_value(IrType::Ptr);
@@ -819,6 +953,41 @@ mod tests {
         )
     }
 
+    /// P7 slice 3c (R2.1): the registry interns on `(element, mutability)`
+    /// (`intern_slice_type`), so the lowering-side lookup has to use the whole
+    /// key. Two views over `i64` differing only in mutability are two
+    /// registry rows with byte-identical layouts, and matching on the element
+    /// alone would silently return whichever came first.
+    #[test]
+    fn slice_id_of_matches_the_whole_interning_key() {
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let mut decls = Vec::new();
+        crate::ast::intern_slice_type(&mut decls, crate::ast::Type::I64, true);
+        crate::ast::intern_slice_type(&mut decls, crate::ast::Type::I64, false);
+        let slices = crate::ir::build_slices(&decls, &structs, &enums, &arrays);
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                slices: &slices,
+                statics: crate::ir::empty_statics(),
+            },
+        );
+        assert_eq!(b.slice_id_of(IrType::I64, false), SliceId::from_index(1));
+        assert_eq!(b.slice_id_of(IrType::I64, true), SliceId::from_index(0));
+    }
+
     #[test]
     fn variant_field_projection_reads_the_correct_variant_and_field() {
         let enums = shape_enums();
@@ -842,6 +1011,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );
@@ -892,6 +1062,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );

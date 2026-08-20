@@ -146,6 +146,7 @@ impl Probe {
             arrays: &self.arrays,
             cells: &self.cells,
             refs: &self.refs,
+            slices: empty_slices(),
             statics: empty_statics(),
         }
     }

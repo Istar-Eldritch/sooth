@@ -357,6 +357,7 @@ pub(super) fn inline_combinator(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
@@ -373,8 +374,8 @@ pub(super) fn inline_combinator(
     // check, so the two paths agree.
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
-            sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly, granted,
-            tail,
+            sig, span, &stack, name, ctx, env, arrays, cells, refs, slices, prov, scope, poly,
+            granted, tail,
         )?)
     } else {
         let tail_slots = tail_called_param_slots(name, poly.combinators.tail());
@@ -406,6 +407,7 @@ pub(super) fn inline_combinator(
                             arrays,
                             cells,
                             refs,
+                            slices,
                             prov,
                             scope,
                             poly,
@@ -534,6 +536,7 @@ pub(super) fn inline_combinator(
         arrays,
         cells,
         refs,
+        slices,
         prov,
         scope,
         splice_tail,
@@ -578,6 +581,7 @@ fn check_poly_combinator_args(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
@@ -695,6 +699,7 @@ fn check_poly_combinator_args(
                 arrays,
                 cells,
                 refs,
+                slices,
                 prov,
                 scope,
                 poly,

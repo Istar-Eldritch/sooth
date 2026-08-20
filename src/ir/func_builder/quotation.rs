@@ -515,6 +515,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );
@@ -569,6 +570,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
         );

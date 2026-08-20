@@ -43,7 +43,13 @@ fn is_aggregate(ty: IrType, enums: &Enums) -> bool {
         // address-having aggregate -- it takes the header-`Phi` path below
         // like any other scalar, never the stable-slot staging.
         IrType::Enum(id) => !enums.layouts[id.index()].is_scalar,
-        IrType::Struct(_) | IrType::Array(_) | IrType::Quotation(_) => true,
+        // P7 slice 3c (R2.1): a slice value is an interior pointer to its own
+        // `{ptr, len}` frame slot, and `push_alloc` hoists that slot to the
+        // entry block -- so a loop-carried slice on the header-`Phi` path
+        // would have its single slot written by the back edge while the
+        // header still reads it (`project_aggregate_return_aliasing`). It
+        // takes the stable-slot + staged-blit path every other aggregate does.
+        IrType::Struct(_) | IrType::Array(_) | IrType::Quotation(_) | IrType::Slice(_) => true,
         _ => false,
     }
 }
@@ -151,6 +157,11 @@ pub(super) struct FuncBuilder<'a> {
     pub(super) enums: &'a Enums,
     pub(super) arrays: &'a Arrays,
     cells: &'a Cells,
+    /// P7 slice 3c (R2.1): the per-`SliceId` element type and stride. A slice
+    /// *value* is an interior pointer to a `{ptr, len}` frame slot, so this is
+    /// the only place the element shape survives into lowering -- exactly like
+    /// `Refs` for a reference parameter's referent.
+    pub(super) slices: &'a Slices,
     /// Phase 7 slice 2 (R1): the module's `static:` table, name -> referent
     /// `IrType`. Consulted by `lower_reference_word` only after a local lookup
     /// misses, so a local shadowing a static still wins. Empty on the
@@ -320,6 +331,7 @@ impl<'a> FuncBuilder<'a> {
             arrays,
             cells,
             refs: _,
+            slices,
             statics,
         } = regs;
         FuncBuilder {
@@ -329,6 +341,7 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
+            slices,
             statics,
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
@@ -896,6 +909,27 @@ mod tests {
     use super::*;
     use crate::ir::test_helpers::*;
 
+    /// P7 slice 3c (R2.1): a slice value is an interior pointer to its own
+    /// `{ptr, len}` frame slot, whose `Alloc` is hoisted to the entry block --
+    /// so a loop-carried one must take the stable-slot + staged-blit path,
+    /// not the header-`Phi` path a scalar takes. On the `Phi` path the back
+    /// edge would write the single hoisted slot the header is still reading
+    /// (`project_aggregate_return_aliasing`).
+    #[test]
+    fn is_aggregate_true_for_a_slice() {
+        let enums = Enums::default();
+        let mut slices = Vec::new();
+        let ir = crate::ir::ir_type_of(crate::ast::intern_slice_type(
+            &mut slices,
+            crate::ast::Type::I64,
+            false,
+        ));
+        assert!(is_aggregate(ir, &enums), "got {ir:?}");
+        // ...and the contrast that makes the claim non-vacuous: the one-word
+        // opaque handle a slice must not be mistaken for.
+        assert!(!is_aggregate(IrType::Str, &enums));
+    }
+
     #[test]
     fn func_builder_new_threads_current_word_name() {
         // R5: FuncBuilder carries the word being lowered, set from `word.name`
@@ -917,6 +951,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                slices: empty_slices(),
                 statics: empty_statics(),
             },
             "loop-word".to_string(),

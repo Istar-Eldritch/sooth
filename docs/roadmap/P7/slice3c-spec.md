@@ -568,6 +568,87 @@ scrutinee is first actually reachable, rather than leaving stale text live.
 - Out of bounds: mutable construction/`subslice`/`&!>` and all exclusivity/non-escape
   tracking (Phase 4).
 
+**Phase 3 exit notes (the surface spelling, and what it cost):** `Slice[T]` had no way to
+be written at all, so Phase 3 owns the type syntax as well as the words. `Slice` is
+intercepted by name in `resolve_type_or_apply` ahead of every user registry (it resolves
+through the interned slice registry, not a declared header) and is therefore reserved:
+`reject_reserved_name` refuses it as a `type:`/variant name, because a declaration under
+that name would be silently *unreachable* rather than merely shadowed. The mutable
+spelling `!Slice[T]` is deliberately absent until Phase 4 — with no way to write one and
+`slice`/`subslice` both refusing a mutable receiver, a mutable view cannot exist in this
+build at all, which is the property Phase 4's guard is owed before it can.
+
+The registry had to reach both the parser and the checker: `slices` is threaded beside
+`refs` through the parse entry points and the whole check walk (the two REPL `type:`-line
+entry points keep a scratch registry, mirroring their `generics` scratch — a slice is
+banned from every field position, so nothing there can intern one). Lowering gets a
+`Slices` registry (element `IrType` + stride, keyed like the interner on
+`(element, mutable)`), built beside `build_statics` rather than inside `build_registries`:
+a slice is never a field or element of anything, so it takes no part in the layout DFS.
+
+**Phase 3 exit notes (three inherited items, resolved):**
+
+- The `Copy`-element gate the Phase 2 notes said `intern_slice_type` owed is **not**
+  written: no array can hold a non-`Copy` element in the first place (a linear one is
+  refused as `linear array elements are not supported yet`, a reference one as `a
+  reference cannot be stored`), and `slice`'s only source is an array reference. A gate
+  here would be unreachable code. The claim is pinned instead by
+  `slice_element_copy_rule_is_enforced_by_the_array_gate`, which fails if either array
+  rule is loosened.
+- `poly_reference_scrutinee_error`'s stale wording is fixed by *not reaching* it: a slice
+  scrutinee in a generic body now gets the plain type mismatch, the same message the
+  concrete path already gives it, rather than advice to "pass the owned `Enum` instead"
+  that names nothing real. `borrow_of_reference_local_error` on `&s` needed no change —
+  its "write `s`, not `&s`; naming a reference local reborrows it" is accurate for a view.
+- Of the six wildcards Phase 2 handed forward, three are now armed and three stay unarmed
+  for the reason Phase 2 gave. Armed: `is_aggregate` answers **true** (a slice value is an
+  interior pointer to a frame slot whose `Alloc` is hoisted to the entry block, so the
+  header-`Phi` path would let the back edge overwrite the slot the header still reads —
+  `project_aggregate_return_aliasing`); `alloc_aggregate` mints the 16-byte slot;
+  `value_size` answers 16. `Instr::Load`/`Instr::Store` gain explicit `unreachable!` arms
+  rather than inheriting `("l", "loadl")`/`storel`: a slice travels by `Blit` like every
+  other aggregate, and a scalar load or store would silently move one word of the two.
+  `LayoutBuilder::size_align` and `scalar_size_align` keep refusing, unchanged.
+
+**Phase 3 exit notes (a fifth `is_ref()` consumer, found by probe):** Phase 1's reroute
+inventory listed seven `is_ref()` consumers, but `overlapping_projection`
+(`word_families.rs`) matches `Type::Ref(..)` **directly** — it needs the mutability bit —
+so the widening never reached it, and a live slice counted as no borrow at all.
+Probe: `7 4 fill W &a slice swap W> drop len .` compiled, while its element-reference twin
+(`&a 0 >usize &>`) was correctly rejected. Ported here, with both rows in
+`consuming_the_buffer_under_a_live_slice_is_error`; `consumed_place_conflict`'s
+"consuming a reference is not a place ending" early return got the same arm.
+
+**Phase 3 exit notes (two spec corrections):**
+
+- `slice_through_a_declared_quotation_parameter_row_runs` cannot be a **non-`inline`**
+  word: a `~[ ... ]` parameter can only ever be spliced, so the language refuses a
+  non-`inline` word declaring one before the row's contents matter. The golden is written
+  `inline`, and asserts the non-`inline` refusal as its second half.
+- `recursive_divide_and_conquer_over_subslices_runs` lands here in its **shared** form
+  (`recursive_divide_and_conquer_over_shared_subslices_runs`), since shared `subslice` is
+  Phase 3's; Phase 4 still owes the mutable-half twin the spec assigns it.
+
+**Phase 3 exit notes (deferred to Phase 4, with rationale):** a slice inside a
+*polymorphic* body can be `len`'d (Phase 1 armed the poly `len` arm) but can be neither
+built nor indexed: `slice`/`subslice` are unknown words on the poly walk, and
+`poly_reference_word`'s `>` arm reads `poly_ref_array_parts`, so a slice receiver falls to
+`poly_op_on_variable_error`. All three are *rejections*, not silent accepts, so this is a
+capability gap and not a soundness hole — but it means R11's "concrete-element poly
+consumer" does not ship until Phase 4, which is where the poly work
+(`PolyBorrow`, `check/poly.rs:96`) is already scheduled. Phase 4 must add the poly
+`slice`/`subslice`/`&>` arms alongside it, threading `slices` into the poly walk the way
+this phase threaded it into the concrete one.
+
+**Phase 3 mutation-tested guards (13, all killed):** the `&>` runtime bounds trap deleted,
+the `subslice` range trap deleted, `len`'s slice arm made non-consuming, the `&>`
+slice-receiver mutability guard stubbed, `slice`'s mutable-receiver refusal deleted, the
+`is_aggregate` slice arm removed, the reserved-`Slice` name check stubbed, the poly
+slice-scrutinee arm removed, `slice_id_of` matching on the element alone (half the
+interning key), `build_slices`'s stride skewed off the array's, the parser interning a
+mutable view, `overlapping_projection` blind to a slice again, and `slice` dropping its
+receiver's region.
+
 ### Phase 4: mutable views, borrow rules ported, poly borrow arms, reborrow test  *(hard)*
 
 Deliver mutable-slice construction (`slice` from a `&![T N]`), mutable `subslice`, and the
@@ -608,7 +689,9 @@ guards are mutation-tested (delete the arm, the test must fail).
 
 - `sum_over_a_slice_noninline_prints_twentyfive` (the exit criterion, diffed against the
   length-threading twin).
-- `recursive_divide_and_conquer_over_subslices_runs`.
+- `recursive_divide_and_conquer_over_subslices_runs` (the **shared** form lands in
+  Phase 3 as `recursive_divide_and_conquer_over_shared_subslices_runs`; Phase 4 owes the
+  mutable-half twin).
 - `slice_out_of_range_index_traps_at_runtime` (asserts the located OOB message, no
   `Option`/`Result`).
 - `declared_slice_output_is_stored_reference_error` (lands in Phase 3, once a signature
@@ -616,10 +699,12 @@ guards are mutation-tested (delete the arm, the test must fail).
 - `two_simultaneous_mutable_subslices_is_error`.
 - `dup_on_mutable_slice_is_error` / `dup_on_shared_slice_ok` (the error case asserts the
   **exact** located diagnostic string, per CLAUDE.md, not merely that an error occurs).
-- `slice_through_a_declared_quotation_parameter_row_runs` — a non-`inline` word whose
-  parameter row is `~[ Slice[i64] -- ]`, exercising the brief's locked
-  quotation-parameter-input-row decision (distinct from the `sum` golden, which captures a
-  slice into a quotation *literal*).
+- `slice_through_a_declared_quotation_parameter_row_runs` — a word whose parameter row is
+  `~[ Slice[i64] -- ]`, exercising the brief's locked quotation-parameter-input-row
+  decision (distinct from the `sum` golden, which captures a slice into a quotation
+  *literal*). The word is `inline`, not non-`inline` as first written: a `~[ ]` parameter
+  can only be spliced, so the language refuses a non-`inline` word declaring one (see
+  Phase 3's exit notes; the golden asserts that refusal too).
 
 **Unit tests beside their stage:**
 

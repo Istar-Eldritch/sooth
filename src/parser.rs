@@ -18,9 +18,9 @@
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
     GlobalMode, Import, ImportAnchor, ImportBinding, ImportTarget, Len, Line, Module, ModuleInfo,
-    ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, Span,
-    StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl,
-    VariantTag, VariantTagMode, WordDef,
+    ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl,
+    Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, Type, TypedSlot,
+    VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -202,7 +202,10 @@ fn invalid_global_mode_error(found: &str, span: Span) -> String {
 }
 
 /// The one reserved-name gate every declaration site calls: a `^`-led name
-/// (owning cells) or a `&`-led name (references).
+/// (owning cells) or a `&`-led name (references). P7 slice 3c: a `type:` or
+/// `variant` name may not be `Slice` either -- `resolve_type_or_apply`
+/// intercepts that spelling ahead of every user registry, so a declaration
+/// under that name would be silently unreachable rather than merely shadowed.
 pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), String> {
     if is_reserved_caret_name(name) {
         return Err(reserved_caret_name_error(kind, name, span));
@@ -210,8 +213,20 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     if is_reserved_ref_name(name) {
         return Err(reserved_ref_name_error(kind, name, span));
     }
+    if matches!(kind, "type" | "variant") && name == SLICE_TYPE_NAME {
+        return Err(format!(
+            "error: `{SLICE_TYPE_NAME}` is reserved for the slice type syntax (`{SLICE_TYPE_NAME}[T]`) and cannot be used as a {kind} name at line {}, col {}",
+            span.line, span.col
+        ));
+    }
     Ok(())
 }
+
+/// P7 slice 3c (R1.1): the one surface spelling of a slice type. Not a
+/// registered `type:` name and not a generic header: `Slice[T]` resolves
+/// through the interned slice registry, so it is intercepted by name ahead of
+/// every user lookup.
+pub const SLICE_TYPE_NAME: &str = "Slice";
 
 /// Phase 5 slice 1: a `'`-prefixed word inside a `type:` body is a type
 /// variable, never a field name. Rejected at every named-field-name position
@@ -372,6 +387,7 @@ pub fn parse_bodies(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     generics: &mut GenericTypes,
 ) -> Result<ParsedBodies, String> {
     let mut out = ParsedBodies {
@@ -390,6 +406,7 @@ pub fn parse_bodies(
         arrays,
         owned_cells,
         refs,
+        slices,
         module,
         imports,
         exports,
@@ -442,6 +459,7 @@ pub(crate) fn prepass_generic_typedefs(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     generics: &mut GenericTypes,
 ) -> Result<(), String> {
     let mut parser = Parser {
@@ -452,6 +470,7 @@ pub(crate) fn prepass_generic_typedefs(
         arrays,
         owned_cells,
         refs,
+        slices,
         module,
         imports,
         exports,
@@ -514,6 +533,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut slices = Vec::new();
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let bodies = parse_bodies(
@@ -527,6 +547,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &mut arrays,
         &mut owned_cells,
         &mut refs,
+        &mut slices,
         &mut generics,
     )?;
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
@@ -557,7 +578,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         arrays,
         owned_cells,
         refs,
-        slices: Vec::new(),
+        slices,
         generic_structs: generics.structs.clone(),
         generic_enums: generics.enums.clone(),
         externs: bodies.externs,
@@ -615,6 +636,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut slices = Vec::new();
     // `structs`/`enums` below are `&[]`, so an instantiation would be
     // appended onto empty registries.
     let mut generics = GenericTypes::with_bases(0, 0);
@@ -630,6 +652,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 arrays: &mut arrays,
                 owned_cells: &mut owned_cells,
                 refs: &mut refs,
+                slices: &mut slices,
                 module: 0,
                 imports: &no_imports,
                 exports: &[],
@@ -656,6 +679,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut slices = Vec::new();
     // `structs`/`enums` below are `&[]`, so an instantiation would be
     // appended onto empty registries.
     let mut generics = GenericTypes::with_bases(0, 0);
@@ -671,6 +695,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 arrays: &mut arrays,
                 owned_cells: &mut owned_cells,
                 refs: &mut refs,
+                slices: &mut slices,
                 module: 0,
                 imports: &no_imports,
                 exports: &[],
@@ -693,6 +718,7 @@ pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut slices = Vec::new();
     parse_line_with_structs(
         tokens,
         &[],
@@ -700,6 +726,7 @@ pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
         &mut arrays,
         &mut owned_cells,
         &mut refs,
+        &mut slices,
         ImportCtx::empty(),
     )
 }
@@ -737,6 +764,7 @@ impl ImportCtx<'_> {
 /// session's interned array-type registry (R22/R23): a `[T N]` in a word
 /// effect interns into it in place, so the `ArrayId` it returns stays valid
 /// for later lines in the same session.
+#[allow(clippy::too_many_arguments)]
 pub fn parse_line_with_structs(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
@@ -744,6 +772,7 @@ pub fn parse_line_with_structs(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     ctx: ImportCtx,
 ) -> Result<Line, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
@@ -757,6 +786,7 @@ pub fn parse_line_with_structs(
         arrays,
         owned_cells,
         refs,
+        slices,
         module: 0,
         imports: ctx.imports,
         exports: ctx.exports,
@@ -796,6 +826,10 @@ pub fn parse_typedef_line(
 ) -> Result<Vec<(String, Type)>, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
     // declaration), so nothing here can apply one: a scratch registry, never read.
+    // A `type:` field can never be a slice (a slice is banned from every
+    // field position, so the checker rejects one), and nothing else in a
+    // typedef line resolves a slice type: a scratch registry, never read.
+    let mut slices = Vec::new();
     let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let mut parser = Parser {
         tokens,
@@ -805,6 +839,7 @@ pub fn parse_typedef_line(
         arrays,
         owned_cells,
         refs,
+        slices: &mut slices,
         module: 0,
         imports: ctx.imports,
         exports: ctx.exports,
@@ -870,6 +905,10 @@ pub fn parse_enum_typedef_line(
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
     // declaration), so nothing here can apply one: a scratch registry, never read.
+    // A `type:` field can never be a slice (a slice is banned from every
+    // field position, so the checker rejects one), and nothing else in a
+    // typedef line resolves a slice type: a scratch registry, never read.
+    let mut slices = Vec::new();
     let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let mut parser = Parser {
         tokens,
@@ -879,6 +918,7 @@ pub fn parse_enum_typedef_line(
         arrays,
         owned_cells,
         refs,
+        slices: &mut slices,
         module: 0,
         imports: ctx.imports,
         exports: ctx.exports,
@@ -1376,6 +1416,12 @@ struct Parser<'t> {
     /// shape has no declared name either, so it grows as type expressions
     /// resolve and persists across REPL lines.
     refs: &'t mut Vec<RefDecl>,
+    /// P7 slice 3c (R1.2): the interned slice registry, mirroring `refs` --
+    /// a `Slice[T]` shape has no declared name, so it grows as type
+    /// expressions resolve. The checker's `slice`/`subslice` words intern
+    /// into the same registry, so a view built at check time and one spelled
+    /// in a signature share a `SliceId`.
+    slices: &'t mut Vec<SliceDecl>,
     /// Phase 4 slice 5a (R11): the module id whose body this parser is
     /// currently reading. `0` for a single-file program and every REPL line;
     /// the driver's closure assembly sets it per file. An unqualified type
@@ -3393,6 +3439,14 @@ impl<'t> Parser<'t> {
     /// `check_selective_imports` rejects a private one post-assembly, which is
     /// how a concrete selective import is validated too.
     fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
+        // P7 slice 3c (R1.1): `Slice[T]` is spelled like a generic
+        // application but resolves through the interned slice registry, not
+        // through a declared header, so it is intercepted ahead of every user
+        // lookup (`reject_reserved_name` keeps the name unclaimable).
+        if name == SLICE_TYPE_NAME {
+            let args = self.parse_type_arguments(name, 1, span)?;
+            return Ok(crate::ast::intern_slice_type(self.slices, args[0], false));
+        }
         let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
                 Some(&target) => (base, target, Some(qualifier)),
@@ -3808,6 +3862,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         let bodies = parse_bodies(
@@ -3821,6 +3876,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -3842,6 +3898,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         parse_bodies(
@@ -3855,6 +3912,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -4343,6 +4401,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         let bodies = parse_bodies(
@@ -4356,6 +4415,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )?;
         match &terms_body(&bodies.words[0])[0].kind {
@@ -4434,6 +4494,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         let result = parse_bodies(
@@ -4447,6 +4508,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         );
         let err = match result {
@@ -4466,6 +4528,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         generics.enums.push(crate::ast::GenericEnumDecl {
             name: "Shape".to_string(),
@@ -4490,6 +4553,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         );
         let err = match result {
@@ -5398,6 +5462,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let no_imports = HashMap::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let mut run = |tokens: &[(Token, Span)], module: u32| {
@@ -5412,6 +5477,7 @@ mod tests {
                 &mut arrays,
                 &mut cells,
                 &mut refs,
+                &mut slices,
                 &mut generics,
             )
             .map(|_| ())
@@ -5436,6 +5502,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let no_imports = HashMap::new();
         let imports = HashMap::from([("b".to_string(), 0u32)]);
         let exports = vec![vec![("Box".to_string(), Span::default())]];
@@ -5454,6 +5521,7 @@ mod tests {
                         &mut arrays,
                         &mut cells,
                         &mut refs,
+                        &mut slices,
                         &mut generics,
                     )
                     .map(|_| ())
@@ -5483,6 +5551,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let no_imports = HashMap::new();
         let imports = HashMap::from([("b".to_string(), 0u32)]);
         let no_exports: Vec<Vec<(String, Span)>> = vec![Vec::new()];
@@ -5499,6 +5568,7 @@ mod tests {
                 &mut arrays,
                 &mut cells,
                 &mut refs,
+                &mut slices,
                 &mut generics,
             )
             .map(|_| ())
@@ -5533,6 +5603,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let no_imports = HashMap::new();
         let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         parse_bodies(
@@ -5546,6 +5617,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut slices,
             &mut generics,
         )
         .unwrap();
@@ -5590,6 +5662,42 @@ mod tests {
         let a_ty = module.words[0].effect.inputs[0].ty;
         let b_ty = module.words[1].effect.inputs[0].ty;
         assert_eq!(a_ty, b_ty);
+    }
+
+    /// P7 slice 3c (R1.1/R1.2): `Slice[T]` is spelled like a generic
+    /// application but resolves through the interned slice registry, so two
+    /// signatures naming the same element share one `SliceId` and a different
+    /// element mints a second.
+    #[test]
+    fn parse_slot_slice_type_interns_by_element() {
+        let module = parse_src(
+            ": a ( Slice[i64] -- ) drop ; : b ( Slice[i64] -- ) drop ; : c ( Slice[f64] -- ) drop ;",
+        )
+        .unwrap();
+        assert_eq!(module.slices.len(), 2);
+        assert_eq!(
+            module.words[0].effect.inputs[0].ty,
+            module.words[1].effect.inputs[0].ty
+        );
+        match module.words[0].effect.inputs[0].ty {
+            Type::Slice(_, mutable, name) => {
+                assert_eq!(name, "Slice[i64]");
+                assert!(!mutable, "the surface spelling builds a shared view");
+            }
+            other => panic!("expected Type::Slice, got {other:?}"),
+        }
+        assert_ne!(
+            module.words[0].effect.inputs[0].ty,
+            module.words[2].effect.inputs[0].ty
+        );
+    }
+
+    /// The arity is fixed at one: `Slice` never reaches a user registry, so
+    /// nothing else would report a wrong argument count for it.
+    #[test]
+    fn parse_slot_slice_type_with_two_arguments_is_error() {
+        let err = parse_src(": a ( Slice[i64 f64] -- ) drop ;").unwrap_err();
+        assert!(err.contains("Slice"), "unexpected message: {err}");
     }
 
     #[test]
@@ -6374,6 +6482,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut slices = Vec::new();
         let no_imports = HashMap::new();
         let imports = HashMap::from([("b".to_string(), 0u32)]);
         let no_exports: Vec<Vec<(String, Span)>> = vec![Vec::new()];
@@ -6390,6 +6499,7 @@ mod tests {
                 &mut arrays,
                 &mut cells,
                 &mut refs,
+                &mut slices,
                 &mut generics,
             )
             .map(|_| ())

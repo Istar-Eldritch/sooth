@@ -394,6 +394,69 @@ pub struct Refs {
     pub referent: Vec<IrType>,
 }
 
+/// P7 slice 3c (R2.1): the IR's view of a program's slice types. Every slice
+/// *value* shares one layout (`slice_layout`), so what is per-`SliceId` here
+/// is only what lowering needs to reach the buffer behind the view: the
+/// element's `IrType` (the referent an indexed element reference records) and
+/// its `stride` (the same figure `ArrayLayout` computes, since a view over
+/// `[T N]` walks that array's own elements). The backend sees none of it --
+/// the element type is erased there exactly as it is for the `Ptr` every `&T`
+/// becomes.
+#[derive(Debug, Default)]
+pub struct Slices {
+    pub elem: Vec<IrType>,
+    pub stride: Vec<u32>,
+    /// Whether the view is mutable. Not an ABI or layout figure: it is the
+    /// second half of the interning key, so a construction site can find the
+    /// `SliceId` the checker already minted for the shape it is building.
+    pub mutable: Vec<bool>,
+}
+
+/// Build the slice registry against the already-built aggregate registries.
+/// Separate from `build_registries` because a slice is never a field or an
+/// element of anything (R5 bans it from every such position), so it takes no
+/// part in the layout DFS and cannot make another layout depend on it.
+pub fn build_slices(
+    decls: &[SliceDecl],
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> Slices {
+    let mut out = Slices::default();
+    for decl in decls {
+        let elem = ir_type_of(decl.element);
+        let (size, align) = match elem {
+            IrType::Struct(id) => {
+                let l = &structs.layouts[id.index()];
+                (l.size, l.align)
+            }
+            IrType::Enum(id) => {
+                let l = &enums.layouts[id.index()];
+                (l.size, l.align)
+            }
+            IrType::Array(id) => {
+                let l = &arrays.layouts[id.index()];
+                (l.size, l.align)
+            }
+            other => scalar_size_align(other),
+        };
+        out.elem.push(elem);
+        out.stride.push(round_up(size, align));
+        out.mutable.push(decl.mutable);
+    }
+    out
+}
+
+/// The shared empty slice registry, mirroring `empty_statics`. Test-only:
+/// every production lowering path builds a real one from `Module::slices`,
+/// but a unit test that hand-builds a `Registries` needs an empty stand-in
+/// with a `'static` lifetime.
+#[cfg(test)]
+pub fn empty_slices() -> &'static Slices {
+    static EMPTY: std::sync::OnceLock<Slices> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Slices::default)
+}
+
 /// Phase 7 slice 2 (R1): the IR's view of a module's `static:` declarations --
 /// each static's referent `IrType`, keyed by the module-mangled name a borrow
 /// site spells (the same string that is its data symbol). Doubles as the
@@ -457,6 +520,7 @@ pub struct Registries<'a> {
     pub arrays: &'a Arrays,
     pub cells: &'a Cells,
     pub refs: &'a Refs,
+    pub slices: &'a Slices,
     pub statics: &'a Statics,
 }
 
@@ -1117,6 +1181,43 @@ mod tests {
         // ...and the figure comes from `slice_layout`, which is two words
         // wide, so it is 16 for the same reason a two-`i64` struct is.
         assert_eq!(slice_layout(WORD_WIDTH).size, 16);
+    }
+
+    /// P7 slice 3c (R2.1): the per-`SliceId` registry carries what lowering
+    /// needs to reach *behind* the view -- the element `IrType` an indexed
+    /// element reference records, and the element stride `&>`/`subslice`
+    /// offset by. The stride must be the same figure `ArrayLayout` computes
+    /// for the very buffer the view is cut from, or an index walks off-pitch;
+    /// the struct element is what makes that non-trivial (a scalar's stride is
+    /// its width either way).
+    #[test]
+    fn build_slices_records_element_type_and_array_matching_stride() {
+        let src = "type: Pair a i64 b i64 ;\n: f ( [Pair 4] -- ) drop ;\n: main ( -- ) ;\n";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let (structs, enums, arrays, cells, refs) = build_registries(
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+            &module.refs,
+        );
+        let _ = (cells, refs);
+        let pair = module
+            .structs
+            .iter()
+            .position(|s| s.name == "Pair")
+            .expect("Pair is declared");
+        let mut decls = Vec::new();
+        crate::ast::intern_slice_type(&mut decls, module.arrays[0].element, false);
+        let slices = build_slices(&decls, &structs, &enums, &arrays);
+        assert_eq!(
+            slices.elem,
+            vec![IrType::Struct(StructId::from_index(pair))]
+        );
+        assert_eq!(slices.stride, vec![arrays.layouts[0].stride]);
+        assert_eq!(slices.stride, vec![16]);
+        assert_eq!(slices.mutable, vec![false]);
     }
 
     /// P7 slice 3c (R2.1): the scalar sizer refuses a slice rather than

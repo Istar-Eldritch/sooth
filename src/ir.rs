@@ -13,8 +13,8 @@ use std::mem;
 use crate::ast::{
     generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, GenericTypes,
     Len, Module, OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId,
-    SliceId, Span, StackEffect, StaticDecl, StaticInit, StructDecl, StructId, Subst, Term,
-    TermKind, Type, TypedSlot, VariantTag, VariantTagMode, WordDef,
+    SliceDecl, SliceId, Span, StackEffect, StaticDecl, StaticInit, StructDecl, StructId, Subst,
+    Term, TermKind, Type, TypedSlot, VariantTag, VariantTagMode, WordDef,
 };
 
 mod destructors;
@@ -36,9 +36,9 @@ pub use self::types::{
 };
 
 pub(crate) use self::layout::{
-    build_registries, build_statics, carried_slot_bytes, empty_statics, ArrayLayout, Arrays, Cells,
-    DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Statics, StructLayout,
-    Structs,
+    build_registries, build_slices, build_statics, carried_slot_bytes, empty_statics, ArrayLayout,
+    Arrays, Cells, DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Slices,
+    Statics, StructLayout, Structs,
 };
 // `VariantLayout` and `Refs` have no non-test caller anywhere in the crate
 // today (only a `repl.rs` test constructs a `VariantLayout`; every `Refs` is a
@@ -52,7 +52,7 @@ use self::layout::{
     EnumWord, StructWord,
 };
 #[cfg(test)]
-pub(crate) use self::layout::{Refs, VariantLayout};
+pub(crate) use self::layout::{empty_slices, Refs, VariantLayout};
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
 /// call sites (the REPL, D2; destructor synthesis; unit tests), so
