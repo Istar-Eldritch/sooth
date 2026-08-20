@@ -472,7 +472,28 @@ not scalar-load).
   way. The type is emitted only when a module holds a slice, so every existing program's
   QBE text is byte-identical (`tests/qbe_baseline.rs` untouched).
 
-**Phase 2 exit notes (what Phase 3 inherits):** the first slice *value* makes four
+**Phase 2 review follow-ups (one settled, one left as found):**
+
+- `member_ty` (the struct-member speller) **refuses** a slice rather than spelling
+  `:{SLICE_TYPE_SYMBOL}`. That spelling was correct but dead and untested, and it
+  disagreed with `field_load_op`/`field_store_op`/`scalar_size_align_ww`, which all refuse
+  a slice on R5's ban. It also quietly underwrote `emit`'s type-ordering comment: the
+  shared slice aggregate is emitted without being ordered against the structs a member
+  would force it ahead of, so the first time the ban lapsed that unordered emission would
+  be wrong with no diagnostic. The refusal asserts the ban where it can be observed;
+  guarded by `member_ty_refuses_a_slice`.
+- **Pre-existing and out of scope:** the collision Finding 1 fixed for the slice symbol is
+  not unique to it. `array_type_symbol` mints `arr_{idx}` and quotations mint `:Q{idx}`,
+  both of which a user struct name can forge -- `type: arr_0 a i64 b i64 ;` beside an
+  `[i64 3]` emits both `type :arr_0 = align 8 { b 24 }` and `type :arr_0 = { l, l }`, and
+  QBE accepts the duplicate silently and keeps the last, so the two values cross
+  param/return boundaries at each other's size (probe-confirmed, latent). `sooth.slice` is
+  the only immune symbol. The proper fix is one shared reserved-prefix helper covering all
+  three, which is neither this phase's nor this slice's: touching array/quotation symbol
+  minting would rewrite type names in `tests/qbe_baseline.rs` for a defect no slice work
+  introduces.
+
+**Phase 2 exit notes (what Phase 3 inherits):** the first slice *value* makes six
 wildcards reachable that Phase 2 deliberately did not arm, because what they should answer
 depends on how construction lowers:
 
@@ -487,14 +508,25 @@ depends on how construction lowers:
   *behaviour* today (a slice is banned from every field and element position by R5), so
   neither is armed; a Phase 3 caller that legitimately needs a slice's byte size adds the
   arm at its first use.
+- `Instr::Load`'s `_ => ("l", "loadl")` and `Instr::Store`'s `_ => storel`
+  (`backend/qbe.rs`) would scalar-load or scalar-store **one word of the two**, which is
+  the exact failure R2.2 was written to prevent. These are the buffer/pointer
+  load-store instructions, distinct from `field_load_op`/`field_store_op`, which already
+  refuse a slice. They are unreachable today (no slice value exists to load or store), and
+  unarmed for the same reason as the rest: whether a slice ever travels through
+  `Load`/`Store` at all, rather than the blit its 16-byte size implies, is Phase 3's
+  construction decision. Whichever way that goes, these two arms must be settled
+  explicitly rather than inherited.
 - `Session::slices` exists so `remap_type`'s rebase has a real base to shift by, but it is
   not threaded into the checker: no session line can intern a slice until there is a
   surface spelling, which is Phase 3's business.
 
-**Phase 2 mutation-tested guards (7, all killed):** the `qbe_abi_ty` arm deleted (R3), the
+**Phase 2 mutation-tested guards (8, all killed):** the `qbe_abi_ty` arm deleted (R3), the
 `remap_type` arm deleted (R8.2), `carried_slot_bytes` answering 8, `ir_type_of` mapping to
-`IrType::Ptr`, the `format_stack` arm deleted, `rich_value_size` answering 8, and
-`render_rich_value`'s placeholder changed.
+`IrType::Ptr`, the `format_stack` arm deleted, `rich_value_size` answering 8,
+`render_rich_value`'s placeholder changed, and `member_ty` answering
+`:{SLICE_TYPE_SYMBOL}` instead of refusing (the review follow-up above; that mutation
+fails exactly one test, which is why the arm needed one).
 
 ### Phase 3: shared construction, sub-ranging, `len`, and shared indexed access  *(hard)*
 
@@ -615,7 +647,10 @@ guards are mutation-tested (delete the arm, the test must fail).
   notes -- so the 16-byte claim is asserted through `slice_layout` in
   `ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer` and the carried-slot test).
 - `src/ir/types.rs`: `ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer` (R1.3/R2.1).
-- `src/backend/qbe.rs`: `qbe_abi_ty_slice_is_aggregate_not_scalar_width`.
+- `src/backend/qbe.rs`: `qbe_abi_ty_slice_is_aggregate_not_scalar_width`,
+  `user_struct_named_slice_does_not_collide_with_slice_aggregate` (Finding 1: the reserved
+  symbol is unforgeable), `member_ty_refuses_a_slice` (R5's field-position ban, asserted
+  where a struct member would be spelled).
 - `src/check/word_families.rs`: `len_over_a_slice_answers_runtime_length`,
   `slice_constructs_a_view_from_an_array_reference`,
   `subslice_rederives_a_fresh_slice_not_a_nested_borrow`.

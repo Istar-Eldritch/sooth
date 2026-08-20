@@ -429,9 +429,15 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
-        // P7 slice 3c (R2.2): a slice member is its whole two-slot aggregate,
-        // spelled by the type every slice shares.
-        IrType::Slice(_) => format!(":{SLICE_TYPE_SYMBOL}"),
+        // P7 slice 3c (R5): a slice is banned from every field position, so
+        // unlike the aggregates above it is never a struct member. This arm
+        // refuses rather than spelling `:{SLICE_TYPE_SYMBOL}`, so the ban is
+        // asserted here instead of being assumed by the type-emission order
+        // in `emit` (which declares the slice aggregate without ordering it
+        // against the structs that would have to reference it), and so it
+        // agrees with `field_load_op`/`field_store_op`/`scalar_size_align_ww`,
+        // which refuse a slice on the same grounds.
+        IrType::Slice(_) => unreachable!("a slice is banned from every field position"),
     }
 }
 
@@ -2910,6 +2916,22 @@ type: Counter n i64 ;
         // A slice-free module emits no slice type, so every existing program's
         // QBE text is byte-identical.
         assert!(!emit_src(": main ( -- ) 1 . ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
+    }
+
+    /// P7 slice 3c (R5): the struct-member speller refuses a slice, the same
+    /// answer `field_load_op`/`field_store_op`/`scalar_size_align_ww` give.
+    /// R5 bans a slice from every field position, and `emit` relies on that
+    /// ban when it declares the shared slice aggregate without ordering it
+    /// against the structs a member would force it ahead of; spelling a
+    /// member here instead would make that unordered emission wrong the first
+    /// time the ban lapsed, with no diagnostic.
+    #[test]
+    #[should_panic(expected = "a slice is banned from every field position")]
+    fn member_ty_refuses_a_slice() {
+        let mut slices = Vec::new();
+        let slice =
+            crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        member_ty(slice, empty_layouts());
     }
 
     /// Review finding (Phase 2): a user struct literally named `slice` used to
