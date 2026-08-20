@@ -804,6 +804,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     structs,
                     enums,
                     arrays,
+                    slices,
                     statics,
                     Some(modules),
                     &mut builtin_overloads,
@@ -2977,6 +2978,18 @@ fn ref_parts(ty: Type, refs: &[RefDecl]) -> Option<(Type, bool)> {
     }
 }
 
+/// P7 slice 3c (R12): whether `ty` is a live borrow of somewhere else -- a
+/// `&T`/`&!T` or a `Slice[T]`/`!Slice[T]` view -- and whether that borrow is
+/// mutable. `ref_parts`' sibling for the sites that want the *borrow* nature
+/// rather than the referent, which a view does not have (its element is not
+/// what it points at: it points at a run of them).
+fn borrow_mutability(ty: Type, refs: &[RefDecl]) -> Option<bool> {
+    match ty {
+        Type::Slice(_, mutable, _) => Some(mutable),
+        _ => ref_parts(ty, refs).map(|(_, mutable)| mutable),
+    }
+}
+
 /// ` in `word`` for a word body, empty for a bare REPL line: the suffix the
 /// slice's own diagnostics use to place themselves the way every other
 /// located error here does.
@@ -3303,6 +3316,27 @@ mod tests {
                 "mismatch for ref_mutable={ref_mutable:?}"
             );
         }
+    }
+
+    /// P7 slice 3c (R12): `borrow_mutability` answers for both borrow shapes.
+    /// A slice is not a `Type::Ref`, so `ref_parts` alone reports it as no
+    /// borrow at all -- which is what would let a mutable view be named twice
+    /// (`terms.rs`' reborrow arm is the one caller that must not miss it).
+    #[test]
+    fn borrow_mutability_covers_a_slice_as_well_as_a_reference() {
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let shared_ref = intern_ref_type(&mut refs, Type::I64, false);
+        let mutable_ref = intern_ref_type(&mut refs, Type::I64, true);
+        let shared_view = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let mutable_view = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
+        assert_eq!(borrow_mutability(shared_ref, &refs), Some(false));
+        assert_eq!(borrow_mutability(mutable_ref, &refs), Some(true));
+        assert_eq!(borrow_mutability(shared_view, &refs), Some(false));
+        assert_eq!(borrow_mutability(mutable_view, &refs), Some(true));
+        // An owned value is no borrow: naming one is a move or a read, never
+        // a reborrow.
+        assert_eq!(borrow_mutability(Type::I64, &refs), None);
     }
 
     /// P7 slice 3c (R6): a slice is in the *explicit* zero-unsafe set, since

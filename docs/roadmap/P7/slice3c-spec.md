@@ -708,6 +708,66 @@ mutable half at a time) lands here.
   golden.
 - Out of bounds: range-aware / disjoint concurrent mutable sub-slices (locked out of scope).
 
+**Phase 4 exit notes (three anchors that did not survive contact):**
+
+- `Deriv` (`check/engine.rs`) needed no change at all. A view already carries a
+  derivation and a region (Phase 3's `slice`/`subslice` forward the receiver's), so the
+  borrow table sees it; the site that could *not* see one was the naming arm in
+  `check/terms.rs`, which asks `ref_parts` whether a named local is a reference. A slice
+  is not a `Type::Ref`, so a named mutable view fell through to the owned-value arm, where
+  a non-linear value is "merely read" -- and `s ... s` handed out two live `&!` views of
+  one buffer with nothing to say so. Fixed by `borrow_mutability` (`check.rs`),
+  `ref_parts`' sibling for the sites that want the *borrow* nature rather than the
+  referent (a view has no single referent: it points at a run of them).
+- `PolyBorrow` (`check/poly.rs`) needed no arm either: Phase 1's `is_reference_slot`
+  already counts a slice, so a live view keeps the borrow it was built from unpruned. What
+  the poly path actually owed was the missing *walk* arms below, not a borrow record.
+- The mutable surface spelling is Phase 4's, not Phase 3's oversight: `!Slice[T]` is
+  intercepted beside `Slice[T]` in `resolve_type_or_apply`, and `!Slice` joins `Slice` in
+  `reject_reserved_name` for the same reason (a declaration under an intercepted name is
+  unreachable, not shadowed).
+
+**Phase 4 exit notes (lowering had to learn reference mutability):** `slice` is the first
+lowering site that needs to know whether a reference is mutable -- the view's *own* type
+carries the bit (R1.1) and the `SliceId` registry is keyed on it (R1.2), while a reference
+lowers to the opaque `IrType::Ptr` that says nothing about it. `FuncBuilder::ref_mutable`
+carries it per `Value` beside `ref_inner`, both filled by one `record_reference` helper so
+they cannot drift, and seeded at every route a reference reaches `slice` by: a prefix
+borrow or projection (the name says it), a declared parameter (`Type::Ref`'s own bool), a
+branch join (`Phi`), and a materialized quotation's env capture. All four are golden-
+covered; the alternative (looking the shape up by element alone) is not merely untidy --
+a program holding only a mutable view has no shared row to find, so it panics.
+
+**Phase 4 exit notes (the poly-path rule R11 asked for, and one gap left as found):**
+
+- A mutable view is **single-use per binding inside a generic body**, where the
+  monomorphic path reborrows a named local. The poly walk move-tracks every non-`Copy`
+  local (Slice 13's design: `poly_call_term` consumes on read when `poly_is_copy` is
+  false), and R4 makes a mutable view non-`Copy`. So a generic consumer can store through
+  a view (`s 0 >usize &!> v !`, one derivation) but cannot read-modify-write through one:
+  that needs two, and the second naming is use-after-move. Ruled rather than worked
+  around -- loosening it is a change to the poly borrow model, which is Slice 13's, not
+  this slice's. Pinned by `poly_mutable_slice_local_is_single_use`.
+- `slice` in a poly body works off a **body borrow** (`&a slice` / `&!a slice`), including
+  over a generic *length* (`['T 'N]`'s length erases into the runtime one, which is the
+  point of a view); a generic *element* is refused by name (R1.2's locked non-goal). It
+  does **not** work off a declared fully-concrete `&[i64 3]` parameter: those arrive as
+  `PolyType::Concrete(Type::Ref(..))` and `poly_ref_array_parts` matches only
+  `PolyType::Ref`. Pre-existing and not slice-specific -- `&>` has the identical gap
+  (probe: `: f ( &[i64 3] 'T -- i64 'T ) | x | 0 >usize &> @ x ;` reports
+  ``&> is not permitted on `&[i64 3]` ``) -- and closing it means threading `refs` into the
+  poly walk to resolve a `RefId`, which would move an existing diagnostic. Left as found.
+
+**Phase 4 mutation-tested guards (11, all killed):** the `borrow_mutability` slice arm
+deleted (the two-live-mutable-subslices golden flips to accept), `slice` interning a
+shared view off a `&!` receiver (mono and poly, separately), the poly `&>` slice-receiver
+mutability guard stubbed, the poly `slice` generic-element gate opened, the poly
+`subslice` arm deleted, `check_poly_slice_offset` made permissive, the parser interning
+`!Slice[T]` as shared, `!Slice` dropped from the reserved names, and the lowering
+mutability lookup hardcoded shared at each of its four seeding routes
+(`reference_is_mutable` at the `slice` arm, the prefix borrow, the declared parameter, the
+branch join, the env capture).
+
 ### Phase 5: roadmap correction, regression sweep, growth-signal re-check  *(standard)*
 
 Deliver R14: rewrite the P7.S3c body + exit in `docs/roadmap/P7-language-prereqs.md` from

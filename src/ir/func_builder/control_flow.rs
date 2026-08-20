@@ -159,7 +159,10 @@ impl<'a> FuncBuilder<'a> {
                         // nothing about its referent; carry the shape across
                         // the join so a projection past it still resolves.
                         if let Some(&referent) = self.ref_inner.get(&t) {
-                            self.ref_inner.insert(v, referent);
+                            // `record_reference` fills both maps together, so
+                            // a value with a referent always has the bit.
+                            let mutable = self.ref_mutable[&t];
+                            self.record_reference(v, referent, mutable);
                         }
                         join_stack.push(v);
                     }

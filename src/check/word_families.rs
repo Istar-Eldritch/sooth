@@ -792,20 +792,18 @@ pub(super) fn check_array_word(
                     recv.ty,
                 ));
             };
-            // Phase 3 builds shared views only: a mutable one is not
-            // exclusivity-tracked until Phase 4, so it must not be
-            // constructible before its guard exists.
-            if recv_mut {
-                return Err(mutable_slice_unsupported_error(ctx, span, "slice"));
-            }
             // R1.2 (the `Copy`-element rule) needs no gate here: `slice`'s
             // only source is an array reference, and no array can hold a
             // non-`Copy` element in the first place -- a linear one is refused
             // as `linear array elements are not supported yet`, a reference
             // one as `a reference cannot be stored`. Pinned by
             // `slice_element_copy_rule_is_enforced_by_the_array_gate`.
+            //
+            // R12: the view inherits the receiver's mutability, so a `&!`
+            // buffer reference yields a `!Slice[T]` -- non-`Copy` (R4) and
+            // exclusivity-tracked through the region it carries forward.
             let element = arrays[id.index()].element;
-            let out = intern_slice_type(slices, element, false);
+            let out = intern_slice_type(slices, element, recv_mut);
             let deriv = prov.project(recv.deriv);
             let alias = recv.alias;
             stack.truncate(n - 1);
@@ -817,7 +815,9 @@ pub(super) fn check_array_word(
         // R10.3: `subslice ( Slice[T] usize usize -- Slice[T] )` re-derives a
         // *fresh* view from the receiver's pointer and length -- offset by
         // `start`, of length `len` -- and is never a reference to a reference.
-        // The receiver is an ordinary consumed input, as it is for `&>`.
+        // The receiver is an ordinary consumed input, as it is for `&>`, and
+        // the sub-view is its own type: a mutable receiver yields a mutable
+        // sub-view, a shared one a shared sub-view.
         "subslice" => {
             let n = stack.len();
             if n < 3 {
@@ -827,14 +827,11 @@ pub(super) fn check_array_word(
                 return Err(reject_quotation_operand(ctx, span, "subslice"));
             }
             let recv = stack[n - 3];
-            let Type::Slice(_, recv_mut, _) = recv.ty else {
+            let Type::Slice(..) = recv.ty else {
                 return Err(reference_word_operand_error(
                     ctx, span, "subslice", "a slice", recv.ty,
                 ));
             };
-            if recv_mut {
-                return Err(mutable_slice_unsupported_error(ctx, span, "subslice"));
-            }
             // Both offsets are runtime `usize`; unlike an array index there is
             // no compile-time bound to check a literal against, so the range
             // check is entirely the runtime trap's job.
@@ -1284,22 +1281,6 @@ fn check_slice_offset(operand: Slot, ctx: &Ctx, span: Span, op: &str) -> Result<
     }
 }
 
-/// P7 slice 3c: a mutable view (`slice` off a `&![T N]`, or `subslice` of
-/// one) reached before Phase 4's exclusivity tracking exists. Refused rather
-/// than admitted untracked: a mutable slice must never exist in a build whose
-/// borrow table cannot see it.
-fn mutable_slice_unsupported_error(ctx: &Ctx, span: Span, op: &str) -> String {
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` builds shared views only; a mutable slice is not supported yet\n  note: declared {}",
-            name, span.line, op, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: type mismatch: `{op}` builds shared views only; a mutable slice is not supported yet"
-        ),
-    }
-}
-
 /// `cstr` applied to something other than `str` (R7): the only legal source
 /// for the discard-the-length conversion, so the error names it by name
 /// rather than as a generic type mismatch.
@@ -1396,7 +1377,7 @@ fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type)
 }
 /// A reference-mode word applied to something that is not the reference shape
 /// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
-fn reference_word_operand_error(
+pub(super) fn reference_word_operand_error(
     ctx: &Ctx,
     span: Span,
     op: &str,
@@ -2719,18 +2700,69 @@ mod tests {
         }
     }
 
-    /// Phase 3 ships shared views only: a mutable one is not
-    /// exclusivity-tracked until Phase 4, so `slice` refuses a `&!` receiver
-    /// rather than minting a view the borrow table cannot see.
+    /// R12: the view inherits its receiver's mutability -- a `&!` buffer
+    /// reference yields `!Slice[T]`, a `&` one yields `Slice[T]`. A view can
+    /// never be a declared *output* (R5), so the witness is a consumer word
+    /// declaring one spelling or the other; both directions are asserted, so
+    /// an arm hardcoding either mutability fails one of them.
     #[test]
-    fn slice_over_a_mutable_reference_is_error() {
+    fn slice_inherits_the_receivers_mutability() {
+        let src = |sigil: &str, recv: &str| {
+            format!(
+                ": take ( {sigil}Slice[i64] -- usize ) len ;\n\
+                 : f ( {recv}[i64 3] -- usize ) slice take ;\n\
+                 : main ( -- ) ;\n"
+            )
+        };
+        check_src(&src("", "&")).unwrap();
+        check_src(&src("!", "&!")).unwrap();
+        let err = check_src(&src("", "&!")).unwrap_err();
+        assert!(
+            err.contains("expected `Slice[i64]`, found `!Slice[i64]`"),
+            "unexpected message: {err}"
+        );
+        let err = check_src(&src("!", "&")).unwrap_err();
+        assert!(
+            err.contains("expected `!Slice[i64]`, found `Slice[i64]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R10.3 (phase 4): `subslice` re-derives a view of its receiver's *own*
+    /// type, so a mutable receiver yields a mutable sub-view. A hardcoded
+    /// shared output would be accepted by the shared consumer below.
+    #[test]
+    fn subslice_keeps_the_receivers_mutability() {
+        check_src(
+            ": take ( !Slice[i64] -- usize ) len ;\n\
+             : f ( !Slice[i64] -- usize ) 0 >usize 2 >usize subslice take ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap();
+        let err = check_src(
+            ": take ( Slice[i64] -- usize ) len ;\n\
+             : f ( !Slice[i64] -- usize ) 0 >usize 2 >usize subslice take ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected `Slice[i64]`, found `!Slice[i64]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R9.2 (phase 4): `&!>` takes a mutable slice receiver and yields a
+    /// mutable element reference; the shared spelling on the same receiver is
+    /// the mismatch the mutable spelling was on a shared one.
+    #[test]
+    fn mutable_index_of_a_mutable_slice_yields_a_mutable_element_reference() {
+        check_src(": f ( !Slice[i64] i64 -- ) | v | 0 >usize &!> v ! ;\n: main ( -- ) ;\n")
+            .unwrap();
         let err =
-            check_src(": f ( &![i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap_err();
-        assert_eq!(
-            err,
-            "error: type mismatch in `f` (line 1)\n  \
-             `slice` builds shared views only; a mutable slice is not supported yet\n  \
-             note: declared ( &![i64 3] -- usize )"
+            check_src(": f ( !Slice[i64] -- i64 ) 0 >usize &> @ ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("`&>` expected a slice, found `!Slice[i64]`"),
+            "unexpected message: {err}"
         );
     }
 

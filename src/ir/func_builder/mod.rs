@@ -139,6 +139,10 @@ pub(super) struct EnvCapture {
     pub(super) name: String,
     pub(super) ty: IrType,
     pub(super) referent: Option<IrType>,
+    /// P7 slice 3c (R12): a captured *reference*'s mutability, carried across
+    /// the boundary alongside its referent so the body rebinding it records
+    /// the same pair `record_reference` would have.
+    pub(super) ref_mutable: bool,
 }
 
 /// 7b/R17: the env-parameter plan for a lowered body. A user word (or REPL
@@ -288,6 +292,12 @@ pub(super) struct FuncBuilder<'a> {
     /// is carried here instead. Seeded from a word's declared reference
     /// parameters and extended by each projection.
     pub(super) ref_inner: HashMap<Value, IrType>,
+    /// P7 slice 3c (R12): whether each reference-typed `Value` is mutable,
+    /// kept in lockstep with `ref_inner` by `record_reference`. Mutability is
+    /// otherwise frontend-only here (a `&T` and a `&!T` are both
+    /// `IrType::Ptr`), but `slice` builds a view whose *own* type carries the
+    /// bit, and the receiver's reference is where that bit comes from.
+    pub(super) ref_mutable: HashMap<Value, bool>,
     /// R12: the quotation-literal body table, indexed by `QuotId`. A quotation
     /// literal lowers to a phantom `Value` that defines no `Instr`; its body is
     /// interned here and spliced in place at `call`/`times` (D5 fusion), never
@@ -368,6 +378,7 @@ impl<'a> FuncBuilder<'a> {
             value_types: Vec::new(),
             const_vals: HashMap::new(),
             ref_inner: HashMap::new(),
+            ref_mutable: HashMap::new(),
             quot_defs: Vec::new(),
             quot_arm_tags: Vec::new(),
             quot_bodies: HashMap::new(),
@@ -669,7 +680,7 @@ impl<'a> FuncBuilder<'a> {
 fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value {
     match cap.referent {
         Some(referent) => {
-            b.ref_inner.insert(word, referent);
+            b.record_reference(word, referent, cap.ref_mutable);
             word
         }
         None => {
@@ -760,8 +771,8 @@ pub(super) fn lower_word_parts(
     // not from the value. Seeded against `stack_inputs` so a loop reads it off
     // the header phi output the body actually uses.
     for (slot, value) in effect.inputs.iter().zip(&stack_inputs) {
-        if let Type::Ref(id, _, _) = slot.ty {
-            b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
+        if let Type::Ref(id, mutable, _) = slot.ty {
+            b.record_reference(*value, regs.refs.referent[id.index()], mutable);
         }
     }
 

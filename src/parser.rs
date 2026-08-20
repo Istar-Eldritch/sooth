@@ -203,9 +203,10 @@ fn invalid_global_mode_error(found: &str, span: Span) -> String {
 
 /// The one reserved-name gate every declaration site calls: a `^`-led name
 /// (owning cells) or a `&`-led name (references). P7 slice 3c: a `type:` or
-/// `variant` name may not be `Slice` either -- `resolve_type_or_apply`
-/// intercepts that spelling ahead of every user registry, so a declaration
-/// under that name would be silently unreachable rather than merely shadowed.
+/// `variant` name may not be `Slice` or `!Slice` either --
+/// `resolve_type_or_apply` intercepts both spellings ahead of every user
+/// registry, so a declaration under either name would be silently unreachable
+/// rather than merely shadowed.
 pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), String> {
     if is_reserved_caret_name(name) {
         return Err(reserved_caret_name_error(kind, name, span));
@@ -213,9 +214,9 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     if is_reserved_ref_name(name) {
         return Err(reserved_ref_name_error(kind, name, span));
     }
-    if matches!(kind, "type" | "variant") && name == SLICE_TYPE_NAME {
+    if matches!(kind, "type" | "variant") && matches!(name, SLICE_TYPE_NAME | MUT_SLICE_TYPE_NAME) {
         return Err(format!(
-            "error: `{SLICE_TYPE_NAME}` is reserved for the slice type syntax (`{SLICE_TYPE_NAME}[T]`) and cannot be used as a {kind} name at line {}, col {}",
+            "error: `{name}` is reserved for the slice type syntax (`{SLICE_TYPE_NAME}[T]`) and cannot be used as a {kind} name at line {}, col {}",
             span.line, span.col
         ));
     }
@@ -227,6 +228,11 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
 /// through the interned slice registry, so it is intercepted by name ahead of
 /// every user lookup.
 pub const SLICE_TYPE_NAME: &str = "Slice";
+
+/// P7 slice 3c (R1.1, phase 4): the mutable view's spelling, `!Slice[T]`. The
+/// `!` marks mutability exactly as it does in `&!T`, and it is glued to the
+/// name because a type expression has no other place to put it.
+pub const MUT_SLICE_TYPE_NAME: &str = "!Slice";
 
 /// Phase 5 slice 1: a `'`-prefixed word inside a `type:` body is a type
 /// variable, never a field name. Rejected at every named-field-name position
@@ -3443,9 +3449,10 @@ impl<'t> Parser<'t> {
         // application but resolves through the interned slice registry, not
         // through a declared header, so it is intercepted ahead of every user
         // lookup (`reject_reserved_name` keeps the name unclaimable).
-        if name == SLICE_TYPE_NAME {
+        if matches!(name, SLICE_TYPE_NAME | MUT_SLICE_TYPE_NAME) {
             let args = self.parse_type_arguments(name, 1, span)?;
-            return Ok(crate::ast::intern_slice_type(self.slices, args[0], false));
+            let mutable = name == MUT_SLICE_TYPE_NAME;
+            return Ok(crate::ast::intern_slice_type(self.slices, args[0], mutable));
         }
         let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
@@ -5690,6 +5697,28 @@ mod tests {
             module.words[0].effect.inputs[0].ty,
             module.words[2].effect.inputs[0].ty
         );
+    }
+
+    /// P7 slice 3c (R1.1, phase 4): `!Slice[T]` is the mutable spelling, the
+    /// same `!` mutability marker `&!T` carries. It interns a *distinct*
+    /// `SliceId` from the shared view of the same element -- the two are
+    /// different types, and only the registry key says so.
+    #[test]
+    fn parse_slot_mutable_slice_type_interns_separately() {
+        let module =
+            parse_src(": a ( Slice[i64] -- ) drop ; : b ( !Slice[i64] -- ) drop ;").unwrap();
+        assert_eq!(module.slices.len(), 2);
+        assert_ne!(
+            module.words[0].effect.inputs[0].ty,
+            module.words[1].effect.inputs[0].ty
+        );
+        match module.words[1].effect.inputs[0].ty {
+            Type::Slice(_, mutable, name) => {
+                assert_eq!(name, "!Slice[i64]");
+                assert!(mutable, "`!Slice[T]` builds a mutable view");
+            }
+            other => panic!("expected Type::Slice, got {other:?}"),
+        }
     }
 
     /// The arity is fixed at one: `Slice` never reaches a user registry, so

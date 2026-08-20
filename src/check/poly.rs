@@ -390,6 +390,7 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
@@ -437,6 +438,7 @@ pub fn check_poly_body(
         structs,
         enums,
         arrays,
+        slices,
         builtin_overloads,
     )?;
     // P7 slice 3b (R4/L2): splice-consumed quotations only. A literal still
@@ -476,6 +478,7 @@ pub(super) fn poly_walk(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolySlot>, String> {
     // P7 slice 3b (R2): the same written-adjacency rule the concrete path
@@ -505,6 +508,7 @@ pub(super) fn poly_walk(
             structs,
             enums,
             arrays,
+            slices,
             builtin_overloads,
         )?;
     }
@@ -522,6 +526,7 @@ pub(super) fn poly_term(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolySlot>, String> {
     let span = term.span;
@@ -594,6 +599,7 @@ pub(super) fn poly_term(
                 structs,
                 enums,
                 arrays,
+                slices,
                 builtin_overloads,
             );
         }
@@ -648,6 +654,7 @@ pub(super) fn poly_call_term(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolySlot>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
@@ -686,7 +693,7 @@ pub(super) fn poly_call_term(
     // `check_reference_word`'s own position ahead of the monomorphic
     // family. `Ok(None)` (not `&`-led) falls through unchanged.
     if let Some(next) = poly_reference_word(
-        name, span, &mut stack, scope, sig, ctx, structs, enums, arrays,
+        name, span, &mut stack, scope, sig, ctx, structs, enums, arrays, slices,
     )? {
         return Ok(next);
     }
@@ -811,6 +818,50 @@ pub(super) fn poly_call_term(
             }
             return Ok(stack);
         }
+        // P7 slice 3c (R10.1, phase 4): `slice ( &[T N] -- Slice[T] )` in a
+        // generic body. The buffer's *length* may be a variable (`&[i64 'N]`)
+        // -- erasing it into a runtime length is what a view is for -- but its
+        // element may not: a generic element is a locked non-goal (R1.2), so a
+        // non-concrete one is a located rejection here rather than a shape no
+        // instantiation could ground.
+        "slice" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need(1, n));
+            }
+            let receiver = stack[n - 1].pt.clone();
+            let Some((recv_mut, elem, _)) = poly_ref_array_parts(&receiver, arrays) else {
+                return Err(poly_op_on_variable_error(
+                    ctx, span, "slice", &receiver, sig,
+                ));
+            };
+            let PolyType::Concrete(element) = elem else {
+                return Err(poly_slice_generic_element_error(ctx, span, &elem, sig));
+            };
+            let out = intern_slice_type(slices, element, recv_mut);
+            stack.truncate(n - 1);
+            stack.push(PolySlot::new(PolyType::Concrete(out)));
+            return Ok(stack);
+        }
+        // R10.3: `subslice` re-derives a fresh view of the receiver's own
+        // type, so it interns nothing and needs no element rule of its own.
+        "subslice" => {
+            let n = stack.len();
+            if n < 3 {
+                return Err(need(3, n));
+            }
+            let receiver = stack[n - 3].pt.clone();
+            if !matches!(receiver, PolyType::Concrete(Type::Slice(..))) {
+                return Err(poly_op_on_variable_error(
+                    ctx, span, "subslice", &receiver, sig,
+                ));
+            }
+            check_poly_slice_offset(&stack[n - 2], ctx, span, "subslice", sig)?;
+            check_poly_slice_offset(&stack[n - 1], ctx, span, "subslice", sig)?;
+            stack.truncate(n - 3);
+            stack.push(PolySlot::new(receiver));
+            return Ok(stack);
+        }
         _ => {}
     }
     // Comparisons: on a bare variable they need `Ord` (X8); on two concrete
@@ -893,6 +944,7 @@ pub(super) fn poly_call_term(
             structs,
             enums,
             arrays,
+            slices,
             builtin_overloads,
         );
     }
@@ -1037,6 +1089,7 @@ fn poly_eliminator_call(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolySlot>, String> {
     let enum_decl = &enums[id.index()];
@@ -1207,6 +1260,7 @@ fn poly_eliminator_call(
             structs,
             enums,
             arrays,
+            slices,
             builtin_overloads,
         )?;
         // Step 5b: a `Type::Variant` may not leave the call. Every
@@ -1653,6 +1707,7 @@ pub(super) fn poly_reference_word(
     _structs: &[StructDecl],
     _enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    slices: &[SliceDecl],
 ) -> Result<Option<Vec<PolySlot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -1679,6 +1734,34 @@ pub(super) fn poly_reference_word(
             let index_pt = stack[n - 1].pt.clone();
             let index_lit = stack[n - 1].int_val;
             let receiver = stack[n - 2].pt.clone();
+            // P7 slice 3c (R9.2, phase 4): a slice receiver, matched ahead of
+            // the array extraction exactly as the monomorphic twin matches
+            // ahead of `ref_parts` -- a slice is not a `PolyType::Ref`, so
+            // `poly_ref_array_parts` would send it to the "not a reference to
+            // an array" error instead of indexing it.
+            if let PolyType::Concrete(recv_ty @ Type::Slice(id, recv_mut, _)) = receiver {
+                if recv_mut != mutable {
+                    return Err(reference_word_operand_error(
+                        ctx,
+                        span,
+                        name,
+                        if mutable {
+                            "a mutable slice"
+                        } else {
+                            "a slice"
+                        },
+                        recv_ty,
+                    ));
+                }
+                check_poly_slice_offset(&stack[n - 1], ctx, span, name, sig)?;
+                let elem = slices[id.index()].element;
+                stack.truncate(n - 2);
+                stack.push(PolySlot::new(PolyType::Ref(
+                    Box::new(PolyType::Concrete(elem)),
+                    mutable,
+                )));
+                return Ok(Some(std::mem::take(stack)));
+            }
             let Some((recv_mut, elem, len)) = poly_ref_array_parts(&receiver, arrays) else {
                 return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
             };
@@ -1848,6 +1931,28 @@ fn check_poly_array_index(
             // there is no value here to bounds-check at compile time.
             None => Err(size_conversion_needed_error(ctx, span, op, Type::Usize)),
         },
+        other => Err(poly_op_on_variable_error(ctx, span, op, other, sig)),
+    }
+}
+
+/// P7 slice 3c (R9.2/R10.1, phase 4): the poly twin of `check_slice_offset`
+/// -- a slice index, or `subslice`'s start and length. A slice carries its
+/// length at runtime, so unlike `check_poly_array_index` there is no count to
+/// bound a literal against and an `i64` literal is admitted the same way the
+/// monomorphic path admits one (`match_slot`'s `LiteralSizeType`).
+fn check_poly_slice_offset(
+    offset: &PolySlot,
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    sig: &PolySig,
+) -> Result<(), String> {
+    match &offset.pt {
+        PolyType::Concrete(Type::Usize) => Ok(()),
+        PolyType::Concrete(Type::I64) if offset.int_val.is_some() => Ok(()),
+        PolyType::Concrete(Type::I64) => {
+            Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
+        }
         other => Err(poly_op_on_variable_error(ctx, span, op, other, sig)),
     }
 }
@@ -2820,6 +2925,24 @@ pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) ->
     )
 }
 
+/// P7 slice 3c (R1.2, phase 4): `slice` over a buffer whose *element* is still
+/// generic. The view's length may be a variable -- that is what a view erases
+/// -- but its element may not: a generic element is a locked non-goal, so the
+/// message names the rule rather than reporting a shape mismatch.
+fn poly_slice_generic_element_error(
+    ctx: &Ctx,
+    span: Span,
+    elem: &PolyType,
+    sig: &PolySig,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `slice` over an array of `{}` in `{where_}` (line {}) is not supported\n  a view's element type must be concrete; only its length may be generic",
+        poly_type_str(elem, sig),
+        span.line
+    )
+}
+
 pub(super) fn poly_op_on_variable_error(
     ctx: &Ctx,
     span: Span,
@@ -3574,6 +3697,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &mut Vec::new(),
             &mut overloads,
         )
         .expect("a quotation literal is admitted in a polymorphic body");
@@ -3620,6 +3744,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                &mut Vec::new(),
                 &mut overloads,
             )
             .expect("two literals then a swap");
@@ -3790,6 +3915,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &mut Vec::new(),
             &mut overloads,
         )
         .expect("an int literal should push a slot");
@@ -3811,6 +3937,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &mut Vec::new(),
             &mut overloads,
         )
         .expect("binding the literal should consume the slot");
@@ -4469,12 +4596,142 @@ mod tests {
             &[],
             &[],
             &[],
+            &mut Vec::new(),
             &mut overloads,
         )
         .expect("`len` answers a slice");
         assert_eq!(
             stack.iter().map(|s| s.pt.clone()).collect::<Vec<_>>(),
             vec![PolyType::Concrete(Type::Usize)]
+        );
+    }
+
+    /// P7 slice 3c (R9.2/R10, phase 4): the poly walk's own slice arms --
+    /// `&>` on a view, `subslice`, and `slice` off a body borrow. Phase 3 left
+    /// all three as rejections (`&>` fell to `poly_op_on_variable_error`,
+    /// the two words to `unknown word`), so a generic body could `len` a view
+    /// and nothing else.
+    #[test]
+    fn poly_slice_words_index_subrange_and_construct() {
+        // A view indexed inside a generic body yields an element reference,
+        // and the sub-view keeps the receiver's own type.
+        check_src(": f ( Slice[i64] 'T -- i64 'T ) | x | 0 >usize &> @ x ;\n").unwrap();
+        check_src(": f ( Slice[i64] 'T -- usize 'T ) | x | 0 >usize 2 >usize subslice len x ;\n")
+            .unwrap();
+        // `slice` off a borrow taken in the body: the length may be generic
+        // (a view erases it into a runtime length), the element may not.
+        check_src(": f ( [i64 3] 'T -- [i64 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
+            .unwrap();
+        check_src(": f ( ['T 3] 'T -- ['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
+            .unwrap_err();
+        // ...and the view it builds inherits the borrow's mutability: a
+        // shared one could not be written through here.
+        check_src(
+            ": f ( [i64 3] i64 'T -- [i64 3] 'T ) | x | | v | | a | \
+             &!a slice 0 >usize &!> v ! a x ;\n",
+        )
+        .unwrap();
+    }
+
+    /// R1.2: a generic *element* is a locked non-goal, and the rejection says
+    /// so by name rather than reporting an unrelated shape mismatch -- a
+    /// generic *length* is fine, which is the whole point of a view.
+    #[test]
+    fn poly_slice_over_a_generic_element_is_a_located_error() {
+        let err =
+            check_src(": f ( ['T 3] 'T -- ['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `slice` over an array of `'T` in `f` (line 1) is not supported\n  \
+             a view's element type must be concrete; only its length may be generic"
+        );
+    }
+
+    /// R9.2 (poly half): the mutability of a slice receiver is part of the
+    /// match, exactly as it is on the concrete path, and the wording is the
+    /// same one -- the two paths must not disagree about one spelling. (The
+    /// empty `note: declared ( -- )` is the poly path's own: a polymorphic
+    /// word carries no concrete effect for the note to render, and every
+    /// mismatch it reports says the same.)
+    #[test]
+    fn poly_index_of_a_slice_matches_on_mutability() {
+        check_src(": f ( !Slice[i64] i64 'T -- 'T ) | x | | v | 0 >usize &!> v ! x ;\n").unwrap();
+        let err =
+            check_src(": f ( !Slice[i64] 'T -- i64 'T ) | x | 0 >usize &> @ x ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `f` (line 1)\n  \
+             `&>` expected a slice, found `!Slice[i64]`\n  \
+             note: declared ( -- )"
+        );
+        let err = check_src(": f ( Slice[i64] i64 'T -- 'T ) | x | | v | 0 >usize &!> v ! x ;\n")
+            .unwrap_err();
+        assert!(
+            err.contains("`&!>` expected a mutable slice, found `Slice[i64]`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// The poly twin of `check_slice_offset`: a `usize` passes, an `i64`
+    /// literal passes (the monomorphic path admits one too), a computed `i64`
+    /// needs the explicit conversion, and a bare variable is a located error.
+    /// Unlike the array twin there is no count to bound a literal against.
+    #[test]
+    fn check_poly_slice_offset_admits_usize_and_literals_only() {
+        let sig = ref_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let span = Span::default();
+        let slot = |pt: PolyType, lit: Option<i64>| PolySlot {
+            pt,
+            int_val: lit,
+            quot: None,
+        };
+        check_poly_slice_offset(
+            &slot(PolyType::Concrete(Type::Usize), None),
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect("a `usize` offset passes");
+        check_poly_slice_offset(
+            &slot(PolyType::Concrete(Type::I64), Some(9999)),
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect("a literal needs no compile-time bound: the trap is at runtime");
+        check_poly_slice_offset(
+            &slot(PolyType::Concrete(Type::I64), None),
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect_err("a computed i64 needs the explicit `>usize`");
+        check_poly_slice_offset(&slot(PolyType::Var(0), None), &ctx, span, "&>", &sig)
+            .expect_err("a bare type variable is not an offset");
+    }
+
+    /// R12 (poly half): a mutable view is exclusivity-tracked in a generic
+    /// body too -- but by the poly walk's *move* tracking, not by a reborrow:
+    /// a non-`Copy` local is consumed on read there, so a mutable view is
+    /// single-use per binding where the concrete path reborrows it. Ruled on
+    /// here rather than discovered in a golden (see the phase's exit notes).
+    #[test]
+    fn poly_mutable_slice_local_is_single_use() {
+        check_src(": f ( Slice[i64] 'T -- usize usize 'T ) | x | | s | s len s len x ;\n").unwrap();
+        let err =
+            check_src(": f ( !Slice[i64] 'T -- usize usize 'T ) | x | | s | s len s len x ;\n")
+                .unwrap_err();
+        assert!(
+            err.contains("use after move in `f`") && err.contains("local `s` is linear"),
+            "unexpected message: {err}"
         );
     }
 

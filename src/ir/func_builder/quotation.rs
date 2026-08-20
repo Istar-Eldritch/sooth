@@ -58,6 +58,7 @@ impl<'a> FuncBuilder<'a> {
                     name: name.clone(),
                     ty: self.value_type(*value),
                     referent: self.ref_inner.get(value).copied(),
+                    ref_mutable: self.ref_mutable.get(value).copied().unwrap_or(false),
                 })
                 .collect();
             self.materialized.push(MaterializedQuot {

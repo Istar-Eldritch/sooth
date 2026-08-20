@@ -188,12 +188,17 @@ fn check_term(
                     binding.quot,
                     binding.surviving,
                 );
-                match ref_parts(ty, refs) {
+                // P7 slice 3c (R12): a slice local reborrows here too. It is
+                // not a `Type::Ref`, so `ref_parts` alone would send a view
+                // down the owned-value arm below, where a non-linear value is
+                // "merely read" -- and a mutable view named twice would be two
+                // live `&!` into one buffer with nothing to say so.
+                match borrow_mutability(ty, refs) {
                     // Naming a reference local is a reborrow, not a move.
                     // A mutable one suspends its place: a second reborrow while
                     // anything derived from the first is still live would be two
                     // live mutable references into one place.
-                    Some((_, mutable)) => {
+                    Some(mutable) => {
                         if mutable {
                             if let Some(id) = live_deriv(&stack, scope, prov, live, at, |d| {
                                 d.reborrow && d.place == *name
@@ -1661,6 +1666,36 @@ mod tests {
         let tokens = crate::lexer::lex(src).unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         crate::check::check(&mut module)
+    }
+
+    /// P7 slice 3c (R12): naming a slice local is a *reborrow*, like naming a
+    /// reference local -- so a mutable view whose derivation is still live
+    /// cannot be named again, and two live mutable sub-views of one buffer are
+    /// the coarse borrow table's rejection rather than a silent accept.
+    ///
+    /// The shared row is what stops the arm from simply suspending every
+    /// slice: a `Slice[T]` is `Copy`, so naming one twice is as free as naming
+    /// a `&T` twice.
+    #[test]
+    fn naming_a_mutable_slice_local_reborrows_and_suspends_its_place() {
+        check_src(
+            ": main ( -- )\n  0 4 fill | buf |\n  &buf slice | s |\n  \
+             s 0 >usize 2 >usize subslice | a |\n  \
+             s 2 >usize 2 >usize subslice | b |\n  \
+             a len . b len .\n  buf drop\n;\n",
+        )
+        .expect("two live shared sub-views of one buffer conflict with nothing");
+        let err = check_src(
+            ": main ( -- )\n  0 4 fill | buf |\n  &!buf slice | s |\n  \
+             s 0 >usize 2 >usize subslice | a |\n  \
+             s 2 >usize 2 >usize subslice | b |\n  \
+             a len . b len .\n  buf drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot reborrow `s` in `main` while a reference derived from it is live"),
+            "unexpected message: {err}"
+        );
     }
 
     /// Slice 10c (R-P3-1a): `branch`'s two branch operands arrive in *both*

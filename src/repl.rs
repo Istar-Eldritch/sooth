@@ -2684,6 +2684,7 @@ impl Session {
             &self.structs,
             &self.enums,
             &self.arrays,
+            &mut self.slices,
             &[],
             None,
             &mut builtin_overloads,

@@ -2,8 +2,9 @@
 //!
 //! Phase 3 ships the **shared** half: `slice` from a `&[T N]`, `subslice`,
 //! `len` answering a runtime length, and the shared `&>` receiver bounds-
-//! checked against that length. Mutable views, their exclusivity tracking, and
-//! the reborrow-chain test land in Phase 4.
+//! checked against that length. Phase 4 adds the mutable half -- `slice` off a
+//! `&![T N]`, mutable `subslice`, the `&!>` receiver -- together with the
+//! exclusivity rules that make it safe and the reborrow-chain test (R13).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -283,4 +284,249 @@ fn declaring_a_type_named_slice_is_rejected() {
         err.contains("`Slice` is reserved for the slice type syntax (`Slice[T]`)"),
         "unexpected message: {err}"
     );
+}
+
+// --- Phase 4: mutable views, their borrow rules, and the reborrow chain. ---
+
+/// R10.3/R12, the mutable twin of the shared divide-and-conquer golden: `dbl`
+/// takes one mutable half at a time, so the coarse borrow table never sees two
+/// live `&!` views of the same buffer, and the mutation each leaf performs is
+/// visible through the buffer afterwards. The view is built one frame up, in
+/// `dbl_all`, off a declared `&![i64 5]` *parameter*: the mutability of a
+/// reference that arrives as a parameter comes from its declared type, not
+/// from the borrow that produced it.
+#[test]
+fn recursive_divide_and_conquer_over_mutable_subslices_runs() {
+    let src = "\
+: dbl ( !Slice[i64] -- )
+  | s |
+  s len | n |
+  n 0 >usize eq ~[
+  ] ~[
+    n 1 >usize eq ~[
+      s 0 >usize &!> | e | e @ | v | e v v add !
+    ] ~[
+      n >i64 1 shr >usize | mid |
+      s 0 >usize mid subslice dbl
+      s mid n mid sub subslice dbl
+    ] if
+  ] if
+;
+
+: dbl_all ( &![i64 5] -- ) slice dbl ;
+
+: main ( -- )
+  3 5 fill | buf |
+  &!buf dbl_all
+  &buf 0 >usize &> @ .
+  &buf 4 >usize &> @ .
+  buf drop
+;
+";
+    let prog = Scratch::write("recmut", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "6\n6\n");
+    assert_eq!(code, 0);
+}
+
+/// R4: a **mutable** view is not `Copy`, so `dup` on one is the exclusivity
+/// error a `&!T` gets, word for word. The shared twin (`dup_on_shared_slice_ok`
+/// above) is what keeps the arm from simply answering "never `Copy`".
+#[test]
+fn dup_on_mutable_slice_is_error() {
+    let prog = Scratch::write(
+        "dupmut",
+        ": main ( -- )\n  7 4 fill | buf |\n  &!buf slice | s |\n  s dup len . len .\n  buf drop\n;\n",
+    );
+    let err = driver::build(prog.path()).unwrap_err();
+    assert_eq!(
+        err,
+        "error: cannot `dup` a value of type `!Slice[i64]` in `main` (line 4)\n  \
+         `!Slice[i64]` is exclusive: at most one may be live for a place, so copying it \
+         would make a second one; use it where it is, or borrow again once it is consumed\n  \
+         note: declared ( -- )"
+    );
+}
+
+/// R12: two mutable sub-views of one buffer, both live at once, are rejected
+/// by the coarse borrow table -- range-awareness (they are disjoint here) is
+/// deliberately out of scope. The rejection lands on the *second* derivation:
+/// naming `s` again reborrows a place the first sub-view still holds.
+#[test]
+fn two_simultaneous_mutable_subslices_is_error() {
+    let src = "\
+: main ( -- )
+  0 4 fill | buf |
+  &!buf slice | s |
+  s 0 >usize 2 >usize subslice | a |
+  s 2 >usize 2 >usize subslice | b |
+  a len . b len .
+  buf drop
+;
+";
+    let prog = Scratch::write("twomut", src);
+    let err = driver::build(prog.path()).unwrap_err();
+    assert!(
+        err.contains("cannot reborrow `s` in `main` while a reference derived from it is live")
+            && err.contains("a mutable borrow suspends its place"),
+        "unexpected message: {err}"
+    );
+    // The shared twin is legal: two live shared views of one buffer conflict
+    // with nothing, so the rejection above is about mutability, not about
+    // sub-viewing twice.
+    let shared = src.replace("&!buf", "&buf");
+    let prog = Scratch::write("twoshared", &shared);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "2\n2\n");
+    assert_eq!(code, 0);
+}
+
+/// R12: a shared view cannot coexist with a mutable one over the same buffer.
+/// The view carries its receiver's region, so the second borrow of `buf` is
+/// what reports -- the same diagnostic two overlapping `&`/`&!` borrows get.
+#[test]
+fn a_shared_view_alongside_a_mutable_view_is_error() {
+    let src = "\
+: main ( -- )
+  0 4 fill | buf |
+  &!buf slice | m |
+  &buf slice | s |
+  m len . s len .
+  buf drop
+;
+";
+    let prog = Scratch::write("mixed", src);
+    let err = driver::build(prog.path()).unwrap_err();
+    assert!(
+        err.contains("`&buf` conflicts with a live borrow of `buf`")
+            && err.contains("never a `&` alongside a `&!`"),
+        "unexpected message: {err}"
+    );
+}
+
+/// R13 (OQ3): the reborrow chain the brief's probe never covered --
+/// `&!buffer -> &!Slice -> &!sub-slice -> &!element` -- mutating through the
+/// **innermost** hop while both outer hops are still live (each is read after
+/// the write). The middle hops are references stored *inside an aggregate*
+/// (a `{ptr, len}` view), which is the shape no earlier chain had.
+#[test]
+fn mutate_innermost_hop_of_buffer_slice_subslice_element_chain_while_outer_live() {
+    let src = "\
+: main ( -- )
+  0 4 fill | buf |
+  &!buf slice | s |
+  s 1 >usize 2 >usize subslice | half |
+  half 1 >usize &!> | e |
+  e 9 !
+  half 0 >usize &!> @ .
+  s len .
+  &buf 2 >usize &> @ .
+  buf drop
+;
+";
+    let prog = Scratch::write("chain", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    // The sub-view starts at buffer index 1, so its element 1 is buffer
+    // element 2: the write lands there and nowhere else, and both outer hops
+    // still answer for themselves afterwards.
+    assert_eq!(stdout, "0\n4\n9\n");
+    assert_eq!(code, 0);
+}
+
+/// R11: the concrete-element poly consumer. A *generic* word indexes and
+/// sub-ranges a `Slice[i64]` -- the shape Phase 3 could only reject -- and
+/// stores through a `!Slice[i64]`, so the poly walk's slice arms are exercised
+/// end to end rather than only at the checker.
+///
+/// `set_head` writes with a single derivation on purpose: in a generic body a
+/// non-`Copy` local is move-tracked per binding, so a mutable view (and the
+/// `&!` element reference cut from it) is single-use there, where the
+/// monomorphic path reborrows a named local. A read-modify-write through a
+/// mutable view therefore needs the concrete path; see the phase's exit notes.
+#[test]
+fn poly_body_indexes_subslices_and_mutates_a_slice() {
+    let src = "\
+: head_of ( Slice[i64] 'T -- i64 'T )
+  | mark |
+  1 >usize 2 >usize subslice
+  0 >usize &> @
+  mark
+;
+: set_head ( !Slice[i64] i64 'T -- 'T )
+  | mark | | v |
+  0 >usize &!> v !
+  mark
+;
+: main ( -- )
+  4 3 fill | buf |
+  &buf slice 0 head_of drop .
+  &!buf slice 5 0 set_head drop
+  &buf 0 >usize &> @ .
+  buf drop
+;
+";
+    let prog = Scratch::write("polyslice", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "4\n5\n");
+    assert_eq!(code, 0);
+}
+
+/// R1.1 (phase 4): the mutable spelling is reserved for the same reason the
+/// shared one is -- `!Slice[T]` is intercepted ahead of every user registry,
+/// so a declaration under that name would be unreachable, not shadowed.
+#[test]
+fn declaring_a_type_named_mutable_slice_is_rejected() {
+    let prog = Scratch::write("reserved-mut", "type: !Slice a i64 ;\n: main ( -- ) ;\n");
+    let err = driver::build(prog.path()).unwrap_err();
+    assert!(
+        err.contains("`!Slice` is reserved for the slice type syntax"),
+        "unexpected message: {err}"
+    );
+}
+
+/// R12/R2.2: a mutable buffer reference captured into a *materialized*
+/// quotation, then sliced and written through inside it. The capture crosses
+/// an env boundary, where the reference is a bare pointer and its mutability
+/// travels beside it -- the one path where the view's mutability is not
+/// readable off the value at all.
+#[test]
+fn a_materialized_quotation_slices_a_captured_mutable_reference() {
+    let src = "\
+: apply ( [ -- ] -- ) call ;
+: main ( -- )
+  0 4 fill | buf |
+  &!buf | r |
+  [ r slice 0 >usize &!> 5 ! ] apply
+  &buf 0 >usize &> @ .
+  buf drop
+;
+";
+    let prog = Scratch::write("capture", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+/// R12: a mutable buffer reference that reaches `slice` through a **branch
+/// join** -- the arms project two different fields of one owner, so the joined
+/// value really is a `Phi` of two distinct pointers (two arms yielding the
+/// *same* value are joined without one, and would not exercise this). A reference lowers to an opaque pointer, so the join is
+/// the second place (with the env capture above) where the view's mutability
+/// has to be carried alongside the value rather than read off it.
+#[test]
+fn a_view_built_from_a_joined_mutable_reference_writes_through() {
+    let src = "\
+type: W a [i64 4] b [i64 4] ;
+: main ( -- )
+  0 4 fill 0 4 fill W | w |
+  1 1 eq ~[ &!w &!a ] ~[ &!w &!b ] if slice | s |
+  s 0 >usize &!> 9 !
+  &w &a 0 >usize &> @ .
+  w drop
+;
+";
+    let prog = Scratch::write("joined", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
 }

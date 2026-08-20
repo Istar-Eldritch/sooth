@@ -6,9 +6,27 @@ use super::*;
 impl<'a> FuncBuilder<'a> {
     /// Push a reference `Value` (always `IrType::Ptr`) and record what it
     /// points at, since the `IrType` deliberately no longer says.
-    pub(super) fn push_reference(&mut self, ptr: Value, referent: IrType) {
-        self.ref_inner.insert(ptr, referent);
+    pub(super) fn push_reference(&mut self, ptr: Value, referent: IrType, mutable: bool) {
+        self.record_reference(ptr, referent, mutable);
         self.stack.push(ptr);
+    }
+
+    /// Record what a reference `Value` points at, and whether it points there
+    /// mutably. The single insertion point for both maps, so the two cannot
+    /// drift: a reference known to `ref_inner` and missing from `ref_mutable`
+    /// would make `slice` mint a view of the wrong mutability.
+    pub(super) fn record_reference(&mut self, ptr: Value, referent: IrType, mutable: bool) {
+        self.ref_inner.insert(ptr, referent);
+        self.ref_mutable.insert(ptr, mutable);
+    }
+
+    /// Whether a reference `Value` is a mutable one -- `slice`'s only source
+    /// for the mutability of the view it builds.
+    fn reference_is_mutable(&self, ptr: Value) -> bool {
+        *self
+            .ref_mutable
+            .get(&ptr)
+            .expect("checked: every reference value records its mutability")
     }
 
     /// The referent shape of a reference `Value`.
@@ -38,7 +56,7 @@ impl<'a> FuncBuilder<'a> {
                     self.bounds_check_dynamic(index, len, line);
                     let stride = self.slices.stride[id.index()];
                     let addr = self.elem_addr(ptr, index, stride);
-                    self.push_reference(addr, self.slices.elem[id.index()]);
+                    self.push_reference(addr, self.slices.elem[id.index()], mutable);
                     return;
                 }
                 let IrType::Array(id) = self.referent_of(base) else {
@@ -47,7 +65,7 @@ impl<'a> FuncBuilder<'a> {
                 let (stride, elem, count) = self.array_parts(id);
                 self.bounds_check(index, count, line);
                 let addr = self.elem_addr(base, index, stride);
-                self.push_reference(addr, elem);
+                self.push_reference(addr, elem, mutable);
             }
             "^" => {
                 let base = self.stack.pop().expect("&^: cell reference");
@@ -59,7 +77,7 @@ impl<'a> FuncBuilder<'a> {
                 // at that pointer, so the projection reads it out.
                 let cell_ptr = self.fresh_value(IrType::Ptr);
                 self.push_instr(Instr::Load(cell_ptr, base));
-                self.push_reference(cell_ptr, payload);
+                self.push_reference(cell_ptr, payload, mutable);
             }
             _ => {
                 // P7 slice 1 (R6): a receiver-directed projection `&f`/`&!f`.
@@ -78,7 +96,7 @@ impl<'a> FuncBuilder<'a> {
                     }
                     let field = self.structs.layouts[id.index()].fields[fi];
                     let addr = self.field_ptr(base, field.offset);
-                    self.push_reference(addr, field.ty);
+                    self.push_reference(addr, field.ty, mutable);
                     return;
                 }
                 // Phase 6 slice 3 (R6): the variant twin, keyed by `EnumId`
@@ -94,12 +112,12 @@ impl<'a> FuncBuilder<'a> {
                     let payload_offset = self.enums.layouts[id.index()].payload_offset;
                     let field = self.enums.layouts[id.index()].variants[vi].fields[fi];
                     let addr = self.field_ptr(base, payload_offset + field.offset);
-                    self.push_reference(addr, field.ty);
+                    self.push_reference(addr, field.ty, mutable);
                     return;
                 }
                 let local = self.locals.iter().find(|(n, _)| n == rest).map(|(_, v)| *v);
                 match local {
-                    Some(value) => self.lower_borrow(value),
+                    Some(value) => self.lower_borrow(value, mutable),
                     // R1: a module static, which unlike a local has a data
                     // symbol to hand out an address for -- so a *scalar*
                     // static is borrowable where a scalar local is not. Looked
@@ -112,7 +130,7 @@ impl<'a> FuncBuilder<'a> {
                             );
                         let addr = self.fresh_value(IrType::Ptr);
                         self.push_instr(Instr::StaticAddr(addr, rest.to_string()));
-                        self.push_reference(addr, ty);
+                        self.push_reference(addr, ty, mutable);
                     }
                 }
             }
@@ -125,7 +143,7 @@ impl<'a> FuncBuilder<'a> {
     /// no address of its own; `&^`/`&!^` reads a cell reference by loading the
     /// pointer out of the place holding it, so borrowing a cell local first
     /// gives it a place.
-    fn lower_borrow(&mut self, value: Value) {
+    fn lower_borrow(&mut self, value: Value, mutable: bool) {
         let referent = self.value_type(value);
         let ptr = match referent {
             IrType::OwnedCell(_) => {
@@ -140,7 +158,7 @@ impl<'a> FuncBuilder<'a> {
                 p
             }
         };
-        self.push_reference(ptr, referent);
+        self.push_reference(ptr, referent, mutable);
     }
 
     /// `@` fetches through a reference, `!` stores, `+!` adds in place.
@@ -451,7 +469,11 @@ impl<'a> FuncBuilder<'a> {
                 let (_, _, count) = self.array_parts(id);
                 let len = self.fresh_value(IrType::Usize);
                 self.push_instr(Instr::Const(len, i64::from(count)));
-                let slice_id = self.slice_id_of(self.arrays.layouts[id.index()].elem, false);
+                // R12: the view is mutable exactly when the buffer reference
+                // it is cut from is, which is the one thing the receiver's
+                // `IrType::Ptr` does not say -- hence `ref_mutable`.
+                let mutable = self.reference_is_mutable(base);
+                let slice_id = self.slice_id_of(self.arrays.layouts[id.index()].elem, mutable);
                 let view = self.build_slice_value(slice_id, base, len);
                 self.stack.push(view);
             }
@@ -1024,6 +1046,43 @@ mod tests {
         );
         assert_eq!(b.slice_id_of(IrType::I64, false), SliceId::from_index(1));
         assert_eq!(b.slice_id_of(IrType::I64, true), SliceId::from_index(0));
+    }
+
+    /// P7 slice 3c (R12, phase 4): `slice`'s only source for the mutability of
+    /// the view it builds. A reference lowers to the opaque `IrType::Ptr`, so
+    /// the bit lives in `ref_mutable`, recorded in lockstep with the referent
+    /// by the one helper both maps go through.
+    #[test]
+    fn record_reference_keeps_the_referent_and_its_mutability_together() {
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let slices = Slices::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                slices: &slices,
+                statics: crate::ir::empty_statics(),
+            },
+        );
+        let shared = b.fresh_value(IrType::Ptr);
+        let mutable = b.fresh_value(IrType::Ptr);
+        b.record_reference(shared, IrType::I64, false);
+        b.record_reference(mutable, IrType::I64, true);
+        assert!(!b.reference_is_mutable(shared));
+        assert!(b.reference_is_mutable(mutable));
+        assert_eq!(b.ref_inner[&shared], IrType::I64);
+        assert_eq!(b.ref_inner[&mutable], IrType::I64);
     }
 
     #[test]
