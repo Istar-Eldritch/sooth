@@ -129,16 +129,93 @@ pub struct ModuleInfo {
     pub selective: std::collections::HashMap<String, u32>,
 }
 
-/// Phase 4 slice 5a (R6): a parsed `import:` form:
-/// `import: <qualifier> [ | <name>... | ] "<path>" ;`. The optional selective
-/// name list is empty when the `| ... |` clause is absent (D9, phase 4). Spans
-/// locate the `import:` keyword and each selective name for later diagnostics.
+/// P8 slice 1a (F2): where a module-name import's first segment is rooted.
+/// Syntactic, never inferred: a `self::` prefix names the importing file's
+/// own package, its absence names a `depends:` entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportAnchor {
+    Dependency,
+    SelfPackage,
+}
+
+/// A path-derived module name as written in an import target, split on `::`.
+/// For a `Dependency` anchor the first segment is the package name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleName {
+    pub anchor: ImportAnchor,
+    pub segments: Vec<String>,
+}
+
+impl ModuleName {
+    /// The name as written, `self::` prefix included, for diagnostics.
+    pub fn render(&self) -> String {
+        let joined = self.segments.join("::");
+        match self.anchor {
+            ImportAnchor::SelfPackage => format!("self::{joined}"),
+            ImportAnchor::Dependency => joined,
+        }
+    }
+}
+
+/// What an `import:` names: today's quoted path (manifest-less files only) or
+/// a module name resolved against the package graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportTarget {
+    Path(String),
+    Module(ModuleName),
+}
+
+impl ImportTarget {
+    pub fn render(&self) -> String {
+        match self {
+            ImportTarget::Path(p) => p.clone(),
+            ImportTarget::Module(m) => m.render(),
+        }
+    }
+}
+
+/// How an import binds the names it brings in. A `Qualified` import always
+/// carries a concrete qualifier (defaulted to the target's last segment when
+/// the source elides it); `Wildcard` (S2's `import: intrinsics * ;`) carries
+/// none at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportBinding {
+    Qualified {
+        qualifier: String,
+        /// The `| name... |` clause, empty when absent. Each name keeps its
+        /// span: every R20/R21 selective-import diagnostic is located from it.
+        selective: Vec<(String, Span)>,
+    },
+    Wildcard,
+}
+
+/// Phase 4 slice 5a (R6), regrammared by P8 slice 1a (OQ3): a parsed
+/// `import:` form, `import: <target> [<qualifier>] [ | <name>... | ] ;`.
+/// `span` locates the `import:` keyword for later diagnostics.
 #[derive(Debug, Clone)]
 pub struct Import {
-    pub qualifier: String,
-    pub selective: Vec<(String, Span)>,
-    pub path: String,
+    pub target: ImportTarget,
+    pub binding: ImportBinding,
     pub span: Span,
+}
+
+impl Import {
+    /// The bound qualifier, or `None` for a wildcard import (which binds no
+    /// qualifier at all, rather than eliding one).
+    pub fn qualifier(&self) -> Option<&str> {
+        match &self.binding {
+            ImportBinding::Qualified { qualifier, .. } => Some(qualifier),
+            ImportBinding::Wildcard => None,
+        }
+    }
+
+    /// The `| name... |` clause, empty for a wildcard import.
+    pub fn selective(&self) -> &[(String, Span)] {
+        match &self.binding {
+            ImportBinding::Qualified { selective, .. } => selective,
+            ImportBinding::Wildcard => &[],
+        }
+    }
 }
 
 impl Module {

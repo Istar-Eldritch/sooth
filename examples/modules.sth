@@ -4,8 +4,8 @@
 \ entry file importing both and using them together — the type via a receiver-
 \ directed projection (`&x`), the words via their qualifier (`ops::point-add`/`len2`).
 
-import: point | Point | "modules_point.sth" ;
-import: ops | len2 point-add | "modules_ops.sth" ;
+import: "modules_point.sth" point | Point | ;
+import: "modules_ops.sth" ops | len2 point-add | ;
 
 : main ( -- )
   1 2 Point 3 4 Point point-add

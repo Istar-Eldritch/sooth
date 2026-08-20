@@ -1,4 +1,4 @@
-import: c | times | "../lib/combinators.sth" ;
+import: "../lib/combinators.sth" c | times | ;
 
 : main ( -- )
   0 1000000 ~[ 1 add add ] times . ;    \ prints 500000500000: sums i+1 for i in

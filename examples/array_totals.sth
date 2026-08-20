@@ -7,7 +7,7 @@
 \ loops with a synthesized `>usize` index, `&arr i &> @` reads and a
 \ `&!arr i &!> v !` write.
 
-import: c "../lib/combinators.sth" ;
+import: "../lib/combinators.sth" c ;
 
 : scores ( -- [i64 5] )
   0 5 fill | s |

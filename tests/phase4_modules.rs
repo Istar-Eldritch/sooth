@@ -71,7 +71,7 @@ fn two_files_word_import_compiles_and_runs() {
     c.write("lib.sth", ": p ( -- i64 ) 42 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::p . ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) lib::p . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "42\n");
@@ -86,7 +86,7 @@ fn imported_type_is_nameable_and_runs() {
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: mk ( -- geo::Point ) 3 4 geo::Point ;\n: main ( -- ) mk &x @ swap drop . ;\n",
+        "import: \"geo.sth\" geo ;\n: mk ( -- geo::Point ) 3 4 geo::Point ;\n: main ( -- ) mk &x @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "3\n");
@@ -102,7 +102,7 @@ fn same_named_types_in_two_modules_coexist() {
     c.write("b.sth", "type: Point v i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: a \"a.sth\" ;\nimport: b \"b.sth\" ;\n: main ( -- ) 1 a::Point &x @ swap drop . 2 b::Point &v @ swap drop . ;\n",
+        "import: \"a.sth\" a ;\nimport: \"b.sth\" b ;\n: main ( -- ) 1 a::Point &x @ swap drop . 2 b::Point &v @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n2\n");
@@ -113,8 +113,8 @@ fn same_named_types_in_two_modules_coexist() {
 fn import_cycle_is_located_error_naming_both() {
     // Criterion 4: a mutual import is a located cycle error naming both files.
     let c = Closure::new("cycle");
-    c.write("a.sth", "import: b \"b.sth\" ;\n: main ( -- ) 0 . ;\n");
-    c.write("b.sth", "import: a \"a.sth\" ;\n: q ( -- i64 ) 1 ;\n");
+    c.write("a.sth", "import: \"b.sth\" b ;\n: main ( -- ) 0 . ;\n");
+    c.write("b.sth", "import: \"a.sth\" a ;\n: q ( -- i64 ) 1 ;\n");
     let err = build_err(&c.path("a.sth"));
     assert!(err.contains("cycle"), "names the failure: {err}");
     assert!(err.contains("a.sth"), "names the first file: {err}");
@@ -125,7 +125,7 @@ fn import_cycle_is_located_error_naming_both() {
 fn self_import_is_located_error() {
     // Criterion 5: a file importing itself is the degenerate cycle.
     let c = Closure::new("self-import");
-    let entry = c.write("a.sth", "import: self \"a.sth\" ;\n: main ( -- ) 0 . ;\n");
+    let entry = c.write("a.sth", "import: \"a.sth\" self ;\n: main ( -- ) 0 . ;\n");
     let err = build_err(&entry);
     assert!(err.contains("cycle"), "a self-import is a cycle: {err}");
     assert!(err.contains("itself"), "names the degenerate case: {err}");
@@ -139,7 +139,7 @@ fn missing_import_file_is_located_error() {
     let c = Closure::new("missing");
     let entry = c.write(
         "main.sth",
-        "import: x \"nope.sth\" ;\n: main ( -- ) 0 . ;\n",
+        "import: \"nope.sth\" x ;\n: main ( -- ) 0 . ;\n",
     );
     let err = build_err(&entry);
     assert!(err.contains("nope.sth"), "names the missing path: {err}");
@@ -155,15 +155,15 @@ fn diamond_import_dedupes_by_canonical_path() {
     c.write("base.sth", ": b ( -- i64 ) 100 ;\nexport: b ;\n");
     c.write(
         "left.sth",
-        "import: base \"base.sth\" ;\n: lf ( -- i64 ) base::b ;\nexport: lf ;\n",
+        "import: \"base.sth\" base ;\n: lf ( -- i64 ) base::b ;\nexport: lf ;\n",
     );
     c.write(
         "right.sth",
-        "import: base \"base.sth\" ;\n: rt ( -- i64 ) base::b ;\nexport: rt ;\n",
+        "import: \"base.sth\" base ;\n: rt ( -- i64 ) base::b ;\nexport: rt ;\n",
     );
     let entry = c.write(
         "main.sth",
-        "import: l \"left.sth\" ;\nimport: r \"right.sth\" ;\n: main ( -- ) l::lf r::rt add . ;\n",
+        "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) l::lf r::rt add . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "200\n");
@@ -184,7 +184,7 @@ fn prelude_word_called_from_an_imported_module_resolves() {
     );
     let entry = c.write(
         "main.sth",
-        "import: p \"parity.sth\" ;\n: main ( -- ) 7 p::parity . ;\n",
+        "import: \"parity.sth\" p ;\n: main ( -- ) 7 p::parity . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "20\n");
@@ -200,11 +200,11 @@ fn import_path_is_relative_to_importing_file() {
     c.write("sub/leaf.sth", ": w ( -- i64 ) 7 ;\nexport: w ;\n");
     c.write(
         "sub/mid.sth",
-        "import: leaf \"leaf.sth\" ;\n: v ( -- i64 ) leaf::w ;\nexport: v ;\n",
+        "import: \"leaf.sth\" leaf ;\n: v ( -- i64 ) leaf::w ;\nexport: v ;\n",
     );
     let entry = c.write(
         "main.sth",
-        "import: m \"sub/mid.sth\" ;\n: main ( -- ) m::v . ;\n",
+        "import: \"sub/mid.sth\" m ;\n: main ( -- ) m::v . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n");
@@ -223,7 +223,7 @@ fn unexported_word_is_not_exported_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: queue \"queue.sth\" ;\n: main ( -- ) queue::grow . ;\n",
+        "import: \"queue.sth\" queue ;\n: main ( -- ) queue::grow . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -247,7 +247,7 @@ fn absent_word_in_module_is_unknown_not_unexported() {
     c.write("queue.sth", ": p ( -- i64 ) 42 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: queue \"queue.sth\" ;\n: main ( -- ) queue::missing . ;\n",
+        "import: \"queue.sth\" queue ;\n: main ( -- ) queue::missing . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -265,7 +265,7 @@ fn qualified_constructor_destructure_and_projection_all_resolve() {
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: main ( -- ) 1 2 geo::Point &x @ . &!x 9 ! &x @ . geo::Point> drop drop ;\n",
+        "import: \"geo.sth\" geo ;\n: main ( -- ) 1 2 geo::Point &x @ . &!x 9 ! &x @ . geo::Point> drop drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n9\n");
@@ -280,7 +280,7 @@ fn unexported_type_is_not_exported_error() {
     c.write("geo.sth", "type: Point x i64 ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: mk ( -- geo::Point ) 3 geo::Point ;\n: main ( -- ) mk drop ;\n",
+        "import: \"geo.sth\" geo ;\n: mk ( -- geo::Point ) 3 geo::Point ;\n: main ( -- ) mk drop ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -301,7 +301,7 @@ fn unexported_type_named_only_in_an_effect_is_not_exported_error() {
     c.write("geo.sth", "type: Point x i64 ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo \"geo.sth\" ;\n: takes ( geo::Point -- ) drop ;\n: main ( -- ) 0 . ;\n",
+        "import: \"geo.sth\" geo ;\n: takes ( geo::Point -- ) drop ;\n: main ( -- ) 0 . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -314,31 +314,24 @@ fn unexported_type_named_only_in_an_effect_is_not_exported_error() {
 
 #[test]
 fn malformed_import_form_is_located_parse_error() {
-    // Criterion 14: a malformed `import:` (missing qualifier or path string,
-    // unterminated before `;`) is a located parse error naming the construct
-    // and what it expected, not a generic token-level message.
+    // Criterion 14: a malformed `import:` (no target at all, or unterminated
+    // before `;`) is a located parse error naming the construct and what it
+    // expected, not a generic token-level message. Neither an elided qualifier
+    // (`import: "lib.sth" ;`, defaulting to the file stem) nor a bare module
+    // name (`import: lib ;`) is malformed under the P8 slice 1a grammar.
     let c = Closure::new("malformed-import");
 
-    // Missing qualifier: `import:` followed straight by the path string.
-    let missing_qualifier = c.write("mq.sth", "import: \"lib.sth\" ;\n: main ( -- ) 0 . ;\n");
-    let err = build_err(&missing_qualifier);
+    // No target: `import:` followed straight by its terminator.
+    let missing_target = c.write("mt.sth", "import: ;\n: main ( -- ) 0 . ;\n");
+    let err = build_err(&missing_target);
     assert!(
-        err.contains("parse error") && err.contains("`import:`") && err.contains("qualifier"),
-        "names `import:` and the missing qualifier: {err}"
+        err.contains("parse error") && err.contains("`import:`") && err.contains("target"),
+        "names `import:` and the missing target: {err}"
     );
-    assert!(err.contains("line 1"), "locates the qualifier error: {err}");
+    assert!(err.contains("line 1"), "locates the target error: {err}");
 
-    // Missing path string: qualifier present, then `;` with no `\"...\"`.
-    let missing_path = c.write("mp.sth", "import: lib ;\n: main ( -- ) 0 . ;\n");
-    let err = build_err(&missing_path);
-    assert!(
-        err.contains("parse error") && err.contains("`import:`") && err.contains("path"),
-        "names `import:` and the missing path string: {err}"
-    );
-    assert!(err.contains("line 1"), "locates the path error: {err}");
-
-    // Unterminated before `;`: qualifier and path present, no terminator.
-    let unterminated = c.write("un.sth", "import: lib \"lib.sth\"\n: main ( -- ) 0 . ;\n");
+    // Unterminated before `;`: target and qualifier present, no terminator.
+    let unterminated = c.write("un.sth", "import: \"lib.sth\" lib \n: main ( -- ) 0 . ;\n");
     let err = build_err(&unterminated);
     assert!(
         err.contains("parse error") && err.contains("`import:`") && err.contains("`;`"),
@@ -374,7 +367,7 @@ fn exported_word_naming_private_type_is_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) 0 . ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) 0 . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -395,7 +388,7 @@ fn exported_word_naming_exported_type_is_accepted() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk lib::Res> . ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) lib::mk lib::Res> . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "1\n");
@@ -415,7 +408,7 @@ fn imported_linear_type_dropped_without_importing_it_is_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) lib::mk drop ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -427,7 +420,7 @@ fn imported_linear_type_dropped_without_importing_it_is_error() {
         "names the declaring module and the cause: {err}"
     );
     assert!(
-        err.contains("add `Res` to the import (`import: lib | Res | \"...\"`)"),
+        err.contains("add `Res` to the import (`import: \"...\" lib | Res | ;`)"),
         "names the remedy: {err}"
     );
 }
@@ -443,7 +436,7 @@ fn imported_linear_type_dropped_after_selective_import_ok() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib | Res | \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
+        "import: \"lib.sth\" lib | Res | ;\n: main ( -- ) lib::mk drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
@@ -471,7 +464,7 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: lib \"lib.sth\" ;\n",
+            "import: \"lib.sth\" lib ;\n",
             ": hold ( -- lib::Res ) lib::mk ;\n",
             ": main ( -- ) hold | r | &r lib::peek . r lib::sink ;\n",
         ),
@@ -504,7 +497,7 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n: main ( -- ) [ 1 add ] lib::with . ;\n",
+        "import: \"lib.sth\" lib ;\n: main ( -- ) [ 1 add ] lib::with . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(
@@ -531,7 +524,7 @@ fn own_module_operator_overload_reachable_bare_in_multi_module() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: lib \"lib.sth\" ;\n",
+            "import: \"lib.sth\" lib ;\n",
             "type: Vec2 x i64 y i64 ;\n",
             ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
             ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 add &x @ . drop ;\n",
@@ -558,7 +551,7 @@ fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: lib \"lib.sth\" ;\n",
+            "import: \"lib.sth\" lib ;\n",
             "type: Vec2 x i64 y i64 ;\n",
             ": add ( Vec2 Vec2 -- Vec2 ) drop ;\n",
             ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 add Vec2> drop ;\n",
@@ -619,7 +612,7 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: x \"x.sth\" ;\n",
+            "import: \"x.sth\" x ;\n",
             ": main ( -- ) 1 x::mk 2 x::mk add &v @ swap drop . ;\n",
         ),
     );
@@ -659,7 +652,7 @@ fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: v | Vec2 add | \"v.sth\" ;\n",
+            "import: \"v.sth\" v | Vec2 add | ;\n",
             ": main ( -- )\n",
             "  1 2 Vec2 3 4 Vec2 add &x @ swap drop .\n",
             "  1 2 add . ;\n",
@@ -710,7 +703,7 @@ fn selective_import_exposes_names_unqualified() {
     c.write("lib.sth", ": p ( -- i64 ) 42 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: lib | p | \"lib.sth\" ;\n: main ( -- ) p . lib::p . ;\n",
+        "import: \"lib.sth\" lib | p | ;\n: main ( -- ) p . lib::p . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "42\n42\n", "unqualified and qualified both resolve");
@@ -728,7 +721,7 @@ fn selective_import_of_private_name_is_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib | grow | \"lib.sth\" ;\n: main ( -- ) grow . ;\n",
+        "import: \"lib.sth\" lib | grow | ;\n: main ( -- ) grow . ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -748,7 +741,7 @@ fn colliding_selective_imports_are_error_at_second() {
     c.write("b.sth", ": p ( -- i64 ) 2 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: a | p | \"a.sth\" ;\nimport: b | p | \"b.sth\" ;\n: main ( -- ) p . ;\n",
+        "import: \"a.sth\" a | p | ;\nimport: \"b.sth\" b | p | ;\n: main ( -- ) p . ;\n",
     );
     let err = build_err(&entry);
     assert!(err.contains("collides"), "distinguishing wording: {err}");
@@ -765,7 +758,7 @@ fn selective_import_colliding_with_local_word_is_error() {
     c.write("lib.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: lib | p | \"lib.sth\" ;\n: p ( -- i64 ) 2 ;\n: main ( -- ) p . ;\n",
+        "import: \"lib.sth\" lib | p | ;\n: p ( -- i64 ) 2 ;\n: main ( -- ) p . ;\n",
     );
     let err = build_err(&entry);
     assert!(err.contains("collides"), "distinguishing wording: {err}");
@@ -783,7 +776,7 @@ fn selective_import_of_type_exposes_members_unqualified() {
     c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: geo | Point | \"geo.sth\" ;\n: main ( -- ) 1 2 Point &x @ . &!x 9 ! &x @ . Point> drop drop ;\n",
+        "import: \"geo.sth\" geo | Point | ;\n: main ( -- ) 1 2 Point &x @ . &!x 9 ! &x @ . Point> drop drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(
@@ -808,7 +801,7 @@ fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib | add | \"lib.sth\" ;\n: main ( -- ) ;\n",
+        "import: \"lib.sth\" lib | add | ;\n: main ( -- ) ;\n",
     );
     let err = build_err(&entry);
     assert!(
@@ -842,7 +835,7 @@ fn qualified_call_to_builtin_named_overload_dispatches_to_user_word() {
     );
     let entry = c.write(
         "main.sth",
-        "import: v | Vec2 | \"lib.sth\" ;\n\
+        "import: \"lib.sth\" v | Vec2 | ;\n\
          : main ( -- ) 1 2 Vec2 3 4 Vec2 v::add &x @ swap drop . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
@@ -860,7 +853,7 @@ fn selective_type_import_member_collision_is_error() {
     c.write("b.sth", "type: Point v i64 ;\nexport: Point ;\n");
     let entry = c.write(
         "main.sth",
-        "import: a | Point | \"a.sth\" ;\nimport: b | Point | \"b.sth\" ;\n: main ( -- ) 0 . ;\n",
+        "import: \"a.sth\" a | Point | ;\nimport: \"b.sth\" b | Point | ;\n: main ( -- ) 0 . ;\n",
     );
     let err = build_err(&entry);
     assert!(err.contains("collides"), "distinguishing wording: {err}");
@@ -907,7 +900,7 @@ fn unrelated_modules_generic_and_concrete_same_name_do_not_collide() {
     );
     let entry = c.write(
         "main.sth",
-        "import: g \"g.sth\" ;\nimport: c \"c.sth\" ;\n: main ( -- ) 5 g::bump . ;\n",
+        "import: \"g.sth\" g ;\nimport: \"c.sth\" c ;\n: main ( -- ) 5 g::bump . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "5\n");
@@ -925,7 +918,7 @@ fn same_module_generic_and_concrete_overlap_still_rejected_across_files() {
     c.write("lib.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n\
+        "import: \"lib.sth\" lib ;\n\
 type: Vec2 x i64 y i64 ;\n\
 : bump ( Vec2 -- Vec2 ) ;\n\
 : bump ( 'T -- 'T ) ;\n\
@@ -961,7 +954,7 @@ fn unused_import_with_a_colliding_span_does_not_swallow_a_later_print() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib | useq | \"lib.sth\" ;\n\
+        "import: \"lib.sth\" lib | useq | ;\n\
          : p ( 'T -- 'T ) ;\n\
          : main ( -- )\n\
          \x20 7 p . ;\n",

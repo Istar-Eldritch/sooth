@@ -49,7 +49,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 /// `lib/combinators.sth` and cannot be repointed at `lib/arrays.sth`.
 fn lib_import(qualifier: &str, lib_file: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/{lib_file}\" ;\n",
+        "import: \"{}/{lib_file}\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

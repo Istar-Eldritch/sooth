@@ -186,7 +186,7 @@ fn two_modules_declaring_the_same_static_get_distinct_storage() {
     let entry = dir.join("main.sth");
     std::fs::write(
         &entry,
-        "import: l | bump peek | \"lib.sth\" ;\n\
+        "import: \"lib.sth\" l | bump peek | ;\n\
          static: COUNT i64 = 7 ;\n\
          : main ( -- ) bump bump peek . &!COUNT 1 +! &COUNT @ . ;\n",
     )
@@ -228,8 +228,8 @@ fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
     let entry = dir.join("main.sth");
     std::fs::write(
         &entry,
-        "import: p | peek1 | \"lib1.sth\" ;\n\
-         import: q | peek2 | \"lib2.sth\" ;\n\
+        "import: \"lib1.sth\" p | peek1 | ;\n\
+         import: \"lib2.sth\" q | peek2 | ;\n\
          : main ( -- ) peek1 . . peek2 . . ;\n",
     )
     .unwrap();
@@ -256,7 +256,7 @@ fn a_library_static_named_main_does_not_collide_with_the_entry_symbol() {
     let entry = dir.join("main.sth");
     std::fs::write(
         &entry,
-        "import: l | peekmain | \"lib.sth\" ;\n\
+        "import: \"lib.sth\" l | peekmain | ;\n\
          : main ( -- ) peekmain . ;\n",
     )
     .unwrap();

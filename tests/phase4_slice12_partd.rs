@@ -173,7 +173,7 @@ fn repl_import_gate_retains_an_inline_non_quotation_word() {
     )
     .expect("writing temp library should succeed");
     let transcript = repl_transcript(&format!(
-        "import: c \"{}\" ;\n5 c::bump\n:quit\n",
+        "import: \"{}\" c ;\n5 c::bump\n:quit\n",
         lib_path.display()
     ));
     std::fs::remove_file(&lib_path).ok();
@@ -246,7 +246,7 @@ fn repl_importing_an_ordinary_quotation_parameter_word_is_a_located_error() {
     std::fs::write(&lib_path, format!("export: apply ;\n{APPLY}"))
         .expect("writing temp library should succeed");
     let transcript = repl_transcript(&format!(
-        "import: a \"{}\" ;\n[ 1 add ] 5 a::apply\n:quit\n",
+        "import: \"{}\" a ;\n[ 1 add ] 5 a::apply\n:quit\n",
         lib_path.display()
     ));
     std::fs::remove_file(&lib_path).ok();

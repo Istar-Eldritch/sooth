@@ -8,6 +8,7 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::ast::Span;
 use crate::lexer::{self, Token};
 use crate::manifest::{self, Manifest};
 
@@ -48,9 +49,31 @@ impl PackageGraph {
     }
 }
 
+/// A cross-package import that resolution declined to turn into a closure
+/// edge, recorded so `check_package_graph` can report it against the
+/// `depends:`/`module:` tables. Import-triggered: the OQ4-A and OQ4-C
+/// diagnostics name the offending `import:`, so they need the span and the
+/// names the importer actually wrote.
+#[derive(Debug, Clone)]
+pub struct UnresolvedImport {
+    pub importer_pkg: String,
+    pub importer_manifest: PathBuf,
+    pub importer: PathBuf,
+    pub pkg: String,
+    pub module: Vec<String>,
+    pub span: Span,
+    pub kind: UnresolvedKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnresolvedKind {
+    MissingDepends,
+    PrivateModule,
+}
+
 /// The nearest ancestor directory of `file` holding a `sooth.pkg`, i.e. the
 /// package root.
-fn find_package_root(file: &Path) -> Option<PathBuf> {
+pub fn find_package_root(file: &Path) -> Option<PathBuf> {
     let mut dir = file.parent();
     while let Some(d) = dir {
         if d.join("sooth.pkg").is_file() {

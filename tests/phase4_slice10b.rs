@@ -60,7 +60,7 @@ fn build_check_error(name: &str, src: &str) -> String {
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -313,7 +313,7 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
     );
     let entry = c.write(
         "main.sth",
-        "import: lib \"lib.sth\" ;\n\
+        "import: \"lib.sth\" lib ;\n\
          : main ( -- ) 5 lib::make [ drop ] lib::run ;\n",
     );
     let err = driver::build(&entry).expect_err("build should fail its check");
@@ -333,7 +333,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
     // Here `main`'s quotation `[ drop 0 ]` is re-validated inside `c::inner`'s
     // splice, where `ctx.module()` is `c`, but `drop`'s span still names
     // `main`, the module it was written in. `Res` is declared in `b`, which
-    // `main` imports only as a bare `import: b "b.sth"`, not by name, so the
+    // `main` imports only as a bare `import: "b.sth" b `, not by name, so the
     // drop is rejected -- but which module's import map supplies the
     // qualifier depends on which of `span.module` (`main`, which does import
     // `b`) or `ctx.module()` (`c`, which does not) is used: the two give a
@@ -349,7 +349,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
     );
     c.write(
         "b.sth",
-        "import: c \"c.sth\" ;\n\
+        "import: \"c.sth\" c ;\n\
          export: outer Res ;\n\
          type: Res n i64 ;\n\
          : drop ( Res -- )  | r | r Res> . ;\n\
@@ -357,7 +357,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
     );
     let entry = c.write(
         "main.sth",
-        "import: b \"b.sth\" ;\n\
+        "import: \"b.sth\" b ;\n\
          : main ( -- ) 1 ~[ drop 0 ] b::outer . ;\n",
     );
     let err = driver::build(&entry).expect_err("build should fail its check");

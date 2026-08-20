@@ -96,7 +96,7 @@ fn repl_words_shows_user_facing_name_for_imported_word() {
     let lib = dir.join("m.sth");
     std::fs::write(&lib, ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n").unwrap();
 
-    let out = run_session(&[&format!("import: m \"{}\" ;", lib.display()), ":words"]);
+    let out = run_session(&[&format!("import: \"{}\" m ;", lib.display()), ":words"]);
 
     let _ = std::fs::remove_dir_all(&dir);
     assert!(

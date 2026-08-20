@@ -3,7 +3,7 @@
 \ imported by type from `examples/modules_point.sth` and exported for
 \ `examples/modules.sth` to call qualified.
 
-import: point | Point | "modules_point.sth" ;
+import: "modules_point.sth" point | Point | ;
 
 : point-add ( Point Point -- Point )
   | a b |

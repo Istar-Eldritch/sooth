@@ -68,7 +68,7 @@ fn check_ok(src: &str) {
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -1868,7 +1868,7 @@ fn repl_import_exporting_combinator_retains_and_runs() {
         "export: apply_each ;\n: apply_each inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n",
     );
     let transcript = repl_error(&format!(
-        "import: c \"{}\" ;\n5 [ 3 add ] c::apply_each\n:quit\n",
+        "import: \"{}\" c ;\n5 [ 3 add ] c::apply_each\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1886,7 +1886,7 @@ fn repl_import_exporting_combinator_retains_and_runs() {
     // stack render goes to the writer, so `stack: 6` witnesses that `bump`
     // imported, inlined `ap`, and ran.
     let ok = repl_error(&format!(
-        "import: c \"{}\" ;\n5 c::bump\n:quit\n",
+        "import: \"{}\" c ;\n5 c::bump\n:quit\n",
         internal.display()
     ));
     std::fs::remove_file(&internal).ok();
@@ -1918,7 +1918,7 @@ fn repl_imported_combinator_body_call_to_private_word_uses_closure_env() {
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(
-        ": priv_calc6c ( i64 -- i64 ) 1000 add ;\nimport: c \"{}\" ;\n5 [ 10 mul ] c::apply2\n:quit\n",
+        ": priv_calc6c ( i64 -- i64 ) 1000 add ;\nimport: \"{}\" c ;\n5 [ 10 mul ] c::apply2\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1940,7 +1940,7 @@ fn repl_imported_combinator_body_call_to_private_word_without_collision_resolves
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(
-        "import: c \"{}\" ;\n5 [ 10 mul ] c::apply2\n:quit\n",
+        "import: \"{}\" c ;\n5 [ 10 mul ] c::apply2\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -1967,7 +1967,7 @@ fn repl_imported_private_word_still_rejected_by_qualified_name() {
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(
-        "import: c \"{}\" ;\n5 c::privword6c\n:quit\n",
+        "import: \"{}\" c ;\n5 c::privword6c\n:quit\n",
         path.display()
     ));
     std::fs::remove_file(&path).ok();
@@ -2064,7 +2064,7 @@ fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
          export: run ;\n\
          : run ( Secret [ i64 -- i64 ] -- ) | q | &tag @ swap drop q call drop ;\n",
     );
-    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    let transcript = repl_error(&format!("import: \"{}\" c ;\n:quit\n", path.display()));
     std::fs::remove_file(&path).ok();
     assert!(
         transcript.contains("names private type `Secret`") && transcript.contains("`run`"),
@@ -2116,7 +2116,7 @@ fn build_error_with_import(name: &str, entry: &str) -> String {
         &format!("{name}-lib"),
         "export: helper ;\n: helper ( i64 -- i64 ) | x | x 1 add ;\n",
     );
-    let entry_src = format!("import: lib \"{}\" ;\n{entry}", lib.display());
+    let entry_src = format!("import: \"{}\" lib ;\n{entry}", lib.display());
     let path = temp_lib(&format!("{name}-entry"), &entry_src);
     let err = sooth::driver::build(&path).expect_err("build should fail its check");
     std::fs::remove_file(&lib).ok();

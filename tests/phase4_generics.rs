@@ -64,7 +64,7 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
