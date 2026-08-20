@@ -6,7 +6,7 @@
 //! `Import` in at a time and gets a path back, so `Closure` and the walk that
 //! builds it stay entirely the driver's concern.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use crate::ast::{Import, ImportAnchor, ImportTarget, ModuleName, Span};
@@ -27,6 +27,9 @@ pub struct UnresolvedImport {
     pub module: Vec<String>,
     pub span: Span,
     pub kind: UnresolvedKind,
+    /// The target package's manifest, for the OQ4-C remedy line. `None` for
+    /// `MissingDepends`, where no dependency manifest was ever resolved.
+    pub pkg_manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,14 +93,15 @@ impl PackageSite {
 /// most once however many of the closure's files it owns.
 #[derive(Default)]
 pub(crate) struct ManifestCache {
-    manifests: HashMap<PathBuf, Manifest>,
+    manifests: BTreeMap<PathBuf, Manifest>,
     #[cfg(test)]
     pub(crate) parses: usize,
 }
 
 impl ManifestCache {
-    /// Every manifest path the cache has already parsed, snapshotted so
-    /// `check_package_graph` can walk them while also loading new ones.
+    /// Every manifest path the cache has already parsed, sorted so
+    /// `check_package_graph`'s walk order (and so its error choice, when more
+    /// than one manifest has a defect) is deterministic.
     fn known_manifest_paths(&self) -> Vec<PathBuf> {
         self.manifests.keys().cloned().collect()
     }
@@ -238,17 +242,21 @@ fn depends_manifest_missing_error(
 
 /// OQ4-A: a cross-package import naming a package the importer's manifest has
 /// no `depends:` entry for. Import-triggered, so it is worded from the
-/// recorded `UnresolvedImport` rather than the manifest graph alone.
+/// recorded `UnresolvedImport` rather than the manifest graph alone. `<path>`
+/// in the remedy line is a literal placeholder: no dependency manifest was
+/// ever located for `u.pkg`, so there is no real path to suggest.
 fn missing_depends_error(u: &UnresolvedImport) -> String {
     format!(
-        "error: import `{}::{}` at line {}, col {} in {}:\n  package `{}` has no `depends:` entry for `{}`",
+        "error: import `{}::{}` at line {}, col {} in {}:\n  package `{}` has no `depends:` entry for `{}`\n  add `depends: {} path \"<path>\" ;` to {}",
         u.pkg,
         u.module.join("::"),
         u.span.line,
         u.span.col,
         u.importer.display(),
         u.importer_pkg,
-        u.pkg
+        u.pkg,
+        u.pkg,
+        u.importer_manifest.display()
     )
 }
 
@@ -257,28 +265,39 @@ fn missing_depends_error(u: &UnresolvedImport) -> String {
 fn private_module_error(u: &UnresolvedImport) -> String {
     let module = u.module.join("::");
     format!(
-        "error: import `{}::{module}` at line {}, col {} in {}:\n  module `{module}` is not in `{}`'s public `module:` list",
+        "error: import `{}::{module}` at line {}, col {} in {}:\n  module `{module}` is not in `{}`'s public `module:` list\n  add `module: {module} ;` to {} to make it public",
         u.pkg,
         u.span.line,
         u.span.col,
         u.importer.display(),
-        u.pkg
+        u.pkg,
+        u.pkg_manifest
+            .as_ref()
+            .expect("PrivateModule always records the target's manifest")
+            .display()
     )
 }
 
 /// OQ4-B: a `depends:` entry naming a package in a strictly higher layer.
 /// Manifest-declared: fires from the `depends:` line itself, whether or not
-/// anything actually imports across it.
+/// anything actually imports across it. Located to the `depends:` entry's
+/// span within the declaring manifest.
 fn layer_violation_error(
+    manifest_path: &Path,
+    entry: &DependsEntry,
     importer_pkg: &str,
     importer_layer: PackageLayer,
     dep_pkg: &str,
     dep_layer: PackageLayer,
 ) -> String {
     format!(
-        "error: package `{importer_pkg}` is layer `{}` but depends on `{dep_pkg}` which is layer `{}`",
+        "error: layer violation in {}, line {}, col {}:\n  package `{importer_pkg}` is layer `{}` but depends on `{dep_pkg}` which is layer `{}`\n  a `{}` package may only depend on packages at the same layer or below",
+        manifest_path.display(),
+        entry.span.line,
+        entry.span.col,
         importer_layer.name(),
-        dep_layer.name()
+        dep_layer.name(),
+        importer_layer.name()
     )
 }
 
@@ -300,22 +319,32 @@ fn depends_name_mismatch_error(
 }
 
 /// Audits the whole package graph a build's `discover_closure` walk touched:
-/// every cross-package import resolution declined to turn into an edge
-/// (`unresolved`, OQ4-A/OQ4-C), and every `depends:` entry of every manifest
-/// the walk loaded (OQ4-B, and the `depends:` name-mismatch case), whether or
-/// not anything actually imports across it. Runs after `discover_closure`,
-/// before `assemble_module`.
+/// every `depends:` entry of every manifest reachable from one the walk
+/// loaded (OQ4-B, and the `depends:` name-mismatch case), whether or not
+/// anything actually imports across it, then every cross-package import
+/// resolution declined to turn into an edge (`unresolved`, OQ4-A/OQ4-C). The
+/// manifest walk runs first: those checks are the root cause when a `depends:`
+/// entry is both an unimported layer violation and, separately, the source of
+/// an import that could not resolve, and running it first also makes Golden
+/// 2's outcome independent of whether its fixture's import line is present.
+/// Runs after `discover_closure`, before `assemble_module`.
 pub(crate) fn check_package_graph(
     manifests: &mut ManifestCache,
     unresolved: &[UnresolvedImport],
 ) -> Result<(), String> {
-    if let Some(u) = unresolved.first() {
-        return match u.kind {
-            UnresolvedKind::MissingDepends => Err(missing_depends_error(u)),
-            UnresolvedKind::PrivateModule => Err(private_module_error(u)),
-        };
+    // A worklist, not a one-shot iteration over the manifests the walk had
+    // already loaded: a `depends:` entry may name a package `discover_closure`
+    // never had reason to load (nothing imported from it), and that package's
+    // own `depends:` entries are still part of the graph this audits. Seeded
+    // from `known_manifest_paths()` (sorted, so the walk order -- and so which
+    // of several defects is reported first -- is deterministic) and grown as
+    // dependency manifests are loaded.
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut queue: VecDeque<PathBuf> = manifests.known_manifest_paths().into_iter().collect();
+    for path in &queue {
+        visited.insert(path.clone());
     }
-    for importer_path in manifests.known_manifest_paths() {
+    while let Some(importer_path) = queue.pop_front() {
         let importer = manifests.manifests[&importer_path].clone();
         let importer_root = importer_path
             .parent()
@@ -335,13 +364,24 @@ pub(crate) fn check_package_graph(
             }
             if dep.layer > importer.layer {
                 return Err(layer_violation_error(
+                    &importer_path,
+                    entry,
                     &importer.package,
                     importer.layer,
                     &dep.package,
                     dep.layer,
                 ));
             }
+            if visited.insert(dep_manifest_path.clone()) {
+                queue.push_back(dep_manifest_path);
+            }
         }
+    }
+    if let Some(u) = unresolved.first() {
+        return match u.kind {
+            UnresolvedKind::MissingDepends => Err(missing_depends_error(u)),
+            UnresolvedKind::PrivateModule => Err(private_module_error(u)),
+        };
     }
     Ok(())
 }
@@ -501,7 +541,7 @@ fn resolve_dependency_module(
         return Err(bare_package_name_error(importer, imp, dep_name));
     }
     let module = segments.join("::");
-    let mut record = |kind| {
+    let mut record = |kind, pkg_manifest| {
         unresolved.push(UnresolvedImport {
             importer_pkg: site.manifest.package.clone(),
             importer_manifest: site.manifest_path.clone(),
@@ -510,6 +550,7 @@ fn resolve_dependency_module(
             module: segments.to_vec(),
             span: imp.span,
             kind,
+            pkg_manifest,
         })
     };
     let Some(entry) = site
@@ -518,7 +559,7 @@ fn resolve_dependency_module(
         .iter()
         .find(|d| d.pkg_name == *dep_name)
     else {
-        record(UnresolvedKind::MissingDepends);
+        record(UnresolvedKind::MissingDepends, None);
         return Ok(None);
     };
     let tried_manifest = site.root.join(&entry.path).join("sooth.pkg");
@@ -530,7 +571,10 @@ fn resolve_dependency_module(
         module_not_found_error(importer, imp, &dep.manifest.package, &module, &tried)
     })?;
     if !dep.manifest.modules.contains(&module) {
-        record(UnresolvedKind::PrivateModule);
+        record(
+            UnresolvedKind::PrivateModule,
+            Some(dep.manifest_path.clone()),
+        );
         return Ok(None);
     }
     match owning_manifest_of(&file) {
@@ -681,6 +725,7 @@ mod tests {
         pkg: &str,
         module: &[&str],
         span: Span,
+        pkg_manifest: Option<&str>,
     ) -> UnresolvedImport {
         UnresolvedImport {
             importer_pkg: importer_pkg.to_string(),
@@ -690,6 +735,7 @@ mod tests {
             module: module.iter().map(|s| s.to_string()).collect(),
             span,
             kind,
+            pkg_manifest: pkg_manifest.map(PathBuf::from),
         }
     }
 
@@ -707,14 +753,16 @@ mod tests {
                 col: 5,
                 module: 0,
             },
+            None,
         );
         let mut manifests = ManifestCache::default();
         let err = check_package_graph(&mut manifests, &[u]).unwrap_err();
-        assert!(
-            err.contains("package `app` has no `depends:` entry for `collections`"),
-            "unexpected message: {err}"
+        assert_eq!(
+            err,
+            "error: import `collections::vec` at line 3, col 5 in /irrelevant/main.sth:\n\
+             \x20 package `app` has no `depends:` entry for `collections`\n\
+             \x20 add `depends: collections path \"<path>\" ;` to /irrelevant/sooth.pkg"
         );
-        assert!(err.contains("line 3, col 5"), "unlocated message: {err}");
     }
 
     /// OQ4-C: a consumer importing `pkg::private` where `private` is absent
@@ -731,14 +779,16 @@ mod tests {
                 col: 1,
                 module: 0,
             },
+            Some("/dep/sooth.pkg"),
         );
         let mut manifests = ManifestCache::default();
         let err = check_package_graph(&mut manifests, &[u]).unwrap_err();
-        assert!(
-            err.contains("module `detail` is not in `core`'s public `module:` list"),
-            "unexpected message: {err}"
+        assert_eq!(
+            err,
+            "error: import `core::detail` at line 2, col 1 in /irrelevant/main.sth:\n\
+             \x20 module `detail` is not in `core`'s public `module:` list\n\
+             \x20 add `module: detail ;` to /dep/sooth.pkg to make it public"
         );
-        assert!(err.contains("line 2, col 1"), "unlocated message: {err}");
     }
 
     /// OQ4-B: a `core`-layer package `depends:` on a `hosted`-layer package,
@@ -748,7 +798,7 @@ mod tests {
     #[test]
     fn check_package_graph_layer_violation_is_error() {
         let sb = Sandbox::new("layer-violation");
-        sb.write(
+        let core_manifest = sb.write(
             "core/sooth.pkg",
             r#"package: core ; layer: core ; depends: app path "../app" ;"#,
         );
@@ -757,11 +807,14 @@ mod tests {
         let mut manifests = ManifestCache::default();
         manifests.package_of(&core_main).unwrap();
         let err = check_package_graph(&mut manifests, &[]).unwrap_err();
-        assert!(
-            err.contains(
-                "package `core` is layer `core` but depends on `app` which is layer `hosted`"
-            ),
-            "unexpected message: {err}"
+        assert_eq!(
+            err,
+            format!(
+                "error: layer violation in {}, line 1, col 31:\n\
+                 \x20 package `core` is layer `core` but depends on `app` which is layer `hosted`\n\
+                 \x20 a `core` package may only depend on packages at the same layer or below",
+                core_manifest.display()
+            )
         );
     }
 
