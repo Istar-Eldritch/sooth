@@ -53,7 +53,11 @@ module: bool cmp text ;
 
 **`package:` value.** A single identifier token. It is the package's canonical name.
 Distinct from the qualifier used in `depends:` on the consumer side: the consumer names the
-package by its declared `package:` name, not an alias.
+package by its declared `package:` name, not an alias. "Single identifier" excludes a name
+carrying `:` and a bare `*`, at both the `package:` and the `depends:` site: the `pkg`
+segment of an `import: pkg::module ;` target is matched verbatim against the declared name,
+so a `::` -bearing name would be unreachable from every import, and OQ3 reserves a bare `*`
+for the wildcard import form.
 
 **`layer:` value.** A single identifier token from a fixed four-value set: `core`, `fixed`,
 `alloc`, `hosted`. The compiler enforces this at manifest-parse time. The ordering is strict
@@ -373,8 +377,12 @@ level shapes share the `depends:` line grammar:
   fallback chain) owns the user-level file's top-level shape and its parse path.
 
 `parse_manifest` in this slice only produces the `Manifest` struct (package manifest).
-A file that begins with `depends:` but has no `package:` is rejected with a located error
-at the first non-`depends:` keyword; its parsing is S1b's work.
+A file with no `package:` declaration is rejected by the end-of-file located error below,
+whatever it begins with; there is no separate diagnostic for the user-level file's bare
+`depends:` shape. S1b therefore gives the user-level file its own entry point over the
+shared `depends:` line grammar rather than routing `global_sooth.pkg` through
+`parse_manifest`, which would report a missing `package:` for a file that is never meant to
+have one.
 
 Responsible for:
 
@@ -401,6 +409,9 @@ Unit tests in `src/manifest.rs` under `#[cfg(test)] mod tests`:
 - `parse_manifest_unknown_layer_is_error`: `layer: enterprise ;` is rejected with a located
   error naming the unknown value.
 - `parse_manifest_duplicate_package_is_error`: two `package:` lines is rejected.
+- `parse_manifest_qualified_package_name_is_error`: `package: core::x ;` is rejected with a
+  located error naming the offending name; likewise `parse_manifest_wildcard_package_name_is_error`
+  for a bare `*`, and `parse_manifest_qualified_depends_name_is_error` at the `depends:` site.
 - `parse_manifest_missing_package_is_error`: a manifest with `layer:` but no `package:` is
   rejected at end of file with a located error stating `package:` is required.
 - `parse_manifest_missing_layer_is_error`: a manifest with `package:` but no `layer:` is

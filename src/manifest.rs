@@ -67,6 +67,27 @@ fn loc(span: &Span) -> String {
     format!("line {}, col {}", span.line, span.col)
 }
 
+fn eof_loc(src: &str) -> String {
+    let line = 1 + src.matches('\n').count();
+    let col = 1 + src.chars().rev().take_while(|&c| c != '\n').count();
+    format!("line {line}, col {col}")
+}
+
+/// A package name is a single identifier. The `pkg` segment of an
+/// `import: pkg::module ;` target is matched against it verbatim, so a name
+/// carrying `:` could never be named by any import, and a bare `*` is
+/// reserved for the wildcard import form.
+fn check_pkg_name(name: &str, span: &Span, what: &str, path: &Path) -> Result<(), String> {
+    if name.contains(':') || name == "*" {
+        return Err(format!(
+            "manifest error: invalid {what} `{name}` at {} in {}: a package name must be a single identifier, with no `:` and not `*`",
+            loc(span),
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 fn expect_word(
     tokens: &[(Token, Span)],
     pos: &mut usize,
@@ -169,7 +190,8 @@ pub fn parse_manifest(src: &str, path: &Path) -> Result<Manifest, String> {
                     ));
                 }
                 pos += 1;
-                let (name, _) = expect_word(&tokens, &mut pos, "a package name", path)?;
+                let (name, name_span) = expect_word(&tokens, &mut pos, "a package name", path)?;
+                check_pkg_name(&name, &name_span, "package name", path)?;
                 expect_semicolon(&tokens, &mut pos, "package:", path)?;
                 package = Some(name);
             }
@@ -198,6 +220,7 @@ pub fn parse_manifest(src: &str, path: &Path) -> Result<Manifest, String> {
                 pos += 1;
                 let (pkg_name, pkg_span) =
                     expect_word(&tokens, &mut pos, "a dependency package name", path)?;
+                check_pkg_name(&pkg_name, &pkg_span, "dependency package name", path)?;
                 if pkg_name == "intrinsics" {
                     return Err(format!(
                         "manifest error: `depends: intrinsics` at {} in {}: `intrinsics` is compiler-provided and needs no `depends:` entry",
@@ -241,13 +264,15 @@ pub fn parse_manifest(src: &str, path: &Path) -> Result<Manifest, String> {
 
     let package = package.ok_or_else(|| {
         format!(
-            "manifest error: `package:` is required, missing at end of file in {}",
+            "manifest error: `package:` is required, missing at end of file ({}) in {}",
+            eof_loc(src),
             path.display()
         )
     })?;
     let layer = layer.ok_or_else(|| {
         format!(
-            "manifest error: `layer:` is required, missing at end of file in {}",
+            "manifest error: `layer:` is required, missing at end of file ({}) in {}",
+            eof_loc(src),
             path.display()
         )
     })?;
@@ -314,12 +339,13 @@ mod tests {
 
     #[test]
     fn parse_manifest_missing_package_is_error() {
-        let src = "layer: core ;";
+        let src = "layer: core ;\nmodule: cmp ;\n";
         let err = parse_manifest(src, &p()).unwrap_err();
         assert!(
             err.contains("`package:` is required"),
             "unexpected message: {err}"
         );
+        assert!(err.contains("(line 3, col 1)"), "unlocated message: {err}");
     }
 
     #[test]
@@ -328,6 +354,36 @@ mod tests {
         let err = parse_manifest(src, &p()).unwrap_err();
         assert!(
             err.contains("`layer:` is required"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("(line 1, col 16)"), "unlocated message: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_qualified_package_name_is_error() {
+        let err = parse_manifest("package: core::x ; layer: core ;", &p()).unwrap_err();
+        assert!(
+            err.contains("invalid package name `core::x`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 1, col 10"), "unlocated message: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_wildcard_package_name_is_error() {
+        let err = parse_manifest("package: * ; layer: core ;", &p()).unwrap_err();
+        assert!(
+            err.contains("invalid package name `*`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_manifest_qualified_depends_name_is_error() {
+        let src = r#"package: core ; layer: core ; depends: text::ascii path "../text" ;"#;
+        let err = parse_manifest(src, &p()).unwrap_err();
+        assert!(
+            err.contains("invalid dependency package name `text::ascii`"),
             "unexpected message: {err}"
         );
     }
