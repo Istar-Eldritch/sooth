@@ -178,6 +178,14 @@ impl ImportTarget {
 /// carries a concrete qualifier (defaulted to the target's last segment when
 /// the source elides it); `Wildcard` (S2's `import: intrinsics * ;`) carries
 /// none at all.
+///
+/// Callers read this through `Import::qualifier`/`Import::selective` rather
+/// than matching it directly, so the exhaustive match guarding a new variant
+/// lives only in those two functions -- a deliberate trade against the
+/// compile-error tripwire an exhaustive caller-side match would give. When S2
+/// gives `Wildcard` its own visibility effect, audit every caller of
+/// `qualifier`/`selective` by hand rather than relying on the compiler to
+/// flag them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImportBinding {
     Qualified {

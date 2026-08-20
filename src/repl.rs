@@ -4633,6 +4633,24 @@ mod tests {
         );
     }
 
+    /// P8 slice 1a: a wildcard import binds no qualifier, and its visibility
+    /// effect is S2's work -- so it is rejected outright at the REPL rather
+    /// than silently splicing in nothing. The target is a quoted path (not a
+    /// module name), so it is the wildcard rejection that fires here, not
+    /// the module-name one above.
+    #[test]
+    fn repl_wildcard_import_is_rejected() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("import: \"lib/queue.sth\" * ;", &mut out)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: wildcard import at line 1, col 1 in <repl>:\n  a wildcard import brings in no names until S2 gives it its visibility effect\n  use a qualified import for now"
+        );
+    }
+
     #[test]
     fn eval_line_reserved_caret_variant_name_is_error() {
         // R12a at REPL scope: a variant name is a word-generating declaration

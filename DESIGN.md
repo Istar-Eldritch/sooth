@@ -546,7 +546,7 @@ carried by quotations, `call` and the self-tail-call transform alone.
 ## Modules and encapsulation
 
 A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b).
-`import: q "path.sth" ;` binds a qualifier to another file, resolved relative to the
+`import: "path.sth" q ;` binds a qualifier to another file, resolved relative to the
 *importing* file, with an explicit `.sth` and no search path (consistent with
 `extern:` naming its C symbol verbatim: no implicit extension is one fewer resolution
 rule to learn). `export: name... ;` (lines accumulate) is the only way a name leaves
@@ -638,7 +638,7 @@ deferred there, not decided here.
 word whose stack effect names a private, non-primitive type of its own module is
 rejected at the `export:` declaration itself (the module author's bug, not the
 consumer's), naming the word and the private type; exporting the type satisfies it.
-Selective import, `import: q | a b | "path.sth" ;`, is additive to the qualifier: `q`
+Selective import, `import: "path.sth" q | a b | ;`, is additive to the qualifier: `q`
 is always bound, and the listed names are *additionally* exposed unqualified (a
 selectively-imported type brings its generated words unqualified too, one unit as
 ever). The collision rule is deliberately dumb, with no precedence and no use-site

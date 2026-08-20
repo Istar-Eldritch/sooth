@@ -3936,6 +3936,16 @@ mod tests {
         assert_eq!(qualified(&imp), ("cmp", vec!["*"]));
     }
 
+    /// OQ3: `*` followed by a `|` is an ordinary qualifier named `*`, not the
+    /// wildcard shape -- the wildcard test above requires `*` then `;` with
+    /// nothing between, so this and that test guard both halves of the
+    /// disambiguation.
+    #[test]
+    fn parse_import_qualifier_star_before_selective_list_is_literal_qualifier() {
+        let imp = scan_one_import("import: core::cmp * | a b | ;\n");
+        assert_eq!(qualified(&imp), ("*", vec!["a", "b"]));
+    }
+
     #[test]
     fn parse_import_selective_with_explicit_qualifier_ok() {
         let imp = scan_one_import("import: core::text s | split trim | ;\n");
