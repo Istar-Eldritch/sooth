@@ -54,11 +54,18 @@ impl<'a> FuncBuilder<'a> {
         if !self.materialized.iter().any(|m| m.symbol == symbol) {
             let env_caps = captures
                 .iter()
-                .map(|(name, value)| EnvCapture {
-                    name: name.clone(),
-                    ty: self.value_type(*value),
-                    referent: self.ref_inner.get(value).copied(),
-                    ref_mutable: self.ref_mutable.get(value).copied().unwrap_or(false),
+                .map(|(name, value)| {
+                    // A scalar capture has no mutability to carry; a reference
+                    // one is required to have recorded it, so ask through the
+                    // accessor that panics rather than defaulting -- a broken
+                    // lockstep must not read out as a shared view here.
+                    let referent = self.ref_inner.get(value).copied();
+                    EnvCapture {
+                        name: name.clone(),
+                        ty: self.value_type(*value),
+                        ref_mutable: referent.is_some() && self.reference_is_mutable(*value),
+                        referent,
+                    }
                 })
                 .collect();
             self.materialized.push(MaterializedQuot {

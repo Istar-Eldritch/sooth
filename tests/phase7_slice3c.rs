@@ -531,16 +531,17 @@ type: W a [i64 4] b [i64 4] ;
     assert_eq!(code, 0);
 }
 
-/// R12: two more routes a reference reaches `slice` by, beyond the four the
-/// exit notes name -- `&>`'s array-element projection (a nested array, the
-/// only shape where that projection can feed `slice` at all) and `&^`'s
-/// owned-cell payload projection. Both derive a fresh reference whose
-/// mutability is the sigil's own, same as a prefix borrow, but through a
-/// different `push_reference` call site; each half writes through its view
-/// and reads back through the original owner to prove the view really
-/// aliases it.
+/// R12: the projection routes a reference reaches `slice` by, each through its
+/// own `push_reference` call site: `&>` on an array reference, `&>` on a *view*
+/// (`slice`'s own element projection -- the two element projections are
+/// reachable only through a nested array, the one element shape that is itself
+/// sliceable), `&^`'s owned-cell payload, and a variant field inside a mutable
+/// eliminator arm. The struct-field site is covered by the branch-join golden
+/// above. Each part writes through its view and reads back through the
+/// original owner, so a view that failed to alias it would print the initial
+/// value rather than merely build.
 #[test]
-fn a_view_built_from_a_nested_array_element_or_owned_cell_payload_writes_through() {
+fn a_view_built_from_each_projection_route_writes_through() {
     let src = "\
 : main ( -- )
   0 2 fill 2 fill | n |
@@ -549,6 +550,21 @@ fn a_view_built_from_a_nested_array_element_or_owned_cell_payload_writes_through
 ;
 ";
     let prog = Scratch::write("nestedarray", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+
+    // The element projection off a view rather than off the array: the write
+    // goes through `&!> slice`, the read back through the buffer's own
+    // array-element projection, so only a genuinely aliasing view shows `7`.
+    let src = "\
+: main ( -- )
+  0 2 fill 2 fill | n |
+  &!n slice 0 >usize &!> slice 0 >usize &!> 7 !
+  &n 0 >usize &> 0 >usize &> @ .
+;
+";
+    let prog = Scratch::write("sliceelem", src);
     let (stdout, _, code) = build_and_run(prog.path());
     assert_eq!(stdout, "7\n");
     assert_eq!(code, 0);
@@ -565,5 +581,42 @@ type: Buf data ^[i64 4] ;
     let prog = Scratch::write("ownedcell", src);
     let (stdout, _, code) = build_and_run(prog.path());
     assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+
+    // The variant-field twin of the struct-field projection: the field lives
+    // at the variant's payload offset, and `poke` writes through a view cut
+    // from it while `peek` reads the owner back. The second variant is a
+    // different shape, so an arm routed to the wrong variant would project the
+    // wrong offsets. `peek` reads through a plain array-element projection and
+    // not through a view of its own on purpose: a *shared* view of the same
+    // element type anywhere in the program would be interned, and would then
+    // give a mis-recorded mutability a shape to resolve to instead of failing.
+    let src = "\
+type: Box
+| Arr  a [i64 4]
+| Pair x i64 y i64
+;
+: poke ( &!Box -- )
+  ~[ ( &!Arr )  &!a slice 0 >usize &!> 5 ! ]
+  ~[ ( &!Pair ) &!x 1 +! ]
+  Box? ;
+: peek ( &Box -- i64 )
+  ~[ ( &Arr )  &a 0 >usize &> @ ]
+  ~[ ( &Pair ) &x @ ]
+  Box? ;
+: discard ( Box -- )
+  ~[ ( Arr )  Arr> drop ]
+  ~[ ( Pair ) Pair> drop drop ]
+  Box? ;
+: main ( -- )
+  0 4 fill Arr | b |
+  &!b poke
+  &b peek .
+  b discard
+;
+";
+    let prog = Scratch::write("variantfield", src);
+    let (stdout, _, code) = build_and_run(prog.path());
+    assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
 }

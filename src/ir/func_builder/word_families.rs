@@ -22,7 +22,7 @@ impl<'a> FuncBuilder<'a> {
 
     /// Whether a reference `Value` is a mutable one -- `slice`'s only source
     /// for the mutability of the view it builds.
-    fn reference_is_mutable(&self, ptr: Value) -> bool {
+    pub(super) fn reference_is_mutable(&self, ptr: Value) -> bool {
         *self
             .ref_mutable
             .get(&ptr)

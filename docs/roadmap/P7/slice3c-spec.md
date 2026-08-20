@@ -735,12 +735,25 @@ lowers to the opaque `IrType::Ptr` that says nothing about it. `FuncBuilder::ref
 carries it per `Value` beside `ref_inner`, both filled by one `record_reference` helper so
 they cannot drift, and seeded at every route a reference reaches `slice` by: a prefix
 borrow or field/variant-field projection (the name says it), an array-element projection
-(`&>`, reachable only through a *nested* array, the one element shape that is itself
-sliceable), an owned-cell payload projection (`&^`), a declared parameter (`Type::Ref`'s
-own bool), a branch join (`Phi`), and a materialized quotation's env capture -- six routes,
-not four. All six are golden-covered; the alternative (looking the shape up by element
-alone) is not merely untidy -- a program holding only a mutable view has no shared row to
-find, so it panics.
+(`&>` on an array reference), a *slice*-element projection (`&>` on a view -- the same
+word's other receiver arm, with its own seeding site; both element projections need a
+*nested* array, the one element shape that is itself sliceable), an owned-cell payload
+projection (`&^`), a declared parameter (`Type::Ref`'s own bool), a branch join (`Phi`),
+and a materialized quotation's env capture -- seven routes, not four, spread over nine
+seeding sites that can reach `slice` (the prefix-borrow route covers three: a named
+local, a struct field, a variant field). The tenth site, a borrow of a module static, is
+unreachable here because a static is scalar-only. All nine are golden-covered
+individually; the alternative (looking the shape up by element alone) is not merely
+untidy -- a program holding only a mutable view has no shared row to find, so it panics.
+A site's mis-recorded mutability is only observable when the *other* mutability of the
+same element type is absent from the registry, so a golden for one must not build a view
+of the opposite mutability over the same element type (which is why the variant-field
+golden reads its buffer back through a plain array-element projection).
+
+The env capture is the one site that could report a mutability it never recorded: its
+`ref_mutable` is read out of the map at a boundary where a *scalar* capture legitimately
+has no entry. It asks through the same panicking accessor the other sites use, gated on
+the capture having a referent at all, rather than defaulting a missing entry to shared.
 
 **Phase 4 exit notes (the poly-path rule R11 asked for, and one gap left as found):**
 
@@ -762,16 +775,17 @@ find, so it panics.
   ``&> is not permitted on `&[i64 3]` ``) -- and closing it means threading `refs` into the
   poly walk to resolve a `RefId`, which would move an existing diagnostic. Left as found.
 
-**Phase 4 mutation-tested guards (13, all killed):** the `borrow_mutability` slice arm
+**Phase 4 mutation-tested guards (all killed):** the `borrow_mutability` slice arm
 deleted (the two-live-mutable-subslices golden flips to accept), `slice` interning a
 shared view off a `&!` receiver (mono and poly, separately), the poly `&>` slice-receiver
 mutability guard stubbed, the poly `slice` generic-element gate opened, the poly
 `subslice` arm deleted, `check_poly_slice_offset` made permissive at its own three call
 sites (`subslice`'s two operands, `&>`'s one), the parser interning `!Slice[T]` as shared,
 `!Slice` dropped from the reserved names, and the lowering mutability lookup hardcoded
-shared at each of its six seeding routes (the prefix borrow/projection, the array-element
-projection, the owned-cell payload projection, the declared parameter, the branch join,
-the env capture).
+shared at each of the nine seeding sites separately (the prefix borrow, the struct-field
+and variant-field projections, the array-element and slice-element projections, the
+owned-cell payload projection, the declared parameter, the branch join, the env
+capture).
 
 ### Phase 5: roadmap correction, regression sweep, growth-signal re-check  *(standard)*
 
@@ -785,6 +799,12 @@ significantly (notably `src/check/word_families.rs`, `src/backend/qbe.rs`, and
 
 - Modify: `docs/roadmap/P7-language-prereqs.md:139`/`:187`.
 - Verify: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
+- Record in the sweep: capturing a slice *value* into a materialized quotation ICEs at
+  `backend/qbe.rs:521` (``an aggregate field is copied by blit, not scalar-stored``).
+  Pre-existing and not slice-specific -- capturing an array or a struct value panics
+  identically, so Phase 2's `IrType::Slice` arm there is right and the gap is in the env
+  bundle's one-word-per-capture shape. Capturing the *reference* and slicing inside the
+  body works (`a_materialized_quotation_slices_a_captured_mutable_reference`).
 - Out of bounds: any code change beyond fmt/clippy fixes surfaced by the sweep.
 
 ## Testing
