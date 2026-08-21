@@ -1364,6 +1364,37 @@ mod tests {
         assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
     }
 
+    /// Review fix (P8 S2): `resolve_import`'s in-package rejection narrowed
+    /// from `origin != UserLevel` to `origin == Ancestor`, so a `--manifest`
+    /// (Flag-origin) site no longer counts as package membership for a
+    /// quoted-path import either -- consistent with
+    /// `self_import_under_flag_manifest_error` already treating a flag site
+    /// as outside the package for `self::` imports. Mutation-test by
+    /// widening the guard back to `!= UserLevel`, which rejects this case.
+    #[test]
+    fn flag_site_still_allows_a_quoted_path_import() {
+        let sb = Sandbox::new("flag-quoted-path");
+        sb.write("p/sooth.pkg", "package: p ; layer: hosted ;");
+        let entry = sb.write("p/main.sth", "");
+        let sibling = sb.write("p/sib.sth", "");
+        let flag = sb.write("q/sooth.pkg", "package: q ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        assert_eq!(site.origin, SiteOrigin::Flag);
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &import(ImportTarget::Path("sib.sth".to_string())),
+            Some(&site),
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .expect("a quoted-path sibling still resolves under a flag site");
+        assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
+    }
+
     /// R6: a user-level manifest that is not there is tier 4, not a read
     /// error. Mutation-test by dropping the existence check, which turns the
     /// missing file into a failed read.

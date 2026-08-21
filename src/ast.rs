@@ -141,18 +141,18 @@ pub struct ModuleInfo {
 /// table itself does not move and is not per module; only visibility is gated,
 /// so this says which of those names a body in this module may call bare.
 ///
-/// `All` is the `Default` because the single-file, no-driver parse path
-/// (`parser::parse`: the REPL, every in-process test) resolves no `import:` and
-/// so has nothing to derive a gate from -- the same exemption `Ctx::Line`
-/// already has. `driver::assemble_module` sets this field unconditionally for
-/// every file it assembles, so no build path inherits the default.
+/// Both `parser::parse` (the REPL, every in-process test) and
+/// `driver::assemble_module` set this field explicitly on every `ModuleInfo`
+/// they build, so nothing reads the derived `Default`. It fails closed to
+/// `None` anyway: a build path that forgot to set it should reject every
+/// bare intrinsic rather than silently admit all of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum IntrinsicVisibility {
-    #[default]
     All,
     /// `import: intrinsics | dup add | ;` -- only the listed names.
     Only(std::collections::HashSet<String>),
     /// No `import: intrinsics` line at all.
+    #[default]
     None,
 }
 

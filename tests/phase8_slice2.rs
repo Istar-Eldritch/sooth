@@ -351,6 +351,35 @@ fn an_unimported_comparison_is_an_unknown_word_not_an_ungated_intrinsic() {
     );
 }
 
+/// R2/R6a, one representative per gate arm in `check_terms`: `branch` (the
+/// quotation-operand exemption), `dup` (`check_shuffle`), `tag`
+/// (`check_tag_word`), and `len` (`check_str_word`/`check_array_word`) must
+/// each refuse to dispatch as a builtin without an `intrinsics` import, the
+/// same as the operator family already covered above. `w` is never called
+/// from `main`: checking runs over every declared word regardless of call
+/// reachability, so this needs no operand of a type `main` can construct
+/// without itself reaching a gated intrinsic.
+#[test]
+fn every_gate_arm_refuses_its_builtin_without_an_import() {
+    let cases: &[(&str, &str)] = &[
+        ("branch", ": w ( u32 -- i64 ) [ 1 ] [ 2 ] branch ;\n"),
+        ("dup", ": w ( i64 -- i64 i64 ) dup ;\n"),
+        ("tag", ": w ( bool -- u32 ) tag ;\n"),
+        ("len", ": w ( str -- usize ) len ;\n"),
+    ];
+    for (name, body) in cases {
+        let t = Tree::new(&format!("gate-arm-{name}"));
+        let entry = write_raw(&t, "main.sth", &format!("{body}: main ( -- ) ;\n"));
+        let err = build_error(&entry);
+        assert!(
+            err.contains(&format!(
+                "error: `{name}` is an intrinsic and is not imported in `w`"
+            )),
+            "case `{name}`: unexpected diagnostic: {err}"
+        );
+    }
+}
+
 // -- R3/R8: the prelude is gone; `core` is a package you import ---------------
 
 /// R3: `if` and the comparisons no longer arrive without an `import:`. The same
