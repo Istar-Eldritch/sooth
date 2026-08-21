@@ -203,6 +203,12 @@ fn narrowed_guard_keeps_call_branch_and_tag_located() {
     //
     // `tag`'s arm is reached the same way the other two are: the guard is
     // name-based, so an untagged quotation literal is enough to reach it.
+    //
+    // The *second* line is pinned too, and separately: it is the one that says
+    // which follow-up would take each name, and `call` is the only one of the
+    // three that has one -- P7.S3d's spec excludes `branch`/`tag` while
+    // pointing them back here. Asserting the first line alone leaves that
+    // claim unguarded for two of the three names.
     for (name, body) in [
         ("call", "~[ drop ] call"),
         ("branch", "over over gt ~[ drop ] ~[ swap drop ] branch"),
@@ -217,6 +223,12 @@ fn narrowed_guard_keeps_call_branch_and_tag_located() {
                 "error: `{name}` on a quotation in the polymorphic body of `bad` (line 1) is not yet supported"
             )),
             "`{name}` must stay a located rejection naming itself, not `unknown word`: {err}"
+        );
+        assert!(
+            err.contains(
+                "`call` on a literal is P7.S3d's own exit criterion, and `branch`/`tag` name no follow-up slice yet"
+            ),
+            "`{name}`'s rejection must say which follow-up would take it: {err}"
         );
     }
 }

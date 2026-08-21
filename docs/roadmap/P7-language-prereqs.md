@@ -125,7 +125,12 @@ route is its own located error.
 Two standing limits bound what can be written against this today: field projection (`&w`) is
 rejected in every generic body, so an arm destructures (`Rect>`) rather than projects; and a
 generic word cannot call another generic word (`unknown word g__m0`), so a combinator written
-here composes concrete and builtin callees only. P6.S3b widens the consumer to generic enums;
+here composes concrete and builtin callees only. A third, narrower one: the arm join compares
+each slot's *type* and not the compile-time literal beside it, so arms disagreeing on an index
+literal leave the join carrying the first arm's — `~[ a 0 ] ~[ a 9 ]` joined over a `['T 4]`
+satisfies the static bounds check and traps at runtime instead. Memory-safe, and no laxer than
+the concrete path, which ICEs on the same program rather than rejecting it.
+P6.S3b widens the consumer to generic enums;
 P6.S4, by deleting `WordBody::Clauses`, makes this the only route to elimination that exists.
 **Exit:** a polymorphic word can eliminate an enum — quotation-literal arms in its body,
 dispatched to the generated eliminator — with the quotation's identity surviving a shuffle,

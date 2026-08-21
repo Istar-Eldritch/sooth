@@ -3694,11 +3694,11 @@ pub(super) fn poly_quotation_not_consumed_error(ctx: &Ctx, span: Span) -> String
 /// `unknown word`.
 ///
 /// `call` on a literal is P7.S3d's own exit criterion. `branch` is the same
-/// shape one level down, but that slice's own spec excludes it ("stays
-/// rejected, unchanged"), so it names no slice yet. `tag` consumes no
-/// quotation at all (an all-unit enum to `u32`), and reaches this only
-/// because the guard naming it is name-based; it is a scalar-primitive port
-/// with no arm walk, so it rides along there rather than here.
+/// shape one level down and `tag` is a scalar-primitive port with no arm walk
+/// (it consumes no quotation at all -- an all-unit enum to `u32` -- and
+/// reaches this only because the guard naming it is name-based), but S3d's own
+/// spec excludes both ("stays rejected, unchanged") while pointing them back
+/// at this slice, so neither names a slice yet.
 pub(super) fn poly_quotation_combinator_unsupported_error(
     ctx: &Ctx,
     span: Span,

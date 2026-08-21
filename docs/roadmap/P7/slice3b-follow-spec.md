@@ -275,8 +275,15 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
   `poly_combinator_abstract_signature_error`:
   the call's exit row is read straight off that baseline, so a shape-changing parameter
   declaring a slot *above* its output row (`~[ ..a -- ..b i64 ]`, which parses) would need
-  the slot stripped back off to recover `..b` — a rule neither consumer shares, so it is
-  refused instead; and a signature promising an output row none of its parameters produces
+  the slot stripped back off to recover `..b`, and is refused instead. That refusal is a
+  **capability divergence with the concrete path as the more permissive one**, probe-verified:
+  the same `pick` called from a monomorphic body compiles and prints `7`, because the concrete
+  consumer needs no stripping rule at all — it takes `..b` from the declared signature's own
+  region instead of reconstructing it from an arm exit. Stripping the declared outs back off
+  the arm exit is the small honest fix, and is a **Phase 4 exit finding** rather than a bare
+  deferral: a generic body may not be the stricter of the two without a recorded reason any
+  more than it may be the laxer. And a signature promising an output row none of its
+  parameters produces
   (`( ..a bool ~[ ..a -- ..a ] -- ..b )`, which also parses) has no account of that row at
   all, so it is refused rather than answered with the entry row it differs from.
   Relating a parameter's rows to the signature's own needs no check here: the parser
@@ -290,11 +297,15 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
 
 `poly_quotation_combinator_unsupported_error` remains for `call`/`branch`/`tag`, its message
 re-pointed at the follow-up that would take the primitives (not at "P7.S3b-follow", which is
-this slice). Phase 3 note: the follow-up is **P7.S3d**, whose own exit criterion is already a
-rowless `call` on a literal; `branch` is that shape one level down and `tag` is a
-scalar-primitive port with no arm walk, so both ride along there. `tests/phase7_slice3b.rs`'s
-own assertion on that name moved with it, the one edit to that suite. No name that reaches this family is left to a rejection that does not say the
-consumer is deferred.
+this slice). Phase 3 note: only `call` has a follow-up to name. **P7.S3d**'s own exit
+criterion is a rowless `call` on a literal, but its spec excludes the other two — "everything
+else stays rejected, unchanged" (`slice3d-spec.md:16`) — while pointing them back at *this*
+slice (`:364`), which does not deliver them either. `branch` being `call`'s shape one level
+down and `tag` being a scalar-primitive port with no arm walk is an argument that they *could*
+ride along there, not evidence that they will, so the message names P7.S3d for `call` and no
+slice at all for `branch`/`tag`. `tests/phase7_slice3b.rs`'s own assertion on that name moved
+with it, the one edit to that suite. No name that reaches this family is left to a rejection
+that does not say the consumer is deferred.
 
 **Correction to the placebo rationale below (probe-verified by deleting the guard).** Removing
 the guard does *not* send these three to `unknown word` in the shape the tests use. With the
@@ -459,6 +470,17 @@ Regression, green and untouched: `tests/phase7_slice3b.rs` (the extraction's gat
 - L4's rendered *declared* type drops the row (`times` prints as `~[ i64 -- ]`), because
   `poly_walk_arms` builds it with empty outputs. Inherited from Phase 1 and harmless to
   soundness; record it rather than fix it here if it is still present.
+- Schedule the `~[ ..a -- ..b i64 ]` divergence (R3, Phase 3): a shape-changing parameter
+  declaring a slot above its output row is a located rejection from a generic body and
+  compiles from a monomorphic one. The fix is to strip the declared outs off the arm exit
+  before taking it as the call's exit row. Name the slice that takes it; do not leave it as
+  an unowned deferral.
+- Record the arm join's `int_val` gap: `poly_arms_agree` compares each slot's `pt` and not
+  the compile-time literal beside it, so a differing index literal leaves the join carrying
+  the first arm's value. Pre-existing (the eliminator path has compared `pt` alone since
+  S3b) and memory-safe — the static bounds check passes and the index traps at runtime,
+  while the monomorphic twin ICEs at `word_families.rs:1250` — so it belongs in the roadmap
+  as a standing limit, not in this slice.
 
 ## Out of scope
 
