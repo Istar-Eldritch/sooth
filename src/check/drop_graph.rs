@@ -1314,8 +1314,9 @@ mod tests {
         ] {
             let words = words_of(src);
             // The word under test is the source's own, at index 0: `words_of`
-            // appends the `lib/core.sth` prelude, which now defines `lt` too,
-            // so both `last()` and a name lookup can find the wrong one.
+            // appends the typed core (`test_support::core_lib_words`), which
+            // defines `lt` too, so both `last()` and a name lookup can find
+            // the wrong one.
             let word = words.first().expect("the builtin-named word");
             let terms = &word.body;
             let combs = combinator_index(&words);

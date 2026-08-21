@@ -160,6 +160,14 @@ pub fn fixture_source(name: &str, contents: &str) -> String {
 /// example's own directory so relative imports still resolve, and its `.tmpsth`
 /// extension keeps both the copy and its binary under `.gitignore`'s
 /// `/examples/*`.
+///
+/// P8.S2 (R7): deliberately *not* `--manifest`-passing. `examples/` is a real
+/// package now (`examples/sooth.pkg`, depending on `core` at `../lib`), so a
+/// committed example resolves through its own ancestor manifest -- which is
+/// what `sooth build examples/gcd.sth` does too, and what makes its `self::`
+/// imports spellable at all (a `--manifest` site rejects those). Fixtures
+/// written to temp directories are the ones that need the shared manifest;
+/// `manifest_for` is where that choice lives.
 #[allow(dead_code)]
 pub fn build_example(rel: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);

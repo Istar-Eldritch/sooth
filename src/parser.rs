@@ -546,7 +546,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     //
     // P7 slice 3a phase 2 (R2): flushed and rebased, not dropped -- this
     // single-file path is a real check/lower entry too (used directly by
-    // tests and by `lib/core.sth`'s own parse), so it keeps `generics` alive
+    // tests and by the `lib/` core modules' own parse), so it keeps `generics` alive
     // the same way `driver::assemble_module` does.
     generics.flush_structs_into(&mut structs);
     generics.flush_enums_into(&mut enums);

@@ -5,8 +5,8 @@
 //! conditional jump on a 32-bit flag taking two quotations), `tag` (a scalar
 //! enum's discriminant as that flag) and the six comparison primitives that
 //! produce it -- and `bool`, `if`, `unless` and `eq`/`lt`/`gt`/`lte`/`gte`/`ne` are
-//! ordinary words in `lib/core.sth`. `TermKind::If` and the `if`/`else`/`end`
-//! grammar are gone.
+//! ordinary words in the `core` package (`core::bool`, `core::cmp`).
+//! `TermKind::If` and the `if`/`else`/`end` grammar are gone.
 
 use sooth::ir::{lower, CmpOp, Instr, IrFunc, IrType, Terminator};
 use sooth::{backend, check, lexer, test_support};

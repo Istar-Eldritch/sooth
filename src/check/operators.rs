@@ -595,7 +595,7 @@ mod tests {
     }
     #[test]
     fn check_symbolic_comparison_is_unknown_word() {
-        // The retired `<` is gone from `lib/core.sth` too, not just the table.
+        // The retired `<` is gone from `core::cmp` too, not just the table.
         let err = check_src(": w ( i64 i64 -- bool ) < ;").unwrap_err();
         assert!(
             err.contains("unknown word `<`"),

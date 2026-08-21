@@ -3,8 +3,7 @@
 //! a libc symbol (or a runtime shim's callee) silently hijacked it at link time.
 //! Native builds now mangle even a one-file closure (`resolve::resolve_modules`
 //! forced on via `driver::assemble_module`'s `always_mangle`), so `main`,
-//! `drop` and the `lib/core.sth` prelude words aside, every user word is
-//! `name__m0` and can no longer collide.
+//! `drop` aside, every user word is `name__m0` and can no longer collide.
 //!
 //! Each test asserts exact stdout and exit code, not merely "does not crash":
 //! before the fix each program produced observably different output (mode 1

@@ -658,7 +658,7 @@ fn check_term(
             // first (it is two pointers) so `poly` can be reborrowed mutably
             // for the splice.
             // Slice 10c: a name can now be *both* a polymorphic library word
-            // and a concrete user overload -- `lib/core.sth`'s `'T: Copy Ord`
+            // and a concrete user overload -- `core::cmp`'s `'T: Copy Ord`
             // comparisons against a user's `: lt ( Vec2 Vec2 -- bool )` for
             // their own type, which slice 8a shipped. The library candidate's
             // `Ord` bound excludes `Vec2`, so when no polymorphic candidate
@@ -1512,7 +1512,7 @@ fn check_branch(
             let else_end = prov.quotations[e.0].span;
             // The join's diagnostics are located at the first arm, not at
             // `branch` itself: the arms are the *caller's* literals, while
-            // `branch` is reached through `lib/core.sth`'s `if`, whose span
+            // `branch` is reached through `core::bool`'s `if`, whose span
             // would point a user at library source they did not write.
             check_branch_join(
                 &then_body,
@@ -1743,7 +1743,7 @@ mod tests {
     /// exercises -- `myif`'s body forwards its declared `~` parameters into
     /// `branch`, and at *its* definition site those are abstract quotation
     /// slots with no interned body. Measured mutation: route `branch`'s arm
-    /// through the `QuotRef::Known` case alone and `lib/core.sth`'s own `if`
+    /// through the `QuotRef::Known` case alone and `core::bool`'s own `if`
     /// stops checking, so *nothing* builds -- the abstract-forward case is not
     /// an edge case, it is the case the whole slice rests on.
     #[test]

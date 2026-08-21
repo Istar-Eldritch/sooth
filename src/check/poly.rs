@@ -1086,9 +1086,9 @@ pub(super) fn poly_call_term(
 
 /// P8 S2 (R6b): the located diagnostic for a non-inline polymorphic word
 /// calling another polymorphic word. Deleting the prelude removed the one shape
-/// this used to work for -- the injected `lib/core.sth` comparisons were
-/// reachable by bare, unmangled name from any body -- so this is the narrowing
-/// that replaced it, named rather than left as a raw unknown-word error. An
+/// this used to work for -- its injected comparisons were reachable by bare,
+/// unmangled name from any body -- so this is the narrowing that replaced it,
+/// named rather than left as a raw unknown-word error. An
 /// imported callee and a same-module one emit the same message: both are the
 /// one underlying gap.
 fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
@@ -2306,7 +2306,7 @@ pub(super) fn poly_sig_could_match(
         }
         // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
         // (`is_ord` is `is_numeric` and nothing else), and the bound is what
-        // keeps `lib/core.sth`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
         // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
         // library word swallows every operand type.

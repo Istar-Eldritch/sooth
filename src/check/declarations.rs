@@ -1144,7 +1144,7 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
 /// bound the concrete type fails means no call site can reach both, so there
 /// is nothing to disambiguate.
 ///
-/// Slice 10c: this is what lets `lib/core.sth`'s `: < ( 'T: Copy Ord 'T --
+/// Slice 10c: this is what lets `core::cmp`'s `: < ( 'T: Copy Ord 'T --
 /// bool )` coexist with a user's `: < ( Vec2 Vec2 -- bool )`, which slice 8a
 /// shipped and an arity-only test would now reject outright. Only the `Ord`
 /// bound is consulted (`is_ord` is `is_numeric` and nothing else): `Copy` needs

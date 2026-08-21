@@ -221,7 +221,7 @@ fn inline_word_polymorphic_signature_is_accepted() {
     // Slice 10c (R-P3-3b) **reverses R3's polymorphic half**, which its own
     // doc admitted was a policy rule and not a soundness one: the splice
     // already handles a variable-bearing body. The reversal is what lets the
-    // six `lib/core.sth` comparison words be both `'T: Copy Ord`-polymorphic
+    // six `core::cmp` comparison words be both `'T: Copy Ord`-polymorphic
     // and `inline`. R3's other rejections (`main`, a builtin operator name)
     // are untouched, and the tests above still pin them.
     let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n")

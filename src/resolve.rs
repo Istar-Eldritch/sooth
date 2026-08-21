@@ -29,10 +29,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// registered under it. Every other name gains a `__m{module}` component,
 /// minted so no punctuation reaches a symbol sanitizer (D8).
 ///
-/// P8 S2 (R3): these two are the whole exemption list. The third one, the
-/// compiler-injected `lib/core.sth` prelude, is gone with the prelude itself:
-/// `if` and the comparisons are ordinary `core` words now, mangled per module
-/// and reached by `import:` like any other name.
+/// P8 S2 (R3): these two are the whole exemption list. The third one covered a
+/// prelude the compiler injected into every closure, and went with it: `if` and
+/// the comparisons are ordinary `core` words now, mangled per module and
+/// reached by `import:` like any other name.
 pub(crate) fn mangle(name: &str, module: u32) -> String {
     if name == "main" || name == "drop" {
         return name.to_string();

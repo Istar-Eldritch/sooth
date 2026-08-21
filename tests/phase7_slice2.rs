@@ -200,17 +200,18 @@ fn two_modules_declaring_the_same_static_get_distinct_storage() {
     assert_eq!(code, 0);
 }
 
-/// R2, the exempt names: `resolve::mangle` deliberately leaves `main`, `drop`
-/// and every `lib/core.sth` prelude word unmangled so a *word* of that name
-/// stays reachable by bare name from a module that did not declare it. A
+/// R2, the exempt names: `resolve::mangle` deliberately leaves `main` and
+/// `drop` unmangled so a *word* of that name stays reachable from a module that
+/// did not declare it (the C shim's entry, and `find_drop_overloads`). A
 /// static is reachable no such way, so routing it through those exemptions
 /// only ever collided: two modules each declaring `static: drop` emitted one
 /// raw `drop` data symbol (`symbol `drop' is already defined` straight from
 /// the assembler), and `Ctx::static_type`, which matches on the mangled name
 /// alone, borrowed whichever of the two it found first. Values differ per
 /// module and per name so a collapse that somehow linked would still show up
-/// as wrong numbers. Both exempt classes that can name a static are covered:
-/// the fixed names (`drop`) and the `lib/core.sth` prelude words (`if`).
+/// as wrong numbers. Both fixed names are covered, plus `if` -- which P8.S2
+/// (R3) retired from the exemption list, so a static named after it now only
+/// has to survive the ordinary path.
 #[test]
 fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
     let dir = scratch("exempt-names");

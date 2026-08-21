@@ -2885,7 +2885,7 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
 
 /// Slice 10c: the two arms of a `branch` disagree. Named for the *arms*, not
 /// for `if`: `branch` is the primitive and `if`/`unless` are ordinary
-/// `lib/core.sth` words over it, so by the time this fires the surface word
+/// `core::bool` words over it, so by the time this fires the surface word
 /// the user wrote has been spliced away and could equally have been `branch`
 /// itself. (The span still points at the first arm, which is the user's own
 /// literal either way -- see `check_branch_join`.)

@@ -475,8 +475,9 @@ relabel because such a value already *is* its discriminant; and the six comparis
 primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`, one per comparison shape, each deriving
 signed / unsigned / float behaviour from its operand type.
 
-Everything typed is a library word over them, in `lib/core.sth`, injected into every
-program as `bool` itself is. `if` and `unless` are term-body combinators
+Everything typed is a library word over them, in the `core` package: `core::bool` and
+`core::cmp`, which a program reaches by `import:` like any other module (only `bool` the
+*type* is compiler-known). `if` and `unless` are term-body combinators
 (`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
 condition's discriminant with `tag` and `branch`es on the flag); `eq`/`lt`/`gt`/`lte`/`gte`/`ne`
 are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
@@ -1046,7 +1047,7 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: linear (use exactly once) by default, `dup` is the explicit copy,
   `drop` is the explicit destructor point the checker enforces.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if`/`unless`, ordinary `lib/core.sth` words taking a `bool` and two
+- Control flow: `if`/`unless`, ordinary `core::bool` words taking a `bool` and two
   quotations over the `branch` and `tag` primitives (see The machine layer and the
   library layer); the generated eliminator word (`Shape?`) over variant-tagged
   quotation arms as the sole, exhaustive eliminator for enums (no inline `match`, no

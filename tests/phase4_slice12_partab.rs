@@ -8,7 +8,7 @@
 //! left the tree.
 
 /// The nine library words that gained `inline` this slice, paired with the file
-/// that defines each. P8.S2 (R8) split `lib/core.sth` into `core::bool` and
+/// that defines each. P8.S2 (R8) split the old `lib/core.sth` into `core::bool` and
 /// `core::cmp`, so `if`/`unless` live in `bool.sth` now.
 mod common;
 const MIGRATED: [(&str, &str); 9] = [
