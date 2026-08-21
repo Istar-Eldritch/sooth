@@ -17,36 +17,47 @@
 
 import: "combinators.sth" c | times | ;
 
-export: bin_search sort ;
+export: bin_search bin_search-helper sort ;
 
 \ Binary search over an array kept sorted by `cmp`. Converges to the
 \ leftmost insertion point (`lower_bound`) using only `cmp`'s sign, then
 \ checks equality once at the end -- so duplicates report their leftmost
-\ index. The loop runs a fixed 32 iterations rather than `ceil(log2(n))`:
-\ every Sooth array's length is a `u32` (`fill`'s own range check), so 32
-\ halvings always converge regardless of `n`, and an already-converged
-\ iteration (`lo == hi`) is a no-op, not wasted merge work.
+\ index. The halving loop is `bin_search-helper`, a self-*tail* recursion on
+\ the `lo`/`hi` pair in the same shape as `times-helper`: the recursive call
+\ sits in tail position of an `if` arm, so it lowers to a loop back-edge (D8)
+\ and runs in constant stack. It stops when the window closes, rather than
+\ running a fixed 32 halvings and idling once converged.
+\ `bin_search-helper` is exported for the same reason `times-helper` is: the
+\ REPL's dlopen import path retains only a module's exported words.
+: bin_search-helper inline ( ['T: Copy 'N] 'T ~[ 'T 'T -- i64 ] i64 i64 -- ['T 'N] i64 )
+  | arr key cmp lo hi |
+  lo hi lt 
+  ~[
+    lo hi add 1 shr | mid |
+    &arr mid >usize &> @ key cmp call 0 lt 
+    ~[ arr key cmp mid 1 add hi bin_search-helper ]
+    ~[ arr key cmp lo mid bin_search-helper ]
+    if
+  ] 
+  ~[ arr lo ] 
+  if ;
+
 : bin_search inline ( ['T: Copy 'N] 'T ~[ 'T 'T -- i64 ] -- ['T 'N] usize bool )
-  | cmp | | key | len >i64 | n | | arr |
-  0 n 32 ~[ | i |
-    over over lt ~[
-      | lo hi |
-      lo hi add 1 shr | mid |
-      &arr mid >usize &> @ key cmp call 0 lt ~[
-        mid 1 add hi
-      ] ~[
-        lo mid
-      ] if
-    ] ~[ ] if
-  ] times
-  | lo hi |
-  lo n lt ~[
-    &arr lo >usize &> @ key cmp call 0 eq
-  ] ~[
+  | key cmp | 
+  len >i64 
+  | arr  n|
+  arr key cmp 0 n bin_search-helper
+  | sorted lo |
+  lo n lt 
+  ~[
+    &sorted lo >usize &> @ key cmp call 0 eq
+  ] 
+  ~[
     false
-  ] if
+  ] 
+  if
   | found |
-  arr lo >usize found
+  sorted lo >usize found
 ;
 
 : min2 ( i64 i64 -- i64 )
