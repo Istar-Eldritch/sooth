@@ -461,20 +461,49 @@ Regression, green and untouched: `tests/phase7_slice3b.rs` (the extraction's gat
 
 ## Exit findings (Phase 4, required)
 
-- Re-run `poly.rs`'s five split signals (OQ3) and record the decision. Phase 2 left the file
-  at ~6100 lines.
-- Confirm the borrow join is unique in the file (no second, non-unioning join was introduced).
-  Phase 2's audit found one join, in `poly_walk_arms`; the only other `borrows.push` in the
-  file is the ordinary borrow-creation site in the `&`/`&!` term.
-- Record any consumer still rejected and the follow-up its message points at.
+- **OQ3, the split re-run: defer again, with a named reason instead of a schedule reason
+  this time.** `poly.rs` is 6299 lines with 77 top-level functions at exit, 40 of them pure
+  diagnostic formatters. Re-running the five signals: (2) the module does several things
+  (the abstract term walk, shuffle/reference ops, eliminator dispatch, combinator dispatch,
+  and ~40 diagnostics) and (4) many of those formatters never call each other or the logic
+  functions beside them, both nominally fire; (3) high- and low-level code mixed fires too,
+  but S3b's own exit already noted `check.rs` carries the identical shape (40 formatters
+  beside their checks) as this codebase's standing convention, not an anomaly of this file —
+  so that signal does not distinguish `poly.rs`, and (2)/(4) are largely the same root cause
+  restated. (1) import divergence and (5) a split forced by a circular dependency do not
+  fire. Net one signal that is actually load-bearing here, under the 2-signal bar. **What
+  changed since S3b, and what did not**: the responsibility-shaped split (eliminator +
+  combinator arm machinery into one module) no longer cuts the single-consumer
+  `poly_call_term → poly_eliminator_call → poly_walk` recursion S3b deferred it over — that
+  objection is gone — but the bar the signals set is not cleared either, so this is a
+  judgment call to defer, not a blocked one. Deferred with the extraction shape named so it
+  can be done in one sitting rather than re-litigated: `poly_eliminator_call`,
+  `poly_combinator_call`, `poly_walk_arms`, `poly_row_combinator`, `poly_declared_arm`,
+  `ArmRule`/`DeclaredArm`, and their ~15 diagnostic formatters, into a new
+  `check/poly_arms.rs`, called from `poly_call_term` in `poly.rs`. Trigger it opportunistically
+  (a third consumer, or an unrelated phase that already has to touch this neighbourhood),
+  not on a fixed schedule.
+- **Borrow join uniqueness, confirmed at HEAD.** Exactly one join: the `for borrows in
+  arm_borrows { … }` union plus the `Moves::join` reduce inside `poly_walk_arms`
+  (`src/check/poly.rs:1345`), called from both `poly_eliminator_call` and the new
+  `poly_combinator_call`. The only other `.borrows.push` in the file
+  (`poly_reference_word`, an `&`/`&!` term) records one fresh borrow, not a merge, so it is
+  not a second join.
+- **Consumers still rejected, and what their message now points at.** `call` on a literal
+  keeps `poly_quotation_combinator_unsupported_error`, re-pointed at P7.S3d (its own exit
+  criterion, not yet landed); `branch` and `tag` keep the same error naming no follow-up
+  slice yet (`tag` is genuinely reachable, not a dead guard arm — confirmed by the mutation
+  list in Testing). `poly.rs:848`'s guard is narrowed to exactly these three names; every
+  other row-typed inline combinator (`if`, `unless`, `times`, and any library/user one)
+  reaches the new dispatch instead.
 - L4's rendered *declared* type drops the row (`times` prints as `~[ i64 -- ]`), because
   `poly_walk_arms` builds it with empty outputs. Inherited from Phase 1 and harmless to
   soundness; record it rather than fix it here if it is still present.
-- Schedule the `~[ ..a -- ..b i64 ]` divergence (R3, Phase 3): a shape-changing parameter
-  declaring a slot above its output row is a located rejection from a generic body and
-  compiles from a monomorphic one. The fix is to strip the declared outs off the arm exit
-  before taking it as the call's exit row. Name the slice that takes it; do not leave it as
-  an unowned deferral.
+- The `~[ ..a -- ..b i64 ]` divergence (R3, Phase 3) is named: **P7.S3i**
+  (`docs/roadmap/P7-language-prereqs.md`). A shape-changing parameter declaring a slot above
+  its output row is a located rejection from a generic body and compiles from a monomorphic
+  one; the fix is to strip the declared outs off the arm exit before taking it as the call's
+  exit row.
 - Record the arm join's `int_val` gap: `poly_arms_agree` compares each slot's `pt` and not
   the compile-time literal beside it, so a differing index literal leaves the join carrying
   the first arm's value. Pre-existing (the eliminator path has compared `pt` alone since

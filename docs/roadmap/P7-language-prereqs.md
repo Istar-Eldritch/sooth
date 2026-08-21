@@ -143,6 +143,40 @@ parallel `lits` vector beside it, a `QuotRef` index over a per-body literal inte
 run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
 `tests/phase7_slice3b.rs`).
 
+**P7.S3b-follow — Row-typed quotation consumers in a polymorphic body.** `[ done ]` S3b
+shipped one quotation consumer, enum elimination; every row-typed inline combinator
+(`if`/`unless`/`times`, and any library or user `inline` word declaring `~[ ]` parameters)
+stayed a located rejection naming this slice. A **non-inline** polymorphic word can now
+consume one, so it can branch and loop as a **monomorphized function** — one compiled body
+per instantiation — instead of forcing every call site to splice its whole body. Scheduled
+on code size, not on an unwritable-program witness: every candidate motivating program
+turned out writable today with `inline` (a self-*tail*-recursive generic word already lowers
+to a loop back-edge, `inline` and all); what a non-spliced body actually saves is that a
+generic word's *callers* no longer each carry a full copy of it. Dispatch is driven by the
+callee's declared `PolySig`, not by name, so one mechanism covers `if`, `unless`, `times`,
+and a user's own row-typed combinator alike; `unless` is the witness it is not name-driven,
+since it never reached the old rejection at all (it landed on an unrelated operand-window
+error instead). `call`, `branch`, `tag` are deliberately **not** delivered — `call` on a
+literal is P7.S3d's own exit criterion, and `branch`/`tag` keep the located rejection,
+naming no slice yet scoped to resolve them. An arm operand that is not a splice-consumed
+quotation literal (a value, or one that lost its identity through a local bind) is a located
+rejection reusing S3b's materialisation diagnostics, never an inherited backend panic — this
+forecloses the pre-existing `while`-over-an-erased-quotation ICE from being reached through
+the new path. Type variables and rows stay rigid throughout (S3b's L1/L2, unchanged): no
+mid-body `Subst`, and a declared row grounds once, to the caller region beneath the
+combinator's fixed inputs, never solved for.
+**Exit:** a non-inline generic word can pass a quotation literal to a row-typed inline
+combinator's `~[ ]` parameter, in both the non-shape-changing (`times`) and shape-changing
+(`if`/`unless`) cases, with the arms' borrow table unioned and their exit rows checked
+structurally under rigid type variables — a single-arm combinator's declared row is
+pre-seeded as its own baseline (soundness: `times`'s one arm has no sibling to compare
+against), and shape-changing sibling arms are cross-checked by output-row id. Landed by
+extracting the eliminator's per-arm walk and N-arm join (borrow-union, `Scope::leave`
+analogue, `Moves::join`) into a shared `poly_walk_arms`, now called by both
+`poly_eliminator_call` and a new `poly_combinator_call`; a `poly_row_combinator` lookup in
+`poly_call_term` dispatches ahead of the narrowed `call`/`branch`/`tag` guard
+(`docs/roadmap/P7/slice3b-follow-spec.md`, `tests/phase7_slice3b_follow.rs`).
+
 **P7.S3c — Slicing a buffer into a view.** `[ done ]` DESIGN.md lists slices among
 `core`'s concrete types but defers the mechanism ("Slicing a buffer into a view is
 deferred"); `str` is already the pattern's one instance, a pointer plus a runtime
@@ -390,3 +424,21 @@ touches `env` today, so any claim that an existing rule already disposes a captu
 returned from the word that built it, calling it observes the captured value, and dropping
 the closure disposes the captured value exactly once -- with a leaked or double-disposed
 capture each a located error rather than a silent miscompile.
+
+**P7.S3i — A shape-changing combinator parameter declaring a slot above its row.**
+Discovered and located, not fixed, at P7.S3b-follow's phase 3 exit: a row-typed inline
+combinator whose quotation parameter declares a slot *above* its output row
+(`~[ ..a -- ..b i64 ]`, as a hand-written `pick` combinator might) is rejected from a
+generic body (`` `pick` declares `~[ ..a -- ..b i64 ]`, which a call ... cannot ground ``)
+but compiles from a monomorphic one, because `poly_combinator_call` reads the produced row
+straight off an arm's exit and has no rule for stripping a declared trailing slot back off
+first. Neither existing quotation consumer (the eliminator, or this slice's own `if`/`times`
+family) needs that rule, so nothing here builds it as a side effect. Memory-safe as it
+stands: the located rejection is what stands between this program and a backend panic
+(`ir/func_builder/quotation.rs`'s row-length arithmetic, `attempt to subtract with overflow`)
+rather than just being a worse diagnostic, and `if`/`times`/`unless` themselves declare no
+such parameter, so no shipped library word is narrower for it. **Exit:** a row-typed
+combinator parameter may declare a slot above its output row, and a generic body calling it
+grounds and strips that slot the same way the monomorphic path already does
+(`tests/phase7_slice3b_follow.rs`'s `a_slot_declared_above_a_produced_row_is_located` is the
+regression the fix must keep passing under the new, permissive path).
