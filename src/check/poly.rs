@@ -1222,37 +1222,147 @@ fn poly_eliminator_call(
     // the concrete narrowed variant this dispatch computes. So the poly
     // analogue of `check_literal_against_declared_effect` is a recursive
     // `poly_walk` of the arm body over `(caller row ++ narrowed variant)`,
-    // yielding an abstract exit row. Each arm walks its own clone of the
-    // enclosing scope, exactly as the concrete path clones `scope` per arm;
-    // the join below reconciles the clones.
+    // yielding an abstract exit row: the shared arm machinery, with the
+    // narrowed variant as each arm's input.
     let base = stack.len() - 1;
     let row: Vec<PolySlot> = stack[..base].to_vec();
-    let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+    let walk_arms: Vec<PolyArm> = arms
+        .iter()
+        .zip(&variant_indices)
+        .map(|((quot, _), vi)| {
+            let narrowed = variant_type(enums, id, *vi);
+            let mut input = row.clone();
+            input.push(PolySlot::new(PolyType::Concrete(narrowed)));
+            PolyArm {
+                quot: *quot,
+                input,
+                declared: crate::ast::inline_quotation_type(vec![narrowed], vec![]),
+            }
+        })
+        .collect();
+    // The cross-arm output rule an eliminator supplies: its arms have no
+    // declared output row to be held to, so each is compared against the
+    // first arm's exit.
     let mut baseline: Option<Vec<PolySlot>> = None;
+    poly_walk_arms(
+        walk_arms,
+        name,
+        span,
+        scope,
+        sig,
+        ctx,
+        env,
+        structs,
+        enums,
+        arrays,
+        slices,
+        builtin_overloads,
+        &mut |literal_span, exit| match &baseline {
+            None => {
+                baseline = Some(exit);
+                Ok(())
+            }
+            Some(expected) => {
+                if expected.len() != exit.len() {
+                    return Err(combinator_branch_output_mismatch_rendered(
+                        ctx,
+                        literal_span,
+                        name,
+                        &poly_row_str(expected, sig),
+                        &poly_row_str(&exit, sig),
+                    ));
+                }
+                // L1: structural equality under *rigid* variables. `'T` in one
+                // arm against `'U`, or against `i64`, disagrees -- binding
+                // either would be a mid-body unification this slice does not
+                // do (and could not undo across the sibling arms).
+                for (a, b) in expected.iter().zip(&exit) {
+                    if a.pt != b.pt {
+                        return Err(poly_arm_output_disagreement_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            &poly_type_str(&a.pt, sig),
+                            &poly_type_str(&b.pt, sig),
+                        ));
+                    }
+                }
+                Ok(())
+            }
+        },
+    )?;
+    // A zero-variant enum has no arms and no constructible value, so its call
+    // is unreachable and `row` is simply handed back untouched.
+    Ok(baseline.unwrap_or(row))
+}
+
+/// P7 slice 3b-follow (R1): one arm handed to `poly_walk_arms` -- the literal
+/// to walk, the abstract stack its body walks over, and the inline parameter
+/// it stands at.
+struct PolyArm {
+    quot: PolyQuotRef,
+    input: Vec<PolySlot>,
+    /// The declared parameter named when the arm was written with an ordinary
+    /// `[ ... ]` bracket (L4).
+    declared: Type,
+}
+
+/// P7 slice 3b-follow (R1): the per-arm machinery every quotation-consuming
+/// call in a polymorphic body shares -- the per-arm scope clone, the recursive
+/// `poly_walk`, the arm-exit escape checks, the `Scope::leave` analogue, and
+/// the join that reconciles the clones. What differs between consumers is
+/// supplied by the caller: each arm's *input* row (an eliminator's narrowed
+/// variant; a combinator's grounded declared row) in `PolyArm`, and the
+/// cross-arm *output* rule in `cross_arm`, which sees each arm's exit in
+/// written order and is called before the next arm walks, so a disagreement is
+/// reported at the arm that introduces it rather than behind a later arm's own
+/// error.
+///
+/// L3: the borrow table is **unioned** here, and this is the only join. The
+/// table is keyed by place and a *missing* record reads as "no conflict"
+/// (`live_borrow_of` answers `None`), so a second join that intersects or
+/// picks one arm would be a silent false accept, not a false reject.
+#[allow(clippy::too_many_arguments)]
+fn poly_walk_arms(
+    arms: Vec<PolyArm>,
+    name: &str,
+    span: Span,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
+    builtin_overloads: &mut HashMap<Span, String>,
+    cross_arm: &mut dyn FnMut(Span, Vec<PolySlot>) -> Result<(), String>,
+) -> Result<(), String> {
+    let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
     let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
     let mut arm_borrows: Vec<Vec<PolyBorrow>> = Vec::with_capacity(arms.len());
-    for ((quot, _), vi) in arms.iter().zip(&variant_indices) {
-        let lit = scope.quotation(*quot);
+    for arm in arms {
+        let lit = scope.quotation(arm.quot);
         let (literal_span, body, is_inline) = (lit.span, lit.body.clone(), lit.is_inline);
-        let narrowed = variant_type(enums, id, *vi);
-        // An eliminator's arm parameters are declared inline
-        // (`enum_eliminator_sigs`), so an ordinary `[ ... ]` arm is the wrong
-        // bracket here exactly as it is on the concrete path -- same
-        // diagnostic, so the two paths do not disagree about one spelling.
+        // L4: an arm stands at a parameter declared inline, so an ordinary
+        // `[ ... ]` arm is the wrong bracket here exactly as it is on the
+        // concrete path -- same diagnostic, so the two paths do not disagree
+        // about one spelling.
         if !is_inline {
             return Err(ordinary_literal_at_inline_param_error(
                 ctx,
                 literal_span,
                 name,
-                crate::ast::inline_quotation_type(vec![narrowed], vec![]),
+                arm.declared,
             ));
         }
-        let mut arm_stack = row.clone();
-        arm_stack.push(PolySlot::new(PolyType::Concrete(narrowed)));
+        // Each arm walks its own clone of the enclosing scope, exactly as the
+        // concrete path clones `scope` per arm; the join below reconciles the
+        // clones.
         let mut arm_scope = scope.clone();
         let exit = poly_walk(
             &body,
-            arm_stack,
+            arm.input,
             &mut arm_scope,
             sig,
             ctx,
@@ -1263,10 +1373,10 @@ fn poly_eliminator_call(
             slices,
             builtin_overloads,
         )?;
-        // Step 5b: a `Type::Variant` may not leave the call. Every
-        // type-directed predicate outside the eliminator is written over
-        // `Type::Enum`, so `is_copy` reads an escaped variant as trivially
-        // `Copy` and a later `dup` double-drops a linear payload.
+        // A `Type::Variant` may not leave the call. Every type-directed
+        // predicate outside the eliminator is written over `Type::Enum`, so
+        // `is_copy` reads an escaped variant as trivially `Copy` and a later
+        // `dup` double-drops a linear payload.
         for slot in &exit {
             let escaping = match &slot.pt {
                 PolyType::Concrete(t) => Some(*t),
@@ -1295,7 +1405,7 @@ fn poly_eliminator_call(
                 ));
             }
         }
-        // R3, the poly analogue of `Scope::leave`. The poly walk has no block
+        // The poly analogue of `Scope::leave`. The poly walk has no block
         // scope: `poly_term`'s `Bind` inserts into `locals`/`moves` and
         // nothing removes them. Without this, an arm-bound linear local leaks
         // unreported, *and* `Moves::join` (which indexes the other arm's map
@@ -1325,38 +1435,10 @@ fn poly_eliminator_call(
             .retain(|k, _| enclosing_locals.contains(k));
         arm_moves.push(arm_scope.moves);
         arm_borrows.push(arm_scope.borrows);
-        match &baseline {
-            None => baseline = Some(exit),
-            Some(expected) => {
-                if expected.len() != exit.len() {
-                    return Err(combinator_branch_output_mismatch_rendered(
-                        ctx,
-                        literal_span,
-                        name,
-                        &poly_row_str(expected, sig),
-                        &poly_row_str(&exit, sig),
-                    ));
-                }
-                // L1: structural equality under *rigid* variables. `'T` in one
-                // arm against `'U`, or against `i64`, disagrees -- binding
-                // either would be a mid-body unification this slice does not
-                // do (and could not undo across the sibling arms).
-                for (a, b) in expected.iter().zip(&exit) {
-                    if a.pt != b.pt {
-                        return Err(poly_arm_output_disagreement_error(
-                            ctx,
-                            literal_span,
-                            name,
-                            &poly_type_str(&a.pt, sig),
-                            &poly_type_str(&b.pt, sig),
-                        ));
-                    }
-                }
-            }
-        }
+        cross_arm(literal_span, exit)?;
     }
 
-    // L4: the borrow table is **unioned**, not picked or intersected. It is
+    // L3: the borrow table is **unioned**, not picked or intersected. It is
     // keyed by place and a *missing* record reads as "no conflict", so
     // dropping one arm's record is a silent false accept: arm A's `&!x` and
     // arm B's `&!y` must both survive, or a later use of whichever was
@@ -1378,13 +1460,12 @@ fn poly_eliminator_call(
     // The move-state join, generalized from the concrete path's two arms to N
     // by the same reduction. Every arm now presents the enclosing key set
     // (the `leave` analogue above), which is what makes `Moves::join`'s
-    // indexing sound here. A zero-variant enum has no arms and no
-    // constructible value, so its call is unreachable and `scope`/`row` are
-    // simply left untouched.
+    // indexing sound here. With no arms at all there is nothing to join and
+    // `scope` is left untouched.
     if let Some(joined) = arm_moves.into_iter().reduce(Moves::join) {
         scope.moves = joined;
     }
-    Ok(baseline.unwrap_or(row))
+    Ok(())
 }
 
 /// The exit row of one eliminator arm, rendered for the cross-arm shape
@@ -3849,6 +3930,127 @@ mod tests {
                 "the `{place}` record must survive the union: {err}"
             );
         }
+    }
+    /// P7 slice 3b-follow (R1): the pieces `poly_walk_arms` needs from a
+    /// caller that is not the eliminator -- a one-variable signature (so a
+    /// bare `'T` slot is non-`Copy` and carries a move obligation) and an arm
+    /// that binds one local and reads it back.
+    fn one_var_sig() -> PolySig {
+        PolySig {
+            ty_var_names: vec!["T".to_string()],
+            ..bare_sig()
+        }
+    }
+    fn arm_binding(local: &str, consume: bool) -> Vec<Term> {
+        let mut body = vec![Term {
+            kind: TermKind::Bind(vec![local.to_string()]),
+            span: Span::default(),
+        }];
+        if consume {
+            body.push(Term {
+                kind: TermKind::Call(local.to_string()),
+                span: Span::default(),
+            });
+        }
+        body
+    }
+    fn interned_arm(scope: &mut PolyScope, body: Vec<Term>) -> PolyArm {
+        let quot = scope.intern_quotation(PolyQuotLit {
+            body,
+            span: Span::default(),
+            is_inline: true,
+            annot: None,
+        });
+        PolyArm {
+            quot,
+            input: vec![PolySlot::new(PolyType::Var(0))],
+            declared: crate::ast::inline_quotation_type(vec![Type::I64], vec![]),
+        }
+    }
+    #[test]
+    fn poly_walk_arms_truncates_arm_locals_before_joining_moves() {
+        // R1: the `Scope::leave` analogue is what makes the N-arm
+        // `Moves::join` sound -- it indexes each later arm's map by the first
+        // arm's keys, so two arms binding *different* names panic outright
+        // unless every arm is truncated back to the enclosing key set first.
+        // Driven through the shared helper rather than an eliminator so the
+        // machinery is pinned independently of its one caller today.
+        let sig = one_var_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let arms = vec![
+            interned_arm(&mut scope, arm_binding("a", true)),
+            interned_arm(&mut scope, arm_binding("b", true)),
+        ];
+        let mut exits: Vec<Vec<PolyType>> = Vec::new();
+        poly_walk_arms(
+            arms,
+            "consumer",
+            Span::default(),
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut Vec::new(),
+            &mut HashMap::new(),
+            &mut |_, exit| {
+                exits.push(exit.into_iter().map(|slot| slot.pt).collect());
+                Ok(())
+            },
+        )
+        .expect("two arms binding different locals join once both are truncated");
+        assert_eq!(
+            exits,
+            vec![vec![PolyType::Var(0)], vec![PolyType::Var(0)]],
+            "every arm's exit reaches the cross-arm rule, in written order"
+        );
+        assert!(
+            scope.moves.states.is_empty() && scope.locals.is_empty(),
+            "an arm-local never reaches the enclosing scope: {:?}",
+            scope.moves.states
+        );
+    }
+    #[test]
+    fn poly_walk_arms_rejects_an_arm_local_left_unconsumed() {
+        // R1: the leak is rejected *before* the truncation erases it -- the
+        // poly walk has no block scope, so nothing else would ever notice a
+        // linear local bound inside an arm and dropped on the floor there.
+        let sig = one_var_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut scope = PolyScope::default();
+        let arms = vec![interned_arm(&mut scope, arm_binding("a", false))];
+        let err = poly_walk_arms(
+            arms,
+            "consumer",
+            Span::default(),
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &[],
+            &[],
+            &mut Vec::new(),
+            &mut HashMap::new(),
+            &mut |_, _| Ok(()),
+        )
+        .expect_err("a linear local bound in an arm and never read leaks");
+        assert!(
+            err.contains("the local `a` of type `T`, bound in an arm of `consumer`")
+                && err.contains("is never consumed"),
+            "unexpected message: {err}"
+        );
     }
     #[test]
     fn poly_eliminator_arm_leaving_its_own_variant_is_error() {
