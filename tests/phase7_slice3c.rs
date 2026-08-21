@@ -620,3 +620,14 @@ type: Box
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
 }
+
+/// The committed dogfood: `examples/slices.sth` sums a `Slice[i64]` (`sum`,
+/// no length threading) and doubles one in place through recursive shared and
+/// mutable `subslice` (`double`), the two shapes this file's tests otherwise
+/// only build from scratch strings.
+#[test]
+fn slices_example_sums_and_doubles_in_place() {
+    let (stdout, _, code) = build_and_run(Path::new("examples/slices.sth"));
+    assert_eq!(stdout, "15\n6\n6\n");
+    assert_eq!(code, 0);
+}
