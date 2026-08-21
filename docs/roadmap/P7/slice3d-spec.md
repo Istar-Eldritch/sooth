@@ -249,7 +249,7 @@ cannot be probed for the exact rejection a deleted guard would produce.
     swap call
   ;
 
-  : c2_apply_and_pass_through ( 'T: Copy 'T -- 'T i64 )
+  : c2_apply_and_pass_through ( 'T: Copy -- 'T i64 )
     | x | x [ 1 add ] 2 run1
   ;
   ```
@@ -280,12 +280,20 @@ cannot be probed for the exact rejection a deleted guard would produce.
     ```
 
   - A literal passed to a **poly** callee (`c2_literal_to_poly_callee_is_rejected`) still
-    rejects (S3f's territory), proving the concrete-only gate in R2 holds, asserting
-    `reject_quotation_argument`'s unchanged wording:
+    rejects, proving the concrete-only gate in R2 holds. **Correction (probe-verified during
+    implementation):** this does not reach `check_poly_call`'s `reject_quotation_argument`
+    at all — that function is the *concrete-caller-calls-poly-callee* path only
+    (`Scope`/`Slot`), never invoked from `poly_call_term` (the *poly-caller* path, on
+    `PolyScope`/`PolySlot`). `poly_call_term` cannot see `poly_env` (recon 1), so a poly
+    callee is simply not present in `env`; the pre-existing operand-window guard rejects it
+    first with the ordinary `poly_op_on_variable_error` wording:
 
     ```text
-    error: a quotation cannot be passed to `<word>`; only `call` accepts one (a runtime quotation value is slice 7) in `<word>` (line <N>)
+    error: `<word>` is not permitted on a quotation literal in `<word>` (line <N>)
     ```
+
+    The poly→poly shape is the one that actually proves R2's concrete-only gate; the
+    original wording above (a *concrete*-caller shape) would not have exercised it.
 
   - A **non-literal** quotation operand at `call` (C1) — see the C1 negative above.
 
@@ -315,9 +323,17 @@ instantiations; and every R4 negative, each asserting exact message text.
 Unit tests beside the stage (`src/check/poly.rs`, `#[cfg(test)] mod tests`, per CLAUDE.md,
 naming `thing_condition_expected`): `call` on a literal splices the body in place;
 `call` on a non-literal operand is a located rejection; a `QuotLit` passed to a concrete
-`env` word with a ground `Type::Quotation` input grounds and the call proceeds; the same
-`QuotLit` against a `Type::InlineQuotation` input still rejects; against a poly candidate
-still rejects; the retained guard still fires for `branch`/`if`/`times`/`tag`.
+`env` word with a ground `Type::Quotation` input grounds and the call proceeds; a `QuotLit`
+at the top-of-window operand position grounds via the carve-out (the load-bearing shape,
+see the mutation-testing correction below); `poly_ground_quotation_literal`'s own three
+guards each have a dedicated test (a leaked non-`Copy` local, the post-grounding local
+retain, and the `eff.outputs` pointwise mismatch); the retained guard still fires for
+`branch`/`if`/`times`/`tag`; a declared `~[ ]` parameter rejects at its own declaration
+(R6), and even a legal `inline` word with one never reaches dispatch by name (both pinned
+so this shape is never mistaken for evidence of the grounding arm's own
+`Type::Quotation`-not-`Type::InlineQuotation` exclusion, which is otherwise unreachable);
+against a poly candidate still rejects (see the golden negative's correction below for the
+actual mechanism).
 
 Mutation-tested guards (delete/flip the guarded code, watch the named test fail, then
 restore to a clean `git status`; commit before mutation testing; a mutation copy needs
@@ -326,38 +342,75 @@ restore to a clean `git status`; commit before mutation testing; a mutation copy
 - R1's `call`-on-literal arm (deletion → C1 fixture rejects with the located message).
 - R2's env-dispatch grounding arm (deletion → C2 fixture rejects with
   `poly_op_on_variable_error`).
-- R2's operand-window carve-out (revert → C2 fixture rejects at the earlier guard).
+- R2's operand-window carve-out. **Correction (probe-verified during implementation):**
+  forcing it off fails **zero** tests against the R4 C2 fixture — a non-builtin name's
+  operand window is always exactly one slot (its top), and both the R4 fixture and the
+  `poly_quotlit_grounds_against_concrete_quotation_param_ok` unit test park the literal
+  *underneath* the window (`x [ .. ] 2 run1`), where the guard never inspects it; the
+  env-dispatch loop's `other` arm produces the identical `poly_op_on_variable_error`
+  message regardless of the carve-out, which is why that mutation looked covered and
+  wasn't. The carve-out is only load-bearing for the quotation-*last* shape
+  (`i64 [ i64 -- i64 ] -- i64`, the literal as the top-of-window operand); its own test is
+  `poly_quotlit_grounds_when_it_is_the_top_of_window_operand_ok`, mutation-verified to fail
+  when the carve-out is forced off.
 - The retained guard's remaining names (deletion → the corresponding negative starts
-  compiling or falls through to `unknown word`).
+  compiling or falls through to `unknown word`). **Correction:** dropping `branch` fails a
+  slice3b test and dropping `times` fails a phase-2 unit test, but dropping `if` or `tag`
+  failed **zero** tests until `c2_branch_if_times_tag_on_quotation_still_rejected` (this
+  phase) added coverage for all four by name.
 
 Regression, green and untouched: `tests/phase7_slice3b.rs`, `tests/phase7_slice3a.rs`, the
 `tests/phase6_*` eliminator suites, `tests/qbe_baseline.rs`. Green is
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
 
-## Exit findings (required, to confirm during implementation)
+## Exit findings (confirmed at implementation)
 
-- **OQ1 (carried from the brief, confirm):** `call`-splicing a literal is a straight-line
-  walk with one body and one continuation, genuinely simpler than the eliminator's per-arm
-  clone-and-union, **not** a hidden case of it. Confirm no join/merge logic is needed and
-  none was added (R3).
-- **OQ3 lowering (carried from the brief, open — do NOT pre-decide):** the brief's
-  recon is checker-only and did not trace lowering. Confirm at exit whether a spliced `call`
-  and a grounded C2 call inside a non-inline poly body's IR generation fall out of the
-  existing monomorphization / eliminator-splice lowering, or whether new lowering work is
-  required. Record the answer; if new lowering is needed, that is an exit finding, not
-  silently in-scope work.
+- **OQ1:** confirmed. `call`-splicing a literal (R1) is a straight-line walk with one body
+  and one continuation. `poly_eliminator_call`'s own arm-cloning/union machinery is untouched
+  by this slice; the file's only `Moves::join` call site remains `poly.rs:1594`, inside
+  `poly_eliminator_call`. Neither C1 nor C2 adds a second join.
+- **OQ3 lowering:** no new lowering work was required. Both C1 and C2 fall out of the
+  existing monomorphization pass unchanged: `tests/phase7_slice3d.rs`'s C1 and C2 goldens
+  build and run correctly at two instantiations of the outer `'T` with no lowering changes
+  in this phase's diff.
 
-  Note also: the C2 lowering confirmation this exit finding calls for only covers a
-  **capture-free** literal, matching R4's golden fixture. A literal that captures a bound
-  local and is passed to a concrete `Type::Quotation` parameter must **materialize** to
-  reach that parameter (C2 grounds the literal's body, but the ordinary monomorphic call
-  still receives a value, not a splice) and would risk the known pre-existing
-  capture-into-materialized-quotation ICE. Record this as something to watch for at exit,
-  not something this slice is required to fix.
-- Re-run `poly.rs`'s five split signals (P7.S3b's deferred split; S3b-follow's OQ3) against
-  `poly.rs` as it stands after this slice, and record the decision — do not pre-judge the
-  outcome here (matching slice3b-follow-spec.md's phrasing for the same exit finding).
-- Confirm the borrow join is unique in the file (no second, non-unioning join introduced).
+  The anticipated capture risk did not bite, for a structural reason the spec's phrasing
+  undersold: C2 never materializes a quotation value at all. `poly_ground_quotation_literal`
+  walks the literal's body directly (the same in-place execution R1's splice uses); nothing
+  is stored, boxed, or handed to the callee as a runtime value. Probe-confirmed: a literal
+  capturing a **concrete** outer local grounds and runs correctly against a C2 parameter
+  (`| x k | x [ k add ] 2 run1` at `'T = i64` prints `9` then `5`). The
+  capture-into-materialized-quotation ICE this exit finding was watching for needs an actual
+  materializing consumer, which neither C1 nor C2 is.
+
+  A related, **pre-existing** gap found while probing this: a literal that captures a local
+  whose type is still a bare type variable (not a concrete capture) produces a misattributed
+  diagnostic rather than a located poly rejection —
+  `` `add` needs 2 values, but the stack holds 0 / note: declared ( -- ) `` for
+  `` : apply ( 'T: Copy -- 'T i64 ) | x | 5 [ x add ] call ; ``. This reproduces identically
+  through **C1** (`call` on the literal directly, no C2 involved), so it predates this phase
+  and belongs to the parse-time literal-effect inference C1 already relies on, not to R2's
+  carve-out or grounding arm. Recorded as a recommendation for a future phase; not fixed
+  here.
+- **`poly.rs` split signals, re-run:** at P7.S3b's deferred split, 3 of 5 signals fired and
+  both candidate splits (`poly/diagnostics.rs`, `poly/eliminator.rs`) were rejected as wrong
+  splits, with the deferral's own stated expiry condition being "a second quotation
+  consumer lands" (`project_poly_rs_split_deferred`). This slice adds exactly that — C1 and
+  C2 are a second and third consumer beyond the eliminator — so the condition has fired.
+  Re-running the signals against `poly.rs` as it now stands (5945 lines, still a single
+  `use super::*`, no circular dependency): the same 3 of 5 fire, and the two previously
+  rejected splits are still wrong for the same reasons (a layer-shaped `diagnostics.rs` has
+  no precedent elsewhere in the checker; `poly_call_term` → `poly_eliminator_call` →
+  `poly_walk` → `poly_call_term` is still one mutually-recursive walk, and C1/C2 hang off
+  `poly_call_term` directly, so a split drawn around the eliminator alone would not even
+  capture the new consumers). **Decision: still defer.** The file has grown, not
+  reorganized into separable responsibilities; a split is recommended once an actual
+  distinct-module boundary appears (e.g. P7.S3b-follow's real row-typed
+  `branch`/`if`/`times`/`tag` implementation, not just the deferred-rejection stub that
+  exists today), not as a line-count response.
+- **Borrow join uniqueness:** confirmed. `grep -n "Moves::join"` finds one call site,
+  `poly.rs:1594`, inside `poly_eliminator_call`. R1's splice teardown and R2's grounding
+  teardown both use a `retain`-to-snapshot, never a join (R3).
 
 ## Out of scope
 

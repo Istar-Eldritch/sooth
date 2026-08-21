@@ -5805,18 +5805,110 @@ mod tests {
         .expect("a literal grounding against a concrete quotation parameter should be accepted");
     }
 
-    /// P7 slice 3d (C2/R2): the same `QuotLit` against a declared
-    /// `Type::InlineQuotation` input still rejects -- R6's standing gate, out
-    /// of this slice's scope, and not something the carve-out may loosen.
+    /// P7 slice 3d (C2/R2): a `~[ ]` parameter can never reach the grounding
+    /// arm at all, so this does *not* pin the arm's own `Type::Quotation`
+    /// (not `Type::InlineQuotation`) exclusion -- R6's declaration gate
+    /// (`word_entry.rs`) rejects `run1`'s own declaration first, since a
+    /// non-inline word may not declare a `~[ ]` parameter, before any call
+    /// site is even checked. Confirmed even a *legal* `inline run1` never
+    /// reaches `chosen`: an inline word is spliced, not dispatched through
+    /// `env` by name, so the call instead falls through to `unknown word
+    /// run1__m0`. Both are pinned here so this rejection is never
+    /// mistaken for evidence of the grounding arm's own exclusion.
     #[test]
-    fn poly_quotlit_against_inline_quotation_param_still_rejects() {
+    fn poly_quotlit_against_declared_inline_quotation_param_rejects_at_declaration() {
         let err = check_src(
             ": run1 ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
-        .expect_err("a literal must not ground against an inline-only parameter");
+        .expect_err("a non-inline word may not declare a `~[ ]` parameter");
         assert!(
-            !err.contains("panic"),
-            "a located rejection is expected, not a panic: {err}"
+            err.contains("declares an inline-quotation parameter") && err.contains("not `inline`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn poly_quotlit_against_legal_inline_quotation_param_never_reaches_dispatch() {
+        let err = check_src(
+            ": run1 inline ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err("a spliced inline word is never a callable `env` candidate here");
+        assert!(err.contains("unknown word"), "{err}");
+    }
+
+    /// P7 slice 3d (R2): the load-bearing shape for the operand-window
+    /// carve-out -- a non-builtin name's window is exactly one slot (its
+    /// top), so the carve-out only ever matters when the literal itself is
+    /// that top slot (the conventional quotation-last API shape). Every
+    /// other test in this file parks the literal *underneath* the window
+    /// (`x [ .. ] 2 run1`), where the window guard never even inspects it;
+    /// forcing the carve-out to always reject fails none of those, only
+    /// this one.
+    #[test]
+    fn poly_quotlit_grounds_when_it_is_the_top_of_window_operand_ok() {
+        check_src(
+            ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x 2 [ 1 add ] run0 ;\n : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect("a top-of-window literal must ground against a concrete quotation parameter");
+    }
+
+    /// P7 slice 3d (C2): `poly_ground_quotation_literal`'s own teardown --
+    /// the poly analogue of `Scope::leave` -- rejects a non-`Copy` local the
+    /// grounded literal binds and never consumes, exactly as R1's splice
+    /// teardown does for `call`.
+    #[test]
+    fn poly_ground_quotation_literal_leaked_local_is_error() {
+        let err = check_src(&format!(
+            "{SPY}: run1 ( [ Spy -- i64 ] Spy -- i64 ) swap call ;\n\
+             : apply ( 'T: Copy -- 'T i64 )\n\
+               | x | x [ | s | 1 ] 1 Spy run1\n\
+             ;\n\
+             : main ( -- ) 5 apply drop drop ;\n"
+        ))
+        .expect_err("a local bound in the grounded literal and never consumed should be rejected");
+        assert!(
+            err.contains("the local `s` of type `Spy`, bound in an arm of `run1` in `apply`")
+                && err.contains("is never consumed"),
+            "{err}"
+        );
+    }
+
+    /// P7 slice 3d (C2): the teardown also retains `scope.locals`/
+    /// `scope.moves` back down to the pre-grounding snapshot -- without it,
+    /// a `Copy` local bound inside the grounded literal would still be
+    /// registered afterward, so a second reference to that name would
+    /// resolve as a stale local rather than the ordinary lookup it should
+    /// fall through to.
+    #[test]
+    fn poly_ground_quotation_literal_retains_locals_after_grounding() {
+        let err = check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+             : leaks ( 'T: Copy -- 'T i64 )\n\
+               | x | x [ | y | 3 ] 2 run1 y\n\
+             ;\n\
+             : main ( -- ) 7 leaks drop drop ;\n",
+        )
+        .expect_err("`y` must not remain a resolvable local past the grounded literal's own scope");
+        assert!(err.contains("unknown word `y`"), "{err}");
+    }
+
+    /// P7 slice 3d (C2): the grounded literal's exit stack must match
+    /// `eff.outputs` pointwise, not merely in arity -- a literal that leaves
+    /// the declared output type but the wrong shape is still a type
+    /// mismatch, not a silent pass.
+    #[test]
+    fn poly_ground_quotation_literal_output_mismatch_is_error() {
+        let err = check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+             : apply ( 'T: Copy -- 'T i64 )\n\
+               | x | x [ true ] 2 run1\n\
+             ;\n\
+             : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err("a literal whose grounded body leaves the wrong output shape must be rejected");
+        assert!(
+            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `i64 bool`"),
+            "{err}"
         );
     }
 

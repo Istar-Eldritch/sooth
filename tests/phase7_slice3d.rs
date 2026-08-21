@@ -102,3 +102,90 @@ fn c1_call_on_non_literal_operand_is_located_rejection() {
     );
     assert!(!err.contains("unknown word"), "{err}");
 }
+
+/// C2 behavioural: a poly body passing a literal to a concrete helper that
+/// carries real logic around its own `call` (a second, unrelated argument
+/// on the same call), run at two distinct instantiations of the outer `'T`.
+#[test]
+fn c2_literal_grounds_against_concrete_quotation_param() {
+    let src = ": run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
+               swap call\n\
+             ;\n\
+             : c2_apply_and_pass_through ( 'T: Copy -- 'T i64 )\n\
+               | x | x [ 1 add ] 2 run1\n\
+             ;\n\
+             : main ( -- )\n\
+               5 c2_apply_and_pass_through . .\n\
+               true c2_apply_and_pass_through . .\n\
+             ;\n";
+    let prog = Scratch::write("c2-behavioural", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "3\n5\n3\ntrue\n",
+        "each instantiation must ground and apply the literal independently"
+    );
+}
+
+/// `branch`/`if`/`times`/`tag` on a quotation in a non-inline poly body stay
+/// rejected, unaffected by this phase's operand-window carve-out -- each
+/// asserted individually since dropping `if` or `tag` from the retained
+/// guard is otherwise unobserved by any other test in the suite.
+#[test]
+fn c2_branch_if_times_tag_on_quotation_still_rejected() {
+    for name in ["branch", "if", "times", "tag"] {
+        let err = check_err(&format!(
+            ": bad ( 'T: Copy -- 'T ) [ ] {name} ;\n : main ( -- ) 5 bad drop ;\n"
+        ));
+        assert!(
+            err.contains(&format!(
+                "`{name}` on a quotation in the polymorphic body of `bad`"
+            )) && err.contains("P7.S3b-follow"),
+            "{name}: {err}"
+        );
+    }
+}
+
+/// A literal passed to a **poly** callee stays rejected (S3f's R9p
+/// territory), proving R2's concrete-only gate holds. From a poly caller
+/// this never reaches `check_poly_call`'s own `reject_quotation_argument`
+/// (that path only runs for a *concrete* caller) -- `poly_call_term` cannot
+/// see `poly_env` at all, so a poly callee is simply absent from `env` and
+/// the pre-existing operand-window guard rejects it first.
+#[test]
+fn c2_literal_to_poly_callee_is_rejected() {
+    let err = check_err(
+        ": pq ( 'U: Copy -- 'U 'U ) dup ;\n\
+         : c2_literal_to_poly_callee_is_rejected ( 'T: Copy -- 'T i64 )\n\
+           | x | x [ 1 add ] pq call\n\
+         ;\n\
+         : main ( -- ) 5 c2_literal_to_poly_callee_is_rejected drop drop drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: `pq` is not permitted on a quotation literal in `c2_literal_to_poly_callee_is_rejected` (line 3)"
+    );
+}
+
+/// R2's completeness-gap note: a literal passed as the sole (top-of-window)
+/// operand to an **overloaded** concrete name is a located rejection, not
+/// `unknown word` -- the pre-existing operand-window guard catches it before
+/// this phase's carve-out is ever consulted (the carve-out never matches an
+/// overloaded name).
+#[test]
+fn c2_overloaded_candidate_with_quotation_literal_is_located_rejection() {
+    let err = check_err(
+        ": run2 ( [ i64 -- i64 ] -- i64 ) 1 swap call ;\n\
+         : run2 ( i64 -- i64 ) 1 add ;\n\
+         : c2_overloaded_candidate_with_quotation_literal_is_located_rejection ( 'T: Copy -- 'T i64 )\n\
+           | x | x [ 1 add ] run2\n\
+         ;\n\
+         : main ( -- ) 5 c2_overloaded_candidate_with_quotation_literal_is_located_rejection drop drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: `run2` is not permitted on a quotation literal in `c2_overloaded_candidate_with_quotation_literal_is_located_rejection` (line 4)"
+    );
+    assert!(!err.contains("unknown word"), "{err}");
+}
