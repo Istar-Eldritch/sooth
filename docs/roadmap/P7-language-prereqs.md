@@ -118,7 +118,8 @@ the same rule the concrete path applies, so a generic body is not the laxer of t
 Elimination is the only quotation consumer this slice gives a generic body: the row-typed
 combinators (`if`/`unless`/`times`) need a declared row grounded against an abstract stack,
 and land in **P7.S3b-follow**; the `call`/`branch`/`tag` primitives declare no `~[ ]`
-parameter to dispatch off and stay a located rejection naming **P7.S3d**. A quotation may not
+parameter to dispatch off, and `call` on a literal is **P7.S3d**'s own exit criterion —
+`branch`/`tag` stay a located rejection naming no slice yet scoped to resolve them. A quotation may not
 be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
 route is its own located error.
 Two standing limits bound what can be written against this today: field projection (`&w`) is
@@ -183,16 +184,16 @@ poly walk, no row unification against an abstract stack required. The row-typed
 combinators (`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) are the
 expensive tier and are **P7.S3b-follow**'s, which shipped them by grounding the declared
 row against the poly walk's abstract stack. What this slice inherits alongside its own
-rowless consumer is the `call`/`branch`/`tag` primitives, which S3b-follow's
-signature-driven dispatch cannot reach at all: they are compiler-known, so they carry no
-declared `PolySig`, and its located rejection names this slice.
+rowless consumer is the `call` primitive: compiler-known, so it carries no declared
+`PolySig`, and its located rejection names this slice. `branch`/`tag` are compiler-known
+the same way, but stay rejected, unchanged (`slice3d-spec.md`'s own scope exclusion), so
+their located rejection names no slice yet.
 This is also the second quotation consumer S3b's own exit findings named as the trigger
 for re-running `poly.rs`'s deferred split signals. Ordered after S3c and ahead of S3e,
 because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
 already shipped.
-**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal,
-and `branch`/`tag` either land with it or keep a located rejection naming their own
-follow-up.
+**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
+`branch`/`tag` keep a located rejection naming no slice yet scoped to resolve them.
 
 **P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate

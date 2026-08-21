@@ -3693,20 +3693,21 @@ pub(super) fn poly_quotation_not_consumed_error(ctx: &Ctx, span: Span) -> String
 /// no arm of it produces. Located rather than left to fall through to
 /// `unknown word`.
 ///
-/// The primitives are P7.S3d's: a rowless `call` on a literal is that slice's
-/// own exit criterion, and `branch` is the same shape one level down. `tag`
-/// consumes no quotation at all (an all-unit enum to `u32`), and reaches this
-/// only because the guard naming it is name-based; it is a scalar-primitive
-/// port with no arm walk, so it rides along there rather than here.
+/// `call` on a literal is P7.S3d's own exit criterion. `branch` is the same
+/// shape one level down, but that slice's own spec excludes it ("stays
+/// rejected, unchanged"), so it names no slice yet. `tag` consumes no
+/// quotation at all (an all-unit enum to `u32`), and reaches this only
+/// because the guard naming it is name-based; it is a scalar-primitive port
+/// with no arm walk, so it rides along there rather than here.
 pub(super) fn poly_quotation_combinator_unsupported_error(
     ctx: &Ctx,
     span: Span,
     word: &str,
 ) -> String {
-    let word = crate::resolve::demangle_call(word);
+    let demangled = crate::resolve::demangle_call(word);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
-        "error: `{word}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  a generic body consumes a quotation through an enum eliminator, or through an always-spliced combinator that declares it as a `~[ ]` parameter; the `call`/`branch`/`tag` primitives declare nothing to ground (P7.S3d)",
+        "error: `{demangled}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  a generic body consumes a quotation through an enum eliminator, or through an always-spliced combinator that declares it as a `~[ ]` parameter; the `call`/`branch`/`tag` primitives declare nothing to ground; `call` on a literal is P7.S3d's own exit criterion, and `branch`/`tag` name no follow-up slice yet",
         crate::resolve::demangle_word(where_),
         span.line
     )

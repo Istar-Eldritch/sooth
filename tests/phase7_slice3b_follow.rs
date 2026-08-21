@@ -441,12 +441,19 @@ fn a_slot_declared_above_a_produced_row_is_located() {
     // that slot stripped back off first -- a rule neither quotation consumer
     // shares. Located, and named against the declaration rather than against
     // the arm, which is written correctly.
+    //
+    // `bad` declares `-- 'T i64`, the *un-stripped* row itself, rather than
+    // just `-- 'T`: with the guard deleted, that is what lets this reach
+    // `ir/func_builder/quotation.rs`'s row-length arithmetic instead of being
+    // caught first by an ordinary stack-effect-mismatch check, so the guard
+    // is what stands between this program and a backend panic
+    // (`attempt to subtract with overflow`), not just a worse diagnostic.
     let err = build_err(
         "above-the-row",
         ": pick inline ( ..a bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
-         : main ( -- ) 5 7 bad . ;\n",
+         : bad ( 'T: Copy Ord 'T -- 'T i64 ) over over gt ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
         err.contains(
