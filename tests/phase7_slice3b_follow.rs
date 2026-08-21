@@ -193,11 +193,13 @@ fn times_arm_leaving_a_rigid_variable_as_a_concrete_type_is_error() {
 #[test]
 fn narrowed_guard_keeps_call_branch_and_tag_located() {
     // R4: the three consumers this slice does *not* deliver keep their located
-    // rejection. Each asserts the **exact message**: a bare "the build fails"
-    // assertion passes identically against an `unknown word` fallthrough,
-    // which is the one regression these exist to catch (nothing registers
-    // these names on the poly path, so that is where they land if the guard
-    // stops naming one).
+    // rejection. Each asserts the **exact message**, which is what makes the
+    // guard's deletion observable at all: these bodies put the quotation on
+    // top, so without the guard they fall to the `QuotLit` operand window
+    // ("`call` is not permitted on a quotation literal"), not to `unknown
+    // word` -- that is only where they land when the quotation sits deeper
+    // than the window. Both fallbacks name the word, so a bare "the build
+    // fails" assertion, and even one matching on the word alone, is a placebo.
     //
     // `tag`'s arm is reached the same way the other two are: the guard is
     // name-based, so an untagged quotation literal is enough to reach it.

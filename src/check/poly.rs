@@ -953,9 +953,12 @@ pub(super) fn poly_call_term(
     // needs its own hand-written row grounding, and `tag` is not a quotation
     // consumer at all (an all-unit enum to `u32`), so it shares no machinery
     // with the dispatch above. Located and named here rather than left to
-    // fall through to `unknown word`, which is what these emit otherwise
-    // (`poly_call_term` cannot see `poly_env`, so none of them is even
-    // registered on this path).
+    // whichever of two unrelated rejections happens to catch the call, neither
+    // of which says the consumer is *deferred*: with the quotation on top the
+    // `QuotLit` operand window below reports it as a data operand ("`call` is
+    // not permitted on a quotation literal"), and with the quotation deeper
+    // than that window it reaches `unknown word` (`poly_call_term` cannot see
+    // `poly_env`, so none of the three is registered on this path).
     if matches!(name, "call" | "branch" | "tag") && stack.iter().any(|slot| slot.quot.is_some()) {
         return Err(poly_quotation_combinator_unsupported_error(ctx, span, name));
     }

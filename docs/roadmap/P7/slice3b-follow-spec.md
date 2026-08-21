@@ -177,6 +177,22 @@ through the new path. Materialised/escaping quotations in a poly body remain out
 (carried L2); the arm is a literal or it is an error. Phase 3 must include a test that a
 non-literal arm operand hits the located rejection and does not panic.
 
+**Phase 3 inherits a self-contradictory message from Phase 2, and owns fixing it.** Phase 2
+needed *some* handling of a missing `PolyQuotRef` to compile the arm walk at all, so it shipped
+a new `poly_combinator_arm_not_a_literal_error` rather than the family named above. Two
+operands reach it, and one of them reads as a contradiction:
+
+```text
+: bad ( 'T: Copy Ord 'T i64 -- 'T ) ~[ swap ] | f | f times drop ;
+error: `times` ... needs a quotation literal written at the call site, found `a quotation literal`
+```
+
+The bind keeps `PolyType::QuotLit` and loses the `PolyQuotRef`, and `poly_type_str` renders
+`QuotLit` as "a quotation literal" -- so the `found` slot denies exactly what it reports. The
+other operand (`9 times`, a value that is not a quotation) renders correctly as `` `i64` ``.
+Phase 3 must split the two: the identity-lost case should say the identity was lost, not
+re-print the type. Both branches are currently untested; Phase 3's OQ4 test must cover each.
+
 ## Locked rules (carried from P7.S3b, unchanged and for the same reasons)
 
 - **L1 Type variables stay rigid; no mid-body `Subst`.** An arm leaving `Var(0)` against a
@@ -264,7 +280,23 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
 
 `poly_quotation_combinator_unsupported_error` remains for `call`/`branch`/`tag`, its message
 re-pointed at the follow-up that would take the primitives (not at "P7.S3b-follow", which is
-this slice). No name that reaches this family falls through to `unknown word`.
+this slice). No name that reaches this family is left to a rejection that does not say the
+consumer is deferred.
+
+**Correction to the placebo rationale below (probe-verified by deleting the guard).** Removing
+the guard does *not* send these three to `unknown word` in the shape the tests use. With the
+quotation on top -- which is how a call to any of them is written -- they fall to the `QuotLit`
+operand window instead:
+
+```text
+: bad ( 'T: Copy Ord 'T -- 'T ) ~[ swap ] call ;
+error: `call` is not permitted on a quotation literal in `bad` (line 1)
+```
+
+`unknown word` is reached only when the quotation sits *deeper* than the operand window
+(`~[ swap ] 5 call`), since none of the three is registered on this path. Both fallbacks name
+the word, so the exact-message requirement stands -- but matching on the word alone is also a
+placebo, not just a bare failure assertion.
 
 **`tag`'s guard arm is reachable — probe-verified, so it stays in the mutation list.**
 Review fix: the reachability was queried on the grounds that a guard whose deletion causes no
@@ -276,8 +308,9 @@ error: `tag` on a quotation in the polymorphic body of `tg` (line 1) is not yet 
 ```
 
 Each retained name's rejection test **must assert the exact message text**. Asserting only
-that the build fails is a placebo: it passes identically against an `unknown word`
-fallthrough, which is the one regression these tests exist to catch.
+that the build fails, or matching on the word's own name, is a placebo: both pass identically
+against the two fallbacks above, and losing the deferral message is the one regression these
+tests exist to catch.
 
 ## Lowering
 
@@ -365,10 +398,20 @@ asserting **both** single-arm-pick directions and a cross-arm mutability disagre
 bind-and-leak of a linear arm-local and the one-arm-binds-one-does-not no-ICE case; an
 ordinary `[ ]` arm (L4); the OQ4 non-literal / erased arm operand (located, no panic); and
 the narrowed `call`/`branch`/`tag` located rejections, **each asserting the exact message
-text** rather than merely that the build fails (a bare failure assertion passes identically
-against an `unknown word` fallthrough, the one regression these tests exist to catch).
+text** rather than merely that the build fails or that the word is named (both pass
+identically against the fallbacks in R4, and losing the deferral message is the one
+regression these tests exist to catch).
 `unless` gets its own golden proving it reaches the new dispatch rather than the
 operand-window `QuotLit` arm at `poly.rs:1997`.
+
+**Phase 4 hazard: a borrow-union golden on the combinator path needs a liveness anchor, or it
+passes vacuously.** `PolyScope::prune_dead_borrows` clears the whole table when no
+reference is reachable from the stack *or the locals*, and a non-shape-changing arm exits on
+`(grounded region ++ concrete declared outs)` -- so it cannot leave a reference on the stack,
+and an arm-local dies with the arm. A single-arm-pick test written without a reference that
+outlives the call therefore exercises an empty table and passes whichever arm the union picks.
+Bind the borrow before the combinator call (`&!x | rx |`, still live after it) and assert
+*both* directions.
 
 Unit tests in `src/check/poly.rs`: the extraction preserves the eliminator join
 (`poly_walk_arms` under both an eliminator and a combinator caller unions borrows
@@ -382,7 +425,8 @@ intercept (deletion → located rejection on the golden); **R3's pre-seeded entr
 (revert the seed to `None` → `~[ dup ] times` must start compiling; if it still fails,
 the test is a placebo and something else is rejecting it)**; the OQ4 non-literal rejection;
 the shape-baseline cross-arm check; and the narrowed guard's remaining names
-(`tag`'s arm is probe-confirmed reachable, so it belongs here). **The structural
+(`tag`'s arm is probe-confirmed reachable, so it belongs here; the kill is the *exact* text,
+since deleting a name still yields a located, word-naming rejection). **The structural
 characterization is deliberately NOT on this list** — it asserts a lowering property this
 slice does not change, so no mutation of this slice's code can flip it. Commit before
 mutation testing; a mutation copy needs `examples/`; touch sources after any rollback; end
@@ -393,9 +437,15 @@ Regression, green and untouched: `tests/phase7_slice3b.rs` (the extraction's gat
 
 ## Exit findings (Phase 4, required)
 
-- Re-run `poly.rs`'s five split signals (OQ3) and record the decision.
+- Re-run `poly.rs`'s five split signals (OQ3) and record the decision. Phase 2 left the file
+  at ~6100 lines.
 - Confirm the borrow join is unique in the file (no second, non-unioning join was introduced).
+  Phase 2's audit found one join, in `poly_walk_arms`; the only other `borrows.push` in the
+  file is the ordinary borrow-creation site in the `&`/`&!` term.
 - Record any consumer still rejected and the follow-up its message points at.
+- L4's rendered *declared* type drops the row (`times` prints as `~[ i64 -- ]`), because
+  `poly_walk_arms` builds it with empty outputs. Inherited from Phase 1 and harmless to
+  soundness; record it rather than fix it here if it is still present.
 
 ## Out of scope
 
