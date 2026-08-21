@@ -97,6 +97,15 @@ test lives in phase 2, where it starts passing.
   same per-file loop that builds `import_map`/`selective_map`
   (`src/driver.rs:305-350`), on the branch where a wildcard has a resolved
   `target`.
+- Two wildcard imports of the **same** module collide on the first shared name
+  under R21's collision wording (`wildcard import of \`lw\` ... collides with
+  the wildcard import of \`lw\``). Located, but it names neither module: a
+  wildcard has no qualifier to interpolate. Accepted as is; the qualified twin
+  keeps its sharper `duplicate_qualifier_error`.
+- `selective_not_exported_error`'s no-qualifier wording is unreachable for a
+  wildcard entry and stays untested. The synthesized names come from
+  `exports_by_module[target]`, which is the very list the not-exported check
+  compares them against (`module.modules[m].exports`, `src/driver.rs:438`).
 - Wildcard **re-export is not provided** (design doc): a hub lists what it
   promises. `export:` stays a name list; there is no `export: * ;`.
 
@@ -485,9 +494,17 @@ Three phases. The first two are independently reviewable; the third
    explicit `import:` lines to every `.sth` file (examples, goldens, non-`core`
    `lib/` files) and to the migrating file-based test sources, which resolve
    against the shared fixture manifest via `--manifest` (R7, `build_example`).
-   This step also carries S1a's `lib/`-as-layered-packages dogfood: a manifest
-   over `lib/` rejects `arrays.sth`'s quoted-path import until its imports are
-   module names.
+   This step also carries S1a's `lib/`-as-layered-packages dogfood. **That
+   dogfood needs a new subject:** `lib/arrays.sth` was deleted (`eaa58ba`), and
+   no remaining `lib/` file (`combinators` `core` `option` `result`) has a
+   quoted-path import for a manifest over `lib/` to reject. Either source the
+   dogfood from a file this phase's own split creates or drop the sub-claim.
+   The same deletion leaves two file-based tests red before this phase starts:
+   `phase4_slice6g::sort_called_with_bound_array_locals_runs` and
+   `phase4_slice12_partab::retyped_array_words_still_run`, both importing
+   `lib/arrays.sth` by quoted path. They fall inside this phase's test-source
+   migration, which must retarget or retire them (with `phase4_slice6g`'s
+   `lib_import` and `phase4_slice12_partab`'s `arrays_import` helpers).
 
    **Why atomic (not two phases).** Deleting the prelude removes `if`/the six
    comparisons from every closure, and activating the intrinsic gate removes

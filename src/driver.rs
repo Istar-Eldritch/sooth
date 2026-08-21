@@ -1381,11 +1381,14 @@ mod tests {
 
     /// P8 S2 (R1): a wildcard-bound name colliding with a local declaration is
     /// a hard error, inheriting `check_selective_imports`'s existing rule --
-    /// no silent shadow.
+    /// no silent shadow. The synthesized entry carries the *importer's*
+    /// `import: ... * ;` span, so the diagnostic's line/col land in the file
+    /// that has to change; the exporting file's `export:` site is pushed to a
+    /// distinct line/col here so a span taken from the wrong file cannot pass.
     #[test]
     fn driver_wildcard_import_colliding_with_local_is_error() {
         let s = Sandbox::new("wildcard-collision");
-        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
+        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\n\n\n\n\nexport: lw ;\n");
         let entry = s.write(
             "main.sth",
             "import: \"lib.sth\" * ;\n: lw ( -- i64 ) 2 ;\n: main ( -- ) lw . ;\n",
@@ -1393,9 +1396,9 @@ mod tests {
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let err = assemble_module(&closure, true)
             .expect_err("a wildcard-bound name colliding with a local decl is an error");
-        assert!(
-            err.contains("wildcard import of `lw`") && err.contains("collides with a local"),
-            "unexpected message: {err}"
+        assert_eq!(
+            err,
+            "error: wildcard import of `lw` (line 1, col 1) collides with a local definition of `lw`"
         );
     }
 
