@@ -224,6 +224,19 @@ across a two-file change.
 **Dogfood:** `sooth publish --check` on a two-version bump of a small library, one that adds
 a word (MINOR) and one that removes one (MAJOR).
 
+**P8.S4 — Richer `extern:` payloads and unmangled exports.** Pulled forward from Phase 12
+because the gap is module/linkage machinery, not self-hosting content, and a progressive
+self-host (see [P12](./P12-self-hosting.md)) needs it before any stage-by-stage sequencing
+can even be planned. Two gaps, both currently unaddressed: `extern:` (Sooth calling out)
+is almost certainly scoped to flat/scalar C ABI shapes, with no way to pass a struct,
+array, or tagged union across the boundary; and there is no way for a Sooth module to
+export a word under its bare, unmangled name, so host-language code can link against it
+without knowing `resolve::mangle`'s scheme (a fourth exemption category, alongside
+main/drop/prelude and statics). **Exit:** an `extern:` declaration can carry a
+struct-shaped argument or return, and a module can mark an exported word for unmangled
+linkage. **Dogfood:** a small Rust host program that links against a Sooth-compiled module
+by its bare word names and exchanges a struct across the boundary in both directions.
+
 ## Declined and deferred, with reasons
 
 **A Rust-style source-side `mod` declaration.** Declined. `mod foo;` exists in Rust as the

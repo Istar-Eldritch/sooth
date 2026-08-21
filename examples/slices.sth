@@ -1,0 +1,38 @@
+\ Dogfood: Phase 7 slice 3c. `Slice[T]`/`!Slice[T]` are runtime {ptr, len}
+\ views over an array, built with `slice`, split with `subslice`, and indexed
+\ with `&>`/`&!>` -- unlike `&[T N]`, a word taking a slice names no length
+\ variable and threads no length parameter, so the same `sum`/`double` bodies
+\ run over any array size.
+
+import: "../lib/combinators.sth" c | times | ;
+
+: sum ( Slice[i64] -- i64 )
+  | s |
+  0 s len >i64 ~[ | i | s i >usize &> @ add ] times
+;
+
+: double ( !Slice[i64] -- )
+  | s |
+  s len | n |
+  n 0 >usize eq ~[
+  ] ~[
+    n 1 >usize eq ~[
+      s 0 >usize &!> | e | e @ | v | e v v add !
+    ] ~[
+      n >i64 1 shr >usize | mid |
+      s 0 >usize mid subslice double
+      s mid n mid sub subslice double
+    ] if
+  ] if
+;
+
+: main ( -- )
+  3 5 fill | buf |
+  &buf slice sum .        \ 15, the total before doubling
+
+  &!buf slice double       \ halves recursively via subslice, doubling in place
+  &buf 0 >usize &> @ .     \ 6
+  &buf 4 >usize &> @ .     \ 6
+
+  buf drop
+;

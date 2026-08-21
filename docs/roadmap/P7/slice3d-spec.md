@@ -116,6 +116,24 @@ its own arm, ahead of the retained guard:
   `check_terms_relaxed`'s splice (`terms.rs:299-357`). One body, one continuation: a
   straight-line walk, **no** per-arm clone-and-union, **no** `poly_eliminator_call` join
   (see OQ1).
+- **Teardown, the poly analogue of `Scope::leave`/`leave_block` for a splice with no block
+  of its own.** Before splicing, snapshot the enclosing scope's `locals`/`moves` (the keys
+  already bound outside this `call`) — the same snapshot `poly_eliminator_call` takes ahead
+  of each arm walk (`poly.rs:1298`, its own comment: "R3, the poly analogue of
+  `Scope::leave`. The poly walk has no block scope[...] nothing removes them"). After the
+  `poly_walk` above returns, reject any local still unconsumed that is not in that snapshot
+  — the same leaked-arm-bound-local shape `poly_eliminator_call` already rejects, reusing
+  its diagnostic rather than a fresh message (`poly_arm_local_not_consumed_error`,
+  `poly.rs:3304`: "the local `{local}` of type `{ty}`, bound in an arm of `{word}` in
+  `{...}` (line {N}), is never consumed"). Only then retain `locals`/`moves` back down to
+  the snapshot — a **retain**, not a `Moves::join` (R3 explains why that distinction
+  matters). Without this, a linear local bound inside the spliced literal leaks past `call`
+  unreported, exactly as an unguarded arm would leak one past an eliminator.
+
+  (OQ3-adjacent, recorded but not resolved here: lowering's own call-of-literal fusion
+  already truncates locals at the splice point, which is *why* the checker needs this
+  matching teardown — a checker that left a leaked local visible past the splice would
+  disagree with what lowering already discards.)
 - `call` on a **non-literal** quotation operand (an abstract/forwarded/erased quotation) is
   a **located rejection** (L1), not a splice and not a panic.
 
@@ -146,46 +164,148 @@ Two edits, at the two anchors in recon 2 and 3:
   the phantom-`'T` hazard is real only for a poly callee with an unbound `'T`; a concrete
   callee has none, which is exactly why C2 is safe and S3f is not).
 
-### R3 No cross-arm machinery, no join touched
+**Single-candidate (non-overloaded) concrete names only.** The grounding arm above applies
+when `name` resolves the way `chosen` already requires: a lone candidate, or one exact
+match among several. An **overloaded** concrete name — several candidates disagreeing in
+type, one of them a ground `Type::Quotation` at this position — is out of scope for this
+slice: the existing overload-selection predicate (`poly.rs:1005-1010`: `[only] =>
+Some(only)`, else `all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))`) can
+never match a `PolyType::QuotLit` slot against `PolyType::Concrete(t)`, so an overloaded
+candidate set resolves `chosen` to `None` regardless of this carve-out. Two probe-confirmed
+outcomes at HEAD follow from where the literal sits in the operand window:
+
+- If the literal is **not** the top-of-window operand, `chosen` falls through to
+  `poly_delegate_op`, which also finds no match, and then to `unknown_word_error` (probed:
+  a two-overload concrete `run1` with the literal as the first of two operands rejects with
+  `` unknown word `run1__m0` ``). This is a **completeness gap** — a program whose intent
+  is unambiguous still fails to compile — not a soundness hole: nothing is mis-selected.
+- If the literal **is** the top-of-window operand, the earlier, pre-existing generic
+  operand-window guard (`poly.rs:966-980`, itself unaffected by this carve-out, since the
+  carve-out only fires for a single resolved concrete quotation-taking candidate) already
+  catches it first and rejects with `poly_op_on_variable_error` (probed: a two-overload
+  `run2` taking the literal as its sole operand rejects with `` `run2` is not permitted on
+  a quotation literal in `caller` (line 3) ``) — a located rejection, not `unknown word`.
+
+This slice does not close the first gap; both outcomes are recorded, not fixed.
+
+### R3 No cross-arm machinery, no second join
 
 Neither C1 nor C2 has multiple arms, so `poly_eliminator_call`'s per-arm clone, borrow-table
-union, `Scope::leave` analogue, and `Moves::join` are **not** reused or modified. This slice
-must introduce **no** second join into `poly.rs` (the file's single borrow-table union stays
-the only one; a second is a soundness regression, per S3b-follow's L3). Confirm this at exit.
+union, and `Moves::join` are **not** reused or modified. R1's splice teardown does reuse
+one piece of that arm machinery — the `Scope::leave` analogue (a `locals`/`moves`
+**retain** back down to a snapshot taken before the splice) — because a straight-line walk
+with no block scope of its own leaks a spliced-in linear local exactly the way an
+unconsumed arm binding would. That retain is **not** a `Moves::join`: it discards the
+spliced body's own bindings against a single fixed snapshot, never reconciles two
+divergent maps, so reusing it does not conflict with this section's claim below. This slice
+must introduce **no** second join into `poly.rs` (the file's single borrow-table union,
+over the eliminator's N arms, stays the only one; a second is a soundness regression, per
+S3b-follow's L3). Confirm this at exit.
 
 ## R4 The golden
 
-A test fixture (`tests/phase7_slice3d.rs`), not a `lib/` word.
+A test fixture (`tests/phase7_slice3d.rs`), not a `lib/` word. Fixtures are given below as
+complete `.sth` sources, not abbreviated fragments — an abbreviated `[ 1 add ]` sketch
+cannot be probed for the exact rejection a deleted guard would produce.
 
-- **C1 behavioural** — a non-inline generic word with `[ ] call` and a **non-trivial**
-  literal body (e.g. `[ 1 add ]`, or a body that names/consumes a bound local), compiling
-  and running to the correct result at **two instantiations** so `'T` is carried rigidly
-  rather than coincidentally matching. Mutation guard: deleting R1's `call`-on-literal arm
-  makes the fixture fail with the located rejection.
-- **C2 behavioural** — a poly body passing a literal to a **concrete** helper that carries
-  **real logic** around its own `call` (per the brief's finding 6: a second, unrelated
-  argument on the same call, or composing/side-effecting), so the fixture is **not** a
-  transparent wrapper that inlining `call` on a literal already covers. Probe from the
-  brief for the helper shape:
+- **C1 behavioural (`c1_call_on_literal_splices_body_in_place`)** — a non-inline generic
+  word whose literal body names a bound local (non-trivial: not `[ ] call`), run at **two
+  distinct instantiations** of `'T` so it is carried rigidly rather than coincidentally
+  matching:
 
   ```sooth
-  : run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;
+  : bump ( 'T: Copy 'T -- 'T 'T )
+    | x | [ x x ] call
+  ;
   ```
 
-  called as `dup [ 1 add ] 2 run1` from inside a generic body, with the second argument
-  ruling out the transparent-wrapper placebo. Mutation guard: deleting R2's env-dispatch
-  grounding arm makes the fixture fail with `poly_op_on_variable_error`.
-- **Negatives (each asserting the exact message text, not merely that the build fails —
-  a bare failure assertion passes identically against an `unknown word` fallthrough, the
-  one regression these tests exist to catch):**
-  - `branch`/`if`/`times`/`tag` on a quotation in a non-inline poly body still reject with
-    the unchanged `poly_quotation_combinator_unsupported_error` naming P7.S3b-follow, one
-    test per name (`tag`'s guard arm is probe-confirmed reachable in S3b-follow, so it
-    stays in the list).
-  - A literal passed to a **poly** callee still rejects (S3f's territory), proving the
-    concrete-only gate in R2 holds.
-  - A **non-literal** quotation operand at `call` (C1) hits the located rejection, no panic
-    (L1).
+  Run as `5 bump` (`'T = i64`, expect `5 5`) and `true bump` (`'T = bool`, expect
+  `true true`). Mutation guard: deleting R1's `call`-on-literal arm makes this fixture fail
+  to compile; confirm the mutated message is the operand-window guard's `QuotLit`
+  rendering, not the C1 negative's wording below (`call` again reaches only the retained
+  `branch`/`if`/`times`/`tag` guard, so the marker slot falls through to the generic
+  operand-window check, which renders "a quotation **literal**" for a `QuotLit` slot,
+  distinct from the C1 negative's non-literal "a quotation" wording below).
+
+- **C1 negative (`c1_call_on_non_literal_operand_is_located_rejection`)** — `call` on a
+  **non-literal** (abstract/forwarded) quotation operand in a non-inline poly body is a
+  located rejection, not a panic (L1). R1's new arm reuses `poly_op_on_variable_error`'s
+  renderer (the same "is not permitted on" family already used for `dup`/`over` on a
+  quotation literal, `poly.rs:2946`), so the exact expected text is:
+
+  ```text
+  error: `call` is not permitted on a quotation in `<word>` (line <N>)
+  ```
+
+  never `unknown word`.
+
+- **C2 behavioural (`c2_literal_grounds_against_concrete_quotation_param`)** — a poly body
+  passing a literal to a **concrete** helper that carries real logic around its own `call`
+  (finding 6: a second, unrelated argument on the same call), so the fixture is not a
+  transparent wrapper that inlining `call` on a literal already covers:
+
+  ```sooth
+  : run1 ( [ i64 -- i64 ] i64 -- i64 )
+    swap call
+  ;
+
+  : c2_apply_and_pass_through ( 'T: Copy 'T -- 'T i64 )
+    | x | x [ 1 add ] 2 run1
+  ;
+  ```
+
+  Run as `5 c2_apply_and_pass_through` (`'T = i64`, expect `5 3`) and
+  `true c2_apply_and_pass_through` (`'T = bool`, expect `true 3`) — two distinct
+  instantiations of the outer `'T`, ruling out a coincidental match. Mutation guard:
+  deleting R2's env-dispatch grounding arm makes this fixture fail to compile with:
+
+  ```text
+  error: `run1` is not permitted on a quotation literal in `c2_apply_and_pass_through` (line <N>)
+  ```
+
+  (`poly_op_on_variable_error` — the operand-window guard at `poly.rs:966-980` still sees
+  the `QuotLit` slot once the env-dispatch carve-out is gone).
+
+- **Negatives (each asserting the exact message text below, not merely that the build
+  fails — a bare failure assertion passes identically against an unrelated `unknown word`
+  fallthrough, the one regression these tests exist to catch):**
+
+  - `branch`/`if`/`times`/`tag` on a quotation in a non-inline poly body, one test per name
+    (`tag`'s guard arm is probe-confirmed reachable in S3b-follow, so it stays in the
+    list), each asserting the unchanged `poly_quotation_combinator_unsupported_error`:
+
+    ```text
+    error: `<name>` on a quotation in the polymorphic body of `<word>` (line <N>) is not yet supported
+      only an enum eliminator consumes a quotation in a generic body today (P7.S3b-follow)
+    ```
+
+  - A literal passed to a **poly** callee (`c2_literal_to_poly_callee_is_rejected`) still
+    rejects (S3f's territory), proving the concrete-only gate in R2 holds, asserting
+    `reject_quotation_argument`'s unchanged wording:
+
+    ```text
+    error: a quotation cannot be passed to `<word>`; only `call` accepts one (a runtime quotation value is slice 7) in `<word>` (line <N>)
+    ```
+
+  - A **non-literal** quotation operand at `call` (C1) — see the C1 negative above.
+
+  - **A quotation literal passed as the sole operand to an overloaded concrete name**
+    (`c2_overloaded_candidate_with_quotation_literal_is_located_rejection`, R2's
+    completeness-gap note) — probe-confirmed at HEAD (pre-existing, unaffected by this
+    slice) that the generic operand-window guard (`poly.rs:966-980`, not R2's carve-out,
+    which only fires for a single resolved concrete quotation-taking candidate) already
+    catches this shape and rejects with `poly_op_on_variable_error`:
+
+    ```text
+    error: `<name>` is not permitted on a quotation literal in `<word>` (line <N>)
+    ```
+
+    never `unknown word`, never a panic. This test must **not** attempt the
+    deeper-operand shape (a quotation literal at a non-top-of-window position of an
+    overloaded call): that shape is the completeness gap named in R2 and currently falls
+    through to `unknown_word_error` (probed: `` unknown word `run1__m0` `` for a
+    two-overload `run1` with the literal as its first of two operands) — asserting a
+    located rejection there would misdescribe current behaviour.
 
 ## Testing
 
@@ -226,10 +346,17 @@ Regression, green and untouched: `tests/phase7_slice3b.rs`, `tests/phase7_slice3
   existing monomorphization / eliminator-splice lowering, or whether new lowering work is
   required. Record the answer; if new lowering is needed, that is an exit finding, not
   silently in-scope work.
-- Re-run `poly.rs`'s five split signals (P7.S3b's deferred split; S3b-follow's OQ3) and
-  record the decision. Note that this slice adds arms inside `poly_call_term`, not a second
-  consumer with its own arm-walk, so the split's trigger (a second arm-walking consumer) is
-  **not** met here.
+
+  Note also: the C2 lowering confirmation this exit finding calls for only covers a
+  **capture-free** literal, matching R4's golden fixture. A literal that captures a bound
+  local and is passed to a concrete `Type::Quotation` parameter must **materialize** to
+  reach that parameter (C2 grounds the literal's body, but the ordinary monomorphic call
+  still receives a value, not a splice) and would risk the known pre-existing
+  capture-into-materialized-quotation ICE. Record this as something to watch for at exit,
+  not something this slice is required to fix.
+- Re-run `poly.rs`'s five split signals (P7.S3b's deferred split; S3b-follow's OQ3) against
+  `poly.rs` as it stands after this slice, and record the decision — do not pre-judge the
+  outcome here (matching slice3b-follow-spec.md's phrasing for the same exit finding).
 - Confirm the borrow join is unique in the file (no second, non-unioning join introduced).
 
 ## Out of scope
@@ -270,13 +397,13 @@ literal passed to a concrete `Type::Quotation` parameter, never a `~[ ]` paramet
   "phases": [
     {
       "phase": 1,
-      "focus": "C1: split the poly.rs:914-925 name guard so `call` on a quotation literal splices the literal's body in place via poly_walk against the live stack (poly analogue of terms.rs:299-357); non-literal `call` operand stays a located rejection; retained guard narrows to branch/if/times/tag unchanged",
+      "focus": "C1: split the poly.rs:914-925 name guard so `call` on a quotation literal splices the literal's body in place via poly_walk against the live stack (poly analogue of terms.rs:299-357), with R1's snapshot/retain teardown rejecting a leaked arm-bound linear local; non-literal `call` operand stays a located rejection; retained guard narrows to branch/if/times/tag unchanged. Full C1 coverage lands here: poly.rs unit tests for the splice and the non-literal rejection, the C1 behavioural golden at two instantiations, and C1's own negative",
       "effort": "S",
       "difficulty": "standard"
     },
     {
       "phase": 2,
-      "focus": "C2: carve the operand-window guard (poly.rs:966-980) and add one env-dispatch arm (poly.rs:997-1043) grounding a QuotLit against a concrete candidate's ground Type::Quotation input (ported from unify_poly_input's Quotation arm, rowless), concrete-callee only, never Type::InlineQuotation or a poly candidate; golden fixtures (C1 + non-wrapper C2 at two instantiations) plus exact-message negatives; mutation-test the guards; exit findings incl. the OQ3 lowering confirmation and the poly.rs split re-run",
+      "focus": "C2: carve the operand-window guard (poly.rs:966-980) and add one env-dispatch arm (poly.rs:997-1043) grounding a QuotLit against a concrete, single-candidate (non-overloaded) declared ground Type::Quotation input (ported from unify_poly_input's Quotation arm, rowless); never Type::InlineQuotation, a poly candidate, or an overloaded name. C2's own coverage plus the shared negatives: poly.rs unit tests, the non-wrapper C2 behavioural golden at two instantiations, the branch/if/times/tag and poly-callee negatives, the new overloaded-candidate-with-quotation-literal negative (R2's completeness gap), all mutation tests for both phases, and exit findings incl. the OQ3 lowering confirmation and the poly.rs split re-run",
       "effort": "S",
       "difficulty": "standard"
     }

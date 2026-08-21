@@ -4,9 +4,11 @@
 //! `src/check/combinators.rs`); a `~[ ... ]` parameter without `inline` is a
 //! located error (R-B1, unit-tested in `src/check/word_entry.rs`). This file
 //! covers X2 (the nine library words are declared combinators, and still run)
-//! and X4 (`arrays.sth`'s retyped `bin_search`/`sort` still run, an ordinary
-//! `[ ... ]` literal still satisfying their new `~[ ... ]` parameter until part
-//! C requires the tilde).
+//!. X4 (the retyped array words) is deliberately absent:
+//! its subject moved to `examples/experiments/arrays.sth`, which is an
+//! experiment rather than library code, and the transition it guarded (an
+//! ordinary `[ ... ]` literal satisfying a `~[ ... ]` parameter) was superseded
+//! when part C required the tilde.
 
 /// The nine `lib/combinators.sth`/`lib/core.sth` words that gained `inline`
 /// this slice, paired with the file that defines each.
@@ -96,47 +98,9 @@ fn migrated_library_words_still_run() {
     assert_eq!(code, 0);
 }
 
-/// X4: `arrays.sth`'s `bin_search`/`sort` retype their comparator to
-/// `inline ~[ 'T 'T -- i64 ]` and still run. The call site spells the tilde
-/// (part C, `phase4_slice12_partc.rs`, requires it once this file's own
-/// mechanical corpus migration lands).
-#[test]
-fn retyped_array_words_still_run() {
-    let src = format!(
-        "{}{}: main ( -- )\n\
-         0 4 fill | d |\n\
-         &!d 0 >usize &!> 4 !\n\
-         &!d 1 >usize &!> 2 !\n\
-         &!d 2 >usize &!> 1 !\n\
-         &!d 3 >usize &!> 3 !\n\
-         0 4 fill | s |\n\
-         d s ~[ | x y | x y sub ] a::sort\n\
-         | ra rs | rs drop\n\
-         &ra 0 >usize &> @ .\n\
-         &ra 1 >usize &> @ .\n\
-         &ra 2 >usize &> @ .\n\
-         &ra 3 >usize &> @ .\n\
-         ra 3 ~[ | x y | x y sub ] a::bin_search | arr i found |\n\
-         found . i >i64 . arr drop ;\n",
-        combinators_import("c"),
-        arrays_import("a"),
-    );
-    let (binary, stdout, code) = build_and_run("slice12-partab-arrays", &src);
-    std::fs::remove_file(&binary).ok();
-    assert_eq!(code, 0);
-    assert_eq!(stdout, "1\n2\n3\n4\ntrue\n2\n");
-}
-
 fn combinators_import(qualifier: &str) -> String {
     format!(
         "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
-        env!("CARGO_MANIFEST_DIR")
-    )
-}
-
-fn arrays_import(qualifier: &str) -> String {
-    format!(
-        "import: \"{}/lib/arrays.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
