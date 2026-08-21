@@ -14,11 +14,12 @@
 //! inside the granted-into term" from "read across the edge". T-doorway-no
 //! is pre-existing behaviour, unchanged by R1.
 //!
-//! T-sort is the `lib/arrays.sth` `sort` dogfood: the library's own merge
-//! sort, called with the data and scratch arrays bound to locals before the
-//! call. That binding shape is exactly what the pre-6g compiler rejects
-//! (`cannot borrow cs__inl0 mutably: it is aliased by s`), so it is the
-//! honest measure of the bug's cost, not just a synthetic repro.
+//! T-sort (the `sort` dogfood) is deliberately absent: its subject moved to
+//! `examples/experiments/arrays.sth`, an experiment rather than library code,
+//! and tests are not written against it. The binding shape it exercised -- a
+//! bound array local passed to a combinator, which the pre-6g compiler rejected
+//! -- stays covered by `bound_array_passed_to_filter_is_accepted` and the two
+//! `while_over_an_aliased_array_local_*` positives over `lib/combinators.sth`.
 
 mod common;
 
@@ -46,7 +47,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 /// An `import:` line for a committed library by *absolute* path, so a temp
 /// source built under `temp_dir()` resolves it regardless of cwd. Generalizes
 /// `combinators_import` (`tests/phase4_combinators.rs`), which is hardcoded to
-/// `lib/combinators.sth` and cannot be repointed at `lib/arrays.sth`.
+/// `lib/combinators.sth` and cannot be repointed at another library file.
 fn lib_import(qualifier: &str, lib_file: &str) -> String {
     format!(
         "import: \"{}/{lib_file}\" {qualifier} ;\n",
@@ -362,37 +363,4 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
         ),
     );
     assert_aliased_by(&err, "arr", "a");
-}
-
-// -- D3/T-sort: the `arrays.sth` dogfood -------------------------------------
-
-#[test]
-fn sort_called_with_bound_array_locals_runs() {
-    // T-sort. `sort`'s data and scratch arrays are BOUND TO LOCALS before the
-    // call -- that binding is exactly what the pre-6g compiler rejects
-    // (`aliased by s`). `sort` returns `ra rs` (sorted deeper, scratch on
-    // top): drop the scratch `rs`, read the sorted `ra`.
-    let (out, code) = run_src(
-        "6g-sort",
-        &format!(
-            "{}\n\
-             : main ( -- )\n\
-             0 4 fill | d |\n\
-             &!d 0 >usize &!> 4 !\n\
-             &!d 1 >usize &!> 2 !\n\
-             &!d 2 >usize &!> 1 !\n\
-             &!d 3 >usize &!> 3 !\n\
-             0 4 fill | s |\n\
-             d s ~[ | x y | x y sub ] a::sort\n\
-             | ra rs | rs drop\n\
-             &ra 0 >usize &> @ .\n\
-             &ra 1 >usize &> @ .\n\
-             &ra 2 >usize &> @ .\n\
-             &ra 3 >usize &> @ .\n\
-             ra drop ;\n",
-            lib_import("a", "lib/arrays.sth")
-        ),
-    );
-    assert_eq!(out, "1\n2\n3\n4\n");
-    assert_eq!(code, 0);
 }
