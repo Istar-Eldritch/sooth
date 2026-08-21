@@ -51,10 +51,10 @@ This slice is scheduled on **code size**, not on an unwritable-program witness. 
 candidate motivating programs were tried in the brief and **both turned out writable today
 with `inline`**, and that record stands:
 
-- A recursive generic word has an inline escape: `lib/arrays.sth`'s `bin_search` is
+- A recursive generic word has an inline escape: `examples/experiments/arrays.sth`'s `bin_search` is
   self-*tail*-recursive, still `inline`, still generic, and lowers to a loop back-edge
   (verified in disassembly). Tail recursion is **not** blocked.
-- `lib/binary_search.sth`'s sketch was withdrawn: strictly worse than what `lib/arrays.sth`
+- `lib/binary_search.sth`'s sketch was withdrawn: strictly worse than what `examples/experiments/arrays.sth`
   already ships, and its `if` is inside a word that could be `inline`.
 
 What is actually left is a real cost, not a capability gap: every caller of a generic
@@ -320,10 +320,10 @@ instantiations so `'T` is carried rigidly rather than coincidentally matching:
 : clampsum ( 'T: Copy Ord 'T 'T i64 -- 'T )
 ```
 
-A test fixture, **not** a library word: `lib/arrays.sth` already ships the capable
-comparator-driven `bin_search`/`sort`, and an `Ord`-only fixture is strictly weaker
-(`is_ord` is `is_numeric` and nothing else, so it cannot reach a user struct). Nothing here
-belongs in `lib/`.
+A test fixture, **not** a library word: `examples/experiments/arrays.sth` already has a
+capable comparator-driven `bin_search`/`sort` (an experiment, not shipped in `lib/`), and
+an `Ord`-only fixture is strictly weaker anyway (`is_ord` is `is_numeric` and nothing else,
+so it cannot reach a user struct). Nothing here belongs in `lib/`.
 
 Two halves:
 

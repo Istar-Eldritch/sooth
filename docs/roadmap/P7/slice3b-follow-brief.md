@@ -56,15 +56,15 @@ implied when P7.S3d deferred it.
 **Two candidate consumers were tried and both failed to motivate the slice. Recording that,
 because it is the honest state and a spec should not re-argue them.**
 
-1. *A recursive generic word has no inline escape.* False. `lib/arrays.sth`'s `bin_search`
+1. *A recursive generic word has no inline escape.* False. `examples/experiments/arrays.sth`'s `bin_search`
    was rewritten (this session) from a fixed-32-halving `times` loop to a self-*tail*
    recursive `bin_search-helper`, still `inline`, still generic. It lowers to a loop
    back-edge exactly as `times-helper` does — verified in the disassembly: two backward
    jumps, one per `if` arm, both targeting the loop head, in a 98-instruction
    `sooth_main` with no 32-fold splice. Tail recursion is not blocked.
 2. *`lib/binary_search.sth`'s sketch needs it.* Withdrawn. That untracked file is a
-   "hypothetical grammar" sketch that is strictly worse than what `lib/arrays.sth` already
-   ships, and its `if` usage is inside a word that could be `inline`.
+   "hypothetical grammar" sketch that is strictly worse than what `examples/experiments/arrays.sth` already
+   has, and its `if` usage is inside a word that could be `inline`.
 
 **What is actually left, and it is a real cost rather than a capability gap:** every caller
 of a generic row-consuming word splices its entire body. `sort`'s merge sort is spliced in
@@ -158,7 +158,7 @@ instead of a comparator quotation:
 
 with a non-inline recursive helper whose body uses `if`. **A test fixture, not a library
 word**: an `Ord`-bounded search is strictly less capable than the comparator version
-`lib/arrays.sth` already ships (`is_ord` is `is_numeric` and nothing else, so it cannot
+`examples/experiments/arrays.sth` already has (`is_ord` is `is_numeric` and nothing else, so it cannot
 reach a user struct), and two `bin_search`es in `lib/` would be a downgrade shipped beside
 the real one. Revisit only if P7.S3e makes the bound mean something.
 
