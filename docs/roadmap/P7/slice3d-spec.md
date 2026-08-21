@@ -214,7 +214,7 @@ cannot be probed for the exact rejection a deleted guard would produce.
   matching:
 
   ```sooth
-  : bump ( 'T: Copy 'T -- 'T 'T )
+  : bump ( 'T: Copy -- 'T 'T )
     | x | [ x x ] call
   ;
   ```

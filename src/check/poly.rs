@@ -5548,6 +5548,29 @@ mod tests {
         assert!(!err.contains("unknown word"), "{err}");
     }
 
+    /// P7 slice 3d (C1/R1, L1): `call` on a plain non-quotation operand (a
+    /// concrete `i64`, not a quotation of any kind) falls into the same
+    /// `poly_op_on_variable_error` else-arm as the non-literal-quotation
+    /// case above -- `PolyType::Concrete` renders `` `i64` ``, never
+    /// `unknown word`. Untested behavioural change flagged in the Phase 1
+    /// review: before R1's arm existed, `call` fell through to the ordinary
+    /// env lookup and any operand type produced `unknown word`.
+    #[test]
+    fn poly_call_on_non_quotation_operand_is_located_error() {
+        let err = check_src(
+            ": caller ( 'T i64 -- 'T i64 )\n\
+               call\n\
+             ;\n\
+             : main ( -- ) 1 2 caller drop drop ;\n",
+        )
+        .expect_err("a non-quotation operand at `call` should be rejected");
+        assert_eq!(
+            err,
+            "error: `call` is not permitted on `i64` in `caller` (line 2)"
+        );
+        assert!(!err.contains("unknown word"), "{err}");
+    }
+
     /// P7 slice 3d (C1/R1): the splice's own teardown, the poly analogue of
     /// `Scope::leave` -- a linear local bound *inside* the spliced literal and
     /// never consumed there leaks past `call` unless this is rejected before
