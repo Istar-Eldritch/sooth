@@ -5548,6 +5548,26 @@ mod tests {
         assert!(!err.contains("unknown word"), "{err}");
     }
 
+    /// P7 slice 3d (C1/R1): `call` on an *empty* stack reports the ordinary
+    /// arity underflow, not `unknown word`. R1's arm owns every `call` in a
+    /// poly body now, so it owns this report too: before the arm existed the
+    /// name fell through to the env lookup, which has no `call` candidate.
+    #[test]
+    fn poly_call_on_empty_stack_is_underflow_error() {
+        let err = check_src(
+            ": uf ( 'T: Copy -- 'T )\n\
+               | x | call x\n\
+             ;\n\
+             : main ( -- ) 1 uf drop ;\n",
+        )
+        .expect_err("`call` with nothing on the stack should underflow");
+        assert!(
+            err.contains("`call` needs 1 values, but the stack holds 0"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown word"), "{err}");
+    }
+
     /// P7 slice 3d (C1/R1, L1): `call` on a plain non-quotation operand (a
     /// concrete `i64`, not a quotation of any kind) falls into the same
     /// `poly_op_on_variable_error` else-arm as the non-literal-quotation
