@@ -1922,7 +1922,11 @@ impl Session {
         // which has no module of its own to be local to).
         for (name, span) in import.selective() {
             if !module.modules[0].exports.iter().any(|(n, _)| n == name) {
-                return Err(check::selective_not_exported_error(name, qualifier, *span));
+                return Err(check::selective_not_exported_error(
+                    name,
+                    Some(qualifier),
+                    *span,
+                ));
             }
         }
         // R12: a selectively-exposed name colliding with an existing session

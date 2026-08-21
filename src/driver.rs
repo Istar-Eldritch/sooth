@@ -239,18 +239,6 @@ fn duplicate_qualifier_error(file: &Path, qualifier: &str, at: Span, first: Span
     )
 }
 
-/// P8 slice 1a: a wildcard import binds no qualifier, and nothing here gives
-/// it a visibility effect to splice in -- a compiled build rejects it
-/// outright, exactly as the REPL does, rather than silently binding nothing.
-fn wildcard_import_is_error(file: &Path, at: Span) -> String {
-    format!(
-        "error: wildcard import at line {}, col {} in {}:\n  a wildcard import binds no names in this build\n  use a qualified import instead",
-        at.line,
-        at.col,
-        file.display()
-    )
-}
-
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
@@ -310,11 +298,31 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         for (imp, target) in node.imports.iter().zip(&node.import_targets) {
             let qualifier = match imp.qualifier() {
                 Some(q) => q,
-                // The reserved `intrinsics` wildcard (F6) is the one wildcard
-                // shape that adds no closure edge and needs no qualifier; any
-                // other wildcard binds no names and is rejected outright.
-                None if target.is_none() => continue,
-                None => return Err(wildcard_import_is_error(&node.canon, imp.span)),
+                // P8 S2 (R1): a wildcard import binds no qualifier. The
+                // reserved `intrinsics` wildcard (F6, no resolved target) adds
+                // no closure edge and binds nothing here -- its visibility is
+                // gated separately (R2). A real-target wildcard desugars to a
+                // selective import of every name on the target's `export:`
+                // list: the synthesized entry carries no qualifier (there is
+                // no qualified spelling for a wildcard-bound name) and the
+                // importer's own `import: ... * ;` span, not the exporting
+                // file's `export:` span, so a collision diagnostic lands in
+                // the right file.
+                None => {
+                    let Some(&target) = target.as_ref() else {
+                        continue;
+                    };
+                    for (name, _) in &exports_by_module[target as usize] {
+                        selective_map.insert(name.clone(), target);
+                        selective_entries.push(check::SelectiveName {
+                            name: name.clone(),
+                            qualifier: None,
+                            target,
+                            span: imp.span,
+                        });
+                    }
+                    continue;
+                }
             };
             if let Some(first) = bound_at.insert(qualifier, imp.span) {
                 return Err(duplicate_qualifier_error(
@@ -335,7 +343,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
                 selective_map.insert(name.clone(), target);
                 selective_entries.push(check::SelectiveName {
                     name: name.clone(),
-                    qualifier: qualifier.to_string(),
+                    qualifier: Some(qualifier.to_string()),
                     target,
                     span: *span,
                 });
@@ -1301,20 +1309,59 @@ mod tests {
         );
     }
 
-    /// P8 slice 1a: a wildcard import binds no qualifier and gets no
-    /// visibility effect until S2 -- so a compiled build rejects it outright,
-    /// exactly as the REPL does, rather than silently binding no names.
+    /// P8 S2 (R1): a wildcard import of a module that declares its own
+    /// exports binds every exported name, reachable bare with no qualifier.
     #[test]
-    fn driver_wildcard_import_is_error() {
+    fn driver_wildcard_import_binds_exports() {
         let s = Sandbox::new("wildcard-build");
         s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
-        let entry = s.write("main.sth", "import: \"lib.sth\" * ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\n",
+        );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
-        let err = assemble_module(&closure, true).expect_err("a wildcard import is rejected");
+        let mut module =
+            assemble_module(&closure, true).expect("a wildcard import binds its target's exports");
+        check::check(&mut module).expect("a wildcard-bound name is reachable bare");
+    }
+
+    /// P8 S2 (R1): a wildcard binds only the target's exports, not every
+    /// declaration -- a non-exported name of the target stays `unknown word`.
+    #[test]
+    fn driver_wildcard_import_does_not_bind_private_names() {
+        let s = Sandbox::new("wildcard-private");
+        s.write(
+            "lib.sth",
+            ": lw ( -- i64 ) 1 ;\nexport: lw ;\n: hidden ( -- i64 ) 2 ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) hidden . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let mut module =
+            assemble_module(&closure, true).expect("assembly itself does not reject a bare call");
+        let err = check::check(&mut module)
+            .expect_err("a wildcard binds exports only, not every declaration");
+        assert!(err.contains("unknown word"), "unexpected message: {err}");
+    }
+
+    /// P8 S2 (R1): a wildcard-bound name colliding with a local declaration is
+    /// a hard error, inheriting `check_selective_imports`'s existing rule --
+    /// no silent shadow.
+    #[test]
+    fn driver_wildcard_import_colliding_with_local_is_error() {
+        let s = Sandbox::new("wildcard-collision");
+        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: lw ( -- i64 ) 2 ;\n: main ( -- ) lw . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let err = assemble_module(&closure, true)
+            .expect_err("a wildcard-bound name colliding with a local decl is an error");
         assert!(
-            err.contains("error: wildcard import at line 1, col 1 in")
-                && err.contains("a wildcard import binds no names in this build")
-                && err.contains("use a qualified import instead"),
+            err.contains("wildcard import of `lw`") && err.contains("collides with a local"),
             "unexpected message: {err}"
         );
     }
