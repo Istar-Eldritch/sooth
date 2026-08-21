@@ -5569,4 +5569,23 @@ mod tests {
             "{err}"
         );
     }
+
+    /// P7 slice 3d (R1): the splice's teardown also retains `scope.locals`/
+    /// `scope.moves` down to the pre-splice snapshot, the poly analogue of
+    /// `Scope::leave`'s own truncation -- without it, a local bound and
+    /// consumed *inside* the splice would still be registered in the
+    /// enclosing scope afterward, so a second reference to that name would
+    /// resolve as a stale local instead of the ordinary-word lookup it should
+    /// fall through to.
+    #[test]
+    fn poly_call_on_literal_retains_locals_past_splice() {
+        let err = check_src(
+            ": leaks ( 'T: Copy -- 'T i64 )\n\
+               | x | 3 [ | y | ] call x y\n\
+             ;\n\
+             : main ( -- ) 7 leaks drop drop ;\n",
+        )
+        .expect_err("`y` must not remain a resolvable local past the splice's own scope");
+        assert!(err.contains("unknown word `y`"), "{err}");
+    }
 }
