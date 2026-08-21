@@ -278,9 +278,17 @@ green except deletion, gating, split, and migration together.
   `None`. `parser::prelude_words` and `is_prelude_word_name` are gone, `mangle` exempts only
   `main`/`drop`, and `is_operator_dispatch_name` no longer lists the six comparisons.
 - A hub re-exports an imported word (and an imported type, and an enum's variants) and a
-  consumer uses it qualified and bare, through two hops and through a qualified-only import; a
-  cycle, an unresolvable name, and a two-origin ambiguity are each located errors, not a hang
-  or a first-wins pick.
+  consumer uses it qualified and bare, through two hops and through a qualified-only import; an
+  unresolvable name and a two-origin ambiguity are each located errors, not a hang or a
+  first-wins pick. The `re_export_cycle_error` guard in `walk_to_origin` is *not reachable from
+  a source program*: a re-export cycle cannot arise without an import cycle (an immediate source
+  only exists via a real import edge, and a self-source ends the walk), and import cycles are
+  caught by module-closure construction before `resolve_export_origins` runs. It is exercised
+  only by `export_re_export_cycle_is_a_located_error`, which feeds a hand-built cyclic
+  `immediate` table straight into `resolve_export_origins`; no end-to-end golden reaches it,
+  because no source can. The guard stays as defensive code — diagnostic, not safety — and its
+  pair-keyed visited set is still the sound way to tell a diamond from a cycle should that
+  reasoning ever change.
 - A wildcard binds every exported name of its target, including names the target re-exports;
   the reserved `intrinsics` wildcard makes the builtins visible, and a selective `intrinsics`
   import is a real subset in both monomorphic and polymorphic bodies.
@@ -296,7 +304,14 @@ green except deletion, gating, split, and migration together.
 
 - The generic-calls-generic P7 fix (brief decision (b): narrowed with a diagnostic).
 - Manifest grammar, package attribution, module naming/visibility, cross-package resolution,
-  the layer check (S1a); `--manifest` and the fallback chain (S1b) — depended on, not modified.
+  the layer check (S1a); `--manifest` and the fallback chain (S1b) — depended on, and modified
+  only in one respect: commit `9c9981b` narrowed the in-package quoted-path rejection guard in
+  `packages.rs::resolve_import` from `site.origin != SiteOrigin::UserLevel` to
+  `site.origin == SiteOrigin::Ancestor`, so a `--manifest` (Flag-origin) entry file may now
+  import siblings by quoted path where before only non-`Ancestor`/non-`UserLevel` sites could.
+  This is what R7's shared fixture manifest harness needs (temp-dir entry files passed
+  `--manifest` that then import sibling fixtures by quoted path); it is tested by
+  `flag_site_still_allows_a_quoted_path_import`.
 - Wildcard re-export (`export: * ;`), manifest path tables, and a package-wide
   unqualified-exports escape hatch (design doc: declined / deferred).
 - Semver, the serialisable API description, `sooth publish --check` (S3).

@@ -489,3 +489,21 @@ fn the_intrinsic_gate_also_covers_a_polymorphic_body() {
         "unexpected diagnostic: {err}"
     );
 }
+
+/// R2, the positive control the gate rests on: dropping `&& !env.contains_key(name)`
+/// from the gate (commit `fe0e09c`) assumes a module's own word under a gated
+/// builtin spelling always arrives *mangled*, so a bare gated name reaching the
+/// gate never has an env candidate to defer to. Pin the legal shape: a module
+/// that declares its own `dup` and calls it builds and runs its own word (prints
+/// `7`, which the shuffle `dup` on an empty stack could not), rather than drawing
+/// a spurious `` `dup` is an intrinsic and is not imported `` diagnostic.
+#[test]
+fn an_own_word_under_a_gated_builtin_spelling_still_resolves() {
+    let t = Tree::new("own-word-shadows-builtin");
+    let entry = write_raw(
+        &t,
+        "main.sth",
+        "import: intrinsics * ;\n: dup ( -- i64 ) 7 ;\n: main ( -- ) dup . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "7\n");
+}
