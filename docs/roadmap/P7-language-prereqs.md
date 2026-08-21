@@ -259,3 +259,78 @@ lang trait — a trait earns its keep only with two or more carriers.
 can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with
 a located error naming the missing word and the trait.
+
+**P7.S3f — Runtime quotation values crossing the polymorphism boundary.** Discovered
+while scoping S3d, not planned: a *non-inline* word cannot declare a `~[ ]`
+(`InlineQuotation`) parameter, and that gate is correct, not a gap — `~[ ]` is splice-only
+by design (`src/check/word_entry.rs:112-142`), has no runtime representation, and giving it
+one would just reinvent plain `[ ]` under a different sigil. But ordinary `[ ]` quotations
+(`Type::Quotation`) already have a real runtime representation, landed and marked
+`Implemented.` in Phase 4 Slices 7a/7b: a concrete word taking one and `call`ing it works
+today, probe-verified. What does not work is that value crossing the **polymorphism**
+boundary, on either side, both probe-verified stale rather than designed: a poly body
+calling an abstract (non-literal, parameter-bound) quotation slot fails with
+`` unknown word `call` `` (`poly_call_term` never special-cases `call` for anything but a
+literal marker, `slot.quot.is_some()`); and any caller — concrete or poly — passing a real
+quotation *argument* into a poly callee's signature is rejected outright by
+`check_poly_call`'s R9p (`src/check/poly.rs:2416-2419`, `reject_quotation_argument`), whose
+message still reads "a runtime quotation value is slice 7" as if 7a/7b never shipped.
+**Independent of S3d, not a prerequisite either way.** S3d's gap is a quotation *literal*
+written inside a poly body (`poly_call_term`'s `QuotLit`-marker path); this slice's gap is
+an *abstract parameter* and the *call-site argument boundary* (`check_poly_call`), a
+different code path in the same file. Nothing traced so far makes one need the other.
+**This, not S3d, is what would let `sort`/`bin_search` become genuinely non-inline** —
+S3d's `call`-on-a-literal fix cannot reach a comparator *parameter* at all (a non-inline
+word still can't declare `~[ ]`); this slice's `call`-on-a-parameter fix, paired with an
+ordinary `[ ]` (not `~[ ]`) comparator type, is the mechanism that actually would. Needs its
+own recon before a spec: `reject_quotation_argument`'s R9p comment ("binds `'T` to the
+placeholder and monomorphizes over a phantom") names a real hazard — unifying a bare `'T`
+against a quotation's `Type` needs the same care S3b took with `PolySlot`, not a bare
+removal of the guard — and lowering a `call` through an abstract quotation parameter inside
+a monomorphized (not spliced) poly word is untraced.
+**Exit:** a polymorphic word can declare an ordinary (non-`~`) quotation-typed parameter,
+call it inside its own body via an indirect call, and receive a real quotation value from
+any caller at a concrete instantiation; the stale "slice 7" wording is retired.
+
+**P7.S3g — Self-recursion in a non-inline generic body.** A non-inline polymorphic word
+cannot call itself: `: loopg ( 'T: Copy 'T i64 -- 'T ) 1 sub loopg ;` fails with
+`` unknown word `loopg__m0` ``, which is the *generic-word-calls-generic-word* diagnostic
+and misdescribes what is wrong. Recursion is the ordinary way to write a loop over an
+abstract stack, so its absence is what forces every looping generic word to be `inline`
+and spliced at each call site.
+**Smaller than the general generic-calls-generic limit it currently reports as, and the
+lowering half is already done.** The general case is blocked because `poly_call_term`
+cannot see `poly_env` (`src/check/poly.rs:846`), so no polymorphic callee is registered on
+that path. A *self*-call needs no registry: its signature is the `PolySig` the walk
+already holds. On the lowering side `lower_instantiation` already states the case works --
+"a self-recursive polymorphic word is a nested polymorphic call ... so such a body still
+lowers correctly as an ordinary recursive call, just without the loop/back-edge transform
+a monomorphic self-tail word gets" (`src/ir/driver.rs:250-259`). So the slice is a checker
+gap plus an optional codegen improvement, not new machinery.
+Two pieces, and the second is optional: resolve the self-name against the body's own `sig`
+in the poly walk; and decide whether to lift the hardcoded `self_tail = false` for
+instantiations (`poly.rs:392`) so a self-*tail* call lowers to a back-edge instead of real
+recursion. Without the second the feature is correct but consumes stack, which is the
+difference between `times-helper` running in constant stack and not.
+**Polymorphic recursion is excluded by the backend, and must be a located rejection
+rather than a to-do.** A self-call at *different* type arguments (`'T` recursing at
+`['T 2]`) demands a fresh instantiation per level, so monomorphization never terminates.
+This is a consequence of Sooth's monomorphizing codegen, not of the type system: an erased
+or boxed uniform representation compiles it fine, which is precisely what DESIGN.md
+declines (no trait objects, no vtables, no hidden allocation). The slice therefore needs a
+guard on the instantiation worklist that reports the expansion as a located error, or a
+sufficiently deep generic program hangs the compiler instead of failing.
+**S3e's traits do not unlock it, and the two are orthogonal.** A bound answers *what
+operations `'T` admits*, an abstraction question; polymorphic recursion is blocked by *how
+many instantiations must be emitted*, a termination question, and a bound does not reduce
+that count -- a polymorphically recursive word still demands a distinct instantiation per
+depth whether or not its variable carries a bound. S3e is explicit that a satisfied bound
+resolves at monomorphization with "no runtime representation, no vtable, no erasure, no
+allocation", which is the opposite of the uniform representation this would need. Only trait
+*objects* would change the answer, and S3e declines them on purpose. Bounded-depth
+monomorphization (a fixed instantiation limit, as C++ templates effectively have) is
+declined too: it is a larger finite bound with a worse error message, not a solution.
+**Exit:** a non-inline generic word can call itself at its own type arguments and run; a
+self-call at different type arguments is a located error naming polymorphic recursion, not
+a hang and not the `g__m0` message; and the `g__m0` diagnostic no longer claims a self-call
+is a generic-calls-generic call.

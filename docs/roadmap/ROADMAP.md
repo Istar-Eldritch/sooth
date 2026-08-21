@@ -84,4 +84,7 @@ completion. The piped (non-tty) path is unchanged byte-for-byte.
   within that band by what you want to play with first, which for a craft project is
   a legitimate way to choose. Two orderings are not free: the stdlib layers (9) are
   built as packages, so they follow packages (8), and packages need Phase 7's bounds
-  before an exported signature's API description can be baselined.
+  before an exported signature's API description can be baselined. Phase 12 depends on
+  Phase 8 too, but not on 9-11: self-hosting is planned as a progressive, stage-by-stage
+  takeover rather than a rewrite-and-cutover, and the FFI boundary that depends on
+  (richer `extern:` payloads, unmangled exports) is P8.S4, not new content in Phase 12.
