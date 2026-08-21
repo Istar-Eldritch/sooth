@@ -158,9 +158,9 @@ fn str_carried_across_a_repl_line_alongside_another_slot_is_correct() {
 fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
     // The carried-slot prologue's `_` wildcard used to load every
     // unrecognised slot, including `Bool`, as a bare `IrType::I64`, so a
-    // carried `true` printed `1` (missing `Instr::Print`'s `Bool` arm and its
-    // `$boolstrs` path) instead of `true`. Same-line `true .` was always
-    // correct; only the carried path degraded.
+    // carried `true` printed `1` (the old backend `Bool` Print arm was
+    // unreachable from the carried path) instead of `true`. Same-line
+    // `true .` was always correct; only the carried path degraded.
     let out = run_session(&["true", "."]);
     assert_eq!(out, "stack: true\ntrue\nstack: (empty)\n");
 }

@@ -907,12 +907,12 @@ impl EnumId {
 /// fixed `Type::Enum` without threading the registry through a pure resolver.
 pub const BOOL_ENUM_ID: EnumId = EnumId(0);
 
-/// Slice 9 (R2): the builtin `bool` enum declaration, `type: Bool | False | True ;`,
+/// Slice 9 (R2): the builtin `bool` enum declaration, `type: bool | False | True ;`,
 /// injected at `BOOL_ENUM_ID` in every assembled module. `False` is variant 0
 /// and `True` variant 1 by declaration order, so their discriminants are the
-/// `0`/`1` the retired `TermKind::BoolLit` produced (and the order the print
-/// table `$boolstrs` indexes). Both variants carry an empty payload, so the
-/// general zero-payload-enum layout rule lowers it to a bare scalar.
+/// `0`/`1` the retired `TermKind::BoolLit` produced. Both variants carry an
+/// empty payload, so the general zero-payload-enum layout rule lowers it to a
+/// bare scalar.
 pub fn bool_enum_decl() -> EnumDecl {
     EnumDecl {
         name: "bool".to_string(),

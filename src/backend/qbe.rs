@@ -1774,6 +1774,10 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let entry = dir.join("main.sth");
+        // `import: intrinsics * ;` is needed for `tag`, the intrinsic the bool
+        // eliminator (`bool?`) dispatches over; it resolves as a reserved
+        // Dependency-anchored name with no file lookup, so a temp-dir entry is
+        // fine (packages::resolve_import returns Ok(None) for it).
         std::fs::write(&entry, ": main ( -- ) true . ;\nimport: intrinsics * ;\n").unwrap();
         let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
         let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
@@ -1792,10 +1796,16 @@ mod tests {
             !il.contains("$false_str"),
             "$false_str data must not be emitted: {il}"
         );
-        // The eliminator prints via `str`'s `.` (`%.*s`), not via `%s`.
+        // The eliminator prints via `str`'s `.` (`%.*s`), not via `%s`.  Assert
+        // the actual printf call, not just the data symbol: `$strfmt` is emitted
+        // unconditionally so a bare `contains("$strfmt")` would be vacuous.
         assert!(
-            il.contains("$strfmt"),
-            "bool print must route through str's `.` (expected $strfmt): {il}"
+            il.contains("call $printf(l $strfmt"),
+            "bool print must route through str's `.` (expected $strfmt printf call): {il}"
+        );
+        assert!(
+            !il.contains("call $printf(l $sfmt,"),
+            "bool print must not use the old `%s` ($sfmt) boolstrs path: {il}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
