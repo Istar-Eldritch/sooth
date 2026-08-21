@@ -5528,6 +5528,20 @@ mod tests {
         .expect("a literal's body should splice in place against the live stack");
     }
 
+    /// P7 slice 3d (C1/R1): the splice is flavour-neutral, matching the
+    /// concrete path (`call` is not a materialization boundary, so `~` decides
+    /// nothing there either). This is the shape `tests/phase7_slice3b.rs`'s
+    /// deferred-combinator test used to carry before R1 narrowed that guard
+    /// off `call`, so without this nothing pins the `~[ ]` half.
+    #[test]
+    fn poly_call_on_inline_literal_splices_body_in_place_ok() {
+        check_src(
+            ": bump ( 'T: Copy -- 'T 'T ) | x | ~[ x x ] call ;\n\
+             : main ( -- ) 5 bump drop drop ;\n",
+        )
+        .expect("an inline literal's body should splice in place too");
+    }
+
     /// P7 slice 3d (C1/R1, L1): `call` on a **non-literal** quotation operand
     /// -- a declared parameter whose effect still carries a free `'T`, so it
     /// stays `PolyType::Quotation` rather than folding to `PolyType::Concrete`
