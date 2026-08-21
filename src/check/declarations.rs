@@ -119,6 +119,25 @@ pub(super) fn is_builtin_word_name(name: &str) -> bool {
     BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
 }
 
+/// P8 S2 (R2): the names the `intrinsics` import gates, which is
+/// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
+/// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
+/// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
+/// as a self-call. Their home is `core::cmp`, so gating them here would answer
+/// an unimported `lt` with "add `import: intrinsics *`", pointing at the wrong
+/// module.
+///
+/// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
+/// `Print` row per printable type, dispatched by `check_operator`) and does not
+/// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
+/// import error.
+pub(super) fn is_gated_intrinsic_name(name: &str) -> bool {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
+        return false;
+    }
+    is_builtin_word_name(name)
+}
+
 /// R1: a located error for an `extern:` declaration redeclaring a name
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
@@ -436,10 +455,13 @@ fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> St
 /// came from and the span of the name in the `import:` form, for the R20/R21
 /// validation. A type name exposes its generated words as one unit (R15c), so
 /// only the base name appears here; a member (`Type>`) can only collide when
-/// its base does.
+/// its base does. `qualifier` is `None` for a P8 S2 wildcard-desugared entry
+/// (R1): a wildcard binds no qualifier, so its diagnostics use a
+/// wildcard-specific wording rather than a fabricated qualifier that would
+/// misdescribe the import shape.
 pub struct SelectiveName {
     pub name: String,
-    pub qualifier: String,
+    pub qualifier: Option<String>,
     pub target: u32,
     pub span: Span,
 }
@@ -460,28 +482,28 @@ pub fn check_selective_imports(
     for (m, entries) in selective_by_module.iter().enumerate() {
         let locals = local_decl_names(module, m as u32);
         // name -> the qualifier that first exposed it, for R21's both-sources error.
-        let mut seen: HashMap<&str, &str> = HashMap::new();
+        let mut seen: HashMap<&str, Option<&str>> = HashMap::new();
         for entry in entries {
             let exports = &module.modules[entry.target as usize].exports;
             if !exports.iter().any(|(n, _)| n == &entry.name) {
                 return Err(selective_not_exported_error(
                     &entry.name,
-                    &entry.qualifier,
+                    entry.qualifier.as_deref(),
                     entry.span,
                 ));
             }
             if locals.contains(entry.name.as_str()) {
                 return Err(selective_collides_with_local_error(
                     &entry.name,
-                    &entry.qualifier,
+                    entry.qualifier.as_deref(),
                     entry.span,
                 ));
             }
-            if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_str()) {
+            if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_deref()) {
                 return Err(selective_collision_error(
                     &entry.name,
                     first,
-                    &entry.qualifier,
+                    entry.qualifier.as_deref(),
                     entry.span,
                 ));
             }
@@ -502,7 +524,7 @@ pub fn check_selective_imports(
                     if arity != builtin_arity {
                         return Err(selective_arity_clash_error(
                             &entry.name,
-                            &entry.qualifier,
+                            entry.qualifier.as_deref(),
                             entry.span,
                             arity,
                             builtin_arity,
@@ -543,12 +565,31 @@ fn local_decl_names(module: &Module, m: u32) -> HashSet<&str> {
     names
 }
 
+/// P8 S2 (R1): a selective-import diagnostic names its source either as
+/// `module `<qualifier>`` or, for a wildcard-desugared entry with no
+/// qualifier, as a wildcard import -- so a fabricated qualifier never
+/// misdescribes the import shape.
+fn selective_source_phrase(name: &str, qualifier: Option<&str>) -> String {
+    match qualifier {
+        Some(q) => format!("selective import of `{name}` from module `{q}`"),
+        None => format!("wildcard import of `{name}`"),
+    }
+}
+
 /// R20: a selectively imported name absent from its source module's `export:`
 /// list is the R16 visibility error, same wording as a qualified private
 /// reference.
-pub(crate) fn selective_not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+pub(crate) fn selective_not_exported_error(
+    name: &str,
+    qualifier: Option<&str>,
+    span: Span,
+) -> String {
+    let source = match qualifier {
+        Some(q) => format!("module `{q}`"),
+        None => "its wildcard-imported module".to_string(),
+    };
     format!(
-        "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
+        "error: `{name}` is not exported from {source} at line {}, col {}",
         span.line, span.col
     )
 }
@@ -556,19 +597,31 @@ pub(crate) fn selective_not_exported_error(name: &str, qualifier: &str, span: Sp
 /// R21: a second selective import exposing a name a prior one already exposed,
 /// naming both source modules. No precedence, no shadowing: the collision is
 /// the error.
-fn selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
+fn selective_collision_error(
+    name: &str,
+    first: Option<&str>,
+    second: Option<&str>,
+    span: Span,
+) -> String {
+    let second_phrase = selective_source_phrase(name, second);
+    let first_phrase = match first {
+        Some(q) => format!("the selective import of `{name}` from module `{q}`"),
+        None => format!("the wildcard import of `{name}`"),
+    };
     format!(
-        "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
+        "error: {second_phrase} (line {}, col {}) collides with {first_phrase}",
         span.line, span.col
     )
 }
 
 /// R21: a selective import exposing a name the importing module already defines
 /// locally, naming the source module and the local definition.
-fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
+fn selective_collides_with_local_error(name: &str, qualifier: Option<&str>, span: Span) -> String {
     format!(
-        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
-        span.line, span.col
+        "error: {} (line {}, col {}) collides with a local definition of `{name}`",
+        selective_source_phrase(name, qualifier),
+        span.line,
+        span.col
     )
 }
 
@@ -578,14 +631,15 @@ fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) 
 /// the import site rather than a definition site.
 fn selective_arity_clash_error(
     name: &str,
-    qualifier: &str,
+    qualifier: Option<&str>,
     span: Span,
     arity: usize,
     builtin_arity: usize,
 ) -> String {
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     format!(
-        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) takes {arity} input{} but the builtin `{name}` takes {builtin_arity}; all overloads of a name must agree on input count",
+        "error: {} (line {}, col {}) takes {arity} input{} but the builtin `{name}` takes {builtin_arity}; all overloads of a name must agree on input count",
+        selective_source_phrase(name, qualifier),
         span.line,
         span.col,
         plural(arity),
@@ -1090,7 +1144,7 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
 /// bound the concrete type fails means no call site can reach both, so there
 /// is nothing to disambiguate.
 ///
-/// Slice 10c: this is what lets `lib/core.sth`'s `: < ( 'T: Copy Ord 'T --
+/// Slice 10c: this is what lets `core::cmp`'s `: < ( 'T: Copy Ord 'T --
 /// bool )` coexist with a user's `: < ( Vec2 Vec2 -- bool )`, which slice 8a
 /// shipped and an arity-only test would now reject outright. Only the `Ord`
 /// bound is consulted (`is_ord` is `is_numeric` and nothing else): `Copy` needs
@@ -1770,7 +1824,7 @@ mod tests {
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     #[test]
@@ -1796,7 +1850,7 @@ mod tests {
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         module
     }
@@ -1867,9 +1921,8 @@ mod tests {
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),
             modules: vec![ModuleInfo {
-                imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
-                selective: HashMap::new(),
+                ..ModuleInfo::default()
             }],
             statics: Vec::new(),
         };
@@ -1896,12 +1949,11 @@ mod tests {
 
         fn info(exports: &[&str]) -> ModuleInfo {
             ModuleInfo {
-                imports: HashMap::new(),
                 exports: exports
                     .iter()
                     .map(|n| (n.to_string(), Span::default()))
                     .collect(),
-                selective: HashMap::new(),
+                ..ModuleInfo::default()
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -1940,7 +1992,19 @@ mod tests {
         fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
             SelectiveName {
                 name: name.to_string(),
-                qualifier: qualifier.to_string(),
+                qualifier: Some(qualifier.to_string()),
+                target,
+                span: Span {
+                    line,
+                    col: 1,
+                    module: 0,
+                },
+            }
+        }
+        fn wildcard_sel(name: &str, target: u32, line: u32) -> SelectiveName {
+            SelectiveName {
+                name: name.to_string(),
+                qualifier: None,
                 target,
                 span: Span {
                     line,
@@ -1991,6 +2055,20 @@ mod tests {
         // A clean selective import of an exported, non-colliding name passes.
         let m = module_with(vec![word("p", 1)], vec![info(&[]), info(&["p"])]);
         assert!(check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).is_ok());
+
+        // P8 S2 (R1): a wildcard-desugared entry (no qualifier) colliding
+        // with a local declaration is a wildcard-specific wording, not a
+        // fabricated qualifier.
+        let m = module_with(
+            vec![word("p", 0), word("p", 1)],
+            vec![info(&[]), info(&["p"])],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![wildcard_sel("p", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(
+            err.contains("wildcard import of `p`") && err.contains("collides with a local"),
+            "wildcard collision wording: {err}"
+        );
     }
     /// U3 (R12): the duplicate-type-name check partitions by owning module, so
     /// two modules each declaring `Point` is not a duplicate, while two `Point`
@@ -2175,6 +2253,36 @@ mod tests {
             );
         }
     }
+    /// P8 S2 (R2): the gate set is `is_builtin_word_name` minus exactly the six
+    /// surface comparisons -- no wider and no narrower. `.` is the case that
+    /// makes the difference load-bearing: both r1 reviews put it in the
+    /// exclusion set, but it is a real `BUILTIN_TABLE` intrinsic that does not
+    /// move to `core`, so gating it is correct and excluding it would let a bare
+    /// `.` through with no import at all.
+    #[test]
+    fn the_gate_set_excludes_exactly_the_six_surface_comparisons() {
+        for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
+            assert!(
+                is_builtin_word_name(name),
+                "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
+            );
+            assert!(!is_gated_intrinsic_name(name), "`{name}` is a `core` word");
+        }
+        for name in BUILTIN_WORDS
+            .iter()
+            .copied()
+            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
+            .chain([">u8", ">usize"])
+        {
+            assert!(is_gated_intrinsic_name(name), "`{name}` is gated");
+        }
+        assert!(is_gated_intrinsic_name("."), "`.` is a real intrinsic");
+        assert!(
+            !is_gated_intrinsic_name("call"),
+            "`call` is not in the table"
+        );
+    }
+
     #[test]
     fn overload_exact_input_match_is_error() {
         // R1: two definitions with identical `(module, name, input_types)`

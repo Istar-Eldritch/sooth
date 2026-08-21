@@ -1,0 +1,9 @@
+\ core::prelude -- the hub. It declares no words of its own; it re-exports the
+\ typed core the compiler used to inject into every program, so a consumer
+\ writes one `import: core::prelude * ;` for the whole surface instead of one
+\ line per module. Nothing is implicit: a program that wants none of this
+\ imports none of it.
+import: self::bool b | if unless | ;
+import: self::cmp c | eq lt gt lte gte ne | ;
+
+export: if unless eq lt gt lte gte ne ;

@@ -8,7 +8,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use sooth::ir::{lower, Instr};
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -43,8 +43,9 @@ fn run_session(lines: &[&str]) -> String {
 /// the goldens run in parallel in one process.
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -66,7 +67,7 @@ fn len_of_a_str_emits_no_call_native() {
     // function, and the native binary prints the right value.
     let src = ": main ( -- )\n  \"hello\" len . ;";
     let tokens = lexer::lex(src).unwrap();
-    let mut module = parser::parse(&tokens).unwrap();
+    let mut module = test_support::parse_with_core(&tokens).unwrap();
     check::check(&mut module).unwrap();
     let ir = lower(&module).unwrap();
     let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
@@ -194,12 +195,14 @@ fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
     // as an `i64` but enormous as a `usize`, so `lt "hh" len` (2) flips
     // between `true` (signed) and `false` (unsigned, correct); the same-line
     // form is the reference.
-    let same_line = run_session(&["\"h\" len \"hh\" len sub \"hh\" len lt ."]);
-    let carried = run_session(&["\"h\" len \"hh\" len sub", "\"hh\" len lt ."]);
-    assert_eq!(same_line, "false\nstack: (empty)\n");
+    // P8.S2 (R3): `lt` is a `core` word a session imports, not a seeded one.
+    let cmp = common::repl_core_import("cmp", "lt");
+    let same_line = run_session(&[&cmp, "\"h\" len \"hh\" len sub \"hh\" len lt ."]);
+    let carried = run_session(&[&cmp, "\"h\" len \"hh\" len sub", "\"hh\" len lt ."]);
+    assert_eq!(same_line, "imported cmp\nfalse\nstack: (empty)\n");
     assert_eq!(
         carried,
-        "stack: 18446744073709551615\nfalse\nstack: (empty)\n"
+        "imported cmp\nstack: 18446744073709551615\nfalse\nstack: (empty)\n"
     );
 }
 

@@ -10,3 +10,4 @@ pub mod packages;
 pub mod parser;
 pub mod repl;
 pub mod resolve;
+pub mod test_support;

@@ -5,6 +5,8 @@
 \ one and returns its result. A word that must be spliced instead declares
 \ `inline` over a `~[ ... ]` parameter (see `lib/combinators.sth`).
 
+import: intrinsics * ;
+
 : apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;
 
 : apply2 ( [ i64 -- i64 ] i64 -- i64 ) apply ;

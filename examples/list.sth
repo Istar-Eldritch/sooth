@@ -3,6 +3,9 @@
 \ list's tail via the fused iterative destructor, not recursion, so it
 \ stays constant-stack no matter how long the tail is.
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 type: List | Nil | Cons v i64 next ^List ;
 type: Popped rest List val i64 ;
 type: Summed rest List total i64 ;

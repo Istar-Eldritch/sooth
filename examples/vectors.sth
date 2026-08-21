@@ -3,6 +3,8 @@
 \ arithmetic over fields, nested juxtaposition access, and a functional
 \ setter, all through user-defined words.
 
+import: intrinsics * ;
+
 type: Vec2 x i64 y i64 ;
 type: Segment from Vec2 to Vec2 ;
 

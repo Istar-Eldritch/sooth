@@ -10,8 +10,10 @@
 //! ordinary `[ ... ]` literal satisfying a `~[ ... ]` parameter) was superseded
 //! when part C required the tilde.
 
-/// The nine `lib/combinators.sth`/`lib/core.sth` words that gained `inline`
-/// this slice, paired with the file that defines each.
+/// The nine library words that gained `inline` this slice, paired with the file
+/// that defines each. P8.S2 (R8) split the old `lib/core.sth` into `core::bool` and
+/// `core::cmp`, so `if`/`unless` live in `bool.sth` now.
+mod common;
 const MIGRATED: [(&str, &str); 9] = [
     ("combinators.sth", "times-helper"),
     ("combinators.sth", "times"),
@@ -20,16 +22,17 @@ const MIGRATED: [(&str, &str); 9] = [
     ("combinators.sth", "fold"),
     ("combinators.sth", "filter"),
     ("combinators.sth", "while"),
-    ("core.sth", "if"),
-    ("core.sth", "unless"),
+    ("bool.sth", "if"),
+    ("bool.sth", "unless"),
 ];
 
 /// Build and run `src`, returning the built binary's path (left in place for
 /// the caller to remove), stdout, and exit code.
 fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()

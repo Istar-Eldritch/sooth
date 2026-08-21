@@ -11,6 +11,9 @@
 \ `decode` always advances `pc` by one; `h-jz`/`h-jmp` overwrite it afterward,
 \ so no handler needs to know whether it is straight-line or a branch.
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 type: Op
 | Push v i64
 | Add

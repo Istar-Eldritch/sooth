@@ -6,6 +6,8 @@
 \ elements directly with no closure at all; the golden pins both to the same
 \ output.
 
+import: intrinsics * ;
+
 : seed ( -- [ -- i64 ] ) [ 0 ] ;
 
 : main ( -- )

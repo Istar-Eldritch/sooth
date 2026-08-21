@@ -58,8 +58,9 @@ term-splicing compiler pass rather than minting a function per call site; multi-
 modules with word/type imports, natively and at the REPL; and quotations as real runtime
 values (non-capturing closures, storable and passable to non-inlined higher-order code).
 No combinator is compiler-known: `times` is ordinary Sooth source over a
-self-tail-recursive helper, like the rest. Nor is `if`: it is a `lib/core.sth` word
-taking a `bool` and two quotations, over the machine primitives `branch` and `tag`.
+self-tail-recursive helper, like the rest. Nor is `if`: it is a `core::bool` word
+taking a `bool` and two quotations, over the machine primitives `branch` and `tag`,
+imported by name like anything else.
 In progress: capturing closures and static ad-hoc overloading (`docs/roadmap/P4/slice7b-brief.md`,
 `docs/roadmap/P4/slice8a-brief.md`).
 

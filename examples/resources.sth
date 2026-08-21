@@ -1,3 +1,5 @@
+import: intrinsics * ;
+
 extern: open     ( cstr i64 -- i64 )              "open" ;
 extern: read     ( i64 &![u8 64] usize -- isize ) "read" ;
 extern: close-fd ( i64 -- i64 )                   "close" ;

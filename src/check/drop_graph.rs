@@ -800,11 +800,10 @@ fn recursive_drop_overload_error(
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
@@ -816,7 +815,7 @@ mod tests {
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
     fn first_word(src: &str) -> WordDef {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         module.words.into_iter().next().unwrap()
     }
     #[test]
@@ -1104,7 +1103,7 @@ mod tests {
         // set is both branch quotations, seeded from `branch` -- so the index
         // has to carry the real `if`, not be empty.
         let src = ": rec ( i64 -- i64 ) dup 0 gt ~[ rec ] ~[ rec ] if ;";
-        let module = parse(&lex(src).unwrap()).unwrap();
+        let module = crate::test_support::parse_with_core(&lex(src).unwrap()).unwrap();
         let combs = combinator_index(module.words.iter());
         let w = module.words.iter().find(|w| w.name == "rec").unwrap();
         // The tail callees are `if` itself and, through both of its
@@ -1183,7 +1182,7 @@ mod tests {
 
     fn words_of(src: &str) -> Vec<WordDef> {
         let tokens = lex(src).unwrap();
-        parse(&tokens).unwrap().words
+        crate::test_support::parse_with_core(&tokens).unwrap().words
     }
     fn named<'w>(words: &'w [WordDef], name: &str) -> &'w WordDef {
         words.iter().find(|w| w.name == name).unwrap()
@@ -1315,8 +1314,9 @@ mod tests {
         ] {
             let words = words_of(src);
             // The word under test is the source's own, at index 0: `words_of`
-            // appends the `lib/core.sth` prelude, which now defines `lt` too,
-            // so both `last()` and a name lookup can find the wrong one.
+            // appends the typed core (`test_support::core_lib_words`), which
+            // defines `lt` too, so both `last()` and a name lookup can find
+            // the wrong one.
             let word = words.first().expect("the builtin-named word");
             let terms = &word.body;
             let combs = combinator_index(&words);

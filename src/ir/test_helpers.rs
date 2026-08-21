@@ -5,11 +5,11 @@ use super::*;
 use crate::ast::Line;
 use crate::check::check;
 use crate::lexer::lex;
-use crate::parser::{parse, parse_line};
+use crate::parser::parse_line;
 
 pub(super) fn lower_src(src: &str) -> IrModule {
     let tokens = lex(src).unwrap();
-    let mut module = parse(&tokens).unwrap();
+    let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
     check(&mut module).unwrap();
     lower(&module).unwrap()
 }
@@ -70,14 +70,14 @@ pub(super) fn func<'a>(module: &'a IrModule, name: &str) -> &'a IrFunc {
 
 pub(super) fn structs_of(src: &str) -> Structs {
     let tokens = lex(src).unwrap();
-    let mut module = parse(&tokens).unwrap();
+    let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
     check(&mut module).unwrap();
     Structs::from_structs(&module.structs)
 }
 
 pub(super) fn enums_of(src: &str) -> Enums {
     let tokens = lex(src).unwrap();
-    let mut module = parse(&tokens).unwrap();
+    let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
     check(&mut module).unwrap();
     build_registries(
         &module.structs,
@@ -113,7 +113,7 @@ impl Probe {
     /// module that type-checks.
     pub(super) fn with_overrides(src: &str, overridden: &[&str]) -> Probe {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         for name in overridden {
             let decl = module
@@ -233,7 +233,7 @@ pub(super) fn empty_builder<'a>(
 
 pub(super) fn arrays_of(src: &str) -> Arrays {
     let tokens = lex(src).unwrap();
-    let mut module = parse(&tokens).unwrap();
+    let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
     check(&mut module).unwrap();
     build_registries(
         &module.structs,
@@ -247,7 +247,7 @@ pub(super) fn arrays_of(src: &str) -> Arrays {
 
 pub(super) fn module_of(src: &str) -> Module {
     let tokens = lex(src).unwrap();
-    let mut module = parse(&tokens).unwrap();
+    let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
     check(&mut module).unwrap();
     module
 }

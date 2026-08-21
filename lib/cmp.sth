@@ -1,0 +1,26 @@
+\ core::cmp -- the typed comparisons over the raw flag primitives.
+\
+\ The compiler is left with three machine-level primitives here: `branch`,
+\ which jumps on a 32-bit flag and takes two quotations; `tag` (see
+\ `core::bool`), which reads a payload-free enum's discriminant as that flag;
+\ and the six comparison primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`,
+\ which produce it. Everything typed -- `bool`, `if`, `eq` -- is written in
+\ Sooth.
+\
+\ Each comparison is `'T: Copy Ord`-polymorphic, so one definition covers the
+\ whole numeric tower rather than narrowing the language to `i64`, and each is
+\ `inline`, so it is spliced at its call site: without that every comparison in
+\ every program would become a real call with a frame. The branch-and-construct
+\ body is also what makes an invalid `bool` impossible to build -- there is
+\ deliberately no operation turning a machine word back into an enum, only
+\ these two named variants.
+import: intrinsics i | ueq ult ugt ulte ugte une branch | ;
+
+export: eq lt gt lte gte ne ;
+
+: eq  inline ( 'T: Copy Ord 'T -- bool ) ueq  [ true ] [ false ] branch ;
+: lt  inline ( 'T: Copy Ord 'T -- bool ) ult  [ true ] [ false ] branch ;
+: gt  inline ( 'T: Copy Ord 'T -- bool ) ugt  [ true ] [ false ] branch ;
+: lte inline ( 'T: Copy Ord 'T -- bool ) ulte [ true ] [ false ] branch ;
+: gte inline ( 'T: Copy Ord 'T -- bool ) ugte [ true ] [ false ] branch ;
+: ne  inline ( 'T: Copy Ord 'T -- bool ) une  [ true ] [ false ] branch ;

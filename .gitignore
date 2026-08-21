@@ -7,6 +7,8 @@
 # Compiled example binaries land alongside their source (spec §9.2).
 /examples/*
 !/examples/*.sth
+# The examples are a package (P8): its manifest is source, not an artifact.
+!/examples/sooth.pkg
 # `resources.sth` reads this fixture at run time: source, not an artifact.
 !/examples/resource_fixture.txt
 

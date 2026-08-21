@@ -18,6 +18,9 @@
 \ keeping them leaves holds every combinator at the same depth as `each`. They
 \ share the loop shape, not a call.
 
+import: intrinsics * ;
+import: self::prelude * ;
+
 export: each map fold filter while times times-helper ;
 
 \ `times` runs its quotation `n` times, handing it the 0-based index as its top

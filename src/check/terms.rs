@@ -265,13 +265,22 @@ fn check_term(
                 }
                 return Ok(stack);
             }
+            // P8 S2 (R2): an intrinsic name this module never imported is not
+            // a builtin *here*. Every builtin-dispatch arm below is skipped
+            // for it, so the name falls through to the ordinary env/overload
+            // path, and that fall-through reports the missing import rather
+            // than `unknown word`. The env lookup never actually claims the
+            // name: a module's own word under a builtin spelling arrives
+            // mangled, so a gated name reaching here has no candidate and the
+            // fall-through is always the diagnostic.
+            let gated = intrinsic_is_gated_out(ctx, span, name);
             // Slice 10c (R-P3-1a): `branch` is intercepted here, beside
             // `call`, for the same reason: it is a compiler-known word whose
             // operands are quotations, so every builtin family below it would
             // reject them under R11's default-deny. It is the *single*
             // sanctioned exemption from that deny; nothing else in the
             // language takes a quotation operand to a builtin name.
-            if name == "branch" {
+            if name == "branch" && !gated {
                 return check_branch(
                     stack,
                     span,
@@ -452,8 +461,10 @@ fn check_term(
             {
                 return Ok(stack);
             }
-            if let Some(stack) =
-                check_shuffle(name, span, &mut stack, ctx, arrays, prov, scope, live, at)?
+            if let Some(stack) = (!gated)
+                .then(|| check_shuffle(name, span, &mut stack, ctx, arrays, prov, scope, live, at))
+                .transpose()?
+                .flatten()
             {
                 return Ok(stack);
             }
@@ -462,12 +473,26 @@ fn check_term(
             // lookup that misses a per-module-mangled decl in a multi-module
             // build. `None` (REPL / single-module) falls back to the flat
             // lookup unchanged.
-            let scoped_ops = scoped_operator_overloads(ctx, env, name);
+            // P8 S2 (R2): an unimported intrinsic gets no operator candidates
+            // either. The operator dispatch is the intrinsics' own machinery --
+            // a module-visible overload of `add` is an overload *of the
+            // builtin*, and the compiler-injected `bool` `.` sits in the same
+            // candidate set -- so leaving it populated would answer an
+            // unimported `1 .` with that overload's own type mismatch instead
+            // of the missing import.
+            let scoped_ops = match gated {
+                true => None,
+                false => scoped_operator_overloads(ctx, env, name),
+            };
             let op_candidates = match &scoped_ops {
                 Some(v) => Some(&v[..]),
                 None => env.get(name).map(|v| &v[..]),
             };
-            match check_operator(name, span, &mut stack, ctx, op_candidates)? {
+            let dispatch = match gated {
+                true => OpDispatch::NotOperator,
+                false => check_operator(name, span, &mut stack, ctx, op_candidates)?,
+            };
+            match dispatch {
                 OpDispatch::Builtin(stack) => return Ok(stack),
                 // Slice 8a phase 2 (R6/R7): a builtin operator name whose
                 // operands match a user overload exactly dispatches to the
@@ -481,14 +506,24 @@ fn check_term(
                 }
                 OpDispatch::NotOperator => {}
             }
-            if let Some(stack) = check_tag_word(name, span, &mut stack, ctx)? {
+            if let Some(stack) = (!gated)
+                .then(|| check_tag_word(name, span, &mut stack, ctx))
+                .transpose()?
+                .flatten()
+            {
                 return Ok(stack);
             }
-            if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
+            if let Some(stack) = (!gated)
+                .then(|| check_str_word(name, span, &mut stack, ctx))
+                .transpose()?
+                .flatten()
+            {
                 return Ok(stack);
             }
-            if let Some(stack) =
-                check_array_word(name, span, &mut stack, ctx, arrays, refs, slices, prov)?
+            if let Some(stack) = (!gated)
+                .then(|| check_array_word(name, span, &mut stack, ctx, arrays, refs, slices, prov))
+                .transpose()?
+                .flatten()
             {
                 return Ok(stack);
             }
@@ -625,7 +660,7 @@ fn check_term(
             // first (it is two pointers) so `poly` can be reborrowed mutably
             // for the splice.
             // Slice 10c: a name can now be *both* a polymorphic library word
-            // and a concrete user overload -- `lib/core.sth`'s `'T: Copy Ord`
+            // and a concrete user overload -- `core::cmp`'s `'T: Copy Ord`
             // comparisons against a user's `: lt ( Vec2 Vec2 -- bool )` for
             // their own type, which slice 8a shipped. The library candidate's
             // `Ord` bound excludes `Vec2`, so when no polymorphic candidate
@@ -691,9 +726,13 @@ fn check_term(
             // overloads; every other name still resolves through `env`.
             let candidates = match &scoped_ops {
                 Some(v) => v.as_slice(),
-                None => env
-                    .get(name)
-                    .ok_or_else(|| unknown_word_error(ctx, span, name))?,
+                None => env.get(name).ok_or_else(|| match gated {
+                    // P8 S2 (R6a): the name is a real intrinsic that nothing
+                    // else claimed, so the remedy is the import, not a
+                    // definition.
+                    true => ungated_intrinsic_error(ctx, span, name),
+                    false => unknown_word_error(ctx, span, name),
+                })?,
             };
             let chosen = match candidates {
                 [only] => {
@@ -1475,7 +1514,7 @@ fn check_branch(
             let else_end = prov.quotations[e.0].span;
             // The join's diagnostics are located at the first arm, not at
             // `branch` itself: the arms are the *caller's* literals, while
-            // `branch` is reached through `lib/core.sth`'s `if`, whose span
+            // `branch` is reached through `core::bool`'s `if`, whose span
             // would point a user at library source they did not write.
             check_branch_join(
                 &then_body,
@@ -1664,7 +1703,7 @@ mod tests {
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = crate::lexer::lex(src).unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::check::check(&mut module)
     }
 
@@ -1706,7 +1745,7 @@ mod tests {
     /// exercises -- `myif`'s body forwards its declared `~` parameters into
     /// `branch`, and at *its* definition site those are abstract quotation
     /// slots with no interned body. Measured mutation: route `branch`'s arm
-    /// through the `QuotRef::Known` case alone and `lib/core.sth`'s own `if`
+    /// through the `QuotRef::Known` case alone and `core::bool`'s own `if`
     /// stops checking, so *nothing* builds -- the abstract-forward case is not
     /// an edge case, it is the case the whole slice rests on.
     #[test]

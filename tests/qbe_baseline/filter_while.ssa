@@ -41,7 +41,7 @@ export function :arr_0 $scores__m0() {
 	%v14 =w cultl %v12, %v13
 	jnz %v14, @blk4, @blk5
 @blk5
-	%v15 =l copy 13
+	%v15 =l copy 16
 	%v16 =l copy 5
 	call $sooth_oob_trap(l %v15, l %v12, l %v16)
 	jmp @blk4
@@ -57,7 +57,7 @@ export function :arr_0 $scores__m0() {
 	%v23 =w cultl %v21, %v22
 	jnz %v23, @blk6, @blk7
 @blk7
-	%v24 =l copy 14
+	%v24 =l copy 17
 	%v25 =l copy 5
 	call $sooth_oob_trap(l %v24, l %v21, l %v25)
 	jmp @blk6
@@ -73,7 +73,7 @@ export function :arr_0 $scores__m0() {
 	%v32 =w cultl %v30, %v31
 	jnz %v32, @blk8, @blk9
 @blk9
-	%v33 =l copy 15
+	%v33 =l copy 18
 	%v34 =l copy 5
 	call $sooth_oob_trap(l %v33, l %v30, l %v34)
 	jmp @blk8
@@ -89,7 +89,7 @@ export function :arr_0 $scores__m0() {
 	%v41 =w cultl %v39, %v40
 	jnz %v41, @blk10, @blk11
 @blk11
-	%v42 =l copy 16
+	%v42 =l copy 19
 	%v43 =l copy 5
 	call $sooth_oob_trap(l %v42, l %v39, l %v43)
 	jmp @blk10
@@ -105,7 +105,7 @@ export function :arr_0 $scores__m0() {
 	%v50 =w cultl %v48, %v49
 	jnz %v50, @blk12, @blk13
 @blk13
-	%v51 =l copy 17
+	%v51 =l copy 20
 	%v52 =l copy 5
 	call $sooth_oob_trap(l %v51, l %v48, l %v52)
 	jmp @blk12
@@ -148,7 +148,7 @@ export function $sooth_main() {
 	%v22 =w cultl %v20, %v21
 	jnz %v22, @blk8, @blk9
 @blk9
-	%v23 =l copy 65
+	%v23 =l copy 68
 	%v24 =l copy 5
 	call $sooth_oob_trap(l %v23, l %v20, l %v24)
 	jmp @blk8
@@ -176,7 +176,7 @@ export function $sooth_main() {
 	%v40 =w cultl %v38, %v39
 	jnz %v40, @blk16, @blk17
 @blk17
-	%v41 =l copy 66
+	%v41 =l copy 69
 	%v42 =l copy 5
 	call $sooth_oob_trap(l %v41, l %v38, l %v42)
 	jmp @blk16

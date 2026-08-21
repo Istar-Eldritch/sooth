@@ -11,7 +11,9 @@
 //! shape-changing `~[ ..i -- ..o ]` is P2).
 
 use sooth::ir::{lower, Instr, IrFunc, Terminator};
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
+
+mod common;
 
 /// A two-way branch whose two quotation parameters are each `call`ed in tail
 /// position, so both inherit their caller's tail position.
@@ -35,7 +37,7 @@ fn sum_to(branch: &str, iterations: u32) -> String {
 
 fn lowered(src: &str) -> Vec<IrFunc> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     lower(&module).expect("lowering should succeed").funcs
 }
@@ -78,8 +80,9 @@ static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}-{id}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     binary
 }
@@ -104,7 +107,7 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -243,7 +246,13 @@ fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
     // 1e6 real frames overflow the host stack, so the printed sum is what
     // separates the loop from the recursion; the REPL echoes the whole
     // residual stack each line, so the assertion pins the exact line.
+    // P8.S2 (R3): the session imports the typed core rather than being seeded
+    // with it.
+    let cmp = common::repl_core_import("cmp", "eq");
+    let boolean = common::repl_core_import("bool", "if");
     let out = run_session(&[
+        &cmp,
+        &boolean,
         ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
          | e | | t | | c | c ~[ t call ] ~[ e call ] if ;",
         ": sum-to ( i64 i64 -- i64 ) \

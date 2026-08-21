@@ -1,12 +1,12 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::{Import, Module, ModuleInfo, Span};
+use crate::ast::{Import, IntrinsicVisibility, Module, ModuleInfo, Span};
 use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
@@ -239,16 +239,42 @@ fn duplicate_qualifier_error(file: &Path, qualifier: &str, at: Span, first: Span
     )
 }
 
-/// P8 slice 1a: a wildcard import binds no qualifier, and nothing here gives
-/// it a visibility effect to splice in -- a compiled build rejects it
-/// outright, exactly as the REPL does, rather than silently binding nothing.
-fn wildcard_import_is_error(file: &Path, at: Span) -> String {
-    format!(
-        "error: wildcard import at line {}, col {} in {}:\n  a wildcard import binds no names in this build\n  use a qualified import instead",
-        at.line,
-        at.col,
-        file.display()
-    )
+/// P8 S2 (R2): whether this import names the reserved `intrinsics` module.
+/// The same test `packages::resolve_import` makes before any anchor-based
+/// lookup, so a file's visibility and its closure edges agree on which line is
+/// the reserved one: a bare Dependency-anchored `intrinsics`, never
+/// `self::intrinsics` (an ordinary own-package module name).
+fn names_the_intrinsics(imp: &Import) -> bool {
+    match &imp.target {
+        crate::ast::ImportTarget::Module(name) => {
+            name.anchor == crate::ast::ImportAnchor::Dependency && name.segments == ["intrinsics"]
+        }
+        crate::ast::ImportTarget::Path(_) => false,
+    }
+}
+
+/// P8 S2 (R2): fold one `import: intrinsics ...` line into what the file can
+/// already see. Several lines accumulate rather than the last one winning: two
+/// selective lines are the union of their names, and a wildcard anywhere in the
+/// file makes the whole surface visible, matching how `export:` lines and
+/// `module:` entries accumulate elsewhere. A qualified `import: intrinsics i ;`
+/// with no `| ... |` clause and no `*` binds nothing at all -- there is no
+/// qualified spelling for an intrinsic (`i::add` would have to be rewritten to
+/// a name the builtin dispatch never sees), so it widens nothing.
+fn widen_intrinsics(current: IntrinsicVisibility, imp: &Import) -> IntrinsicVisibility {
+    if imp.qualifier().is_none() {
+        return IntrinsicVisibility::All;
+    }
+    match current {
+        IntrinsicVisibility::All => IntrinsicVisibility::All,
+        IntrinsicVisibility::Only(mut names) => {
+            names.extend(imp.selective().iter().map(|(n, _)| n.clone()));
+            IntrinsicVisibility::Only(names)
+        }
+        IntrinsicVisibility::None => {
+            IntrinsicVisibility::Only(imp.selective().iter().map(|(n, _)| n.clone()).collect())
+        }
+    }
 }
 
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
@@ -294,6 +320,9 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // collision shadows to the local decl at parse, never miscompiles).
     let mut import_by_module: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
     let mut selective_maps: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
+    // P8 S2 (R2): what each file's `import: intrinsics ...` lines make visible.
+    let mut intrinsics_by_module: Vec<IntrinsicVisibility> =
+        Vec::with_capacity(closure.nodes.len());
     // R20/R21: every module's selective-import entries, kept with their source
     // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
     let mut selective_by_module: Vec<Vec<check::SelectiveName>> =
@@ -307,14 +336,53 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         // rather than a silent shadow. Both an explicit qualifier and a
         // defaulted last segment bind concretely, so both collide.
         let mut bound_at: HashMap<&str, Span> = HashMap::new();
+        let mut intrinsics = IntrinsicVisibility::None;
         for (imp, target) in node.imports.iter().zip(&node.import_targets) {
+            // P8 S2 (R2): the reserved name resolves to no module, so its
+            // effect is entirely a visibility one, recorded here and read by
+            // the checker's builtin-dispatch gate. Recognised exactly as
+            // closure discovery recognises it (`packages::resolve_import`).
+            if names_the_intrinsics(imp) {
+                intrinsics = widen_intrinsics(intrinsics, imp);
+                continue;
+            }
             let qualifier = match imp.qualifier() {
                 Some(q) => q,
-                // The reserved `intrinsics` wildcard (F6) is the one wildcard
-                // shape that adds no closure edge and needs no qualifier; any
-                // other wildcard binds no names and is rejected outright.
-                None if target.is_none() => continue,
-                None => return Err(wildcard_import_is_error(&node.canon, imp.span)),
+                // P8 S2 (R1): a wildcard import binds no qualifier. The
+                // reserved `intrinsics` wildcard (F6, no resolved target) adds
+                // no closure edge and binds nothing here -- its visibility is
+                // gated separately (R2). A real-target wildcard desugars to a
+                // selective import of every name on the target's `export:`
+                // list: the synthesized entry carries no qualifier (there is
+                // no qualified spelling for a wildcard-bound name) and the
+                // importer's own `import: ... * ;` span, not the exporting
+                // file's `export:` span, so a collision diagnostic lands in
+                // the right file.
+                None => {
+                    let Some(&target) = target.as_ref() else {
+                        continue;
+                    };
+                    // A target's `export:` list can repeat a name (e.g. two
+                    // `export:` blocks both naming it), which `scan_exports`
+                    // does not dedup. Left alone, a wildcard would synthesize
+                    // two entries for that one name and falsely self-collide
+                    // in `check_selective_imports`, even though the qualified
+                    // and selective forms of the same import build fine.
+                    let mut wildcard_seen: HashSet<&str> = HashSet::new();
+                    for (name, _) in &exports_by_module[target as usize] {
+                        if !wildcard_seen.insert(name.as_str()) {
+                            continue;
+                        }
+                        selective_map.insert(name.clone(), target);
+                        selective_entries.push(check::SelectiveName {
+                            name: name.clone(),
+                            qualifier: None,
+                            target,
+                            span: imp.span,
+                        });
+                    }
+                    continue;
+                }
             };
             if let Some(first) = bound_at.insert(qualifier, imp.span) {
                 return Err(duplicate_qualifier_error(
@@ -335,7 +403,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
                 selective_map.insert(name.clone(), target);
                 selective_entries.push(check::SelectiveName {
                     name: name.clone(),
-                    qualifier: qualifier.to_string(),
+                    qualifier: Some(qualifier.to_string()),
                     target,
                     span: *span,
                 });
@@ -344,6 +412,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         import_by_module.push(import_map);
         selective_maps.push(selective_map);
         selective_by_module.push(selective_entries);
+        intrinsics_by_module.push(intrinsics);
     }
 
     let mut arrays = Vec::new();
@@ -352,8 +421,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     let mut slices = Vec::new();
     // Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected
     // ahead of every file's own words exactly as `bool_enum_decl` injects
-    // the enum it dispatches over. Slice 10c (R-P3-4) puts `if`/`unless` and
-    // the six comparison words beside it, from `lib/core.sth`.
+    // the enum it dispatches over.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
     let mut statics = Vec::new();
@@ -419,13 +487,9 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             imports: import_map,
             exports: exports_by_module[m].clone(),
             selective: selective_map.clone(),
+            intrinsics: intrinsics_by_module[m].clone(),
         });
     }
-
-    // Slice 10c (R-P3-4): `lib/core.sth`'s words — `if`, `unless` and the six
-    // comparison words — appended once for the whole closure, the multi-file
-    // twin of `parser::parse`'s own injection.
-    words.extend(parser::prelude_words());
 
     // R4/D5: the minted instantiations join the ordinary registries, after
     // every pre-pass entry their ids were computed against.
@@ -702,7 +766,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) 0 . ;\n",
+            "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         assert_eq!(closure.nodes.len(), 4, "base deduped: one node per file");
@@ -723,7 +787,10 @@ mod tests {
     #[test]
     fn import_cycle_detected_with_both_files() {
         let s = Sandbox::new("cycle");
-        s.write("a.sth", "import: \"b.sth\" b ;\n: main ( -- ) 0 . ;\n");
+        s.write(
+            "a.sth",
+            "import: \"b.sth\" b ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+        );
         s.write("b.sth", "import: \"a.sth\" a ;\n: q ( -- i64 ) 1 ;\n");
         let entry = s.0.join("a.sth");
         let err = match discover_closure(&entry) {
@@ -741,10 +808,13 @@ mod tests {
     #[test]
     fn check_no_main_in_closure_allows_entry_module_main() {
         let s = Sandbox::new("entry-main-ok");
-        s.write("lib.sth", ": helper ( -- i64 ) 1 ;\nexport: helper ;\n");
+        s.write(
+            "lib.sth",
+            ": helper ( -- i64 ) 1 ;\nexport: helper ;\nimport: intrinsics * ;\n",
+        );
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -766,13 +836,13 @@ mod tests {
         let s = Sandbox::new("combinator-sees-static");
         s.write(
             "lib.sth",
-            ": apply inline ( ~[ -- ] -- ) call ;\nexport: apply ;\n",
+            ": apply inline ( ~[ -- ] -- ) call ;\nexport: apply ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write(
             "main.sth",
             "import: \"lib.sth\" c ;\n\
              static: COUNT i64 = 0 ;\n\
-             : main ( -- ) ~[ &!COUNT 1 +! ] c::apply &COUNT @ drop ;\n",
+             : main ( -- ) ~[ &!COUNT 1 +! ] c::apply &COUNT @ drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -788,11 +858,11 @@ mod tests {
         let s = Sandbox::new("imported-main-bad");
         let lib = s.write(
             "lib.sth",
-            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -817,11 +887,11 @@ mod tests {
         let s = Sandbox::new("build-imported-main-bad");
         let lib = s.write(
             "lib.sth",
-            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\n",
+            "import: \"lib.sth\" l ;\n: main ( -- ) l::helper drop ;\nimport: intrinsics * ;\n",
         );
         let err = build(&entry).expect_err("an imported `main` must reject the native build");
         assert!(err.contains("main"), "names the word: {err}");
@@ -946,7 +1016,7 @@ mod tests {
         s.write(
             "use.sth",
             "import: \"box.sth\" b ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
-             : show ( i64 -- ) Box unwrap . ;\nexport: show ;\n",
+             : show ( i64 -- ) Box unwrap . ;\nexport: show ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write("main.sth", entry_src);
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -1006,7 +1076,7 @@ mod tests {
         let entry = s.write(
             "main.sth",
             "import: \"box.sth\" b | Box | ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
-             : main ( -- ) 7 Box unwrap . ;\n",
+             : main ( -- ) 7 Box unwrap . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -1030,7 +1100,7 @@ mod tests {
         let entry = s.write(
             "main.sth",
             "import: \"box.sth\" b | Box | ;\ntype: Box 'T val 'T tag i64 ;\n\
-             type: W f Box[i64] ;\n: main ( -- ) ;\n",
+             type: W f Box[i64] ;\n: main ( -- ) ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let module = assemble_module(&closure, true).expect("assembles");
@@ -1111,7 +1181,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: self::a ;\nimport: self::b ;\n: main ( -- ) a::aw b::bw add . ;\n",
+            "import: self::a ;\nimport: self::b ;\n: main ( -- ) a::aw b::bw add . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("the self-anchored imports resolve");
         assert_eq!(closure.nodes.len(), 3, "b is discovered once, not twice");
@@ -1126,7 +1196,10 @@ mod tests {
         let s = Sandbox::new("manifest-cache");
         pkg(&s, "", "package: app ; layer: hosted ;");
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
-        let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+        );
         let mut manifests = ManifestCache::default();
         discover_closure_configured(&entry, &ResolutionConfig::from_env(), &mut manifests)
             .expect("closure resolves");
@@ -1158,7 +1231,7 @@ mod tests {
         );
         let entry = s.write(
             "scratch/main.sth",
-            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\nimport: intrinsics * ;\n",
         );
         let mut config = ResolutionConfig::from_env();
         config.manifest_override = Some(s.0.join("flag/sooth.pkg"));
@@ -1187,7 +1260,7 @@ mod tests {
         s.write("dep/lib.sth", ": lw ( -- i64 ) 7 ;\nexport: lw ;\n");
         let entry = s.write(
             "scratch/main.sth",
-            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\n",
+            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\nimport: intrinsics * ;\n",
         );
         let config = ResolutionConfig {
             manifest_override: None,
@@ -1213,7 +1286,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\n",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
         );
         let config = ResolutionConfig {
             manifest_override: None,
@@ -1272,7 +1345,7 @@ mod tests {
         s.write("inner/leaf.sth", ": lw ( -- i64 ) 2 ;\nexport: lw ;\n");
         let entry = s.write(
             "inner/main.sth",
-            "import: self::leaf ;\n: main ( -- ) leaf::lw . ;\n",
+            "import: self::leaf ;\n: main ( -- ) leaf::lw . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         assert!(
@@ -1291,7 +1364,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\n",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1301,21 +1374,86 @@ mod tests {
         );
     }
 
-    /// P8 slice 1a: a wildcard import binds no qualifier and gets no
-    /// visibility effect until S2 -- so a compiled build rejects it outright,
-    /// exactly as the REPL does, rather than silently binding no names.
+    /// P8 S2 (R1): a wildcard import of a module that declares its own
+    /// exports binds every exported name, reachable bare with no qualifier.
     #[test]
-    fn driver_wildcard_import_is_error() {
+    fn driver_wildcard_import_binds_exports() {
         let s = Sandbox::new("wildcard-build");
         s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
-        let entry = s.write("main.sth", "import: \"lib.sth\" * ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+        );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
-        let err = assemble_module(&closure, true).expect_err("a wildcard import is rejected");
-        assert!(
-            err.contains("error: wildcard import at line 1, col 1 in")
-                && err.contains("a wildcard import binds no names in this build")
-                && err.contains("use a qualified import instead"),
-            "unexpected message: {err}"
+        let mut module =
+            assemble_module(&closure, true).expect("a wildcard import binds its target's exports");
+        check::check(&mut module).expect("a wildcard-bound name is reachable bare");
+    }
+
+    /// P8 S2 (R1) review fix: a target that repeats a name across two
+    /// `export:` blocks -- `scan_exports` concatenates rather than dedups --
+    /// used to make a wildcard synthesize two `SelectiveName` entries for
+    /// that one name, which `check_selective_imports` then rejected as the
+    /// import colliding with itself. A qualified or selective import of the
+    /// same module builds fine, so the wildcard must dedup at synthesis.
+    #[test]
+    fn driver_wildcard_import_of_repeated_export_name_builds() {
+        let s = Sandbox::new("wildcard-repeated-export");
+        s.write(
+            "lib.sth",
+            ": lw ( -- i64 ) 1 ;\nexport: lw ;\nexport: lw ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let mut module = assemble_module(&closure, true)
+            .expect("a repeated export name must not make a wildcard collide with itself");
+        check::check(&mut module).expect("a wildcard-bound name is reachable bare");
+    }
+
+    /// P8 S2 (R1): a wildcard binds only the target's exports, not every
+    /// declaration -- a non-exported name of the target stays `unknown word`.
+    #[test]
+    fn driver_wildcard_import_does_not_bind_private_names() {
+        let s = Sandbox::new("wildcard-private");
+        s.write(
+            "lib.sth",
+            ": lw ( -- i64 ) 1 ;\nexport: lw ;\n: hidden ( -- i64 ) 2 ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) hidden . ;\nimport: intrinsics * ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let mut module =
+            assemble_module(&closure, true).expect("assembly itself does not reject a bare call");
+        let err = check::check(&mut module)
+            .expect_err("a wildcard binds exports only, not every declaration");
+        assert!(err.contains("unknown word"), "unexpected message: {err}");
+    }
+
+    /// P8 S2 (R1): a wildcard-bound name colliding with a local declaration is
+    /// a hard error, inheriting `check_selective_imports`'s existing rule --
+    /// no silent shadow. The synthesized entry carries the *importer's*
+    /// `import: ... * ;` span, so the diagnostic's line/col land in the file
+    /// that has to change; the exporting file's `export:` site is pushed to a
+    /// distinct line/col here so a span taken from the wrong file cannot pass.
+    #[test]
+    fn driver_wildcard_import_colliding_with_local_is_error() {
+        let s = Sandbox::new("wildcard-collision");
+        s.write("lib.sth", ": lw ( -- i64 ) 1 ;\n\n\n\n\nexport: lw ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: lw ( -- i64 ) 2 ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let err = assemble_module(&closure, true)
+            .expect_err("a wildcard-bound name colliding with a local decl is an error");
+        assert_eq!(
+            err,
+            "error: wildcard import of `lw` (line 1, col 1) collides with a local definition of `lw`"
         );
     }
 
@@ -1333,6 +1471,48 @@ mod tests {
         assemble_module(&closure, true).expect("intrinsics wildcard import must still build");
     }
 
+    /// P8 S2 (R2): the visibility each `import: intrinsics ...` shape records on
+    /// `ModuleInfo`, read where it is built rather than where it is consumed --
+    /// the checker's gate is only as good as this, and a module that silently
+    /// came out `All` would make the gate untestable from the outside.
+    /// `assemble_module` sets the field for *every* file, so no build path can
+    /// inherit `Default` (which is `All`, the in-process/REPL exemption).
+    #[test]
+    fn assemble_module_records_each_intrinsics_import_shape() {
+        let cases = [
+            ("none.sth", "", IntrinsicVisibility::None),
+            (
+                "wild.sth",
+                "import: intrinsics * ;\n",
+                IntrinsicVisibility::All,
+            ),
+            (
+                "some.sth",
+                "import: intrinsics i | dup add | ;\n",
+                IntrinsicVisibility::Only(["dup".to_string(), "add".to_string()].into()),
+            ),
+            // Two selective lines accumulate rather than the last one winning,
+            // and a wildcard beside them widens to the whole surface.
+            (
+                "two.sth",
+                "import: intrinsics i | dup | ;\nimport: intrinsics j | add | ;\n",
+                IntrinsicVisibility::Only(["dup".to_string(), "add".to_string()].into()),
+            ),
+            (
+                "both.sth",
+                "import: intrinsics i | dup | ;\nimport: intrinsics * ;\n",
+                IntrinsicVisibility::All,
+            ),
+        ];
+        for (file, imports, want) in cases {
+            let s = Sandbox::new("intrinsics-visibility");
+            let entry = s.write(file, &format!("{imports}: main ( -- ) ;\n"));
+            let closure = discover_closure(&entry).expect("closure resolves");
+            let module = assemble_module(&closure, true).expect("assembles");
+            assert_eq!(module.modules[0].intrinsics, want, "for {file}");
+        }
+    }
+
     /// P8 slice 1a: two imports binding the same qualifier -- here both
     /// defaulting to their last segment -- is a located error at the second,
     /// naming where the first bound it. No shadowing, no precedence.
@@ -1344,7 +1524,7 @@ mod tests {
         s.write("bin/ascii.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::text::ascii ;\nimport: self::bin::ascii ;\n: main ( -- ) 0 . ;\n",
+            "import: self::text::ascii ;\nimport: self::bin::ascii ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("both targets resolve");
         let err = assemble_module(&closure, true).expect_err("the second binding is an error");
@@ -1367,7 +1547,7 @@ mod tests {
         s.write("inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::inner::thing ;\n: main ( -- ) thing::tw . ;\n",
+            "import: self::inner::thing ;\n: main ( -- ) thing::tw . ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1398,7 +1578,7 @@ mod tests {
         s.write("dep/inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
         let entry = s.write(
             "app/main.sth",
-            "import: dep::inner::thing ;\n: main ( -- ) thing::tw . ;\n",
+            "import: dep::inner::thing ;\n: main ( -- ) thing::tw . ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1449,7 +1629,10 @@ mod tests {
     fn resolve_bare_package_name_no_module_is_error() {
         let s = Sandbox::new("bare-package");
         pkg(&s, "", "package: app ; layer: hosted ;");
-        let entry = s.write("main.sth", "import: core ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: core ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+        );
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `core` at line 1, col 1 in")
@@ -1475,7 +1658,7 @@ mod tests {
         s.write("secret.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::secret ;\n: main ( -- ) secret::sw . ;\n",
+            "import: self::secret ;\n: main ( -- ) secret::sw . ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("`module:` does not gate a `self::` import");
         assert_eq!(closure.nodes.len(), 2);
@@ -1489,7 +1672,10 @@ mod tests {
         let s = Sandbox::new("non-word-segment");
         pkg(&s, "", "package: app ; layer: hosted ;");
         s.write("42.sth", ": nw ( -- i64 ) 1 ;\nexport: nw ;\n");
-        let entry = s.write("main.sth", "import: self::42 q ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::42 q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+        );
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::42` at line 1, col 1 in")
@@ -1505,7 +1691,10 @@ mod tests {
         let s = Sandbox::new("star-segment");
         pkg(&s, "", "package: app ; layer: hosted ;");
         s.write("*.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
-        let entry = s.write("main.sth", "import: self::* q ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::* q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+        );
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::*` at line 1, col 1 in")
@@ -1524,7 +1713,7 @@ mod tests {
         s.write("sub/y.sth", ": yw ( -- i64 ) 1 ;\nexport: yw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 . ;\n",
+            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1548,7 +1737,10 @@ mod tests {
         let s = Sandbox::new("directory-as-module");
         pkg(&s, "", "package: app ; layer: hosted ;");
         s.write("text.sth/ascii.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
-        let entry = s.write("main.sth", "import: self::text ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::text ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+        );
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::text` at line 1, col 1 in")
@@ -1566,7 +1758,10 @@ mod tests {
     fn module_import_outside_a_package_is_error() {
         let s = Sandbox::new("no-manifest");
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
-        let entry = s.write("main.sth", "import: self::b ;\n: main ( -- ) b::bw . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: self::b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+        );
         let err = discover_err(&entry);
         assert!(
             err.contains("error: import `self::b` at line 1, col 1 in")
@@ -1592,7 +1787,7 @@ mod tests {
         s.write("dep/cmp.sth", ": lt ( -- i64 ) 1 ;\nexport: lt ;\n");
         let entry = s.write(
             "app/main.sth",
-            "import: dep::cmp c ;\n: main ( -- ) c::lt . ;\n",
+            "import: dep::cmp c ;\n: main ( -- ) c::lt . ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1614,7 +1809,7 @@ mod tests {
 
     #[test]
     fn compile_so_produces_loadable_object() {
-        let src = ": sq ( i64 -- i64 ) | n | n n mul ;";
+        let src = ": sq ( i64 -- i64 ) | n | n n mul ;\nimport: intrinsics * ;\n";
         let tokens = lexer::lex(src).unwrap();
         let mut module = parser::parse(&tokens).unwrap();
         check::check(&mut module).unwrap();
@@ -1638,11 +1833,11 @@ mod tests {
         // Both `&n` sites sit at the same line and column in their own file.
         s.write(
             "lib.sth",
-            ": show ( -- ) 1 true B &n @ drop drop ;\nexport: show ;\ntype: B tag i64 n bool ;\nexport: B ;\n",
+            ": show ( -- ) 1 true B &n @ drop drop ;\nexport: show ;\ntype: B tag i64 n bool ;\nexport: B ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write(
             "main.sth",
-            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\n",
+            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");

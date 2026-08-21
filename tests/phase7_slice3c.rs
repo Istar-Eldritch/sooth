@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/phase7_slice3a.rs`'s
 /// own pattern).
 struct Scratch(PathBuf);
@@ -23,7 +25,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3c-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -44,7 +46,8 @@ impl Drop for Scratch {
 /// panics with the diagnostic: every program here is well-typed, so a build
 /// error is itself the regression.
 fn build_and_run(src: &Path) -> (String, String, i32) {
-    let binary = driver::build(src).unwrap_or_else(|e| panic!("program should build: {e}"));
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .unwrap_or_else(|e| panic!("program should build: {e}"));
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -229,7 +232,9 @@ fn dup_on_shared_slice_ok() {
 #[test]
 fn declared_slice_output_is_stored_reference_error() {
     let prog = Scratch::write("output", ": bad ( -- Slice[i64] ) ;\n: main ( -- ) ;\n");
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert!(
         err.contains("a reference cannot be stored")
             && err.contains("declares the output `Slice[i64]`"),
@@ -264,7 +269,11 @@ fn slice_through_a_declared_quotation_parameter_row_runs() {
         "quotrow-noninline",
         ": apply ( Slice[i64] ~[ Slice[i64] -- ] -- ) | f | | s | s f call ;\n: main ( -- ) ;\n",
     );
-    let err = driver::build(non_inline.path()).unwrap_err();
+    let err = driver::build_with_manifest(
+        non_inline.path(),
+        common::manifest_for(non_inline.path()).as_deref(),
+    )
+    .unwrap_err();
     assert!(
         err.contains(
             "declares an inline-quotation parameter `~[ Slice[i64] -- ]` but is not `inline`"
@@ -279,7 +288,9 @@ fn slice_through_a_declared_quotation_parameter_row_runs() {
 #[test]
 fn declaring_a_type_named_slice_is_rejected() {
     let prog = Scratch::write("reserved", "type: Slice a i64 ;\n: main ( -- ) ;\n");
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert!(
         err.contains("`Slice` is reserved for the slice type syntax (`Slice[T]`)"),
         "unexpected message: {err}"
@@ -338,7 +349,9 @@ fn dup_on_mutable_slice_is_error() {
         "dupmut",
         ": main ( -- )\n  7 4 fill | buf |\n  &!buf slice | s |\n  s dup len . len .\n  buf drop\n;\n",
     );
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert_eq!(
         err,
         "error: cannot `dup` a value of type `!Slice[i64]` in `main` (line 4)\n  \
@@ -365,7 +378,9 @@ fn two_simultaneous_mutable_subslices_is_error() {
 ;
 ";
     let prog = Scratch::write("twomut", src);
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert!(
         err.contains("cannot reborrow `s` in `main` while a reference derived from it is live")
             && err.contains("a mutable borrow suspends its place"),
@@ -396,7 +411,9 @@ fn a_shared_view_alongside_a_mutable_view_is_error() {
 ;
 ";
     let prog = Scratch::write("mixed", src);
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert!(
         err.contains("`&buf` conflicts with a live borrow of `buf`")
             && err.contains("never a `&` alongside a `&!`"),
@@ -477,7 +494,9 @@ fn poly_body_indexes_subslices_and_mutates_a_slice() {
 #[test]
 fn declaring_a_type_named_mutable_slice_is_rejected() {
     let prog = Scratch::write("reserved-mut", "type: !Slice a i64 ;\n: main ( -- ) ;\n");
-    let err = driver::build(prog.path()).unwrap_err();
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .unwrap_err();
     assert!(
         err.contains("`!Slice` is reserved for the slice type syntax"),
         "unexpected message: {err}"

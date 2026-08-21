@@ -3,6 +3,8 @@
 \ An owning scrutinee hands each arm the whole narrowed variant, which the arm
 \ reads through `&field` projections and then consumes.
 
+import: intrinsics * ;
+
 type: Shape
 | Circle r i64
 | Rect   w i64 h i64

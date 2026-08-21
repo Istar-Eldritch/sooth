@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 fn scratch(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let seq = N.fetch_add(1, Ordering::Relaxed);
@@ -25,15 +27,17 @@ fn scratch(tag: &str) -> PathBuf {
 
 fn build_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
 }
 
 /// Build a scratch entry file and run it, returning `(stdout, exit code)`.
 fn build_and_run(entry: &Path) -> (String, i32) {
-    let binary = sooth::driver::build(entry).expect("build should succeed");
+    let binary = sooth::driver::build_with_manifest(entry, common::manifest_for(entry).as_deref())
+        .expect("build should succeed");
     let out = std::process::Command::new(&binary)
         .output()
         .expect("the built binary should run");
@@ -49,7 +53,7 @@ fn build_and_run(entry: &Path) -> (String, i32) {
 fn run_program(tag: &str, src: &str) -> (String, i32) {
     let dir = scratch(tag);
     let entry = dir.join("main.sth");
-    std::fs::write(&entry, src).expect("writing the entry should succeed");
+    common::write_fixture(&entry, src).expect("writing the entry should succeed");
     build_and_run(&entry)
 }
 
@@ -175,8 +179,8 @@ fn agreeing_static_program_builds_and_runs() {
 #[test]
 fn two_modules_declaring_the_same_static_get_distinct_storage() {
     let dir = scratch("two-modules");
-    std::fs::write(
-        dir.join("lib.sth"),
+    common::write_fixture(
+        &dir.join("lib.sth"),
         "static: COUNT i64 = 100 ;\n\
          : bump ( -- ) global: COUNT w &!COUNT 1 +! ;\n\
          : peek ( -- i64 ) global: COUNT r &COUNT @ ;\n\
@@ -184,7 +188,7 @@ fn two_modules_declaring_the_same_static_get_distinct_storage() {
     )
     .unwrap();
     let entry = dir.join("main.sth");
-    std::fs::write(
+    common::write_fixture(
         &entry,
         "import: \"lib.sth\" l | bump peek | ;\n\
          static: COUNT i64 = 7 ;\n\
@@ -196,17 +200,18 @@ fn two_modules_declaring_the_same_static_get_distinct_storage() {
     assert_eq!(code, 0);
 }
 
-/// R2, the exempt names: `resolve::mangle` deliberately leaves `main`, `drop`
-/// and every `lib/core.sth` prelude word unmangled so a *word* of that name
-/// stays reachable by bare name from a module that did not declare it. A
+/// R2, the exempt names: `resolve::mangle` deliberately leaves `main` and
+/// `drop` unmangled so a *word* of that name stays reachable from a module that
+/// did not declare it (the C shim's entry, and `find_drop_overloads`). A
 /// static is reachable no such way, so routing it through those exemptions
 /// only ever collided: two modules each declaring `static: drop` emitted one
 /// raw `drop` data symbol (`symbol `drop' is already defined` straight from
 /// the assembler), and `Ctx::static_type`, which matches on the mangled name
 /// alone, borrowed whichever of the two it found first. Values differ per
 /// module and per name so a collapse that somehow linked would still show up
-/// as wrong numbers. Both exempt classes that can name a static are covered:
-/// the fixed names (`drop`) and the `lib/core.sth` prelude words (`if`).
+/// as wrong numbers. Both fixed names are covered, plus `if` -- which P8.S2
+/// (R3) retired from the exemption list, so a static named after it now only
+/// has to survive the ordinary path.
 #[test]
 fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
     let dir = scratch("exempt-names");
@@ -214,19 +219,20 @@ fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
         ("lib1.sth", "100", "300", "peek1"),
         ("lib2.sth", "11", "13", "peek2"),
     ] {
-        std::fs::write(
-            dir.join(file),
+        common::write_fixture(
+            &dir.join(file),
             format!(
                 "static: drop i64 = {dropv} ;\n\
                  static: if i64 = {ifv} ;\n\
                  : {word} ( -- i64 i64 ) global: drop r, if r &drop @ &if @ ;\n\
                  export: {word} ;\n"
-            ),
+            )
+            .as_str(),
         )
         .unwrap();
     }
     let entry = dir.join("main.sth");
-    std::fs::write(
+    common::write_fixture(
         &entry,
         "import: \"lib1.sth\" p | peek1 | ;\n\
          import: \"lib2.sth\" q | peek2 | ;\n\
@@ -246,15 +252,15 @@ fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
 #[test]
 fn a_library_static_named_main_does_not_collide_with_the_entry_symbol() {
     let dir = scratch("static-main");
-    std::fs::write(
-        dir.join("lib.sth"),
+    common::write_fixture(
+        &dir.join("lib.sth"),
         "static: main i64 = 42 ;\n\
          : peekmain ( -- i64 ) global: main r &main @ ;\n\
          export: peekmain ;\n",
     )
     .unwrap();
     let entry = dir.join("main.sth");
-    std::fs::write(
+    common::write_fixture(
         &entry,
         "import: \"lib.sth\" l | peekmain | ;\n\
          : main ( -- ) peekmain . ;\n",

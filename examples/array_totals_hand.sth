@@ -5,7 +5,9 @@
 \ synthesized `>usize` index, a `&arr i &> @` read and (for the doubling loop) a
 \ `&!arr i &!> v !` write.
 
-import: "../lib/combinators.sth" c | times | ;
+import: intrinsics * ;
+
+import: core::combinators c | times | ;
 
 : scores ( -- [i64 5] )
   0 5 fill | s |

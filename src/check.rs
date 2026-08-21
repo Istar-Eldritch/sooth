@@ -664,6 +664,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         }
     }
 
+    // P8 S2 (R6b): every polymorphic word's name, post-mangle, so a poly body
+    // that calls one can say so. `poly_call_term` reads `env` (the concrete
+    // one) and never `poly_env`, so such a call reaches its fall-through and
+    // used to leak a raw `unknown word `lt__m2``; this set is what lets the
+    // fall-through name the real narrowing instead.
+    let poly_words: HashSet<String> = poly_env.keys().cloned().collect();
+
     check_main_effect(
         &module.words,
         &module.structs,
@@ -808,6 +815,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     statics,
                     Some(modules),
                     &mut builtin_overloads,
+                    &poly_words,
                     Some(&generics_cell),
                 )?;
                 let mut g = generics_cell.borrow_mut();
@@ -2877,7 +2885,7 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
 
 /// Slice 10c: the two arms of a `branch` disagree. Named for the *arms*, not
 /// for `if`: `branch` is the primitive and `if`/`unless` are ordinary
-/// `lib/core.sth` words over it, so by the time this fires the surface word
+/// `core::bool` words over it, so by the time this fires the surface word
 /// the user wrote has been spliced away and could equally have been `branch`
 /// itself. (The span still points at the first arm, which is the user's own
 /// literal either way -- see `check_branch_join`.)
@@ -3238,11 +3246,10 @@ fn check_shuffle(
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
 
@@ -3470,13 +3477,14 @@ mod tests {
         // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
         // session seeds this at index 0 (`Session::new`); this bare-line
         // helper mirrors that so a `bool`-producing comparison resolves.
-        // Slice 10c (R-P3-4): a session also seeds `lib/core.sth`'s words, so
-        // a line's `lt`/`if` resolves to the library definition; without them a
-        // bare comparison is an unknown word.
+        // P8 S2 (R3/R7): a real session no longer seeds them -- it imports
+        // `core::prelude` like a file does -- but this helper resolves no
+        // `import:`, so it keeps seeding the typed core in process so a bare
+        // line's `lt`/`if` still names something.
         let bool_enums = [crate::ast::bool_enum_decl()];
-        let prelude = crate::parser::prelude_words();
+        let core = crate::test_support::core_lib_words();
         let mut combinators = CombinatorEnv::default();
-        for word in &prelude {
+        for word in &core {
             combinators.insert(word.name.clone(), vec![combinator_of(word)]);
         }
         // `True`/`False`, which a comparison word's branch-and-construct body
@@ -4305,7 +4313,7 @@ mod tests {
                           type: B tag i64 n bool ;\n\
                           : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;")
         .unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).expect("both projections resolve");
         let a = module
             .structs
@@ -4637,7 +4645,7 @@ mod tests {
              : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         let err = check(&mut module).unwrap_err();
         assert!(
@@ -4651,7 +4659,7 @@ mod tests {
              : main ( -- ) 3 Circle area . ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         let err = check(&mut module).unwrap_err();
         assert!(
@@ -4674,7 +4682,7 @@ mod tests {
              : main ( -- ) 3 Circle area . ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         let err = check(&mut module).unwrap_err();
         assert!(

@@ -1,3 +1,6 @@
+import: intrinsics * ;
+import: core::prelude * ;
+
 type: Buf  data ^[u8 64]  len usize ;
 
 : new ( -- Buf )

@@ -7,7 +7,9 @@
 \ loops with a synthesized `>usize` index, `&arr i &> @` reads and a
 \ `&!arr i &!> v !` write.
 
-import: "../lib/combinators.sth" c ;
+import: intrinsics * ;
+
+import: core::combinators c ;
 
 : scores ( -- [i64 5] )
   0 5 fill | s |

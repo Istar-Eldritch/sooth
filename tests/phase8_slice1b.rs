@@ -2,13 +2,15 @@
 //! (user-level manifest, then the implicit anonymous package). Every
 //! negative golden pins the exact diagnostic substring, never a bare
 //! `is_err()`. Every golden spawns the real `sooth` binary (never
-//! `driver::build_with_manifest`/`select_site`/`resolve_import` directly):
+//! `sooth::driver::build_with_manifest`/`select_site`/`resolve_import` directly):
 //! a direct-call test would prove the library honours the flag without
 //! proving `main` ever passes it along (S1a's lesson, generalized).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod common;
 
 /// A scratch tree of packages (each its own directory with a `sooth.pkg` and
 /// `.sth` files), removed on drop.
@@ -29,7 +31,7 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(rel, contents)).unwrap();
         path
     }
 }
@@ -42,7 +44,7 @@ impl Drop for Tree {
 
 /// Build the entry file through the real `sooth build --manifest` CLI
 /// invocation (matching the exit criterion literally, not
-/// `driver::build_with_manifest` called directly), then run the resulting
+/// `sooth::driver::build_with_manifest` called directly), then run the resulting
 /// binary and return `(stdout, exit_code)`. Spawning the binary pins
 /// `main`'s own wiring of the flag on the `build` arm, not just the
 /// library's handling of it once wired.

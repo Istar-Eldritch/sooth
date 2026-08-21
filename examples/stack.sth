@@ -9,6 +9,8 @@
 \ return more than one value through a call (the multi-output aggregate-
 \ return ABI), so no hand-written bundle struct is needed.
 
+import: intrinsics * ;
+
 type: Stack 
   items [i64 16] 
   top usize ;

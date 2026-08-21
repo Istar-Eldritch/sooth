@@ -1,3 +1,6 @@
+import: intrinsics * ;
+import: core::prelude * ;
+
 : pos ( i64 -- bool )
   0 gt ;
 

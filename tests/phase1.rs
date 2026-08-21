@@ -4,6 +4,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 /// Run a scripted REPL session (one input line per element of `lines`) and
 /// return the whole captured stdout.
 fn run_session(lines: &[&str]) -> String {
@@ -156,13 +158,28 @@ fn failed_redefinition_keeps_old_generation_resident() {
 
 #[test]
 fn sign_definable_and_callable_in_repl() {
+    // P8.S2 (R3): the typed core is imported, not seeded -- a session names
+    // it exactly as a file does.
+    let cmp = common::repl_core_import("cmp", "gt");
+    let boolean = common::repl_core_import("bool", "if");
     let out = run_session(&[
+        &cmp,
+        &boolean,
         ": sign ( i64 -- i64 ) 0 gt ~[ 1 ] ~[ 0 ] if ;",
         "-7 sign",
         "7 sign",
     ]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["defined sign", "stack: 0", "stack: 0 1"]);
+    assert_eq!(
+        lines,
+        vec![
+            "imported cmp",
+            "imported bool",
+            "defined sign",
+            "stack: 0",
+            "stack: 0 1"
+        ]
+    );
 }
 
 #[test]
@@ -574,14 +591,24 @@ fn enum_declaration_errors_report_and_session_survives() {
 /// overflow the host stack.
 #[test]
 fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
+    let cmp = common::repl_core_import("cmp", "eq");
+    let boolean = common::repl_core_import("bool", "if");
     let out = run_session(&[
+        &cmp,
+        &boolean,
         ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;",
         "0 1000000 sum-to .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["defined sum-to", "500000500000", "stack: (empty)"]
+        vec![
+            "imported cmp",
+            "imported bool",
+            "defined sum-to",
+            "500000500000",
+            "stack: (empty)"
+        ]
     );
 }
 
@@ -594,7 +621,11 @@ fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
 /// the native golden, so "the same result" is literal.
 #[test]
 fn vm_dogfood_runs_in_repl() {
+    let cmp = common::repl_core_import("cmp", "eq");
+    let boolean = common::repl_core_import("bool", "if");
     let out = run_session(&[
+        &cmp,
+        &boolean,
         "type: Op | Push v i64 | Add | Sub | Mul | Load addr usize | Store addr usize | Jz target usize | Jmp target usize | Halt ;",
         "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
         "type: Fetched vm Vm op Op ;",
@@ -611,6 +642,8 @@ fn vm_dogfood_runs_in_repl() {
     assert_eq!(
         lines,
         vec![
+            "imported cmp",
+            "imported bool",
             "defined type Op",
             "defined type Vm",
             "defined type Fetched",

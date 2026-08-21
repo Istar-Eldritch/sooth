@@ -27,8 +27,9 @@ mod common;
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -57,7 +58,7 @@ fn lib_import(qualifier: &str, lib_file: &str) -> String {
 
 fn check_error(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).expect("lexing should succeed");
-    let mut module = sooth::parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = sooth::test_support::parse_with_core(&tokens).expect("parsing should succeed");
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
@@ -78,8 +79,9 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 /// multi-module driver but whose check is expected to fail before it runs.
 fn build_err_with_import(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
 }

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 /// A scratch directory of `.sth` library files, removed on drop.
 struct LibDir(PathBuf);
 
@@ -24,7 +26,7 @@ impl LibDir {
 
     fn write(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.0.join(name);
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(name, contents)).unwrap();
         path
     }
 }

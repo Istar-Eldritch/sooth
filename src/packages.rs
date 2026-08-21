@@ -604,11 +604,15 @@ pub(crate) fn resolve_import(
 ) -> Result<Option<PathBuf>, String> {
     let name = match &imp.target {
         ImportTarget::Path(path) => {
-            // A user-level site is not a real package (R4), so it does not
-            // trigger the in-package rejection: a manifest-less file reaches
-            // its siblings by quoted path whether or not a user-level
-            // manifest happens to exist.
-            if let Some(site) = site.filter(|s| s.origin != SiteOrigin::UserLevel) {
+            // Only an *ancestor* manifest puts the importing file inside a
+            // package, which is what the rejection is about. A user-level site
+            // is not a real package (R4), and a `--manifest` site is a
+            // dependency table named on the command line for an entry file the
+            // design doc places explicitly *outside* the package's own tree (a
+            // test harness fixture in a temp directory) -- so neither makes
+            // the file a package member, and both keep reaching their siblings
+            // by quoted path.
+            if let Some(site) = site.filter(|s| s.origin == SiteOrigin::Ancestor) {
                 return Err(quoted_path_in_package_error(
                     importer,
                     imp,
@@ -1357,6 +1361,37 @@ mod tests {
             &mut Vec::new(),
         )
         .expect("a quoted-path sibling still resolves under a user-level site");
+        assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
+    }
+
+    /// Review fix (P8 S2): `resolve_import`'s in-package rejection narrowed
+    /// from `origin != UserLevel` to `origin == Ancestor`, so a `--manifest`
+    /// (Flag-origin) site no longer counts as package membership for a
+    /// quoted-path import either -- consistent with
+    /// `self_import_under_flag_manifest_error` already treating a flag site
+    /// as outside the package for `self::` imports. Mutation-test by
+    /// widening the guard back to `!= UserLevel`, which rejects this case.
+    #[test]
+    fn flag_site_still_allows_a_quoted_path_import() {
+        let sb = Sandbox::new("flag-quoted-path");
+        sb.write("p/sooth.pkg", "package: p ; layer: hosted ;");
+        let entry = sb.write("p/main.sth", "");
+        let sibling = sb.write("p/sib.sth", "");
+        let flag = sb.write("q/sooth.pkg", "package: q ; layer: hosted ;");
+        let mut manifests = ManifestCache::default();
+        let site = select_site(&entry, &entry, &config(Some(&flag), None), &mut manifests)
+            .expect("the flag manifest loads")
+            .expect("a flag site");
+        assert_eq!(site.origin, SiteOrigin::Flag);
+        let resolved = resolve_import(
+            &entry,
+            entry.parent().unwrap(),
+            &import(ImportTarget::Path("sib.sth".to_string())),
+            Some(&site),
+            &mut manifests,
+            &mut Vec::new(),
+        )
+        .expect("a quoted-path sibling still resolves under a flag site");
         assert_eq!(resolved, Some(std::fs::canonicalize(&sibling).unwrap()));
     }
 

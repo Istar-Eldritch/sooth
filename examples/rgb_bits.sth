@@ -2,6 +2,8 @@
 \ (the bitwise analogue of `rgb.sth`'s arithmetic pack), then unpack the green
 \ channel back out via `shr` + `and`.
 
+import: intrinsics * ;
+
 : pack ( u8 u8 u8 -- i32 )
   | r g b |
   r >i32 16 shl
