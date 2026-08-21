@@ -83,49 +83,61 @@ error: `helper` is not permitted on a quotation literal in `caller` (line 2)
    slot in a poly *body* against a monomorphic candidate's ground `Type::Quotation` input —
    has no existing call site; the arm exists, but wired to a different pair of endpoints.
 
+6. **Probe-verified correction (subagent probe, 2026-08-21): finding 3 has a real, legal
+   consumer after all — narrower than "any word," but real.** A poly body passing a
+   quotation literal to a *concrete* (non-poly) helper that consumes it immediately
+   (`: run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;`, called as `dup [ 1 add ] 2 run1`
+   from inside a generic body) does not violate P7.S3b's rule — the literal is consumed as
+   an ordinary operand (`stack.truncate(base)` before the callee's outputs land, never
+   surviving past the call) — and carries none of R9p's hazard, because `run1`'s parameter
+   is a **fully concrete** `Type::Quotation(eff)` with no free type variable to phantom-bind
+   (`reject_quotation_argument`'s R9p warning is specifically about a poly *callee* with an
+   unbound `'T`; a concrete callee has none). It is also not equivalent to inlining `run1`'s
+   body at the call site: the helper can carry arbitrary logic around its own `call` (a
+   second argument, composing two quotations, side effects), so this is ordinary function
+   reuse, not a transparent wrapper S3d's `call`-on-a-literal fix already covers. The fix is
+   the same shape as finding 1's: one new `PolyType::QuotLit`-vs-`Type::Quotation` arm in
+   the env-dispatch loop (`poly.rs:997-1043`), gated to a **concrete** candidate word only
+   (never `Type::InlineQuotation`, which stays unrepresentable per finding 4) — so this
+   folds into this slice rather than sitting out as an unresolved open question.
+
 ## The consumer
 
-Two candidate consumers, and only one survives gate 4 above.
+Three candidate consumers now, not two — finding 6 revises the brief's own
+"no legal consumer" conclusion for the pass-to-another-word case.
 
-1. *A comparator parameter reaching a non-inline `sort`/`bin_search`.* Excluded by finding
-   4: the parameter itself cannot be declared on a non-inline word, independent of this
-   slice. Confirms P7.S3b-follow's existing note that this stays out of reach either way.
-2. *A body-local literal, `call`ed or passed to a helper.* The only shape actually
-   reachable. `[ ] call` and `[ 1 add ] call` are both rejected today for the same reason
-   (finding 1) and would both compile after this slice with no row involved. A degenerate
-   golden, but an honest one: this slice's exit criterion is narrower than "a comparator
-   works in a non-inline `sort`" — it is "a rowless quotation literal is no longer flatly
-   forbidden in a non-inline generic body."
+1. *A comparator parameter reaching a non-inline `sort`/`bin_search`.* Still excluded by
+   finding 4: the parameter itself cannot be declared on a non-inline word, independent of
+   this slice. Confirms P7.S3b-follow's existing note that this stays out of reach either
+   way.
+2. *A body-local literal, `call`ed directly.* `[ ] call` and `[ 1 add ] call` are both
+   rejected today for the reason in finding 1 and would compile after this slice with no
+   row involved.
+3. *A body-local literal, passed to a concrete (non-poly) helper that consumes it.* Real,
+   per finding 6 — not "any word," but a genuine, distinct consumer: pass to a **concrete**
+   word only, gated on the declared parameter being `Type::Quotation` (never
+   `Type::InlineQuotation`).
 
-**This narrows the slice's payoff relative to how P7.S3d was described when P7.S3b-follow
-deferred it.** The text that named this slice ("splice a second, fully concrete quotation
-consumer ... e.g. a comparator") assumed a comparator *parameter* was the target; finding 4
-says that consumer needs the `inline`-only gate lifted too, which is out of scope for both
-this slice and P7.S3b-follow. What is left is: `call` on a literal (real, findings 1–3), and
-passing a literal to another *non-inline* word whose declared input is a materialized
-`Type::Quotation` — which by P7.S3b's own rule ("only splice-consumed literals... nothing is
-materialized") is exactly the thing that must stay rejected, not the thing to enable. So
-finding 3's grounding gap may have **no legal consumer at all** once P7.S3b's
-no-materialization rule is applied to it: a `Type::Quotation` parameter that isn't
-`InlineQuotation` means the callee receives (and could store/return) the value, which is
-materialization by another name. The only sound target left is **`call` on a literal**
-(finding 1) — the spec should confirm this explicitly rather than build (2)/(3)'s carve-outs
-for a consumer that turns out not to exist.
+**This still narrows the slice's payoff relative to how P7.S3d was described when
+P7.S3b-follow deferred it** (a comparator *parameter* on `sort`/`bin_search` stays out of
+reach, per finding 4), but it is wider than the brief's first draft concluded: both 2 and 3
+are real, and both are cheap — no row, no phantom-`'T`, no lowering change beyond what falls
+out of the checker fix.
 
 ## Shape of the work
-
-Narrower than the slice's name implied before this recon:
 
 - Split the hardcoded list at `poly.rs:914-925`: `call` on a `QuotLit` gets its own arm —
   pop the marker, look up the literal's stored body (the `PolyQuotLit` behind the
   `PolyQuotRef`, via `scope.quotation(quot)`), and `poly_walk` that body in place against
   the current stack, the poly analogue of `check_terms_relaxed`'s splice in
   `terms.rs:299-357`. `branch`/`if`/`times`/`tag` keep the existing rejection unchanged.
-- Leave the operand-window guard (finding 2) and the `env`-dispatch grounding gap
-  (finding 3) alone unless the consumer analysis above is wrong and a legal
-  pass-to-another-word case turns up — the working assumption going into the spec is that
-  there is none, so building carve-outs for both would be machinery for a consumer that
-  cannot legally exist under P7.S3b's own rule.
+- Carve the operand-window guard (finding 2) and add the `env`-dispatch grounding arm
+  (finding 3/6): a `QuotLit` slot in the operand window, and again in the env-dispatch
+  loop, is accepted when the matching candidate's declared input is `Type::Quotation`
+  (ground, no free variable) — splice the literal's body against that declared effect and
+  let the ordinary monomorphic call proceed. Never accepted against `Type::InlineQuotation`
+  (finding 4) or a poly (`PolyType`) candidate signature (S3f's territory, out of scope
+  here per R9p's phantom-`'T` hazard).
 
 ## Locked decisions carried forward
 
@@ -142,12 +154,11 @@ adds no row machinery at all, unlike P7.S3b-follow.
    walk?** Unlike an eliminator's N arms, `call` has exactly one body and one continuation;
    there should be no analogue of `poly_eliminator_call`'s per-arm clone-and-union. Confirm
    this is genuinely simpler than S3b's machinery, not a hidden case of it.
-2. **Is the "no legal consumer beyond `call`" conclusion (The consumer, above) right?**
-   If a real program needs to pass a literal to another non-inline word without that word
-   materializing it (e.g. the callee itself immediately `call`s it and never stores it),
-   that is a real consumer P7.S3b's rule doesn't obviously forbid, and findings 2/3 would
-   need their carve-outs after all. Test this before locking the spec's scope to `call`
-   alone.
+2. **Resolved (subagent probe, 2026-08-21).** The brief's first-draft "no legal consumer
+   beyond `call`" conclusion was wrong. Passing a literal to a **concrete** helper that
+   consumes it immediately (never a poly callee, never `Type::InlineQuotation`) is a real,
+   legal consumer and is now folded into this slice's scope (finding 6). Confirmed by
+   probe, not assumed.
 3. **Lowering:** does a spliced `call` inside a poly body's IR generation already fall out
    of however P7.S3b's eliminator lowering handles a spliced arm, or is this new lowering
    work? Not traced in this brief — the recon above is checker-only.
@@ -158,6 +169,9 @@ adds no row machinery at all, unlike P7.S3b-follow.
 - A `~[ ]` parameter on a non-inline word — a standing gate this slice does not touch
   (finding 4), which is what keeps `sort`/`bin_search` from ever becoming this slice's
   consumer.
+- Passing a literal (or an abstract quotation parameter) to a **poly** callee — S3f's
+  territory (`check_poly_call`'s R9p, the phantom-`'T` hazard). This slice's finding 6
+  carve-out is concrete-callee only.
 - Trait bounds (P7.S3e) and self-recursion (P7.S3g) — no interaction traced.
 - Any lowering change beyond what falls out of the checker fix, pending open question 3.
 
@@ -165,17 +179,20 @@ adds no row machinery at all, unlike P7.S3b-follow.
 
 `[ ] call` and a non-trivial `[ ... ]` body (e.g. `[ 1 add ]` or a body that names/consumes
 a bound local) inside a **non-inline** generic word, both compiling and running with the
-correct result. Plus the negative: `branch`/`if`/`times`/`tag` on a quotation still reject
-with the unchanged P7.S3b-follow message, so the split doesn't accidentally widen past
-`call`.
+correct result; a poly body passing a literal to a concrete helper that immediately
+consumes it (finding 6), with a second, unrelated argument on the same call to rule out a
+transparent-wrapper placebo. Plus the negative: `branch`/`if`/`times`/`tag` on a quotation
+still reject with the unchanged P7.S3b-follow message, so the split doesn't accidentally
+widen past `call` and a concrete-callee carve-out; and passing a literal to a **poly**
+callee still rejects (S3f's territory), so the concrete-only gate holds.
 
 ## Ready to spec?
 
-**Almost, but open question 2 should be answered by probing first, not assumed.** The
-recon revises the slice down from "the cheap tier of a two-tier deferral" to something
-smaller still: a single hardcoded-list carve-out for `call`, because the comparator-shaped
-consumer P7.S3d was named for turns out blocked by an unrelated gate (finding 4), and the
-"pass a literal to another word" consumer (findings 2/3) may not legally exist once P7.S3b's
-no-materialization rule is applied to it. If probing confirms open question 2's answer is
-"no," this is an **S**, not the **M** implied by the original deferral text — a spec should
-say so plainly rather than build unused grounding machinery for findings 2/3.
+**Yes.** Open question 2 is resolved by probe, not assumed: the slice is real work on two
+dispatch points (`call` on a literal, finding 1; a literal passed to a concrete helper,
+finding 6), both cheap for the same reason — no row, no phantom-`'T`, no lowering change
+expected beyond what the checker fix implies. The comparator-*parameter* consumer
+P7.S3d was originally named for stays out of reach regardless (finding 4, a separate
+standing gate `sort`/`bin_search` won't clear here), so the exit criterion is the literal-
+and-concrete-helper shape above, not "a comparator works in a non-inline `sort`". Sizing:
+**S**, not the **M** implied by the original deferral text.
