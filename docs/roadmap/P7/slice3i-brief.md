@@ -105,22 +105,27 @@ second, independent injection mechanism P8.S2 didn't touch.
 
 ## Open questions
 
-1. **Do the ~80 checker/backend sites that read the global `Type::BOOL` constant
-   need to become module-scoped lookups, or can they stay a global constant?**
-   `branch`, `tag`, and every comparison operator are genuine compiler intrinsics
-   that must type their result as *some* boolean type regardless of the calling
-   module's imports — the same way `intrinsics` words work today without per-import
-   variance in their own signatures. If `Bool`'s `EnumId` varies per module (each
-   module importing `core::bool` gets whatever `EnumId` that module's own registry
-   assigns it, via the ordinary cross-module enum-import machinery P8.S1a already
-   built), then every one of these ~80 sites needs the *current checking module's*
-   resolved `Bool` type, not a fixed constant — otherwise a comparison in module A
-   would type its result against module B's registry slot. Needs a probe: does the
-   existing cross-module enum resolution (`resolve.rs`'s `exported_origin`/import
-   machinery, P8.S2) already give every checker call site cheap access to "the
-   concrete `Type` this module's `Bool` name currently resolves to," or does this
-   slice need to thread a new parameter through `check_term`/`poly_term`/the operator
-   dispatch table?
+1. ~~Do the ~80 checker/backend sites that read the global `Type::BOOL` constant
+   need to become module-scoped lookups, or can they stay a global constant?~~
+   **Resolved: they stay a single value, not per-module** (probed:
+   `docs/roadmap/P7/slice3i-brief.md`'s probe report, `/tmp/s3i-probe-report.md`,
+   kept in the resolving session). `assemble_module` (`src/driver.rs:290-296`)
+   builds one whole-build merged enum vector; `find_type_in_module`
+   (`src/ast.rs:343-380`) resolves a cross-module type reference to the *origin*
+   module's index in that one shared vector, never a per-module rebase — confirmed
+   by a real two-module build (module `a` declares `Thing`, module `b` imports and
+   eliminates it, builds and runs, prints `10`) plus an instrumented `assemble_module`
+   id dump showing both modules reference the same `EnumId`. So a `Bool` declared once
+   in `core::bool` gets exactly one `EnumId` for the entire build, and the ~80 sites
+   need no new per-module parameter threaded through `check_term`/`poly_term`/the
+   operator dispatch table. What does change: `Type::BOOL` and
+   `Type::from_name("bool")` stop being a compile-time `const EnumId(0)` and become a
+   single **build-time-resolved** value (looked up once, after assembly, since bool's
+   slot is now discovery-order-dependent rather than fixed) that every site reads from
+   the check/backend context instead of a `const`. Any static table currently baking
+   in `Type::BOOL`/`BOOL_ENUM_ID` (`BUILTIN_TABLE` in `check/builtins.rs`, the
+   backend's `IrType::Enum(BOOL_ENUM_ID)` match in `backend/qbe.rs`) needs this same
+   const-to-resolved-read rewrite.
 
 2. **What happens to a `static:` boolean initializer once `true`/`false` require an
    import?** Finding 3's `StaticInit::Bool` path parses `true`/`false` directly
@@ -133,15 +138,34 @@ second, independent injection mechanism P8.S2 didn't touch.
    a raw literal grammar than a call site? This is a real design fork, not a detail —
    rule it explicitly.
 
-3. **Does the REPL's `BOOL_ENUM_ID`-specific pinning logic actually become
-   redundant, or does it need its own migration?** Finding 5 is a plausible read,
-   not yet a probe. Before speccing, build a small REPL session that imports a
-   *user* two-module enum today (module A declares `type: Color | Red | Green ;`,
-   module B does `import: A ;` and constructs `A::Red`) across two session lines and
-   confirm the existing session-import machinery already gives `Color` a stable
-   cross-line identity the way `BOOL_ENUM_ID`'s special-case code does for `bool`
-   today. If it doesn't, this slice inherits a larger, REPL-specific migration cost
-   than the checker/backend side does.
+3. ~~Does the REPL's `BOOL_ENUM_ID`-specific pinning logic actually become
+   redundant, or does it need its own migration?~~ **Resolved: needs its own
+   migration, but bounded** (probed, `/tmp/s3i-probe-report.md`). Cross-line identity
+   is already stable for any user type today (a session-declared `type: Color | Red
+   | Green ;` on line 1 is constructible and eliminable on line 2, prints correctly),
+   and a quoted-path import persists across lines too — so `core::bool` does not need
+   re-importing per line, no new REPL mechanism required there. But the
+   `BOOL_ENUM_ID`-specific code does not fall out for free; four sites need action:
+   (1) `remap_type`'s `id == BOOL_ENUM_ID => Type::BOOL` arm (`src/repl.rs:214`) must
+   be *deleted* — left in place, it would wrongly force whatever enum lands at an
+   imported module's slot 0 to `Type::BOOL`; (2) `splice_import`'s `skip(1)`
+   bool-dedup (`src/repl.rs:2119`, which assumes an imported module's slot 0 is always
+   the injected bool) must be removed; (3) `format_stack`'s `true`/`false` render arm
+   (`src/repl.rs:628`, keyed on `*ty == Type::BOOL`) must be *migrated* to key on the
+   session's resolved `Bool` id rather than deleted, or `:stack` regresses to printing
+   a raw enum tag instead of `true`/`false`; (4) `Session::new`'s startup seeding
+   (`src/repl.rs:1082`, `bool_enum_decl()` plus `bool_print_word_def()`) must be
+   converted, and this is the one genuine design fork left for the spec to rule on.
+   Today `bool` is the *only* type usable on a session's first line with no import
+   written (bare `true` works; `lt`/`if` are `unknown word` per P8.S2's existing
+   baseline) — confirmed live. **Rule one of:** (A) auto-seed `core::bool` at session
+   startup, preserving today's no-import `true`/`false`/stack-render UX (probe's
+   recommendation) — with the wrinkle that the REPL cannot resolve a package-name
+   import at all yet (`import: core::bool ;` fails with "the REPL cannot resolve a
+   module-name import yet"), so the seed must splice `lib/bool.sth` by path, not by
+   package name; or (B) require the user to import it like any other core word,
+   consistent with P8.S2's treatment of `if`/comparisons, accepting a `true`/`false`
+   UX regression from today's REPL.
 
 4. **Resolved by finding 8: no bootstrap problem for `branch`/`tag` themselves.**
    `branch` consumes a raw `Type::U32` condition flag (`check/terms.rs:1503`), never a
@@ -170,10 +194,11 @@ second, independent injection mechanism P8.S2 didn't touch.
 
 ## Ready to spec?
 
-**Not yet.** OQ1 (whether ~80 call sites need module-scoped resolution or can stay a
-global constant) is the load-bearing question that decides this slice's actual size,
-and OQ3 (REPL migration cost) could not be answered by reading alone in the time this
-brief took — both need a short probe (a real two-module cross-import enum session in
-the REPL; a trace through one checker call site to see what's actually available to it
-today) before a spec author commits to an approach. Recommend a probe pass on OQ1/OQ3
-next, then write the spec once both come back.
+**Yes.** Both load-bearing open questions are resolved by probe (`/tmp/s3i-probe-report.md`,
+kept in the resolving session): OQ1 is a single build-time-resolved id, not per-module
+threading, so the checker/backend side of this slice is a mechanical const-to-resolved-read
+rewrite; OQ3 is a bounded, enumerated REPL migration (two deletions, one render migration,
+one startup-seed decision) with exactly one remaining design fork for the spec to rule on
+(auto-seed `core::bool` at REPL startup vs. require an explicit import). OQ2 (the `static:`
+boolean-initializer path) is unresolved and untouched by this probe pass — the spec must
+rule on it directly; it was not blocking enough to warrant its own probe.
