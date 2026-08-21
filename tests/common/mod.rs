@@ -133,6 +133,13 @@ fn fixture_imports(src: &str) -> String {
 }
 
 /// Write a fixture source to `path`, with `fixture_imports` appended.
+///
+/// **Not for a fixture whose subject is `import:` itself.** Appending the
+/// imports a fixture's text implies is what keeps several hundred goldens from
+/// restating them, but it also means a fixture can never be observed *missing*
+/// one -- so a test asserting that an unimported name is refused would pass
+/// against a source the harness had already fixed. Write those verbatim
+/// instead (`phase8_slice2.rs`'s `write_raw` is the pattern).
 #[allow(dead_code)]
 pub fn write_fixture(path: &Path, src: &str) -> std::io::Result<()> {
     std::fs::write(path, format!("{src}{}", fixture_imports(src)))
@@ -140,7 +147,8 @@ pub fn write_fixture(path: &Path, src: &str) -> std::io::Result<()> {
 
 /// The bytes to write for one file of a multi-file fixture tree, keyed on its
 /// name: `fixture_imports` is appended to Sooth source and to nothing else, so
-/// the same tree helper can write a `sooth.pkg` beside a `.sth`.
+/// the same tree helper can write a `sooth.pkg` beside a `.sth`. Carries
+/// `write_fixture`'s caveat: not for a fixture about `import:` lines.
 #[allow(dead_code)]
 pub fn fixture_source(name: &str, contents: &str) -> String {
     match name.ends_with(".sth") {

@@ -698,10 +698,16 @@ pub(super) fn poly_call_term(
     // P8 S2 (R2): the poly-body twin of `check_term`'s intrinsic-import gate.
     // A generic body dispatches the same builtins on its own path, so without
     // this an unimported `dup`/`add` would be gated in a monomorphic word and
-    // free in a polymorphic one. An env candidate under the same name (a
-    // module's own overload) still wins, so only a real builtin dispatch is
-    // refused.
-    if intrinsic_is_gated_out(ctx, span, name) && !env.contains_key(name) {
+    // free in a polymorphic one.
+    //
+    // The bare spelling reaching here is always the builtin's own: a word the
+    // module declared under that name arrives mangled (`dup__m0`), which
+    // `is_gated_intrinsic_name` does not match, and the two un-mangled
+    // categories are not in `env` under the bare name either (an operator
+    // decl is keyed mangled, and a user `drop` is type-directed, never an
+    // `env` entry). So there is no candidate to defer to and nothing to check
+    // `env` for.
+    if intrinsic_is_gated_out(ctx, span, name) {
         return Err(ungated_intrinsic_error(ctx, span, name));
     }
     // R-B1 (slice 13): every `&`-led word (the prefix borrow and the

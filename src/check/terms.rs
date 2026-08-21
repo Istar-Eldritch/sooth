@@ -268,9 +268,11 @@ fn check_term(
             // P8 S2 (R2): an intrinsic name this module never imported is not
             // a builtin *here*. Every builtin-dispatch arm below is skipped
             // for it, so the name falls through to the ordinary env/overload
-            // path (a module may still declare its own `add`), and that
-            // fall-through reports the missing import rather than
-            // `unknown word`.
+            // path, and that fall-through reports the missing import rather
+            // than `unknown word`. The env lookup never actually claims the
+            // name: a module's own word under a builtin spelling arrives
+            // mangled, so a gated name reaching here has no candidate and the
+            // fall-through is always the diagnostic.
             let gated = intrinsic_is_gated_out(ctx, span, name);
             // Slice 10c (R-P3-1a): `branch` is intercepted here, beside
             // `call`, for the same reason: it is a compiler-known word whose
