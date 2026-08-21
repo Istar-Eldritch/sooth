@@ -101,8 +101,11 @@ pub const REPL_CORE_ECHO: &str = "imported cmp\nimported bool\n";
 /// numbers are what its located-diagnostic assertions pin, and `import:` is
 /// legal anywhere at the top level, so adding lines at the end leaves every
 /// `line N, col C` in the suite meaning what it meant before.
-#[allow(dead_code)]
-pub fn fixture_imports(src: &str) -> String {
+///
+/// Private: fixtures reach it through `write_fixture`/`fixture_source`, so the
+/// "which imports" rule has exactly one implementation and no second caller
+/// deriving its own.
+fn fixture_imports(src: &str) -> String {
     let tokens: Vec<&str> = src.split_whitespace().collect();
     let declared: Vec<&str> = tokens
         .windows(2)
