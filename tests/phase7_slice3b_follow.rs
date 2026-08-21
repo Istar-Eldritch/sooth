@@ -490,3 +490,98 @@ fn inline_generic_body_still_splices_a_row_combinator() {
     assert_eq!(stdout, "9\n9.5\n");
     assert_eq!(code, 0);
 }
+
+/// Phase 4's golden: a **non-inline** generic word that loops with a literal
+/// `times` carrying an **inner `if`**, so both tiers this slice ships (R2's
+/// non-shape-changing `times`, R3's shape-changing `if`) are exercised in one
+/// undivided body -- and, per the spec's own review fix, with no
+/// self-recursion (`P7.S3g`'s standing limit).
+///
+/// `clampsum` takes three `'T` parameters (`hi`, `lo`, `val`) plus the
+/// iteration count: `( 'T: Copy Ord 'T 'T i64 -- 'T )` is the spec's own
+/// literal header, and the bound-declaring first `'T` is itself an input, so
+/// three `'T` values enter, not two. Each iteration clamps `val` into
+/// `[lo, hi]` in two comparisons, each its own `if`: `over over gt` peeks the
+/// compared pair the same way `mymax` does (R3), leaving the row intact
+/// underneath for the arm to pick from, and a `rot`/`rot rot` re-aligns the
+/// three-element row back to the entry convention (`hi lo val`) between and
+/// after the two comparisons, so the *next* `times` iteration (and the
+/// loop's own row check, R3's pre-seeded baseline) sees the same shape it
+/// started with. The clamp is idempotent after the first iteration, so
+/// `n == 0` is what discriminates a real loop from one that never executes.
+const CLAMPSUM: &str = ": clampsum ( 'T: Copy Ord 'T 'T i64 -- 'T )
+  ~[ | i |
+     over over gt ~[ drop dup ] ~[ ] if
+     rot
+     over over gt ~[ swap drop dup ] ~[ ] if
+     rot rot
+  ] times
+  swap drop swap drop ;
+";
+
+#[test]
+fn clampsum_golden_behavioural_matrix() {
+    // Mutation-tested guard: deleting the R2/R3 combinator dispatch makes
+    // this fail to *compile* with the located rejection
+    // (`poly_quotation_combinator_unsupported_error`), so a compile failure
+    // is the primary failure mode this golden guards against -- which is why
+    // the assertions below must also be able to fail *while compiling*, by
+    // exercising both `if` arms and an `n == 0` no-loop path across two `'T`
+    // instantiations (i64 and f64), so a wrong arm-routing or a wrong
+    // exit-row join changes a printed value instead of breaking the build.
+    let src = format!(
+        "{}{}\
+         : main ( -- )\n\
+           10 0 3 5 clampsum .\n\
+           10 0 -3 5 clampsum .\n\
+           10 0 15 5 clampsum .\n\
+           10 0 5 0 clampsum .\n\
+           10.0 0.0 3.5 2 clampsum .\n\
+           10.0 0.0 -3.5 2 clampsum .\n\
+           10.0 0.0 15.5 2 clampsum . ;\n",
+        import_lib("combinators.sth", "times"),
+        CLAMPSUM,
+    );
+    let scratch = Scratch::write("clampsum-behavioural", &src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "3\n0\n10\n5\n3.5\n0\n10\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clampsum_structural_characterization_one_definition_per_instantiation() {
+    // CHARACTERIZATION ONLY, no mutation-guard claim (per the spec: a wrong
+    // R3 that spliced the arms into the caller is a **lowering** property,
+    // and this slice changes no lowering -- see the spec's own "Lowering"
+    // section). This pins the code-size claim the slice is scheduled on: a
+    // non-inline generic word's body is emitted once per instantiation it is
+    // actually reached from, not once per call site. Four call sites (three
+    // `i64`, one `f64`) must therefore show exactly two definitions -- over
+    // emitted QBE, since `nm` is a known placebo here (`poly_indices`
+    // excludes poly template words from symbol minting).
+    let src = format!(
+        "{}{}\
+         : main ( -- )\n\
+           10 0 3 5 clampsum .\n\
+           10 0 -3 5 clampsum .\n\
+           10 0 15 5 clampsum .\n\
+           10.0 0.0 3.5 2 clampsum . ;\n",
+        import_lib("combinators.sth", "times"),
+        CLAMPSUM,
+    );
+    let scratch = Scratch::write("clampsum-structural", &src);
+    let ssa = driver::emit_ssa(scratch.path()).expect("program should build");
+    let call_sites = ssa.matches("call $sooth_mono_clampsum").count();
+    let definitions = ssa
+        .lines()
+        .filter(|l| l.contains("function") && l.contains("clampsum"))
+        .count();
+    assert_eq!(
+        call_sites, 4,
+        "all four call sites should reach a `clampsum` instantiation: {ssa}"
+    );
+    assert_eq!(
+        definitions, 2,
+        "one definition per instantiation (i64, f64), not per call site: {ssa}"
+    );
+}
