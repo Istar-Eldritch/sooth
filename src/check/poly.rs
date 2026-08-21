@@ -1040,8 +1040,16 @@ pub(super) fn poly_call_term(
     // poly callee; an overloaded name (more than one candidate) never
     // matches `single_candidate` below and keeps the rejection, which is
     // R2's own completeness-gap note, not a bug in this carve-out.
+    //
+    // `only.symbol == name` keeps that to a candidate whose mangled symbol is
+    // still its surface name: `ast::overload_symbols` suffixes (`$$0`) a
+    // concrete word merely for sharing a name with an unrelated poly word,
+    // and grounding through one records no `builtin_overloads` entry (`exact`
+    // is never true for a `QuotLit`), leaving lowering to resolve a bare name
+    // it cannot find. Excluded here, it falls through to the located
+    // rejection instead.
     let single_candidate = match env.get(name).map(Vec::as_slice) {
-        Some([only]) => Some(only),
+        Some([only]) if only.symbol == name => Some(only),
         _ => None,
     };
     let window_base = stack.len() - operand_window;
@@ -1127,7 +1135,13 @@ pub(super) fn poly_call_term(
                     // no declared `PolyType` row to unify against here. The
                     // ordinary call then proceeds exactly as for any other
                     // operand (L1: the literal is consumed, never survives).
-                    PolyType::QuotLit if matches!(inp, Type::Quotation(_)) => {
+                    // `chosen.symbol == name` mirrors the `single_candidate`
+                    // guard above; grounding a `$$`-suffixed candidate would
+                    // skip this arm's `builtin_overloads` record and panic in
+                    // lowering instead of reporting a located rejection.
+                    PolyType::QuotLit
+                        if matches!(inp, Type::Quotation(_)) && chosen.symbol == name =>
+                    {
                         let Type::Quotation(eff) = *inp else {
                             unreachable!()
                         };
@@ -5908,6 +5922,30 @@ mod tests {
         .expect_err("a literal whose grounded body leaves the wrong output shape must be rejected");
         assert!(
             err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `i64 bool`"),
+            "{err}"
+        );
+    }
+
+    /// P7 slice 3d (C2): a same-arity mismatch -- the grounded literal
+    /// leaves exactly as many outputs as `eff.outputs` declares, but the
+    /// wrong type at that position, so only the pointwise half of the
+    /// check (not the arity half the mismatch test above exercises) can
+    /// catch it. Without it this would compile a type-confused program
+    /// silently.
+    #[test]
+    fn poly_ground_quotation_literal_output_type_mismatch_same_arity_is_error() {
+        let err = check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+             : apply ( 'T: Copy -- 'T i64 )\n\
+               | x | x [ drop true ] 2 run1\n\
+             ;\n\
+             : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err(
+            "a same-arity output whose type differs from the declared effect must still be rejected",
+        );
+        assert!(
+            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `bool`"),
             "{err}"
         );
     }

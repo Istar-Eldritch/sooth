@@ -189,3 +189,27 @@ fn c2_overloaded_candidate_with_quotation_literal_is_located_rejection() {
     );
     assert!(!err.contains("unknown word"), "{err}");
 }
+
+/// A concrete word sharing its *surface name* with an unrelated poly word is
+/// still `env`'s sole candidate for that name, but `ast::overload_symbols`
+/// suffixes its mangled symbol anyway. C2's carve-out must not ground through
+/// such a candidate: it records no `builtin_overloads` entry (a literal is
+/// never `PolyType::Concrete`, so `exact` is false), so lowering is left to
+/// resolve a bare name it cannot find and panics (L1: never an inherited
+/// backend panic) instead of reporting this located rejection.
+#[test]
+fn c2_literal_to_name_shared_with_a_poly_word_is_located_rejection() {
+    let err = check_err(
+        ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+         : run1 ( 'U: Copy -- 'U 'U ) dup ;\n\
+         : c2_literal_to_name_shared_with_a_poly_word_is_located_rejection ( 'T: Copy -- 'T i64 )\n\
+           | x | x [ 1 add ] 2 run1\n\
+         ;\n\
+         : main ( -- ) 5 c2_literal_to_name_shared_with_a_poly_word_is_located_rejection drop drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: `run1` is not permitted on a quotation literal in `c2_literal_to_name_shared_with_a_poly_word_is_located_rejection` (line 4)"
+    );
+    assert!(!err.contains("unknown word"), "{err}");
+}

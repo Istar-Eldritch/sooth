@@ -374,14 +374,21 @@ Regression, green and untouched: `tests/phase7_slice3b.rs`, `tests/phase7_slice3
   build and run correctly at two instantiations of the outer `'T` with no lowering changes
   in this phase's diff.
 
-  The anticipated capture risk did not bite, for a structural reason the spec's phrasing
-  undersold: C2 never materializes a quotation value at all. `poly_ground_quotation_literal`
-  walks the literal's body directly (the same in-place execution R1's splice uses); nothing
-  is stored, boxed, or handed to the callee as a runtime value. Probe-confirmed: a literal
-  capturing a **concrete** outer local grounds and runs correctly against a C2 parameter
-  (`| x k | x [ k add ] 2 run1` at `'T = i64` prints `9` then `5`). The
-  capture-into-materialized-quotation ICE this exit finding was watching for needs an actual
-  materializing consumer, which neither C1 nor C2 is.
+  C2 **does** materialize the literal, once per instantiation: the C2 golden's binary
+  carries `sooth_mono_c2__m0__t0_i64__quot0` and `..._bool__quot0`, and the mono body
+  stores that code pointer with a null env into a `(code, env)` pair and passes it to
+  `run1__m0` by value. Only the checker side (`poly_ground_quotation_literal`) walks the
+  body in place; lowering treats the operand as an ordinary materialized quotation, which
+  is why it needs no new lowering work rather than because nothing is materialized.
+
+  So the capture risk this exit finding was watching for **is** reachable through C2: a
+  literal capturing an aggregate local panics `an aggregate field is copied by blit, not
+  scalar-stored` (`backend/qbe.rs:521`). It is **pre-existing** and shared with the
+  concrete path, not introduced here — the monomorphic twin of the same program
+  (`| x | x drop 1 2 P | p | [ p drop 1 add ] 2 run1`, no generics) panics identically.
+  Capturing a **concrete scalar** local is fine and probe-confirmed (`| x k | x [ k add ]
+  2 run1` at `'T = i64` prints `9` then `5`). Recorded as a recommendation for the phase
+  that owns aggregate capture; out of scope here.
 
   A related, **pre-existing** gap found while probing this: a literal that captures a local
   whose type is still a bare type variable (not a concrete capture) produces a misattributed
@@ -392,6 +399,21 @@ Regression, green and untouched: `tests/phase7_slice3b.rs`, `tests/phase7_slice3
   and belongs to the parse-time literal-effect inference C1 already relies on, not to R2's
   carve-out or grounding arm. Recorded as a recommendation for a future phase; not fixed
   here.
+- **R2's single-candidate gate is symbol-based, not just arity-based:** `env` recording one
+  candidate for a name is not enough to ground through it. `ast::overload_symbols` suffixes
+  a concrete word's mangled symbol (`run1__m0$$0`) merely for *sharing its surface name*
+  with an unrelated **poly** word, while `env["run1__m0"]` still holds it as that name's sole
+  candidate. Grounding through such a candidate records no `builtin_overloads` entry (the
+  record is `exact`-gated, and a `QuotLit` operand is never `PolyType::Concrete`), so
+  lowering is left to resolve a bare, un-mangled name and panics at `calls.rs:685` — an
+  inherited backend panic, which L1 forbids. Both the operand-window carve-out and the
+  grounding arm therefore also require `symbol == name`, falling such a call through to the
+  ordinary located rejection (pinned by
+  `c2_literal_to_name_shared_with_a_poly_word_is_located_rejection`).
+
+  Actually *supporting* that shape is a **future-phase lowering item**, not a checker one:
+  recording the `$$`-suffixed symbol makes the checker accept it, but lowering then emits
+  invalid QBE for the quotation argument. Deferred with the rest of the OQ3 lowering work.
 - **`poly.rs` split signals, re-run:** at P7.S3b's deferred split, 3 of 5 signals fired and
   both candidate splits (`poly/diagnostics.rs`, `poly/eliminator.rs`) were rejected as wrong
   splits, with the deferral's own stated expiry condition being "a second quotation
