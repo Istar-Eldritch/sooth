@@ -334,3 +334,48 @@ declined too: it is a larger finite bound with a worse error message, not a solu
 self-call at different type arguments is a located error naming polymorphic recursion, not
 a hang and not the `g__m0` message; and the `g__m0` diagnostic no longer claims a self-call
 is a generic-calls-generic call.
+
+**P7.S3h — An escaping closure may capture a linear value (closure env disposal).**
+Capture into a *materialized* (escaping) closure is restricted to `Copy` values
+(DESIGN.md:372). The restriction is not arbitrary: the captured env is absent from the
+disposal walk entirely -- `src/ir/destructors.rs` synthesizes destructors per concrete
+`IrType::Struct`/`Enum`/`OwnedCell` and never sees a closure env -- so a linear value moved
+into an env would simply never be disposed. This slice gives the env an owner and a
+destructor, which is the mechanism a linear value needs to outlive the frame that built it.
+**Probe-verified boundary at HEAD**, three cases, only the third rejected:
+
+- a `Copy` local captured into an escaping closure compiles and runs;
+- a *linear* local captured into a **spliced** `~[ ]` quotation compiles and runs (splicing
+  keeps it in scope, so no env exists);
+- a linear local captured into an **escaping** `[ ]` closure is rejected:
+  `` error: an escaping closure captures `b`, a local of this frame, whose storage does not
+  survive the return `` (`src/check/captures.rs:52`). The same message covers an aggregate
+  captured by value, so this is one wall, not two.
+
+That rejection is *correct* for a stack local read through the env. What is missing is the
+alternative it leaves unavailable: **moving** the value into the env, transferring ownership,
+so the closure owns it and disposal runs when the closure is dropped. Today a capture can
+only ever be a read of something living elsewhere.
+**Framed as closure capture, deliberately, and not as trait objects.** A materialized
+quotation is already a `(code, env)` pair, which is a trait object's shape with a one-method
+vtable, so owned trait objects and this slice want the *same* missing mechanism: a
+destructor reachable from an erased owner. Doing it as closure capture is narrower, has a
+consumer, and forces the disposal question to be answered concretely; heterogeneous
+collections (`Vec[dyn T]`) are a separate and much weaker motivation, since a closed enum is
+usually the better design and already works in `core`. Trait objects, if ever wanted, are a
+generalization *after* this exists, not the thing that introduces it.
+**The real cost, and it touches a load-bearing invariant:** disposal is type-directed and
+statically resolved today. An env whose contents vary per closure needs its destructor
+reached through the closure value, which puts **dynamic dispatch into the destructor path**
+-- where the linear spine bottoms out. That is the decision this slice actually turns on and
+it needs DESIGN.md's owner to weigh in, not a spec author. A per-capture-set synthesized
+destructor (one concrete env struct per closure literal, statically resolved) may avoid the
+dynamic dispatch entirely and is the first design to price.
+**Standing hazards in this neighbourhood, to verify before speccing rather than discover
+during:** a materialized quotation cannot be linked in the REPL at all (a session line
+building a `(code, env)` value dies on a non-PIC `__quot0` relocation), and `drop` never
+touches `env` today, so any claim that an existing rule already disposes a capture is false.
+**Exit:** a linear value can be moved into an escaping closure's env, the closure can be
+returned from the word that built it, calling it observes the captured value, and dropping
+the closure disposes the captured value exactly once -- with a leaked or double-disposed
+capture each a located error rather than a silent miscompile.
