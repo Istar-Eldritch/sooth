@@ -225,7 +225,12 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
   its `..a` to `row = stack[..base].to_vec()` (L2); a parameter with no row grounds against
   the empty region.
 - Collect each arm literal off the stack by its `PolyQuotRef`; a non-literal operand is the
-  OQ4 located rejection; an ordinary `[ ]` bracket is L4's existing diagnostic.
+  OQ4 located rejection; an ordinary `[ ]` bracket is L4's existing diagnostic. Phase 1 note:
+  `PolyArm` carries the declared parameter as `declared_inputs: Vec<Type>` (built into a
+  `Type` only when L4's diagnostic fires, since `inline_quotation_type` leaks). A row-bearing
+  `~[ ..a -- ..b ]` parameter has no `Type` spelling, so this phase must change that field's
+  shape, most likely to a pre-rendered string, which also means
+  `ordinary_literal_at_inline_param_error`'s `param: Type` becomes a rendered parameter.
 - **Non-shape-changing** (`row_in == row_out`, e.g. `times`): **pre-seed the cross-arm
   baseline with the grounded entry row (`row`) before walking any arm**, then compare each
   arm's exit to it structurally (L1 rigid).

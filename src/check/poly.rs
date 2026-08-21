@@ -1072,10 +1072,10 @@ pub(super) fn poly_call_term(
 /// *below* the scrutinee and the arms' exit rows, and those are compared
 /// **structurally**, never row-unified against an abstract stack.
 ///
-/// L1: type variables stay rigid. Two arms agree on an exit position iff the
-/// `PolyType`s are structurally equal; `'T` against `i64` is a rejection, not
-/// a mid-body bind, so no `Subst` is built or applied in the term walk and no
-/// per-arm clone can diverge on one.
+/// S3b L1: type variables stay rigid. Two arms agree on an exit position iff
+/// the `PolyType`s are structurally equal; `'T` against `i64` is a rejection,
+/// not a mid-body bind, so no `Subst` is built or applied in the term walk and
+/// no per-arm clone can diverge on one.
 #[allow(clippy::too_many_arguments)]
 fn poly_eliminator_call(
     id: EnumId,
@@ -1130,7 +1130,7 @@ fn poly_eliminator_call(
         // The operand that stopped collection is a quotation, so it was meant
         // as an arm but carries no variant tag to match one by. The marker is
         // checked beside the identity because a quotation that has been
-        // through a `| q |` bind keeps the one and loses the other (L3:
+        // through a `| q |` bind keeps the one and loses the other (S3b L3:
         // `PolyScope.locals` carries no `QuotRef`), and it is still an
         // untagged arm -- not the abstract-scrutinee case below, which would
         // send it off to ask for an enum-kind bound on a type variable it
@@ -1236,7 +1236,7 @@ fn poly_eliminator_call(
             PolyArm {
                 quot: *quot,
                 input,
-                declared: crate::ast::inline_quotation_type(vec![narrowed], vec![]),
+                declared_inputs: vec![narrowed],
             }
         })
         .collect();
@@ -1272,8 +1272,8 @@ fn poly_eliminator_call(
                         &poly_row_str(&exit, sig),
                     ));
                 }
-                // L1: structural equality under *rigid* variables. `'T` in one
-                // arm against `'U`, or against `i64`, disagrees -- binding
+                // S3b L1: structural equality under *rigid* variables. `'T` in
+                // one arm against `'U`, or against `i64`, disagrees -- binding
                 // either would be a mid-body unification this slice does not
                 // do (and could not undo across the sibling arms).
                 for (a, b) in expected.iter().zip(&exit) {
@@ -1302,9 +1302,12 @@ fn poly_eliminator_call(
 struct PolyArm {
     quot: PolyQuotRef,
     input: Vec<PolySlot>,
-    /// The declared parameter named when the arm was written with an ordinary
-    /// `[ ... ]` bracket (L4).
-    declared: Type,
+    /// The inputs of the parameter named when the arm was written with an
+    /// ordinary `[ ... ]` bracket (S3b-follow L4). Held unbuilt:
+    /// `inline_quotation_type` leaks its spelling and its effect for the
+    /// program's lifetime, so the `Type` is built only when the diagnostic
+    /// fires.
+    declared_inputs: Vec<Type>,
 }
 
 /// P7 slice 3b-follow (R1): the per-arm machinery every quotation-consuming
@@ -1318,10 +1321,11 @@ struct PolyArm {
 /// reported at the arm that introduces it rather than behind a later arm's own
 /// error.
 ///
-/// L3: the borrow table is **unioned** here, and this is the only join. The
-/// table is keyed by place and a *missing* record reads as "no conflict"
-/// (`live_borrow_of` answers `None`), so a second join that intersects or
-/// picks one arm would be a silent false accept, not a false reject.
+/// S3b-follow L3: the borrow table is **unioned** here, and this is the only
+/// join. The table is keyed by place and a *missing* record reads as "no
+/// conflict" (`live_borrow_of` answers `None`), so a second join that
+/// intersects or picks one arm would be a silent false accept, not a false
+/// reject.
 #[allow(clippy::too_many_arguments)]
 fn poly_walk_arms(
     arms: Vec<PolyArm>,
@@ -1344,16 +1348,16 @@ fn poly_walk_arms(
     for arm in arms {
         let lit = scope.quotation(arm.quot);
         let (literal_span, body, is_inline) = (lit.span, lit.body.clone(), lit.is_inline);
-        // L4: an arm stands at a parameter declared inline, so an ordinary
-        // `[ ... ]` arm is the wrong bracket here exactly as it is on the
-        // concrete path -- same diagnostic, so the two paths do not disagree
-        // about one spelling.
+        // S3b-follow L4: an arm stands at a parameter declared inline, so an
+        // ordinary `[ ... ]` arm is the wrong bracket here exactly as it is on
+        // the concrete path -- same diagnostic, so the two paths do not
+        // disagree about one spelling.
         if !is_inline {
             return Err(ordinary_literal_at_inline_param_error(
                 ctx,
                 literal_span,
                 name,
-                arm.declared,
+                crate::ast::inline_quotation_type(arm.declared_inputs, vec![]),
             ));
         }
         // Each arm walks its own clone of the enclosing scope, exactly as the
@@ -1394,7 +1398,7 @@ fn poly_walk_arms(
                     escaping,
                 ));
             }
-            // L2: nor may a quotation literal, which would then have to be
+            // S3b L2: nor may a quotation literal, which would then have to be
             // materialised to exist past the arm. Its own span, not the
             // arm's: a quotation nested inside the arm body is not written
             // where the arm literal is.
@@ -1438,12 +1442,12 @@ fn poly_walk_arms(
         cross_arm(literal_span, exit)?;
     }
 
-    // L3: the borrow table is **unioned**, not picked or intersected. It is
-    // keyed by place and a *missing* record reads as "no conflict", so
-    // dropping one arm's record is a silent false accept: arm A's `&!x` and
-    // arm B's `&!y` must both survive, or a later use of whichever was
-    // dropped is wrongly admitted. A genuine disagreement (one place, two
-    // mutabilities) is rejected rather than erased.
+    // S3b-follow L3: the borrow table is **unioned**, not picked or
+    // intersected. It is keyed by place and a *missing* record reads as "no
+    // conflict", so dropping one arm's record is a silent false accept: arm
+    // A's `&!x` and arm B's `&!y` must both survive, or a later use of
+    // whichever was dropped is wrongly admitted. A genuine disagreement (one
+    // place, two mutabilities) is rejected rather than erased.
     for borrows in arm_borrows {
         for borrow in borrows {
             match scope.borrows.iter().find(|b| b.place == borrow.place) {
@@ -3792,8 +3796,8 @@ mod tests {
     }
     #[test]
     fn poly_quotation_identity_moves_with_the_slot_under_swap() {
-        // L3: the literal's identity rides the slot, so a shuffle reorders the
-        // indices with no special handling. Pinned here rather than through a
+        // S3b L3: the literal's identity rides the slot, so a shuffle reorders
+        // the indices with no special handling. Pinned here rather than through a
         // source program: a *tagged* literal must reach its eliminator by
         // written adjacency (the concrete path's rule), so no program can put
         // a shuffle between two arms.
@@ -3885,8 +3889,8 @@ mod tests {
     }
     #[test]
     fn poly_arm_join_rejects_rigid_type_variable_disagreement() {
-        // L1: `'T` stays rigid across arms. One arm leaving `'T` and another
-        // `i64` is a located rejection naming both sides in order, never a
+        // S3b L1: `'T` stays rigid across arms. One arm leaving `'T` and
+        // another `i64` is a located rejection naming both sides in order, never a
         // mid-body bind of `'T := i64`.
         let err = check_src(&format!(
             "{SHAPE}\
@@ -3904,10 +3908,11 @@ mod tests {
     }
     #[test]
     fn poly_arm_join_unions_borrows() {
-        // L4: the arms' borrow tables are unioned, not picked between. A
-        // missing record reads as "no conflict", so dropping either arm's is a
-        // silent false accept -- both directions are asserted, since "pick arm
-        // A" keeps `x` and drops `y` and an `x`-only assertion would not flip.
+        // S3b L4 (restated as S3b-follow L3): the arms' borrow tables are
+        // unioned, not picked between. A missing record reads as "no
+        // conflict", so dropping either arm's is a silent false accept -- both
+        // directions are asserted, since "pick arm A" keeps `x` and drops `y`
+        // and an `x`-only assertion would not flip.
         let program = |later: &str| {
             format!(
                 "type: P a i64 ;\n\
@@ -3964,7 +3969,7 @@ mod tests {
         PolyArm {
             quot,
             input: vec![PolySlot::new(PolyType::Var(0))],
-            declared: crate::ast::inline_quotation_type(vec![Type::I64], vec![]),
+            declared_inputs: vec![Type::I64],
         }
     }
     #[test]
