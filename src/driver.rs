@@ -1,6 +1,6 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -312,7 +312,17 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
                     let Some(&target) = target.as_ref() else {
                         continue;
                     };
+                    // A target's `export:` list can repeat a name (e.g. two
+                    // `export:` blocks both naming it), which `scan_exports`
+                    // does not dedup. Left alone, a wildcard would synthesize
+                    // two entries for that one name and falsely self-collide
+                    // in `check_selective_imports`, even though the qualified
+                    // and selective forms of the same import build fine.
+                    let mut wildcard_seen: HashSet<&str> = HashSet::new();
                     for (name, _) in &exports_by_module[target as usize] {
+                        if !wildcard_seen.insert(name.as_str()) {
+                            continue;
+                        }
                         selective_map.insert(name.clone(), target);
                         selective_entries.push(check::SelectiveName {
                             name: name.clone(),
@@ -1322,6 +1332,29 @@ mod tests {
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let mut module =
             assemble_module(&closure, true).expect("a wildcard import binds its target's exports");
+        check::check(&mut module).expect("a wildcard-bound name is reachable bare");
+    }
+
+    /// P8 S2 (R1) review fix: a target that repeats a name across two
+    /// `export:` blocks -- `scan_exports` concatenates rather than dedups --
+    /// used to make a wildcard synthesize two `SelectiveName` entries for
+    /// that one name, which `check_selective_imports` then rejected as the
+    /// import colliding with itself. A qualified or selective import of the
+    /// same module builds fine, so the wildcard must dedup at synthesis.
+    #[test]
+    fn driver_wildcard_import_of_repeated_export_name_builds() {
+        let s = Sandbox::new("wildcard-repeated-export");
+        s.write(
+            "lib.sth",
+            ": lw ( -- i64 ) 1 ;\nexport: lw ;\nexport: lw ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
+        let mut module = assemble_module(&closure, true)
+            .expect("a repeated export name must not make a wildcard collide with itself");
         check::check(&mut module).expect("a wildcard-bound name is reachable bare");
     }
 
