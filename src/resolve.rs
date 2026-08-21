@@ -28,8 +28,13 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// two different structs never collide on the name, since neither is ever
 /// registered under it. Every other name gains a `__m{module}` component,
 /// minted so no punctuation reaches a symbol sanitizer (D8).
+///
+/// P8 S2 (R3): these two are the whole exemption list. The third one, the
+/// compiler-injected `lib/core.sth` prelude, is gone with the prelude itself:
+/// `if` and the comparisons are ordinary `core` words now, mangled per module
+/// and reached by `import:` like any other name.
 pub(crate) fn mangle(name: &str, module: u32) -> String {
-    if name == "main" || name == "drop" || is_prelude_word_name(name) {
+    if name == "main" || name == "drop" {
         return name.to_string();
     }
     format!("{name}__m{module}")
@@ -38,7 +43,7 @@ pub(crate) fn mangle(name: &str, module: u32) -> String {
 /// R2: a static's own mangle, with no exemptions. Every exemption `mangle`
 /// makes exists so a *word* stays reachable by bare name from a module that
 /// did not declare it (`main` from the C shim, a `drop` overload from
-/// `find_drop_overloads`, `if` from every module at once). A static is
+/// `find_drop_overloads`). A static is
 /// reachable no such way: only `&NAME` inside its declaring module names one,
 /// and that site mangles identically. Routing statics through `mangle` instead
 /// gave `static: drop` and `static: main` a raw data symbol, so two modules
@@ -49,39 +54,21 @@ pub(crate) fn mangle_static(name: &str, module: u32) -> String {
     format!("{name}__m{module}")
 }
 
-/// Slice 10c (R-P3-4): the `lib/core.sth` words injected into every closure.
-/// They are declared once but reached by bare name from every module, so
-/// mangling them per module would bind each module's `if` to a spelling only
-/// the injected copy's own module could resolve, leaving every other module's
-/// bare `if` unresolvable. Same reasoning as `main` and `drop`.
-///
-/// Read off `lib/core.sth` rather than listed here: the file is meant to grow,
-/// and a hand-mirrored list would leave each word added to it unresolvable
-/// from every module but the entry one.
-pub(crate) fn is_prelude_word_name(name: &str) -> bool {
-    static NAMES: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
-    NAMES
-        .get_or_init(|| {
-            crate::parser::prelude_words()
-                .into_iter()
-                .map(|w| w.name)
-                .collect()
-        })
-        .contains(name)
-}
-
 /// `check::builtin_table`'s keys, mirrored by hand (that table's own
 /// `check_operator::is_operator` list carries the same warning): the
 /// arithmetic/comparison/`max`/`max-total`/`.` names a bare call must reach
 /// `check_operator`'s operand-type dispatch for, never a static rewrite. Keep
 /// in sync when a table operator is added.
 ///
-/// Slice 10c (R-P3-3): the six comparison *surface* names stay listed even
-/// though they are no longer table rows. They are `lib/` words now, reached by
-/// bare name from every module, so mangling one per module would bind every
-/// use inside a module to that module's own spelling and leave every other
-/// module's bare `eq` unresolvable. The `u`-prefixed primitives that took over
-/// their rows are listed beside them.
+/// P8 S2 (R3a): the six comparison *surface* names are deliberately absent.
+/// They are not `BUILTIN_TABLE` keys (their rows moved to the `u`-prefixed
+/// primitives listed below in slice 10c), `check_operator::is_operator` does
+/// not list them, and `scoped_operator_overloads` early-returns for any name
+/// the table has no row for -- so no operator-overload dispatch path ever
+/// reached them through here. Listing them bought only the coincidence that a
+/// bare *call* stayed unrewritten to match a prelude *declaration* that was
+/// also unmangled; with the prelude deleted the decl mangles, so the call must
+/// mangle with it or resolve to nothing.
 fn is_operator_dispatch_name(name: &str) -> bool {
     matches!(
         name,
@@ -96,12 +83,6 @@ fn is_operator_dispatch_name(name: &str) -> bool {
             | "not"
             | "shl"
             | "shr"
-            | "eq"
-            | "lt"
-            | "gt"
-            | "lte"
-            | "gte"
-            | "ne"
             | "ueq"
             | "ult"
             | "ugt"
@@ -711,8 +692,8 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     }
     // R2: a static's data symbol is module-scoped exactly as a word's is, so
     // two modules may each declare `COUNT` without colliding at codegen --
-    // and, via `mangle_static`, without colliding on `drop`/`main`/a prelude
-    // word either. No operator-name carve-out applies: a static is never a
+    // and, via `mangle_static`, without colliding on `drop`/`main` either.
+    // No operator-name carve-out applies: a static is never a
     // dispatch name.
     for s in &mut module.statics {
         s.name = mangle_static(&s.name, s.module);
@@ -805,7 +786,7 @@ mod tests {
     /// word's own `sooth_main` -- then collided with at the assembler.
     #[test]
     fn mangle_static_suffixes_even_the_exempt_word_names() {
-        for name in ["main", "drop", "if"] {
+        for name in ["main", "drop"] {
             assert_eq!(mangle(name, 1), name, "precondition: {name} is exempt");
             assert_eq!(mangle_static(name, 1), format!("{name}__m1"));
         }
@@ -985,6 +966,54 @@ mod tests {
             call_names(&bump.body).contains(&"&COUNT__m1".to_string()),
             "module 1 borrows its own static: {:?}",
             call_names(&bump.body)
+        );
+    }
+
+    /// P8 S2 (R3a): the six surface comparisons left `is_operator_dispatch_name`
+    /// with the prelude, so a bare call to one now *mangles* like any other word
+    /// -- which is the only way it can match its own, now-mangled declaration.
+    /// A real table operator (`add`) still stays bare for `check_operator`'s
+    /// operand dispatch, so this pins the split rather than "nothing is
+    /// carved out any more".
+    #[test]
+    fn a_comparison_call_mangles_while_a_table_operator_stays_bare() {
+        let mut words = vec![HashSet::new(), HashSet::new()];
+        for name in ["lt", "add"] {
+            words[0].insert(name.to_string());
+            words[1].insert(name.to_string());
+        }
+        let tables = NameTables {
+            structs: vec![HashSet::new(), HashSet::new()],
+            enums: vec![HashSet::new(), HashSet::new()],
+            words,
+            statics: vec![HashSet::new(), HashSet::new()],
+        };
+        let imports = std::collections::HashMap::new();
+        let selective: HashMap<String, u32> =
+            [("lt".to_string(), 1u32), ("add".to_string(), 1u32)].into();
+        let vis = declaring_visibility(vec![
+            Vec::new(),
+            vec![
+                ("lt".to_string(), Span::default()),
+                ("add".to_string(), Span::default()),
+            ],
+        ]);
+        let scope = HashSet::new();
+        let span = Span::default();
+        let rewrite = |name: &str| {
+            tables
+                .rewrite(name, 0, &imports, &selective, &scope, &vis, span)
+                .unwrap()
+        };
+        assert_eq!(
+            rewrite("lt"),
+            Some("lt__m0".to_string()),
+            "a bare comparison resolves own-module-first and mangles"
+        );
+        assert_eq!(
+            rewrite("add"),
+            None,
+            "a table operator is still left bare for operand dispatch"
         );
     }
 
@@ -1235,15 +1264,7 @@ mod tests {
         let tokens = lex(": p ( -- i64 ) 1 ; : main ( -- ) p drop ;").unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         resolve_modules(&mut module, false).unwrap();
-        // Slice 10c: `parse` appends `lib/core.sth`'s words, which are never
-        // mangled (`is_prelude_word_name`), so only the file's own two are
-        // asserted here.
-        let names: Vec<&str> = module
-            .words
-            .iter()
-            .map(|w| w.name.as_str())
-            .filter(|n| !is_prelude_word_name(n))
-            .collect();
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["p", "main"]);
         let main = module.words.iter().find(|w| w.name == "main").unwrap();
         assert_eq!(
@@ -1549,12 +1570,12 @@ mod tests {
                 ModuleInfo {
                     imports: imports0,
                     exports: entry_bodies.exports,
-                    selective: HashMap::new(),
+                    ..ModuleInfo::default()
                 },
                 ModuleInfo {
                     imports: no_imports,
                     exports: lib_bodies.exports,
-                    selective: HashMap::new(),
+                    ..ModuleInfo::default()
                 },
             ],
             statics,

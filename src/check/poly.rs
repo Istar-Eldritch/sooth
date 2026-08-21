@@ -394,6 +394,7 @@ pub fn check_poly_body(
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
+    poly_words: &HashSet<String>,
     generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // R12 (slice 8b, 8a): the caller module's operator visibility rides on
@@ -440,6 +441,7 @@ pub fn check_poly_body(
         arrays,
         slices,
         builtin_overloads,
+        poly_words,
     )?;
     // P7 slice 3b (R4/L2): splice-consumed quotations only. A literal still
     // on the stack here would have to *be* a value to leave the word, and it
@@ -480,6 +482,7 @@ pub(super) fn poly_walk(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    poly_words: &HashSet<String>,
 ) -> Result<Vec<PolySlot>, String> {
     // P7 slice 3b (R2): the same written-adjacency rule the concrete path
     // applies to a variant-tagged literal. A tag is only meaningful as
@@ -510,6 +513,7 @@ pub(super) fn poly_walk(
             arrays,
             slices,
             builtin_overloads,
+            poly_words,
         )?;
     }
     Ok(stack)
@@ -528,6 +532,7 @@ pub(super) fn poly_term(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    poly_words: &HashSet<String>,
 ) -> Result<Vec<PolySlot>, String> {
     let span = term.span;
     match &term.kind {
@@ -601,6 +606,7 @@ pub(super) fn poly_term(
                 arrays,
                 slices,
                 builtin_overloads,
+                poly_words,
             );
         }
         // P7 slice 3b (R2): a quotation literal is admitted, interned, and
@@ -656,6 +662,7 @@ pub(super) fn poly_call_term(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    poly_words: &HashSet<String>,
 ) -> Result<Vec<PolySlot>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
     // consumed on read (R3/D2): a second read is use-after-move, exactly as
@@ -688,6 +695,15 @@ pub(super) fn poly_call_term(
         return Ok(stack);
     }
     let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
+    // P8 S2 (R2): the poly-body twin of `check_term`'s intrinsic-import gate.
+    // A generic body dispatches the same builtins on its own path, so without
+    // this an unimported `dup`/`add` would be gated in a monomorphic word and
+    // free in a polymorphic one. An env candidate under the same name (a
+    // module's own overload) still wins, so only a real builtin dispatch is
+    // refused.
+    if intrinsic_is_gated_out(ctx, span, name) && !env.contains_key(name) {
+        return Err(ungated_intrinsic_error(ctx, span, name));
+    }
     // R-B1 (slice 13): every `&`-led word (the prefix borrow and the
     // reference accessor family) fronts the rest of dispatch, mirroring
     // `check_reference_word`'s own position ahead of the monomorphic
@@ -946,6 +962,7 @@ pub(super) fn poly_call_term(
             arrays,
             slices,
             builtin_overloads,
+            poly_words,
         );
     }
     // P7 slice 3b (R2/L2): every legal use of a quotation literal has been
@@ -1056,7 +1073,32 @@ pub(super) fn poly_call_term(
     if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
         return Ok(next);
     }
+    // P8 S2 (R6b): a polymorphic callee is registered in `poly_env`, which this
+    // path cannot see, so a poly word calling one lands here rather than
+    // dispatching. That is the generic-calls-generic gap, not an unknown name:
+    // say so, and name the caller, the callee and the three ways out, instead
+    // of leaking the mangled spelling through `unknown word`.
+    if poly_words.contains(name) {
+        return Err(poly_calls_poly_word_error(ctx, span, name));
+    }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P8 S2 (R6b): the located diagnostic for a non-inline polymorphic word
+/// calling another polymorphic word. Deleting the prelude removed the one shape
+/// this used to work for -- the injected `lib/core.sth` comparisons were
+/// reachable by bare, unmangled name from any body -- so this is the narrowing
+/// that replaced it, named rather than left as a raw unknown-word error. An
+/// imported callee and a same-module one emit the same message: both are the
+/// one underlying gap.
+fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
+    let caller = ctx.word_name().unwrap_or("this line");
+    format!(
+        "error: `{caller}` cannot call the polymorphic word `{}` (line {}, col {})\n  a polymorphic word is not yet reachable from another polymorphic word across a module boundary\n  inline the caller, make the callee concrete, or call the callee from a monomorphic word",
+        crate::resolve::demangle_call(callee),
+        span.line,
+        span.col
+    )
 }
 
 /// P7 slice 3b (R2/R3): the abstract twin of `check_eliminator_call`
@@ -1091,6 +1133,7 @@ fn poly_eliminator_call(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    poly_words: &HashSet<String>,
 ) -> Result<Vec<PolySlot>, String> {
     let enum_decl = &enums[id.index()];
     let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
@@ -1262,6 +1305,7 @@ fn poly_eliminator_call(
             arrays,
             slices,
             builtin_overloads,
+            poly_words,
         )?;
         // Step 5b: a `Type::Variant` may not leave the call. Every
         // type-directed predicate outside the eliminator is written over
@@ -3509,11 +3553,10 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     // A one-field struct with a `drop` overload: linear for the same reason any
@@ -3543,7 +3586,7 @@ mod tests {
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         module
     }
@@ -3699,6 +3742,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &HashSet::new(),
         )
         .expect("a quotation literal is admitted in a polymorphic body");
         assert_eq!(stack.len(), 1);
@@ -3746,6 +3790,7 @@ mod tests {
                 &[],
                 &mut Vec::new(),
                 &mut overloads,
+                &HashSet::new(),
             )
             .expect("two literals then a swap");
         }
@@ -3917,6 +3962,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &HashSet::new(),
         )
         .expect("an int literal should push a slot");
         assert_eq!(stack.len(), 1);
@@ -3939,6 +3985,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &HashSet::new(),
         )
         .expect("binding the literal should consume the slot");
         assert!(
@@ -4470,7 +4517,7 @@ mod tests {
         // *declare* a borrow, and the declaration survives parse + fold +
         // rendering unchanged. Producing one is Part B.
         let tokens = lex(": peek ( ['T 4] -- &['T 4] ) ;").unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(poly_type_str(&sig.outputs[0], sig), "&['T 4]");
     }
@@ -4598,6 +4645,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &HashSet::new(),
         )
         .expect("`len` answers a slice");
         assert_eq!(

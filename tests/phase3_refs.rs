@@ -7,7 +7,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -24,8 +24,9 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 /// transcript in program order.
 fn run_src_traced(name: &str, src: &str, trace: bool) -> (String, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let mut cmd = Command::new(&binary);
     match trace {
         true => cmd.env(sooth::ir::TRACE_ALLOC_ENV, "1"),
@@ -46,7 +47,7 @@ fn run_src_traced(name: &str, src: &str, trace: bool) -> (String, String, i32) {
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -82,7 +83,7 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    parser::parse(&tokens).expect_err("parsing should fail")
+    test_support::parse_with_core(&tokens).expect_err("parsing should fail")
 }
 
 /// Run a scripted REPL session (one input line per element of `lines`) and

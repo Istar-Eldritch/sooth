@@ -947,7 +947,6 @@ mod tests {
     use crate::check::check;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     #[test]
     fn ir_registers_overridden_struct_as_linear_despite_all_copy_fields() {
@@ -1194,7 +1193,7 @@ mod tests {
     fn build_slices_records_element_type_and_array_matching_stride() {
         let src = "type: Pair a i64 b i64 ;\n: f ( [Pair 4] -- ) drop ;\n: main ( -- ) ;\n";
         let tokens = crate::lexer::lex(src).unwrap();
-        let module = crate::parser::parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let (structs, enums, arrays, cells, refs) = build_registries(
             &module.structs,
             &module.enums,
@@ -1351,7 +1350,7 @@ mod tests {
         let (structs, enums, _arrays, _cells, _refs) = {
             let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
             let tokens = lex(src).unwrap();
-            let mut module = parse(&tokens).unwrap();
+            let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
             check(&mut module).unwrap();
             build_registries(
                 &module.structs,
@@ -1377,7 +1376,7 @@ mod tests {
             let src =
                 "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
             let tokens = lex(src).unwrap();
-            let mut module = parse(&tokens).unwrap();
+            let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
             check(&mut module).unwrap();
             build_registries(
                 &module.structs,
@@ -1481,7 +1480,7 @@ mod tests {
                    : w ( -- ) ;"
         );
         let tokens = lex(&src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         // `SpyArr` (a `[Spy 4]` field) is spliced in directly rather than
         // through source: Item 1's array-type-use rejection means no source

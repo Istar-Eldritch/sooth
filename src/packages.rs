@@ -604,11 +604,15 @@ pub(crate) fn resolve_import(
 ) -> Result<Option<PathBuf>, String> {
     let name = match &imp.target {
         ImportTarget::Path(path) => {
-            // A user-level site is not a real package (R4), so it does not
-            // trigger the in-package rejection: a manifest-less file reaches
-            // its siblings by quoted path whether or not a user-level
-            // manifest happens to exist.
-            if let Some(site) = site.filter(|s| s.origin != SiteOrigin::UserLevel) {
+            // Only an *ancestor* manifest puts the importing file inside a
+            // package, which is what the rejection is about. A user-level site
+            // is not a real package (R4), and a `--manifest` site is a
+            // dependency table named on the command line for an entry file the
+            // design doc places explicitly *outside* the package's own tree (a
+            // test harness fixture in a temp directory) -- so neither makes
+            // the file a package member, and both keep reaching their siblings
+            // by quoted path.
+            if let Some(site) = site.filter(|s| s.origin == SiteOrigin::Ancestor) {
                 return Err(quoted_path_in_package_error(
                     importer,
                     imp,

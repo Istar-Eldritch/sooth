@@ -41,7 +41,7 @@ export function :arr_0 $scores__m0() {
 	%v14 =w cultl %v12, %v13
 	jnz %v14, @blk4, @blk5
 @blk5
-	%v15 =l copy 12
+	%v15 =l copy 14
 	%v16 =l copy 5
 	call $sooth_oob_trap(l %v15, l %v12, l %v16)
 	jmp @blk4
@@ -57,7 +57,7 @@ export function :arr_0 $scores__m0() {
 	%v23 =w cultl %v21, %v22
 	jnz %v23, @blk6, @blk7
 @blk7
-	%v24 =l copy 13
+	%v24 =l copy 15
 	%v25 =l copy 5
 	call $sooth_oob_trap(l %v24, l %v21, l %v25)
 	jmp @blk6
@@ -73,7 +73,7 @@ export function :arr_0 $scores__m0() {
 	%v32 =w cultl %v30, %v31
 	jnz %v32, @blk8, @blk9
 @blk9
-	%v33 =l copy 14
+	%v33 =l copy 16
 	%v34 =l copy 5
 	call $sooth_oob_trap(l %v33, l %v30, l %v34)
 	jmp @blk8
@@ -89,7 +89,7 @@ export function :arr_0 $scores__m0() {
 	%v41 =w cultl %v39, %v40
 	jnz %v41, @blk10, @blk11
 @blk11
-	%v42 =l copy 15
+	%v42 =l copy 17
 	%v43 =l copy 5
 	call $sooth_oob_trap(l %v42, l %v39, l %v43)
 	jmp @blk10
@@ -105,7 +105,7 @@ export function :arr_0 $scores__m0() {
 	%v50 =w cultl %v48, %v49
 	jnz %v50, @blk12, @blk13
 @blk13
-	%v51 =l copy 16
+	%v51 =l copy 18
 	%v52 =l copy 5
 	call $sooth_oob_trap(l %v51, l %v48, l %v52)
 	jmp @blk12
@@ -147,7 +147,7 @@ export function $sooth_main() {
 	%v20 =w cultl %v18, %v19
 	jnz %v20, @blk8, @blk9
 @blk9
-	%v21 =l copy 21
+	%v21 =l copy 23
 	%v22 =l copy 5
 	call $sooth_oob_trap(l %v21, l %v18, l %v22)
 	jmp @blk8
@@ -188,7 +188,7 @@ export function $sooth_main() {
 	%v45 =w cultl %v43, %v44
 	jnz %v45, @blk17, @blk18
 @blk18
-	%v46 =l copy 22
+	%v46 =l copy 24
 	%v47 =l copy 5
 	call $sooth_oob_trap(l %v46, l %v43, l %v47)
 	jmp @blk17
@@ -204,7 +204,7 @@ export function $sooth_main() {
 	%v55 =w cultl %v53, %v54
 	jnz %v55, @blk19, @blk20
 @blk20
-	%v56 =l copy 22
+	%v56 =l copy 24
 	%v57 =l copy 5
 	call $sooth_oob_trap(l %v56, l %v53, l %v57)
 	jmp @blk19
@@ -243,7 +243,7 @@ export function $sooth_main() {
 	%v78 =w cultl %v76, %v77
 	jnz %v78, @blk28, @blk29
 @blk29
-	%v79 =l copy 23
+	%v79 =l copy 25
 	%v80 =l copy 5
 	call $sooth_oob_trap(l %v79, l %v76, l %v80)
 	jmp @blk28

@@ -527,7 +527,6 @@ mod tests {
     use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     #[test]
     fn ir_type_of_array_and_usize_map() {
@@ -633,7 +632,7 @@ mod tests {
     #[test]
     fn ir_type_of_struct_maps_to_struct_irtype() {
         let tokens = lex("type: Vec2 x i64 y i64 ;").unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let ty = module.resolve_type_name("Vec2").unwrap();
         assert!(matches!(ir_type_of(ty), IrType::Struct(_)));
     }
@@ -641,7 +640,7 @@ mod tests {
     #[test]
     fn ir_type_of_enum_maps_to_enum_irtype() {
         let tokens = lex("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let ty = module.resolve_type_name("Shape").unwrap();
         assert!(matches!(ir_type_of(ty), IrType::Enum(_)));
     }

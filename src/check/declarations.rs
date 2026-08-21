@@ -119,6 +119,25 @@ pub(super) fn is_builtin_word_name(name: &str) -> bool {
     BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
 }
 
+/// P8 S2 (R2): the names the `intrinsics` import gates, which is
+/// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
+/// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
+/// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
+/// as a self-call. Their home is `core::cmp`, so gating them here would answer
+/// an unimported `lt` with "add `import: intrinsics *`", pointing at the wrong
+/// module.
+///
+/// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
+/// `Print` row per printable type, dispatched by `check_operator`) and does not
+/// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
+/// import error.
+pub(super) fn is_gated_intrinsic_name(name: &str) -> bool {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
+        return false;
+    }
+    is_builtin_word_name(name)
+}
+
 /// R1: a located error for an `extern:` declaration redeclaring a name
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
@@ -1805,7 +1824,7 @@ mod tests {
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     #[test]
@@ -1831,7 +1850,7 @@ mod tests {
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         module
     }
@@ -1902,9 +1921,8 @@ mod tests {
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),
             modules: vec![ModuleInfo {
-                imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
-                selective: HashMap::new(),
+                ..ModuleInfo::default()
             }],
             statics: Vec::new(),
         };
@@ -1931,12 +1949,11 @@ mod tests {
 
         fn info(exports: &[&str]) -> ModuleInfo {
             ModuleInfo {
-                imports: HashMap::new(),
                 exports: exports
                     .iter()
                     .map(|n| (n.to_string(), Span::default()))
                     .collect(),
-                selective: HashMap::new(),
+                ..ModuleInfo::default()
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -2236,6 +2253,36 @@ mod tests {
             );
         }
     }
+    /// P8 S2 (R2): the gate set is `is_builtin_word_name` minus exactly the six
+    /// surface comparisons -- no wider and no narrower. `.` is the case that
+    /// makes the difference load-bearing: both r1 reviews put it in the
+    /// exclusion set, but it is a real `BUILTIN_TABLE` intrinsic that does not
+    /// move to `core`, so gating it is correct and excluding it would let a bare
+    /// `.` through with no import at all.
+    #[test]
+    fn the_gate_set_excludes_exactly_the_six_surface_comparisons() {
+        for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
+            assert!(
+                is_builtin_word_name(name),
+                "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
+            );
+            assert!(!is_gated_intrinsic_name(name), "`{name}` is a `core` word");
+        }
+        for name in BUILTIN_WORDS
+            .iter()
+            .copied()
+            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
+            .chain([">u8", ">usize"])
+        {
+            assert!(is_gated_intrinsic_name(name), "`{name}` is gated");
+        }
+        assert!(is_gated_intrinsic_name("."), "`.` is a real intrinsic");
+        assert!(
+            !is_gated_intrinsic_name("call"),
+            "`call` is not in the table"
+        );
+    }
+
     #[test]
     fn overload_exact_input_match_is_error() {
         // R1: two definitions with identical `(module, name, input_types)`

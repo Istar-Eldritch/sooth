@@ -6,7 +6,10 @@
 \ `&!arr over &!> v !` writes), and the fixpoint loop is a hand-written
 \ self-tail-recursive word instead of `while`.
 
-import: "../lib/combinators.sth" c | times | ;
+import: intrinsics * ;
+import: core::prelude * ;
+
+import: core::combinators c | times | ;
 
 : scores ( -- [i64 5] )
   0 5 fill | s |

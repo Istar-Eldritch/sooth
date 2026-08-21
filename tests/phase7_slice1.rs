@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 fn scratch(tag: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let seq = N.fetch_add(1, Ordering::Relaxed);
@@ -19,7 +21,8 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn build_and_run(entry: &Path) -> String {
-    let binary = sooth::driver::build(entry).expect("build should succeed");
+    let binary = sooth::driver::build_with_manifest(entry, common::manifest_for(entry).as_deref())
+        .expect("build should succeed");
     let out = Command::new(&binary)
         .output()
         .expect("the built binary should run");
@@ -37,7 +40,7 @@ fn build_and_run(entry: &Path) -> String {
 fn run_program(tag: &str, src: &str) -> String {
     let dir = scratch(tag);
     let entry = dir.join("main.sth");
-    std::fs::write(&entry, src).expect("writing the entry should succeed");
+    common::write_fixture(&entry, src).expect("writing the entry should succeed");
     build_and_run(&entry)
 }
 
@@ -167,8 +170,9 @@ fn drop_of_owned_receiver_through_a_reference_chain_while_projected_is_diagnosti
                : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
                : main ( -- ) mk &data &^ swap drop 0 >usize &> @ >i64 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-p7s1-uaf-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("`drop` consumes a value while a reference derived from it is still live"),

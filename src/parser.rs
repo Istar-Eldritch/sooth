@@ -17,10 +17,10 @@
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, Import, ImportAnchor, ImportBinding, ImportTarget, Len, Line, Module, ModuleInfo,
-    ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl,
-    Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, Type, TypedSlot,
-    VariantDecl, VariantTag, VariantTagMode, WordDef,
+    GlobalMode, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line,
+    Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
+    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
+    Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -501,36 +501,10 @@ pub fn prepass_and_register(
     Ok(())
 }
 
-/// Slice 10c (R-P3-4): `lib/core.sth`, the words every program sees without an
-/// `import:` — `if`, `unless` and the six comparison words, each an ordinary
-/// `WordDef` over the `branch`/`tag`/comparison primitives. Compiled into the
-/// binary and parsed once, so the source of record is a real `lib/` file
-/// rather than a hand-built AST nobody can read.
-///
-/// Injected ahead of a file's own words exactly as `bool_enum_decl` injects
-/// the enum, and for the same reason: they are library definitions with no
-/// import path to reach them by. `resolve::mangle` leaves their names alone,
-/// so every module in a closure reaches the one definition by bare name.
-pub fn prelude_words() -> Vec<WordDef> {
-    let src = include_str!("../lib/core.sth");
-    let tokens = crate::lexer::lex(src).expect("lib/core.sth lexes");
-    parse_without_prelude(&tokens)
-        .expect("lib/core.sth parses")
-        .words
-}
-
+/// Parse one file's tokens into a whole `Module`: the single-file path, with
+/// no import closure around it. The driver's multi-file path builds its own
+/// `Module` around `parse_bodies` instead.
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
-    let mut module = parse_without_prelude(tokens)?;
-    // Appended, not prepended: a file's own words keep their source order and
-    // their positions in `words`, which the parser's own tests index by.
-    module.words.extend(prelude_words());
-    Ok(module)
-}
-
-/// `parse` minus the prelude injection: the prelude itself is parsed through
-/// here, and the driver's multi-file path builds its own `Module` around
-/// `parse_bodies` and injects the prelude at that level instead.
-fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
     // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
     // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
@@ -597,6 +571,12 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
             imports: HashMap::new(),
             exports: bodies.exports,
             selective: HashMap::new(),
+            // P8 S2 (R2): the single-file, no-driver path (the REPL's own
+            // parse, and every in-process test). It resolves no `import:` at
+            // all, so it has nothing to derive a gate from; the driver builds
+            // its own `ModuleInfo` per file in `assemble_module` and never
+            // reaches this one, so the gate still holds where files are built.
+            intrinsics: IntrinsicVisibility::All,
         }],
         statics: bodies.statics,
     })
@@ -4063,7 +4043,7 @@ mod tests {
     fn parse_gcd_shape_matches_ast() {
         let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
         let module = parse_src(&src).unwrap();
-        assert_eq!(module.words.len(), 2 + crate::parser::prelude_words().len());
+        assert_eq!(module.words.len(), 2);
 
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");

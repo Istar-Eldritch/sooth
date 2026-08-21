@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -39,7 +39,7 @@ fn repl_session(lines: &[&str]) -> String {
 /// diagnostic negatives.
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -76,8 +76,9 @@ fn combinators_import(qualifier: &str) -> String {
 /// nor add one.
 fn run_src(name: &str, src: &str, trace: bool) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let mut cmd = Command::new(&binary);
     match trace {
         true => cmd.env(sooth::ir::TRACE_ALLOC_ENV, "1"),
@@ -298,8 +299,9 @@ fn max_total_over_floats_prints_the_total_ordered_larger() {
 /// `run_src`'s `.code().expect(...)` would panic on rather than report.
 fn run_stack_bounded_src(name: &str, src: &str) -> Option<i32> {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     let status = std::process::Command::new("sh")
         .arg("-c")

@@ -60,7 +60,7 @@ export function $push.2d.byte__m0(l %v0, w %v1) {
 	%v7 =w cultl %v3, %v6
 	jnz %v7, @blk1, @blk2
 @blk2
-	%v8 =l copy 10
+	%v8 =l copy 13
 	%v9 =l copy 64
 	call $sooth_oob_trap(l %v8, l %v3, l %v9)
 	jmp @blk1
@@ -84,7 +84,7 @@ export function w $byte.2d.at__m0(l %v0, l %v1) {
 	%v5 =w cultl %v1, %v4
 	jnz %v5, @blk1, @blk2
 @blk2
-	%v6 =l copy 15
+	%v6 =l copy 18
 	%v7 =l copy 64
 	call $sooth_oob_trap(l %v6, l %v1, l %v7)
 	jmp @blk1

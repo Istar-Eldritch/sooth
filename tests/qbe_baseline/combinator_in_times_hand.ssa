@@ -41,7 +41,7 @@ export function :arr_0 $mk__m0(l %v0) {
 	%v15 =w cultl %v13, %v14
 	jnz %v15, @blk4, @blk5
 @blk5
-	%v16 =l copy 13
+	%v16 =l copy 15
 	%v17 =l copy 3
 	call $sooth_oob_trap(l %v16, l %v13, l %v17)
 	jmp @blk4
@@ -56,7 +56,7 @@ export function :arr_0 $mk__m0(l %v0) {
 	%v23 =w cultl %v21, %v22
 	jnz %v23, @blk6, @blk7
 @blk7
-	%v24 =l copy 14
+	%v24 =l copy 16
 	%v25 =l copy 3
 	call $sooth_oob_trap(l %v24, l %v21, l %v25)
 	jmp @blk6
@@ -73,7 +73,7 @@ export function :arr_0 $mk__m0(l %v0) {
 	%v33 =w cultl %v31, %v32
 	jnz %v33, @blk8, @blk9
 @blk9
-	%v34 =l copy 15
+	%v34 =l copy 17
 	%v35 =l copy 3
 	call $sooth_oob_trap(l %v34, l %v31, l %v35)
 	jmp @blk8
@@ -133,7 +133,7 @@ export function $sooth_main() {
 	%v32 =w cultl %v30, %v31
 	jnz %v32, @blk15, @blk16
 @blk16
-	%v33 =l copy 20
+	%v33 =l copy 22
 	%v34 =l copy 3
 	call $sooth_oob_trap(l %v33, l %v30, l %v34)
 	jmp @blk15

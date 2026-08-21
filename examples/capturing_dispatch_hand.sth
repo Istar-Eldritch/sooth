@@ -4,6 +4,8 @@
 \ version reads the same three elements directly, with no closure, no
 \ dispatch table, and no `call`. The golden pins both to the same output.
 
+import: intrinsics * ;
+
 : main ( -- )
   7 3 fill | arr |
   &!arr 1 >usize &!> 8 !

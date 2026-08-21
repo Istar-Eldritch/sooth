@@ -10,7 +10,9 @@
 //! argument site, not the splice site.
 
 use sooth::ir::{lower, Instr, IrFunc, Terminator};
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
+
+mod common;
 
 /// A row-polymorphic `if`, hand-written over the primitive `if` (the library
 /// `if` arrives in P3): `..i`/`..o` may differ, per P2's parser lift.
@@ -19,7 +21,7 @@ const MYIF: &str = ": myif inline ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- 
 
 fn lowered(src: &str) -> Vec<IrFunc> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     lower(&module).expect("lowering should succeed").funcs
 }
@@ -55,8 +57,9 @@ static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}-{id}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     binary
 }
@@ -90,7 +93,7 @@ fn run(src: &str) -> String {
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 

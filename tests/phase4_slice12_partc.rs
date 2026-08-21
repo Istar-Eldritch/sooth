@@ -8,17 +8,19 @@
 //! this phase). `examples/capturing_dispatch.sth`'s stored/returned ordinary
 //! quotations stay unmigrated and still run (X9, R-C4).
 
+mod common;
 fn check_error(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).expect("lexing should succeed");
-    let mut module = sooth::parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = sooth::test_support::parse_with_core(&tokens).expect("parsing should succeed");
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
 /// Build and run `src`, returning its stdout.
 fn run(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -128,7 +130,11 @@ fn capturing_dispatch_example_stays_unmigrated_and_runs() {
         !src.contains('~'),
         "capturing_dispatch.sth's stored/returned quotations must stay ordinary `[ ... ]`: {src}"
     );
-    let binary = sooth::driver::build(std::path::Path::new(&path)).expect("build should succeed");
+    let binary = sooth::driver::build_with_manifest(
+        std::path::Path::new(&path),
+        common::manifest_for(std::path::Path::new(&path)).as_deref(),
+    )
+    .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()

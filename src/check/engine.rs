@@ -1325,11 +1325,10 @@ impl<'a> Ctx<'a> {
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     fn bare_word(name: &str, module: u32) -> WordDef {
@@ -1400,7 +1399,7 @@ mod tests {
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         module
     }

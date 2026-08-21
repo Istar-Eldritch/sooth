@@ -1,6 +1,8 @@
 \ Slice 13 phase 2 (R-B8): the shared read witness. `first` borrows its array
 \ local, indexes it through the shared array-element accessor, and fetches
 \ the element -- all still generic, monomorphized at `i64` by this call.
+import: intrinsics * ;
+
 : first ( ['T: Copy 4] -- 'T ) | a | &a 0 &> @ ;
 : main ( -- )
   0 4 fill | a |

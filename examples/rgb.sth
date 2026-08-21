@@ -2,6 +2,8 @@
 \ `i32` arithmetic, then unpack the lowest channel (blue) back to a `u8` via
 \ narrowing. No `/`: unpack only isolates blue, per the slice's Q3 resolution.
 
+import: intrinsics * ;
+
 : pack ( i64 i64 i64 -- i32 )
   | r g b |
   r >i32 65536 >i32 mul

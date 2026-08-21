@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/symbol_hijack.rs`'s
 /// own pattern).
 struct Scratch(PathBuf);
@@ -20,7 +22,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3a-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -41,7 +43,8 @@ impl Drop for Scratch {
 /// build failure panics: these programs are all well-typed, so a build error
 /// is itself the regression to surface.
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
-    let binary = driver::build(src).expect("program should build");
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -105,7 +108,9 @@ fn two_asymmetric_instantiations_mint_distinct_symbols_nm() {
            \"one\" 2 Err reorder drop show_si ;\n"
     );
     let prog = Scratch::write("t2", &src);
-    let binary = driver::build(prog.path()).expect("program should build");
+    let binary =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .expect("program should build");
     let nm = std::process::Command::new("nm")
         .arg(&binary)
         .output()
@@ -172,7 +177,7 @@ fn generic_nested_depth_two_is_error() {
                : wrap ( 'T -- Box[Box['T]] ) Box ;\n\
                : main ( -- ) 1 wrap drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
-    let err = sooth::parser::parse(&tokens).unwrap_err();
+    let err = sooth::test_support::parse_with_core(&tokens).unwrap_err();
     assert!(
         err.contains("nesting depth"),
         "names the depth-2 rejection: {err}"
@@ -188,7 +193,7 @@ fn generic_constructor_undetermined_argument_is_error() {
                : bad ( 'T i64 -- 'T ) Err drop ;\n\
                : main ( -- ) 1 2 bad drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
+    let mut module = sooth::test_support::parse_with_core(&tokens).unwrap();
     let err = sooth::check::check(&mut module).unwrap_err();
     assert!(
         err.contains("leaves the type variable `'T` undetermined"),
@@ -205,7 +210,7 @@ fn generic_constructor_operand_mismatch_is_error() {
                : mk ( 'T -- Pair['T] ) 1 swap Pair ;\n\
                : main ( -- ) \"oops\" mk drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
+    let mut module = sooth::test_support::parse_with_core(&tokens).unwrap();
     let err = sooth::check::check(&mut module).unwrap_err();
     assert!(err.contains("type mismatch in `mk`"), "{err}");
 }
@@ -219,7 +224,7 @@ fn dup_on_variable_bearing_generic_slot_is_error() {
                : dupit ( 'T Result['T 'E] -- Result['T 'E] Result['T 'E] 'T ) dup ;\n\
                : main ( -- ) 1 2 Err dupit drop drop drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
+    let mut module = sooth::test_support::parse_with_core(&tokens).unwrap();
     let err = sooth::check::check(&mut module).unwrap_err();
     assert!(
         err.contains("cannot `dup` a generic type applied to a variable"),

@@ -1458,7 +1458,7 @@ mod tests {
         Registries, Structs,
     };
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
+    use crate::parser::parse_line;
     use std::collections::HashMap;
 
     fn empty_layouts() -> Layouts<'static> {
@@ -1471,7 +1471,7 @@ mod tests {
 
     fn emit_src(src: &str) -> String {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         let ir = lower(&module).unwrap();
         emit(&ir).unwrap()

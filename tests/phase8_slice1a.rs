@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch tree of packages (each its own directory with a `sooth.pkg` and
 /// `.sth` files), removed on drop.
 struct Tree(PathBuf);
@@ -27,7 +29,7 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(rel, contents)).unwrap();
         path
     }
 }
@@ -40,7 +42,8 @@ impl Drop for Tree {
 
 /// Build and run the entry file, returning `(stdout, exit_code)`.
 fn build_and_run(entry: &Path) -> (String, i32) {
-    let binary = driver::build(entry).expect("build should succeed");
+    let binary = driver::build_with_manifest(entry, common::manifest_for(entry).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -53,7 +56,7 @@ fn build_and_run(entry: &Path) -> (String, i32) {
 
 /// Build the entry file, expecting a diagnostic (the closure never links).
 fn build_err(entry: &Path) -> String {
-    match driver::build(entry) {
+    match driver::build_with_manifest(entry, common::manifest_for(entry).as_deref()) {
         Ok(_) => panic!("build should have failed"),
         Err(e) => e,
     }

@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 /// A scratch tree of `.sth` files outside any package, so imports resolve by
 /// quoted path and no manifest is involved. Removed on drop.
 struct Tree(PathBuf);
@@ -27,7 +29,7 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(rel, contents)).unwrap();
         path
     }
 }
@@ -266,4 +268,194 @@ fn a_name_the_hub_does_not_export_is_unreachable_through_it() {
     );
     let err = build_error(&entry);
     assert!(err.contains("unknown word"), "unexpected diagnostic: {err}");
+}
+
+// -- R2/R6a: the intrinsics are a module, and `import:` gates them ------------
+
+/// A fixture written *verbatim*, with no harness-appended imports: every golden
+/// below is about which `import:` lines are present, so `Tree::write`'s
+/// convenience would erase the thing under test.
+fn write_raw(t: &Tree, rel: &str, contents: &str) -> PathBuf {
+    let path = t.0.join(rel);
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+/// R2/R6a: a bare builtin call in a module with no `intrinsics` import is a
+/// located error naming the word and the missing import, not `unknown word`
+/// and not a builtin dispatch.
+#[test]
+fn a_bare_intrinsic_without_an_import_is_a_located_error() {
+    let t = Tree::new("intrinsic-ungated");
+    let entry = write_raw(&t, "main.sth", ": main ( -- ) 1 2 add . ;\n");
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: `add` is an intrinsic and is not imported in `main` (line 1, col 19)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file"
+        ),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// R2: both import shapes make a builtin visible, and a selective import that
+/// omits the name still refuses it -- the positive control that stops the gate
+/// from being satisfied by "nothing ever resolves".
+#[test]
+fn both_intrinsics_import_shapes_admit_a_builtin_and_a_partial_one_does_not() {
+    let t = Tree::new("intrinsic-shapes");
+    let wildcard = write_raw(
+        &t,
+        "wild.sth",
+        "import: intrinsics * ;\n: main ( -- ) 1 2 add . ;\n",
+    );
+    assert_eq!(build_and_run(&wildcard), "3\n");
+
+    let selective = write_raw(
+        &t,
+        "sel.sth",
+        "import: intrinsics i | add . | ;\n: main ( -- ) 1 2 add . ;\n",
+    );
+    assert_eq!(build_and_run(&selective), "3\n");
+
+    // The same file with `add` dropped from the list: the subset is a real
+    // subset, not a spelling of "all".
+    let partial = write_raw(
+        &t,
+        "partial.sth",
+        "import: intrinsics i | . | ;\n: main ( -- ) 1 2 add . ;\n",
+    );
+    let err = build_error(&partial);
+    assert!(
+        err.contains("error: `add` is an intrinsic and is not imported in `main`"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// R2: the six surface comparisons are *not* in the gate set. They are `core`
+/// words, so an unimported `lt` must be an unknown word -- pointing at
+/// `import: core::prelude`, which the R6(a) wording would not -- even though
+/// `BUILTIN_WORDS` still lists them for `has_self_tail_call`'s sake.
+#[test]
+fn an_unimported_comparison_is_an_unknown_word_not_an_ungated_intrinsic() {
+    let t = Tree::new("cmp-not-intrinsic");
+    let entry = write_raw(
+        &t,
+        "main.sth",
+        "import: intrinsics * ;\n: main ( -- ) 1 2 lt drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("error: unknown word `lt`") && !err.contains("is an intrinsic"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+// -- R3/R8: the prelude is gone; `core` is a package you import ---------------
+
+/// R3: `if` and the comparisons no longer arrive without an `import:`. The same
+/// file builds once it names `core::prelude`, so this is the import doing the
+/// work rather than the program being wrong.
+#[test]
+fn the_typed_core_arrives_only_by_import() {
+    let t = Tree::new("core-import");
+    const BODY: &str = ": main ( -- ) 3 4 lt ~[ 1 ] ~[ 0 ] if . ;\n";
+    let without = write_raw(
+        &t,
+        "without.sth",
+        &format!("import: intrinsics * ;\n{BODY}"),
+    );
+    let err = build_error(&without);
+    assert!(
+        err.contains("error: unknown word `lt`"),
+        "unexpected diagnostic: {err}"
+    );
+
+    // With the import, and resolved through the real `lib/` package rather than
+    // a stand-in, so this also pins that `core::prelude`'s re-export chain
+    // reaches `core::cmp`/`core::bool`.
+    let with = write_raw(
+        &t,
+        "with.sth",
+        &format!("import: intrinsics * ;\nimport: core::prelude * ;\n{BODY}"),
+    );
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(&with)
+        .arg("--manifest")
+        .arg(common::fixture_manifest())
+        .output()
+        .expect("sooth build should spawn");
+    assert!(
+        build.status.success(),
+        "the same file builds with the import; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = with.with_extension("");
+    let out = Command::new(&binary).output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n");
+}
+
+// -- R6b: the narrowing prelude deletion introduces, named ------------------
+
+/// R6b: a non-inline polymorphic word calling an imported polymorphic word is
+/// the one capability prelude deletion removes (the prelude's comparisons were
+/// reachable by bare, unmangled name from any body). It is a located error
+/// naming caller, callee and remedy -- not the raw `unknown word `lt__mN``
+/// that leaks a mangled spelling.
+#[test]
+fn a_poly_word_calling_an_imported_poly_word_names_the_narrowing() {
+    let t = Tree::new("poly-calls-poly");
+    let entry = write_raw(
+        &t,
+        "main.sth",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n\
+         : mylt ( 'T: Copy Ord 'T -- bool ) lt ;\n\
+         : main ( -- ) 1 2 mylt drop ;\n",
+    );
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(&entry)
+        .arg("--manifest")
+        .arg(common::fixture_manifest())
+        .output()
+        .expect("sooth build should spawn");
+    let err = String::from_utf8_lossy(&build.stderr).into_owned();
+    assert!(!build.status.success(), "build should have failed: {err}");
+    assert!(
+        err.contains(
+            "cannot call the polymorphic word `lt`"
+        ) && err.contains("`mylt`")
+            && err.contains(
+                "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
+            )
+            && err.contains(
+                "inline the caller, make the callee concrete, or call the callee from a monomorphic word"
+            ),
+        "unexpected diagnostic: {err}"
+    );
+    assert!(
+        !err.contains("__m"),
+        "the diagnostic must not leak a mangled spelling: {err}"
+    );
+}
+
+/// R2, the poly-body twin: a generic body dispatches the same builtins on its
+/// own path (`poly_call_term`), so without a gate there an unimported `dup`
+/// would be refused in a monomorphic word and free in a polymorphic one.
+#[test]
+fn the_intrinsic_gate_also_covers_a_polymorphic_body() {
+    let t = Tree::new("intrinsic-poly");
+    let entry = write_raw(
+        &t,
+        "main.sth",
+        "import: intrinsics i | . | ;\n\
+         : twice ( 'T: Copy -- 'T 'T ) dup ;\n\
+         : main ( -- ) 1 twice . . ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("error: `dup` is an intrinsic and is not imported in `twice`"),
+        "unexpected diagnostic: {err}"
+    );
 }

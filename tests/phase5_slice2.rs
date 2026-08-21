@@ -9,10 +9,12 @@
 //! selective import list (`import: "..." r | Ok Err | ;`); the dispatch call
 //! itself is the unqualified `Result?`, keyed by the generic's surface name.
 
+mod common;
 fn build_and_run(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -35,9 +37,13 @@ fn build_and_run_dir(name: &str, files: &[(&str, &str)], entry: &str) -> (String
     let dir = std::env::temp_dir().join(format!("sooth-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("creating temp dir should succeed");
     for (fname, src) in files {
-        std::fs::write(dir.join(fname), src).expect("writing temp source should succeed");
+        common::write_fixture(&dir.join(fname), src).expect("writing temp source should succeed");
     }
-    let binary = sooth::driver::build(&dir.join(entry)).expect("build should succeed");
+    let binary = sooth::driver::build_with_manifest(
+        &dir.join(entry),
+        common::manifest_for(&dir.join(entry)).as_deref(),
+    )
+    .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()

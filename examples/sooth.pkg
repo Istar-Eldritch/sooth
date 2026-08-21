@@ -1,0 +1,7 @@
+\ The examples and goldens as a package, so each one resolves `core` through a
+\ `depends:` entry in the tree rather than through a developer's machine-local
+\ user manifest: `sooth build examples/gcd.sth` and a CI run see the same
+\ `core`.
+package: examples ;
+layer: hosted ;
+depends: core path "../lib" ;

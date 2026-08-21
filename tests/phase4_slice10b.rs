@@ -29,8 +29,9 @@ mod common;
 /// Compile and run `src`, returning stdout and the exit code.
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -50,8 +51,9 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 /// resolving the import needs the full driver.
 fn build_check_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
 }
@@ -100,7 +102,7 @@ impl Closure {
 
     fn write(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.0.join(name);
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(name, contents)).unwrap();
         path
     }
 }
@@ -316,7 +318,8 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
         "import: \"lib.sth\" lib ;\n\
          : main ( -- ) 5 lib::make [ drop ] lib::run ;\n",
     );
-    let err = driver::build(&entry).expect_err("build should fail its check");
+    let err = driver::build_with_manifest(&entry, common::manifest_for(&entry).as_deref())
+        .expect_err("build should fail its check");
     assert!(
         err.contains("cannot `drop` a value of type `lib::Res` in `main`")
             && err.contains("has not imported by name"),
@@ -360,7 +363,8 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
         "import: \"b.sth\" b ;\n\
          : main ( -- ) 1 ~[ drop 0 ] b::outer . ;\n",
     );
-    let err = driver::build(&entry).expect_err("build should fail its check");
+    let err = driver::build_with_manifest(&entry, common::manifest_for(&entry).as_deref())
+        .expect_err("build should fail its check");
     assert!(
         err.contains("cannot `drop` a value of type `b::Res` in `main`")
             && err.contains("has not imported by name"),
@@ -380,8 +384,9 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
 /// reduced `ulimit -s` (the constant-stack witnesses) rather than plainly.
 fn build_binary(name: &str, src: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     binary
 }

@@ -4,6 +4,9 @@
 \ (the same loop-state hygiene the constructor needs, now on `fill` for the
 \ first time since `fill` never opened a loop before).
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 type: Pair a i64 b i64 ;
 
 \ A scalar seed reaches the last slot (index 7 of 8).

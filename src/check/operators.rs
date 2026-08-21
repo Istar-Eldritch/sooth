@@ -531,11 +531,10 @@ fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     /// `check_src` skips `resolve_modules` entirely, so it never mangles a
@@ -544,7 +543,7 @@ mod tests {
     /// even for a single file, so this helper runs that same pass first.
     fn check_src_mangled(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }

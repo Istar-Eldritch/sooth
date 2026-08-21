@@ -1113,15 +1113,12 @@ impl Session {
         session
             .eval_def(crate::ast::bool_print_word_def(), &mut std::io::sink())
             .expect("the injected `bool` print word always checks and compiles");
-        // Slice 10c (R-P3-4): `lib/core.sth`'s words, seeded the same way, so
-        // a session sees `if`/`unless` and the six comparison words exactly as
-        // a compiled program does. All eight are always-spliced, so `eval_def`
-        // routes each to the combinator-retention path.
-        for word in crate::parser::prelude_words() {
-            session
-                .eval_def(word, &mut std::io::sink())
-                .expect("an injected `lib/core.sth` word always checks and compiles");
-        }
+        // P8 S2 (R3): nothing else is seeded. `if`, `unless` and the six
+        // comparisons used to be injected here from the compiler-baked
+        // prelude; they are ordinary `core` words now, so a session that wants
+        // them writes `import: core::prelude * ;` exactly as a file does, and a
+        // bare comparison with no import is `unknown word` -- which is what a
+        // compiled build does too.
         session
     }
 
@@ -2261,27 +2258,54 @@ impl Session {
             // env-splice loop above skips it -- a spliced combinator's call
             // to bare `.` resolves against the session's own identical
             // injected copy with no rename needed, and no `q::.__importN`
-            // env row exists to rename it to. Slice 10c (R-P3-4): the
-            // `lib/core.sth` words are excluded on the same grounds; they are
-            // injected into the imported closure *and* seeded into the
-            // session, so renaming an imported `while`'s `if` would point it
-            // at a `q::if__importN` nothing defines.
-            .filter(|w| {
-                w.module == 0
-                    && w.name != "main"
-                    && w.name != "drop"
-                    && w.name != "."
-                    && !crate::resolve::is_prelude_word_name(&w.name)
-            })
+            // env row exists to rename it to. P8 S2 (R3): the `core` words
+            // used to be excluded here for the same reason -- they existed
+            // twice, injected into the imported closure *and* seeded into the
+            // session. The prelude is gone, so they exist once, in the
+            // closure, and epoch-rename like any other imported word.
+            // P8 S2 (R3): a *dependency* module's always-spliced word is
+            // renamed too, not just module 0's. Module 0's own body may call
+            // one (`lib/combinators.sth`'s `while` calls `core::bool`'s `if`),
+            // and until the prelude was deleted that call named the injected,
+            // never-mangled `if` and resolved against the session's own seeded
+            // copy. It is `if__m2` now -- a real word of a real dependency
+            // module -- so it has to be renamed and retained like any other.
+            // Its mangled spelling is already module-unique, so it is used
+            // as-is rather than stripped.
+            .filter(|w| w.name != "main" && w.name != "drop" && w.name != ".")
             .map(|w| {
-                let raw = if multi {
-                    w.name.strip_suffix("__m0").unwrap_or(&w.name)
-                } else {
-                    w.name.as_str()
+                let raw = match (w.module, multi) {
+                    (0, true) => w.name.strip_suffix("__m0").unwrap_or(&w.name),
+                    _ => w.name.as_str(),
                 };
                 (w.name.clone(), format!("{q}::{raw}__import{epoch}"))
             })
             .collect();
+        // The dependency-module half of the retention below: an always-spliced
+        // word module 0's own retained bodies call. No alias and no `self.env`
+        // row -- it is reachable only through a spliced body, never by a name a
+        // session line could write, so `q::if` still misses (R15 privacy).
+        for w in &module.words {
+            if w.module == 0 || !check::is_combinator(w) {
+                continue;
+            }
+            let Some(internal) = body_rename.get(&w.name).cloned() else {
+                continue;
+            };
+            let stored = remap_imported_combinator(
+                w,
+                &internal,
+                &body_rename,
+                module_base,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+                slice_base,
+            );
+            self.combinators.insert(internal, stored);
+        }
         for (raw, _span) in &module.modules[0].exports {
             let mangled = mangled_of(raw);
             let Some(w) = module
@@ -2692,6 +2716,10 @@ impl Session {
             &[],
             None,
             &mut builtin_overloads,
+            // P8 S2 (R6b): a session's poly words are not in a module closure,
+            // so no cross-module narrowing can arise here and there is nothing
+            // to name.
+            &HashSet::new(),
             None,
         )?;
 
@@ -4317,9 +4345,9 @@ mod tests {
             "lib.sth",
             "type: P x i64 ;\n\
              type: H y i64 ;\n\
-             : ok? ( i64 -- bool ) 0 gt ;\n\
-             : hidden? ( i64 -- bool ) 0 gt ;\n\
-             export: ok? P ;\n",
+             : ok? ( i64 -- bool ) drop true ;\n\
+             : hidden? ( i64 -- bool ) drop true ;\n\
+             export: ok? P ;\nimport: intrinsics * ;\n",
         );
         let mut session = Session::new();
         let mut out = Vec::new();
@@ -4468,7 +4496,10 @@ mod tests {
         // the `display_name` reversal or the `poly_words` fold inside
         // `word_names()` must fail this test, not just `:words`' listing.
         let d = LibDir::new("word_names");
-        let lib = d.write("lib.sth", ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n");
+        let lib = d.write(
+            "lib.sth",
+            ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\nimport: intrinsics * ;\n",
+        );
         let mut session = Session::new();
         let mut out = Vec::new();
         session

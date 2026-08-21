@@ -9,7 +9,7 @@
 use std::io::BufReader;
 
 use sooth::ast::Type;
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -17,8 +17,9 @@ mod common;
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -36,7 +37,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -46,21 +47,22 @@ fn check_error(src: &str) -> String {
 /// its check.
 fn build_check_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
 }
 
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    parser::parse(&tokens).expect_err("parsing should fail")
+    test_support::parse_with_core(&tokens).expect_err("parsing should fail")
 }
 
 /// Assert `src` type-checks (a positive standalone-check golden).
 fn check_ok(src: &str) {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
 }
 
@@ -98,7 +100,7 @@ fn quotation_type_in_signature_parses() {
     let src = ": a ( [ i64 -- i64 ] -- ) drop ;\n\
                : b ( [ -- ] -- ) drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let a_in = module.words[0].effect.inputs[0].ty;
     let b_in = module.words[1].effect.inputs[0].ty;
     assert!(
@@ -337,7 +339,7 @@ fn array_of_quotation_type_is_a_legal_declaration() {
     // error as an array count nor panic in layout.
     let tokens =
         lexer::lex(": main ( [ [ i64 -- i64 ] 3 ] -- ) drop ;\n").expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("an array-of-quotation type is legal to declare in 7a");
 }
 
@@ -1411,8 +1413,9 @@ fn quotation_at_runtime_position_in_poly_body_is_error() {
 /// and runs it at several stack limits.
 fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     binary
 }
@@ -1556,8 +1559,11 @@ fn repl_self_tail_combinator_definition_is_accepted() {
     // R19: the former self-tail rejection is now acceptance. `while` defines at
     // a session line (the self-tail edge is permitted, 6b D5) rather than being
     // rejected on its declared quotation parameter.
-    let transcript = repl_error(&format!("{WHILE_DEF}:quit\n"));
-    assert_eq!(transcript, "defined while\n");
+    let transcript = repl_error(&format!("{}{WHILE_DEF}:quit\n", common::repl_core_lines()));
+    assert_eq!(
+        transcript,
+        format!("{}defined while\n", common::REPL_CORE_ECHO)
+    );
     assert!(
         !transcript.contains("declares a quotation parameter"),
         "the former self-tail rejection must be gone: {transcript}"
@@ -1582,9 +1588,13 @@ fn repl_while_define_runs_to_fixpoint() {
     // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
     // stack), not an infinite splice or a link failure to a never-minted symbol.
     let transcript = repl_error(&format!(
-        "{WHILE_DEF}0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while\n:quit\n"
+        "{}{WHILE_DEF}0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while\n:quit\n",
+        common::repl_core_lines()
     ));
-    assert_eq!(transcript, "defined while\nstack: 5\n");
+    assert_eq!(
+        transcript,
+        format!("{}defined while\nstack: 5\n", common::REPL_CORE_ECHO)
+    );
 }
 
 #[test]
@@ -1596,11 +1606,15 @@ fn repl_two_output_combinator_define_and_call() {
     // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
     // be wrongly deferred as "resolves to 2 outputs".
     let transcript = repl_error(&format!(
-        "{TIMES_DEF}{FILTER_DEF}7 3 fill [ 5 gt ] filter\n:quit\n"
+        "{}{TIMES_DEF}{FILTER_DEF}7 3 fill [ 5 gt ] filter\n:quit\n",
+        common::repl_core_lines()
     ));
     assert_eq!(
         transcript,
-        "defined times-helper\ndefined times\ndefined filter\nstack: <[i64 3]> 3\n"
+        format!(
+            "{}defined times-helper\ndefined times\ndefined filter\nstack: <[i64 3]> 3\n",
+            common::REPL_CORE_ECHO
+        )
     );
 }
 
@@ -1851,7 +1865,7 @@ fn combinator_in_times_dogfood_matches_hand_threaded() {
 /// Each test names its file distinctly so the goldens can run in parallel.
 fn temp_lib(name: &str, contents: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, contents).expect("writing temp library should succeed");
+    common::write_fixture(&path, contents).expect("writing temp library should succeed");
     path
 }
 
@@ -2030,10 +2044,14 @@ fn repl_imported_while_runs_to_fixpoint() {
     // deleted, the self-call would miss the recognizer and the splice would
     // recurse forever.
     let transcript = repl_error(&format!(
-        "{}0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while\n:quit\n",
+        "{}{}0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while\n:quit\n",
+        common::repl_core_lines(),
         combinators_import("c")
     ));
-    assert_eq!(transcript, "imported c\nstack: 5\n");
+    assert_eq!(
+        transcript,
+        format!("{}imported c\nstack: 5\n", common::REPL_CORE_ECHO)
+    );
 }
 
 #[test]
@@ -2044,10 +2062,14 @@ fn repl_imported_filter_runs() {
     // The two-output poly combinator lands both outputs on the residual stack,
     // exactly as the session-defined `filter` does.
     let transcript = repl_error(&format!(
-        "{}7 3 fill ~[ 5 gt ] c::filter\n:quit\n",
+        "{}{}7 3 fill ~[ 5 gt ] c::filter\n:quit\n",
+        common::repl_core_lines(),
         combinators_import("c")
     ));
-    assert_eq!(transcript, "imported c\nstack: <[i64 3]> 3\n");
+    assert_eq!(
+        transcript,
+        format!("{}imported c\nstack: <[i64 3]> 3\n", common::REPL_CORE_ECHO)
+    );
 }
 
 #[test]
@@ -2088,7 +2110,8 @@ fn repl_combinators_dogfood_matches_native() {
     // this leaves both results on the residual stack instead of printing them,
     // and pins the same two values in the same order.
     let transcript = repl_error(&format!(
-        "{}{}\n{}\n{}\n:quit\n",
+        "{}{}{}\n{}\n{}\n:quit\n",
+        common::repl_core_lines(),
         combinators_import("c"),
         ": scores ( -- [i64 5] ) 0 5 fill | s | \
          &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
@@ -2098,7 +2121,10 @@ fn repl_combinators_dogfood_matches_native() {
     ));
     assert_eq!(
         transcript,
-        "imported c\ndefined scores\nstack: 3\nstack: 3 5\n"
+        format!(
+            "{}imported c\ndefined scores\nstack: 3\nstack: 3 5\n",
+            common::REPL_CORE_ECHO
+        )
     );
 }
 
@@ -2118,7 +2144,8 @@ fn build_error_with_import(name: &str, entry: &str) -> String {
     );
     let entry_src = format!("import: \"{}\" lib ;\n{entry}", lib.display());
     let path = temp_lib(&format!("{name}-entry"), &entry_src);
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&lib).ok();
     std::fs::remove_file(&path).ok();
     err

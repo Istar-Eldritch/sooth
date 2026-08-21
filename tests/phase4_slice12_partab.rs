@@ -3,13 +3,14 @@
 //! `is_combinator` is declared, not inferred (R-A1, unit-tested in
 //! `src/check/combinators.rs`); a `~[ ... ]` parameter without `inline` is a
 //! located error (R-B1, unit-tested in `src/check/word_entry.rs`). This file
-//! covers X2 (the nine library words are declared combinators, and still run)
-//! and X4 (`arrays.sth`'s retyped `bin_search`/`sort` still run, an ordinary
-//! `[ ... ]` literal still satisfying their new `~[ ... ]` parameter until part
-//! C requires the tilde).
+//! covers X2 (the nine library words are declared combinators, and still run).
+//! X4 (`arrays.sth`'s retyped `bin_search`/`sort`) went with that file when it
+//! left the tree.
 
-/// The nine `lib/combinators.sth`/`lib/core.sth` words that gained `inline`
-/// this slice, paired with the file that defines each.
+/// The nine library words that gained `inline` this slice, paired with the file
+/// that defines each. P8.S2 (R8) split `lib/core.sth` into `core::bool` and
+/// `core::cmp`, so `if`/`unless` live in `bool.sth` now.
+mod common;
 const MIGRATED: [(&str, &str); 9] = [
     ("combinators.sth", "times-helper"),
     ("combinators.sth", "times"),
@@ -18,16 +19,17 @@ const MIGRATED: [(&str, &str); 9] = [
     ("combinators.sth", "fold"),
     ("combinators.sth", "filter"),
     ("combinators.sth", "while"),
-    ("core.sth", "if"),
-    ("core.sth", "unless"),
+    ("bool.sth", "if"),
+    ("bool.sth", "unless"),
 ];
 
 /// Build and run `src`, returning the built binary's path (left in place for
 /// the caller to remove), stdout, and exit code.
 fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -96,47 +98,9 @@ fn migrated_library_words_still_run() {
     assert_eq!(code, 0);
 }
 
-/// X4: `arrays.sth`'s `bin_search`/`sort` retype their comparator to
-/// `inline ~[ 'T 'T -- i64 ]` and still run. The call site spells the tilde
-/// (part C, `phase4_slice12_partc.rs`, requires it once this file's own
-/// mechanical corpus migration lands).
-#[test]
-fn retyped_array_words_still_run() {
-    let src = format!(
-        "{}{}: main ( -- )\n\
-         0 4 fill | d |\n\
-         &!d 0 >usize &!> 4 !\n\
-         &!d 1 >usize &!> 2 !\n\
-         &!d 2 >usize &!> 1 !\n\
-         &!d 3 >usize &!> 3 !\n\
-         0 4 fill | s |\n\
-         d s ~[ | x y | x y sub ] a::sort\n\
-         | ra rs | rs drop\n\
-         &ra 0 >usize &> @ .\n\
-         &ra 1 >usize &> @ .\n\
-         &ra 2 >usize &> @ .\n\
-         &ra 3 >usize &> @ .\n\
-         ra 3 ~[ | x y | x y sub ] a::bin_search | arr i found |\n\
-         found . i >i64 . arr drop ;\n",
-        combinators_import("c"),
-        arrays_import("a"),
-    );
-    let (binary, stdout, code) = build_and_run("slice12-partab-arrays", &src);
-    std::fs::remove_file(&binary).ok();
-    assert_eq!(code, 0);
-    assert_eq!(stdout, "1\n2\n3\n4\ntrue\n2\n");
-}
-
 fn combinators_import(qualifier: &str) -> String {
     format!(
         "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
-        env!("CARGO_MANIFEST_DIR")
-    )
-}
-
-fn arrays_import(qualifier: &str) -> String {
-    format!(
-        "import: \"{}/lib/arrays.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/phase7_slice3a.rs`'s
 /// own pattern).
 struct Scratch(PathBuf);
@@ -19,7 +21,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3b-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -37,7 +39,8 @@ impl Drop for Scratch {
 }
 
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
-    let binary = driver::build(src).expect("program should build");
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -53,7 +56,7 @@ fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
 
 fn check_err(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
+    let mut module = sooth::test_support::parse_with_core(&tokens).unwrap();
     sooth::check::check(&mut module).expect_err("this program should be rejected")
 }
 

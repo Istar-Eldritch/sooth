@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop.
 struct Scratch(PathBuf);
 
@@ -27,7 +29,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-hijack-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -48,7 +50,8 @@ impl Drop for Scratch {
 /// panics: these programs are all well-typed, so a build error is itself a
 /// regression to surface, not an expected outcome.
 fn build_and_run(src: &Path) -> (String, Option<i32>) {
-    let binary = driver::build(src).expect("program should build");
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -126,7 +129,9 @@ fn single_file_operator_overload_named_div_does_not_own_the_libc_symbol() {
          : div ( V V -- V ) drop ;\n\
          : main ( -- ) 6.0 V 2.0 V div &x @ swap drop . 9.0 3.0 div . ;\n",
     );
-    let binary = driver::build(prog.path()).expect("program should build");
+    let binary =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");

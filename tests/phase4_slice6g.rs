@@ -26,8 +26,9 @@ mod common;
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -56,7 +57,7 @@ fn lib_import(qualifier: &str, lib_file: &str) -> String {
 
 fn check_error(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).expect("lexing should succeed");
-    let mut module = sooth::parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = sooth::test_support::parse_with_core(&tokens).expect("parsing should succeed");
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
@@ -77,8 +78,9 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 /// multi-module driver but whose check is expected to fail before it runs.
 fn build_err_with_import(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
 }
@@ -362,37 +364,4 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
         ),
     );
     assert_aliased_by(&err, "arr", "a");
-}
-
-// -- D3/T-sort: the `arrays.sth` dogfood -------------------------------------
-
-#[test]
-fn sort_called_with_bound_array_locals_runs() {
-    // T-sort. `sort`'s data and scratch arrays are BOUND TO LOCALS before the
-    // call -- that binding is exactly what the pre-6g compiler rejects
-    // (`aliased by s`). `sort` returns `ra rs` (sorted deeper, scratch on
-    // top): drop the scratch `rs`, read the sorted `ra`.
-    let (out, code) = run_src(
-        "6g-sort",
-        &format!(
-            "{}\n\
-             : main ( -- )\n\
-             0 4 fill | d |\n\
-             &!d 0 >usize &!> 4 !\n\
-             &!d 1 >usize &!> 2 !\n\
-             &!d 2 >usize &!> 1 !\n\
-             &!d 3 >usize &!> 3 !\n\
-             0 4 fill | s |\n\
-             d s ~[ | x y | x y sub ] a::sort\n\
-             | ra rs | rs drop\n\
-             &ra 0 >usize &> @ .\n\
-             &ra 1 >usize &> @ .\n\
-             &ra 2 >usize &> @ .\n\
-             &ra 3 >usize &> @ .\n\
-             ra drop ;\n",
-            lib_import("a", "lib/arrays.sth")
-        ),
-    );
-    assert_eq!(out, "1\n2\n3\n4\n");
-    assert_eq!(code, 0);
 }

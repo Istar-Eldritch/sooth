@@ -9,18 +9,20 @@
 //! grammar are gone.
 
 use sooth::ir::{lower, CmpOp, Instr, IrFunc, IrType, Terminator};
-use sooth::{backend, check, lexer, parser};
+use sooth::{backend, check, lexer, test_support};
+
+mod common;
 
 fn lowered(src: &str) -> Vec<IrFunc> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     lower(&module).expect("lowering should succeed").funcs
 }
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -56,14 +58,14 @@ fn back_edges(f: &IrFunc) -> usize {
 /// a library word or still a compiler-known construct, since the construct also
 /// emitted a jump-and-join and minted no symbol; only the resolution tells the
 /// two apart. Mutation: leave the primitive in place and this fails, because
-/// `lib/core.sth` would not be where `if` comes from.
+/// `lib/bool.sth` would not be where `if` comes from.
 #[test]
 fn if_resolves_to_a_library_word_definition() {
-    let prelude = parser::prelude_words();
-    let if_word = prelude
+    let core = test_support::core_lib_words();
+    let if_word = core
         .iter()
         .find(|w| w.name == "if")
-        .expect("`if` is a `lib/core.sth` word definition");
+        .expect("`if` is a `lib/bool.sth` word definition");
     assert!(
         check::is_combinator(if_word),
         "`if` is an always-spliced word, so no call site mints a symbol for it"
@@ -76,7 +78,7 @@ fn if_resolves_to_a_library_word_definition() {
     );
     assert_eq!(sig.inputs.len(), 3, "a condition and two branch quotations");
     assert!(
-        prelude.iter().any(|w| w.name == "unless"),
+        core.iter().any(|w| w.name == "unless"),
         "`unless` ships beside it"
     );
 
@@ -101,7 +103,7 @@ fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
                : else-arm ( i64 -- i64 ) 1 add ;\n\
                : main ( -- ) 1 cond then-arm else-arm . ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
 }
 
@@ -164,7 +166,7 @@ fn term_kind_if_has_no_remaining_references() {
 #[test]
 fn the_if_else_end_grammar_no_longer_parses() {
     let tokens = lexer::lex(": w ( bool -- i64 ) if 1 else 2 end ;").expect("lexing succeeds");
-    let err = parser::parse(&tokens).expect_err("the old grammar is gone");
+    let err = test_support::parse_with_core(&tokens).expect_err("the old grammar is gone");
     assert!(err.contains("`else`"), "unexpected message: {err}");
     assert!(
         err.contains("~[ then ] ~[ else ] if"),
@@ -246,13 +248,13 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 /// comparison builtin row remains.
 #[test]
 fn the_six_comparisons_are_library_words() {
-    let prelude = parser::prelude_words();
+    let core = test_support::core_lib_words();
     let table = check::builtin_table();
     for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
-        let word = prelude
+        let word = core
             .iter()
             .find(|w| w.name == name)
-            .unwrap_or_else(|| panic!("`{name}` is a `lib/core.sth` word"));
+            .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
             word.declares_inline,
             "`{name}` is `inline`, or every comparison becomes a real call"
@@ -377,7 +379,7 @@ fn the_canonical_comparison_and_branch_costs_no_call() {
 /// its label to the `.type` directive QBE closes every function with.
 fn word_w_assembly(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     let il = backend::qbe::emit(&ir).expect("QBE IL emission should succeed");
@@ -454,7 +456,7 @@ fn the_library_comparisons_cover_non_i64_numeric_types() {
                3 >u32 2 >u32 gte .\n  \
                1.5 2.5 ne . ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("the comparisons cover `u32`, `i8` and `f64` too");
 }
 
@@ -475,8 +477,11 @@ fn corpus_loops_still_lower_to_a_back_edge_through_the_library_if() {
         ("examples/countdown.sth", "sum.2d.to__m0"),
         ("examples/filter_while_hand.sth", "fixpoint__m0"),
     ] {
-        let ssa = sooth::driver::emit_ssa(std::path::Path::new(source))
-            .unwrap_or_else(|e| panic!("emitting {source}: {e}"));
+        let ssa = sooth::driver::emit_ssa_with_manifest(
+            std::path::Path::new(source),
+            common::manifest_for(std::path::Path::new(source)).as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("emitting {source}: {e}"));
         // The word's own emitted function block, so an unrelated runtime
         // helper's `call` cannot satisfy or break the assertion.
         let start = ssa
@@ -532,12 +537,14 @@ fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
         env!("CARGO_MANIFEST_DIR")
     );
     let path = std::env::temp_dir().join(format!("sooth-10c-witness-{}.sth", std::process::id()));
-    std::fs::write(&path, &src).expect("writing the witness should succeed");
-    let binary = sooth::driver::build(&path).expect("the witness builds");
+    common::write_fixture(&path, &src).expect("writing the witness should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("the witness builds");
     let out = std::process::Command::new(&binary)
         .output()
         .expect("the witness runs");
-    let ssa = sooth::driver::emit_ssa(&path).expect("the witness emits");
+    let ssa = sooth::driver::emit_ssa_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("the witness emits");
     std::fs::remove_file(&path).ok();
     std::fs::remove_file(&binary).ok();
 

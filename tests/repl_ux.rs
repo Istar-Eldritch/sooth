@@ -4,6 +4,8 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+mod common;
+
 /// Run a scripted REPL session (one input line per element of `lines`) and
 /// return the whole captured stdout.
 fn run_session(lines: &[&str]) -> String {
@@ -113,7 +115,7 @@ fn repl_words_shows_user_facing_name_for_imported_word() {
     let dir = std::env::temp_dir().join(format!("sooth-replux-import-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let lib = dir.join("m.sth");
-    std::fs::write(&lib, ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n").unwrap();
+    common::write_fixture(&lib, ": inc ( i64 -- i64 ) 1 add ;\nexport: inc ;\n").unwrap();
 
     let out = run_session(&[&format!("import: \"{}\" m ;", lib.display()), ":words"]);
 
