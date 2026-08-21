@@ -1,48 +1,38 @@
 # P8.S2 spec — single-mode imports, the intrinsics module, wildcard, and re-export
 
-**Slice:** P8.S2 · **Design authority:** `docs/roadmap/P8-packages-modules.md`
-(sections "Modules re-export", "The intrinsics are a module too", and the P8.S2
-plan block) · **Brief:** `docs/roadmap/P8/slice2-brief.md` (source- and
-probe-verified, `main` at `ccfbd89`) · **Builds on:** P8.S1a (manifest grammar,
-module names, `export:` visibility gating, `resolve::NameTables`), P8.S1b (the
-`--manifest` flag and `ResolutionConfig`).
-**Siblings (out of scope):** S1a/S1b (done); S3 (API description, semver,
+**Slice:** P8.S2 (delivered) · **Design authority:** `docs/roadmap/P8-packages-modules.md`
+(sections "Modules re-export", "The intrinsics are a module too", and the P8.S2 plan block)
+· **Brief:** `docs/roadmap/P8/slice2-brief.md` · **Builds on:** P8.S1a (manifest grammar,
+module names, `export:` gating, `resolve::NameTables`), P8.S1b (`--manifest`,
+`ResolutionConfig`).
+**Siblings (out of scope):** S1a/S1b (delivered); S3 (API description, semver,
 `publish --check`).
 
 ---
 
-## What this slice does and why
+## What shipped and why
 
-Today every program silently inherits `lib/core.sth` (`if`, `unless`, the six
-surface comparisons) through a compiler-baked prelude, and the ~40
-`BUILTIN_WORDS` are dispatched ahead of any environment lookup with no import
-gating them. This slice makes **no word resolve without an `import:`**, the
-intrinsics included. It:
+Before this slice every program silently inherited `lib/core.sth` (`if`, `unless`, the six
+surface comparisons) through a compiler-baked prelude, and the ~40 `BUILTIN_WORDS` dispatched
+ahead of any environment lookup with nothing gating them. Now **no word resolves without an
+`import:`** on the file/driver path, the intrinsics included:
 
-1. Gives the bare `*` wildcard import a real visibility effect (it parses
-   already, and a real target is a hard build error today).
-2. Adds **re-export** through `export:` — a structurally new resolution pass, not
-   a permissions tweak (brief recon finding 6): a per-module exported-name →
-   origin-module table, resolved to a fixpoint over hub-of-hubs chains, with a
-   located cycle rejection, plus the existence check `export:` skips entirely
-   today.
-3. Deletes the compiler-baked prelude (`parser::prelude_words`, both injection
-   sites, and the `is_prelude_word_name` mangling exemption), drops the six
-   surface comparisons from the *second* un-mangling carve-out
-   (`is_operator_dispatch_name`) so they resolve as ordinary `core` words (R3a),
-   and gates `BUILTIN_WORDS` visibility behind an `intrinsics` import.
-4. Splits `lib/core.sth` into a `core` package with a hub, and migrates every
-   corpus file and every migrating test source to explicit imports.
+1. The bare `*` wildcard, which used to be a hard build error against a real target, desugars
+   to a selective import of every name on the target's `export:` list.
+2. `export:` re-exports an imported name, via a new per-module exported-name → origin-module
+   table resolved to its declaring module across hub-of-hubs chains, with located cycle,
+   existence, and ambiguity rejections (`export:` did no existence check at all before).
+3. The prelude is deleted (`parser::prelude_words`, both injection sites, the
+   `is_prelude_word_name` mangling exemption, and the six surface comparisons' second
+   un-mangling carve-out in `is_operator_dispatch_name`), and `BUILTIN_WORDS` *visibility* is
+   gated behind an `intrinsics` import.
+4. `lib/` became a real `core` package with a re-exporting hub (`core::prelude`), and every
+   `.sth` file plus every file-based test source carries explicit imports.
 
-Deleting the prelude removes one capability that has no current user (brief
-recon finding 4): a **non-inline** polymorphic word could call the prelude's
-poly comparison and cannot call an imported one. This slice takes brief decision
-**(b)**: accept the narrowing with a located diagnostic and a rejection test,
-rather than bundling the P7 generic-calls-generic fix into a packaging slice.
-
-The brief's Decisions section is settled and is not reopened here: prelude
-deletion mechanics, the wildcard grammar, the choice of narrowing option (b),
-and the intrinsics gating design.
+Deleting the prelude narrowed one capability with no user: a **non-inline** polymorphic word
+could call the prelude's poly comparison and cannot call an imported one. Per the brief's
+decision (b), that is accepted with a located diagnostic and a mutation-guarded rejection
+test, not fixed by dragging the P7 generic-calls-generic work into a packaging slice.
 
 ---
 
@@ -50,586 +40,263 @@ and the intrinsics gating design.
 
 ### R1 — Wildcard visibility desugars to an all-exports selective import
 
-`driver::assemble_module` currently rejects a real-target wildcard outright
-(`wildcard_import_is_error`, `src/driver.rs:245`, raised at the `None =>` arm of
-the qualifier match, `src/driver.rs:317`); only the reserved `intrinsics`
-wildcard (`target.is_none()`) is let through, and it binds nothing. A wildcard
-import of a resolved target module `t` now binds **every name on `t`'s
-`export:` list** into the importing module's *selective* map, pointing at `t` —
-i.e. it is exactly a selective import of all of `t`'s exports. This reuses the
-existing selective resolution branch in `resolve::NameTables::rewrite`
-(`src/resolve.rs`, the `selective.get(...)` branches near the end of `rewrite`)
-and the existing `check::check_selective_imports` validation, adding no new
-resolution path for the wildcard itself.
+A wildcard of a resolved target `t` inserts every name of `exports_by_module[t]` into the
+importing module's `selective_map`/`selective_entries`, reusing `NameTables::rewrite`'s
+selective branch and `check::check_selective_imports` with no new resolution path. The
+synthesized `SelectiveName` carries **no qualifier** (a wildcard binds none, so there is no
+qualified spelling) and the importer's own `import: ... * ;` span, never the exporting file's
+`export:` span, so a collision diagnostic lands in the right file. Consequences that had to be
+built out:
 
-**Not independent of R4 for a re-exporting hub.** Phase 1 alone fully handles a
-wildcard of a module that **declares** its own exports directly: `rewrite`'s
-selective branch matches `self.words[target].contains(name)`. A wildcard of a
-*re-exporting hub* — `import: core *`, the headline ergonomic of this whole
-slice — binds names the hub does **not** declare, so the selective branch
-returns `Ok(None)` and the bare name is `unknown word` until R4 (phase 2)
-threads `exported_origin` into that same branch (`src/resolve.rs:372`). So the
-hub case is a phase-2 capability, not a phase-1 one; phase 1's wildcard test
-targets a module that declares its exports, and the wildcard-of-a-re-export
-test lives in phase 2, where it starts passing.
+- `SelectiveName::qualifier` became `Option<String>`, and `check_selective_imports`'
+  collision/not-exported messages gained wildcard-specific wording
+  (`wildcard import of `p`  collides with a local ...`) rather than a fabricated qualifier that
+  would misdescribe the import shape.
+- A target's `export:` list may repeat a name across two `export:` blocks, which
+  `scan_exports` does not dedup; the desugaring dedups, otherwise a wildcard synthesizes two
+  entries and falsely self-collides where the qualified and selective forms build fine.
+- A wildcard-bound name colliding with a local declaration stays a hard error, inheriting the
+  existing collides-with-local rule; no wildcard shadowing case was invented.
+- The duplicate-qualifier scan is skipped (a wildcard binds no qualifier); the reserved
+  `intrinsics` wildcard keeps its `continue`, and the no-target wildcard keeps its rejection.
+- Wildcard re-export (`export: * ;`) is not provided, per the design doc.
 
-- A wildcard binds **no qualifier** (`Import::qualifier()` returns `None`,
-  `src/ast.rs:213`), so there is no qualified spelling for its names; they are
-  reachable bare only, per the design doc. A synthesized wildcard
-  `SelectiveName` therefore carries **no qualifier string** and its `span` is the
-  importer's `import: ... * ;` site (**not** the exporting file's `export:` site,
-  whose `Span` from `exports_by_module[target]` would point a collision
-  diagnostic into the wrong file). Because `check_selective_imports`'s
-  collision/not-exported messages interpolate a qualifier, they need a
-  wildcard-specific wording variant rather than a fabricated qualifier that would
-  misdescribe the import shape.
-- A wildcard-bound name colliding with a **local declaration** is a **hard
-  error**, inheriting `check_selective_imports`'s existing
-  collides-with-local rule, not a silent shadow — consistent with every other
-  selective-import collision already in the codebase; no special wildcard
-  shadowing case is invented.
-- Wildcard and selective (`| ... |`) are mutually exclusive on one line, already
-  enforced by the grammar (`ImportBinding` is one variant or the other,
-  `src/ast.rs:190`). No change.
-- `assemble_module`'s duplicate-qualifier scan (`src/driver.rs:319`) must not
-  fire for a wildcard (it binds no qualifier); today the wildcard reaches that
-  loop only via the reserved-`intrinsics` `continue`. The desugaring runs in the
-  same per-file loop that builds `import_map`/`selective_map`
-  (`src/driver.rs:305-350`), on the branch where a wildcard has a resolved
-  `target`.
-- Two wildcard imports of the **same** module collide on the first shared name
-  under R21's collision wording (`wildcard import of \`lw\` ... collides with
-  the wildcard import of \`lw\``). Located, but it names neither module: a
-  wildcard has no qualifier to interpolate. Accepted as is; the qualified twin
-  keeps its sharper `duplicate_qualifier_error`.
-- `selective_not_exported_error`'s no-qualifier wording is unreachable for a
-  wildcard entry and stays untested. The synthesized names come from
-  `exports_by_module[target]`, which is the very list the not-exported check
-  compares them against (`module.modules[m].exports`, `src/driver.rs:438`).
-- Wildcard **re-export is not provided** (design doc): a hub lists what it
-  promises. `export:` stays a name list; there is no `export: * ;`.
+The re-exporting-hub case (`import: core::prelude *`, the headline ergonomic) is a **phase-2**
+capability: the selective branch only binds names the hub does not declare once R4's origin
+table is threaded into it.
 
 ### R2 — The `intrinsics` module gates `BUILTIN_WORDS` visibility
 
-`BUILTIN_WORDS` (`src/check/declarations.rs:63-110`) and its predicate
-`is_builtin_word_name` (`src/check/declarations.rs:118`) do not move: the table
-is unchanged and `has_self_tail_call`/`terms_tail_call_self`
-(`src/check/drop_graph.rs:107,378`) keep reading it unchanged. Only *visibility*
-is gated. Each module carries an **intrinsic-visibility** value derived at
-assembly:
+`BUILTIN_WORDS` and `is_builtin_word_name` are unchanged, and `has_self_tail_call` keeps
+reading them. Only visibility is gated, by `IntrinsicVisibility { All, Only(BTreeSet), None }`
+on `ModuleInfo`, populated in `assemble_module`'s import loop:
 
-**Gate set (not the raw `is_builtin_word_name`).** The gate keys on
-`BUILTIN_WORDS` **minus `{eq, lt, gt, lte, gte, ne}`**. Those six surface
-comparisons are `lib/` words — they left `BUILTIN_TABLE` in Slice 10c
-(`builtin_table`, `src/check/builtins.rs`) and `is_builtin_word_name` returns
-`true` for them only so `has_self_tail_call` does not misread a trailing `lt` —
-and after R3a they resolve through the ordinary import/mangle path as `core`
-words. Keying the gate on the raw set would fire the R6(a)
-`import: intrinsics *` remedy for an unimported `lt`, whose real home is `core`,
-not `intrinsics`. **`.` stays *in* the gate set**: it is a genuine
-`BUILTIN_TABLE` intrinsic (14 `Print` rows, `src/check/builtins.rs`;
-`builtin_table_has_a_row_per_printable_type_for_print`), dispatched by
-`check_operator`, and does not move to `core`, so a bare `.` with no `intrinsics`
-import is correctly the R6(a) error. (Both r1 reviews listed `.` in the
-exclusion set; that is wrong, verified against `BUILTIN_TABLE` — the complete
-exclusion set is the six comparisons only.) The gate runs **after** the
-specialized dispatch/env path (`check_operator`, `scoped_operator_overloads`,
-the env lookup), never before, so a correctly-imported-and-mangled `core` word —
-now `lt__mN`, which `is_builtin_word_name` no longer matches — is never
-intercepted and misdirected.
+- `import: intrinsics * ;` → all builtins visible; `| ... |` → that subset; nothing → none.
+- Multiple `intrinsics` lines **accumulate** (union of selective names, any wildcard wins)
+  rather than the last one winning, matching how `export:` and `module:` entries accumulate. A
+  qualified `import: intrinsics i ;` with neither `*` nor a `| ... |` clause widens nothing:
+  there is no qualified spelling for an intrinsic.
+- The import is recognised exactly as `packages::resolve_import` recognises it
+  (`ImportAnchor::Dependency`, `segments == ["intrinsics"]`, no closure edge);
+  `self::intrinsics` stays an ordinary module name.
 
-- `import: intrinsics * ;` → all builtin names visible in that module.
-- `import: intrinsics | dup add ... | ;` → only the listed subset visible.
-- no `intrinsics` import → no builtin visible in that module.
+**Gate set:** `is_gated_intrinsic_name` = `is_builtin_word_name` **minus
+`{eq, lt, gt, lte, gte, ne}`**. Those six are `lib/` words (they left `BUILTIN_TABLE` in slice
+10c and sit in `BUILTIN_WORDS` only so `has_self_tail_call` does not misread a trailing `lt`),
+so gating them would answer an unimported `lt` with "add `import: intrinsics *`", pointing at
+the wrong module. `.` stays **in** the set: it is a genuine table intrinsic with a `Print` row
+per printable type.
 
-A bare call to a builtin name in a module that has not imported it (or imported
-a selective subset not containing it) is a **located error** naming the word and
-the missing import (`R6`), raised at the checker's builtin-dispatch site rather
-than falling through to `unknown word`. This gate **cannot fire on the
-REPL/`Ctx::Line` path** (`ctx.modules()` is `None`, `src/check/engine.rs`),
-exactly as the existing `drop`-visibility scoped gate never fires there
-([[project_repl_bypasses_module_checks]]): the "no builtin without an
-`intrinsics` import" invariant holds on the file/driver path and is explicitly
-exempted at the REPL prompt, consistent with the REPL's existing bypass of
-module-level checks (not a new hole). The `intrinsics` import is recognised
-exactly as it is for closure discovery: `ImportAnchor::Dependency` with
-`segments == ["intrinsics"]` (`src/packages.rs:631`), which adds no closure edge
-(`resolve_import` returns `Ok(None)`); `self::intrinsics` is an ordinary module
-name and not the reserved one (`src/driver.rs:1409`, unchanged).
+**Placement.** `check_term` computes `gated` once and skips every builtin-dispatch arm for a
+gated name (including the `branch` interception), letting it fall through to the ordinary
+env/overload path, which reports `ungated_intrinsic_error` instead of `unknown word`. The env
+lookup never actually claims such a name: a module's own word under a builtin spelling arrives
+mangled, and the two un-mangled categories are not `env` entries under the bare name, so the
+fall-through is always the diagnostic. `check_poly_term` carries the **same gate as its own
+first check**, without the env-candidate dance: a generic body dispatches the same builtins on
+its own path, so without it an unimported `dup` would be gated in a monomorphic word and free
+in a polymorphic one.
 
-Threading: intrinsic visibility is per module, so it is carried on `ModuleInfo`
-(`src/ast.rs`, alongside `imports`/`exports`/`selective`) and read by the
-checker where a builtin is dispatched, not recomputed. `>`-prefixed numeric
-conversions (`>u8`, `src/check/declarations.rs:119`) are part of the intrinsic
-surface and gate with the rest.
+Two exemptions are load-bearing. The gate keys on **`span.module`** (where the term was
+written), not `ctx.module()`: a caller's `~[ ... ]` argument spliced into a library combinator
+is checked under the library's module and would otherwise be judged against the library's
+imports. And a term with `span.line == 0` (compiler-synthesized, e.g. `bool_print_word_def`)
+is exempt: there is no file to add an import to. The gate cannot fire on the REPL/`Ctx::Line`
+path (`ctx.modules()` is `None`), the same exemption the `drop` visibility gate has, so the
+invariant is a file/driver-path rule and the prompt keeps its existing module-check bypass.
 
-### R3 — The prelude and its mangling exemption are deleted, not deprecated
+### R3 — The prelude and its mangling exemption are deleted
 
-Delete `parser::prelude_words` (`src/parser.rs:514`), its unconditional
-injection in `parser::parse` (`src/parser.rs:526`), and the multi-file twin in
-`driver::assemble_module` (`words.extend(parser::prelude_words())`, the
-"Slice 10c" line after the modules loop). Delete `resolve::is_prelude_word_name`
-(`src/resolve.rs:61`) and remove its clause from `resolve::mangle`
-(`src/resolve.rs:32`), which then exempts exactly `main` and `drop`.
+`parser::prelude_words`, its injection in `parser::parse`, and the `assemble_module` twin are
+gone; `is_prelude_word_name` is gone and `resolve::mangle` now exempts exactly `main` and
+`drop`. Every live consumer was migrated, not merely made to compile:
 
-Deleting `parser::prelude_words`/`is_prelude_word_name` breaks every live
-consumer, and R3 must migrate each. The r1 spec cited only
-`src/check.rs:3358-3362` as "the REPL's own prelude seeding"; that is **not** the
-REPL but a `#[cfg(test)]` bare-line inference helper (`infer_src`, near
-`SPY_DEF`, now `src/check.rs:3477`) — R7 already treats the same helper
-correctly, and it is *not* a `--manifest` fixture consumer, so its seeding of a
-bare line's `bool`/comparison env stays an in-process helper. The actual live
-consumers:
-
-- **`src/repl.rs:1120`** — the real REPL seed: `Session::new`'s
-  `for word in prelude_words() { session.eval_def(word, ..) }` loop. This loop
-  is **deleted**; a session no longer auto-seeds `if`/`lt`, and one that wants
-  them writes `import: core *` exactly as a file does, so a bare comparison with
-  no import is `unknown word`, matching a compiled build. (The neighbouring
-  `bool` print overload seed, `bool_print_word_def`, is not a prelude word and
-  stays.)
-  - **"exactly as a file does" holds only for the *declaring* module.** A REPL
-    import of the `core::prelude` **hub** is accepted (`imported p`) and then
-    every re-exported name is `unknown word`: import retention binds and aliases
-    module 0's own definitions, and a hub declares none — its exports resolve
-    through R4's `exported_origin` to dependency-module words, which the
-    combinator half of retention deliberately keeps alias-less (slice 6c's R15
-    privacy, "`q::if` still misses"). So a session names `core::cmp`/`core::bool`
-    directly (`tests/common/mod.rs`'s `repl_core_import`). Following a re-export
-    at the prompt would mean aliasing a dependency word the hub promises, which
-    is a change to that privacy rule and so its own slice's decision, not a
-    silent widening here. What is unsatisfactory either way is the *silent*
-    acceptance: the import line reports success and binds nothing.
-- **`src/repl.rs:2270`** — a live `is_prelude_word_name(&w.name)` in the
-  import-rename filter (`body_rename`), excluding prelude words from
-  epoch-renaming because they were both session-seeded **and** closure-injected,
-  a dual existence a rename would strand. Deleting the prelude ends that dual
-  existence, so this clause is **removed** (not merely made to compile): an
-  imported closure's `core` words are ordinary module-0 words and epoch-rename
-  like any other import. The `main`/`drop`/`.` exclusions beside it stay for
-  their own distinct reasons (never-mangled entry/destructor; the separately
-  seeded `bool` print overload).
-- **`src/check/word_entry.rs:415`** — a test pulling `eq` out of
-  `prelude_words()` as its witness; rewrite it to declare its own witness word
-  rather than reach for the deleted prelude.
-- **`src/parser.rs:4066`** — a test asserting a parsed word count against
-  `prelude_words().len()`; with no injection that addend is gone and the
-  assertion drops it.
-- **`src/resolve.rs:1001-1012`** — the `#[cfg(test)]` test
-  `single_module_closure_is_left_unchanged`, whose whole premise (its `:1006`
-  comment) is that `parse` appends unmangled `lib/core.sth` words and which
-  filters them out of its name assertion with `is_prelude_word_name` (`:1012`).
-  With the prelude deleted `parse` appends nothing, so the filter and its
-  premise both go: drop the `.filter(|n| !is_prelude_word_name(n))` (the closure
-  is now just the file's own `p`/`main`) and the stale comment.
-- (`tests/phase4_slice10c_primitives.rs:62,249` also read `prelude_words()`;
-  they retire with the prelude.)
-
-A corpus file that still resolves `if` through the deleted prelude is a build
-failure whose fix is the import, not a restored exemption.
+- `repl.rs` `Session::new`'s prelude seed loop is deleted: a session that wants `if`/`lt`
+  writes an import exactly as a file does, so a bare comparison with no import is
+  `unknown word`, matching a compiled build. The neighbouring `bool_print_word_def` seed is
+  not a prelude word and stays.
+- `repl.rs`'s `is_prelude_word_name` clause in the import-rename filter is removed: it existed
+  because prelude words were both session-seeded and closure-injected, a dual existence a
+  rename would strand. An imported closure's `core` words are ordinary module-0 words now and
+  epoch-rename like any other import; the `main`/`drop`/`.` exclusions beside it stay.
+- The `word_entry.rs` test declares its own witness; the `parser.rs` word-count assertion
+  drops the injected addend; `resolve.rs`'s `single_module_closure_is_left_unchanged` loses the
+  filter and the stale premise comment; the `phase4_slice10c_primitives.rs` readers retired
+  with the prelude. `check.rs`'s `infer_src` is a `#[cfg(test)]` bare-line inference helper,
+  not the REPL seed, and keeps seeding in process (R7).
 
 ### R3a — `is_operator_dispatch_name` drops the six surface comparisons
 
-Deleting `is_prelude_word_name` is not sufficient on its own: a **second**,
-independent un-mangling carve-out strands the same six words.
-`resolve::is_operator_dispatch_name` (`src/resolve.rs:85-116`) lists
-`eq lt gt lte gte ne` alongside the real operators, and `NameTables::rewrite`
-guards **both** its own-module and selective rewrite branches on
-`!is_operator_dispatch_name(core)` (`src/resolve.rs:342`, `:371`), so a bare
-comparison call is left *unrewritten* regardless of imports. Today that is
-harmless only because `is_prelude_word_name` leaves the comparison *declaration*
-unmangled too, so bare call and bare decl coincide. After R3 the decl mangles
-(`lt__mN`) while `is_operator_dispatch_name` still leaves the call bare — they no
-longer match, and the call is `unknown word` with no resolution path.
+`rewrite` guards both its own-module and selective branches on
+`!is_operator_dispatch_name(core)`, so while the six were listed a bare comparison call stayed
+unrewritten. That was harmless only because the *declaration* was unmangled too; once R3
+mangles the decl to `lt__mN`, the bare call resolves to nothing. Dropping them regresses no
+dispatch: they are not `BUILTIN_TABLE` keys (their rows moved to the `u`-prefixed primitives in
+slice 10c), `check_operator::is_operator` does not list them, and `scoped_operator_overloads`
+early-returns for any name with no table row. The genuinely overloaded names stay
+(`add sub mul div mod and or xor not shl shr`, the `u`-prefixed comparisons, `max`,
+`max-total`, `.`). The six are ordinary words now, reached by import through the normal
+machinery.
 
-**Verified safe to drop the six (they carry no operator dispatch).** The six
-surface comparisons are **not** `BUILTIN_TABLE` keys — their rows moved wholesale
-to the `u`-prefixed primitives in Slice 10c (`builtin_table`,
-`src/check/builtins.rs`; pinned by
-`builtin_table_comparisons_have_a_row_per_numeric_type`, which asserts
-`!table.contains_key("lt")` for each). `check_operator`'s own `is_operator` list
-(`src/check/operators.rs:79-95`) does not list them either, so it returns
-`NotOperator` for a bare `lt`. And `scoped_operator_overloads`
-(`src/check/word_families.rs:1065`) early-returns `None` for any name not in
-`BUILTIN_TABLE` (`:1075`). So **no** operator-overload dispatch path touches the
-six; listing them in `is_operator_dispatch_name` buys nothing but the
-bare-call/bare-decl coincidence above. Their **only** consumers are `rewrite`'s
-two branches (`src/resolve.rs:342`, `:371`); no `check/*` path reads the
-function. Removing them therefore regresses no real operator-overload dispatch.
+### R4 — Re-export: an exported-name → origin-module table with a per-pair walk
 
-**Ruling.** `is_operator_dispatch_name` drops `eq lt gt lte gte ne`. It keeps
-the genuinely operator-overloaded names — the arithmetic/bitwise set
-(`add sub mul div mod and or xor not shl shr`), the `u`-prefixed comparison
-primitives (`ueq ult ugt ulte ugte une`), and `max max-total .` — all of which
-**are** `BUILTIN_TABLE` keys reached through
-`scoped_operator_overloads`/`check_operator` and would regress if dropped. The
-six comparisons become ordinary words: `resolve::mangle` mangles the decl to
-`lt__mN`, and `rewrite`'s own-module and selective branches now mangle a bare
-call to match, so a consumer reaches them by import through the normal machinery
-like any other name — the compiler special-cases no specific library word.
+`Visibility { exports, exported_origin: Vec<HashMap<String, u32>> }` bundles the cross-module
+lookup tables into one `rewrite`/`rewrite_terms` parameter (both already sit at clippy's
+argument ceiling). Built in `resolve_modules` before any body is rewritten, since a body may
+reference a name through a hub whose export list has not been reached yet. Per `(m, name)` on
+an export list, the immediate source is:
 
-### R4 — Re-export resolution: an exported-name → origin-module table with a fixpoint
+- `m` itself, if `name` is in `exportable_names(m)`;
+- else `m`'s selective map (already populated for wildcards by R1);
+- else a scan of the modules `m`'s `import_maps` **values** point at, testing each one's own
+  declaration set. This is not a lookup of `name` *in* `import_maps` (keyed by qualifier, so
+  it always misses). A hub that imports a dependency qualified-only reaches `lw` as `dep::lw`
+  alone, and the compiler must not restrict which import shapes are re-exportable.
 
-`export:` accepts a name the file **imported** as readily as one it declared
-(design doc). Today this is structurally unsupported: `NameTables::rewrite`
-resolves a qualified or selective word only against `words[target]`
-(`src/resolve.rs`, the `self.words[target].contains(rest)` branch and the
-selective branch), which `NameTables::build` fills only from decls whose
-`module == target`; a re-exported name's origin module is never consulted, so
-`hub::lw` is `unknown word` even after `check_selective_imports` passed it
-against `hub`'s export list.
+`exportable_names` is deliberately **wider than `NameTables`**: words, `extern:`s, structs,
+generic structs, enums, generic enums, and the variant constructors of both enum kinds.
+`NameTables` holds only what a call site can be mangled against, but `lib/result.sth` exports
+`Result`, `Ok`, and `Err`, so an existence check keyed on the mangling tables alone would
+reject the whole shape. `static:` names are excluded: a static is module-private and reachable
+only by `&NAME` in its own module, so exporting one promises what no importer can reach.
 
-**Table.** Add a per-module map `exported_origin: Vec<HashMap<String, u32>>`:
-for module `m`, each name on `m`'s `export:` list maps to the module id that
-actually declares it. Built in `resolve::resolve_modules` (which already
-materialises `import_maps`, `selectives`, and `exports` per module) *before*
-body rewriting, by, for each `(m, name)` on an export list:
+Origins from the qualified scan are keyed **by module id**, so one module bound under two
+qualifiers is one origin, not an ambiguity; the lower qualifier spelling is shown so the
+diagnostic does not depend on hash order. Two or more distinct origin modules is a located
+`ambiguous_re_export_error` (R6c), not a silent first-import-wins pick: `export:` is a flat
+name list, there is no `export: dep1::lw ;` to disambiguate with, and a tiebreak would
+privilege declaration order.
 
-- if `name` is a local decl of `m` (in `NameTables.words[m]`/`structs`/`enums`),
-  origin is `m`;
-- else look `name` up in `m`'s selective map (which R1's wildcard desugaring has
-  already populated for wildcard imports too); that gives the immediate source
-  module;
-- else scan the modules `m`'s `import_maps` **values point at** and check each
-  one's own local declaration table for `name`. Each qualified import binds
-  `qualifier → module id` (`import_maps` is `Vec<HashMap<String, u32>>`, values
-  are `u32` module ids), so `import_maps[m].values()` is the set of
-  qualified-imported module ids; for each `dep_id` in it, test
-  `tables.words[dep_id].contains(name)` (and `structs[dep_id]`/`enums[dep_id]`).
-  A hub that imports a dependency *qualified* (`import: dep ;`, no
-  wildcard/selective) and then `export: lw ;` reaches `lw` only as `dep::lw`, so
-  it is neither a local decl nor a selective entry, but `dep`'s own decl table
-  holds it. This is **not** a lookup of `name` *in* `import_maps` — that map is
-  keyed by qualifier, never by word name, so `import_maps[m].get(name)` always
-  misses — it is an iteration over the qualified-imported modules' decl tables.
-  Without this scan R5's existence check would wrongly reject a legitimate
-  qualified-only re-export; the compiler must not restrict which import shapes
-  are re-exportable, so the origin is the qualified-imported module that
-  declares `name`.
-  - **Ambiguity (multiple qualified origins).** If **two or more** of the
-    qualified-imported modules each declare `name`
-    (`import: dep1 ; import: dep2 ;`, both declaring `lw`, then `export: lw ;`),
-    the bare export name gives no qualifier to pick between them, and `export:`
-    stays a flat name list ("No new AST", below), so no `dep1::lw` export
-    spelling exists to disambiguate. This is a **located ambiguity error**
-    (`ambiguous_re_export_error`, `R6(c)`) naming the `export:` site and the
-    two-or-more colliding origin modules — **not** a silent first-import-wins
-    pick. That ruling follows this codebase's design (CLAUDE.md: turn Forth's
-    silent failures into sharp compile errors) and R4's own "the compiler must
-    not restrict which import shapes are re-exportable" (a first-wins tiebreak
-    would silently privilege one import's declaration order). A `name` that is a
-    local decl, or resolves through the selective/wildcard map, is unambiguous
-    and never reaches this scan, so the error fires only for the
-    qualified-only-collision case.
+Chains are resolved by `walk_to_origin`, following immediate sources with a **per-resolution
+visited set keyed on the `(module, name)` pair**. Pair-keying is load-bearing: a hub
+re-exporting two names through one downstream hub is a diamond, not a cycle. A revisit before
+reaching a declaration is a located `re_export_cycle_error`. (A "repeat passes until nothing
+changes" fixpoint was rejected: on a cycle it never stabilises and has no per-pair structure
+at which to notice the revisit.)
 
-**Fixpoint (per-resolution visited set, keyed on `(module, name)`).** The
-immediate source may itself re-export the name (hub-of-hubs). Resolve each export
-entry on demand, following `exported_origin[src][name]` until reaching a module
-that declares `name` locally, carrying a **per-resolution visited set keyed on
-the `(module, name)` pair**. This is the committed strategy, not one of two
-options: a naive "repeat passes until no entry changes" fixpoint is rejected
-because it **cannot detect a re-export cycle** — on a cycle an entry keeps being
-rewritten one hop and never stabilises, so the pass hangs rather than
-converging, and it carries no per-pair structure at which to notice the revisit.
-The pair-keying (not module-keying) is load-bearing: a hub re-exporting two
-different names both routed through one downstream hub is a legitimate diamond,
-not a cycle, and a module-keyed visited set would false-positive on it.
+`rewrite` consults `Visibility::origin(target, name)` in both the qualified and selective
+branches, for words and for types, after its own local-decl branches. No separate export gate:
+an `exported_origin` entry exists only for a name on the target's own `export:` list, so the
+entry *is* the promise. Own-module resolution still runs first, so a hub's re-export never
+shadows a consumer's same-named local word. **No new AST**: a re-export is detected purely by
+"not a local decl, so its origin is in the import map."
 
-**Cycle rejection.** A re-export chain that revisits a `(module, name)` pair
-before reaching a local declaration is a **re-export cycle**: a located error
-(`re_export_cycle_error`, `R7`) naming the name and the `export:` site, raised
-instead of looping or overflowing the fixpoint. This is the one place the
-fixpoint can fail to converge and must be guarded explicitly.
+### R5 — `export:` existence validation lands here
 
-**Threading.** `NameTables::rewrite`'s two lookup branches consult
-`exported_origin[target]` when `target` does not declare the name locally: a
-qualified `hub::lw` (or a selective bare `lw` re-exported through `hub`) whose
-name is on `hub`'s export list and resolves through `exported_origin` to origin
-`o` rewrites to `mangle(name, o)`, gated by `hub`'s export list (the entry that
-made it a re-export). `rewrite` needs `exported_origin` alongside `exports`;
-rather than a bare 9th parameter (`rewrite` already takes 8, so a 9th trips
-`clippy::too_many_arguments` under `-D warnings`, and it must thread through
-`rewrite_terms`, its recursive caller, plus the ~6 in-file test call sites),
-bundle the new lookup tables into a small `struct`-of-tables parameter.
+A name that is neither declared by nor imported into the exporting module has no origin and is
+now `export_unknown_name_error`, raised where the table is built (`export: nonexistent ;` built
+and ran clean before). Both this and the ambiguity check fall out of the same construction
+pass. `check_exported_signatures` keeps its distinct private-type-in-signature job. The
+pre-landing corpus grep found no `export:` relying on the old silent pass.
 
-**No new AST.** A re-export needs no representation distinct from a plain export:
-it is detected purely by "the name is not a local decl of the exporting module,
-so its origin is found through the import map." `export:` stays a flat
-`Vec<(String, Span)>`.
+### R6 — Diagnostic wording
 
-### R5 — `export:` existence validation lands in this slice
-
-`export:` performs zero existence validation today (`export: nonexistent ;` with
-the name declared and imported nowhere builds and runs clean; brief recon
-finding 6). Building R4's `exported_origin` table makes an unresolvable export
-name observable: a name that is neither a local decl nor an imported name of the
-exporting module has no origin. This is now a **located error**
-(`export_unknown_name_error`, `R7`), raised where the table is built.
-`check_exported_signatures` (`src/check/declarations.rs:243`) keeps its distinct
-job (private-type-in-signature) and does not absorb this check.
-
-The same table-construction pass also surfaces re-export **ambiguity**: a bare
-`export:` name declared by two or more qualified-imported modules, with no local
-decl and no selective/wildcard entry to disambiguate, is a located
-`ambiguous_re_export_error` (R6(c)). Existence validation and ambiguity
-validation both land in this slice, built off the same `exported_origin`
-construction pass (R4).
-
-**Prerequisite grep (implementation gate):** before landing R5, grep the corpus
-(`lib/`, `examples/`, committed test fixtures) for any `export:` naming a word
-declared/imported nowhere in its file. The brief's probe found none in the tree,
-but silent acceptance must be confirmed unused rather than assumed; a real
-reliance would be migrated to a correct `export:`, not a retained silent pass.
-
-### R6 — Diagnostic wording (three located messages)
-
-All three are located (line, col) and name the surface spelling, never a mangled
-name (`resolve::demangle_word`/`demangle_call`, `src/resolve.rs`).
-
-**(a) Ungated intrinsic (R2).** A bare builtin call in a module that has not
-imported it:
+All located, all naming the surface spelling. The two `export:` messages identify the
+exporting module by its located site rather than by name: a module carries no name in the
+resolved closure, only importers spell one as a qualifier.
 
 ```
 error: `<word>` is an intrinsic and is not imported in `<caller>` (line L, col C)
   add `import: intrinsics * ;` (or `import: intrinsics | <word> ... | ;`) to this file
-```
 
-**(b) Narrowing: non-inline poly word calls an imported poly word (brief
-decision (b)).** In a polymorphic body, an imported poly word's call is mangled
-to `<name>__m<k>` and reaches `poly_call_term`'s fall-through
-(`src/check/poly.rs:1059`, `Err(unknown_word_error(...))`) because a poly callee
-is registered in `poly.env`, never in the `env` this path reads. Before that
-fall-through, if the demangled call name names a **polymorphic word of another
-module** (detected against a threaded set of the program's poly-word names,
-keyed by their post-mangle spelling), raise:
-
-```
 error: `<caller>` cannot call the polymorphic word `<callee>` (line L, col C)
   a polymorphic word is not yet reachable from another polymorphic word across a module boundary
   inline the caller, make the callee concrete, or call the callee from a monomorphic word
-```
 
-`<caller>` is the enclosing word's demangled name, `<callee>` the demangled call
-name. This replaces the raw `` unknown word `<__m1` `` that leaks the mangled
-name today. The same-module non-inline poly-to-poly gap emits an identical
-message (its `<callee>` is a same-module poly word); both are the one underlying
-generic-calls-generic gap.
-
-**(c) Re-export existence / cycle / ambiguity (R4/R5).**
-
-```
-error: `<name>` in `export:` of `<module>` names nothing declared or imported here (line L, col C)
+error: `<name>` in `export:` names nothing declared or imported in this module (line L, col C)
 error: `<name>` re-exports itself through a cycle of `export:` chains (line L, col C)
-error: `<name>` in `export:` of `<module>` is declared by more than one qualified-imported module (`<origin1>`, `<origin2>`, ...) and cannot be re-exported without disambiguation (line L, col C)
+error: `<name>` in `export:` is declared by more than one qualified-imported module (`<q1>`, `<q2>`) and cannot be re-exported without disambiguation (line L, col C)
 ```
 
-### R7 — Shared test-fixture manifest: one manifest for the whole migrating suite
+(b) replaces the raw `` unknown word `<__m1` `` that leaked a mangled name; it fires ahead of
+`poly_call_term`'s fall-through when the demangled call names a polymorphic word, and the
+same-module non-inline poly-to-poly gap emits the identical message, since both are the one
+underlying generic-calls-generic gap.
 
-The migrating file-based test sources point at **one shared manifest**, not one
-per test-module grouping. Every migrating source depends on the same two things
-(`core` and `intrinsics`); per-grouping manifests would be near-identical copies
-that drift, and no grouping has a distinct dependency set that would justify its
-own. The shared manifest declares `core` (resolved to `lib/`'s `core` package)
-and is passed via S1b's `--manifest` flag through a single test helper: switch
-`tests/common/mod.rs`'s `build_example` (which today calls `driver::build`,
-`tests/common/mod.rs:23-37`) to the manifest-passing
-`driver::build_with_manifest(&copy, Some(<shared manifest>))`
-(`src/driver.rs:542`); the per-call sibling copy still resolves relative to the
-manifest. In-process `check_src`/`check_error` tests, which never
-resolve `import:`, keep seeding what they need in process — including the
-`#[cfg(test)]` bare-line helper `infer_src` (`src/check.rs:3477`), which the r1
-spec mis-labelled as the REPL seed but is an in-process helper (R3); these are
-not part of the `--manifest` fixture set, which is the file-based, driver-built
-sources only.
+### R7 — One shared test-fixture manifest, and imports appended by the harness
 
-### R8 — `lib/core.sth` splits into a `core` package with a hub
+Every migrating file-based source depends on the same two things (`core` and `intrinsics`), so
+there is one shared fixture manifest (`tests/fixtures/sooth.pkg`, plus `fixture_package` for
+trees that need their own), passed through `build_example`'s switch to
+`driver::build_with_manifest`. Because several hundred goldens would otherwise each need hand
+edits, `tests/common/mod.rs` gained a private `fixture_imports`, appended by exactly two
+wrappers (`write_fixture` and `fixture_source`), so the "which imports" rule has one
+implementation. It is explicitly **not** for a fixture whose subject is `import:` itself:
+`tests/phase8_slice2.rs` writes those verbatim through its own `write_raw`. In-process
+`check_src`/`check_error` tests, `infer_src` included, never resolve `import:` and keep seeding
+in process; they are not part of the `--manifest` fixture set.
 
-The Sooth half of `lib/core.sth` (`bool`, `if`/`unless`, the six surface
-comparisons) splits into modules of one `core` package; its compiler half
-(`branch`, `tag`, the `u`-prefixed comparisons) does not move — those are
-`BUILTIN_WORDS` reached through `import: intrinsics` (R2). The `core` hub imports
-`intrinsics` and **re-exports** (R4) the curated subset it endorses, so a
-consumer writes `import: core ...` for the typed surface and `import: intrinsics
-*` only where it wants the raw builtins. The six comparisons the hub re-exports
-have a working resolution path only because of R3a: as ordinary mangled `core`
-words they go through `rewrite`'s selective branch, which consults R4's
-`exported_origin`, with no operator-dispatch carve-out intercepting the lookup
-(the gate-specific carve-out the r1 review flagged is gone). `core` is an
-ordinary package, not a compiler-reserved name (design doc: reserving it would
-re-privilege the library this phase de-privileges).
+### R8 — `lib/` is the `core` package, with `core::prelude` as the hub
+
+`lib/sooth.pkg` declares `package: core ; layer: core ; module: bool cmp prelude combinators
+option result ;`. `bool` and `cmp` hold the Sooth half of the old `lib/core.sth`; the compiler
+half (`branch`, `tag`, the `u`-prefixed comparisons) did not move and is reached via
+`import: intrinsics`. `core::prelude` declares nothing and re-exports `if unless eq lt gt lte
+gte ne`, so a consumer spends one `import: core::prelude * ;` on the typed surface and
+`import: intrinsics *` only where it wants the raw builtins. That hub path works only because
+of R3a. `core` is an ordinary package, not a compiler-reserved name. `examples/` likewise
+became a package with its own committed `sooth.pkg` (source, not an artifact, per `.gitignore`).
 
 ---
 
 ## Implementation
 
-Three phases. The first two are independently reviewable; the third
-(prelude deletion + gating + `core` split + corpus/test migration) is one
-**atomic** phase, not several — see the note under it. Cited lines are `main` at
-`ccfbd89`; verify before editing, several will shift as earlier steps land.
+Three phases; the third was necessarily atomic. Deleting the prelude strips `if` and the
+comparisons from every closure and activating the gate strips ambient `BUILTIN_WORDS`, so every
+golden fails until the corpus gains its imports, and the imports cannot go first (while the
+prelude still injects `if`, a file's own import double-binds it). No ordering leaves the tree
+green except deletion, gating, split, and migration together.
 
-1. **Wildcard visibility (R1).** In `driver::assemble_module`'s per-file
-   import loop, on a `Wildcard` binding with a resolved `target`, insert every
-   name of `exports_by_module[target]` into that module's `selective_map` and
-   `selective_entries` (so `check_selective_imports` validates them), with the
-   synthesized `SelectiveName` carrying no qualifier and the importer's
-   `import: ... * ;` span (R1). Keep the reserved-`intrinsics` `continue` and the
-   real-target rejection only for the *no-target* wildcard. Delete/retarget
-   `wildcard_import_is_error` and its test `driver_wildcard_import_is_error`,
-   which now must assert the wildcard *binds*. This phase handles a wildcard of a
-   module that **declares** its own exports; the re-exporting-hub case
-   (`import: core *`) only fully works once phase 2's `exported_origin` lands
-   (R1, R4).
-
-2. **Re-export (R4/R5).** In `resolve::resolve_modules` (`src/resolve.rs`,
-   after `import_maps`/`selectives`/`exports` are built), build
-   `exported_origin: Vec<HashMap<String, u32>>` with the fixpoint and the
-   cycle/existence guards, then pass it into `rewrite` and consult it in both
-   the qualified `self.words[target].contains(rest)` branch and the selective
-   branch. New errors `re_export_cycle_error` and `export_unknown_name_error`
-   beside `not_exported_error` (`src/resolve.rs:390`).
-
-3. **Prelude deletion + intrinsics gating + `core` split + migration
-   (R2/R3/R3a/R6/R7/R8) — one atomic phase.** Delete `parser::prelude_words` and
-   its two injection sites; shrink `resolve::mangle` to `main`/`drop`, delete
-   `is_prelude_word_name`, and drop `eq lt gt lte gte ne` from
-   `is_operator_dispatch_name` (R3a). Migrate every live prelude consumer
-   (`repl.rs:1120` seed loop deleted, `repl.rs:2270` filter clause removed,
-   `word_entry.rs:415` and `parser.rs:4066` tests rewritten — R3). Add per-module
-   intrinsic visibility to `ModuleInfo`, populate it in `assemble_module`'s
-   import loop (from `intrinsics` imports, wildcard = all / selective = subset),
-   and gate the builtin-dispatch site in the checker with the R6(a) error, keyed
-   on the corrected gate set (`BUILTIN_WORDS` minus the six comparisons, R2) and
-   placed **after** the specialized dispatch/env path. Add the narrowing
-   diagnostic R6(b): thread the poly-word-name set into the poly body checker and
-   branch before `poly_call_term`'s `unknown_word_error` (`src/check/poly.rs:1059`).
-   Split `lib/core.sth` into the `core` package with a re-exporting hub, and add
-   explicit `import:` lines to every `.sth` file (examples, goldens, non-`core`
-   `lib/` files) and to the migrating file-based test sources, which resolve
-   against the shared fixture manifest via `--manifest` (R7, `build_example`).
-   This step also carries S1a's `lib/`-as-layered-packages dogfood. **That
-   dogfood needs a new subject:** `lib/arrays.sth` was deleted (`eaa58ba`), and
-   no remaining `lib/` file (`combinators` `core` `option` `result`) has a
-   quoted-path import for a manifest over `lib/` to reject. Either source the
-   dogfood from a file this phase's own split creates or drop the sub-claim.
-   The same deletion leaves two file-based tests red before this phase starts:
-   `phase4_slice6g::sort_called_with_bound_array_locals_runs` and
-   `phase4_slice12_partab::retyped_array_words_still_run`, both importing
-   `lib/arrays.sth` by quoted path. They fall inside this phase's test-source
-   migration, which must retarget or retire them (with `phase4_slice6g`'s
-   `lib_import` and `phase4_slice12_partab`'s `arrays_import` helpers).
-
-   **Why atomic (not two phases).** Deleting the prelude removes `if`/the six
-   comparisons from every closure, and activating the intrinsic gate removes
-   ambient `BUILTIN_WORDS`, so *every* existing golden and example fails to build
-   until the corpus gains its imports. Conversely the imports cannot be added
-   first: while the prelude still injects `if`, a file's own `import: core *`
-   would double-bind the name. No ordering leaves the tree green except doing
-   deletion, gating, split, and migration together, so a fourth
-   "independently reviewable" boundary between them would be fictional — which
-   CLAUDE.md's "goldens pass at phase exit" rule forbids. Land it as one phase
-   whose single exit is a green corpus.
+- **Wildcard visibility (R1):** the desugaring in `driver::assemble_module`'s import loop, with
+  the `Option<String>` qualifier and wildcard-specific `check_selective_imports` wording
+  (`src/check/declarations.rs`, `src/repl.rs`) in `f85bd23`, repeated-export-name dedup in
+  `ab0eb43`, and the exact-diagnostic assertion in `d741b79`. `wildcard_import_is_error` is
+  retargeted to the no-target case and its test asserts the wildcard binds.
+- **Re-export (R4/R5):** `Visibility`, `exportable_names`, `build_exported_origin` /
+  `resolve_export_origins` / `walk_to_origin`, the three new errors beside
+  `not_exported_error`, and the origin consults in `rewrite`'s four branches in `src/resolve.rs`
+  — `9598c57`, with the golden suite in `tests/phase8_slice2.rs` (hub qualified and bare,
+  wildcard-of-a-re-export, hub-of-hubs, qualified-only re-export, consumer's own word
+  outranking a re-export, a re-exported type through both branches, enum-variant export,
+  unknown name, two-dep ambiguity, and a name the hub does not export).
+- **Prelude deletion, gating, split, migration (R2/R3/R3a/R6/R7/R8):** `d539032d` deletes the
+  prelude and its consumers, adds `IntrinsicVisibility`/`widen_intrinsics`/`names_the_intrinsics`
+  and the `check_term` gate, drops the six from `is_operator_dispatch_name`, splits `lib/` into
+  the `core` package, and migrates every `.sth` file and file-based test source.
+  `92cd951` retargets the prelude's stale references in `DESIGN.md`/`README.md` and
+  mutation-guards the new gates; `74ccba3` scopes `fixture_imports` to its two wrappers;
+  `8098ca1` drops a permissive `import: intrinsics *` that had blinded a gating test to its own
+  claim; `9c9981b` addresses review cycle 1; `fe0e09c` prunes the dead env lookup from the poly
+  gate and documents why there is nothing there to defer to.
 
 ---
 
-## Tests
+## Exit criteria (met)
 
-- **Wildcard binds (R1, phase 1):** a wildcard of a module that **declares** an
-  exported name makes it reachable bare; replaces `driver_wildcard_import_is_error`.
-  A non-exported name of the target stays `unknown word` (wildcard binds exports
-  only). A wildcard-bound name colliding with a local declaration is a hard
-  error (R1).
-- **Wildcard of a re-export (R1×R4, phase 2):** `import: core *` where `core`
-  **re-exports** (does not declare) a name binds it and a consumer calls it bare.
-  Placed in phase 2, not phase 1, because it only starts passing once
-  `exported_origin` is threaded into `rewrite`'s selective branch (the headline
-  `import: core *`-over-a-hub path).
-- **Re-export (R4):** a hub re-exports an imported word and a consumer calls it
-  (qualified through the hub and, where applicable, bare). A hub-of-hubs chain
-  (two re-export hops) resolves to the origin. A hub that imports a dependency
-   *qualified* and re-exports a name reachable only as `dep::name` resolves too
-   (R4's qualified-import decl scan), not a spurious `export_unknown_name_error`.
-- **Re-export ambiguity (R4/R6c):** two qualified-imported dependencies both
-  declaring `lw` (`import: dep1 ; import: dep2 ;`), with the hub doing
-  `export: lw ;` (no local decl, no selective/wildcard entry to disambiguate), is
-  a located `ambiguous_re_export_error` naming the `export:` site and both origin
-  modules — not a silent first-wins pick.
-- **Re-export cycle (R4/R6c):** two modules re-exporting each other's name is a
-  located `re_export_cycle_error`, asserted to terminate (not hang/overflow).
-- **Export existence (R5/R6c):** `export: nonexistent ;` (declared and imported
-  nowhere) is a located `export_unknown_name_error`.
-- **Intrinsic gating (R2/R6a):** a bare `add` with no `intrinsics` import is the
-  located R6(a) error; `import: intrinsics * ;` and the selective form both make
-  it resolve; a selective import missing `add` still rejects a bare `add`.
-- **Prelude deleted (R3):** a file using `if`/`lt` with no import of the `core`
-  module is a build failure; the same file with the import builds. Golden
-  `gcd.sth`/`factorial.sth` build with explicit imports.
-- **Narrowing diagnostic (R6b):** a non-inline poly word (`: mylt ( 'T: Copy Ord
-  'T -- bool ) < ;` over an imported `<`) is the located R6(b) error naming
-  caller, callee, and reason — not `` unknown word `<__m1` ``. Mutation-guard it:
-  deleting the new branch must fall back to the raw unknown-word and fail the
-  test (per `[[workflow_mutation_test_the_guards]]`).
-- **Migration (R7/R8):** the corpus builds and every existing golden passes
-  against the shared fixture manifest.
-
----
-
-## Exit criteria
-
-- No word resolves without an `import:` on the file/driver path, the intrinsics
-  included (the REPL/`Ctx::Line` prompt is exempt, since the gate cannot fire
-  where `ctx.modules()` is `None`, R2 — consistent with the REPL's existing
-  module-check bypass); `is_prelude_word_name` and `parser::prelude_words` are
-  deleted, `resolve::mangle` exempts only `main`/`drop`, and
-  `is_operator_dispatch_name` no longer lists the six surface comparisons (R3a).
-- A hub module re-exports an imported word and a consumer uses it; a re-export
-  cycle, an unresolvable `export:` name, and a bare `export:` name declared by
-  two or more qualified-imported modules are each a located error, not a hang or
-  a silent first-wins pick.
-- A wildcard import binds every exported name of its target; the reserved
-  `intrinsics` wildcard makes the builtins visible.
-- A non-inline poly word calling an imported (or same-module) poly word is a
-  located error naming the caller, the callee, and the reason.
-- The corpus builds, every golden passes, and `cargo fmt --check && cargo clippy
-  -- -D warnings && cargo test` is green.
+- No word resolves without an `import:` on the file/driver path, intrinsics included; the
+  REPL/`Ctx::Line` prompt is exempt because the gate cannot fire where `ctx.modules()` is
+  `None`. `parser::prelude_words` and `is_prelude_word_name` are gone, `mangle` exempts only
+  `main`/`drop`, and `is_operator_dispatch_name` no longer lists the six comparisons.
+- A hub re-exports an imported word (and an imported type, and an enum's variants) and a
+  consumer uses it qualified and bare, through two hops and through a qualified-only import; a
+  cycle, an unresolvable name, and a two-origin ambiguity are each located errors, not a hang
+  or a first-wins pick.
+- A wildcard binds every exported name of its target, including names the target re-exports;
+  the reserved `intrinsics` wildcard makes the builtins visible, and a selective `intrinsics`
+  import is a real subset in both monomorphic and polymorphic bodies.
+- A non-inline poly word calling an imported or same-module poly word is a located error naming
+  caller, callee, and reason; the branch is mutation-guarded (deleting it falls back to the raw
+  unknown-word and fails the test).
+- The corpus builds, every golden passes, and
+  `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
 ---
 
 ## Out of scope
 
-- The generic-calls-generic P7 fix (brief decision (b): narrowed with a
-  diagnostic, not fixed here).
-- Manifest grammar, package attribution, module naming/visibility, cross-package
-  resolution, the layer check (S1a), the `--manifest` flag and fallback chain
-  (S1b) — depended on, not modified.
+- The generic-calls-generic P7 fix (brief decision (b): narrowed with a diagnostic).
+- Manifest grammar, package attribution, module naming/visibility, cross-package resolution,
+  the layer check (S1a); `--manifest` and the fallback chain (S1b) — depended on, not modified.
 - Wildcard re-export (`export: * ;`), manifest path tables, and a package-wide
   unqualified-exports escape hatch (design doc: declined / deferred).
 - Semver, the serialisable API description, `sooth publish --check` (S3).
-
----
-
-## Phases (JSON)
-
-```json
-{
-  "phases": [
-    {
-      "phase": 1,
-      "focus": "driver.rs assemble_module: wildcard visibility (R1) desugars a real-target Wildcard import into an all-exports selective binding (insert every exports_by_module[target] name into selective_map/selective_entries), keep the reserved-intrinsics continue and no-target rejection only; delete/retarget wildcard_import_is_error and rewrite driver_wildcard_import_is_error to assert the wildcard binds; unit tests",
-      "effort": "S",
-      "difficulty": "standard"
-    },
-    {
-      "phase": 2,
-      "focus": "resolve.rs re-export (R4/R5): build per-module exported_origin table in resolve_modules with a transitive fixpoint over hub-of-hubs chains (origin found by local decl, then the selective/wildcard map, then a scan of the qualified-imported modules' own decl tables via import_maps' target ids -- tables.words[dep_id].contains(name), NOT a name lookup in import_maps which is keyed by qualifier), thread it into NameTables::rewrite's qualified and selective branches, add located re_export_cycle_error, export_unknown_name_error (existence check, gated on the R5 corpus grep), and ambiguous_re_export_error (a bare export name declared by two or more qualified-imported modules, no local/selective/wildcard entry to disambiguate); unit tests for hub, hub-of-hubs, cycle termination, unresolvable export, and two-qualified-deps ambiguity",
-      "effort": "L",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 3,
-      "focus": "ATOMIC (prelude deletion + intrinsics gating + core split + corpus/test migration, R2/R3/R3a/R6/R7/R8 — one phase because no ordering keeps goldens green otherwise): delete parser::prelude_words and its two injection sites, shrink resolve::mangle to main/drop, delete is_prelude_word_name, and drop the six surface comparisons from is_operator_dispatch_name (R3a); migrate every live prelude consumer (repl.rs:1120 seed loop deleted, repl.rs:2270 filter clause removed, word_entry.rs:415 and parser.rs:4066 tests rewritten); add per-module intrinsic visibility to ModuleInfo populated in assemble_module's import loop, gate the checker's builtin-dispatch site with the R6a error keyed on BUILTIN_WORDS minus {eq,lt,gt,lte,gte,ne} and placed after the specialized dispatch/env path, add the R6b narrowing diagnostic before poly_call_term's unknown_word_error at poly.rs:1059 (threaded poly-word-name set, mutation-guarded); split lib/core.sth into a core package with a re-exporting hub and migrate every .sth file and file-based test source to explicit imports against one shared fixture manifest via build_example's build_with_manifest, carry S1a's lib/-as-layered-packages dogfood; corpus builds and every golden passes",
-      "effort": "XL",
-      "difficulty": "hard"
-    }
-  ]
-}
-```
