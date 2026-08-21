@@ -16,7 +16,7 @@
 //! so today's symbols and output are unchanged.
 
 use crate::ast::{Module, Span, Term, TermKind};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
 /// links against (`sooth_main`, via the backend's `qbe_name`). A `drop`
@@ -246,7 +246,7 @@ impl NameTables {
 
     /// Rewrite one call name occurring in a body owned by `module`, given that
     /// module's qualifier->module import map, the locals currently in scope,
-    /// every module's `export:` list, and `span` for a located diagnostic.
+    /// the closure's `Visibility` tables, and `span` for a located diagnostic.
     /// Returns `Ok(None)` to leave the name unchanged (unqualified: an own-
     /// module reference, which is never gated by export; qualified: absent
     /// from the target module, left for `check.rs`'s unknown-word error).
@@ -258,10 +258,10 @@ impl NameTables {
         &self,
         name: &str,
         module: u32,
-        imports: &std::collections::HashMap<String, u32>,
-        selective: &std::collections::HashMap<String, u32>,
+        imports: &HashMap<String, u32>,
+        selective: &HashMap<String, u32>,
         scope: &HashSet<String>,
-        exports: &[Vec<(String, Span)>],
+        vis: &Visibility,
         span: Span,
     ) -> Result<Option<String>, String> {
         // A `&`/`&!` borrow prefix and a qualifier compose on one token
@@ -286,7 +286,7 @@ impl NameTables {
             };
             let (type_part, suffix) = split_destructure_suffix(rest);
             if word_ok && self.names_a_type(target, type_part, suffix) {
-                if !is_exported(&exports[target as usize], type_part) {
+                if !is_exported(&vis.exports[target as usize], type_part) {
                     return Err(not_exported_error(type_part, qualifier, span));
                 }
                 return Ok(Some(format!(
@@ -304,10 +304,33 @@ impl NameTables {
             // when no type of that head name exists, which is a real word
             // this table holds, not a destructure/eliminator collision.
             if word_ok && self.words[target as usize].contains(rest) {
-                if !is_exported(&exports[target as usize], rest) {
+                if !is_exported(&vis.exports[target as usize], rest) {
                     return Err(not_exported_error(rest, qualifier, span));
                 }
                 return Ok(Some(format!("{sigil}{}", mangle(rest, target))));
+            }
+            // P8 S2 (R4): the target may promise a name it does not declare.
+            // `export:` accepts an imported name as readily as a declared one,
+            // so a hub's export list is resolved to the module that actually
+            // declares each name (`Visibility::origin`) and the call mangles
+            // against *that* module. No separate export gate: an
+            // `exported_origin` entry exists only for a name on the target's
+            // own `export:` list, so the entry is the promise.
+            if word_ok {
+                if let Some(origin) = vis.origin(target, type_part) {
+                    if self.names_a_type(origin, type_part, suffix) {
+                        return Ok(Some(format!(
+                            "{sigil}{}{}",
+                            mangle(type_part, origin),
+                            suffix
+                        )));
+                    }
+                }
+                if let Some(origin) = vis.origin(target, rest) {
+                    if self.words[origin as usize].contains(rest) {
+                        return Ok(Some(format!("{sigil}{}", mangle(rest, origin))));
+                    }
+                }
             }
             return Ok(None);
         }
@@ -357,6 +380,17 @@ impl NameTables {
                         suffix
                     )));
                 }
+                // R4: the selective (or wildcard-desugared) entry may name a
+                // type the target re-exports rather than declares.
+                if let Some(origin) = vis.origin(target, type_part) {
+                    if self.names_a_type(origin, type_part, suffix) {
+                        return Ok(Some(format!(
+                            "{sigil}{}{}",
+                            mangle(type_part, origin),
+                            suffix
+                        )));
+                    }
+                }
             }
         }
         // A selectively imported operator name stays unrewritten here for the
@@ -373,9 +407,42 @@ impl NameTables {
                 if self.words[target as usize].contains(core) {
                     return Ok(Some(format!("{sigil}{}", mangle(core, target))));
                 }
+                // R4: `import: hub | lw | ;` (or `import: hub * ;`) where the
+                // hub re-exports `lw` -- the bare name resolves to the origin
+                // module's decl, which is the whole point of a hub.
+                if let Some(origin) = vis.origin(target, core) {
+                    if self.words[origin as usize].contains(core) {
+                        return Ok(Some(format!("{sigil}{}", mangle(core, origin))));
+                    }
+                }
             }
         }
         Ok(None)
+    }
+}
+
+/// P8 S2 (R4): the cross-module visibility tables `rewrite` consults -- every
+/// module's `export:` list, plus each exported name's *origin* module (the one
+/// that declares it, which for a re-exported name is not the exporting module).
+/// Bundled into one parameter because `rewrite` and `rewrite_terms` already sit
+/// at clippy's argument ceiling.
+struct Visibility {
+    exports: Vec<Vec<(String, Span)>>,
+    /// Per module: each name on its `export:` list -> the module id that
+    /// declares it. A module that declares what it exports maps the name to
+    /// itself, so a present entry never implies a re-export; an absent one
+    /// means the name is not exported at all.
+    exported_origin: Vec<HashMap<String, u32>>,
+}
+
+impl Visibility {
+    /// The module that declares `name`, if `target` exports it and is not
+    /// itself the declarer. `None` for a name `target` does not export, and
+    /// for one it declares itself (the caller's own branches, which run
+    /// first, already resolve that case).
+    fn origin(&self, target: u32, name: &str) -> Option<u32> {
+        let origin = *self.exported_origin[target as usize].get(name)?;
+        (origin != target).then_some(origin)
     }
 }
 
@@ -394,6 +461,187 @@ pub(crate) fn not_exported_error(name: &str, qualifier: &str, span: Span) -> Str
     )
 }
 
+/// P8 S2 (R5/R6c): an `export:` name that is neither declared by the exporting
+/// module nor imported into it, so it has no origin to re-export. Until this
+/// slice `export:` did no existence check at all and such a name built clean.
+/// The exporting module is identified by the located `export:` site rather than
+/// by name: a module carries no name in the resolved closure (only importers
+/// spell one, as a qualifier).
+fn export_unknown_name_error(name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` in `export:` names nothing declared or imported in this module (line {}, col {})",
+        span.line, span.col
+    )
+}
+
+/// P8 S2 (R4/R6c): a re-export chain that revisits a `(module, name)` pair
+/// before reaching a declaration. The one way the origin walk can fail to
+/// converge, so it is rejected rather than looped on.
+fn re_export_cycle_error(name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` re-exports itself through a cycle of `export:` chains (line {}, col {})",
+        span.line, span.col
+    )
+}
+
+/// P8 S2 (R4/R6c): a bare `export:` name declared by two or more of the
+/// modules this one imports *qualified*, with no local decl and no
+/// selective/wildcard entry to pick between them. `export:` is a flat name
+/// list (there is no `export: dep1::lw ;`), so there is nothing to disambiguate
+/// with and no defensible tiebreak: taking the first import would silently
+/// privilege declaration order.
+fn ambiguous_re_export_error(name: &str, origins: &[&str], span: Span) -> String {
+    let origins = origins
+        .iter()
+        .map(|q| format!("`{q}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "error: `{name}` in `export:` is declared by more than one qualified-imported module ({origins}) and cannot be re-exported without disambiguation (line {}, col {})",
+        span.line, span.col
+    )
+}
+
+/// Every name a module may legitimately promise in `export:`: its words,
+/// externs, structs, enums, generic `type:` headers, and the variant
+/// constructors of both kinds of enum. Wider than `NameTables`, which holds
+/// only what a *call site* can be mangled against: a generic header and a
+/// variant constructor are resolved by other machinery (monomorphization, the
+/// variant registry) and never mangled here, but `lib/result.sth` exports all
+/// three shapes, so an existence check keyed on the mangling tables alone would
+/// reject them. `static:` declarations are deliberately absent: a static is
+/// module-private and reachable only by `&NAME` inside its own module, so
+/// naming one in `export:` promises something no importer could ever reach.
+fn exportable_names(module: &Module, m: u32) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for w in module.words.iter().filter(|w| w.module == m) {
+        names.insert(w.name.as_str());
+    }
+    for x in module.externs.iter().filter(|x| x.module == m) {
+        names.insert(x.name.as_str());
+    }
+    for s in module.structs.iter().filter(|s| s.module == m) {
+        names.insert(s.name.as_str());
+    }
+    for s in module.generic_structs.iter().filter(|s| s.module == m) {
+        names.insert(s.name.as_str());
+    }
+    for e in module.enums.iter().filter(|e| e.module == m) {
+        names.insert(e.name.as_str());
+        names.extend(e.variants.iter().map(|v| v.name.as_str()));
+    }
+    for e in module.generic_enums.iter().filter(|e| e.module == m) {
+        names.insert(e.name.as_str());
+        names.extend(e.variants.iter().map(|v| v.name.as_str()));
+    }
+    names
+}
+
+/// P8 S2 (R4/R5): resolve every module's `export:` list to a name -> origin
+/// module map. A name the exporting module declares maps to itself; a name it
+/// imported maps to the module that declares it, following re-export chains
+/// (hub of hubs) to their end.
+fn build_exported_origin(
+    module: &Module,
+    exports: &[Vec<(String, Span)>],
+    import_maps: &[HashMap<String, u32>],
+    selectives: &[HashMap<String, u32>],
+) -> Result<Vec<HashMap<String, u32>>, String> {
+    let declared: Vec<HashSet<&str>> = (0..exports.len())
+        .map(|m| exportable_names(module, m as u32))
+        .collect();
+    resolve_export_origins(&declared, exports, import_maps, selectives)
+}
+
+/// `build_exported_origin` over already-collected declaration sets: the whole
+/// origin resolution, independent of how a `Module` spells its decls.
+fn resolve_export_origins(
+    declared: &[HashSet<&str>],
+    exports: &[Vec<(String, Span)>],
+    import_maps: &[HashMap<String, u32>],
+    selectives: &[HashMap<String, u32>],
+) -> Result<Vec<HashMap<String, u32>>, String> {
+    let n = exports.len();
+    // The *immediate* source of each exported name: one hop, which for a
+    // re-exported name may itself be a re-export. Resolved to the declaring
+    // module below, once every module's hop is known -- an export list may
+    // name a hub whose own list has not been walked yet.
+    let mut immediate: Vec<HashMap<String, u32>> = vec![HashMap::new(); n];
+    for (m, list) in exports.iter().enumerate() {
+        for (name, span) in list {
+            let source = if declared[m].contains(name.as_str()) {
+                m as u32
+            } else if let Some(&target) = selectives[m].get(name) {
+                target
+            } else {
+                // A dependency imported *qualified only* is reachable as
+                // `dep::name` and appears in neither table above, so its own
+                // declarations are scanned: `import_maps` is keyed by
+                // qualifier, never by word name, so looking `name` up in it
+                // would always miss. Keyed by module id so two qualifiers
+                // bound to one module are one origin, not an ambiguity.
+                let mut origins: BTreeMap<u32, &str> = BTreeMap::new();
+                for (qualifier, dep) in import_maps[m]
+                    .iter()
+                    .filter(|(_, dep)| declared[**dep as usize].contains(name.as_str()))
+                {
+                    // One module bound under two qualifiers is still one
+                    // origin; the lower spelling wins so the diagnostic does
+                    // not depend on hash order.
+                    let shown = origins.entry(*dep).or_insert(qualifier);
+                    *shown = (*shown).min(qualifier.as_str());
+                }
+                let mut ids = origins.keys();
+                match (ids.next(), ids.next()) {
+                    (None, _) => return Err(export_unknown_name_error(name, *span)),
+                    (Some(&dep), None) => dep,
+                    _ => {
+                        let qualifiers: Vec<&str> = origins.values().copied().collect();
+                        return Err(ambiguous_re_export_error(name, &qualifiers, *span));
+                    }
+                }
+            };
+            immediate[m].insert(name.clone(), source);
+        }
+    }
+
+    let mut exported_origin: Vec<HashMap<String, u32>> = vec![HashMap::new(); n];
+    for (m, list) in exports.iter().enumerate() {
+        for (name, span) in list {
+            let origin = walk_to_origin(m as u32, name, *span, &immediate)?;
+            exported_origin[m].insert(name.clone(), origin);
+        }
+    }
+    Ok(exported_origin)
+}
+
+/// Follow one export entry's chain of immediate sources to the module that
+/// declares the name. The visited set belongs to this one resolution and is
+/// keyed on the `(module, name)` pair: a hub re-exporting two names that both
+/// route through one downstream hub is a diamond, not a cycle, so a set shared
+/// across resolutions -- or keyed on the module alone -- would reject the
+/// second name.
+fn walk_to_origin(
+    module: u32,
+    name: &str,
+    span: Span,
+    immediate: &[HashMap<String, u32>],
+) -> Result<u32, String> {
+    let mut visited: HashSet<(u32, &str)> = HashSet::new();
+    let mut current = module;
+    loop {
+        if !visited.insert((current, name)) {
+            return Err(re_export_cycle_error(name, span));
+        }
+        match immediate[current as usize].get(name) {
+            // A hop that leaves the name's own export list ends the chain:
+            // the source declares it (it is not re-exporting it onward).
+            Some(&next) if next != current => current = next,
+            _ => return Ok(current),
+        }
+    }
+}
+
 /// Mangle every decl name for a multi-module closure and rewrite every body to
 /// match. Below two modules the pass is a no-op *unless* `always_mangle` is set
 /// (R22): the REPL import path leaves a single-file closure raw and does its own
@@ -410,12 +658,20 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     // The word bodies are rewritten first, reading the still-raw decl names via
     // `tables`; only then are the decl names themselves mangled. `words` is
     // split out so a body's own module id and import map drive its rewrite.
-    let import_maps: Vec<std::collections::HashMap<String, u32>> =
+    let import_maps: Vec<HashMap<String, u32>> =
         module.modules.iter().map(|m| m.imports.clone()).collect();
-    let selectives: Vec<std::collections::HashMap<String, u32>> =
+    let selectives: Vec<HashMap<String, u32>> =
         module.modules.iter().map(|m| m.selective.clone()).collect();
     let exports: Vec<Vec<(String, Span)>> =
         module.modules.iter().map(|m| m.exports.clone()).collect();
+    // P8 S2 (R4/R5): resolved before any body is rewritten, since a body may
+    // reference a name through a hub whose own export list has not been
+    // reached yet. This is also where an `export:` name with no origin, and an
+    // ambiguous or cyclic re-export, are rejected.
+    let vis = Visibility {
+        exported_origin: build_exported_origin(module, &exports, &import_maps, &selectives)?,
+        exports,
+    };
     for word in &mut module.words {
         let imports = &import_maps[word.module as usize];
         let selective = &selectives[word.module as usize];
@@ -428,7 +684,7 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
             selective,
             &tables,
             &mut scope,
-            &exports,
+            &vis,
         )?;
     }
 
@@ -471,11 +727,11 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
 fn rewrite_terms(
     terms: &mut [Term],
     module: u32,
-    imports: &std::collections::HashMap<String, u32>,
-    selective: &std::collections::HashMap<String, u32>,
+    imports: &HashMap<String, u32>,
+    selective: &HashMap<String, u32>,
     tables: &NameTables,
     scope: &mut HashSet<String>,
-    exports: &[Vec<(String, Span)>],
+    vis: &Visibility,
 ) -> Result<(), String> {
     let base = scope.len();
     let mut added: Vec<String> = Vec::new();
@@ -483,7 +739,7 @@ fn rewrite_terms(
         match &mut term.kind {
             TermKind::Call(name) => {
                 if let Some(new) =
-                    tables.rewrite(name, module, imports, selective, scope, exports, term.span)?
+                    tables.rewrite(name, module, imports, selective, scope, vis, term.span)?
                 {
                     *name = new;
                 }
@@ -496,7 +752,7 @@ fn rewrite_terms(
                 }
             }
             TermKind::Quotation(inner, _, _) => {
-                rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
+                rewrite_terms(inner, module, imports, selective, tables, scope, vis)?;
             }
             // Slice 6h: an array constructor carries an already-resolved
             // `Type::Array(id)`, not a name, so there is nothing to rewrite.
@@ -574,7 +830,7 @@ mod tests {
         };
         let mut imports = std::collections::HashMap::new();
         imports.insert("q".to_string(), 1u32);
-        let exports = vec![Vec::new(), Vec::new()]; // module 1 exports nothing
+        let vis = declaring_visibility(vec![Vec::new(), Vec::new()]); // module 1 exports nothing
         let scope = HashSet::new();
         let span = Span {
             line: 1,
@@ -583,44 +839,21 @@ mod tests {
         };
 
         let no_selective = std::collections::HashMap::new();
-        let unexported = tables.rewrite(
-            "q::grow",
-            0,
-            &imports,
-            &no_selective,
-            &scope,
-            &exports,
-            span,
-        );
+        let unexported = tables.rewrite("q::grow", 0, &imports, &no_selective, &scope, &vis, span);
         assert!(
             matches!(unexported, Err(ref e) if e.contains("not exported")),
             "existing-but-private name is a located error: {unexported:?}"
         );
 
-        let absent = tables.rewrite(
-            "q::missing",
-            0,
-            &imports,
-            &no_selective,
-            &scope,
-            &exports,
-            span,
-        );
+        let absent = tables.rewrite("q::missing", 0, &imports, &no_selective, &scope, &vis, span);
         assert_eq!(absent, Ok(None), "absent name defers to unknown-word");
 
         // An enum is a type for an *unsuffixed* reference too, which is what
         // makes a qualified one answer R16 here rather than falling through to
         // unknown-word. (`?` eligibility is the enum set's other reader, see
         // `names_a_type`.)
-        let private_enum = tables.rewrite(
-            "q::Hidden",
-            0,
-            &imports,
-            &no_selective,
-            &scope,
-            &exports,
-            span,
-        );
+        let private_enum =
+            tables.rewrite("q::Hidden", 0, &imports, &no_selective, &scope, &vis, span);
         assert!(
             matches!(private_enum, Err(ref e) if e.contains("`Hidden` is not exported")),
             "an unexported enum is a located error, not unknown-word: {private_enum:?}"
@@ -644,7 +877,7 @@ mod tests {
         };
         let mut imports = std::collections::HashMap::new();
         imports.insert("geo".to_string(), 1u32);
-        let exports = vec![
+        let vis = declaring_visibility(vec![
             Vec::new(),
             vec![(
                 "Point".to_string(),
@@ -654,7 +887,7 @@ mod tests {
                     module: 0,
                 },
             )],
-        ];
+        ]);
         let scope = HashSet::new();
         let span = Span {
             line: 2,
@@ -667,8 +900,7 @@ mod tests {
             "geo::Point>", // destructure
         ] {
             let no_selective = std::collections::HashMap::new();
-            let result =
-                tables.rewrite(spelling, 0, &imports, &no_selective, &scope, &exports, span);
+            let result = tables.rewrite(spelling, 0, &imports, &no_selective, &scope, &vis, span);
             assert!(
                 result.is_ok(),
                 "{spelling} resolves once its type is exported: {result:?}"
@@ -772,12 +1004,12 @@ mod tests {
         };
         let imports = std::collections::HashMap::new();
         let selective = std::collections::HashMap::new();
-        let exports = vec![Vec::new(), Vec::new()];
+        let vis = declaring_visibility(vec![Vec::new(), Vec::new()]);
         let scope = HashSet::new();
         let span = Span::default();
         let rewrite = |name: &str, module: u32| {
             tables
-                .rewrite(name, module, &imports, &selective, &scope, &exports, span)
+                .rewrite(name, module, &imports, &selective, &scope, &vis, span)
                 .unwrap()
         };
         assert_eq!(rewrite("COUNT", 0), None, "no sigil, no static rewrite");
@@ -880,14 +1112,15 @@ mod tests {
         };
         let mut imports = std::collections::HashMap::new();
         imports.insert("lib".to_string(), 1u32);
-        let exports = vec![Vec::new(), vec![("ok?".to_string(), Span::default())]];
+        let vis =
+            declaring_visibility(vec![Vec::new(), vec![("ok?".to_string(), Span::default())]]);
         let scope = HashSet::new();
         let span = Span::default();
         let none = std::collections::HashMap::new();
         let mut selective = std::collections::HashMap::new();
         selective.insert("ok?".to_string(), 1u32);
         let at = |name: &str, sel: &std::collections::HashMap<String, u32>| {
-            tables.rewrite(name, 0, &imports, sel, &scope, &exports, span)
+            tables.rewrite(name, 0, &imports, sel, &scope, &vis, span)
         };
 
         assert_eq!(
@@ -1017,6 +1250,208 @@ mod tests {
             call_names(&main.body),
             vec!["p".to_string(), "drop".to_string()]
         );
+    }
+
+    /// P8 S2 (R4): a hub-of-hubs chain resolves to the module that actually
+    /// declares the name -- module 2 declares `lw`, module 1 re-exports it,
+    /// module 0 re-exports module 1's re-export -- so a consumer of any link
+    /// in the chain mangles against module 2.
+    #[test]
+    fn export_origin_follows_a_re_export_chain_to_the_declaring_module() {
+        let declared = vec![HashSet::new(), HashSet::new(), HashSet::from(["lw"])];
+        let origins = resolve_export_origins(
+            &declared,
+            &[exports(&["lw"]), exports(&["lw"]), exports(&["lw"])],
+            &[HashMap::new(), HashMap::new(), HashMap::new()],
+            &[selective("lw", 1), selective("lw", 2), HashMap::new()],
+        )
+        .expect("a two-hop re-export chain resolves");
+        assert_eq!(origins[0]["lw"], 2, "the hub of hubs reaches the declarer");
+        assert_eq!(origins[1]["lw"], 2);
+        assert_eq!(origins[2]["lw"], 2, "the declarer exports its own name");
+    }
+
+    /// R4: the visited set is per resolution and keyed on the `(module, name)`
+    /// pair. Two names re-exported by one hub and both routed through the same
+    /// downstream hub is a diamond, not a cycle: one visited set shared across
+    /// resolutions and keyed on the module alone rejects the second name here.
+    #[test]
+    fn export_origin_accepts_two_names_routed_through_one_hub() {
+        let declared = vec![HashSet::new(), HashSet::new(), HashSet::from(["a", "b"])];
+        let mut hub = selective("a", 2);
+        hub.insert("b".to_string(), 2);
+        let mut top = selective("a", 1);
+        top.insert("b".to_string(), 1);
+        let both = exports(&["a", "b"]);
+        let origins = resolve_export_origins(
+            &declared,
+            &[both.clone(), both.clone(), both],
+            &[HashMap::new(), HashMap::new(), HashMap::new()],
+            &[top, hub, HashMap::new()],
+        )
+        .expect("two names through one hub is a diamond, not a cycle");
+        assert_eq!((origins[0]["a"], origins[0]["b"]), (2, 2));
+    }
+
+    /// R4/R6c: two modules re-exporting each other's `lw` is a located error,
+    /// and the walk terminates rather than looping (this test would hang if it
+    /// did not).
+    #[test]
+    fn export_re_export_cycle_is_a_located_error() {
+        let err = resolve_export_origins(
+            &[HashSet::new(), HashSet::new()],
+            &[vec![("lw".to_string(), at(4, 1))], exports(&["lw"])],
+            &[HashMap::new(), HashMap::new()],
+            &[selective("lw", 1), selective("lw", 0)],
+        )
+        .expect_err("a re-export cycle never reaches a declaration");
+        assert_eq!(
+            err,
+            "error: `lw` re-exports itself through a cycle of `export:` chains (line 4, col 1)"
+        );
+    }
+
+    /// R5/R6c: an `export:` name that is neither declared locally nor imported
+    /// has no origin. Silently accepted before this slice.
+    #[test]
+    fn export_of_an_undeclared_unimported_name_is_a_located_error() {
+        let err = resolve_export_origins(
+            &[HashSet::from(["other"])],
+            &[vec![("nonexistent".to_string(), at(2, 9))]],
+            &[HashMap::new()],
+            &[HashMap::new()],
+        )
+        .expect_err("an export naming nothing is an error");
+        assert_eq!(
+            err,
+            "error: `nonexistent` in `export:` names nothing declared or imported in this module (line 2, col 9)"
+        );
+    }
+
+    /// R4/R6c: a bare `export:` name declared by two *qualified*-imported
+    /// modules has no spelling that could pick between them, so it is a
+    /// located error naming both -- never a first-import-wins pick. The
+    /// qualifiers are listed in module-id order, so the message does not
+    /// depend on the import map's hash order.
+    #[test]
+    fn export_name_declared_by_two_qualified_imports_is_ambiguous() {
+        let declared = vec![HashSet::new(), HashSet::from(["lw"]), HashSet::from(["lw"])];
+        let mut imports = HashMap::new();
+        imports.insert("dep2".to_string(), 2u32);
+        imports.insert("dep1".to_string(), 1u32);
+        let err = resolve_export_origins(
+            &declared,
+            &[
+                vec![("lw".to_string(), at(3, 1))],
+                exports(&["lw"]),
+                exports(&["lw"]),
+            ],
+            &[imports, HashMap::new(), HashMap::new()],
+            &[HashMap::new(), HashMap::new(), HashMap::new()],
+        )
+        .expect_err("two qualified origins cannot be disambiguated");
+        assert_eq!(
+            err,
+            "error: `lw` in `export:` is declared by more than one qualified-imported module (`dep1`, `dep2`) and cannot be re-exported without disambiguation (line 3, col 1)"
+        );
+    }
+
+    /// R4: a hub that imports its dependency *qualified only* reaches the name
+    /// as `dep::lw` alone -- neither a local decl nor a selective entry -- so
+    /// the origin comes from scanning the qualified-imported modules' own
+    /// declarations. Without that scan this is a spurious existence error.
+    #[test]
+    fn export_origin_scans_qualified_imported_declarations() {
+        let declared = vec![HashSet::new(), HashSet::from(["lw"])];
+        let mut imports = HashMap::new();
+        imports.insert("dep".to_string(), 1u32);
+        let origins = resolve_export_origins(
+            &declared,
+            &[exports(&["lw"]), exports(&["lw"])],
+            &[imports, HashMap::new()],
+            &[HashMap::new(), HashMap::new()],
+        )
+        .expect("a qualified-only re-export has an origin");
+        assert_eq!(origins[0]["lw"], 1);
+    }
+
+    /// R4: with the origin table in hand, both of `rewrite`'s cross-module
+    /// branches reach a re-exported name -- a qualified `hub::lw` and the bare
+    /// `lw` a selective (or wildcard-desugared) import of the hub binds -- and
+    /// both mangle against the *declaring* module, not the hub.
+    #[test]
+    fn rewrite_resolves_a_re_exported_name_to_its_origin_module() {
+        let mut words = vec![HashSet::new(), HashSet::new(), HashSet::new()];
+        words[2].insert("lw".to_string());
+        let tables = NameTables {
+            structs: vec![HashSet::new(); 3],
+            enums: vec![HashSet::new(); 3],
+            words,
+            statics: vec![HashSet::new(); 3],
+        };
+        let mut imports = HashMap::new();
+        imports.insert("hub".to_string(), 1u32);
+        let vis = Visibility {
+            exports: vec![Vec::new(), exports(&["lw"]), exports(&["lw"])],
+            exported_origin: vec![
+                HashMap::new(),
+                HashMap::from([("lw".to_string(), 2u32)]),
+                HashMap::from([("lw".to_string(), 2u32)]),
+            ],
+        };
+        let scope = HashSet::new();
+        let span = Span::default();
+        assert_eq!(
+            tables.rewrite("hub::lw", 0, &imports, &HashMap::new(), &scope, &vis, span),
+            Ok(Some("lw__m2".to_string())),
+            "qualified through the hub"
+        );
+        assert_eq!(
+            tables.rewrite("lw", 0, &imports, &selective("lw", 1), &scope, &vis, span),
+            Ok(Some("lw__m2".to_string())),
+            "bare, through a selective or wildcard import of the hub"
+        );
+    }
+
+    /// One `export:` list, every entry at the default span (the origin table
+    /// is keyed on names; a span only surfaces in a diagnostic).
+    fn exports(names: &[&str]) -> Vec<(String, Span)> {
+        names
+            .iter()
+            .map(|n| (n.to_string(), Span::default()))
+            .collect()
+    }
+
+    fn at(line: u32, col: u32) -> Span {
+        Span {
+            line,
+            col,
+            module: 0,
+        }
+    }
+
+    /// A one-entry selective-import map: `name` resolves to module `target`.
+    fn selective(name: &str, target: u32) -> HashMap<String, u32> {
+        HashMap::from([(name.to_string(), target)])
+    }
+
+    /// The `Visibility` of a closure where every module declares what it
+    /// exports: each name's origin is the module exporting it, so no lookup
+    /// reaches a re-export. What every test predating P8 S2 assumed.
+    fn declaring_visibility(exports: Vec<Vec<(String, Span)>>) -> Visibility {
+        let exported_origin = exports
+            .iter()
+            .enumerate()
+            .map(|(m, list)| {
+                list.iter()
+                    .map(|(name, _)| (name.clone(), m as u32))
+                    .collect()
+            })
+            .collect();
+        Visibility {
+            exports,
+            exported_origin,
+        }
     }
 
     fn call_names(body: &[Term]) -> Vec<String> {
