@@ -2674,6 +2674,10 @@ impl Session {
         // later instantiation's lowering dispatches through them instead of
         // an empty map.
         let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
+        // P7 slice 3b-follow (R2): the session's retained combinators, so a
+        // poly body defined at the REPL reaches the same row-typed consumer
+        // dispatch a native one does.
+        let combinators = checker_combinators(&self.combinators);
         // P7 slice 3a: a session-defined poly word can never name a generic
         // `type:` (the REPL has no way to declare one, D2), so `None` here
         // is correct, not a gap.
@@ -2681,6 +2685,7 @@ impl Session {
             &word,
             &sig,
             &env,
+            &combinators,
             &self.structs,
             &self.enums,
             &self.arrays,

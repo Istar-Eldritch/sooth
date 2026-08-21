@@ -387,6 +387,7 @@ pub fn check_poly_body(
     word: &WordDef,
     sig: &PolySig,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -435,6 +436,7 @@ pub fn check_poly_body(
         sig,
         &ctx,
         env,
+        combinators,
         structs,
         enums,
         arrays,
@@ -475,6 +477,7 @@ pub(super) fn poly_walk(
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -505,6 +508,7 @@ pub(super) fn poly_walk(
             sig,
             ctx,
             env,
+            combinators,
             structs,
             enums,
             arrays,
@@ -523,6 +527,7 @@ pub(super) fn poly_term(
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -596,6 +601,7 @@ pub(super) fn poly_term(
                 sig,
                 ctx,
                 env,
+                combinators,
                 structs,
                 enums,
                 arrays,
@@ -651,6 +657,7 @@ pub(super) fn poly_call_term(
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -912,16 +919,44 @@ pub(super) fn poly_call_term(
     // before this lookup dispatches one for a drop-overloaded struct, or a
     // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
-    // P7 slice 3b (R4/OQ6): the quotation-*consuming* combinator family is
-    // deferred to P7.S3b-follow -- each takes a quotation as a row-typed
-    // parameter, which needs row unification against an abstract stack, the
-    // machinery an eliminator dispatch deliberately avoids. Located and
-    // named here rather than left to fall through to `unknown word`, which
-    // is what these emit otherwise (`poly_call_term` cannot see `poly_env`,
-    // so none of them is even registered on this path).
-    if matches!(name, "call" | "branch" | "if" | "times" | "tag")
-        && stack.iter().any(|slot| slot.quot.is_some())
-    {
+    // P7 slice 3b-follow (R2): a call to a row-typed inline combinator, ahead
+    // of both rejections that used to catch this family -- the narrowed name
+    // guard below and the `QuotLit` operand window further down, which is
+    // where every combinator *not* named in that guard (`unless`, any library
+    // or user `inline` word with `~[ ]` parameters) landed. Driven by the
+    // callee's declared `PolySig`, not by name, so one dispatch covers all of
+    // them. The lookup is by the call's own name: `collect_combinators` keys
+    // on `word.name`, and `resolve` rewrites a call site and its callee's
+    // declaration identically (`times__m1`), so a prelude `if` and an
+    // imported `times` both hit under the spelling that reaches here.
+    if let Some(csig) = poly_row_combinator(combinators, name) {
+        return poly_combinator_call(
+            csig,
+            name,
+            span,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            combinators,
+            structs,
+            enums,
+            arrays,
+            slices,
+            builtin_overloads,
+        );
+    }
+    // P7 slice 3b (R4/OQ6), narrowed by S3b-follow (OQ2) to the three
+    // consumers this slice does *not* deliver: `call` and `branch` are
+    // compiler-known primitives rather than combinator-env words, so each
+    // needs its own hand-written row grounding, and `tag` is not a quotation
+    // consumer at all (an all-unit enum to `u32`), so it shares no machinery
+    // with the dispatch above. Located and named here rather than left to
+    // fall through to `unknown word`, which is what these emit otherwise
+    // (`poly_call_term` cannot see `poly_env`, so none of them is even
+    // registered on this path).
+    if matches!(name, "call" | "branch" | "tag") && stack.iter().any(|slot| slot.quot.is_some()) {
         return Err(poly_quotation_combinator_unsupported_error(ctx, span, name));
     }
     // P7 slice 3b (R2): a generated eliminator (`Shape?`) routes ahead of the
@@ -941,6 +976,7 @@ pub(super) fn poly_call_term(
             sig,
             ctx,
             env,
+            combinators,
             structs,
             enums,
             arrays,
@@ -1086,6 +1122,7 @@ fn poly_eliminator_call(
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -1252,6 +1289,7 @@ fn poly_eliminator_call(
         sig,
         ctx,
         env,
+        combinators,
         structs,
         enums,
         arrays,
@@ -1335,6 +1373,7 @@ fn poly_walk_arms(
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -1371,6 +1410,7 @@ fn poly_walk_arms(
             sig,
             ctx,
             env,
+            combinators,
             structs,
             enums,
             arrays,
@@ -1485,6 +1525,263 @@ fn poly_row_str(row: &[PolySlot], sig: &PolySig) -> String {
                 .join(" ")
         ),
     }
+}
+
+/// P7 slice 3b-follow (R2): the row-typed inline combinator `name` resolves
+/// to, if any -- the declaration that drives `poly_combinator_call`.
+///
+/// A *row* on some quotation parameter is the entry condition: this dispatch
+/// grounds that row against the abstract stack, and a combinator declaring
+/// only rowless quotation parameters is the concrete-consumer shape (P7.S3d),
+/// which keeps the located rejection it has today rather than being admitted
+/// through machinery built for a different question.
+///
+/// A name carrying *two* candidates declines: picking between combinator
+/// overloads is `resolve_combinator_overload`'s job over concrete operand
+/// types, and there is no poly analogue of it. Declining leaves the call with
+/// the located rejection it already had, never an accept.
+fn poly_row_combinator<'a>(combinators: &'a CombinatorEnv, name: &str) -> Option<&'a PolySig> {
+    let [only] = combinators.get(name)?.as_slice() else {
+        return None;
+    };
+    let csig = only.word.poly.as_deref()?;
+    csig.inputs
+        .iter()
+        .any(|pin| {
+            matches!(pin, PolyType::Quotation(_, _, _, row_in, row_out) if row_in.is_some() || row_out.is_some())
+        })
+        .then_some(csig)
+}
+
+/// P7 slice 3b-follow (R3): one declared quotation parameter, grounded. The
+/// fixed slots are concrete `Type`s (a variable-carrying declaration is
+/// rejected before this is built), and `carries_row` is whether the parameter
+/// declared the signature's row, which is what decides between grounding
+/// against the caller region and grounding against the empty one.
+struct DeclaredArm {
+    ins: Vec<Type>,
+    outs: Vec<Type>,
+    carries_row: bool,
+}
+
+/// Classify one declared parameter of a row-typed combinator. `Ok(None)` is an
+/// ordinary value parameter, which the caller matches against its live slot.
+fn poly_declared_arm(
+    pin: &PolyType,
+    csig: &PolySig,
+    name: &str,
+    ctx: &Ctx,
+    span: Span,
+) -> Result<Option<DeclaredArm>, String> {
+    let abstract_ = || poly_combinator_abstract_signature_error(ctx, span, name, pin, csig);
+    match pin {
+        PolyType::Quotation(ins, outs, _, row_in, _) => {
+            let ground = |slots: &[PolyType]| -> Option<Vec<Type>> {
+                slots
+                    .iter()
+                    .map(|p| match p {
+                        PolyType::Concrete(t) => Some(*t),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let (Some(ins), Some(outs)) = (ground(ins), ground(outs)) else {
+                return Err(abstract_());
+            };
+            Ok(Some(DeclaredArm {
+                ins,
+                outs,
+                carries_row: row_in.is_some(),
+            }))
+        }
+        // Slice 10a (R1): a fully-concrete declared effect folds to
+        // `Concrete`, so this is the same parameter shape with no variable and
+        // no row -- it grounds against the empty region (R3).
+        PolyType::Concrete(t) => Ok(crate::ast::is_quotation_type(*t).map(|eff| DeclaredArm {
+            ins: eff.inputs.clone(),
+            outs: eff.outputs.clone(),
+            carries_row: false,
+        })),
+        _ => Ok(None),
+    }
+}
+
+/// P7 slice 3b-follow (R3): the abstract twin of `check_poly_combinator_args`
+/// -- a **row-typed inline combinator** called from a non-inline polymorphic
+/// body, whose quotation arms are literals written in that body. This is what
+/// lets a generic word branch and loop as a monomorphized function instead of
+/// forcing every call site to splice its whole body.
+///
+/// The row grounds **once**, here, to the caller region below the combinator's
+/// fixed inputs (S3b-follow L2), and is never solved for; the callee's own
+/// declaration must otherwise be concrete, since binding a variable of it
+/// would be the mid-body unification L1 forbids. Each arm is then walked over
+/// `(grounded region ++ declared inputs)` by the shared arm machinery, which
+/// owns the join (L3).
+#[allow(clippy::too_many_arguments)]
+fn poly_combinator_call(
+    csig: &PolySig,
+    name: &str,
+    span: Span,
+    mut stack: Vec<PolySlot>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    combinators: &CombinatorEnv,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Vec<PolySlot>, String> {
+    let n = csig.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, name, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    // L2: the declared row grounds here, once, to the caller region below the
+    // combinator's fixed inputs -- the same region the concrete path grounds
+    // it to (`check_poly_combinator_args`).
+    let row: Vec<PolySlot> = stack[..base].to_vec();
+    // A row that differs between a side and the other is the shape-changing
+    // case (`if`/`unless`): its exit row is not determined by the declaration
+    // at all, only by agreement between sibling arms sharing an output row id.
+    // Deferred, located, rather than checked against the entry row it is
+    // explicitly allowed to differ from.
+    let shape_changing = csig.row_in != csig.row_out
+        || csig.inputs.iter().any(
+            |pin| matches!(pin, PolyType::Quotation(_, _, _, row_in, row_out) if row_in != row_out),
+        );
+    if shape_changing {
+        return Err(poly_quotation_combinator_unsupported_error(ctx, span, name));
+    }
+    let mut outputs: Vec<PolySlot> = Vec::with_capacity(csig.outputs.len());
+    for out in &csig.outputs {
+        let PolyType::Concrete(t) = out else {
+            return Err(poly_combinator_abstract_signature_error(
+                ctx, span, name, out, csig,
+            ));
+        };
+        outputs.push(PolySlot::new(PolyType::Concrete(*t)));
+    }
+    let mut arms: Vec<PolyArm> = Vec::new();
+    // R3, the soundness point: a non-shape-changing parameter's exit row is
+    // **pre-seeded from the grounded entry row**, before any arm walks, so a
+    // single-arm combinator like `times` is held to its declared `~[ ..a --
+    // ..a ]`. A cross-arm-only rule (the eliminator's, where the arms are
+    // *supposed* to change the shape) never fires with one arm, and `~[ dup ]
+    // times` would lower to a loop whose back-edge depth does not match its
+    // entry. This is the poly port of `check_literal_against_declared_effect`
+    // under `LiteralBoundary { shape_changing: false }`.
+    let mut expected: Vec<(Vec<PolySlot>, String)> = Vec::new();
+    for (i, pin) in csig.inputs.iter().enumerate() {
+        let Some(decl) = poly_declared_arm(pin, csig, name, ctx, span)? else {
+            // An ordinary value parameter (`times`' iteration count), matched
+            // against the live slot exactly as the `env` dispatch matches a
+            // monomorphic word's declared input.
+            let PolyType::Concrete(want) = pin else {
+                return Err(poly_combinator_abstract_signature_error(
+                    ctx, span, name, pin, csig,
+                ));
+            };
+            match &stack[base + i].pt {
+                PolyType::Concrete(t) if t == want => {}
+                PolyType::Concrete(t) => {
+                    return Err(type_mismatch_error(ctx, span, name, *want, *t))
+                }
+                PolyType::Var(v) => {
+                    return Err(poly_var_to_concrete_error(
+                        ctx,
+                        span,
+                        name,
+                        &sig.ty_var_names[*v as usize],
+                        *want,
+                    ))
+                }
+                other => return Err(poly_op_on_variable_error(ctx, span, name, other, sig)),
+            }
+            continue;
+        };
+        // OQ4: the arm is a splice-consumed literal written at this call site
+        // or it is an error. A quotation that lost its identity (bound to a
+        // local), a forwarded parameter, or a value that is not a quotation at
+        // all is located here rather than carried into lowering, where a
+        // materialised quotation in a generic body is a backend panic.
+        let Some(quot) = stack[base + i].quot else {
+            return Err(poly_combinator_arm_not_a_literal_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(&stack[base + i].pt, sig),
+            ));
+        };
+        let region = match decl.carries_row {
+            true => row.clone(),
+            false => Vec::new(),
+        };
+        let mut input = region.clone();
+        input.extend(
+            decl.ins
+                .iter()
+                .map(|t| PolySlot::new(PolyType::Concrete(*t))),
+        );
+        let mut exit = region;
+        exit.extend(
+            decl.outs
+                .iter()
+                .map(|t| PolySlot::new(PolyType::Concrete(*t))),
+        );
+        expected.push((exit, poly_type_str(pin, csig)));
+        arms.push(PolyArm {
+            quot,
+            input,
+            declared_inputs: decl.ins,
+        });
+    }
+    // The arms reach the rule below in written order, so the seeded exit row
+    // of the parameter each one stands at is read off by position.
+    let mut at = 0usize;
+    poly_walk_arms(
+        arms,
+        name,
+        span,
+        scope,
+        sig,
+        ctx,
+        env,
+        combinators,
+        structs,
+        enums,
+        arrays,
+        slices,
+        builtin_overloads,
+        &mut |literal_span, exit| {
+            let (want, declared) = &expected[at];
+            at += 1;
+            // L1: structural equality under *rigid* variables -- an arm
+            // leaving `'T` where the row it entered with carries `i64`
+            // disagrees, and binding either would be a mid-body unification.
+            let agrees =
+                want.len() == exit.len() && want.iter().zip(&exit).all(|(a, b)| a.pt == b.pt);
+            match agrees {
+                true => Ok(()),
+                false => Err(poly_arm_declared_effect_mismatch_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    declared,
+                    &poly_row_str(&exit, sig),
+                    &poly_row_str(want, sig),
+                )),
+            }
+        },
+    )?;
+    // Non-shape-changing, so the exit is the declaration's own: the grounded
+    // row back untouched, then the combinator's fixed outputs.
+    stack.truncate(base);
+    stack.extend(outputs);
+    Ok(stack)
 }
 
 /// P7 slice 3a (R3): the generic header `called` names as a constructor --
@@ -3278,11 +3575,12 @@ pub(super) fn poly_quotation_not_consumed_error(ctx: &Ctx, span: Span) -> String
     )
 }
 
-/// P7 slice 3b (R4/OQ6): `call`/`branch`/`if`/`times`/`tag` applied to a
-/// quotation in a generic body. Each takes its quotation as a row-typed
-/// parameter, so dispatching one needs row unification against an abstract
-/// stack -- the machinery eliminator dispatch is specifically shaped to avoid.
-/// Deferred to P7.S3b-follow, and located rather than an `unknown word`.
+/// P7 slice 3b (R4/OQ6): a quotation consumer in a generic body that this
+/// slice's dispatch does not cover -- the `call`/`branch`/`tag` primitives,
+/// which carry no declared row to ground, and (until the shape-changing case
+/// lands) a combinator whose input and output rows differ, whose exit row the
+/// declaration does not determine at all. Located rather than left to fall
+/// through to `unknown word`.
 pub(super) fn poly_quotation_combinator_unsupported_error(
     ctx: &Ctx,
     span: Span,
@@ -3291,7 +3589,78 @@ pub(super) fn poly_quotation_combinator_unsupported_error(
     let word = crate::resolve::demangle_call(word);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
-        "error: `{word}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  only an enum eliminator consumes a quotation in a generic body today (P7.S3b-follow)",
+        "error: `{word}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  a generic body consumes a quotation through an enum eliminator, or through an always-spliced combinator whose declared row is the same on both sides (P7.S3b-follow)",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b-follow (R3/L1): a row-typed combinator whose declaration
+/// carries a type or length variable of its own (`each`'s `&['T N]`). The row
+/// grounds against the caller's abstract stack, but a *type* variable of the
+/// callee would have to be solved for, which is the mid-body unification L1
+/// forbids -- so the call is located here rather than checked against a
+/// variable nothing binds.
+fn poly_combinator_abstract_signature_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: &PolyType,
+    csig: &PolySig,
+) -> String {
+    let declared = poly_type_str(declared, csig);
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body can consume a row-typed combinator whose own types are concrete; solving for one of the callee's variables would need mid-body unification",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b-follow (R3): a combinator arm whose body does not leave what
+/// its declared *non-shape-changing* effect requires -- the grounded row it
+/// entered with, then the declared fixed outputs. The poly twin of
+/// `literal_effect_mismatch_error` under `LiteralBoundary { shape_changing:
+/// false }`, rendered because the actual row holds `PolyType`s no `Type`
+/// effect can carry.
+///
+/// Not a *cross-arm* message: the requirement is the declaration's, so it
+/// fires on a lone arm (`times`) where an arm-against-sibling rule never runs.
+fn poly_arm_declared_effect_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: &str,
+    found: &str,
+    want: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a non-shape-changing quotation parameter carries one row, the same on both sides: the arm must leave the row it entered with",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3b-follow (OQ4): a combinator arm operand that is not a
+/// splice-consumed quotation *literal* written at the call site -- a quotation
+/// read back out of a local (the bind keeps the type and loses the identity),
+/// a forwarded parameter, or a value that is not a quotation at all. Located
+/// here rather than carried on: a materialised quotation in a generic body has
+/// no runtime representation, and reaching lowering with one is a backend
+/// panic.
+fn poly_combinator_arm_not_a_literal_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    found: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{word}` in the polymorphic body of `{}` (line {}) needs a quotation literal written at the call site, found `{found}`\n  a quotation in a generic body is spliced where it is written: it cannot be bound to a local, forwarded, or returned",
         crate::resolve::demangle_word(where_),
         span.line
     )
@@ -3779,6 +4148,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
@@ -3826,6 +4196,7 @@ mod tests {
                 &sig,
                 &ctx,
                 &env,
+                &CombinatorEnv::default(),
                 &[],
                 &[],
                 &[],
@@ -4000,6 +4371,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
@@ -4043,6 +4415,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
@@ -4054,6 +4427,74 @@ mod tests {
         assert!(
             err.contains("the local `a` of type `T`, bound in an arm of `consumer`")
                 && err.contains("is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn poly_row_combinator_admits_only_a_row_typed_inline_declaration() {
+        // S3b-follow (R2): the dispatch's entry condition, decided from the
+        // callee's declaration alone. `rowed` qualifies; `rowless` is the
+        // concrete-consumer shape (P7.S3d) and must keep the rejection it has
+        // today rather than be admitted through row machinery; `plain` is an
+        // ordinary word. `if` is checked too: it is a prelude word, so it is
+        // exempt from mangling and arrives under its bare spelling, which is
+        // also the `CombinatorEnv` key it is registered under.
+        let src = ": rowed inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call ;\n\
+                   : rowless inline ( ['T 4] ~[ 'T -- 'T ] -- ['T 4] ) | f | f call ;\n\
+                   : plain ( i64 -- i64 ) 1 add ;\n";
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        let combinators = collect_combinators(&module.words);
+        assert!(
+            poly_row_combinator(&combinators, "rowed").is_some(),
+            "a row on a quotation parameter is what the dispatch grounds"
+        );
+        assert!(
+            poly_row_combinator(&combinators, "rowless").is_none(),
+            "a rowless quotation parameter is P7.S3d's shape, not this dispatch's"
+        );
+        assert!(poly_row_combinator(&combinators, "plain").is_none());
+        assert!(
+            poly_row_combinator(&combinators, "if").is_some(),
+            "the prelude `if` is reached under its bare, unmangled name"
+        );
+    }
+    #[test]
+    fn poly_combinator_dispatch_precedes_the_quotlit_operand_window() {
+        // S3b-follow (R2): the dispatch must sit ahead of *both* rejections
+        // that used to catch this family. `unless` never reached the name
+        // guard at all -- it is not one of the names that guard lists -- and
+        // landed on the `QuotLit` operand window instead, under a message that
+        // does not even mention the deferral. Moving the dispatch below that
+        // window silently restores the old message here.
+        let err = check_src(
+            ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] unless ;\n",
+        )
+        .expect_err("a shape-changing row is deferred");
+        assert!(
+            err.contains("`unless` on a quotation in the polymorphic body of `bad` (line 1) is not yet supported"),
+            "`unless` must reach the dispatch, not the operand window: {err}"
+        );
+    }
+    #[test]
+    fn poly_combinator_grounds_the_row_to_the_caller_region() {
+        // R3/L2: the declared row grounds to `stack[..base]` -- the caller
+        // region *below* the combinator's fixed inputs -- once, at the
+        // dispatch site. Pinned from both sides, since grounding it to the
+        // whole stack or to nothing each breaks only one of them: the arm can
+        // shuffle exactly the two slots the region holds, and reaching one
+        // slot deeper underflows inside the arm.
+        const TWICE: &str = ": twice inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call f call ;\n";
+        check_src(&format!(
+            "{TWICE}: g ( 'T: Copy Ord 'T -- 'T 'T ) ~[ swap ] twice ;\n"
+        ))
+        .expect("the arm walks over the grounded row");
+        let err = check_src(&format!(
+            "{TWICE}: g ( 'T: Copy Ord 'T -- 'T 'T ) ~[ drop drop drop ] twice ;\n"
+        ))
+        .expect_err("the region is the caller row, not the whole stack");
+        assert!(
+            err.contains("`drop` needs 1 values, but the stack holds 0"),
             "unexpected message: {err}"
         );
     }
@@ -4119,6 +4560,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
@@ -4141,6 +4583,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
@@ -4800,6 +5243,7 @@ mod tests {
             &sig,
             &ctx,
             &env,
+            &CombinatorEnv::default(),
             &[],
             &[],
             &[],
