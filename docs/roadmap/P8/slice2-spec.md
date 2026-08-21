@@ -188,6 +188,18 @@ consumers:
   no import is `unknown word`, matching a compiled build. (The neighbouring
   `bool` print overload seed, `bool_print_word_def`, is not a prelude word and
   stays.)
+  - **"exactly as a file does" holds only for the *declaring* module.** A REPL
+    import of the `core::prelude` **hub** is accepted (`imported p`) and then
+    every re-exported name is `unknown word`: import retention binds and aliases
+    module 0's own definitions, and a hub declares none — its exports resolve
+    through R4's `exported_origin` to dependency-module words, which the
+    combinator half of retention deliberately keeps alias-less (slice 6c's R15
+    privacy, "`q::if` still misses"). So a session names `core::cmp`/`core::bool`
+    directly (`tests/common/mod.rs`'s `repl_core_import`). Following a re-export
+    at the prompt would mean aliasing a dependency word the hub promises, which
+    is a change to that privacy rule and so its own slice's decision, not a
+    silent widening here. What is unsatisfactory either way is the *silent*
+    acceptance: the import line reports success and binds nothing.
 - **`src/repl.rs:2270`** — a live `is_prelude_word_name(&w.name)` in the
   import-rename filter (`body_rename`), excluding prelude words from
   epoch-renaming because they were both session-seeded **and** closure-injected,

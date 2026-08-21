@@ -335,14 +335,15 @@ fn both_intrinsics_import_shapes_admit_a_builtin_and_a_partial_one_does_not() {
 /// words, so an unimported `lt` must be an unknown word -- pointing at
 /// `import: core::prelude`, which the R6(a) wording would not -- even though
 /// `BUILTIN_WORDS` still lists them for `has_self_tail_call`'s sake.
+///
+/// The fixture deliberately carries **no** `import: intrinsics * ;`: that line
+/// admits every gated name, so the gate could not fire on `lt` whether or not
+/// the six are excluded from the gate set, and the test would pass with the
+/// exclusion deleted.
 #[test]
 fn an_unimported_comparison_is_an_unknown_word_not_an_ungated_intrinsic() {
     let t = Tree::new("cmp-not-intrinsic");
-    let entry = write_raw(
-        &t,
-        "main.sth",
-        "import: intrinsics * ;\n: main ( -- ) 1 2 lt drop ;\n",
-    );
+    let entry = write_raw(&t, "main.sth", ": main ( -- ) 1 2 lt drop ;\n");
     let err = build_error(&entry);
     assert!(
         err.contains("error: unknown word `lt`") && !err.contains("is an intrinsic"),
