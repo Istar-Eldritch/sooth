@@ -1040,16 +1040,8 @@ pub(super) fn poly_call_term(
     // poly callee; an overloaded name (more than one candidate) never
     // matches `single_candidate` below and keeps the rejection, which is
     // R2's own completeness-gap note, not a bug in this carve-out.
-    //
-    // `only.symbol == name` keeps that to a candidate whose mangled symbol is
-    // still its surface name: `ast::overload_symbols` suffixes (`$$0`) a
-    // concrete word merely for sharing a name with an unrelated poly word,
-    // and grounding through one records no `builtin_overloads` entry (`exact`
-    // is never true for a `QuotLit`), leaving lowering to resolve a bare name
-    // it cannot find. Excluded here, it falls through to the located
-    // rejection instead.
     let single_candidate = match env.get(name).map(Vec::as_slice) {
-        Some([only]) if only.symbol == name => Some(only),
+        Some([only]) => Some(only),
         _ => None,
     };
     let window_base = stack.len() - operand_window;
@@ -1135,10 +1127,14 @@ pub(super) fn poly_call_term(
                     // no declared `PolyType` row to unify against here. The
                     // ordinary call then proceeds exactly as for any other
                     // operand (L1: the literal is consumed, never survives).
-                    // `chosen.symbol == name` mirrors the `single_candidate`
-                    // guard above; grounding a `$$`-suffixed candidate would
-                    // skip this arm's `builtin_overloads` record and panic in
-                    // lowering instead of reporting a located rejection.
+                    // `chosen.symbol == name` is R2's "non-overloaded" gate at
+                    // the only place it bites: `ast::overload_symbols` suffixes
+                    // (`$$0`) a concrete word merely for sharing a name with an
+                    // unrelated poly word, and grounding through one records no
+                    // `builtin_overloads` entry (the record below is
+                    // `exact`-gated, never true for a `QuotLit`), leaving
+                    // lowering to resolve a bare name it cannot find. Excluded,
+                    // it falls to `other`'s located rejection.
                     PolyType::QuotLit
                         if matches!(inp, Type::Quotation(_)) && chosen.symbol == name =>
                     {

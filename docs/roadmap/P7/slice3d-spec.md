@@ -406,10 +406,15 @@ Regression, green and untouched: `tests/phase7_slice3b.rs`, `tests/phase7_slice3
   candidate. Grounding through such a candidate records no `builtin_overloads` entry (the
   record is `exact`-gated, and a `QuotLit` operand is never `PolyType::Concrete`), so
   lowering is left to resolve a bare, un-mangled name and panics at `calls.rs:685` — an
-  inherited backend panic, which L1 forbids. Both the operand-window carve-out and the
-  grounding arm therefore also require `symbol == name`, falling such a call through to the
-  ordinary located rejection (pinned by
-  `c2_literal_to_name_shared_with_a_poly_word_is_located_rejection`).
+  inherited backend panic, which L1 forbids. The **grounding arm** therefore also requires
+  `chosen.symbol == name`, falling such a call through to the ordinary located rejection
+  (pinned by `c2_literal_to_name_shared_with_a_poly_word_is_located_rejection`). The same
+  conjunct on the operand-window carve-out's `single_candidate` is *redundant* and was not
+  kept: mutation-testing it kills no test, and probing shows why — whether the carve-out
+  admits the slot or not, the call still lands on either the grounding arm's `other` branch
+  or `poly_delegate_op`, both of which render the identical located rejection (checked for a
+  suffixed name, an unsuffixed name, and a **builtin** name, where a `QuotLit` makes `exact`
+  false and skips the dispatch block entirely).
 
   Actually *supporting* that shape is a **future-phase lowering item**, not a checker one:
   recording the `$$`-suffixed symbol makes the checker accept it, but lowering then emits
