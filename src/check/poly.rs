@@ -912,6 +912,68 @@ pub(super) fn poly_call_term(
     // before this lookup dispatches one for a drop-overloaded struct, or a
     // generic word could destructure it and skip the destructor.
     check_destructure_drop_guard(name, span, ctx)?;
+    // P7 slice 3d (R1): `call` on a quotation *literal* is the one member of
+    // this family that never needs a row -- it splices the literal's own
+    // body in place, the poly analogue of the concrete path's own literal
+    // `call` (`terms.rs:299-357`). Handled ahead of the retained guard below
+    // so a literal never reaches it; a non-literal operand (an abstract or
+    // forwarded quotation) is a located rejection, not a splice.
+    if name == "call" {
+        let Some(top) = stack.last() else {
+            return Err(underflow_error(ctx, span, name, 1, 0));
+        };
+        let Some(quot) = top.quot else {
+            let pt = top.pt.clone();
+            return Err(poly_op_on_variable_error(ctx, span, name, &pt, sig));
+        };
+        stack.pop();
+        let lit = scope.quotation(quot);
+        let body = lit.body.clone();
+        // R1's teardown, the poly analogue of `Scope::leave`/`leave_block`
+        // for a splice with no block of its own (`poly_eliminator_call`
+        // takes the same snapshot ahead of each arm walk, `poly.rs:1298`):
+        // the poly walk has no block scope, so nothing removes a local this
+        // splice binds. Snapshot the enclosing locals, walk the body in
+        // place, reject any local leaked past the splice, then retain back
+        // down to the snapshot -- never a `Moves::join` (R3), since there is
+        // only ever this one body and one continuation.
+        let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+        stack = poly_walk(
+            &body,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            slices,
+            builtin_overloads,
+        )?;
+        let leaked = scope
+            .moves
+            .unconsumed()
+            .into_iter()
+            .find(|local| !enclosing_locals.contains(*local))
+            .map(str::to_string);
+        if let Some(local) = leaked {
+            let pt = scope.locals[&local].clone();
+            return Err(poly_arm_local_not_consumed_error(
+                ctx,
+                span,
+                name,
+                &local,
+                &poly_type_str(&pt, sig),
+            ));
+        }
+        scope.locals.retain(|k, _| enclosing_locals.contains(k));
+        scope
+            .moves
+            .states
+            .retain(|k, _| enclosing_locals.contains(k));
+        return Ok(stack);
+    }
     // P7 slice 3b (R4/OQ6): the quotation-*consuming* combinator family is
     // deferred to P7.S3b-follow -- each takes a quotation as a row-typed
     // parameter, which needs row unification against an abstract stack, the
@@ -919,7 +981,7 @@ pub(super) fn poly_call_term(
     // named here rather than left to fall through to `unknown word`, which
     // is what these emit otherwise (`poly_call_term` cannot see `poly_env`,
     // so none of them is even registered on this path).
-    if matches!(name, "call" | "branch" | "if" | "times" | "tag")
+    if matches!(name, "branch" | "if" | "times" | "tag")
         && stack.iter().any(|slot| slot.quot.is_some())
     {
         return Err(poly_quotation_combinator_unsupported_error(ctx, span, name));
@@ -5451,6 +5513,60 @@ mod tests {
         assert!(
             !err.contains("is not a local"),
             "the local/static arm must not claim this site: {err}"
+        );
+    }
+
+    /// P7 slice 3d (C1/R1): `call` on a body-local literal splices its body
+    /// in place against the live poly stack -- the poly analogue of
+    /// `check_terms_relaxed`'s own literal `call` splice.
+    #[test]
+    fn poly_call_on_literal_splices_body_in_place_ok() {
+        check_src(
+            ": bump ( 'T: Copy -- 'T 'T ) | x | [ x x ] call ;\n\
+             : main ( -- ) 5 bump drop drop ;\n",
+        )
+        .expect("a literal's body should splice in place against the live stack");
+    }
+
+    /// P7 slice 3d (C1/R1, L1): `call` on a **non-literal** quotation operand
+    /// -- a declared parameter whose effect still carries a free `'T`, so it
+    /// stays `PolyType::Quotation` rather than folding to `PolyType::Concrete`
+    /// -- is a located rejection, never a panic and never `unknown word`.
+    #[test]
+    fn poly_call_on_non_literal_quotation_operand_is_located_error() {
+        let err = check_src(
+            ": caller ( 'T [ 'T -- 'T ] -- 'T i64 )\n\
+               call\n\
+             ;\n\
+             : main ( -- ) 1 caller drop drop ;\n",
+        )
+        .expect_err("a non-literal quotation operand at `call` should be rejected");
+        assert_eq!(
+            err,
+            "error: `call` is not permitted on a quotation in `caller` (line 2)"
+        );
+        assert!(!err.contains("unknown word"), "{err}");
+    }
+
+    /// P7 slice 3d (C1/R1): the splice's own teardown, the poly analogue of
+    /// `Scope::leave` -- a linear local bound *inside* the spliced literal and
+    /// never consumed there leaks past `call` unless this is rejected before
+    /// the retain, exactly as an eliminator arm's own unconsumed binding does.
+    /// Reuses `poly_arm_local_not_consumed_error` rather than a fresh
+    /// message, so the report names `call` as the binding site.
+    #[test]
+    fn poly_call_on_literal_leaked_local_is_error() {
+        let err = check_src(&format!(
+            "{SPY}: bad ( 'T: Copy Spy -- 'T )\n\
+               [ | s | ] call\n\
+             ;\n\
+             : main ( -- ) 7 Spy 1 swap bad drop ;\n"
+        ))
+        .expect_err("a local bound inside the splice and never consumed should be rejected");
+        assert!(
+            err.contains("the local `s` of type `Spy`, bound in an arm of `call` in `bad`")
+                && err.contains("is never consumed"),
+            "{err}"
         );
     }
 }

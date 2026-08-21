@@ -509,18 +509,24 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     assert!(!deep.contains("needs 2 values"), "{deep}");
 }
 
-/// OQ6: the quotation-*consuming* combinator family is deferred to
+/// OQ6: the row-typed quotation-*consuming* combinator family is deferred to
 /// P7.S3b-follow, and says so. Never an `unknown word` fallthrough, which is
 /// what these emit otherwise -- `poly_call_term` cannot see the poly env, so
 /// none of them is even registered on this path.
+///
+/// P7.S3d (R1) narrowed this guard: `call` on a quotation *literal* is no
+/// longer a member of this deferred family -- it splices the literal's body
+/// in place instead (its own coverage lives in `tests/phase7_slice3d.rs`).
+/// `branch` pins that the retained guard still fires for the row-typed names
+/// that stay deferred.
 #[test]
-fn poly_body_call_on_a_quotation_is_located_error() {
+fn poly_body_branch_on_a_quotation_is_located_error() {
     let err = check_err(
-        ": bad ( 'T: Copy -- 'T ) ~[ dup ] call ;\n\
+        ": bad ( 'T: Copy -- 'T ) ~[ dup ] branch ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
-        err.contains("`call` on a quotation in the polymorphic body of `bad`")
+        err.contains("`branch` on a quotation in the polymorphic body of `bad`")
             && err.contains("P7.S3b-follow"),
         "{err}"
     );
