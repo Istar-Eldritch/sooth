@@ -1032,17 +1032,39 @@ pub(super) fn poly_call_term(
         .get(name)
         .map_or(1, |rows| rows[0].inputs.len())
         .min(stack.len());
-    if stack[stack.len() - operand_window..]
-        .iter()
-        .any(|slot| matches!(slot.pt, PolyType::QuotLit))
-    {
-        return Err(poly_op_on_variable_error(
-            ctx,
-            span,
-            name,
-            &PolyType::QuotLit,
-            sig,
-        ));
+    // P7 slice 3d (R2): a `QuotLit` slot in the window is not rejected when
+    // it sits at the single resolved concrete `env` candidate's own ground
+    // `Type::Quotation` input position -- the env-dispatch grounding arm
+    // below handles it instead. `env` holds concrete words only (a poly
+    // word lives in `poly_env`, never here), so this can never carve out a
+    // poly callee; an overloaded name (more than one candidate) never
+    // matches `single_candidate` below and keeps the rejection, which is
+    // R2's own completeness-gap note, not a bug in this carve-out.
+    let single_candidate = match env.get(name).map(Vec::as_slice) {
+        Some([only]) => Some(only),
+        _ => None,
+    };
+    let window_base = stack.len() - operand_window;
+    for (i, slot) in stack[window_base..].iter().enumerate() {
+        if !matches!(slot.pt, PolyType::QuotLit) {
+            continue;
+        }
+        let grounds = single_candidate.is_some_and(|only| {
+            only.sig.inputs.len() >= operand_window
+                && matches!(
+                    only.sig.inputs[only.sig.inputs.len() - operand_window + i],
+                    Type::Quotation(_)
+                )
+        });
+        if !grounds {
+            return Err(poly_op_on_variable_error(
+                ctx,
+                span,
+                name,
+                &PolyType::QuotLit,
+                sig,
+            ));
+        }
     }
     // P7 slice 3a (R3): a call naming a variant of a generic enum header (or
     // a generic struct's own constructor) is legal in a polymorphic body,
@@ -1097,6 +1119,37 @@ pub(super) fn poly_call_term(
                             *inp,
                         ));
                     }
+                    // P7 slice 3d (R2): a body-local literal at a declared
+                    // ground `Type::Quotation` input grounds against that
+                    // effect instead of erroring -- the pointwise check
+                    // ported from `unify_poly_input`'s `Quotation` arm, run
+                    // for real against the literal's own body since there is
+                    // no declared `PolyType` row to unify against here. The
+                    // ordinary call then proceeds exactly as for any other
+                    // operand (L1: the literal is consumed, never survives).
+                    PolyType::QuotLit if matches!(inp, Type::Quotation(_)) => {
+                        let Type::Quotation(eff) = *inp else {
+                            unreachable!()
+                        };
+                        let quot = stack[base + i]
+                            .quot
+                            .expect("a QuotLit slot always carries its literal's identity");
+                        poly_ground_quotation_literal(
+                            quot,
+                            eff,
+                            name,
+                            span,
+                            scope,
+                            sig,
+                            ctx,
+                            env,
+                            structs,
+                            enums,
+                            arrays,
+                            slices,
+                            builtin_overloads,
+                        )?;
+                    }
                     other => {
                         return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
                     }
@@ -1119,6 +1172,101 @@ pub(super) fn poly_call_term(
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P7 slice 3d (R2, C2): ground a body-local quotation literal against a
+/// concrete `env` candidate's declared, ground `Type::Quotation` input --
+/// the pointwise check `unify_poly_input`'s `Quotation` arm runs for a
+/// *declared* poly parameter, ported here to run for real against the
+/// literal's own body, since there is no declared `PolyType` row to unify
+/// against (a `QuotLit` marker never carries one). Rowless: seeds a fresh
+/// walk with `eff.inputs`, walks the body in place (`poly_walk`, not a
+/// splice onto the live stack), and requires the exit stack matches
+/// `eff.outputs` pointwise -- the same arity-then-pointwise shape
+/// `unify_poly_input` checks, but by running the body rather than unifying
+/// two signatures.
+///
+/// Teardown mirrors R1's `call`-splice teardown exactly, for the same
+/// reason: this is a straight-line walk with no block scope of its own, so a
+/// linear local the body binds and leaves unconsumed would otherwise leak
+/// past this call unreported (the poly analogue of `Scope::leave`).
+#[allow(clippy::too_many_arguments)]
+fn poly_ground_quotation_literal(
+    quot: PolyQuotRef,
+    eff: &'static QuotEffect,
+    name: &str,
+    span: Span,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    slices: &mut Vec<SliceDecl>,
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<(), String> {
+    let body = scope.quotation(quot).body.clone();
+    let seeded: Vec<PolySlot> = eff
+        .inputs
+        .iter()
+        .map(|t| PolySlot::new(PolyType::Concrete(*t)))
+        .collect();
+    let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+    let out = poly_walk(
+        &body,
+        seeded,
+        scope,
+        sig,
+        ctx,
+        env,
+        structs,
+        enums,
+        arrays,
+        slices,
+        builtin_overloads,
+    )?;
+    let leaked = scope
+        .moves
+        .unconsumed()
+        .into_iter()
+        .find(|local| !enclosing_locals.contains(*local))
+        .map(str::to_string);
+    if let Some(local) = leaked {
+        let pt = scope.locals[&local].clone();
+        return Err(poly_arm_local_not_consumed_error(
+            ctx,
+            span,
+            name,
+            &local,
+            &poly_type_str(&pt, sig),
+        ));
+    }
+    scope.locals.retain(|k, _| enclosing_locals.contains(k));
+    scope
+        .moves
+        .states
+        .retain(|k, _| enclosing_locals.contains(k));
+    if out.len() != eff.outputs.len()
+        || !out
+            .iter()
+            .zip(&eff.outputs)
+            .all(|(slot, t)| matches!(&slot.pt, PolyType::Concrete(u) if u == t))
+    {
+        let found = out
+            .iter()
+            .map(|slot| poly_type_str(&slot.pt, sig))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Err(poly_rendered_type_mismatch_error(
+            ctx,
+            span,
+            name,
+            eff.name_static,
+            &found,
+        ));
+    }
+    Ok(())
 }
 
 /// P7 slice 3b (R2/R3): the abstract twin of `check_eliminator_call`
@@ -5644,5 +5792,62 @@ mod tests {
         )
         .expect_err("`y` must not remain a resolvable local past the splice's own scope");
         assert!(err.contains("unknown word `y`"), "{err}");
+    }
+
+    /// P7 slice 3d (C2/R2): a body-local literal passed to a concrete `env`
+    /// word whose declared parameter is a ground `Type::Quotation` grounds
+    /// against that effect and the ordinary call proceeds.
+    #[test]
+    fn poly_quotlit_grounds_against_concrete_quotation_param_ok() {
+        check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect("a literal grounding against a concrete quotation parameter should be accepted");
+    }
+
+    /// P7 slice 3d (C2/R2): the same `QuotLit` against a declared
+    /// `Type::InlineQuotation` input still rejects -- R6's standing gate, out
+    /// of this slice's scope, and not something the carve-out may loosen.
+    #[test]
+    fn poly_quotlit_against_inline_quotation_param_still_rejects() {
+        let err = check_src(
+            ": run1 ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err("a literal must not ground against an inline-only parameter");
+        assert!(
+            !err.contains("panic"),
+            "a located rejection is expected, not a panic: {err}"
+        );
+    }
+
+    /// P7 slice 3d (R2): the retained combinator guard still rejects
+    /// `branch`/`if`/`times`/`tag` on a quotation, unaffected by the
+    /// operand-window carve-out this phase adds.
+    #[test]
+    fn poly_call_term_still_rejects_times_on_quotation() {
+        let err = check_src(
+            ": apply ( 'T: Copy -- 'T ) | x | x [ ] 3 times ;\n : main ( -- ) 5 apply drop ;\n",
+        )
+        .expect_err("`times` on a quotation should stay rejected");
+        assert!(
+            err.contains("is not yet supported") && err.contains("P7.S3b-follow"),
+            "{err}"
+        );
+    }
+
+    /// P7 slice 3d (R2): a literal passed to an *overloaded* concrete name
+    /// is out of this slice's scope (the completeness gap/scoping note) --
+    /// the pre-existing operand-window guard still catches it when the
+    /// literal is the sole (top-of-window) operand, never `unknown word`.
+    #[test]
+    fn poly_quotlit_to_overloaded_concrete_name_is_located_rejection() {
+        let err = check_src(
+            ": run2 ( [ i64 -- i64 ] -- i64 ) 1 swap call ;\n : run2 ( i64 -- i64 ) 1 add ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] run2 ;\n : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err("an overloaded concrete name must not ground a quotation literal");
+        assert_eq!(
+            err,
+            "error: `run2` is not permitted on a quotation literal in `apply` (line 3)"
+        );
     }
 }
