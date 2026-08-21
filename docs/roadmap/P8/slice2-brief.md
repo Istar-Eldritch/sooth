@@ -81,6 +81,28 @@ five probes confirmed the plan; one falsified a decision.
    is exactly a non-inline poly word over a comparison, so this gap is the first thing a
    real `bin_search` hits.
 
+6. **Probe-verified (2026-08-21, `main` at `ccfbd89`): re-export is structurally
+   unsupported, not merely a permissions gap, and is not a small addition.** Built three
+   throwaway fixtures against the real driver/checker (`/tmp/s2probe`, cleaned up
+   afterward). `export:` performs zero existence validation today (`export: nonexistent ;`
+   with the name declared nowhere builds and runs clean) and does not reject re-exporting
+   an imported (not locally-declared) name — the failure is entirely on the consumer side.
+   `resolve::NameTables::rewrite` (`resolve.rs:257,306`) resolves a qualified or selective
+   word only against `NameTables.words[target]`, which `NameTables::build` fills only from
+   decls whose `module == target` (`resolve.rs:~205-219`); a re-exported name's origin
+   module is never consulted, so `hub::lw` (or a selective bare `lw` re-exported through
+   `hub`) is `unknown word` even though `check_selective_imports` already passed it against
+   `hub`'s export list. `check_exported_signatures` (`check/declarations.rs:243`) checks
+   only private-type-in-signature, never re-export or existence. Fixing this needs a new
+   per-module "exported name to origin module id" table, resolved with a fixpoint (hub-of-
+   hubs chains resolve through each other), threaded into `NameTables::rewrite`'s two
+   lookup branches — on the order of a few dozen lines plus tests, a real resolution pass,
+   not a one-line permissiveness fix. Separately, the bare `*` wildcard grammar already
+   parses today (`parser.rs:1562`, `ast.rs:190`, both already unit-tested), but a
+   real-target wildcard is a hard build error today (`driver.rs:245,310-330
+   wildcard_import_is_error`); only the reserved `intrinsics` wildcard is let through, and
+   even that binds nothing yet. Full probe report: `/tmp/s2-probe-reexport-report.md`.
+
 ## Decisions (settled here, not reopened by the spec)
 
 - **`is_prelude_word_name` and `parser::prelude_words` are deleted, not deprecated.** Every
@@ -135,6 +157,15 @@ five probes confirmed the plan; one falsified a decision.
   manifest via `slice1b-brief.md`'s `--manifest` flag rather than each carrying its own, but
   the exact shape of that shared fixture manifest (one for the whole suite, or one per test
   module grouping) is not decided.
+- **Re-export's resolution shape** (recon finding 6, probe-verified): the spec must design
+  the "exported name to origin module" table and its fixpoint over hub-of-hubs chains, not
+  just wire visibility onto an existing mechanism. Specifically: does a re-export entry need
+  its own AST/table representation distinct from a plain export, or is it detected purely by
+  "the name isn't a local decl, so look in the import map"; how does a cycle in re-export
+  chains get rejected (a located error, not an infinite loop or stack overflow in the
+  fixpoint); and does `export:`'s new existence validation (recon finding 6) land in this
+  slice or was the silent-acceptance of an unresolvable export name already relied upon
+  anywhere in the corpus (grep before assuming not).
 
 ## Out of scope
 
@@ -149,10 +180,16 @@ five probes confirmed the plan; one falsified a decision.
 
 ## Sequencing
 
-1. Add the bare `*` wildcard import form (parsed and its `*`/`| * |` disambiguation already
-   in place per S1a; this step implements the visibility semantics) and re-export through
-   `export:` (needed before the migration below, since intrinsics-heavy files depend on the
-   wildcard to stay readable).
+1. Add the bare `*` wildcard import form's visibility semantics (grammar already parses
+   per S1a; `driver.rs`'s `wildcard_import_is_error` hard-rejects a real target today and
+   must instead bind every exported name of the target) and re-export through `export:`
+   (needed before the migration below, since intrinsics-heavy files depend on the wildcard
+   to stay readable). Re-export is the larger of the two: recon finding 6 (probe-verified)
+   found it structurally unsupported, needing a new per-module exported-name-to-origin
+   table resolved with a fixpoint over hub-of-hubs chains, threaded into
+   `resolve::NameTables::rewrite`'s qualified and selective lookup branches, plus an
+   existence check `export:` currently skips entirely — size this as its own reviewable
+   piece of the phase, not folded silently into "add the wildcard."
 2. Delete the compiler-baked prelude (`parser::prelude_words`, both call sites, the
    `is_prelude_word_name` exemption), gate `BUILTIN_WORDS` visibility behind an
    `intrinsics` import, and add the narrowing diagnostic and its rejection test.
@@ -172,7 +209,11 @@ imported poly word is a located error naming the caller, the callee, and the rea
 ## Ready to spec?
 
 Yes, with one ruling to make explicit (the narrowing-diagnostic option, (b) recommended)
-and one open question (the shared test-fixture manifest's shape) that belongs in the spec.
-Recon is source-verified and the prelude-deletion mechanics are additionally
-probe-verified; the one thing probing falsified is already a stated decision above, not a
-loose end.
+and two open questions for the spec: the shared test-fixture manifest's shape, and
+re-export's resolution design (the origin table, its fixpoint, cycle rejection, and
+whether export-existence validation lands in this slice). Recon is source-verified; the
+prelude-deletion mechanics and the re-export/wildcard mechanics are additionally
+probe-verified against the live compiler. Both probes falsified an assumption the brief
+would otherwise have carried into the spec unchecked (generic-calls-generic exemption
+reliance; re-export being a small permissions change rather than a new resolution pass) —
+both are now stated decisions/open-questions above, not loose ends.
