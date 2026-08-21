@@ -1200,6 +1200,11 @@ pub(super) fn poly_call_term(
 /// reason: this is a straight-line walk with no block scope of its own, so a
 /// linear local the body binds and leaves unconsumed would otherwise leak
 /// past this call unreported (the poly analogue of `Scope::leave`).
+///
+/// R12 is ported here too (see the check below). The eliminator-arm walk
+/// deliberately skips it and this path must not: an arm runs at most once,
+/// in place, whereas the callee this literal is an argument to materializes
+/// it and may `call` it any number of times.
 #[allow(clippy::too_many_arguments)]
 fn poly_ground_quotation_literal(
     quot: PolyQuotRef,
@@ -1223,6 +1228,7 @@ fn poly_ground_quotation_literal(
         .map(|t| PolySlot::new(PolyType::Concrete(*t)))
         .collect();
     let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+    let moves_before = scope.moves.states.clone();
     let out = poly_walk(
         &body,
         seeded,
@@ -1236,6 +1242,27 @@ fn poly_ground_quotation_literal(
         slices,
         builtin_overloads,
     )?;
+    // R12, the poly twin of the concrete argument site's
+    // `quotation_captures_local_error`: a linear *enclosing* local the
+    // literal consumed. The callee holds the materialized literal and may
+    // `call` it N times, so one consumption here is N frees at run time --
+    // without this the double free is silent, the concrete twin of the same
+    // body having rejected it. Name-ordered for a deterministic diagnostic
+    // when a body consumes two of them.
+    let captured = moves_before
+        .iter()
+        .filter(|(n, before)| {
+            matches!(before, MoveState::Live)
+                && matches!(
+                    scope.moves.states.get(*n),
+                    Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))
+                )
+        })
+        .map(|(n, _)| n)
+        .min();
+    if let Some(local) = captured {
+        return Err(quotation_captures_local_error(ctx, span, name, local));
+    }
     let leaked = scope
         .moves
         .unconsumed()
@@ -1257,6 +1284,14 @@ fn poly_ground_quotation_literal(
         .moves
         .states
         .retain(|k, _| enclosing_locals.contains(k));
+    // R12's other half -- a borrow of an enclosing place left on the exit row
+    // -- needs no arm of its own, but only *representationally*: a borrow
+    // slot is `PolyType::Ref`, never `PolyType::Concrete(Type::Ref(..))`, so
+    // it can satisfy no declared output and the pointwise check below rejects
+    // it (as a type mismatch, not as the D3 violation it is). Make the two
+    // representations unify and the D3 rule silently evaporates, which is why
+    // `poly_ground_quotation_literal_borrowing_enclosing_place_is_error` pins
+    // the rejection rather than the message.
     if out.len() != eff.outputs.len()
         || !out
             .iter()
@@ -5881,6 +5916,76 @@ mod tests {
                 && err.contains("is never consumed"),
             "{err}"
         );
+    }
+
+    /// P7 slice 3d (C2, R12): the poly twin of the concrete argument site's
+    /// D3 capture rule. The callee materializes the literal and `call`s it
+    /// twice, so a linear enclosing local consumed inside it is freed twice;
+    /// before the port this compiled clean and died with `free(): double free
+    /// detected in tcache 2` at run time, while the monomorphic twin of the
+    /// same body rejected it.
+    #[test]
+    fn poly_ground_quotation_literal_consuming_enclosing_linear_local_is_error() {
+        let err = check_src(
+            ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
+             : ap ( 'T: Copy ^i64 -- 'T i64 ) | x c | x [ c drop 1 add ] 2 twice ;\n\
+             : main ( -- ) 5 7 ^ ap . . ;\n",
+        )
+        .expect_err("a grounded literal consuming an enclosing linear local must be rejected");
+        assert!(
+            err.contains("the quotation passed to `twice` consumes the enclosing local `c`")
+                && err.contains("(D3)"),
+            "{err}"
+        );
+    }
+
+    /// P7 slice 3d (C2, R12): the companion permissive half -- R12 forbids
+    /// *consuming* an enclosing local, not reading a `Copy` one, so the
+    /// capture check must not reject the shape a grounded literal exists
+    /// for. Widening the check from the consumed locals to every enclosing
+    /// name fails here.
+    #[test]
+    fn poly_ground_quotation_literal_reading_enclosing_copy_local_ok() {
+        check_src(
+            ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
+             : ap ( 'T: Copy i64 -- 'T i64 ) | x c | x [ c add ] 2 twice ;\n\
+             : main ( -- ) 5 7 ap . . ;\n",
+        )
+        .expect("a grounded literal may read an enclosing `Copy` local by value");
+    }
+
+    /// P7 slice 3d (C2, R12): what the capture check's `MoveState::Live`
+    /// precondition buys. The rule is about a *transition* across the
+    /// literal, not about the post-state: `c` is already `Moved` when the
+    /// literal is grounded and the literal never mentions it, so there is no
+    /// capture. Matching the post-state alone rejects this legal program.
+    #[test]
+    fn poly_ground_quotation_literal_local_consumed_before_the_literal_ok() {
+        check_src(
+            ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
+             : ap ( 'T: Copy ^i64 -- 'T i64 ) | x c | c drop x [ 1 add ] 2 twice ;\n\
+             : main ( -- ) 5 7 ^ ap . . ;\n",
+        )
+        .expect("a local consumed before the literal is not captured by it");
+    }
+
+    /// P7 slice 3d (C2, R12): the other half of D3 -- a grounded literal
+    /// that leaves a borrow of an enclosing place on its exit row -- is
+    /// rejected, but only because a `PolyType::Ref` slot can satisfy no
+    /// declared concrete output. The concrete twin of this body reports the
+    /// D3 rule by name; this asserts only that the program is refused, so a
+    /// future change that lets the two reference representations unify fails
+    /// here instead of silently admitting the capture.
+    #[test]
+    fn poly_ground_quotation_literal_borrowing_enclosing_place_is_error() {
+        let err = check_src(
+            "type: Pair a i64 b i64 ;\n\
+             : takes ( [ -- &Pair ] -- ) drop ;\n\
+             : ap ( 'T: Copy Pair -- 'T ) | x p | x [ &p ] takes ;\n\
+             : main ( -- ) 5 1 2 Pair ap drop ;\n",
+        )
+        .expect_err("a grounded literal may not leave a borrow of an enclosing place on its row");
+        assert!(err.contains("`takes` expected `[ -- &Pair ]`"), "{err}");
     }
 
     /// P7 slice 3d (C2): the teardown also retains `scope.locals`/

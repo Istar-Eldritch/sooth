@@ -188,6 +188,27 @@ outcomes at HEAD follow from where the literal sits in the operand window:
 
 This slice does not close the first gap; both outcomes are recorded, not fixed.
 
+**R12 applies at this argument site.** The C2 callee is a concrete word taking a *ground*
+`Type::Quotation`, so it materializes the literal and may `call` it any number of times —
+exactly the premise the monomorphic argument site's D3 capture rule
+(`check.rs`'s `quotation_captures_local_error`) exists for. The grounding arm therefore
+ports it: a *linear enclosing* local whose move state goes `Live` → `Moved`/`MaybeMoved`
+across the literal's walk is rejected. Without it, `[ c drop .. ]` passed to a callee that
+`call`s it twice compiles clean and double-frees at run time, while the monomorphic twin of
+the same body rejects it. This is **not** the eliminator-arm path's rule: an arm runs at
+most once, in place, which is why `poly_eliminator_call` deliberately skips R12 and C2
+must not.
+
+R12's other half — a *borrow* of an enclosing place left on the literal's exit row — needs
+no arm here, but only representationally: a borrow slot is `PolyType::Ref`, never
+`PolyType::Concrete(Type::Ref(..))`, so it satisfies no declared output and the pointwise
+exit check refuses it as a type mismatch rather than by naming D3. The rejection is pinned
+by a test so that a later change unifying the two reference representations fails loudly
+instead of silently admitting the capture. **Recommendation for a follow-up slice:** report
+it as D3 by name. That needs the borrowed *place* on the exit slot, which `PolyType::Ref`
+(referent type and mutability only) does not carry — it lives in `PolyScope::borrows` — so
+it is a representation change, not a guard.
+
 ### R3 No cross-arm machinery, no second join
 
 Neither C1 nor C2 has multiple arms, so `poly_eliminator_call`'s per-arm clone, borrow-table
