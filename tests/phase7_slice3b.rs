@@ -509,10 +509,13 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     assert!(!deep.contains("needs 2 values"), "{deep}");
 }
 
-/// OQ6: the quotation-*consuming* combinator family is deferred to
-/// P7.S3b-follow, and says so. Never an `unknown word` fallthrough, which is
-/// what these emit otherwise -- `poly_call_term` cannot see the poly env, so
-/// none of them is even registered on this path.
+/// OQ6: a deferred quotation consumer names the follow-up that would take it,
+/// and is never an `unknown word` fallthrough, which is what these emit
+/// otherwise -- `poly_call_term` cannot see the poly env, so none of them is
+/// even registered on this path. S3b-follow shipped the row-typed combinators
+/// and narrowed the deferral to the `call`/`branch`/`tag` primitives, which
+/// declare no `~[ ]` parameter to dispatch off; the name it points at moved
+/// with them.
 #[test]
 fn poly_body_call_on_a_quotation_is_located_error() {
     let err = check_err(
@@ -521,7 +524,7 @@ fn poly_body_call_on_a_quotation_is_located_error() {
     );
     assert!(
         err.contains("`call` on a quotation in the polymorphic body of `bad`")
-            && err.contains("P7.S3b-follow"),
+            && err.contains("P7.S3d"),
         "{err}"
     );
     assert!(!err.contains("unknown word"), "{err}");

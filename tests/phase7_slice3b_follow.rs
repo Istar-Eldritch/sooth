@@ -222,29 +222,238 @@ fn narrowed_guard_keeps_call_branch_and_tag_located() {
 }
 
 #[test]
-fn shape_changing_combinator_is_still_located() {
-    // OQ2/R3: a combinator whose input and output rows *differ* (`if`,
-    // `unless`, and any user combinator declaring two rows) has no fixed exit
-    // row for the declaration to require, so it is not part of the
-    // non-shape-changing dispatch. It stays a located rejection here, and
-    // `unless` -- which never reached the old name guard at all -- now reaches
-    // this one, which is what proves the dispatch, not the guard, is what sees
-    // it.
-    for body in [
-        "over over gt ~[ drop ] ~[ swap drop ] if",
-        "over over gt ~[ drop ] ~[ swap drop ] unless",
-    ] {
-        let err = build_err(
-            "shape-changing",
-            &format!(": bad ( 'T: Copy Ord 'T -- 'T ) {body} ;\n: main ( -- ) 5 7 bad . ;\n"),
-        );
-        assert!(
-            err.contains(
-                "on a quotation in the polymorphic body of `bad` (line 1) is not yet supported"
-            ) && err.contains("whose declared row is the same on both sides"),
-            "a shape-changing row is deferred, located: {err}"
-        );
-    }
+fn shape_changing_if_in_a_non_inline_generic_body_compiles_and_runs() {
+    // R3, the shape-changing exit criterion. `if` declares
+    // `( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`: nothing fixes the
+    // exit row, so the arms are held to *each other* and the call's exit is
+    // what they agreed on. Both arms consume one slot of the two-slot row they
+    // enter with, so an exit taken from the *entry* row would be one slot too
+    // deep and this body would not typecheck at all.
+    //
+    // `mymax` is the spec's own exit-criterion program, and it is called at two
+    // instantiations so `'T` is carried rigidly through the arms rather than
+    // coincidentally matching one of them. Both arms are taken at each
+    // instantiation, so arm routing is not vacuous: swapping the arms prints
+    // the minimum instead and these assertions fail while still compiling.
+    let src = ": mymax ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n\
+               : main ( -- ) 2 9 mymax . 9 2 mymax . 2.5 9.5 mymax . 9.5 2.5 mymax . ;\n";
+    let scratch = Scratch::write("shape-changing-if", src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "9\n9\n9.5\n9.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn unless_reaches_the_dispatch_rather_than_the_operand_window() {
+    // R2: `unless` is the witness that the dispatch is driven by the callee's
+    // declaration and not by a list of names. It never reached the old name
+    // guard at all -- it is not one of the names that guard lists -- and
+    // landed on the `QuotLit` operand window instead ("`unless` is not
+    // permitted on a quotation literal"), a rejection that did not even
+    // mention the deferral. Its arms are `if`'s swapped, so `mymin` returns
+    // the *minimum* from the same body `mymax` uses for the maximum: a
+    // dispatch that ignored the callee and hardcoded `if` would print the
+    // maximum here and fail while still compiling.
+    let src = ": mymin ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] unless ;\n\
+               : main ( -- ) 2 9 mymin . 9 2 mymin . 2.5 9.5 mymin . 9.5 2.5 mymin . ;\n";
+    let scratch = Scratch::write("unless", src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "2\n2\n2.5\n2.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn shape_changing_arms_disagreeing_on_a_rigid_variable_is_error() {
+    // L1: the arms are compared **structurally under rigid variables**. These
+    // two leave the same *depth*, differing only in that one leaves `'T` where
+    // the other leaves `i64` -- so the per-slot comparison is what catches it,
+    // and binding `'T := i64` (which would silently retype the arm already
+    // checked) is what the rejection refuses.
+    let err = build_err(
+        "if-rigid",
+        ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ drop drop 1 ] if ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "the arms of `if` in `bad` (line 1) disagree: an earlier one leaves `'T`, this one leaves `i64`"
+        ),
+        "`'T` is never bound to the sibling arm's `i64`: {err}"
+    );
+}
+
+#[test]
+fn shape_changing_arms_disagreeing_on_depth_is_error() {
+    // R3: the other way two arms can disagree. Pinned separately because a
+    // per-slot comparison written without a length check passes this one: the
+    // shorter arm's slots all agree with the longer arm's prefix.
+    let err = build_err(
+        "if-depth",
+        ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap ] if ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "the quotations passed to `if` leave different stack shapes: an earlier one leaves `'T`, this one leaves `'T 'T`"
+        ),
+        "the arms must agree on depth too: {err}"
+    );
+}
+
+#[test]
+fn non_literal_arm_operand_is_located_and_does_not_panic() {
+    // OQ4: an arm is a splice-consumed quotation literal written at the call
+    // site, or it is a located rejection here. Both routes to a non-literal
+    // operand are checked: a value that is not a quotation at all, and a
+    // literal that went through a `| f |` bind, which keeps the type and loses
+    // the identity. Neither may be carried into lowering, where a quotation in
+    // a generic body has no runtime representation and a row-combinator arm
+    // that is not a literal is a backend panic -- so the assertion is on the
+    // *message*: a panic would fail `build` too, and `expect_err` alone cannot
+    // tell the two apart.
+    let not_a_quotation = build_err(
+        "oq4-value",
+        ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt 1 ~[ swap drop ] if ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        not_a_quotation.contains(
+            "`if` in the polymorphic body of `bad` (line 1) needs a quotation literal written at the call site, found `i64`"
+        ),
+        "a data operand at an arm position is located: {not_a_quotation}"
+    );
+    let through_a_local = build_err(
+        "oq4-local",
+        ": bad ( 'T: Copy Ord 'T -- 'T ) ~[ drop ] | f | over over gt f ~[ swap drop ] if ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        through_a_local.contains(
+            "needs a quotation literal written at the call site, found a quotation read back out of a local"
+        ),
+        "a quotation that lost its identity is located: {through_a_local}"
+    );
+}
+
+#[test]
+fn ordinary_bracket_arm_is_the_inline_parameter_diagnostic() {
+    // L4: the arms stand at parameters declared `~[ ]` (`lib/core.sth`), so an
+    // ordinary `[ ... ]` arm is the wrong bracket, not a new kind of error. It
+    // must produce the diagnostic the concrete path already gives that
+    // mistake, so the two paths do not disagree about one spelling.
+    let err = build_err(
+        "ordinary-bracket",
+        ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt [ drop ] ~[ swap drop ] if ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "this argument is an ordinary `[ ... ]` quotation but `if` declares parameter"
+        ) && err.contains("as inline `~[ ... ]`"),
+        "an ordinary bracket at an inline parameter keeps its own diagnostic: {err}"
+    );
+}
+
+#[test]
+fn arm_borrows_are_unioned_not_picked() {
+    // L3, the false-accept guard, now reached through the *combinator*
+    // dispatch rather than the eliminator. `PolyScope`'s borrow table is keyed
+    // by place and a **missing** record reads as "no conflict", so a merge that
+    // picked one arm silently admits a later use of the place the other arm
+    // borrowed. Both directions are asserted: "pick arm A" keeps `x` and drops
+    // `y`, so an `x`-only assertion would not flip.
+    let program = |later: &str| {
+        format!(
+            "type: P a i64 ;\n\
+             : bad ( 'T: Copy P P -- 'T )\n\
+               | x y | true ~[ &!x ] ~[ &!y ] if\n\
+               {later} drop drop ;\n\
+             : main ( -- ) ;\n"
+        )
+    };
+    let err_x = build_err("union-x", &program("x"));
+    assert!(
+        err_x.contains("cannot name `x`") && err_x.contains("a mutable borrow of it is still live"),
+        "arm A's `&!x` must survive the merge: {err_x}"
+    );
+    let err_y = build_err("union-y", &program("y"));
+    assert!(
+        err_y.contains("cannot name `y`") && err_y.contains("a mutable borrow of it is still live"),
+        "arm B's `&!y` must survive the merge: {err_y}"
+    );
+}
+
+#[test]
+fn cross_arm_borrow_mutability_disagreement_is_error() {
+    // L3: one place borrowed at two mutabilities across two arms. The unioned
+    // table cannot hold both records, and erasing either would read as "no
+    // conflict" at a later use, so the disagreement is named instead.
+    let err = build_err(
+        "mutability",
+        "type: P a i64 ;\n\
+         : bad ( 'T: Copy P -- 'T ) | x | true ~[ &!x @ drop ] ~[ &x @ drop ] if ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("the arms of `if` in `bad` (line 2) borrow `x` differently")
+            && err.contains("`&!x`")
+            && err.contains("`&x`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn arm_local_bound_and_leaked_is_error_and_one_sided_binding_is_not() {
+    // R1: the `Scope::leave` analogue, through the combinator dispatch. The
+    // poly walk has no block scope, so a linear local bound inside an arm and
+    // dropped on the floor there is only caught by the arm walk's own check --
+    // which must run *before* the truncation that would erase it.
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy> drop ;\n";
+    let err = build_err(
+        "leak",
+        &format!(
+            "{SPY}: bad ( 'T Spy -- 'T ) true ~[ | z | ] ~[ | z | z drop ] if ;\n\
+             : main ( -- ) ;\n"
+        ),
+    );
+    assert!(
+        err.contains("the local `z` of type `Spy`, bound in an arm of `if` in `bad` (line 3)")
+            && err.contains("is never consumed"),
+        "{err}"
+    );
+    // And the shape that must *not* be an error: one arm binds a local, the
+    // other does not. `Moves::join` indexes the sibling's map by this arm's
+    // keys, so without the truncation this pair panics rather than compiling.
+    let src = format!(
+        "{SPY}: ok ( 'T Spy -- 'T ) true ~[ | z | z drop ] ~[ drop ] if ;\n\
+         : main ( -- ) 7 9 Spy ok . ;\n"
+    );
+    let scratch = Scratch::write("one-sided-bind", &src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_slot_declared_above_a_produced_row_is_located() {
+    // R3: the produced row is read straight off an arm's exit, so a parameter
+    // declaring a slot *above* that row (`~[ ..a -- ..b i64 ]`) would need
+    // that slot stripped back off first -- a rule neither quotation consumer
+    // shares. Located, and named against the declaration rather than against
+    // the arm, which is written correctly.
+    let err = build_err(
+        "above-the-row",
+        ": pick inline ( ..a bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b i64 ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "{err}"
+    );
 }
 
 #[test]

@@ -115,9 +115,10 @@ stack.
 A quotation's identity rides its stack slot, so `dup`/`swap`/`drop` reorder arms with no
 special handling, while a *tagged* arm must still reach its eliminator by written adjacency —
 the same rule the concrete path applies, so a generic body is not the laxer of the two.
-Elimination is the only quotation consumer a generic body has: `call`/`branch`/`if`/`times`/
-`tag` each take a quotation as a row-typed parameter, which needs row unification against an
-abstract stack, and each is a located rejection naming **P7.S3b-follow**. A quotation may not
+Elimination is the only quotation consumer this slice gives a generic body: the row-typed
+combinators (`if`/`unless`/`times`) need a declared row grounded against an abstract stack,
+and land in **P7.S3b-follow**; the `call`/`branch`/`tag` primitives declare no `~[ ]`
+parameter to dispatch off and stay a located rejection naming **P7.S3d**. A quotation may not
 be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
 route is its own located error.
 Two standing limits bound what can be written against this today: field projection (`&w`) is
@@ -178,16 +179,20 @@ unification (`` `call` on a quotation ... is not yet supported ``,
 `` ... is not permitted on a quotation literal ``). The family splits into two tiers by
 cost. This slice is the cheap tier: splice a second, fully concrete quotation consumer
 (no `..a`/`..b` in its signature, e.g. a comparator `~[ &'T &'T -- Ordering ]`) through the
-poly walk, no row unification against an abstract stack required. `if`/`branch`/`times`/
-`tag` stay deferred to **P7.S3b-follow**, the expensive tier: those are row-typed
-(`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) and need unifying a
-declared row against the poly walk's abstract stack, machinery this slice does not add.
+poly walk, no row unification against an abstract stack required. The row-typed
+combinators (`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) are the
+expensive tier and are **P7.S3b-follow**'s, which shipped them by grounding the declared
+row against the poly walk's abstract stack. What this slice inherits alongside its own
+rowless consumer is the `call`/`branch`/`tag` primitives, which S3b-follow's
+signature-driven dispatch cannot reach at all: they are compiler-known, so they carry no
+declared `PolySig`, and its located rejection names this slice.
 This is also the second quotation consumer S3b's own exit findings named as the trigger
 for re-running `poly.rs`'s deferred split signals. Ordered after S3c and ahead of S3e,
 because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
 already shipped.
-**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
-`if`/`branch`/`times`/`tag` remain a located rejection naming P7.S3b-follow.
+**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal,
+and `branch`/`tag` either land with it or keep a located rejection naming their own
+follow-up.
 
 **P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate

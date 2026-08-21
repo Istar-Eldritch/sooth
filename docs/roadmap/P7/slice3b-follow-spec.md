@@ -271,7 +271,17 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
   sibling arms sharing one output-row id are cross-checked against a poly `shape_baseline:
   HashMap<u32, Vec<PolySlot>>` keyed by that id, the first arm setting the baseline and each
   later one compared structurally (L1) with `poly_arm_output_disagreement_error` on
-  disagreement.
+  disagreement. Phase 3 notes, two of them, both located rejections through
+  `poly_combinator_abstract_signature_error`:
+  the call's exit row is read straight off that baseline, so a shape-changing parameter
+  declaring a slot *above* its output row (`~[ ..a -- ..b i64 ]`, which parses) would need
+  the slot stripped back off to recover `..b` — a rule neither consumer shares, so it is
+  refused instead; and a signature promising an output row none of its parameters produces
+  (`( ..a bool ~[ ..a -- ..a ] -- ..b )`, which also parses) has no account of that row at
+  all, so it is refused rather than answered with the entry row it differs from.
+  Relating a parameter's rows to the signature's own needs no check here: the parser
+  already refuses a row inside a quotation effect that is not the signature's own top-level
+  row, and refuses one named on a single side of the parameter.
 - Join via the shared machinery (R1): borrow-union (L3), `Moves::join`, leave-truncation.
 - Exit row is the arms' common exit; type variables are never bound (L1/L2), so no per-arm
   clone diverges on `Subst`.
@@ -280,7 +290,10 @@ Port `check_poly_combinator_args`'s row logic over `PolySlot`/`PolyType`:
 
 `poly_quotation_combinator_unsupported_error` remains for `call`/`branch`/`tag`, its message
 re-pointed at the follow-up that would take the primitives (not at "P7.S3b-follow", which is
-this slice). No name that reaches this family is left to a rejection that does not say the
+this slice). Phase 3 note: the follow-up is **P7.S3d**, whose own exit criterion is already a
+rowless `call` on a literal; `branch` is that shape one level down and `tag` is a
+scalar-primitive port with no arm walk, so both ride along there. `tests/phase7_slice3b.rs`'s
+own assertion on that name moved with it, the one edit to that suite. No name that reaches this family is left to a rejection that does not say the
 consumer is deferred.
 
 **Correction to the placebo rationale below (probe-verified by deleting the guard).** Removing
