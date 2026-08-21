@@ -379,3 +379,29 @@ touches `env` today, so any claim that an existing rule already disposes a captu
 returned from the word that built it, calling it observes the captured value, and dropping
 the closure disposes the captured value exactly once -- with a leaked or double-disposed
 capture each a located error rather than a silent miscompile.
+
+**P7.S3i — `Bool` as an ordinary enum, not a compiler-injected one.** `bool_enum_decl()`
+(`src/ast.rs:914`) already produces a plain two-variant zero-payload `EnumDecl`; the only
+thing making it special is that every module's registry is injected with it at a fixed
+`BOOL_ENUM_ID` slot (`src/parser.rs:510`, `src/driver.rs:293`) ahead of any user enum, so
+`Type::from_name("bool")` and the `true`/`false` literal keywords (`src/parser.rs:3708-3714`)
+resolve to it with no import, unlike every other type P8.S2 made import-gated. Now that
+enums are a real, checked, user-declarable mechanism (Phase 6) with the same zero-payload
+scalar layout `bool` already uses, there is no representational reason left for the
+carve-out: declare it once as ordinary source in `core::bool` (`type: Bool | False | True ;`),
+delete the fixed-slot injection, and let a module resolve `Bool`/`False`/`True` the same way
+it resolves any other imported enum. `true`/`false` become parser sugar for the `False`/`True`
+variant constructors of *the imported* `Bool`, not a global constant, so a file that never
+imports `core::bool`/`prelude` cannot spell a boolean literal at all -- consistent with P8.S2's
+rule that nothing resolves without an `import:`. The checker/backend call sites currently
+reading the global `Type::BOOL`/`BOOL_ENUM_ID` (`check/operators.rs`, `check/builtins.rs`,
+`check/engine.rs`, `backend/qbe.rs`, `repl.rs`'s session-pinning logic -- roughly 80 sites) move
+to resolving `Bool` through the checking module's own imports, the same path any other
+enum-typed builtin result (a comparison, `branch`'s condition, `tag`'s discriminant) already
+goes through.
+**Exit:** `core::bool` declares `Bool` as an ordinary source-level enum; no module resolves
+`bool`/`true`/`false` without importing it (directly or via `prelude`); `BOOL_ENUM_ID`'s
+fixed-slot injection is deleted; the REPL's session-pinning logic resolves the same enum
+across session lines through the session's own import, not a global constant.
+**Dogfood:** a file that imports only `intrinsics` and calls `branch` cannot spell `true`; the
+same file importing `core::bool` can.
