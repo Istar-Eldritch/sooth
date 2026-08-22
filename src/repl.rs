@@ -16,7 +16,7 @@ use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, ImportTarget, Line, OwnedCellDecl, OwnedCellId,
     PolySig, PolyType, RefDecl, RefId, SliceDecl, SliceId, Span, StackEffect, StructDecl, StructId,
-    Term, TermKind, Type, TypedSlot, VariantDecl, WordDef, BOOL_TYPE_NAME,
+    Term, TermKind, Type, TypedSlot, VariantDecl, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -189,15 +189,66 @@ fn import_symbol(name: &str, epoch: u64) -> String {
     format!("{name}__import{epoch}")
 }
 
+/// P7 slice 3i (R2): how an imported closure's `EnumId`s move into session
+/// space. Every enum shifts by the append `base`, except the closure's own
+/// `core::bool`, which *folds* onto the session's single seeded copy: the
+/// session already holds that declaration, so appending a second one would
+/// re-register `True`/`False` and shadow the session's own constructor words
+/// (a `HashMap` env, last write wins), and shifting its references by `base`
+/// instead would make a session `true` and an imported `if` disagree on the
+/// type. The append skips the folded slot, so every enum *after* it shifts by
+/// one less -- left out, that slot's absence would silently rename every
+/// later enum to its neighbour.
+///
+/// Which slot folds is decided by `resolve_bool_type`, the same shape test the
+/// rest of the compiler resolves `bool` by, never by the name alone: an
+/// imported enum that merely happens to be *called* `bool` (a payload-carrying
+/// or three-variant one) is an unrelated type, and folding it onto the
+/// session's one-cell scalar would read its tagged aggregate at the wrong
+/// width.
+#[derive(Clone, Copy)]
+struct EnumRemap {
+    base: usize,
+    folded_bool: Option<EnumId>,
+    session_bool: EnumId,
+}
+
+impl EnumRemap {
+    fn new(module: &Module, base: usize, session_bool: EnumId) -> EnumRemap {
+        let folded_bool = match crate::ast::resolve_bool_type(&module.enums) {
+            Some(Type::Enum(id, _)) => Some(id),
+            _ => None,
+        };
+        EnumRemap {
+            base,
+            folded_bool,
+            session_bool,
+        }
+    }
+
+    /// True for the one imported slot that maps onto the session's `bool`
+    /// (and so is not appended).
+    fn folds(&self, id: EnumId) -> bool {
+        self.folded_bool == Some(id)
+    }
+
+    fn apply(&self, id: EnumId) -> EnumId {
+        if self.folds(id) {
+            return self.session_bool;
+        }
+        let after_folded = matches!(self.folded_bool, Some(b) if b.index() < id.index());
+        EnumId::from_index(self.base + id.index() - usize::from(after_folded))
+    }
+}
+
 /// R9 (slice 5b): shift a closure-local `Type`'s registry id into session
 /// space by the session's registry lengths captured at splice time. A scalar
 /// type carries no id and passes through unchanged.
 #[allow(clippy::too_many_arguments)]
 fn remap_type(
     ty: Type,
-    bool_enum: EnumId,
+    enums: EnumRemap,
     struct_base: usize,
-    enum_base: usize,
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
@@ -205,15 +256,7 @@ fn remap_type(
 ) -> Type {
     match ty {
         Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
-        // P7 slice 3i (R2): the session seeds `core::bool` at startup, so an
-        // imported module's own `bool` is the same declaration the session
-        // already holds, not a per-module type of its own: it maps to the
-        // session's copy rather than being shifted by `enum_base` into a
-        // distinct, non-equal id (which would make a session `true` and an
-        // imported `if` disagree). `splice_import` skips appending the
-        // imported entry for the same reason.
-        Type::Enum(_, name) if name == BOOL_TYPE_NAME => Type::Enum(bool_enum, name),
-        Type::Enum(id, n) => Type::Enum(EnumId::from_index(id.index() + enum_base), n),
+        Type::Enum(id, n) => Type::Enum(enums.apply(id), n),
         Type::Array(id, n) => Type::Array(ArrayId::from_index(id.index() + array_base), n),
         Type::OwnedCell(id, n) => {
             Type::OwnedCell(OwnedCellId::from_index(id.index() + cell_base), n)
@@ -237,9 +280,8 @@ fn remap_type(
 #[allow(clippy::too_many_arguments)]
 fn remap_poly_type(
     p: &PolyType,
-    bool_enum: EnumId,
+    enums: EnumRemap,
     struct_base: usize,
-    enum_base: usize,
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
@@ -248,9 +290,8 @@ fn remap_poly_type(
     match p {
         PolyType::Concrete(t) => PolyType::Concrete(remap_type(
             *t,
-            bool_enum,
+            enums,
             struct_base,
-            enum_base,
             array_base,
             cell_base,
             ref_base,
@@ -262,9 +303,8 @@ fn remap_poly_type(
         PolyType::Array(inner, len) => PolyType::Array(
             Box::new(remap_poly_type(
                 inner,
-                bool_enum,
+                enums,
                 struct_base,
-                enum_base,
                 array_base,
                 cell_base,
                 ref_base,
@@ -278,9 +318,8 @@ fn remap_poly_type(
         PolyType::Ref(referent, mutable) => PolyType::Ref(
             Box::new(remap_poly_type(
                 referent,
-                bool_enum,
+                enums,
                 struct_base,
-                enum_base,
                 array_base,
                 cell_base,
                 ref_base,
@@ -293,9 +332,8 @@ fn remap_poly_type(
                 .map(|q| {
                     remap_poly_type(
                         q,
-                        bool_enum,
+                        enums,
                         struct_base,
-                        enum_base,
                         array_base,
                         cell_base,
                         ref_base,
@@ -307,9 +345,8 @@ fn remap_poly_type(
                 .map(|q| {
                     remap_poly_type(
                         q,
-                        bool_enum,
+                        enums,
                         struct_base,
-                        enum_base,
                         array_base,
                         cell_base,
                         ref_base,
@@ -339,9 +376,8 @@ fn remap_poly_type(
                 .map(|a| {
                     remap_poly_type(
                         a,
-                        bool_enum,
+                        enums,
                         struct_base,
-                        enum_base,
                         array_base,
                         cell_base,
                         ref_base,
@@ -398,9 +434,8 @@ fn remap_imported_combinator(
     internal: &str,
     body_rename: &HashMap<String, String>,
     module_base: u32,
-    bool_enum: EnumId,
+    enums: EnumRemap,
     struct_base: usize,
-    enum_base: usize,
     array_base: usize,
     cell_base: usize,
     ref_base: usize,
@@ -410,9 +445,8 @@ fn remap_imported_combinator(
         name: s.name.clone(),
         ty: remap_type(
             s.ty,
-            bool_enum,
+            enums,
             struct_base,
-            enum_base,
             array_base,
             cell_base,
             ref_base,
@@ -431,9 +465,8 @@ fn remap_imported_combinator(
             .map(|p| {
                 remap_poly_type(
                     p,
-                    bool_enum,
+                    enums,
                     struct_base,
-                    enum_base,
                     array_base,
                     cell_base,
                     ref_base,
@@ -447,9 +480,8 @@ fn remap_imported_combinator(
             .map(|p| {
                 remap_poly_type(
                     p,
-                    bool_enum,
+                    enums,
                     struct_base,
-                    enum_base,
                     array_base,
                     cell_base,
                     ref_base,
@@ -626,6 +658,7 @@ pub fn format_stack(
     layouts: &[StructLayout],
     enum_layouts: &[EnumLayout],
     array_layouts: &[ArrayLayout],
+    bool_enum: EnumId,
 ) -> String {
     if types.is_empty() {
         return "stack: (empty)".to_string();
@@ -637,10 +670,13 @@ pub fn format_stack(
             // P7 slice 3i (R2): a bool is structurally an enum, but `:stack`
             // renders it as `true`/`false` rather than the generic
             // `<TypeName>` placeholder below, matching `.`; this arm must
-            // precede the general `Type::Enum` one to win. Keyed on the type
-            // name plus a scalar layout, which is what makes reading exactly
-            // one cell for it correct.
-            Type::Enum(id, BOOL_TYPE_NAME) if enum_layouts[id.index()].is_scalar => {
+            // precede the general `Type::Enum` one to win. Keyed on the
+            // session's own seeded `bool` (`Session::bool_enum`) rather than
+            // on the type name, so an imported enum merely *named* `bool`
+            // (which `EnumRemap` keeps as a type of its own) renders as the
+            // placeholder it is instead of being read one cell wide. The
+            // scalar-layout check states that one-cell read directly.
+            Type::Enum(id, _) if *id == bool_enum && enum_layouts[id.index()].is_scalar => {
                 let v = buf[cell];
                 vals.push(if v != 0 { "true" } else { "false" }.to_string());
                 cell += 1;
@@ -1269,6 +1305,7 @@ impl Session {
                 &structs.layouts,
                 &enums.layouts,
                 &arrays.layouts,
+                self.bool_enum,
             )
         }
     }
@@ -2045,6 +2082,7 @@ impl Session {
         let selective_names: HashSet<&str> = selective.iter().map(|(n, _)| n.as_str()).collect();
         let struct_base = self.structs.len();
         let enum_base = self.enums.len();
+        let enum_remap = EnumRemap::new(module, enum_base, self.bool_enum);
         let array_base = self.arrays.len();
         let cell_base = self.owned_cells.len();
         let ref_base = self.refs.len();
@@ -2052,9 +2090,8 @@ impl Session {
         let remap = |ty: Type| {
             remap_type(
                 ty,
-                self.bool_enum,
+                enum_remap,
                 struct_base,
-                enum_base,
                 array_base,
                 cell_base,
                 ref_base,
@@ -2160,17 +2197,15 @@ impl Session {
         // No aliases are built this phase (enums are out of phase-1 fixtures),
         // but the ids must still remap so a later reference stays consistent.
         //
-        // P7 slice 3i (R2): the imported closure's own `core::bool` is skipped.
-        // The session seeded that same declaration at startup and `remap_type`
-        // maps every imported reference to it; appending a second `bool` would
-        // re-register `True`/`False` a second time, shadowing the session's own
-        // constructor words (a `HashMap` env, last write wins) and making every
-        // subsequent `true`/`false` construct the wrong enum.
+        // P7 slice 3i (R2): the imported closure's own `core::bool` is the one
+        // enum not appended -- `EnumRemap` folds it onto the session's seeded
+        // copy instead, and holds the shape test that keeps an unrelated enum
+        // merely *named* `bool` out of that fold.
         for (i, e) in module
             .enums
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.name_static != BOOL_TYPE_NAME)
+            .filter(|(i, _)| !enum_remap.folds(EnumId::from_index(*i)))
         {
             let variants = e
                 .variants
@@ -2191,7 +2226,11 @@ impl Session {
                 })
                 .collect();
             self.enums.push(EnumDecl {
-                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i - 1),
+                name: format!(
+                    "{}__import{epoch}__e{}",
+                    e.name_static,
+                    enum_remap.apply(EnumId::from_index(i)).index()
+                ),
                 name_static: e.name_static,
                 variants,
                 span: e.span,
@@ -2352,9 +2391,8 @@ impl Session {
                 &internal,
                 &body_rename,
                 module_base,
-                self.bool_enum,
+                enum_remap,
                 struct_base,
-                enum_base,
                 array_base,
                 cell_base,
                 ref_base,
@@ -2377,9 +2415,8 @@ impl Session {
                 &internal,
                 &body_rename,
                 module_base,
-                self.bool_enum,
+                enum_remap,
                 struct_base,
-                enum_base,
                 array_base,
                 cell_base,
                 ref_base,
@@ -3150,6 +3187,7 @@ impl Session {
                 &structs.layouts,
                 &enums.layouts,
                 &arrays.layouts,
+                self.bool_enum,
             )
         };
         writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))
@@ -3802,14 +3840,17 @@ mod tests {
     fn format_stack_bottom_to_top() {
         let types = vec![Type::I64, Type::I64, Type::I64];
         assert_eq!(
-            format_stack(&[1, 2, 3], &types, &[], &[], &[]),
+            format_stack(&[1, 2, 3], &types, &[], &[], &[], EnumId::from_index(0)),
             "stack: 1 2 3"
         );
     }
 
     #[test]
     fn format_stack_empty_is_marker() {
-        assert_eq!(format_stack(&[], &[], &[], &[], &[]), "stack: (empty)");
+        assert_eq!(
+            format_stack(&[], &[], &[], &[], &[], EnumId::from_index(0)),
+            "stack: (empty)"
+        );
     }
 
     #[test]
@@ -3817,7 +3858,7 @@ mod tests {
         // A carried `f64` displays its value, not the `i64` bit pattern (R21).
         let bits = 2.5f64.to_bits() as i64;
         assert_eq!(
-            format_stack(&[bits], &[Type::F64], &[], &[], &[]),
+            format_stack(&[bits], &[Type::F64], &[], &[], &[], EnumId::from_index(0)),
             "stack: 2.5"
         );
     }
@@ -3828,7 +3869,7 @@ mod tests {
         let bits = 1.5f32.to_bits() as u64 as i64;
         let f32_ty = Type::from_name("f32").unwrap();
         assert_eq!(
-            format_stack(&[bits], &[f32_ty], &[], &[], &[]),
+            format_stack(&[bits], &[f32_ty], &[], &[], &[], EnumId::from_index(0)),
             "stack: 1.5"
         );
     }
@@ -3859,25 +3900,58 @@ mod tests {
     #[test]
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
-        let bool_ty = Type::Enum(EnumId::from_index(0), BOOL_TYPE_NAME);
-        let layouts = vec![enum_layout_named(BOOL_TYPE_NAME, true)];
+        let bool_ty = Type::Enum(EnumId::from_index(0), crate::ast::BOOL_TYPE_NAME);
+        let layouts = vec![enum_layout_named(crate::ast::BOOL_TYPE_NAME, true)];
         assert_eq!(
-            format_stack(&[1, 0], &[bool_ty, bool_ty], &[], &layouts, &[]),
+            format_stack(
+                &[1, 0],
+                &[bool_ty, bool_ty],
+                &[],
+                &layouts,
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: true false"
         );
     }
 
     #[test]
     fn format_stack_non_scalar_enum_named_bool_shows_the_placeholder() {
-        // P7 slice 3i (R2): the arm is keyed on the type name *and* a scalar
-        // layout. `bool` is an ordinary declared name now, so a session enum
+        // P7 slice 3i (R2): the arm requires a scalar layout on top of the
+        // session's own id. `bool` is an ordinary declared name now, so a type
         // that merely shares it must not be read as one cell of `true`/`false`
         // -- it renders (and strides) like the aggregate it is.
-        let forged = Type::Enum(EnumId::from_index(0), BOOL_TYPE_NAME);
-        let layouts = vec![enum_layout_named(BOOL_TYPE_NAME, false)];
+        let forged = Type::Enum(EnumId::from_index(0), crate::ast::BOOL_TYPE_NAME);
+        let layouts = vec![enum_layout_named(crate::ast::BOOL_TYPE_NAME, false)];
         assert_eq!(
-            format_stack(&[1, 0, 7], &[forged, Type::I64], &[], &layouts, &[]),
+            format_stack(
+                &[1, 0, 7],
+                &[forged, Type::I64],
+                &[],
+                &layouts,
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <bool> 7"
+        );
+    }
+
+    #[test]
+    fn format_stack_scalar_enum_named_bool_that_is_not_the_sessions_shows_the_placeholder() {
+        // P7 slice 3i (R2): an imported closure may declare its own enum
+        // called `bool`, and one that happens to be a payload-free pair is a
+        // *scalar* one -- so the name and the layout together still do not
+        // identify the session's boolean. Only the session's own id renders as
+        // `true`/`false`; a same-named, same-shaped stranger is the placeholder
+        // its variant names would otherwise be misreported as.
+        let stranger = Type::Enum(EnumId::from_index(1), crate::ast::BOOL_TYPE_NAME);
+        let layouts = vec![
+            enum_layout_named(crate::ast::BOOL_TYPE_NAME, true),
+            enum_layout_named(crate::ast::BOOL_TYPE_NAME, true),
+        ];
+        assert_eq!(
+            format_stack(&[1], &[stranger], &[], &layouts, &[], EnumId::from_index(0)),
+            "stack: <bool>"
         );
     }
 
@@ -3900,7 +3974,14 @@ mod tests {
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(
-            format_stack(&[5, 6, 99], &[vec2, Type::I64], &layouts, &[], &[]),
+            format_stack(
+                &[5, 6, 99],
+                &[vec2, Type::I64],
+                &layouts,
+                &[],
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <Vec2> 99"
         );
     }
@@ -3913,7 +3994,14 @@ mod tests {
         // trailing scalar reads the cell *past* it, not `index * 8`.
         let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
         assert_eq!(
-            format_stack(&[123, 99], &[cell_ty, Type::I64], &[], &[], &[]),
+            format_stack(
+                &[123, 99],
+                &[cell_ty, Type::I64],
+                &[],
+                &[],
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <^i64> 99"
         );
     }
@@ -3924,7 +4012,14 @@ mod tests {
         // it renders as `<str>` and offsets past its one carried cell, like a
         // cell slot.
         assert_eq!(
-            format_stack(&[0, 99], &[Type::Str, Type::I64], &[], &[], &[]),
+            format_stack(
+                &[0, 99],
+                &[Type::Str, Type::I64],
+                &[],
+                &[],
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <str> 99"
         );
     }
@@ -3932,7 +4027,14 @@ mod tests {
     #[test]
     fn format_stack_cstr_slot_shows_placeholder_and_offsets_past_it() {
         assert_eq!(
-            format_stack(&[0, 99], &[Type::Cstr, Type::I64], &[], &[], &[]),
+            format_stack(
+                &[0, 99],
+                &[Type::Cstr, Type::I64],
+                &[],
+                &[],
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <cstr> 99"
         );
     }
@@ -3946,7 +4048,14 @@ mod tests {
         let mut slices = Vec::new();
         let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
         assert_eq!(
-            format_stack(&[0, 5, 99], &[slice, Type::I64], &[], &[], &[]),
+            format_stack(
+                &[0, 5, 99],
+                &[slice, Type::I64],
+                &[],
+                &[],
+                &[],
+                EnumId::from_index(0)
+            ),
             "stack: <Slice[i64]> 99"
         );
         // The rich renderer agrees on both the span and the placeholder.
@@ -3967,15 +4076,19 @@ mod tests {
     fn remap_type_rebases_sliceid_across_modules() {
         let mut slices = Vec::new();
         let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
-        let no_bool = EnumId::from_index(0);
-        let Type::Slice(id, m, name) = remap_type(mutable, no_bool, 0, 0, 0, 0, 0, 3) else {
+        let no_bool = EnumRemap {
+            base: 0,
+            folded_bool: None,
+            session_bool: EnumId::from_index(0),
+        };
+        let Type::Slice(id, m, name) = remap_type(mutable, no_bool, 0, 0, 0, 0, 3) else {
             panic!("a remapped slice is still a slice");
         };
         assert_eq!(id.index(), 3, "the id shifted by the session's slice base");
         assert!(m, "mutability rides along");
         assert_eq!(name, "!Slice[i64]");
         // A zero base is the identity, so a slice-free session is unaffected.
-        assert_eq!(remap_type(mutable, no_bool, 9, 9, 9, 9, 9, 0), mutable);
+        assert_eq!(remap_type(mutable, no_bool, 9, 9, 9, 9, 0), mutable);
     }
 
     #[test]
@@ -3984,7 +4097,7 @@ mod tests {
         // display must render its unsigned value, not that negative number.
         let u64_ty = Type::from_name("u64").unwrap();
         assert_eq!(
-            format_stack(&[-1], &[u64_ty], &[], &[], &[]),
+            format_stack(&[-1], &[u64_ty], &[], &[], &[], EnumId::from_index(0)),
             "stack: 18446744073709551615"
         );
     }
@@ -3995,7 +4108,7 @@ mod tests {
         // carried `usize` slot with the high bit set used to fall to the
         // catch-all `v.to_string()` arm and render negative.
         assert_eq!(
-            format_stack(&[-1], &[Type::Usize], &[], &[], &[]),
+            format_stack(&[-1], &[Type::Usize], &[], &[], &[], EnumId::from_index(0)),
             "stack: 18446744073709551615"
         );
     }

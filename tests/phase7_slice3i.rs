@@ -150,7 +150,7 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
     );
     let print_err = build_error(&print_entry);
     assert!(
-        print_err.contains("bool"),
+        print_err.contains("`.` requires a printable scalar, found `bool`"),
         "unexpected diagnostic: {print_err}"
     );
 }
@@ -237,11 +237,31 @@ fn static_at_a_payload_carrying_enum_named_bool_is_an_error() {
     );
 }
 
-/// A same-named enum with a third payload-free variant is still not the
-/// logical `bool`: `resolve_bool_type` requires exactly two variants (the
-/// count the `xor 1` lowering of `not` assumes), so `not` on it falls through
-/// to the bitwise-only path and is rejected rather than silently misrouting a
-/// three-way discriminant through a two-way eliminator.
+/// A same-named enum whose variants carry a payload is not the logical `bool`:
+/// `resolve_bool_type` requires both variants payload-free, the shape that makes
+/// a bool a register-resident scalar. `not` on a two-cell tagged aggregate
+/// therefore falls through to the bitwise-only path and is rejected, rather than
+/// `xor 1`-ing whichever word the discriminant happens to occupy.
+#[test]
+fn not_on_a_payload_carrying_enum_named_bool_is_an_error() {
+    let t = Tree::new("g3-payload");
+    let entry = t.write_raw(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         type: bool | A n i64 | B ;\n\
+         : main ( -- ) 1 A not drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("`not` requires an integer or bool operand, found `bool`"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// A same-named enum with a third payload-free variant is not the logical `bool`
+/// either: `resolve_bool_type` requires exactly two variants (the count the
+/// `xor 1` lowering of `not` assumes), so `not` on it is rejected rather than
+/// silently misrouting a three-way discriminant through a two-way eliminator.
 #[test]
 fn not_on_a_three_variant_enum_named_bool_is_an_error() {
     let t = Tree::new("g3-tristate");
@@ -252,7 +272,10 @@ fn not_on_a_three_variant_enum_named_bool_is_an_error() {
          : main ( -- ) C not drop ;\n",
     );
     let err = build_error(&entry);
-    assert!(err.contains("bool"), "unexpected diagnostic: {err}");
+    assert!(
+        err.contains("`not` requires an integer or bool operand, found `bool`"),
+        "unexpected diagnostic: {err}"
+    );
 }
 
 // -- R2: the REPL seeds `core::bool` itself ---------------------------------
@@ -294,6 +317,92 @@ fn repl_seeds_core_bool_so_a_bare_true_works_on_the_first_line() {
             "stack: true",
             "stack: true true false",
         ],
+        "unexpected session transcript: {out}"
+    );
+}
+
+/// R2: an imported closure's own `core::bool` folds onto the one the session
+/// seeded, rather than being appended as a second, non-equal type. That fold is
+/// what lets a session `true` reach an imported `if` at all, and it is the
+/// behaviour the shape test below has to keep while refusing a stranger.
+#[test]
+fn repl_imported_core_bool_folds_onto_the_session_seed() {
+    let import = format!(
+        "import: \"{}/lib/bool.sth\" b | if | ;",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let out = run_session(&[&import, "true ~[ 1 ] ~[ 2 ] if ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["imported b", "1", "stack: (empty)"],
+        "unexpected session transcript: {out}"
+    );
+}
+
+/// R2: the fold is keyed on the shape test `resolve_bool_type` applies, never on
+/// the name `bool` alone. An imported module's own `bool` carrying a payload is
+/// an unrelated type that happens to share a name: folded onto the session's
+/// one-cell scalar, its two-cell tagged aggregate is read at the wrong width
+/// (`5 mk` rendered as `false`). It keeps an id of its own instead -- its
+/// payload survives a round trip through the module's own eliminator, `:stack`
+/// renders it as the aggregate it is, and the session's own `true` is untouched.
+#[test]
+fn repl_imported_enum_named_bool_is_not_the_session_bool() {
+    let t = Tree::new("r2-stranger");
+    let sibling = t.write_raw(
+        "mybool.sth",
+        "import: intrinsics | drop | ;\n\
+         export: bool mk un ;\n\
+         type: bool | A n i64 | B ;\n\
+         : mk ( i64 -- bool ) A ;\n\
+         : un ( bool -- i64 ) ~[ ( A ) A> ] ~[ ( B ) drop 0 ] bool? ;\n",
+    );
+    let import = format!("import: \"{}\" m | mk un | ;", sibling.display());
+    let out = run_session(&[&import, "5 mk un .", "true .", "5 mk"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "imported m",
+            "5",
+            "stack: (empty)",
+            "true",
+            "stack: (empty)",
+            "stack: <bool>",
+        ],
+        "unexpected session transcript: {out}"
+    );
+}
+
+/// R2: the folded slot is *skipped* when the closure's enums are appended, so
+/// every enum after it shifts by one less than the ones before. Shifting them
+/// all alike renames each later enum to its neighbour: here the closure's
+/// `Color` reference pointed one past `Color`'s appended row, and `top` crashed
+/// the checker rather than returning a `Color`.
+#[test]
+fn repl_import_shifts_an_enum_declared_after_the_folded_bool() {
+    let t = Tree::new("r2-after-fold");
+    t.write_raw(
+        "col.sth",
+        "export: Color Red Green mkred ;\n\
+         type: Color | Red | Green ;\n\
+         : mkred ( -- Color ) Red ;\n",
+    );
+    let entry = t.write_raw(
+        "pair.sth",
+        "import: core::bool * ;\n\
+         import: self::col c | Color mkred | ;\n\
+         export: pick top ;\n\
+         : pick ( bool -- i64 ) ~[ 7 ] ~[ 9 ] if ;\n\
+         : top ( -- Color ) mkred ;\n",
+    );
+    let import = format!("import: \"{}\" p | pick top | ;", entry.display());
+    let out = run_session(&[&import, "top", "true p::pick ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["imported p", "stack: <Color>", "7", "stack: <Color>",],
         "unexpected session transcript: {out}"
     );
 }
