@@ -962,6 +962,16 @@ pub(super) fn poly_call_term(
             return Err(underflow_error(ctx, span, name, 1, 0));
         };
         let Some(quot) = top.quot else {
+            // P7.S3f (R3): a genuine ground `Type::Quotation` parameter carries
+            // no literal marker (there is nothing spliceable behind it), so it
+            // is checked against its own declared effect instead -- the poly
+            // twin of `check_abstract_quotation_call`. An abstract
+            // `PolyType::Quotation` (still carrying a variable) and every
+            // non-quotation operand keep rejecting below (L1).
+            if let PolyType::Concrete(Type::Quotation(eff)) = top.pt {
+                stack.pop();
+                return poly_call_ground_quotation_param(eff, span, stack, ctx, name, sig);
+            }
             let pt = top.pt.clone();
             return Err(poly_op_on_variable_error(ctx, span, name, &pt, sig));
         };
@@ -1483,6 +1493,52 @@ fn poly_ground_quotation_literal(
 /// named rather than left as a raw unknown-word error. An
 /// imported callee and a same-module one emit the same message: both are the
 /// one underlying gap.
+/// P7.S3f (R3): `call` on a genuine ground `Type::Quotation` parameter -- a
+/// real `(code, env)` value the body cannot splice, only honour. The poly twin
+/// of `check_abstract_quotation_call`: consume `eff.inputs` deepest-first,
+/// push `eff.outputs`, no body walk and no teardown (L3, there is no body
+/// here). A `QuotEffect` carries no row and no variable, so every declared
+/// slot on either side is a ground `Type` and no `Subst` is involved.
+fn poly_call_ground_quotation_param(
+    eff: &QuotEffect,
+    span: Span,
+    mut stack: Vec<PolySlot>,
+    ctx: &Ctx,
+    op: &str,
+    sig: &PolySig,
+) -> Result<Vec<PolySlot>, String> {
+    let n = eff.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, op, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    for (i, want) in eff.inputs.iter().enumerate() {
+        match &stack[base + i].pt {
+            PolyType::Concrete(t) if t == want => {}
+            // A ground operand that simply is not the declared type renders
+            // through the two-`Type` renderer, matching `unify_poly_input`'s
+            // own `Concrete` arm. Anything else (a bare `Var`, an abstract
+            // quotation) has no `Type` to hand it, so both sides go through
+            // `poly_type_str` instead.
+            PolyType::Concrete(t) => return Err(type_mismatch_error(ctx, span, op, *want, *t)),
+            found => {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    op,
+                    want.name(),
+                    &poly_type_str(found, sig),
+                ));
+            }
+        }
+    }
+    stack.truncate(base);
+    for out in &eff.outputs {
+        stack.push(PolySlot::new(PolyType::Concrete(*out)));
+    }
+    Ok(stack)
+}
+
 fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
     let caller = ctx.word_name().unwrap_or("this line");
     format!(
@@ -4733,6 +4789,86 @@ mod tests {
         assert!(
             err.contains("capturing a quotation value by name is deferred"),
             "{err}"
+        );
+    }
+    /// P7 slice 3f (R3): `call` on a genuine ground `Type::Quotation`
+    /// parameter -- a real value with no interned body to splice -- honours the
+    /// declared effect, popping its inputs and pushing its outputs.
+    #[test]
+    fn poly_call_term_calls_a_ground_quotation_param() {
+        check_src(
+            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) 1 swap call ;\n\
+             : main ( -- ) 7 [ 1 add ] call_it drop drop ;\n",
+        )
+        .expect("`call` on a ground quotation parameter should honour its declared effect");
+    }
+    /// R3's negative, the `PolyType::Concrete` renderer arm: a ground operand
+    /// at a popped position that simply is not the declared input type is a
+    /// located rejection, not a panic and not a silent coercion.
+    #[test]
+    fn poly_call_on_a_ground_quotation_param_ground_mismatch_is_error() {
+        let err = check_src(
+            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) true swap call ;\n\
+             : main ( -- ) 7 [ 1 add ] call_it drop drop ;\n",
+        )
+        .expect_err("a wrong operand type at a declared input must be rejected");
+        assert_eq!(
+            err,
+            "error: type mismatch in `call_it` (line 1)\n  \
+             `call` expected `i64`, found `bool`\n  note: declared ( -- )"
+        );
+    }
+    /// R3's negative, the `poly_rendered_type_mismatch_error` arm: an operand
+    /// with no ground `Type` to render (here a bare `PolyType::Var`) at a
+    /// popped position. `type_mismatch_error` cannot render this side at all,
+    /// which is why the two arms exist.
+    #[test]
+    fn poly_call_on_a_ground_quotation_param_variable_operand_is_error() {
+        let err = check_src(": call_it ( 'T: Copy [ i64 -- i64 ] -- i64 ) call ;\n")
+            .expect_err("a type variable at a declared input must be rejected");
+        assert_eq!(
+            err,
+            "error: type mismatch in `call_it` (line 1)\n  \
+             `call` expected `i64`, found `'T`\n  note: declared ( -- )"
+        );
+    }
+    /// R3's underflow arm, distinct from the bare-`call`-with-an-empty-stack
+    /// rejection above it: the quotation is there, the operands its declared
+    /// effect demands are not.
+    #[test]
+    fn poly_call_on_a_ground_quotation_param_underflow_is_error() {
+        let err = check_src(": call_it ( 'T: Copy [ i64 -- i64 ] -- i64 ) swap drop call ;\n")
+            .expect_err("a declared input with nothing beneath the quotation must be rejected");
+        assert!(
+            err.contains("`call` needs 1 values, but the stack holds 0"),
+            "{err}"
+        );
+    }
+    /// L1, pinned by exact text: an abstract declared quotation parameter is
+    /// out of scope and keeps its pre-existing rejection. The near miss
+    /// `poly_call_on_non_literal_quotation_operand_is_located_error` does not
+    /// cover: only the *output* side carries the variable, so a dispatch
+    /// predicate that checked the declared inputs were ground (they are, a
+    /// single `i64`) would wrongly claim this one.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_is_still_error() {
+        let err = check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) 1 swap call ;\n")
+            .expect_err("an abstract quotation parameter stays rejected");
+        assert_eq!(
+            err,
+            "error: `call` is not permitted on a quotation in `call_it` (line 1)"
+        );
+    }
+    /// L1's other side: the new arm is gated on the operand being a ground
+    /// quotation, not merely on it not being a `QuotLit` marker -- `call` on a
+    /// body local bound to a bare `'T` keeps its own rejection.
+    #[test]
+    fn poly_call_on_a_variable_local_is_still_error() {
+        let err = check_src(": call_it ( 'T: Copy -- ) | a | a call ;\n")
+            .expect_err("`call` on a type variable stays rejected");
+        assert_eq!(
+            err,
+            "error: `call` is not permitted on the type variable `'T` in `call_it` (line 1)"
         );
     }
     #[test]
