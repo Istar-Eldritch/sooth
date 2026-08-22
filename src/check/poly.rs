@@ -1486,13 +1486,6 @@ fn poly_ground_quotation_literal(
     Ok(())
 }
 
-/// P8 S2 (R6b): the located diagnostic for a non-inline polymorphic word
-/// calling another polymorphic word. Deleting the prelude removed the one shape
-/// this used to work for -- its injected comparisons were reachable by bare,
-/// unmangled name from any body -- so this is the narrowing that replaced it,
-/// named rather than left as a raw unknown-word error. An
-/// imported callee and a same-module one emit the same message: both are the
-/// one underlying gap.
 /// P7.S3f (R3): `call` on a genuine ground `Type::Quotation` parameter -- a
 /// real `(code, env)` value the body cannot splice, only honour. The poly twin
 /// of `check_abstract_quotation_call`: consume `eff.inputs` deepest-first,
@@ -1539,6 +1532,13 @@ fn poly_call_ground_quotation_param(
     Ok(stack)
 }
 
+/// P8 S2 (R6b): the located diagnostic for a non-inline polymorphic word
+/// calling another polymorphic word. Deleting the prelude removed the one shape
+/// this used to work for -- its injected comparisons were reachable by bare,
+/// unmangled name from any body -- so this is the narrowing that replaced it,
+/// named rather than left as a raw unknown-word error. An
+/// imported callee and a same-module one emit the same message: both are the
+/// one underlying gap.
 fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
     let caller = ctx.word_name().unwrap_or("this line");
     format!(
