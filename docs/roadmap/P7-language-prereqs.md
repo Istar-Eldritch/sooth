@@ -420,18 +420,21 @@ mismatch at the call site, not a hang; and the generic-calls-generic diagnostic 
 claims a self-call is a call to another generic word
 (`docs/roadmap/P7/slice3g-spec.md`, `tests/phase7_slice3g.rs`).
 
-**P7.S3g-follow — The self-tail loop transform for a polymorphic body.** S3g ships an
-ordinary recursive call, deliberately: a self-recursive generic word is *correct* but
-consumes one stack frame per recursion level, where a monomorphic self-tail word lowers to
-a loop. Two pieces, both absent. On the checker side `check_poly_body` builds its `Ctx`
-with an empty `CombinatorIndex`, so `has_self_tail_call` returns `false` for every poly
-body and `Ctx::Word.self_tail_call` is always `false`; tail-position detection has to run
-over a poly body first. On the lowering side the monomorphization loop passes
-`self_tail: false` into `lower_word_parts`, so no header/phi loop is built and the self-call
-arm in the user-word dispatch emits a real `Instr::Call`; a back-edge case has to join it,
-keyed on the poly callee's name rather than on `cur_word_name`. The cost of leaving it
-standing is stack depth only, which is the difference between a generic `times-helper`
-running in constant stack and not.
+**P7.S3g-follow — The self-tail loop transform for a polymorphic body.** `[ done ]` S3g
+ships an ordinary recursive call, deliberately: a self-recursive generic word is *correct*
+but consumes one stack frame per recursion level, where a monomorphic self-tail word lowers
+to a loop. `has_self_tail_call` (`src/check/drop_graph.rs`) is a purely syntactic name-walk
+and was already poly-aware before this slice; what it lacked was a caller. `check_poly_body`
+now builds its `Ctx` via `check::engine::word_ctx`, which computes `self_tail_call` from
+`has_self_tail_call(word, combs)` directly, so `Ctx::Word.self_tail_call` and
+`ctx.is_self_tail_call()` answer correctly for a generic body with no new tail-detection
+machinery. A poly-side back-edge guard (`src/check/poly.rs`) rejects a reference that would
+cross the back-edge into a rebound local, mirroring the concrete guard
+(`check_reference_across_back_edge`). On the lowering side both call sites that used to
+hardcode `self_tail: false` (`src/ir/driver.rs`, `src/repl.rs`'s `lower_instantiation`) now
+pass `has_self_tail_call(word, &combinator_bodies)`, and the poly self-call arm in
+`src/ir/func_builder/calls.rs` dispatches a back-edge keyed on `self.cur_poly_callee` rather
+than `self.env.get(name)`, which panics on a poly name.
 **Exit:** a self-*tail* call in a non-inline generic body lowers to a loop back-edge, and a
 generic countdown over a large counter runs in constant stack.
 

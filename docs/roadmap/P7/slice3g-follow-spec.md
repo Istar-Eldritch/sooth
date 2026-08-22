@@ -357,9 +357,10 @@ are each killed by a named test above. The one surviving mutation (the per-arm
   and a `back_edges` entry / `Jmp(header)` terminator), not an `Instr::Call` to the
   instantiation symbol. Poly instantiation is unobservable at runtime, so this asserts
   IR shape, not program output.
-- `poly_non_tail_self_call_lowers_to_ordinary_recursive_call` — the migrated negative
+- `poly_self_call_lowers_to_ordinary_recursive_call` — the migrated negative
   regression (see open question 2): a *non*-tail-position self-call still declines the
-  loop and lowers as `emit_user_call`.
+  loop and lowers as `emit_user_call`. The name is unchanged from S3g (`driver.rs`); only
+  its fixture and doc comment migrated onto a self-call kept out of tail position.
 
 ### Golden (exit criteria)
 
@@ -379,9 +380,13 @@ are each killed by a named test above. The one surviving mutation (the per-arm
   into the large-counter constant-stack golden below (verified against `git show
   b49ef63 -- tests/phase7_slice3g.rs`; an earlier draft of this spec miscounted this
   as two tests needing migration).
-- **Rejection golden**: the `&!['T 4]` program of 1c produces the poly-side
-  reference-across-back-edge located diagnostic (source-in → expected-diagnostic-out).
-  *Not* the `Spy`/`loopg` program: that one is legal and stays legal (see 1b).
+- **Rejection**: already covered, not a Phase 3 addition. `poly.rs`'s `check_src` unit
+  tests (`poly_self_tail_reference_to_a_local_across_the_back_edge_is_error` and its
+  three siblings, through an eliminator arm / a spliced block local / a local shadowing
+  a static) pin the exact diagnostic for the `&!['T 4]` program of 1c and its variants,
+  through the same lex→parse→check pipeline `tests/phase7_slice3g.rs::check_err` uses.
+  A `tests/` copy would discriminate nothing beyond what these already do, so none is
+  added. *Not* the `Spy`/`loopg` program: that one is legal and stays legal (see 1b).
 
 ## Out of scope
 
