@@ -94,9 +94,9 @@ and brief before implementation; only the parser-side root cause has been traced
 far, not unification, monomorphization, or lowering.
 Was a prerequisite of S3e's `Map['K 'V]` consumer and, transitively, of P9.S1's generic
 collections. It did not turn out to be sufficient for either: `Map` is still unwritable
-because a generic struct's field cannot be an array of the struct's own type variable, and
-the `sort` consumer needs S3b (a polymorphic body that branches). Both were established by
-probing after this slice landed.
+because a generic struct's field cannot be an array of the struct's own type variable
+(**P7.S3n**), and the `sort` consumer needs S3b (a polymorphic body that branches). Both
+were established by probing after this slice landed.
 **Exit:** a polymorphic word can declare and use a generic type applied to its own
 type variable (`Box['T]`, `Option['T]`, `Map['K 'V]`) in its signature and body,
 resolved correctly per concrete instantiation. Landed as a new `PolyType::Generic`
@@ -279,7 +279,8 @@ has to grow one case, calling a word required by a variable's declared bound.
 writable: a generic struct whose field is an array of its own type variable (`keys ['K 8]`,
 or `slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
 third gap distinct from S3a's (which fixed generic-applied-to-own-var in poly *word*
-signatures, not in generic *struct fields*), so `Map` stays deferred. The array form of
+signatures, not in generic *struct fields*), now its own slice, **P7.S3n**, so `Map` stays
+deferred on it. The array form of
 `sort` was originally thought to need branching (hence `inline`, hence no monomorph symbol
 for a per-instantiation dispatch record to key on) — probe-verified false: S3b's eliminator
 branching already mints a monomorph symbol for a non-inline poly word. A later brief
@@ -584,3 +585,23 @@ Probe: `: call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add print ;` panics iden
 with two or more outputs interns an output bundle the same way a declared word does, and
 `call`ing one on either the concrete or polymorphic path pushes all declared outputs rather
 than panicking.
+
+**P7.S3n -- A generic struct's array field cannot be its own type variable.** Named at
+P7.S3e's brief (the `Map['K 'V]` consumer's own blocker, `docs/roadmap/P7/slice3e-brief.md`),
+distinct from S3a: a generic *struct* declaration already exists and already accepts a plain
+field of its own type variable (`type: Box 'T val 'T ;`, probe-verified to check) and multiple
+independent type variables each with their own scalar field (`type: Ent 'K 'V k 'K v 'V ;`,
+also probe-verified). What fails is narrower and specific: an *array* field whose element
+type is the struct's own type variable (`type: Pair 'T items ['T 2] ;`) rejects with
+`` error: unknown type `'T` ``, probe-verified against current `main`. This is exactly the
+shape `Map`'s open-addressed backing storage needs (`slots [Ent['K 'V] 8]`), so it blocks
+`Map` regardless of whether S3a and S3e both ship. Not yet recon'd: which layer resolves an
+array's element type inside a struct's own field list and why it does not thread the
+enclosing struct's type-parameter scope through to that resolution (plausibly the same
+parse-time-monomorphization root cause S3a traced for poly *word* signatures,
+`resolve_type_or_apply`/`parse_type_arguments`, `src/parser.rs:3129`, but for a struct's own
+field list instead of a word's effect -- unconfirmed, needs its own recon pass before a
+brief).
+**Exit:** a generic struct may declare an array field whose element type is one of the
+struct's own type variables, resolved correctly per concrete instantiation, unblocking
+`Map['K 'V]`'s backing storage.

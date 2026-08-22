@@ -332,6 +332,6 @@ prior finding is unaffected or corrects a stale one.
 **Consumer scope: the array form of `sort` via `'T: Copy Order`, `cmp` as `Order`'s required
 member, dispatched by the new trait-member branch — no dependency on S3d or S3f.** `Map`
 stays separately blocked on S3a (generic instantiation over a poly word's own variable) and
-the generic-struct array-of-own-type-variable field gap. The multi-method-bound collision
-rule (OQ4) keeps a consumer regardless of `sort`, since its rejection golden needs only two
-hand-declared traits and no collection.
+P7.S3n (a generic struct's array field cannot be its own type variable). The
+multi-method-bound collision rule (OQ4) keeps a consumer regardless of `sort`, since its
+rejection golden needs only two hand-declared traits and no collection.
