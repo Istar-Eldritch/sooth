@@ -916,6 +916,16 @@ pub const BOOL_TYPE_NAME: &str = "bool";
 /// treat a bool as a register-resident scalar (the logical operators, the
 /// `extern:` boundary set) rest on, so a same-named enum carrying a payload
 /// cannot inherit that treatment by naming alone.
+///
+/// First match wins, and this reads the whole merged registry rather than one
+/// module's import scope (which is what keeps it out of every `check_term`
+/// signature). A program that declares its own payload-free `bool` ahead of
+/// `core::bool`'s in discovery order therefore takes the logical operators with
+/// it: `true false and` there is a refused `and` (an operand-mismatch
+/// diagnostic naming `bool` twice, confusingly), never a mistyped or
+/// miscompiled one -- both candidates are 1-byte scalar enums, and every other
+/// bool-keyed decision resolves through the module's own imports
+/// (`parse_static_decl`) or the type's name and layout (`:stack` rendering).
 pub fn resolve_bool_type(enums: &[EnumDecl]) -> Option<Type> {
     enums
         .iter()
