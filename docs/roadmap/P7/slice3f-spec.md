@@ -45,7 +45,9 @@
 
 ## Delivered shape
 
-### R1 + R2 Argument boundary (`check_poly_call`, `src/check/poly.rs:3300`)
-
-The per-input loop (`poly.rs:3341-3359`) now matches on the declared type at the same
-position instead of rejecting on the operand's marker alone:
+See the landed commits for the exact mechanism (this condensation trims the how, per
+this project's spec-condensation convention, and the citations above are the durable
+reference): `41118b2` (phase 1, R1+R2, argument boundary), `4576981` (phase 2, R3, body
+boundary), `99c5308` (phase 3, R4, stale wording retirement), plus the review-fix
+commits `c4397ef`/`2d730b3`/`2908a00` (exit findings, roadmap closeout, P7.S3l/P7.S3m
+follow-ups named).
