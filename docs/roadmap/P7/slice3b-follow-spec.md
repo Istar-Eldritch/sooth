@@ -191,7 +191,8 @@ The bind keeps `PolyType::QuotLit` and loses the `PolyQuotRef`, and `poly_type_s
 `QuotLit` as "a quotation literal" -- so the `found` slot denies exactly what it reports. The
 other operand (`9 times`, a value that is not a quotation) renders correctly as `` `i64` ``.
 Phase 3 must split the two: the identity-lost case should say the identity was lost, not
-re-print the type. Both branches are currently untested; Phase 3's OQ4 test must cover each.
+re-print the type. Both branches are covered by
+`tests/phase7_slice3b_follow.rs::non_literal_arm_operand_is_located_and_does_not_panic`.
 
 ## Locked rules (carried from P7.S3b, unchanged and for the same reasons)
 
