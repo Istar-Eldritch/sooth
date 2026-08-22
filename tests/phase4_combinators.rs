@@ -1044,7 +1044,7 @@ fn while_inside_a_times_body_runs_to_fixpoint() {
         combinators_import("c")
     );
     let binary = build_binary("while_in_times", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
@@ -1066,7 +1066,7 @@ fn times_inside_a_self_tail_combinator_body_runs() {
         combinators_import("c")
     );
     let binary = build_binary("times_in_while", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
@@ -1090,7 +1090,7 @@ fn while_inside_a_while_body_runs() {
         combinators_import("c")
     );
     let binary = build_binary("while_in_while", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
@@ -1169,7 +1169,7 @@ fn three_deep_times_nesting_runs_in_constant_stack() {
         combinators_import("c | times |")
     );
     let binary = build_binary("three_deep", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
@@ -1194,7 +1194,7 @@ fn nested_times_large_outer_holds_constant_stack() {
         combinators_import("c | times |")
     );
     let binary = build_binary("nested_big_outer", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
@@ -1228,7 +1228,7 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
         combinators_import("c | times |")
     );
     let binary = build_binary("destructor_in_times", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out.as_str()),
@@ -1262,8 +1262,8 @@ fn while_and_hand_threaded_loop_agree_across_stack_limits() {
 
     for limit in [64u32, 256, 1024] {
         assert_eq!(
-            run_at_stack_limit(&comb_bin, limit),
-            run_at_stack_limit(&hand_bin, limit),
+            common::run_at_stack_limit(&comb_bin, limit),
+            common::run_at_stack_limit(&hand_bin, limit),
             "`while` and its hand-threaded twin must behave identically at ulimit -s {limit}"
         );
     }
@@ -1271,7 +1271,7 @@ fn while_and_hand_threaded_loop_agree_across_stack_limits() {
     // to N, so the equivalence above cannot pass by both sides being equally
     // wrong.
     assert_eq!(
-        run_at_stack_limit(&comb_bin, 1024),
+        common::run_at_stack_limit(&comb_bin, 1024),
         (Some(0), N.to_string()),
         "at a generous stack limit `while` runs to completion and counts to N"
     );
@@ -1441,27 +1441,6 @@ fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     binary
 }
 
-/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code, or
-/// `None` if it died by signal (a `SIGSEGV` from an overflowed stack).
-// `exec` replaces the `sh`, so a signal death is reported as the *binary's*
-// signal and `code()` is `None`; without the `exec` the shell would survive and
-// report 128+signo instead.
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 #[test]
 fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // Criterion 14 (respecified, item 7). The original "1M+ elements under a
@@ -1498,8 +1477,8 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // wherever the boundary sits, so this is robust to the exact machine.
     for limit in [64u32, 256, 1024] {
         assert_eq!(
-            run_at_stack_limit(&comb_bin, limit),
-            run_at_stack_limit(&hand_bin, limit),
+            common::run_at_stack_limit(&comb_bin, limit),
+            common::run_at_stack_limit(&hand_bin, limit),
             "combinator and hand-threaded twin must behave identically at ulimit -s {limit}"
         );
     }
@@ -1507,7 +1486,7 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // computes the right sum*, so the equivalence above cannot pass by both
     // sides being equally wrong.
     assert_eq!(
-        run_at_stack_limit(&comb_bin, 1024),
+        common::run_at_stack_limit(&comb_bin, 1024),
         (Some(0), N.to_string()),
         "at a generous stack limit the combinator version runs to completion and sums to N"
     );
@@ -2451,7 +2430,7 @@ fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
          dup call swap 1 sub dup 0 gt ~[ swap rep ] ~[ drop drop ] if ;\n\
          : main ( -- ) 1000000 [ ] rep 42 . ;\n",
     );
-    let (code, stdout) = run_at_stack_limit(&binary, 1024);
+    let (code, stdout) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         code,

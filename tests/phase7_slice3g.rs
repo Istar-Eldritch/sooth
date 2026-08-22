@@ -69,8 +69,10 @@ fn build_and_run(src: &Path) -> (String, i32) {
 /// `'T` they carry past the recursion, and a poly body cannot print its own
 /// `'T` (`.` has no generic overload), so pinning both instantiations to one
 /// symbol leaves this transcript unchanged. Callee identity is asserted
-/// structurally instead, by `poly_self_call_lowers_to_ordinary_recursive_call`
-/// in `src/ir/driver.rs`.
+/// structurally instead, in `src/ir/driver.rs`: this body's self-call is in
+/// tail position, so `poly_self_tail_call_lowers_to_loop_back_edge` is the
+/// test that pins it -- each instantiation back-edging to its own header,
+/// with no `Instr::Call` reaching any other symbol.
 ///
 /// Deleting R1's checker arm makes this fail to compile with
 /// `poly_calls_poly_word_error`; deleting R2's lowering arm makes it die at
@@ -90,6 +92,39 @@ fn self_recursive_poly_word_runs_to_base_case() {
     let (stdout, code) = build_and_run(scratch.path());
     assert_eq!(stdout, "3\n2\n1\n5\n2\n1\nTrue\n");
     assert_eq!(code, 0);
+}
+
+/// P7.S3g-follow's own exit criterion (roadmap: "a generic countdown over a
+/// large counter runs in constant stack"), extending the base-case golden
+/// above rather than migrating it: the *same* self-tail-recursive `loopg`,
+/// this time counted down from far enough (one million) that one
+/// `Instr::Call` per recursion level would overflow a reduced stack long
+/// before reaching the base case, run under `ulimit -s 1024`. The loop body
+/// prints nothing per iteration (a million-line transcript would swamp the
+/// assertion, not strengthen it); only the final `'T` value is observable,
+/// exactly as `poly_self_tail_call_lowers_to_loop_back_edge`
+/// (`src/ir/driver.rs`) asserts the loop shape this depends on.
+#[test]
+fn self_recursive_poly_word_runs_a_large_counter_in_constant_stack() {
+    let scratch = Scratch::write(
+        "loopg-1m",
+        ": iszero ( i64 -- Bool ) 0 eq ;\n\
+         : loopg ( 'T: Copy i64 -- 'T )\n\
+           dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+         : main ( -- ) 7 1000000 loopg . ;\n",
+    );
+    let binary = driver::build_with_manifest(
+        scratch.path(),
+        common::manifest_for(scratch.path()).as_deref(),
+    )
+    .expect("program should build");
+    let (code, stdout) = common::run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(0), "7"),
+        "a self-tail poly word must run a million-deep countdown to completion in constant stack"
+    );
 }
 
 fn check_err(src: &str) -> String {
@@ -167,5 +202,56 @@ fn different_poly_word_call_still_names_the_narrowing() {
             "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
         ),
         "unexpected message: {err}"
+    );
+}
+
+/// Drive a REPL session over `input` in a fresh process, returning its stdout.
+fn repl_session(input: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the sooth binary spawns");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("the session exits");
+    String::from_utf8(out.stdout).expect("stdout should be utf8")
+}
+
+/// P7 slice 3g-follow: the REPL's own instantiation lowering must reach the
+/// same self-tail verdict the native path does. It is the one call site with
+/// no IR to assert against (`emit_instantiations` hands its funcs straight to
+/// the session's `.so`), so the witness is behavioural: a counter deep enough
+/// that one real frame per level overflows the process stack, where a
+/// back-edge runs it in constant space. Hardcoding `self_tail: false` here
+/// aborts the session instead of printing.
+///
+/// The library imports are quoted-path, absolute: a REPL session can resolve
+/// neither a module-name import nor a wildcard one, and `eq`/`if` are library
+/// words, not intrinsics.
+#[test]
+fn repl_self_tail_poly_word_runs_a_deep_counter_in_constant_stack() {
+    let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    let session = format!(
+        "import: \"{cmp}\" c | eq | ;\n\
+         import: \"{b}\" b | if | ;\n\
+         : iszero ( i64 -- Bool ) 0 eq ;\n\
+         : loopg ( 'T: Copy i64 -- 'T ) dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+         7 2000000 loopg .\n",
+        cmp = lib.join("cmp.sth").display(),
+        b = lib.join("bool.sth").display(),
+    );
+    assert_eq!(
+        repl_session(&session),
+        "imported c\nimported b\ndefined iszero\ndefined loopg\n7\nstack: (empty)\n"
     );
 }

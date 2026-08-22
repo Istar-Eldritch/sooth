@@ -103,6 +103,13 @@ pub(super) struct PolyBorrow {
     place: String,
     mutable: bool,
     span: Span,
+    /// P7.S3g-follow (1c): whether `place` resolved to a static rather than a
+    /// local, decided here at the borrow site because that is the only point
+    /// where the answer is reliable. A later lookup cannot reconstruct it: a
+    /// `call`-splice or eliminator-arm exit drops the arm's locals from scope
+    /// while its borrow records survive, and a local shadowing a static of
+    /// the same name resolves to the local here but to the static there.
+    static_rooted: bool,
 }
 
 /// P7 slice 3b (R1): one entry of the poly walk's virtual stack, replacing
@@ -403,11 +410,12 @@ pub fn check_poly_body(
     // scoped candidate set a concrete body does. `Some` from `check::check`,
     // `None` from `repl.rs` (the REPL path is unscoped, R8).
     //
-    // Slice 10c (review fix, Phase 1): `poly_walk` never reaches the
-    // concrete back-edge guard (R15) `ctx.is_self_tail_call()` gates, so an
-    // empty index is correct here, not just convenient -- lowering never
-    // back-edges a polymorphic instantiation either (`lower_instantiation`
-    // hardcodes `self_tail = false`).
+    // P7.S3g-follow (1a): the *populated* tail index, so
+    // `ctx.is_self_tail_call()` answers for a generic body what it answers
+    // for a concrete one -- whether this word back-edges at all. It is the
+    // word-level half of the back-edge guard below (`poly_call_term`'s
+    // self-call arm); the per-term half is the `tail` flag threaded from
+    // here through the walk.
     //
     // P7 slice 3a phase 2 (R2): rebased here, at the top of this one body's
     // check, to the live registries' *current* length -- this function's
@@ -424,7 +432,7 @@ pub fn check_poly_body(
         enums,
         statics,
         modules,
-        &CombinatorIndex::new(),
+        combinators.tail(),
         generics,
     );
     let terms = &word.body;
@@ -444,6 +452,7 @@ pub fn check_poly_body(
         slices,
         builtin_overloads,
         poly_words,
+        true,
     )?;
     // P7 slice 3b (R4/L2): splice-consumed quotations only. A literal still
     // on the stack here would have to *be* a value to leave the word, and it
@@ -471,6 +480,11 @@ pub fn check_poly_body(
     Ok(())
 }
 
+/// `tail` marks this term sequence as occupying its word's tail position, so
+/// its final term sits on the self-tail-call back-edge -- the poly twin of
+/// `check_terms_relaxed`'s own `tail`, computed per term the same way
+/// (`tail && at == last`) and threaded into a spliced body or a tail-called
+/// arm unchanged. Read only by `poly_call_term`'s self-call arm.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poly_walk(
     terms: &[Term],
@@ -486,7 +500,9 @@ pub(super) fn poly_walk(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     poly_words: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
+    let last = terms.len().wrapping_sub(1);
     // P7 slice 3b (R2): the same written-adjacency rule the concrete path
     // applies to a variant-tagged literal. A tag is only meaningful as
     // arm-to-variant routing, so a tagged literal that no eliminator call
@@ -518,6 +534,7 @@ pub(super) fn poly_walk(
             slices,
             builtin_overloads,
             poly_words,
+            tail && at == last,
         )?;
     }
     Ok(stack)
@@ -538,6 +555,7 @@ pub(super) fn poly_term(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     poly_words: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     let span = term.span;
     match &term.kind {
@@ -613,6 +631,7 @@ pub(super) fn poly_term(
                 slices,
                 builtin_overloads,
                 poly_words,
+                tail,
             );
         }
         // P7 slice 3b (R2): a quotation literal is admitted, interned, and
@@ -670,6 +689,7 @@ pub(super) fn poly_call_term(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     poly_words: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
     // consumed on read (R3/D2): a second read is use-after-move, exactly as
@@ -987,6 +1007,9 @@ pub(super) fn poly_call_term(
         // down to the snapshot -- never a `Moves::join` (R3), since there is
         // only ever this one body and one continuation.
         let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
+        // The splice runs in place, so a tail `call`'s own tail terms are the
+        // enclosing word's: `tail` is threaded unchanged, exactly as the
+        // concrete literal-`call` splice threads it.
         stack = poly_walk(
             &body,
             stack,
@@ -1001,6 +1024,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             poly_words,
+            tail,
         )?;
         let leaked = scope
             .moves
@@ -1052,6 +1076,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             poly_words,
+            tail,
         );
     }
     // P7 slice 3b (R4/OQ6), narrowed first by S3b-follow (OQ2) and again by
@@ -1093,6 +1118,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             poly_words,
+            tail,
         );
     }
     // P7 slice 3b (R2/L2): every legal use of a quotation literal has been
@@ -1312,6 +1338,18 @@ pub(super) fn poly_call_term(
                 ));
             }
         }
+        // P7.S3g-follow (1c): in tail position, in a word that really
+        // back-edges, this call *is* the loop's back-edge, so a reference the
+        // body derived from one of its own locals may not ride it. Gated on
+        // both halves for the same reason the concrete twin is
+        // (`terms.rs`'s R15 site): `tail` is the syntactic position, and
+        // `is_self_tail_call` is the predicate lowering consults to decide
+        // whether this word gets the loop shape at all, so a non-tail
+        // self-call -- which lowers as ordinary recursion, with a fresh frame
+        // per level and no rebound slot -- is untouched.
+        if tail && ctx.is_self_tail_call() {
+            check_poly_reference_across_back_edge(ctx, span, name, &stack[base..], scope)?;
+        }
         stack.truncate(base);
         for out in &sig.outputs {
             stack.push(PolySlot::new(out.clone()));
@@ -1327,6 +1365,59 @@ pub(super) fn poly_call_term(
         return Err(poly_calls_poly_word_error(ctx, span, name));
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P7.S3g-follow (1c): the poly twin of `check_reference_across_back_edge` --
+/// a reference the *body* derived from one of its own locals, handed to the
+/// self-tail call and so carried across the loop's back-edge. Locals are
+/// rebound at the loop header, so the storage that local named this iteration
+/// is not the storage the same name denotes next iteration.
+///
+/// Scanned over the call's `args` (`stack[base..]`), the values that actually
+/// cross the edge. Two things the concrete twin reads are not available here,
+/// which is why this is not a literal port: `PolySlot` carries no `Deriv`, so
+/// there is no way to trace *which* argument a recorded borrow flowed into,
+/// and a poly-body borrow's provenance is only the side table
+/// (`PolyScope::borrows`) with its deliberately coarse liveness. So the rule
+/// is the conjunction the available data supports -- a reference among the
+/// arguments, and a live borrow of a *local* recorded by this body -- which
+/// can reject a program the concrete side would accept (a dead local borrow
+/// beside a forwarded parameter reference). That is the same conservatism
+/// every other poly borrow diagnostic carries, and it is stated in the
+/// message.
+///
+/// A borrow of a **static** is exempt, exactly as the concrete twin's R3
+/// exemption is: a static's data-segment storage survives every iteration. A
+/// reference *parameter* (or one projected from it) is exempt for free, since
+/// nothing in this body borrowed anything to record.
+///
+/// The local/static split is read off `PolyBorrow::static_rooted`, not off
+/// `scope.locals`: a borrow taken inside a `call`-splice or an eliminator arm
+/// outlives the locals of the block that took it (both exits `retain` locals
+/// but keep borrow records, and `poly_walk_arms` unions each arm's borrows
+/// back into the parent), so a lookup here would read a real frame-local
+/// borrow as a static and exempt it.
+fn check_poly_reference_across_back_edge(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    args: &[PolySlot],
+    scope: &PolyScope,
+) -> Result<(), String> {
+    if !args.iter().any(|slot| is_reference_slot(&slot.pt)) {
+        return Ok(());
+    }
+    // Push order, so a body holding two live borrows names the earlier one.
+    let rooted = scope.borrows.iter().find(|borrow| !borrow.static_rooted);
+    match rooted {
+        Some(borrow) => Err(poly_reference_across_back_edge_error(
+            ctx,
+            span,
+            callee,
+            &borrow.place,
+        )),
+        None => Ok(()),
+    }
 }
 
 /// P7 slice 3d (R2, C2): ground a body-local quotation literal against a
@@ -1399,6 +1490,9 @@ fn poly_ground_quotation_literal(
         .collect();
     let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
     let moves_before = scope.moves.states.clone();
+    // Never tail: this literal is an argument the callee materializes and
+    // decides when to run, not a body spliced in place -- the concrete twin
+    // pins the same `false` for every non-arm quotation parameter.
     let out = poly_walk(
         &body,
         seeded,
@@ -1413,6 +1507,7 @@ fn poly_ground_quotation_literal(
         slices,
         builtin_overloads,
         poly_words,
+        false,
     )?;
     // R12, the poly twin of the concrete argument site's
     // `quotation_captures_local_error`: a linear *enclosing* local the
@@ -1583,6 +1678,7 @@ fn poly_eliminator_call(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     poly_words: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     let enum_decl = &enums[id.index()];
     let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
@@ -1729,6 +1825,11 @@ fn poly_eliminator_call(
                 quot: *quot,
                 input,
                 declared_inputs: vec![narrowed],
+                // Every eliminator arm runs at most once, in place, in the
+                // call's own position -- so all of them inherit the call
+                // site's tail-ness (the concrete twin pins `is_arm: true`
+                // for the same reason).
+                tail,
             }
         })
         .collect();
@@ -1776,6 +1877,11 @@ struct PolyArm {
     /// program's lifetime, so the `Type` is built only when the diagnostic
     /// fires.
     declared_inputs: Vec<Type>,
+    /// P7.S3g-follow (1a): whether this arm's body occupies the *caller's*
+    /// tail position. Per arm, not per call, exactly as the concrete
+    /// `LiteralBoundary::is_arm` is: `if`'s two arms do when the `if` does,
+    /// `times`' body never does.
+    tail: bool,
 }
 
 /// P7 slice 3b-follow (R1): the per-arm machinery every quotation-consuming
@@ -1848,6 +1954,7 @@ fn poly_walk_arms(
             slices,
             builtin_overloads,
             poly_words,
+            arm.tail,
         )?;
         // A `Type::Variant` may not leave the call. Every type-directed
         // predicate outside the eliminator is written over `Type::Enum`, so
@@ -2161,7 +2268,23 @@ fn poly_combinator_call(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     poly_words: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
+    // P7.S3g-follow (1a): which of the callee's parameters hold a quotation it
+    // `call`s in *tail* position -- `if`'s two arms, never `times`' body. The
+    // same set, from the same accessor, the concrete argument-site literal
+    // check reads to answer this per parameter, so the poly walk's notion of
+    // tail position stays in lockstep with `tail_position_calls`/`lower_terms`.
+    //
+    // No source program can currently witness the refinement (crediting every
+    // arm with the caller's tail position instead passes the whole suite): the
+    // only thing that reads `tail` is the back-edge reference guard, and it
+    // needs a reference in the self-call's window, which in turn must come
+    // from a reference *parameter* or a body borrow -- and either one keeps
+    // every recorded borrow live under `prune_dead_borrows`' coarse liveness,
+    // so a body that borrows a local in *any* arm and then tail-recurses is
+    // rejected whichever arm the borrow sat in.
+    let tail_slots = tail_called_param_slots(name, combinators.tail());
     let n = csig.inputs.len();
     if stack.len() < n {
         return Err(underflow_error(ctx, span, name, n, stack.len()));
@@ -2263,6 +2386,7 @@ fn poly_combinator_call(
             quot,
             input,
             declared_inputs: decl.ins,
+            tail: tail && tail_slots.contains(&i),
         });
     }
     // R3: the shape-changing arms' agreed exit row, keyed by the output row id
@@ -2753,7 +2877,9 @@ pub(super) fn poly_reference_word(
             }
             // R1's resolution order: a bound local first, then a static of
             // this module, mirroring the monomorphic `check_reference_word`.
-            let referent_pt = if let Some(local_pt) = scope.locals.get(rest).cloned() {
+            let (referent_pt, static_rooted) = if let Some(local_pt) =
+                scope.locals.get(rest).cloned()
+            {
                 // D5: only an aggregate local is borrowable -- a bare type
                 // variable might instantiate to a scalar, which has no
                 // address, so the conservative rule refuses every
@@ -2789,13 +2915,13 @@ pub(super) fn poly_reference_word(
                 if let Some(site) = scope.moves.moved_site(rest) {
                     return Err(poly_use_after_move_error(ctx, span, rest, site));
                 }
-                local_pt
+                (local_pt, false)
             } else if let Some(static_ty) = ctx.static_type(rest) {
                 // R1: a *scalar* static is borrowable though a scalar local
                 // is not -- a static has a data-symbol address to hand out.
                 // Never moved or dropped, so the move gate above has nothing
                 // to say about it.
-                PolyType::Concrete(static_ty)
+                (PolyType::Concrete(static_ty), true)
             } else if receiver_is_aggregate_projection(stack) {
                 // P7 slice 1 (R1): `&f` carries no `>`, so the guard above
                 // cannot see that this is a field projection. Reached only
@@ -2825,6 +2951,7 @@ pub(super) fn poly_reference_word(
                 place: rest.to_string(),
                 mutable,
                 span,
+                static_rooted,
             });
             stack.push(PolySlot::new(PolyType::Ref(Box::new(referent_pt), mutable)));
         }
@@ -4093,6 +4220,26 @@ fn poly_borrow_of_quotation_local_error(ctx: &Ctx, span: Span, local: &str, ty: 
 /// bug.
 const POLY_BORROW_LIVENESS_NOTE: &str = "\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local";
 
+/// P7.S3g-follow (1c): a reference derived from a local of this frame handed to
+/// the self-tail call. Wording tracks the monomorphic
+/// `reference_across_back_edge_error`, minus its `note: declared` line (a
+/// generic word's `Ctx::Word.effect` is a placeholder, not its signature) and
+/// plus the conservative-liveness note every poly borrow rejection carries.
+fn poly_reference_across_back_edge_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    place: &str,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let place = crate::resolve::demangle_word(place);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: a reference to a local cannot cross a loop in `{where_}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration{POLY_BORROW_LIVENESS_NOTE}",
+        span.line,
+    )
+}
+
 /// Slice 13 (E6/R-B5): exclusivity in a generic body, in whichever of its two
 /// symmetric directions was violated -- a new mutable borrow against any live
 /// borrow of the place, a new shared one against a live mutable borrow. Same
@@ -4929,6 +5076,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &HashSet::new(),
+            false,
         )
         .expect("a quotation literal is admitted in a polymorphic body");
         assert_eq!(stack.len(), 1);
@@ -4978,6 +5126,7 @@ mod tests {
                 &mut Vec::new(),
                 &mut overloads,
                 &HashSet::new(),
+                false,
             )
             .expect("two literals then a swap");
         }
@@ -5117,6 +5266,7 @@ mod tests {
             quot,
             input: vec![PolySlot::new(PolyType::Var(0))],
             declared_inputs: vec![Type::I64],
+            tail: false,
         }
     }
     #[test]
@@ -5425,6 +5575,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &HashSet::new(),
+            false,
         )
         .expect("an int literal should push a slot");
         assert_eq!(stack.len(), 1);
@@ -5449,6 +5600,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &HashSet::new(),
+            false,
         )
         .expect("binding the literal should consume the slot");
         assert!(
@@ -5646,6 +5798,290 @@ mod tests {
         assert!(
             err.contains("`rec` needs 2 values, but the stack holds 1"),
             "unexpected message: {err}"
+        );
+    }
+    /// P7.S3g-follow (1c): the one shape that can put a *body-derived*
+    /// reference in a poly self-call's argument window, so every back-edge
+    /// reference test is built from it. A declared `&!['T 4]` is the only
+    /// reference type a poly-body borrow can ever match: a body borrow is
+    /// always `PolyType::Ref`, while a fully concrete `&!Cell` parameter folds
+    /// to `Concrete(Type::Ref(..))` at parse time and the two never compare
+    /// equal, so the referent has to stay variable-bearing. An array is then
+    /// the only borrowable local a generic body admits (a bare `'T` might
+    /// instantiate to a scalar, and a `Generic` application is not on the
+    /// borrowable list).
+    ///
+    /// `'T: Copy` is an input slot of its own, so the leading `| r a b n |`
+    /// binds four of the five declared inputs and each arm opens over a
+    /// residual `'T`. Two array parameters, because the borrowed one cannot
+    /// also be named for the value slot (that is the ordinary aliasing
+    /// rejection, not this guard).
+    fn self_tail_ref_loop(name: &str, recursive_arm: &str) -> String {
+        format!(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : {name} ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ {recursive_arm} ] if ;\n\
+             : main ( -- ) ;\n"
+        )
+    }
+    #[test]
+    fn poly_self_tail_reference_to_a_local_across_the_back_edge_is_error() {
+        // P7.S3g-follow (1c): `&!a` is derived from a local of this frame, and
+        // the self-call it rides is the loop's back-edge, where the header
+        // rebinds every local -- so next iteration the name denotes different
+        // storage than the reference points at. Clean at HEAD before this
+        // guard, while the monomorphic twin of the same body was already
+        // rejected by `check_reference_across_back_edge`.
+        let err = check_src(&self_tail_ref_loop(
+            "loopg",
+            "r drop &!a b dup n 1 sub loopg",
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 4)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_reference_to_a_local_across_the_back_edge_through_an_eliminator_arm_is_error()
+    {
+        // P7.S3g-follow (1a) follow-up: an eliminator arm inherits the call's
+        // own tail-ness in `poly_eliminator_call` ("every eliminator arm runs
+        // ... in the call's own position"), exactly as an `if`/`unless` arm
+        // does, so the same back-edge hazard reached through `Bool?` instead
+        // of `if` must be caught by the same guard. Same body as
+        // `poly_self_tail_reference_to_a_local_across_the_back_edge_is_error`,
+        // with the `if` swapped for the `Bool?` eliminator `if` lowers
+        // through, and a `drop` in each arm for the narrowed variant `Bool?`
+        // hands each arm (payload-less, but still a stack value) that `if`
+        // never gives its arms.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero\n\
+             ~[ ( False ) drop r drop &!a b dup n 1 sub loopg ]\n\
+             ~[ ( True ) drop drop r drop 0 ]\n\
+             Bool? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 5)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_reference_rooted_in_a_spliced_block_local_is_error() {
+        // P7.S3g-follow (1c): the same hazard one `call`-splice deeper. `x` is
+        // a local of the *spliced* block, whose storage is a slot of this same
+        // frame, so a reference to it dies at the back-edge exactly as `&!a`
+        // does. The splice exit `retain`s the enclosing locals but keeps the
+        // borrow records, so `x` is gone from `scope.locals` by the time the
+        // self-call is checked -- which is why the guard reads
+        // `PolyBorrow::static_rooted` instead of looking the place up.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ r drop a ~[ | x | &!x ] call b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 4)\n  a reference derived from `x`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_reference_rooted_in_a_local_shadowing_a_static_is_error() {
+        // The second reason the guard cannot re-look-up the place: `A` names
+        // both a static and a local here, and the borrow site resolves locals
+        // first, so the record is rooted in the frame's slot however the name
+        // reads from outside. Answering "is this a static?" by name at the
+        // self-call would exempt it and let a dead reference cross.
+        let err = check_src(
+            "static: A i64 = 0 ;\n\
+             : iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r A b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ r drop &!A b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 5)\n  a reference derived from `A`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_dropped_borrow_then_forwarded_ref_is_over_conservative() {
+        // `poly_combinator_call`'s doc comment on `tail_slots` (and the spec)
+        // claim a concrete cost for crediting every arm with the call's own
+        // tail-ness instead of refining per arm: a body that borrows a local
+        // in *any* arm and then tail-recurses is rejected whichever arm the
+        // borrow sat in, even when that borrow is dropped before the
+        // back-edge and only a forwarded parameter reference actually rides
+        // it. Pinned here rather than left to a doc comment, so a later
+        // per-arm refinement has something to flip green. The monomorphic
+        // twin (same body, `'T` replaced by `i64` and no residual bound slot)
+        // accepts it: `check_reference_across_back_edge` sees the borrow of
+        // `a` already dropped and only `r` -- an incoming reference parameter
+        // -- crossing.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 4)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+        check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( &![i64 4] [i64 4] [i64 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the monomorphic twin's dropped borrow does not ride the back-edge");
+    }
+    #[test]
+    fn poly_self_tail_reference_parameter_forwarded_across_the_back_edge_is_ok() {
+        // The accept case the guard must not swallow: `r` is the *incoming*
+        // reference parameter, whose referent lives in an ancestor frame that
+        // outlives every iteration. Nothing in this body borrows, so nothing
+        // is recorded to reject.
+        check_src(&self_tail_ref_loop("loopg", "r b dup n 1 sub loopg"))
+            .expect("a reference parameter may cross the back-edge");
+    }
+    #[test]
+    fn poly_non_tail_self_call_carrying_a_local_reference_is_ok() {
+        // The per-term half of the gate (1a): the first arm's self-call has a
+        // term after it, so it is *not* the back-edge -- it lowers as ordinary
+        // recursion, into a fresh frame whose locals are bound once, and a
+        // reference to a local is fine there. Written out rather than built by
+        // `self_tail_ref_loop` because both halves of the gate have to be true
+        // at once: the *second* arm carries the word's real back-edge (with a
+        // parameter reference, which is legal), so `is_self_tail_call` holds
+        // and `tail` is the only thing telling the two calls apart.
+        check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ r drop &!a b dup n 1 sub loopg drop 0 ]\n\
+             ~[ r b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a non-tail self-call is not a back-edge");
+    }
+    #[test]
+    fn poly_self_tail_call_in_a_builtin_named_word_skips_the_back_edge_guard() {
+        // The word-level half of the gate (1a): `has_self_tail_call` refuses
+        // every builtin spelling, so lowering gives a generic `lt` no loop
+        // header however its body is written. The guard must agree, or it
+        // rejects a program that lowers as ordinary recursion. Same body as
+        // the rejection above, renamed.
+        check_src(&self_tail_ref_loop("lt", "r drop &!a b dup n 1 sub lt"))
+            .expect("a builtin-named word never gets the loop shape");
+    }
+    #[test]
+    fn poly_self_tail_reference_rooted_in_a_static_is_ok() {
+        // A static's data-segment storage survives every iteration, unlike a
+        // local's slot, so its borrow record must not be read as a hazard --
+        // the poly twin of `static_ref_crosses_self_tail_call_back_edge_ok`.
+        // The recorded `&!COUNT` is what the guard sees here; the reference
+        // actually crossing is the parameter `r`.
+        check_src(&format!(
+            "static: COUNT i64 = 0 ;\n{}",
+            self_tail_ref_loop("loopg", "&!COUNT drop r b dup n 1 sub loopg")
+        ))
+        .expect("a static-rooted borrow is not a local of this frame");
+    }
+    #[test]
+    fn poly_self_tail_call_with_no_reference_argument_ignores_a_live_local_borrow() {
+        // The other half of the rule: a live borrow of a local is only a
+        // hazard when a reference actually rides the back-edge. Here `&a` is
+        // parked in a `Copy` local (a shared reference, so nothing demands it
+        // be consumed) which keeps the record live under the coarse liveness,
+        // while the call's own window carries no reference at all.
+        check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy ['T 4] i64 -- i64 )\n\
+             | a n |\n\
+             n iszero ~[ drop 0 ] ~[ &a | p | a n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a live local borrow alone is not a back-edge hazard");
+    }
+    #[test]
+    fn poly_self_tail_linear_forwarded_into_the_call_window_is_ok() {
+        // The linear counterpart of the accept case: a `Spy` moved *into* the
+        // recursive call's own argument window is forwarded, not stranded, so
+        // the loop carries it as a back-edge operand with its single owner
+        // intact. This is the whole of what a linear value can do at a poly
+        // self-tail call -- see the two tests below.
+        check_src(&format!(
+            "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( Spy 'T: Copy i64 -- Spy 'T )\n\
+               dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .expect("a linear value forwarded into the window stays legal");
+    }
+    #[test]
+    fn poly_self_tail_unconsumed_linear_local_is_error() {
+        // Why there is no poly port of the monomorphic guard's *second*
+        // clause (an unconsumed linear local at the back-edge): the general
+        // end-of-body check already rejects the shape, one arm having
+        // consumed `s` and the other not. The monomorphic clause exists only
+        // to relocate that same rejection at the call (its own doc says so),
+        // and a second message for an already-rejected program is not worth a
+        // second rule. Pinned here so loosening the general check cannot open
+        // the hole silently.
+        let err = check_src(&format!(
+            "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( Spy 'T: Copy i64 -- 'T )\n\
+               | s t n |\n\
+               n iszero ~[ s drop t ] ~[ 9 Spy t n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: linear value `s` is never consumed in `loopg`\n  `s` has type `Spy`, which is linear: drop it or return it (nothing is dropped for you)"
+        );
+    }
+    #[test]
+    fn poly_self_tail_linear_stranded_below_the_call_window_is_not_well_typed() {
+        // Why there is no poly port of the guard's *first* clause (a linear
+        // value stranded below the argument window) either: a tail self-call
+        // is the last term of a context whose exit row is the word's declared
+        // outputs, and the call itself pushes exactly those outputs -- so
+        // `stranded ++ outputs == outputs`, and nothing can be stranded in a
+        // well-typed body. A generic body cannot even reach the shape from
+        // below: unlike an inline combinator it walks no caller row, its
+        // stack starts at `sig.inputs`.
+        //
+        // A tripwire, not a test of this slice's code: the day that exit-row
+        // rule loosens, the stranded clause has to be written.
+        let err = check_src(&format!(
+            "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy i64 -- Spy 'T )\n\
+               | t n |\n\
+               n iszero ~[ 9 Spy t ] ~[ 9 Spy t n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "the quotations passed to `if` leave different stack shapes: an earlier one leaves `Spy 'T`, this one leaves `Spy Spy 'T`"
+            ),
+            "the stranded `Spy` shows up as the arms disagreeing: {err}"
         );
     }
     #[test]
@@ -6166,6 +6602,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &HashSet::new(),
+            false,
         )
         .expect("`len` answers a slice");
         assert_eq!(

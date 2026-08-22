@@ -45,25 +45,6 @@ fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     binary
 }
 
-/// Mirrors `tests/phase4_combinators.rs`'s helper: run `binary` under
-/// `ulimit -s {limit_kb}` (KB), returning the exit code (`None` on a signal
-/// death, e.g. a stack-overflow `SIGSEGV`) and trimmed stdout.
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 /// The recon-4 `my-times`, spelled with `..s i64 i64 ~[ ..s i64 -- ..s ]`:
 /// `from`/`to` are two separate `i64` counters, not a typo for `times`'s own
 /// single count.
@@ -86,7 +67,7 @@ fn my_times_runs_one_million_iterations_in_constant_stack() {
     // rounds.
     let src = format!("{MY_TIMES}: main ( -- ) 0 0 1000000 ~[ drop 1 add ] my-times . ;\n");
     let binary = build_binary("my-times-1m", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out),
