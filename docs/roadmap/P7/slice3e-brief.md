@@ -6,6 +6,21 @@ a hardcoded predicate to a user-declarable one: `trait: Show 'T show ( 'T -- ) ;
 runtime representation — a bound is satisfied at monomorphization by an ordinary word
 resolving for the concrete type, and vanishes after checking.
 
+**Superseded by `docs/roadmap/P7/slice3e-spec.md` v2 (2026-08-22).** A spec-writer pass
+produced a v1 spec against this brief's "Ready to spec: Yes" verdict below; a
+3-reviewer soundness/implementability loop then found v1's Phase 4 lowering design
+architecturally non-viable and its cross-module trait-identity story unspecified
+(neither was resolvable by patching). A follow-up design conversation resolved both,
+plus five other questions the review loop and the conversation itself surfaced
+(`impl:` as a binding rather than a body; call-site rather than declaration-site
+rejection for multi-bound member collisions; module-qualified disambiguation; the
+obligation/resolution phase split that replaces the whole per-instantiation lowering
+mechanism). The rulings are recorded in the v2 spec's own "Design decisions resolved
+this revision" section, not duplicated here -- this brief's OQ2 ("nominal via `impl:
+Trait for Type ; <body> ; ;`") is specifically superseded by v2's decision 1
+(`impl:` as a binding), and OQ4/R8 ("reject at the bound declaration site") is
+superseded by v2's decision 5 (reject at the ambiguous call site instead).
+
 ## Recon (read against the built compiler; see "Resolved recon" and "Resolved: paper
 
 dogfood" below for the two claims that have since been compiled and checked)
