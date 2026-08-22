@@ -4372,13 +4372,13 @@ pub(super) fn poly_quotation_combinator_unsupported_error(
 }
 
 /// P7 slice 3b-follow (R3/L1): a row-typed combinator whose declaration this
-/// dispatch cannot ground. Three causes, one message, because the answer is
-/// the same: a type or length variable of the callee's own (`each`'s
-/// `&['T N]`) would have to be *solved for*, the mid-body unification L1
-/// forbids; a slot declared above a row a quotation parameter produces would
-/// have to be stripped back off an arm's exit to recover that row; and a
+/// dispatch cannot ground. Two causes, one message, because the answer is the
+/// same: a type or length variable of the callee's own (`each`'s `&['T N]`)
+/// would have to be *solved for*, the mid-body unification L1 forbids; and a
 /// declared output row no parameter produces leaves the combinator's promised
-/// exit and what its arms actually leave unrelated.
+/// exit and what its arms actually leave unrelated. (P7.S3j closed a third:
+/// a slot declared above a row a quotation parameter produces is now
+/// stripped back off an arm's exit rather than rejected here.)
 fn poly_combinator_abstract_signature_error(
     ctx: &Ctx,
     span: Span,
@@ -4388,7 +4388,7 @@ fn poly_combinator_abstract_signature_error(
     let word = crate::resolve::demangle_call(word);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
-        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, that declares no slot above a row its quotation parameters produce, and whose declared output row one of them produces",
+        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, and whose declared output row one of them produces",
         crate::resolve::demangle_word(where_),
         span.line
     )

@@ -534,6 +534,56 @@ fn a_slot_declared_above_a_produced_row_is_stripped_and_grounds() {
 }
 
 #[test]
+fn a_suffix_slot_disagreeing_with_the_declared_type_is_error() {
+    // P7.S3j (R3), the guard the two goldens above never exercise: they
+    // hold the declared suffix's *presence* (its length) to account, not its
+    // *type*. Deleting the whole `!suffix_matches` check leaves this suite
+    // green otherwise -- this arm leaves `Bool` where `pick`'s declared
+    // `~[ ..a -- ..b i64 ]` requires `i64` at the stripped suffix, and
+    // nothing else in the walk notices: the lengths still agree, so only a
+    // per-slot type comparison of the suffix itself catches it.
+    let err = build_err(
+        "suffix-type-mismatch",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T i64 ) True ~[ drop 1 ] ~[ drop True ] pick ;\n\
+         : main ( -- ) 5 7 bad . . ;\n",
+    );
+    assert!(
+        err.contains(
+            "the quotation passed to `pick` in `bad` (line 3) was declared `~[ ..a -- ..b i64 ]`, but it leaves `Bool` where that requires `i64`"
+        ),
+        "the declared suffix's type, not just its length, must be checked: {err}"
+    );
+}
+
+#[test]
+fn an_abstract_declared_suffix_is_still_the_cannot_ground_rejection() {
+    // R3's stripping only fires once `poly_declared_arm` has already ground
+    // every declared parameter type to `Concrete`; a suffix slot that is
+    // still a type variable (`'X`, unbound anywhere in `pick`'s own
+    // signature) fails that grounding first and keeps the combinator's
+    // pre-existing "cannot ground" rejection, not a new one this slice
+    // invents. Regression for the rewrite this slice made to
+    // `a_slot_declared_above_a_produced_row_is_located`'s message: that test
+    // no longer exercises this closure at all, since its program grounds
+    // cleanly now.
+    let err = build_err(
+        "abstract-suffix",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b 'X ] ~[ ..a -- ..b 'X ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ drop 1 ] pick drop ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b 'X ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "a variable-carrying suffix must stay the located, un-groundable rejection: {err}"
+    );
+}
+
+#[test]
 fn inline_generic_body_still_splices_a_row_combinator() {
     // Regression: the whole `inline` route this slice exists to *avoid* forcing
     // is untouched. An `inline` generic word consuming `if` is spliced into its
