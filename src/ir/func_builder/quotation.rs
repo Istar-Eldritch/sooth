@@ -358,7 +358,20 @@ impl<'a> FuncBuilder<'a> {
     pub(super) fn lower_poly_call(&mut self, inst: &CallInst) {
         let in_arity = self.poly_arities[&inst.callee];
         let split = self.stack.len() - in_arity;
-        let args = self.stack.split_off(split);
+        let mut args = self.stack.split_off(split);
+        // P7.S3f (R2): a ground `Type::Quotation` input this call site
+        // materialized checker-side is still a phantom `Value` on the
+        // lowering stack (the checker's `Slot`/IR `Value` are different
+        // representations) -- turn it into a real `(code, env)` aggregate
+        // here, mirroring the concrete boundary's own `materialize_quot_args`.
+        if !inst.quot_inputs.is_empty() {
+            let quot_inputs: Vec<(usize, IrType)> = inst
+                .quot_inputs
+                .iter()
+                .map(|&(i, eff)| (i, IrType::Quotation(QuotSigId(eff))))
+                .collect();
+            self.materialize_quot_args(&mut args, &quot_inputs);
+        }
         let ret = if inst.out_arity == 1 || inst.bundle.is_some() {
             let ret_ty = match inst.bundle {
                 Some(id) => IrType::Struct(id),

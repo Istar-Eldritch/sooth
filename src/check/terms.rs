@@ -708,7 +708,8 @@ fn check_term(
             // its `Sig` is per-instantiation, not name-keyed.
             if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(
-                    name, span, &mut stack, ctx, scope, arrays, refs, prov, live, at, poly,
+                    name, span, &mut stack, ctx, env, scope, arrays, cells, refs, slices, prov,
+                    live, at, poly,
                 );
             }
             // R1/R2: one name can carry several candidates. A single one is

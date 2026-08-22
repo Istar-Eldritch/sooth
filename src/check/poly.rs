@@ -3279,10 +3279,13 @@ pub(super) fn check_poly_call(
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
-    scope: &Scope,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &mut Scope,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
-    prov: &Provenance,
+    slices: &mut Vec<SliceDecl>,
+    prov: &mut Provenance,
     live: &Liveness,
     at: usize,
     poly: &mut PolyCtx,
@@ -3306,12 +3309,30 @@ pub(super) fn check_poly_call(
     }
     let base = stack.len() - n_in;
     let mut subst = Subst::default();
+    // P7.S3f (R2): the positions materialized against a ground declared
+    // `Type::Quotation` input at this call site, threaded onto the recorded
+    // `CallInst` so lowering can materialize the caller's phantom argument
+    // into a real runtime aggregate before the call.
+    let mut quot_inputs: Vec<(usize, &'static QuotEffect)> = Vec::new();
     for i in 0..n_in {
         // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
         // quotation would silently bind `'T` to the placeholder and
-        // monomorphize a call over a phantom. Reject before unification.
-        if stack[base + i].quot.is_some() {
-            return Err(reject_quotation_argument(ctx, span, name));
+        // monomorphize a call over a phantom. Reject before unification --
+        // unless the declared input is itself a ground `Type::Quotation`
+        // (P7.S3f R1), in which case the operand is materialized into a
+        // real runtime value first (R2) and falls through to ordinary
+        // unification below.
+        if let Some(QuotRef::Known(id)) = stack[base + i].quot {
+            match &sig.inputs[i] {
+                PolyType::Concrete(Type::Quotation(eff)) => {
+                    stack[base + i] = materialize_quotation_at_boundary(
+                        id, eff, false, name, span, ctx, env, arrays, cells, refs, slices, prov,
+                        scope, poly,
+                    )?;
+                    quot_inputs.push((i, eff));
+                }
+                _ => return Err(reject_quotation_argument(ctx, span, name)),
+            }
         }
         let slot_ty = stack[base + i].ty;
         unify_poly_input(
@@ -3372,6 +3393,7 @@ pub(super) fn check_poly_call(
             output_types: outputs.clone(),
             bundle: None,
             generation,
+            quot_inputs,
         },
     );
     stack.truncate(base);
@@ -4640,6 +4662,62 @@ mod tests {
             err.contains("a quotation cannot be passed to `dupit`"),
             "check_poly_call should name `dupit`, got: {err}"
         );
+    }
+    /// P7 slice 3f (R1/R2): a `Known` literal quotation argument at a declared
+    /// ground `Type::Quotation` input materializes and the call succeeds, with
+    /// the quotation-typed input first among the declared inputs.
+    #[test]
+    fn check_poly_call_materializes_ground_quotation_first_position() {
+        check_src(
+            ": run_it_first ( [ i64 -- i64 ] 'T: Copy -- 'T ) swap drop ;\n\
+             : main ( -- ) [ 1 add ] 7 run_it_first drop ;\n",
+        )
+        .expect("a ground quotation argument in the first position should materialize");
+    }
+    #[test]
+    fn check_poly_call_materializes_ground_quotation_middle_position() {
+        check_src(
+            ": run_it_mid ( 'T: Copy [ i64 -- i64 ] bool -- 'T ) drop drop ;\n\
+             : main ( -- ) 7 [ 1 add ] true run_it_mid drop ;\n",
+        )
+        .expect("a ground quotation argument in the middle position should materialize");
+    }
+    #[test]
+    fn check_poly_call_materializes_ground_quotation_last_position() {
+        check_src(
+            ": run_it_last ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+             : main ( -- ) 7 [ 1 add ] run_it_last drop ;\n",
+        )
+        .expect("a ground quotation argument in the last position should materialize");
+    }
+    /// R1's negative, re-pinned unmodified against the abstract
+    /// `PolyType::Quotation` shape (still carrying a free variable): a
+    /// declared quotation whose brackets mention `'T` does not fold to
+    /// `Concrete`, so R1's narrowing must not spare it -- the mutation-test
+    /// proof that L1 is not accidentally widened.
+    #[test]
+    fn check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position() {
+        let err = check_src(
+            ": run_abstract ( 'T: Copy [ 'T -- 'T ] -- 'T ) drop ;\n\
+             : main ( -- ) 7 [ dup ] run_abstract drop ;\n",
+        )
+        .expect_err("a quotation at a still-abstract PolyType::Quotation position stays rejected");
+        assert!(
+            err.contains("a quotation cannot be passed to `run_abstract`"),
+            "{err}"
+        );
+    }
+    /// R2: a capturing literal at the argument boundary runs the existing R15
+    /// admission path -- proof this new call site actually invokes
+    /// `check_capture_admission`, not just present in the diff. `n` is an
+    /// in-frame (non-escaping) capture, so it is admitted.
+    #[test]
+    fn check_poly_call_admits_a_capturing_literal_argument() {
+        check_src(
+            ": run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+             : main ( -- ) 3 | n | 7 [ n add ] run_it drop ;\n",
+        )
+        .expect("an in-frame capturing literal should be admitted at the argument boundary");
     }
     #[test]
     fn poly_term_admits_a_quotation_literal_as_a_marker_slot() {

@@ -1428,6 +1428,14 @@ pub struct CallInst {
     /// (Slice 2), the same `__gen{N}` device `mangled_symbol` uses for
     /// ordinary REPL words.
     pub generation: Option<u64>,
+    /// P7.S3f (R2): the positions among the declared inputs that materialized
+    /// a `Known` literal against a ground `Type::Quotation` parameter at this
+    /// call site (R1's spared case), paired with that position's declared
+    /// effect. Lowering materializes the caller's phantom quotation argument
+    /// into a real `(code, env)` aggregate at each of these slots, mirroring
+    /// the concrete boundary's own `Arity::quot_inputs` -- an abstract
+    /// `PolyType::Quotation` position never reaches here (out of scope, L1).
+    pub quot_inputs: Vec<(usize, &'static QuotEffect)>,
 }
 
 /// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,
