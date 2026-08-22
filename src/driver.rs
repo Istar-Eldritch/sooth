@@ -802,6 +802,29 @@ mod tests {
         assert!(err.contains("b.sth"), "names the second file: {err}");
     }
 
+    /// P7 slice 3g (finding 4/R1): a self-call in a poly word declared in a
+    /// *non-entry* module mangles to `rec__m1`, and `resolve::mangle` rewrites
+    /// the self-call body reference to match -- so the checker's guard must
+    /// compare against `ctx.mangled_name()`. A demangled comparison
+    /// (`ctx.word_name()`, still `"rec"` here) would never match the mangled
+    /// call term and would wrongly fall through to `poly_calls_poly_word_error`.
+    #[test]
+    fn poly_self_call_uses_mangled_name_not_demangled() {
+        let s = Sandbox::new("poly-self-call-mangled");
+        s.write(
+            "lib.sth",
+            ": rec ( 'T i64 -- 'T ) drop 3 rec ;\nexport: rec ;\nimport: intrinsics * ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" l ;\n: main ( -- ) ;\nimport: intrinsics * ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module)
+            .expect("a self-call mangled alongside its own declaration still typechecks");
+    }
+
     /// The native build path's entry file (module 0) is allowed to declare
     /// `main` -- the common case -- while an imported file that declares none
     /// checks cleanly.
