@@ -199,15 +199,6 @@ pub(crate) fn is_builtin_operator_name(name: &str) -> bool {
     BUILTIN_TABLE.contains_key(name)
 }
 
-/// P7 slice 3i (R4): `and`/`or`/`xor`/`not` are logical on `bool` as well as
-/// bitwise on the integers -- a stack language evaluates both operands eagerly,
-/// so bitwise-on-0/1 and logical coincide. These four cannot be rows in the
-/// table above: `bool` is `core::bool`'s enum, so the `Type` naming it is only
-/// known once a build has resolved the registry, while the table is built once
-/// per process. `check_operator` matches them by the boolean-type predicate
-/// instead and yields the operands' own type, which is that resolved `Type`.
-pub(super) const BOOL_LOGICAL_OPS: [&str; 4] = ["and", "or", "xor", "not"];
-
 /// The builtin table, built once. `check_operator` consults it on every
 /// operator occurrence; `builtin_table()` itself rebuilds a fresh map for the
 /// callers that own theirs (the REPL, the tests).
@@ -447,8 +438,9 @@ mod tests {
         // `and`/`or`/`xor` are bitwise on every integer width and logical on
         // `bool` too, but the bool half is not a row here: `bool` is
         // `core::bool`'s enum, so the `Type` naming it is build-resolved while
-        // this table is built once per process (P7 slice 3i R4,
-        // `BOOL_LOGICAL_OPS`). The table's domain is exactly the integer tower.
+        // this table is built once per process (P7 slice 3i R4). The table's
+        // domain is exactly the integer tower; `check_operator`'s own arms
+        // decide bool's membership.
         assert_homogeneous_binary_rows("and", int_types(), BuiltinLower::And);
     }
     #[test]
@@ -473,17 +465,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-    #[test]
-    fn bool_logical_ops_are_the_four_names_check_operator_resolves_by_predicate() {
-        // The list is what `check_operator` gates its resolved-bool match on;
-        // every entry must also be a real table name, or the match would sit
-        // behind a `BUILTIN_TABLE` miss and never run.
-        assert_eq!(BOOL_LOGICAL_OPS, ["and", "or", "xor", "not"]);
-        let table = builtin_table();
-        for name in BOOL_LOGICAL_OPS {
-            assert!(table.contains_key(name), "`{name}` is a table operator");
         }
     }
     #[test]

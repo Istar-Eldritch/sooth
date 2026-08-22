@@ -173,20 +173,17 @@ pub(super) fn check_operator(
         stack.extend(hit.outputs.iter().map(|ty| Slot::computed(*ty)));
         return Ok(OpDispatch::Builtin(std::mem::take(stack)));
     }
-    // P7 slice 3i (R4): the four logical rows over `bool`, matched here rather
-    // than in `BUILTIN_TABLE` because the `Type` naming `core::bool`'s enum is
-    // build-resolved (`BOOL_LOGICAL_OPS`). Homogeneous like the integer rows
-    // they mirror -- every operand must be *the* boolean type -- and the result
-    // is that same type, so a mixed `bool`/int pair still falls through to the
-    // hand-written diagnostic below.
+    // P7 slice 3i (R4): the boolean type this build resolved, for the
+    // `and`/`or`/`xor`/`not` arms below -- the four operators that are logical
+    // on `bool` as well as bitwise on the integers. Only the integer half of
+    // their domain is table rows: `bool` is `core::bool`'s enum, so the `Type`
+    // naming it is known only once a build has resolved the registry, while the
+    // table is built once per process. The hand-written arms are where bool's
+    // membership is decided -- which is where it was decided before this slice
+    // too, since a user overload of one of these names intercepts ahead of
+    // `check_operator` on an exact operand match either way: the rows were a
+    // fast path, never the rule.
     let bool_ty = resolve_bool_type(ctx.enums());
-    if BOOL_LOGICAL_OPS.contains(&name)
-        && bool_ty.is_some_and(|b| operands.iter().all(|ty| *ty == b))
-    {
-        stack.truncate(base);
-        stack.push(Slot::computed(operands[0]));
-        return Ok(OpDispatch::Builtin(std::mem::take(stack)));
-    }
 
     // Slice 8a phase 2 (R2/R6): a user overload of this builtin name whose
     // inputs match the operands exactly beats the numeric coercion fallback
