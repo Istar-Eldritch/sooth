@@ -4802,6 +4802,17 @@ mod tests {
         )
         .expect("`call` on a ground quotation parameter should honour its declared effect");
     }
+    /// R3's *ordering*, the output side: the declared outputs are pushed in
+    /// declaration order, so the first one lands deepest. Every other R3 test
+    /// declares a single output, which cannot tell the push order from its
+    /// reverse. Checker-only rather than a golden because a quotation effect
+    /// with two outputs cannot yet be lowered (see the phase 3 note on
+    /// `intern_output_bundles`); the input side gets the golden instead.
+    #[test]
+    fn poly_call_on_a_ground_quotation_param_pushes_outputs_in_order() {
+        check_src(": call_it ( 'T: Copy [ -- i64 bool ] -- 'T i64 bool ) call ;\n")
+            .expect("the first declared output must land deepest");
+    }
     /// R3's negative, the `PolyType::Concrete` renderer arm: a ground operand
     /// at a popped position that simply is not the declared input type is a
     /// located rejection, not a panic and not a silent coercion.

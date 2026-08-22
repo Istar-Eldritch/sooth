@@ -128,6 +128,31 @@ fn argument_and_body_boundary_together() {
     );
 }
 
+/// R3's *ordering*: a declared effect whose inputs are heterogeneous, so each
+/// operand is pinned to its own declared position rather than merely counted.
+/// A golden rather than a unit test because it pins two facts at once -- the
+/// checker pops deepest-first, *and* the backend passes the operands in that
+/// same order, which a checker-only test cannot see (reverse both and they
+/// would agree with each other while silently miscompiling).
+#[test]
+fn body_boundary_pops_declared_inputs_deepest_first() {
+    let src = "import: intrinsics * ;\n\
+               : call_it ( 'T: Copy [ i64 bool -- ] -- 'T )\n\
+                 1 true rot call\n\
+               ;\n\
+               : main ( -- )\n\
+                 9 [ swap . . ] call_it .\n\
+               ;\n";
+    let prog = Scratch::write("body-boundary-input-order", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "1\ntrue\n9\n",
+        "the deepest operand must satisfy the first declared input, at check time and at run time"
+    );
+}
+
 /// L1 at the golden level: a declared quotation parameter that still carries a
 /// free variable inside its brackets is out of scope for this slice, and
 /// `call`ing it in a poly body keeps its pre-existing wording.

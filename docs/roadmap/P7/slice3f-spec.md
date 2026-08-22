@@ -289,6 +289,18 @@ error: `call` is not permitted on a quotation in `call_it` (line 1)
   criterion is expected to fall out of the existing monomorphization pass unchanged,
   the same finding P7.S3d's OQ3 confirmed for its own two consumers — record whether
   this holds at exit (see Exit findings) rather than assuming it.
+  L4 is bounded by an output-arity limit that **predates this slice**: a quotation
+  effect declaring two or more outputs cannot be lowered at all, on the concrete path
+  as much as the polymorphic one. `intern_output_bundles` (`check.rs:913`) walks
+  `module.words`, so a quotation effect's own output tuple is never interned;
+  `bundle_of` then returns `None` in `lower_indirect_call`
+  (`ir/func_builder/quotation.rs:226`), the declared outputs are never pushed, and the
+  next consumer panics in the backend. R3 does not cause this:
+  `: call_it ( [ i64 -- i64 i64 ] -- i64 ) 1 swap call add ;` reproduces it with no
+  polymorphic word in the program. But it does open a second door to it, since before
+  R3 such a body was a located rejection. So L4 holds only for declared effects with at
+  most one output; phase 3 records the gap (see Exit findings) rather than gating R3 on
+  output arity.
 
 ## Delivered shape
 
@@ -561,6 +573,26 @@ At Phase 3 (final), record:
   record the decision — P7.S3b-follow's own exit already deferred with a named
   trigger condition; state whether this slice's additions (R2's widened signature, R3's
   new dispatch arm) meet or fall short of that condition.
+- **The >=2-output lowering gap (qualifies L4).** Record the pre-existing gap named in
+  L4: a quotation effect with two or more declared outputs type-checks and then panics
+  in the backend, because `intern_output_bundles` interns output tuples only for
+  declared words. State that R3 reaches it (a poly body `call`ing such a parameter was a
+  located rejection before this slice) without causing it, and name the follow-up slice
+  for the interning fix. Do **not** close it by gating R3 on `outputs.len() < 2`: that
+  would diverge from the concrete `call` twin, which admits the same shape, and would
+  reject programs that become legal the moment the interning is fixed.
+- **Phase 2's fixture deviations from this spec.** Three of this spec's own body-boundary
+  fixtures were wrong and phase 2 corrected them; record the corrections so the spec is
+  not read back as the delivered shape. (1) The body-boundary golden written here as
+  `( 'T: Copy [ i64 -- 'T ] -- 'T )` contradicts L1, since a `'T` inside the brackets
+  folds to the abstract `PolyType::Quotation` this slice defers, so it landed with a ground
+  `[ i64 -- i64 ]`, and the spec's own shape is pinned as *still rejected* by
+  `body_boundary_rejects_an_abstract_quotation_param`. (2) The round-trip fixture
+  `( 'T: Copy 'T [ i64 -- i64 ] i64 -- 'T i64 )` is off by one input, since the bound
+  site `'T: Copy` is itself an input slot; the duplicate `'T` was dropped. (3) `call` on
+  a bare `'T`-bound local was listed among the goldens but is a checker fact with no
+  runnable program, so it landed as the unit test
+  `poly_call_on_a_variable_local_is_still_error`.
 - **The abstract `PolyType::Quotation` follow-up, named.** State explicitly whether the
   open case from Out of scope (a poly body `call`ing a bound instantiation of a
   declared `[ 'T -- 'T ]`-shaped parameter) needs a new roadmap slice, and if so name it
