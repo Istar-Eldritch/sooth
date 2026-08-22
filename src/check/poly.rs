@@ -4748,8 +4748,8 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_ground_quotation_middle_position() {
         check_src(
-            ": run_it_mid ( 'T: Copy [ i64 -- i64 ] bool -- 'T ) drop drop ;\n\
-             : main ( -- ) 7 [ 1 add ] true run_it_mid drop ;\n",
+            ": run_it_mid ( 'T: Copy [ i64 -- i64 ] Bool -- 'T ) drop drop ;\n\
+             : main ( -- ) 7 [ 1 add ] True run_it_mid drop ;\n",
         )
         .expect("a ground quotation argument in the middle position should materialize");
     }
@@ -4825,7 +4825,7 @@ mod tests {
     /// `intern_output_bundles`); the input side gets the golden instead.
     #[test]
     fn poly_call_on_a_ground_quotation_param_pushes_outputs_in_order() {
-        check_src(": call_it ( 'T: Copy [ -- i64 bool ] -- 'T i64 bool ) call ;\n")
+        check_src(": call_it ( 'T: Copy [ -- i64 Bool ] -- 'T i64 Bool ) call ;\n")
             .expect("the first declared output must land deepest");
     }
     /// R3's negative, the `PolyType::Concrete` renderer arm: a ground operand
@@ -4834,14 +4834,14 @@ mod tests {
     #[test]
     fn poly_call_on_a_ground_quotation_param_ground_mismatch_is_error() {
         let err = check_src(
-            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) true swap call ;\n\
+            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) True swap call ;\n\
              : main ( -- ) 7 [ 1 add ] call_it drop drop ;\n",
         )
         .expect_err("a wrong operand type at a declared input must be rejected");
         assert_eq!(
             err,
             "error: type mismatch in `call_it` (line 1)\n  \
-             `call` expected `i64`, found `bool`\n  note: declared ( -- )"
+             `call` expected `i64`, found `Bool`\n  note: declared ( -- )"
         );
     }
     /// R3's negative, the `poly_rendered_type_mismatch_error` arm: an operand

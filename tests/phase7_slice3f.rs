@@ -8,8 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/phase7_slice3d.rs`'s
-/// own pattern).
+/// own pattern). Carries its own `sooth.pkg` naming `core` at this checkout's
+/// `lib/` (P7.S3i: `core::bool` is an ordinary package import now, not a
+/// compiler injection, so a fixture using `Bool`/`True`/`False` needs a real
+/// package tree to resolve it, same as `tests/phase7_slice3i.rs`'s `Tree`).
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -19,6 +24,7 @@ impl Scratch {
         let dir =
             std::env::temp_dir().join(format!("sooth-p7s3f-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sooth.pkg"), common::fixture_package("p7s3f")).unwrap();
         let path = dir.join("prog.sth");
         std::fs::write(&path, contents).unwrap();
         Scratch(path)
@@ -65,17 +71,18 @@ fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
 #[test]
 fn argument_boundary_materializes_ground_quotation_param() {
     let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
                : run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
                : main ( -- )\n\
                  7 [ 1 add ] run_it .\n\
-                 true [ 1 add ] run_it .\n\
+                 True [ 1 add ] run_it .\n\
                ;\n";
     let prog = Scratch::write("argument-boundary-behavioural", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "7\ntrue\n",
+        stdout, "7\nTrue\n",
         "each instantiation of `'T` must carry the materialized quotation argument independently"
     );
 }
@@ -87,19 +94,20 @@ fn argument_boundary_materializes_ground_quotation_param() {
 #[test]
 fn body_boundary_calls_ground_quotation_param() {
     let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
                : call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 )\n\
                  1 swap call\n\
                ;\n\
                : main ( -- )\n\
                  9 [ 1 add ] call_it . .\n\
-                 true [ 1 add ] call_it . .\n\
+                 True [ 1 add ] call_it . .\n\
                ;\n";
     let prog = Scratch::write("body-boundary-behavioural", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "2\n9\n2\ntrue\n",
+        stdout, "2\n9\n2\nTrue\n",
         "the called quotation must run in each instantiation, beside the untouched `'T`"
     );
 }
@@ -111,19 +119,20 @@ fn body_boundary_calls_ground_quotation_param() {
 #[test]
 fn argument_and_body_boundary_together() {
     let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
                : apply_it ( 'T: Copy [ i64 i64 -- i64 ] i64 -- 'T i64 )\n\
                  3 rot call\n\
                ;\n\
                : main ( -- )\n\
                  9 [ add ] 4 apply_it . .\n\
-                 true [ add ] 4 apply_it . .\n\
+                 True [ add ] 4 apply_it . .\n\
                ;\n";
     let prog = Scratch::write("round-trip-behavioural", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "7\n9\n7\ntrue\n",
+        stdout, "7\n9\n7\nTrue\n",
         "a two-input declared effect must pop both operands at the body boundary"
     );
 }
@@ -137,8 +146,9 @@ fn argument_and_body_boundary_together() {
 #[test]
 fn body_boundary_pops_declared_inputs_deepest_first() {
     let src = "import: intrinsics * ;\n\
-               : call_it ( 'T: Copy [ i64 bool -- ] -- 'T )\n\
-                 1 true rot call\n\
+               import: core::bool * ;\n\
+               : call_it ( 'T: Copy [ i64 Bool -- ] -- 'T )\n\
+                 1 True rot call\n\
                ;\n\
                : main ( -- )\n\
                  9 [ swap . . ] call_it .\n\
@@ -148,7 +158,7 @@ fn body_boundary_pops_declared_inputs_deepest_first() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "1\ntrue\n9\n",
+        stdout, "1\nTrue\n9\n",
         "the deepest operand must satisfy the first declared input, at check time and at run time"
     );
 }
