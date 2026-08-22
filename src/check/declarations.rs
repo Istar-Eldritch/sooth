@@ -316,17 +316,16 @@ pub fn check_static_decls(module: &Module) -> Result<(), String> {
     // P7 slice 3i (R1): `bool` is the one entry in the parser's scalar
     // allow-list that resolves through the type registry, and there it can only
     // check the *name*: an enum's variant payloads are not filled in until
-    // after declaration parsing. So the shape is re-checked here, where they
-    // are. A same-named enum carrying a payload is not a scalar, and a
-    // `= true` initializer would write a bare discriminant over the storage of
-    // an aggregate.
+    // after declaration parsing, and `resolve_bool_type`'s exactly-two-variants
+    // shape test has nothing to run against yet either. So the shape is
+    // re-checked here, against the same `resolve_bool_type` the logical
+    // operators and `extern:` boundary rest on: a same-named enum that is not
+    // *the* resolved bool (a payload-carrying variant, or a third variant) is
+    // not a scalar, and a `= true` initializer would write a bare discriminant
+    // over storage whose layout or discriminant space it does not own.
     for decl in &module.statics {
-        if let Type::Enum(id, name) = decl.ty {
-            if !module.enums[id.index()]
-                .variants
-                .iter()
-                .all(|v| v.fields.is_empty())
-            {
+        if let Type::Enum(_, name) = decl.ty {
+            if Some(decl.ty) != resolve_bool_type(&module.enums) {
                 return Err(static_non_scalar_enum_error(decl, name));
             }
         }
@@ -338,7 +337,7 @@ pub fn check_static_decls(module: &Module) -> Result<(), String> {
 /// all payload-free.
 fn static_non_scalar_enum_error(decl: &StaticDecl, name: &str) -> String {
     format!(
-        "error: static `{}` has a non-scalar type `{name}` (line {}, col {}): every variant of a static's enum type must carry no payload\n  note: only `i64`, `u32`, `bool` and `str` are supported this slice",
+        "error: static `{}` has a non-scalar type `{name}` (line {}, col {}): a static's enum type must be exactly two variants, each carrying no payload\n  note: only `i64`, `u32`, `bool` and `str` are supported this slice",
         decl.name, decl.span.line, decl.span.col
     )
 }

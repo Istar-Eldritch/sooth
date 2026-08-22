@@ -232,7 +232,30 @@ fn static_at_a_payload_carrying_enum_named_bool_is_an_error() {
     let err = build_error(&entry);
     assert!(
         err.contains("static `FLAG` has a non-scalar type `bool`")
-            && err.contains("must carry no payload"),
+            && err.contains("must be exactly two variants, each carrying no payload"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// R1's shape half, the payload-free forgery: a same-named enum with three
+/// payload-free variants passes the old "all variants payload-free" test but
+/// is still not the logical two-variant `bool` `resolve_bool_type` resolves,
+/// so a `= true` initializer would write a bare 0/1 discriminant into a type
+/// whose third variant gives that discriminant space a different meaning.
+#[test]
+fn static_at_a_three_variant_enum_named_bool_is_an_error() {
+    let t = Tree::new("g3-forged-three-variant");
+    let entry = t.write_raw(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         type: bool | Maybe | False | True ;\n\
+         static: FLAG bool = true ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("static `FLAG` has a non-scalar type `bool`")
+            && err.contains("must be exactly two variants, each carrying no payload"),
         "unexpected diagnostic: {err}"
     );
 }

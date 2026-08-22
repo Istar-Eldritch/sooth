@@ -29,8 +29,10 @@ Single-file user enums now start at index 0.
 check: the declared type annotation `bool` resolves through the module's own imports, so
 without the import it is a located `unknown type bool` at the annotation and the
 `StaticInit::Bool` branch is never reached. The former `ty == Type::BOOL` comparison is now
-`Some(ty) == resolve_bool_type(enums)` (`src/check/declarations.rs:179`), so a same-named
-payload-carrying enum is rejected there too.
+`Some(decl.ty) == resolve_bool_type(&module.enums)` in `check_static_decls`
+(`src/check/declarations.rs:328`), so a same-named enum that is not the resolved two-variant,
+payload-free bool -- whether it carries a payload or merely has a third variant -- is
+rejected there too.
 
 **R2 — the REPL seeds `core::bool`, embedded, not path-spliced.** `Session::new` lexes and
 parses `include_str!("../lib/bool.sth")` (`src/repl.rs:1133`); `lib/bool.sth` stays the
