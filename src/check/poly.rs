@@ -1141,9 +1141,23 @@ pub(super) fn poly_call_term(
                         let Type::Quotation(eff) = *inp else {
                             unreachable!()
                         };
-                        let quot = stack[base + i]
-                            .quot
-                            .expect("a QuotLit slot always carries its literal's identity");
+                        // Review fix (Bug 1): a `QuotLit` slot's identity
+                        // does not survive a bind-then-reread (e.g. `[ .. ] |
+                        // q | q run0`) -- the local rebinds a fresh marker
+                        // slot with `quot: None`. That is not a value this
+                        // grounding arm can ground, so it is the located
+                        // rejection the operand-window guard above already
+                        // renders for an ungroundable `QuotLit`, never a
+                        // panic (L1).
+                        let Some(quot) = stack[base + i].quot else {
+                            return Err(poly_op_on_variable_error(
+                                ctx,
+                                span,
+                                name,
+                                &PolyType::QuotLit,
+                                sig,
+                            ));
+                        };
                         poly_ground_quotation_literal(
                             quot,
                             eff,
@@ -1221,7 +1235,30 @@ fn poly_ground_quotation_literal(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
-    let body = scope.quotation(quot).body.clone();
+    let lit = scope.quotation(quot).clone();
+    // Review fix (Bug 2): the mono twin's flavour funnel
+    // (`check_literal_against_declared_effect`, `literal_is_inline !=
+    // is_inline`) runs before anything else touches the literal's body.
+    // C2's callee is always concrete with a ground `Type::Quotation`
+    // input (an `inline` word cannot declare one this grounding arm
+    // matches), so `is_inline` is always `false` here -- the only
+    // reachable mismatch is an inline `~[ ]` literal at this ordinary
+    // parameter.
+    if lit.is_inline {
+        let param = crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone());
+        return Err(inline_literal_at_ordinary_param_error(
+            ctx, lit.span, name, param,
+        ));
+    }
+    // Review fix (Bug 3): port the mono twin's annotation reconciliation
+    // (same function, immediately after the flavour check) -- an
+    // annotated literal must agree with the declared parameter effect
+    // before its body ever runs. Never shape-changing (C2 grounds
+    // against a ground `QuotEffect`, which carries no row).
+    if let Some(annot) = lit.annot.clone() {
+        reconcile_annotation_with_parameter(&annot, eff, false, false, ctx, name)?;
+    }
+    let body = lit.body;
     let seeded: Vec<PolySlot> = eff
         .inputs
         .iter()
@@ -5895,6 +5932,78 @@ mod tests {
             ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x 2 [ 1 add ] run0 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect("a top-of-window literal must ground against a concrete quotation parameter");
+    }
+
+    /// Review fix (Bug 1): binding a quotation literal to a local and
+    /// reading it back loses its `PolyQuotRef` identity -- `| names |`
+    /// only records a bound slot's `PolyType`, never its `quot` (`poly.rs`'s
+    /// own local-binding loop), so a local read pushes a fresh
+    /// `PolySlot::new(pt)` with `quot: None` (the local-read arm, same
+    /// file). A re-read `QuotLit` slot reaching the grounding arm is
+    /// therefore not a value this slice can ground; it must be the located
+    /// rejection the operand-window guard already renders for an
+    /// ungroundable `QuotLit`, never the panic the unguarded `.expect(...)`
+    /// used to produce.
+    #[test]
+    fn poly_quotlit_bound_and_reread_is_located_error_not_panic() {
+        let err = check_src(
+            ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+             : apply ( 'T: Copy -- 'T i64 )\n\
+               | x |\n\
+               [ 1 add ] | q |\n\
+               x 2 q run0\n\
+             ;\n\
+             : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err(
+            "a re-read quotation-literal marker must not reach the `.expect` it used to panic on",
+        );
+        assert_eq!(
+            err, "error: `run0` is not permitted on a quotation literal in `apply` (line 5)",
+            "{err}"
+        );
+    }
+
+    /// Review fix (Bug 2): `poly_ground_quotation_literal` ported no flavour
+    /// check, so an inline `~[ ]` literal at a concrete word's ordinary
+    /// `Type::Quotation` parameter silently grounded and compiled -- the
+    /// mono twin (`check_literal_against_declared_effect`,
+    /// `literal_is_inline != is_inline`) rejects the identical shape with
+    /// `inline_literal_at_ordinary_param_error`.
+    #[test]
+    fn poly_quotlit_inline_literal_at_ordinary_param_is_error() {
+        let err = check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+             : apply ( 'T: Copy -- 'T i64 ) | x | x ~[ 1 add ] 2 run1 ;\n\
+             : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err("an inline literal at an ordinary quotation parameter must be rejected");
+        assert!(
+            err.contains("this quotation is inline `~[ ... ]`")
+                && err.contains("`run1` expects `[ i64 -- i64 ]`"),
+            "{err}"
+        );
+    }
+
+    /// Review fix (Bug 3): `poly_ground_quotation_literal` never reconciled
+    /// an annotated literal against the declared parameter effect, so a
+    /// literal annotated with a disagreeing effect silently grounded and
+    /// compiled -- the mono twin runs `reconcile_annotation_with_parameter`
+    /// immediately after the flavour check and rejects the identical shape.
+    #[test]
+    fn poly_quotlit_disagreeing_annotation_is_error() {
+        let err = check_src(
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
+             : apply ( 'T: Copy -- 'T i64 ) | x | x [ ( bool -- bool ) dup drop ] 2 run1 ;\n\
+             : main ( -- ) 5 apply drop drop ;\n",
+        )
+        .expect_err(
+            "an annotation disagreeing with the declared parameter effect must be rejected",
+        );
+        assert!(
+            err.contains("annotated") && err.contains("but `run1` declares it"),
+            "{err}"
+        );
     }
 
     /// P7 slice 3d (C2): `poly_ground_quotation_literal`'s own teardown --
