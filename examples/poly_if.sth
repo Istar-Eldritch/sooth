@@ -5,6 +5,9 @@
 
 import: intrinsics * ;
 import: core::prelude * ;
+\ `bool` names a type in an effect below, and a type name resolves against
+\ its declaring module rather than following the prelude hub's re-export.
+import: core::bool b | bool | ;
 
 : mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 

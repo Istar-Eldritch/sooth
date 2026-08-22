@@ -1194,8 +1194,8 @@ mod tests {
     fn word_named_for_another_kinds_generated_suffix_stays_a_word() {
         let tokens = lex("type: P x i64 ;\n\
              type: E | A y i64 ;\n\
-             : P? ( i64 -- bool ) 0 gt ;\n\
-             : E> ( i64 -- bool ) 0 gt ;\n\
+             : P? ( i64 -- i64 ) 1 add ;\n\
+             : E> ( i64 -- i64 ) 1 add ;\n\
              : main ( -- ) 3 P? drop 3 E> drop 1 P P> drop E? ;\n")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();

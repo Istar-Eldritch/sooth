@@ -451,10 +451,10 @@ fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
 #[test]
 fn the_library_comparisons_cover_non_i64_numeric_types() {
     let src = ": main ( -- )\n  \
-               1 >u32 2 >u32 lt .\n  \
-               5 >i8 5 >i8 eq .\n  \
-               3 >u32 2 >u32 gte .\n  \
-               1.5 2.5 ne . ;\n";
+               1 >u32 2 >u32 lt drop\n  \
+               5 >i8 5 >i8 eq drop\n  \
+               3 >u32 2 >u32 gte drop\n  \
+               1.5 2.5 ne drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("the comparisons cover `u32`, `i8` and `f64` too");

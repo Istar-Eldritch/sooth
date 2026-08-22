@@ -2,9 +2,6 @@ data $fmt = { b "%ld\n", b 0 }
 data $ufmt = { b "%lu\n", b 0 }
 data $ffmt = { b "%g\n", b 0 }
 data $sfmt = { b "%s", b 0 }
-data $true_str = { b "true\n", b 0 }
-data $false_str = { b "false\n", b 0 }
-data $boolstrs = { l $false_str, l $true_str }
 data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
 data $allocfmt = { b "alloc %ld\n", b 0 }
 data $freefmt = { b "free %ld\n", b 0 }
@@ -148,7 +145,7 @@ export function $sooth_main() {
 	%v22 =w cultl %v20, %v21
 	jnz %v22, @blk8, @blk9
 @blk9
-	%v23 =l copy 68
+	%v23 =l copy 72
 	%v24 =l copy 5
 	call $sooth_oob_trap(l %v23, l %v20, l %v24)
 	jmp @blk8
@@ -176,7 +173,7 @@ export function $sooth_main() {
 	%v40 =w cultl %v38, %v39
 	jnz %v40, @blk16, @blk17
 @blk17
-	%v41 =l copy 69
+	%v41 =l copy 73
 	%v42 =l copy 5
 	call $sooth_oob_trap(l %v41, l %v38, l %v42)
 	jmp @blk16

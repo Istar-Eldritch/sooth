@@ -10,6 +10,10 @@
 
 import: intrinsics * ;
 import: core::prelude * ;
+\ `bool` names a type in an effect below and a bool is printed with `.`, and
+\ neither a type name nor an operator overload follows the prelude hub's
+\ re-export: both come from the declaring module.
+import: core::bool b | bool . | ;
 
 import: core::combinators c | times | ;
 

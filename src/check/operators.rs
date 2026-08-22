@@ -173,6 +173,17 @@ pub(super) fn check_operator(
         stack.extend(hit.outputs.iter().map(|ty| Slot::computed(*ty)));
         return Ok(OpDispatch::Builtin(std::mem::take(stack)));
     }
+    // P7 slice 3i (R4): the boolean type this build resolved, for the
+    // `and`/`or`/`xor`/`not` arms below -- the four operators that are logical
+    // on `bool` as well as bitwise on the integers. Only the integer half of
+    // their domain is table rows: `bool` is `core::bool`'s enum, so the `Type`
+    // naming it is known only once a build has resolved the registry, while the
+    // table is built once per process. The hand-written arms are where bool's
+    // membership is decided -- which is where it was decided before this slice
+    // too, since a user overload of one of these names intercepts ahead of
+    // `check_operator` on an exact operand match either way: the rows were a
+    // fast path, never the rule.
+    let bool_ty = resolve_bool_type(ctx.enums());
 
     // Slice 8a phase 2 (R2/R6): a user overload of this builtin name whose
     // inputs match the operands exactly beats the numeric coercion fallback
@@ -239,7 +250,9 @@ pub(super) fn check_operator(
                 return Err(need(name, 2, n));
             }
             let (a, b) = (stack[n - 2], stack[n - 1]);
-            if !(a.ty.is_int() || a.ty.is_bool()) || !(b.ty.is_int() || b.ty.is_bool()) {
+            if !(a.ty.is_int() || Some(a.ty) == bool_ty)
+                || !(b.ty.is_int() || Some(b.ty) == bool_ty)
+            {
                 return Err(bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
             let ty = unify(a, b).map_err(|size_target| match size_target {
@@ -255,7 +268,7 @@ pub(super) fn check_operator(
                 return Err(need(name, 1, n));
             }
             let a = stack[n - 1];
-            if !(a.ty.is_int() || a.ty.is_bool()) {
+            if !(a.ty.is_int() || Some(a.ty) == bool_ty) {
                 return Err(bitwise_not_requires_int_error(ctx, span, a.ty));
             }
         }
@@ -346,7 +359,7 @@ pub(super) fn check_operator(
             // word's decision, not an operator's. So a slice reaches
             // `print_requires_printable_error` here, and the print/REPL
             // renderers match that with their own "not printable" arms.
-            if !a.ty.is_numeric() && !a.ty.is_bool() && !matches!(a.ty, Type::Str | Type::Cstr) {
+            if !a.ty.is_numeric() && !matches!(a.ty, Type::Str | Type::Cstr) {
                 return Err(print_requires_printable_error(ctx, span, a.ty));
             }
             stack.truncate(n - 1);
@@ -499,11 +512,10 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
     }
 }
 
-/// `.` applied to a non-printable value. Every current primitive `Type` (the
-/// integer tower, the float tower) is printable via a builtin row, and `bool`
-/// is printable via the library overload injected by `bool_print_word_def`,
-/// so this path has no reachable golden yet; it exists for the day a
-/// non-printable scalar (e.g. a future `Ptr`) enters the type system.
+/// `.` applied to a non-printable value: every current primitive `Type` (the
+/// integer tower, the float tower, `str`/`cstr`) has a builtin row, so this is
+/// what a `bool` gets when `core::bool`'s `.` overload is not in scope
+/// (P7 slice 3i R3) -- and what a future non-printable scalar would get.
 fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
@@ -537,6 +549,7 @@ mod tests {
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
+
     /// `check_src` skips `resolve_modules` entirely, so it never mangles a
     /// name and cannot catch a diagnostic that forgot to demangle one. Every
     /// real build mangles (`assemble_module`'s `always_mangle`, `driver.rs`)
@@ -1053,15 +1066,31 @@ mod tests {
     }
     #[test]
     fn check_print_accepts_every_printable_scalar() {
-        // `.` is type-directed over the whole integer tower, both float
-        // widths, and `bool`, not just `i64`.
+        // `.` is type-directed over the whole integer tower and both float
+        // widths, not just `i64`.
         check_src(": w ( -- ) 5 . ;").unwrap();
         check_src(": w ( -- ) 5 >u8 . ;").unwrap();
         check_src(": w ( -- ) 5 >i32 . ;").unwrap();
         check_src(": w ( -- ) -1 >u64 . ;").unwrap();
         check_src(": w ( -- ) 3.14 . ;").unwrap();
         check_src(": w ( -- ) 3.14 >f32 . ;").unwrap();
-        check_src(": w ( -- ) true . ;").unwrap();
+    }
+    #[test]
+    fn check_print_of_a_bool_needs_the_core_bool_overload() {
+        // P7 slice 3i (R3): `bool` is not in the builtin printable set, so the
+        // operator itself refuses it -- printing one is `core::bool`'s `.`
+        // overload, reached by 8a's overload dispatch on a builtin-row miss.
+        // `check_src_mangled` runs the resolve pass first, which is what puts
+        // the overload under the mangled key `scoped_operator_overloads` reads
+        // (a bare parse-then-check leaves it unfound, hence the bare-`check_src`
+        // rejection below).
+        let err = check_src(": w ( -- ) true . ;").unwrap_err();
+        assert!(
+            err.contains("`.` requires a printable scalar, found `bool`"),
+            "unexpected message: {err}"
+        );
+        check_src_mangled(": w ( -- ) true . ;")
+            .expect("`core::bool`'s `.` overload prints a bool");
     }
     #[test]
     fn check_not_on_literal_count_is_not_a_literal_for_fill() {

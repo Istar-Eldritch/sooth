@@ -6,7 +6,6 @@
 
 use std::fmt::Write;
 
-use crate::ast::BOOL_ENUM_ID;
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
     QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value, ALLOC_SYMBOL,
@@ -73,13 +72,8 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
     out.push_str("data $ufmt = { b \"%lu\\n\", b 0 }\n");
     out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
-    // Bool prints via a 2-entry pointer table indexed by the canonical 0/1
-    // value (no branch needed): `$boolstrs[v]` selects `$true_str`/`$false_str`,
-    // printed through `%s` (`$sfmt`).
+    // `%s` for `cstr` printing (a bare NUL-terminated byte pointer).
     out.push_str("data $sfmt = { b \"%s\", b 0 }\n");
-    out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
-    out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
-    out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
     // The runtime out-of-bounds trap message: a located line + the offending
     // index + the array length, printed to stderr before a nonzero exit.
     out.push_str(
@@ -1232,28 +1226,6 @@ fn emit_instr(
         // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
         // and `sooth_trace_event`'s `printf`.
         Instr::Print(v) => match ty_of(value_types, *v) {
-            // Slice 9: `Bool` is `IrType::Enum(BOOL_ENUM_ID)` now, still
-            // routed to the same `$boolstrs` table -- `.`'s primitive `bool`
-            // printable row is deleted in P2 (R6), not this phase, so `.` on
-            // `Bool` must keep working identically through P1.
-            IrType::Bool | IrType::Enum(BOOL_ENUM_ID) => {
-                // No branch needed: widen the canonical 0/1 to an index into
-                // the 2-entry `$boolstrs` pointer table and print the
-                // selected string via `%s`.
-                let idx = format!("%pidx{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{idx} =l extuw {}", val(*v)).unwrap();
-                let off = format!("%poff{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{off} =l mul {idx}, 8").unwrap();
-                let addr = format!("%paddr{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{addr} =l add $boolstrs, {off}").unwrap();
-                let ptr = format!("%pptr{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{ptr} =l loadl {addr}").unwrap();
-                writeln!(out, "\tcall $printf(l $sfmt, l {ptr}, ...)")
-            }
             // A float always prints as a `d`: an `f32` widens first (`exts`)
             // since a variadic C call needs the explicit promotion QBE never
             // does implicitly.
@@ -1306,9 +1278,15 @@ fn emit_instr(
                 writeln!(out, "\t{len} =l loadl {len_addr}").unwrap();
                 writeln!(out, "\tcall $printf(l $strfmt, l {len}, l {ptr}, ...)")
             }
-            // `cstr` is already a bare NUL-terminated byte pointer, so it
-            // prints exactly like a bool's selected string does: `%s`.
+            // `cstr` is a bare NUL-terminated byte pointer, printed via `%s`.
             IrType::Cstr => writeln!(out, "\tcall $printf(l $sfmt, l {}, ...)", val(*v)),
+            // `bool` prints through `core::bool`'s own `.` overload, which
+            // eliminates over `True`/`False` and prints via `str`'s `.` --
+            // never through `Instr::Print`. Reaching this arm is a checker or
+            // lowering bug.
+            IrType::Bool => {
+                unreachable!("`bool` prints through the library `.` overload, not `Instr::Print`")
+            }
             IrType::OwnedCell(_) => {
                 unreachable!("a cell is not a printable scalar; checker rejects it")
             }
@@ -1774,28 +1752,72 @@ mod tests {
         );
     }
 
+    /// Regression guard (P7.S3i R3): `.` on a `bool` routes through
+    /// `core::bool`'s own `.` overload, eliminating over `True`/`False` and
+    /// printing via `str`'s `.` — never through a backend `Instr::Print` on a
+    /// bool. The `$boolstrs`/`$true_str`/`$false_str` data symbols and the
+    /// `IrType::Bool` Print arm are therefore dead from source; this probe
+    /// confirms their absence in a driver-path build (the path that resolves
+    /// the import) and is kept as a regression guard against reintroducing the
+    /// fast path.
     #[test]
-    fn emit_print_on_bool_indexes_boolstrs_via_sfmt() {
-        // `.` on a `bool` selects `$true_str`/`$false_str` through the
-        // 2-entry `$boolstrs` pointer table, no branch, printed via `%s`.
-        let il = emit_src(": w ( -- ) true . ;");
+    fn bool_print_routes_through_eliminator_not_boolstrs() {
+        let dir = std::env::temp_dir().join(format!(
+            "sooth-bool-print-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("main.sth");
+        // `import: intrinsics * ;` is needed for `tag`, the intrinsic the bool
+        // eliminator (`bool?`) dispatches over; it resolves as a reserved
+        // Dependency-anchored name with no file lookup, so a temp-dir entry is
+        // fine (packages::resolve_import returns Ok(None) for it).
+        //
+        // `core::bool` comes in by quoted path: `bool`, its constructors and
+        // its `.` overload are ordinary imported names (P7 slice 3i), and a
+        // temp-dir entry has no ancestor manifest to resolve a package name
+        // through.
+        std::fs::write(
+            &entry,
+            format!(
+                ": main ( -- ) true . ;\nimport: intrinsics * ;\nimport: \"{}/lib/bool.sth\" b | bool True False . | ;\n",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        )
+        .unwrap();
+        let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
+        let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
+        crate::check::check(&mut module).expect("checks");
+        let ir = crate::ir::lower(&module).unwrap();
+        let il = emit(&ir).unwrap();
         assert!(
-            il.contains("data $boolstrs = { l $false_str, l $true_str }"),
-            "unexpected IL: {il}"
+            !il.contains("$boolstrs"),
+            "$boolstrs data must not be emitted: {il}"
         );
         assert!(
-            il.contains("data $true_str = { b \"true\\n\", b 0 }"),
-            "unexpected IL: {il}"
+            !il.contains("$true_str"),
+            "$true_str data must not be emitted: {il}"
         );
         assert!(
-            il.contains("data $false_str = { b \"false\\n\", b 0 }"),
-            "unexpected IL: {il}"
+            !il.contains("$false_str"),
+            "$false_str data must not be emitted: {il}"
         );
-        assert!(il.contains("add $boolstrs,"), "unexpected IL: {il}");
+        // The eliminator prints via `str`'s `.` (`%.*s`), not via `%s`.  Assert
+        // the actual printf call, not just the data symbol: `$strfmt` is emitted
+        // unconditionally so a bare `contains("$strfmt")` would be vacuous.
         assert!(
-            il.contains("call $printf(l $sfmt, l "),
-            "unexpected IL: {il}"
+            il.contains("call $printf(l $strfmt"),
+            "bool print must route through str's `.` (expected $strfmt printf call): {il}"
         );
+        assert!(
+            !il.contains("call $printf(l $sfmt,"),
+            "bool print must not use the old `%s` ($sfmt) boolstrs path: {il}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1817,15 +1839,21 @@ mod tests {
     fn emit_print_of_cstr_uses_string_format() {
         // R9/criterion 9: `.` on a `cstr` prints via plain `%s` (`$sfmt`),
         // since it has no carried length to prefer.
+        //
+        // Scoped to `$w`'s own function body: the in-process seed brings
+        // `core::bool` in as source (P7 slice 3i), whose `.` overload prints
+        // through the `str` row and so legitimately emits a `$strfmt` call of
+        // its own elsewhere in the module.
         let il = emit_src(": w ( -- ) \"hi\" cstr . ;");
-        assert!(
-            il.contains("call $printf(l $sfmt, l "),
-            "unexpected IL: {il}"
-        );
-        assert!(
-            !il.contains("call $printf(l $strfmt"),
-            "unexpected IL: {il}"
-        );
+        let w = il
+            .split("export function $w()")
+            .nth(1)
+            .expect("the emitted `w`")
+            .split("\n}")
+            .next()
+            .expect("the body up to its closing brace");
+        assert!(w.contains("call $printf(l $sfmt, l "), "unexpected IL: {w}");
+        assert!(!w.contains("call $printf(l $strfmt"), "unexpected IL: {w}");
     }
 
     #[test]

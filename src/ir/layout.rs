@@ -976,9 +976,7 @@ mod tests {
             "type: Shape | Circle r i64 p i64 | Dot ;\n\
              : main ( -- ) ;\n",
         );
-        // `bool` is injected as enum 0 ahead of any user enum
-        // (`BOOL_ENUM_ID`), so `Shape` is enum 1.
-        let id = EnumId::from_index(1);
+        let id = enum_id(&enums, "Shape");
         for (vi, name) in ["Circle", "Dot"].iter().enumerate() {
             assert!(
                 matches!(enums.words.get(*name), Some(EnumWord::Construct(got_id, got_vi)) if *got_id == id && *got_vi == vi),
@@ -1398,13 +1396,11 @@ mod tests {
         // R17: a carried enum slot occupies its size rounded up to a multiple
         // of 8. Shape is 24 bytes (already a multiple of 8); a tag-only enum
         // (4 bytes pre-Slice-9, now a 1-byte scalar) rounds up to one 8-byte
-        // cell either way. `enums_of` parses through the full pipeline, so
-        // `bool` occupies the reserved index 0 (Slice 9, R2) ahead of the
-        // source's own `Shape`/`Dir`.
+        // cell either way.
         let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
         assert_eq!(
             carried_slot_bytes(
-                IrType::Enum(EnumId::from_index(1)),
+                IrType::Enum(enum_id(&e, "Shape")),
                 &Structs::default(),
                 &e,
                 &Arrays::default()
@@ -1413,7 +1409,7 @@ mod tests {
         );
         assert_eq!(
             carried_slot_bytes(
-                IrType::Enum(EnumId::from_index(2)),
+                IrType::Enum(enum_id(&e, "Dir")),
                 &Structs::default(),
                 &e,
                 &Arrays::default()

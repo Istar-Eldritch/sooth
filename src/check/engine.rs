@@ -1428,10 +1428,10 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
-        // session seeds this at index 0 (`Session::new`); this bare-line
-        // helper mirrors that so a `bool`-producing comparison resolves.
-        let bool_enums = [crate::ast::bool_enum_decl()];
+        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
+        // session seeds at startup (`Session::new`); this bare-line helper
+        // mirrors that seed so a `bool`-producing comparison resolves.
+        let bool_enums = crate::test_support::core_bool_enums();
         infer_line(
             &terms,
             entry,
@@ -1667,6 +1667,7 @@ mod tests {
         // registry the layout pass reads, flagged as a bundle and carrying the
         // output tuple in order (deepest output first).
         let module = checked_module(": pair ( -- i64 bool ) 1 true ; : main ( -- ) ;");
+        let bool_ty = resolve_bool_type(&module.enums).expect("`core::bool` is seeded");
         let bundles: Vec<&StructDecl> = module.structs.iter().filter(|d| d.is_bundle).collect();
         assert_eq!(bundles.len(), 1);
         assert_eq!(
@@ -1675,7 +1676,7 @@ mod tests {
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect::<Vec<Type>>(),
-            vec![Type::I64, Type::BOOL]
+            vec![Type::I64, bool_ty]
         );
     }
     #[test]
@@ -1772,9 +1773,9 @@ mod tests {
         // block-end firing site reports. `bind`'s `linear` flag is passed
         // explicitly by the caller (not derived from the `Type` via
         // `is_copy`), so any type distinct from `a`'s suffices here.
-        scope.bind("s", Slot::computed(Type::BOOL), true, prov);
+        scope.bind("s", Slot::computed(Type::Str), true, prov);
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
-        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::BOOL));
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Str));
         assert_eq!(leaked.2, MoveState::Live);
     }
     #[test]
@@ -1845,7 +1846,7 @@ mod tests {
         let mut refs = Vec::new();
         let a = intern_ref_type(&mut refs, Type::I64, true);
         let b = intern_ref_type(&mut refs, Type::I64, true);
-        let c = intern_ref_type(&mut refs, Type::BOOL, true);
+        let c = intern_ref_type(&mut refs, Type::U32, true);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(refs.len(), 2);

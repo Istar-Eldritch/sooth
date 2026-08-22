@@ -48,7 +48,7 @@ pub(super) fn check_extern_decls(
             return Err(extern_multi_output_error(decl));
         }
         check_reference_free_signature(&decl.name, &decl.effect, structs, enums, arrays)?;
-        check_extern_boundary_types(decl)?;
+        check_extern_boundary_types(decl, enums)?;
     }
     Ok(())
 }
@@ -170,16 +170,18 @@ fn extern_multi_output_error(decl: &ExternDecl) -> String {
 /// makes it a descriptor handle, not a scalar or a single opaque `Ptr`, so C
 /// would receive a pointer to a descriptor rather than a `char*`. See
 /// `extern_str_input_error`/`extern_str_output_error` for each direction.
-fn is_extern_boundary_scalar(ty: Type) -> bool {
+///
+/// P7 slice 3i (R4): `bool` is `core::bool`'s enum, so admitting it takes the
+/// registry the build resolved it in rather than a constant pattern. Only that
+/// one enum is admitted, not every payload-free enum: widening the FFI boundary
+/// to user enums is a rule change with no client here.
+fn is_extern_boundary_scalar(ty: Type, enums: &[EnumDecl]) -> bool {
+    if Some(ty) == resolve_bool_type(enums) {
+        return true;
+    }
     matches!(
         ty,
-        Type::Int(_)
-            | Type::Float(_)
-            | Type::BOOL
-            | Type::Usize
-            | Type::Isize
-            | Type::Ref(..)
-            | Type::Cstr
+        Type::Int(_) | Type::Float(_) | Type::Usize | Type::Isize | Type::Ref(..) | Type::Cstr
     )
 }
 
@@ -190,7 +192,7 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
 /// the FFI boundary has no answer and no client. A `^T` specifically in
 /// output position gets its own message, since forging ownership of memory
 /// the allocator did not hand out is a sharper reason than the generic one.
-fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
+fn check_extern_boundary_types(decl: &ExternDecl, enums: &[EnumDecl]) -> Result<(), String> {
     for slot in &decl.effect.inputs {
         if matches!(slot.ty, Type::Str) {
             return Err(extern_str_input_error(decl));
@@ -198,12 +200,12 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if matches!(slot.ty, Type::Slice(..)) {
             return Err(extern_slice_input_error(decl, slot.ty));
         }
-        if !is_extern_boundary_scalar(slot.ty) {
+        if !is_extern_boundary_scalar(slot.ty, enums) {
             return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
         }
     }
     for slot in &decl.effect.outputs {
-        if is_extern_boundary_scalar(slot.ty) {
+        if is_extern_boundary_scalar(slot.ty, enums) {
             continue;
         }
         if matches!(slot.ty, Type::Str) {
@@ -311,7 +313,33 @@ pub fn check_static_decls(module: &Module) -> Result<(), String> {
             return Err(static_name_collision_error(decl, kind));
         }
     }
+    // P7 slice 3i (R1): `bool` is the one entry in the parser's scalar
+    // allow-list that resolves through the type registry, and there it can only
+    // check the *name*: an enum's variant payloads are not filled in until
+    // after declaration parsing, and `resolve_bool_type`'s exactly-two-variants
+    // shape test has nothing to run against yet either. So the shape is
+    // re-checked here, against the same `resolve_bool_type` the logical
+    // operators and `extern:` boundary rest on: a same-named enum that is not
+    // *the* resolved bool (a payload-carrying variant, or a third variant) is
+    // not a scalar, and a `= true` initializer would write a bare discriminant
+    // over storage whose layout or discriminant space it does not own.
+    for decl in &module.statics {
+        if let Type::Enum(_, name) = decl.ty {
+            if Some(decl.ty) != resolve_bool_type(&module.enums) {
+                return Err(static_non_scalar_enum_error(decl, name));
+            }
+        }
+    }
     Ok(())
+}
+
+/// P7 slice 3i (R1): a static declared at an enum type whose variants are not
+/// all payload-free.
+fn static_non_scalar_enum_error(decl: &StaticDecl, name: &str) -> String {
+    format!(
+        "error: static `{}` has a non-scalar type `{name}` (line {}, col {}): a static's enum type must be exactly two variants, each carrying no payload\n  note: only `i64`, `u32`, `bool` and `str` are supported this slice",
+        decl.name, decl.span.line, decl.span.col
+    )
 }
 
 /// What else in the static's own module already holds its name, if anything.
@@ -416,15 +444,6 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
 /// it could even be named here), and a primitive/array/etc. names no
 /// declared type at all.
 fn private_type_name(ty: Type, owner_module: u32, module: &Module) -> Option<&'static str> {
-    // Slice 9 (R2): `bool` is the builtin zero-payload enum injected
-    // identically (with `module: 0`) into every assembled module's registry
-    // (`bool_enum_decl`, `BOOL_ENUM_ID`); it is never a user-declared,
-    // ownable type, so it can never trip the private-type export rule --
-    // otherwise any module whose own `owner_module` happens to be `0` would
-    // wrongly see its own builtin `bool` usage as an unexported private type.
-    if ty == Type::BOOL {
-        return None;
-    }
     let (decl_module, name) = match ty {
         Type::Struct(id, name) => (module.structs[id.index()].module, name),
         Type::Enum(id, name) => (module.enums[id.index()].module, name),
@@ -1681,7 +1700,7 @@ mod tests {
             module: 0,
         };
         assert_eq!(
-            check_extern_boundary_types(&decl).unwrap_err(),
+            check_extern_boundary_types(&decl, &[]).unwrap_err(),
             "error: `extern: consume` declares the input `Slice[i64]` (line 3, col 1)\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`"
         );
         // The reference it views crosses fine, which is what the message
@@ -1703,7 +1722,8 @@ mod tests {
             },
             ..decl
         };
-        check_extern_boundary_types(&ok).expect("`&i64` plus a `usize` length is a C prototype");
+        check_extern_boundary_types(&ok, &[])
+            .expect("`&i64` plus a `usize` length is a C prototype");
     }
 
     #[test]

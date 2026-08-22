@@ -2,9 +2,6 @@ data $fmt = { b "%ld\n", b 0 }
 data $ufmt = { b "%lu\n", b 0 }
 data $ffmt = { b "%g\n", b 0 }
 data $sfmt = { b "%s", b 0 }
-data $true_str = { b "true\n", b 0 }
-data $false_str = { b "false\n", b 0 }
-data $boolstrs = { l $false_str, l $true_str }
 data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
 data $allocfmt = { b "alloc %ld\n", b 0 }
 data $freefmt = { b "free %ld\n", b 0 }
@@ -73,7 +70,7 @@ export function :Popped $pop__m0(:List %v0) {
 	%v6 =w ceqw %v3, %v5
 	jnz %v6, @blk1, @blk2
 @blk1
-	call $sooth_enum_drop_1(:List %v0)
+	call $sooth_enum_drop_0(:List %v0)
 	%v7 =l alloc8 24
 	%v8 =w copy 0
 	%v9 =l add %v7, 0
@@ -164,25 +161,25 @@ export function $sooth_main() {
 	%v9 =l add %v7, 24
 	%v10 =l loadl %v9
 	call $printf(l $fmt, l %v10, ...)
-	call $sooth_enum_drop_1(:List %v8)
+	call $sooth_enum_drop_0(:List %v8)
 	ret
 }
 
 export function $sooth_struct_drop_0(:Popped %v0) {
 @start
 	%v1 =l add %v0, 0
-	call $sooth_enum_drop_1(:List %v1)
+	call $sooth_enum_drop_0(:List %v1)
 	ret
 }
 
 export function $sooth_struct_drop_1(:Summed %v0) {
 @start
 	%v1 =l add %v0, 0
-	call $sooth_enum_drop_1(:List %v1)
+	call $sooth_enum_drop_0(:List %v1)
 	ret
 }
 
-export function $sooth_enum_drop_1(:List %v0) {
+export function $sooth_enum_drop_0(:List %v0) {
 @start
 	%v8 =l alloc8 24
 	jmp @blk1
@@ -210,7 +207,7 @@ export function $sooth_cell_drop_0(l %v0) {
 	blit %v0, %v1, 24
 	%v2 =l copy 24
 	call $sooth_free(l %v0, l %v2)
-	call $sooth_enum_drop_1(:List %v1)
+	call $sooth_enum_drop_0(:List %v1)
 	ret
 }
 

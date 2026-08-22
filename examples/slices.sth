@@ -6,7 +6,6 @@
 
 import: intrinsics * ;
 import: core::prelude * ;
-
 import: core::combinators c | times | ;
 
 : sum ( Slice[i64] -- i64 )

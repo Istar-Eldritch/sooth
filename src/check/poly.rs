@@ -915,8 +915,15 @@ pub(super) fn poly_call_term(
                     }
                     _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
                 }
+                // P7 slice 3i (R4): the comparison's result type is
+                // `core::bool`'s enum as this build resolved it. Absent, the
+                // six comparison names are `lib/cmp.sth` words that resolved
+                // to nothing, which is what the caller is told.
+                let Some(bool_ty) = resolve_bool_type(ctx.enums()) else {
+                    return Err(unknown_word_error(ctx, span, name));
+                };
                 stack.truncate(n - 2);
-                stack.push(PolySlot::new(PolyType::Concrete(Type::BOOL)));
+                stack.push(PolySlot::new(PolyType::Concrete(bool_ty)));
                 return Ok(stack);
             }
         }

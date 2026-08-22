@@ -129,7 +129,53 @@ fn fixture_imports(src: &str) -> String {
             wanted.join(" ")
         ));
     }
+    out.push_str(&bool_imports(src, &tokens, &declared));
     out
+}
+
+/// P7 slice 3i: the `core::bool` names a fixture's text implies, on the same
+/// derive-it-from-the-source principle as the `core` words above.
+///
+/// It is a separate `import:` line from the `core::prelude` one on purpose:
+/// `core::prelude` re-exports the `true`/`false` constructors but cannot
+/// re-export the *type* `bool` (a type name resolves against its declaring
+/// module) nor the `.` overload (an operator overload's candidate lookup is one
+/// hop), so a fixture that names either has to reach the declaring module. Both
+/// routes at once would be a hard collision, so everything bool comes from
+/// `core::bool` here and the prelude line stays words-only.
+fn bool_imports(src: &str, tokens: &[&str], declared: &[&str]) -> String {
+    // A fixture that declares any of these itself -- the in-process shape, and
+    // the subject of the "no import, no `bool`" goldens -- gets nothing added.
+    let own = ["bool", "False", "True"];
+    if src.contains("import: core::bool") || own.iter().any(|n| declared.contains(n)) {
+        return String::new();
+    }
+    let mut names: Vec<&str> = Vec::new();
+    if src.contains("bool") {
+        names.push("bool");
+    }
+    if tokens.contains(&"true") || tokens.contains(&"false") {
+        names.push("False");
+        names.push("True");
+    }
+    // The `.` overload, for a fixture that prints a bool. A bool can reach `.`
+    // without any bool name appearing in the text -- `2 3 lt .` prints one and
+    // spells neither the type nor a constructor -- so a produced-a-bool word
+    // counts as evidence too. Requesting it unused would be harmless (it
+    // overloads a builtin, so no other type's `.` changes); requesting it where
+    // the fixture declares its own `.` is a hard collision.
+    let produces_bool = [
+        "eq", "lt", "gt", "lte", "gte", "ne", "and", "or", "xor", "not",
+    ]
+    .iter()
+    .any(|w| tokens.contains(w));
+    if tokens.contains(&".") && !declared.contains(&".") && (!names.is_empty() || produces_bool) {
+        names.push(".");
+    }
+    match names.is_empty() {
+        true => String::new(),
+        false => format!("import: core::bool corebool | {} | ;\n", names.join(" ")),
+    }
 }
 
 /// Write a fixture source to `path`, with `fixture_imports` appended.

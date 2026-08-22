@@ -487,12 +487,10 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
 
-    /// `bool` is injected as enum 0 ahead of any user enum (`BOOL_ENUM_ID`),
-    /// so `Shape` is enum 1. `Circle` (vi 0) carries two fields, `Rect` (vi
-    /// 1) one, `Dot` (vi 2) none.
+    /// `Circle` (vi 0) carries two fields, `Rect` (vi 1) one, `Dot` (vi 2)
+    /// none. Callers take `Shape`'s id from `enum_id`, never a literal index.
     fn shape_enums() -> Enums {
         enums_of(
             "type: P a i64 b i64 ;\n\
@@ -507,7 +505,7 @@ mod tests {
         // directly against hand-built state (no surface syntax reaches
         // `EnumWord::Destructure` until Phase 4's eliminator calls it).
         let enums = shape_enums();
-        let id = EnumId::from_index(1);
+        let id = enum_id(&enums, "Shape");
         let structs = Structs::default();
         let arrays = Arrays::default();
         let cells = Cells::default();
@@ -562,7 +560,7 @@ mod tests {
         // would not catch a mutation that always pushes nothing regardless
         // of field count, so both are asserted.
         let enums = shape_enums();
-        let id = EnumId::from_index(1);
+        let id = enum_id(&enums, "Shape");
         let structs = Structs::default();
         let arrays = Arrays::default();
         let cells = Cells::default();
@@ -637,7 +635,7 @@ mod tests {
         // R14 table, not `dupit`.
         let ir = lower_src(
             ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
-             : main ( -- ) 5 dupit . . true dupit . . ;",
+             : main ( -- ) 5 dupit . . 5 >u32 dupit . . ;",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "dupit"),
@@ -649,7 +647,7 @@ mod tests {
             .map(|f| f.name.as_str())
             .filter(|n| n.starts_with("sooth_mono_dupit"))
             .collect();
-        assert_eq!(mono.len(), 2, "one IrFunc per θ (i64 and bool)");
+        assert_eq!(mono.len(), 2, "one IrFunc per θ (i64 and u32)");
         let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
         let calls = call_symbols(main);
         for sym in &mono {
@@ -719,8 +717,8 @@ mod tests {
     fn bool_enum_true_false_construct_0_and_1() {
         // Slice 9 (R2): `True`/`False` replace `TermKind::BoolLit`, lowering
         // to the same `0`/`1` scalar discriminant a bare `Const` produced
-        // before this migration -- no memory aggregate, `IrType::Enum`
-        // carrying `BOOL_ENUM_ID` (R1's general zero-payload-enum scalar
+        // before that migration -- no memory aggregate, just an `IrType::Enum`
+        // at the boolean enum's own id (the general zero-payload-enum scalar
         // rule, not `IrType::Bool` directly).
         // Single-output words each, so neither triggers R10's bundle-return
         // packing (which would add its own, unrelated `Instr::Alloc` for the
@@ -755,7 +753,7 @@ mod tests {
                 _ => None,
             })
             .expect("a const 1 for `true`");
-        assert_eq!(t.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+        assert_eq!(t.value_types[v.0 as usize], bool_ir_type(&ir));
     }
 
     #[test]

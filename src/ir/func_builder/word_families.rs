@@ -1088,9 +1088,7 @@ mod tests {
     #[test]
     fn variant_field_projection_reads_the_correct_variant_and_field() {
         let enums = shape_enums();
-        // `bool` is injected as enum 0 ahead of any user enum (`BOOL_ENUM_ID`),
-        // so `Shape` is enum 1.
-        let id = EnumId::from_index(1);
+        let id = enum_id(&enums, "Shape");
         let payload_offset = enum_layout(&enums, "Shape").payload_offset;
         let field = enum_layout(&enums, "Shape").variants[0].fields[0];
         let structs = Structs::default();
@@ -1141,7 +1139,7 @@ mod tests {
         // consumed by the projection (`ref_inner` is what tells the two
         // apart), an owned one is not.
         let enums = shape_enums();
-        let id = EnumId::from_index(1);
+        let id = enum_id(&enums, "Shape");
         let payload_offset = enum_layout(&enums, "Shape").payload_offset;
         let field = enum_layout(&enums, "Shape").variants[0].fields[0];
         let structs = Structs::default();

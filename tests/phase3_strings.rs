@@ -158,9 +158,9 @@ fn str_carried_across_a_repl_line_alongside_another_slot_is_correct() {
 fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
     // The carried-slot prologue's `_` wildcard used to load every
     // unrecognised slot, including `Bool`, as a bare `IrType::I64`, so a
-    // carried `true` printed `1` (missing `Instr::Print`'s `Bool` arm and its
-    // `$boolstrs` path) instead of `true`. Same-line `true .` was always
-    // correct; only the carried path degraded.
+    // carried `true` printed `1` (the old backend `Bool` Print arm was
+    // unreachable from the carried path) instead of `true`. Same-line
+    // `true .` was always correct; only the carried path degraded.
     let out = run_session(&["true", "."]);
     assert_eq!(out, "stack: true\ntrue\nstack: (empty)\n");
 }
@@ -169,8 +169,8 @@ fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
 fn bool_print_dispatches_to_library_overload_same_line() {
     // Slice 9 phase 2 (R6): the primitive `bool` printable row is gone from
     // `.`'s `BUILTIN_TABLE`; `true .`/`false .` now resolve through 8a's
-    // `builtin_overloads` dispatch to the injected library word
-    // (`bool_print_word_def`), which prints identically. A REPL twin of
+    // `builtin_overloads` dispatch to `core::bool`'s own `.` overload, which
+    // prints identically. A REPL twin of
     // `leap_year_dogfood_compiles_and_runs`'s native coverage, proving the
     // session's own copy (`Session::new`'s `eval_def`) resolves too, with no
     // fall-through to the deleted builtin `Instr::Print` arm (R7).

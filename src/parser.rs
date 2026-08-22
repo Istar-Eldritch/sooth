@@ -506,9 +506,7 @@ pub fn prepass_and_register(
 /// `Module` around `parse_bodies` instead.
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
-    // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
-    // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
-    let mut enums = vec![crate::ast::bool_enum_decl()];
+    let mut enums = Vec::new();
     prepass_and_register(tokens, 0, &mut structs, &mut enums)?;
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
@@ -533,10 +531,9 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
     }
-    // The user enums start after the injected `bool` at `BOOL_ENUM_ID`.
     for (idx, variant_fields) in bodies.enum_fields_by_decl.into_iter().enumerate() {
         for (vidx, fields) in variant_fields.into_iter().enumerate() {
-            enums[crate::ast::BOOL_ENUM_ID.index() + 1 + idx].variants[vidx].fields = fields;
+            enums[idx].variants[vidx].fields = fields;
         }
     }
     // R4/D5: every monomorphized instantiation lands in the ordinary
@@ -1710,11 +1707,18 @@ impl<'t> Parser<'t> {
         // in the same file), so a genuine struct type and a mistyped or
         // forward-referenced user type both fall through to the same "not a
         // scalar" error here.
+        //
+        // P7 slice 3i (R1): `bool` is the one entry that is not a keyword. It
+        // is `core::bool`'s enum, so it resolves through the ordinary
+        // type-name path here -- and so a boolean static requires the
+        // enclosing module to import `core::bool`, exactly as naming `bool` in
+        // an effect does. Without the import this is a located `unknown type
+        // bool` at the annotation and the initializer is never read.
         let ty = match ty_name.as_str() {
             "i64" => Type::I64,
             "u32" => Type::U32,
-            "bool" => Type::BOOL,
             "str" => Type::Str,
+            "bool" => self.resolve_type(&ty_name, ty_span)?,
             _ => return Err(static_scalar_type_error(&name, &ty_name, ty_span)),
         };
         let init = if matches!(self.peek(), Some((Token::Word(w), _)) if w == "=") {
@@ -1738,6 +1742,12 @@ impl<'t> Parser<'t> {
     /// D1/D3: the `= literal` initialiser, one literal matching the static's
     /// declared scalar type -- no arithmetic, no reference to another
     /// static, no struct-literal aggregate.
+    ///
+    /// The boolean arm keys on `ty` being *an enum*, which the allow-list in
+    /// `parse_static_decl` only ever admits through its `bool` entry: an
+    /// enum's variant payloads are not filled in until after declaration
+    /// parsing, so this is the sharpest test available here, and
+    /// `check_static_decls` re-tests the resolved shape once they are.
     fn parse_static_init(&mut self, ty: Type) -> Result<StaticInit, String> {
         match self.peek() {
             Some((Token::Int(n), _)) if ty == Type::I64 => {
@@ -1758,7 +1768,9 @@ impl<'t> Parser<'t> {
                 self.pos += 1;
                 Ok(StaticInit::Str(s))
             }
-            Some((Token::Word(w), _)) if ty == Type::BOOL && (w == "true" || w == "false") => {
+            Some((Token::Word(w), _))
+                if matches!(ty, Type::Enum(..)) && (w == "true" || w == "false") =>
+            {
                 let b = w == "true";
                 self.pos += 1;
                 Ok(StaticInit::Bool(b))
@@ -3810,6 +3822,22 @@ mod tests {
         parse(&tokens)
     }
 
+    /// P7 slice 3i: `core::bool`'s declaration, for a fixture whose subject is
+    /// the boolean type. `bool` is an ordinary declared enum now, and this path
+    /// resolves no `import:`, so a source that names it declares it. Appended
+    /// by `parse_src_with_bool`, never prepended, so a fixture's own line
+    /// numbers stay the ones its diagnostics report.
+    const BOOL_DEF: &str = "\ntype: bool | False | True ;\n";
+
+    fn parse_src_with_bool(src: &str) -> Result<Module, String> {
+        parse_src(&format!("{src}{BOOL_DEF}"))
+    }
+
+    /// The parsed module's boolean type.
+    fn bool_ty(module: &Module) -> Type {
+        crate::ast::resolve_bool_type(&module.enums).expect("the fixture declares `bool`")
+    }
+
     /// The qualifier and selective names of a `Qualified` import, for the
     /// import-parsing tests below.
     fn qualified(imp: &Import) -> (&str, Vec<&str>) {
@@ -4110,11 +4138,11 @@ mod tests {
 
     #[test]
     fn parse_slot_resolves_i64_and_bool_expected() {
-        let module = parse_src(": w ( i64 bool -- bool ) drop ;").unwrap();
+        let module = parse_src_with_bool(": w ( i64 bool -- bool ) drop ;").unwrap();
         let w = &module.words[0];
         assert_eq!(w.effect.inputs[0].ty, Type::I64);
-        assert_eq!(w.effect.inputs[1].ty, Type::BOOL);
-        assert_eq!(w.effect.outputs[0].ty, Type::BOOL);
+        assert_eq!(w.effect.inputs[1].ty, bool_ty(&module));
+        assert_eq!(w.effect.outputs[0].ty, bool_ty(&module));
     }
 
     #[test]
@@ -4138,7 +4166,7 @@ mod tests {
 
     #[test]
     fn parse_true_false_construct_bool_variants() {
-        let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
+        let module = parse_src_with_bool(": w ( -- bool bool ) true false ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "True"));
         assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
@@ -4149,7 +4177,7 @@ mod tests {
     /// diagnostic naming the replacement rather than a bare unknown word.
     #[test]
     fn parse_if_else_end_grammar_is_error() {
-        let err = parse_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
+        let err = parse_src_with_bool(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
         assert!(err.contains("`else`"), "unexpected message: {err}");
         assert!(
             err.contains("~[ then ] ~[ else ] if"),
@@ -4228,13 +4256,14 @@ mod tests {
     /// and both name tables empty.
     #[test]
     fn parse_quotation_annotation_full_form_ok() {
-        let module = parse_src(": w ( -- ) [ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
+        let module =
+            parse_src_with_bool(": w ( -- ) [ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3, "the body is read by the untouched reader");
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert_eq!(annot.inputs, vec![PolyType::Concrete(Type::I64)]);
-                assert_eq!(annot.outputs, vec![PolyType::Concrete(Type::BOOL)]);
+                assert_eq!(annot.outputs, vec![PolyType::Concrete(bool_ty(&module))]);
                 assert_eq!((annot.row_in, annot.row_out), (None, None));
                 assert!(annot.ty_var_names.is_empty());
                 assert!(annot.row_var_names.is_empty());
@@ -4246,13 +4275,14 @@ mod tests {
     /// The `~[ ... ]` flavour reads the same annotation and keeps its flag.
     #[test]
     fn parse_quotation_annotation_inline_flavour_ok() {
-        let module = parse_src(": w ( -- ) ~[ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
+        let module =
+            parse_src_with_bool(": w ( -- ) ~[ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 assert_eq!(annot.inputs, vec![PolyType::Concrete(Type::I64)]);
-                assert_eq!(annot.outputs, vec![PolyType::Concrete(Type::BOOL)]);
+                assert_eq!(annot.outputs, vec![PolyType::Concrete(bool_ty(&module))]);
             }
             other => panic!("expected an annotated Quotation, got {other:?}"),
         }
@@ -4276,7 +4306,7 @@ mod tests {
     /// with no `--` is a located error rather than an elided effect.
     #[test]
     fn parse_quotation_annotation_missing_arrow_is_error() {
-        let err = parse_src(": w ( -- ) [ ( i64 bool ) dup 10 lt ] drop ;").unwrap_err();
+        let err = parse_src_with_bool(": w ( -- ) [ ( i64 bool ) dup 10 lt ] drop ;").unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
         assert!(err.contains("line 1, col 25"), "unexpected: {err}");
     }
@@ -4346,7 +4376,7 @@ mod tests {
     /// as a partial arm.
     #[test]
     fn parse_quotation_annotation_variant_tag_extra_token_no_arrow_is_error() {
-        let err = parse_src(
+        let err = parse_src_with_bool(
             "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle bool ) drop ] drop ;",
         )
         .unwrap_err();
@@ -4663,11 +4693,12 @@ mod tests {
     /// (`gte` is its bound replacement, R-P3-3/Decision 2).
     #[test]
     fn ge_is_not_read_as_a_type_conversion() {
-        let module = parse_src(": w ( i64 i64 -- bool ) >= ;").unwrap();
+        let module = parse_src_with_bool(": w ( i64 i64 -- bool ) >= ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
         let err = crate::check::check(
-            &mut parse_src(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;").unwrap(),
+            &mut parse_src_with_bool(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;")
+                .unwrap(),
         )
         .unwrap_err();
         assert!(
@@ -4856,11 +4887,11 @@ mod tests {
     fn parse_typedef_enum_with_leading_pipe_registers_variants() {
         let module = parse_src("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
         assert!(module.structs.is_empty());
-        // Slice 9 (R2): `bool` occupies the reserved head of every module's
-        // enum registry (`BOOL_ENUM_ID`), so a source module's first
-        // declared enum lands at index 1, not 0.
-        assert_eq!(module.enums.len(), 2);
-        let shape = &module.enums[1];
+        // P7 slice 3i (R5): no registry slot is reserved for `bool` any more, so
+        // a source module's first declared enum lands at index 0 and its
+        // registry holds exactly what the source declared.
+        assert_eq!(module.enums.len(), 1);
+        let shape = &module.enums[0];
         assert_eq!(shape.name, "Shape");
         assert_eq!(shape.variants.len(), 2);
         assert_eq!(shape.variants[0].name, "Circle");
@@ -4879,9 +4910,8 @@ mod tests {
     #[test]
     fn parse_typedef_enum_without_leading_pipe_registers_first_variant() {
         let module = parse_src("type: MaybeInt None | Some v i64 ;").unwrap();
-        // Slice 9 (R2): `bool` is the reserved index-0 entry.
-        assert_eq!(module.enums.len(), 2);
-        let maybe = &module.enums[1];
+        assert_eq!(module.enums.len(), 1);
+        let maybe = &module.enums[0];
         assert_eq!(maybe.variants.len(), 2);
         assert_eq!(maybe.variants[0].name, "None");
         assert!(maybe.variants[0].fields.is_empty());
@@ -4891,11 +4921,10 @@ mod tests {
 
     #[test]
     fn parse_typedef_enum_single_variant_newtype_ok() {
-        // M3: a single-variant enum is allowed. Slice 9 (R2): `bool` is the
-        // reserved index-0 entry, so `Id` lands at index 1.
+        // M3: a single-variant enum is allowed.
         let module = parse_src("type: Id | Wrap v i64 ;").unwrap();
-        assert_eq!(module.enums.len(), 2);
-        assert_eq!(module.enums[1].variants.len(), 1);
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].variants.len(), 1);
     }
 
     #[test]
@@ -4936,9 +4965,8 @@ mod tests {
     #[test]
     fn parse_typedef_enum_self_referential_field_resolves_to_own_type() {
         let module = parse_src("type: Loop | Next n Loop | Stop ;").unwrap();
-        // Slice 9 (R2): `bool` is the reserved index-0 entry.
-        assert_eq!(module.enums.len(), 2);
-        match module.enums[1].variants[0].fields[0].1 {
+        assert_eq!(module.enums.len(), 1);
+        match module.enums[0].variants[0].fields[0].1 {
             Type::Enum(_, name) => assert_eq!(name, "Loop"),
             other => panic!("expected Type::Enum(Loop), got {other:?}"),
         }
@@ -4961,9 +4989,8 @@ mod tests {
                 .unwrap();
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
-        // Slice 9 (R2): `bool` is the reserved index-0 entry.
-        assert_eq!(module.enums.len(), 2);
-        assert_eq!(module.enums[1].name, "Shape");
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].name, "Shape");
     }
 
     #[test]
@@ -5092,9 +5119,8 @@ mod tests {
     #[test]
     fn parse_generic_enum_typedef_registers_decl() {
         let module = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'E ;").unwrap();
-        // Slice 9 (R2): `bool` occupies the reserved index-0 entry; a
-        // generic header mints no further concrete enum entry (R1/D5).
-        assert_eq!(module.enums.len(), 1);
+        // A generic header mints no concrete enum entry at all (R1/D5).
+        assert!(module.enums.is_empty());
         assert_eq!(module.generic_enums.len(), 1);
         let decl = &module.generic_enums[0];
         assert_eq!(decl.name, "Result");
@@ -5264,12 +5290,12 @@ mod tests {
         // R4: two applications of one generic type are two registry entries
         // with their own field layouts, not one shared entry.
         let module =
-            parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] y Box[bool] ;").unwrap();
+            parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] y Box[u32] ;").unwrap();
         let (int_id, int_box) = struct_by_name(&module, "Box[i64]");
-        let (bool_id, bool_box) = struct_by_name(&module, "Box[bool]");
-        assert_ne!(int_id, bool_id);
+        let (u32_id, u32_box) = struct_by_name(&module, "Box[u32]");
+        assert_ne!(int_id, u32_id);
         assert_eq!(int_box.fields[0].1, Type::I64);
-        assert_eq!(bool_box.fields[0].1, Type::BOOL);
+        assert_eq!(u32_box.fields[0].1, Type::U32);
     }
 
     #[test]
@@ -5366,7 +5392,7 @@ mod tests {
     fn parse_generic_application_with_too_many_arguments_is_a_located_error() {
         // R3: the over-applied case, decidable only because the argument list
         // is bracketed.
-        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64 bool] ;").unwrap_err();
+        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64 u32] ;").unwrap_err();
         assert!(
             err.contains("generic type `Box` declares 1 type variable"),
             "unexpected message: {err}"
@@ -5394,18 +5420,18 @@ mod tests {
         // R4: the instantiation key is the ordered argument list, so the two
         // orderings are two entries with mirrored field types.
         let module =
-            parse_src("type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64 bool] y Pair[bool i64] ;")
+            parse_src("type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64 u32] y Pair[u32 i64] ;")
                 .unwrap();
-        let (first, _) = struct_by_name(&module, "Pair[i64 bool]");
-        let (second, _) = struct_by_name(&module, "Pair[bool i64]");
+        let (first, _) = struct_by_name(&module, "Pair[i64 u32]");
+        let (second, _) = struct_by_name(&module, "Pair[u32 i64]");
         assert_ne!(first, second);
         assert_eq!(
-            struct_by_name(&module, "Pair[i64 bool]").1.fields,
-            vec![("a".to_string(), Type::I64), ("b".to_string(), Type::BOOL)]
+            struct_by_name(&module, "Pair[i64 u32]").1.fields,
+            vec![("a".to_string(), Type::I64), ("b".to_string(), Type::U32)]
         );
         assert_eq!(
-            struct_by_name(&module, "Pair[bool i64]").1.fields,
-            vec![("a".to_string(), Type::BOOL), ("b".to_string(), Type::I64)]
+            struct_by_name(&module, "Pair[u32 i64]").1.fields,
+            vec![("a".to_string(), Type::U32), ("b".to_string(), Type::I64)]
         );
     }
 
@@ -5415,26 +5441,25 @@ mod tests {
         // spelling as their enum, so two instantiations' `Ok` constructors
         // can't clobber each other in a name-keyed registry.
         let module =
-            parse_src("type: Res 'T 'E | Ok val 'T | Err val 'E ;\ntype: W r Res[i64 bool] ;")
+            parse_src("type: Res 'T 'E | Ok val 'T | Err val 'E ;\ntype: W r Res[i64 u32] ;")
                 .unwrap();
-        // `bool` holds the reserved index-0 entry; the instantiation follows.
-        assert_eq!(module.enums.len(), 2);
-        let minted = &module.enums[1];
-        assert_eq!(minted.name, "Res[i64 bool]");
+        assert_eq!(module.enums.len(), 1);
+        let minted = &module.enums[0];
+        assert_eq!(minted.name, "Res[i64 u32]");
         assert_eq!(minted.module, 0);
-        assert_eq!(minted.variants[0].name, "Ok[i64 bool]");
+        assert_eq!(minted.variants[0].name, "Ok[i64 u32]");
         assert_eq!(
             minted.variants[0].fields,
             vec![("val".to_string(), Type::I64)]
         );
-        assert_eq!(minted.variants[1].name, "Err[i64 bool]");
+        assert_eq!(minted.variants[1].name, "Err[i64 u32]");
         assert_eq!(
             minted.variants[1].fields,
-            vec![("val".to_string(), Type::BOOL)]
+            vec![("val".to_string(), Type::U32)]
         );
         assert_eq!(
             struct_by_name(&module, "W").1.fields[0].1,
-            Type::Enum(EnumId::from_index(1), "Res[i64 bool]")
+            Type::Enum(EnumId::from_index(0), "Res[i64 u32]")
         );
     }
 
@@ -5584,7 +5609,7 @@ mod tests {
     #[test]
     fn parse_generic_application_stamps_the_instantiating_module_id() {
         let tokens = lex(
-            "type: Box 'T val 'T ;\ntype: Res 'T | Ok v 'T ;\n: f ( Box[i64] Res[bool] -- ) drop drop ;\n",
+            "type: Box 'T val 'T ;\ntype: Res 'T | Ok v 'T ;\n: f ( Box[i64] Res[u32] -- ) drop drop ;\n",
         )
         .unwrap();
         let mut arrays = Vec::new();
@@ -5734,8 +5759,7 @@ mod tests {
     fn parse_typedef_enum_variant_array_field_resolves() {
         let module = parse_src("type: Shape | Poly pts [f64 3] ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
-        // Slice 9 (R2): `bool` is the reserved index-0 entry.
-        match module.enums[1].variants[0].fields[0].1 {
+        match module.enums[0].variants[0].fields[0].1 {
             Type::Array(_, name) => assert_eq!(name, "[f64 3]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
@@ -5891,8 +5915,7 @@ mod tests {
     #[test]
     fn parse_owning_cell_type_resolves_in_enum_variant_field_position() {
         let module = parse_src("type: Shape | Boxed b ^i64 ;").unwrap();
-        // Slice 9 (R2): `bool` is the reserved index-0 entry.
-        match module.enums[1].variants[0].fields[0].1 {
+        match module.enums[0].variants[0].fields[0].1 {
             Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }
@@ -6185,9 +6208,9 @@ mod tests {
 
     #[test]
     fn parse_static_bool_elided_zero_ok() {
-        let module = parse_src("static: FLAG bool ;").unwrap();
+        let module = parse_src_with_bool("static: FLAG bool ;").unwrap();
         let decl = &module.statics[0];
-        assert_eq!(decl.ty, Type::BOOL);
+        assert_eq!(decl.ty, bool_ty(&module));
         assert_eq!(decl.init, StaticInit::Zero);
     }
 
@@ -6204,7 +6227,8 @@ mod tests {
 
     #[test]
     fn parse_static_bool_and_str_initializer_ok() {
-        let module = parse_src("static: FLAG bool = true ;\nstatic: TAG str = \"x\" ;").unwrap();
+        let module =
+            parse_src_with_bool("static: FLAG bool = true ;\nstatic: TAG str = \"x\" ;").unwrap();
         assert_eq!(module.statics[0].init, StaticInit::Bool(true));
         assert_eq!(module.statics[1].init, StaticInit::Str("x".to_string()));
     }
@@ -6640,7 +6664,7 @@ mod tests {
         // R-P2-1's deferred check). The shape change is splice-local
         // (INV-INLINE-COMBINATOR), never a carried region on a back-edge, so
         // it is not the 10a same-row restriction's concern.
-        let module = parse_src(
+        let module = parse_src_with_bool(
             ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
              | e | | t | | c | c [ t call ] [ e call ] if ;",
         )
@@ -6691,11 +6715,12 @@ mod tests {
         // top-level row is bound to it yet at this point in the signature.
         // Removing the first quotation (the only thing that had interned
         // `..o`) must not change whether the second one is accepted.
-        let err = parse_src(": f ( ..i bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;").unwrap_err();
+        let err = parse_src_with_bool(": f ( ..i bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;")
+            .unwrap_err();
         assert!(err.contains("..o"), "unexpected message: {err}");
         assert!(err.contains("top-level row"), "unexpected message: {err}");
 
-        let err = parse_src(
+        let err = parse_src_with_bool(
             ": f ( ..i bool ~[ ..i -- ..o ] ~[ ..o -- ..o ] -- ..o ) \
              | d | | c | c call d call ;",
         )
