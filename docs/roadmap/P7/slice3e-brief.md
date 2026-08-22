@@ -260,79 +260,78 @@ today with no dependency on S3a, while `Map` waits for S3a to land.
 
 ## Ready to spec?
 
-**Not yet — and for a stronger reason than "unverified." Both pre-spec checks ran,
-and both came back with real findings that change the shape of the slice, not just
-confirmations.**
+**Yes, against the array form of `sort` via trait-member dispatch — `Map` stays deferred to
+S3a.** Re-probed directly against current `main` (P7.S3d, S3f, and S3g have all since
+landed) before writing this verdict; each of the three findings below either confirms a
+prior finding is unaffected or corrects a stale one.
 
-- The paper dogfood found a **blocker outside this slice's own control**: generic
-  types applied to a poly word's type variable don't parse today
-  (`docs/roadmap/P7/slice3-dogfood.md`, finding #5), so `Map['K 'V]` — the slice's
-  own stated forcing consumer — is not writable regardless of what P7.S3e ships.
-  **Split out as P7.S3a**, its own roadmap entry — this slice now specs against the
-  array form of `sort` only, with `Map` deferred until S3a lands.
-- The OQ1 probe found that **Recon 5's central cost claim is false**: lowering does
-  need new machinery (a per-instantiation-aware overload record, or a change to the
-  "lowering never re-runs resolution" invariant), not none. The spec's effort sizing
-  and exit criteria both need to price this in before implementation starts, not
-  discover it mid-slice.
+1. **The body-side barrier Recon 4/OQ1 described is unchanged.** Probed:
+   `` : add_both ( 'T 'T -- 'T ) add ; ``, called from a concrete body, still fails with
+   `` `add` needs 2 values, but the stack holds 0 `` — the exact symptom OQ1 recorded before
+   S3d/S3f/S3g existed. None of those three slices touch `poly_call_term`'s env-lookup
+   fallthrough or `poly_var_to_concrete_error`; the new branch Recon 4 sketches (a bare
+   `PolyType::Var` with a matching `Bound::User` member pushes the trait's declared abstract
+   output types) is still exactly the missing piece, unchanged.
+2. **`sort`'s comparator dispatch does not need S3d or S3f at all — the brief's prior
+   "withdrawn, pending S3d" verdict was written against an abandoned design and is wrong.**
+   The dogfood's actual, worked `sort` (`slice3-dogfood.md`, Program 2) calls `cmp` as an
+   ordinary required trait member — a plain word call resolved per-instantiation — not a
+   quotation value passed or spliced across the boundary. Probed the quotation-parameter
+   alternative directly to close this off for good: a non-inline word *can* declare a bare
+   (non-`~`) quotation parameter whose own effect still mentions its declaring word's `'T`
+   (`` [ &'T &'T -- i64 ] ``, distinct from `~[ ]`'s inline-only splice marker, R6) — the
+   declaration itself type-checks. But passing an argument to it, or `call`ing it inside the
+   body, are *both* still rejected exactly as L1 describes (`` a quotation cannot be passed
+   to `run_it`; only `call` accepts one `` / `` `call` is not permitted on a quotation ``).
+   S3d and S3f only ever reached a **ground** (no free type variable) `Type::Quotation`
+   crossing the boundary; an **abstract** one that still mentions the declaring word's own
+   `'T` — exactly `sort`'s comparator, if it were designed as a quotation parameter — was
+   never in either slice's scope and remains fully blocked, unnamed, with no forcing
+   consumer. Conclusion: the trait-member design (Recon 4, dogfood-validated) is the one to
+   spec against; it depends on neither S3d nor S3f, and the quotation-parameter alternative
+   should not be revisited without a real consumer forcing it.
+3. **Finding 2 (nested poly-call dispatch key) is now free to answer as "restrict to leaf
+   calls," because the located rejection it needs already exists.** Re-probed: a poly word
+   calling another poly word, same module, still fails — but no longer with the raw
+   `` unknown word `inner__m0` `` this brief originally recorded. It is now a deliberate,
+   general, located diagnostic, `poly_calls_poly_word_error`
+   (`src/check/poly.rs:1533-1546`, P8.S2's R6b, landed independently of this slice): "a
+   polymorphic word is not yet reachable from another polymorphic word across a module
+   boundary," with the fix comment noting explicitly that a same-module and a cross-module
+   callee "emit the same message: both are the one underlying gap." A bound obligation whose
+   satisfying member happens to be a poly word therefore already gets this exact rejection
+   for free — **no new mechanism needed** to close finding 2. The spec should state this
+   plainly (leaf calls only; a poly-word-implemented trait member inherits R6b's existing
+   rejection) rather than treating it as an open design fork.
 
-**No longer ready to spec — a spec was written (`slice3e-spec.md`) and then falsified by
-probing, and finding 1 below was itself later falsified by a second probe.** Three
-findings, in descending order of consequence:
+**Unaffected by the re-probe, still true as recorded:**
 
-1. **No consumer compiles — corrected.** The original claim here was that the array form
-   of `sort` needs branching, so it must be `inline`, so it mints no monomorph symbol for a
-   per-instantiation dispatch record to key on. That claim is false: **P7.S3b** shipped
-   eliminator-arm branching in a non-inline poly word (`Ordering?`-style), probe-verified to
-   compile and mint `sooth_mono_pick__m0__t0_i64`. The real remaining gap is narrower and is
-   not branching at all: a **rowless quotation-consumer splice** — calling a fully concrete
-   `~[ &'T &'T -- Ordering ]` (a comparator, no `..a`/`..b`) inside a poly body is still
-   rejected (`` `call` on a quotation ... is not yet supported ``), distinct from the
-   row-typed `if`/`branch`/`times`/`tag` family S3b deferred to S3b-follow. This is now its
-   own slice, **P7.S3d**, inserted ahead of this one. `Map['K 'V]` is blocked separately: a
-   generic struct whose field is an array of its own type variable (`keys ['K 8]`,
-   `slots [Ent['K 'V] 8]`) fails with `` error: unknown type 'K `` — a third gap, distinct
-   from S3a's. The `Map` scope widening recorded below is therefore withdrawn.
-2. **The dispatch key is sound, but only for a leaf word.** Check-time and lowering-time
-   monomorph symbols are byte-identical (probe: `sooth_mono_idc__m0__t0_i64`/`_bool` at both
-   sites, and across modules), so the mechanism works. But a bounded poly word calling
-   *another* poly word fails at check today (`` error: unknown word `inner__m0` ``), and
-   `module.instantiations` is keyed by bare call-site span with nested poly calls explicitly
-   out of scope, so a nested obligation has no coherent key. The slice must either restrict
-   bounded bodies to leaf calls with a located rejection and a guarding test, or specify
-   obligation propagation (which means re-keying `instantiations`, a much larger change).
-3. **The illustrative bound syntax in the spec is wrong.** A bound rides on the variable's
-   *first occurrence*, which is itself an input slot, so `( 'T: Show &'T &'T -- )` declares a
-   spurious bare `'T` input. The intended two-reference form is `( &'T: Show &'T -- )`.
-   Illustrative only, but it would propagate into golden signatures.
-
-**Also to settle before a re-spec: a third trait kind.** The spec has predicate-kind
-(`Copy`/`Ord`) and member-kind (user) traits. A *compiler-known, library-declared* trait is
-neither, and is probably wanted: it would let intrinsic compiler logic be written against a
-library implementation. `bool` is already this shape — a library-declared enum known by a
-reserved registry position (`src/ast.rs:779`), with its `.` overload injected (`:816`). A
-`Fallible`-style bound satisfied by `Result`/`Option` would give fallible slice indexing
-(S3c), a failing allocator (S5), and S8's fallible push one shared desugaring. **Test it
-first:** a trait is only justified with two or more carrier types, or if users can add their
-own; with a single carrier this should be a lang *type* like `bool`, not a lang trait.
-**Test before S3c locks its index-failure carrier, not after** — this decides whether
-fallible slice indexing returns a plain `Option['T]` or rides a bound.
-
-The decisions below are still good, and survive the falsification:
-
+- OQ1's core cost claim (`Module::builtin_overloads: HashMap<Span, String>` is still
+  span-keyed, confirmed unchanged in `src/ast.rs`) — the slice still needs a
+  per-instantiation-aware overload record; lowering re-resolving against `Subst` (touching
+  the "lowering never re-runs resolution" invariant) stays out of scope for this slice.
+- Finding 3 (illustrative bound syntax): a bound rides on the variable's *first occurrence*,
+  itself an input slot, so `( 'T: Show &'T &'T -- )` declares a spurious bare `'T` input; the
+  correct two-reference form is `( &'T: Show &'T -- )`. Propagates into golden signatures.
+- The third-trait-kind question (a compiler-known, library-declared trait, `bool`-shaped) is
+  still open and still worth testing before locking it in. Correction to the framing only:
+  **P7.S3c already landed and *deferred* the index-failure carrier rather than locking
+  it** (`docs/roadmap/P7-language-prereqs.md`'s S3c entry: "a fallible, Option/Result-
+  returning accessor is deferred to P7.S3e"), so there is no retrofit risk yet — the decision
+  is still S3e's to make, not already made. Out of this slice's initial scope regardless: no
+  forcing consumer exists within S3e itself (the array `sort`/member-collision goldens need
+  only `Copy`/`Ord`/one or two hand-declared traits), so ship predicate-kind and member-kind
+  traits first and revisit the third kind against `Fallible` as its own follow-up once a
+  consumer (S3c's deferred accessor) actually needs it.
 - **OQ2 — nominal satisfaction** via `impl: Trait for Type ; ... ;`, with an orphan
   rule confining an `impl:` block to the trait's or the type's own defining module.
 - **OQ8 — predicate-kind trait-table entries** for `Copy`/`Ord`, one lookup path in
   `parse_capabilities`, duplicate-declaration error on collision.
 - **OQ4 — located rejection** of a member name colliding across a variable's bound set.
 
-**Consumer scope: withdrawn, pending P7.S3d (rowless quotation-consumer splice).** S3b
-already supplies the branching `sort`'s comparator dispatch needs (`Ordering?` elimination);
-the one remaining wall is calling the comparator quotation itself from inside the poly body.
-`Map` stays separately blocked on the generic-struct array-of-own-type-variable field gap.
-The multi-method-bound collision rule keeps a consumer regardless, since its rejection
-golden needs only two hand-declared traits and no collection.
-
-OQ1 is settled: a per-instantiation dispatch record, populated at check time and read at
-lowering, so "lowering never re-runs resolution" stands. Probing confirmed the key matches
-across that boundary. What is *not* settled is the nested case (see finding 2 above).
+**Consumer scope: the array form of `sort` via `'T: Copy Order`, `cmp` as `Order`'s required
+member, dispatched by the new trait-member branch — no dependency on S3d or S3f.** `Map`
+stays separately blocked on S3a (generic instantiation over a poly word's own variable) and
+the generic-struct array-of-own-type-variable field gap. The multi-method-bound collision
+rule (OQ4) keeps a consumer regardless of `sort`, since its rejection golden needs only two
+hand-declared traits and no collection.

@@ -275,18 +275,24 @@ invariant and needs that invariant's owner to weigh in). The other real work is 
 body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
 bounded type variable — required members take `&'T`, per the dogfood) may be used for
 has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a (landed), S3b (landed), and S3d (landed) — and the consumer scope is not settled,
-because probing falsified one candidate and corrected another.** `Map['K 'V]` is *not*
+**Depends on S3a (landed), S3b (landed) — not on S3d or S3f.** `Map['K 'V]` is *not*
 writable: a generic struct whose field is an array of its own type variable (`keys ['K 8]`,
 or `slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
 third gap distinct from S3a's (which fixed generic-applied-to-own-var in poly *word*
-signatures, not in generic *struct fields*). The array form of `sort` was originally
-thought to need branching (hence `inline`, hence no monomorph symbol for a per-instantiation
-dispatch record to key on) — probe-verified false: S3b's eliminator branching already mints
-a monomorph symbol for a non-inline poly word. The real remaining wall is S3d's (calling the
-comparator quotation itself from inside the poly body). **This slice must not be specced
-until it has a consumer that compiles**, which means after S3d, with the
-generic-struct-array-field gap resolved or routed around for `Map`.
+signatures, not in generic *struct fields*), so `Map` stays deferred. The array form of
+`sort` was originally thought to need branching (hence `inline`, hence no monomorph symbol
+for a per-instantiation dispatch record to key on) — probe-verified false: S3b's eliminator
+branching already mints a monomorph symbol for a non-inline poly word. A later brief
+revision then attributed the remaining wall to S3d (calling the comparator as a *quotation*
+from inside the poly body) — **re-probed against current main with S3d and S3f both landed,
+and that attribution is wrong**: the dogfood's actual `sort` calls its comparator as an
+ordinary required trait member (a plain word call resolved per-instantiation), never a
+quotation value, so the real remaining wall is this slice's own new dispatch mechanism
+(a `Bound::User` branch in `poly_call_term`), independent of S3d/S3f. The quotation-parameter
+alternative was probed directly and remains fully blocked (an abstract quotation still
+mentioning its declaring word's own `'T` is out of scope for both S3d and S3f, which only
+ever reached the ground, no-free-variable case) — not needed for this consumer and not worth
+revisiting without one.
 **Design decisions settled in the brief** (`docs/roadmap/P7/slice3e-brief.md`):
 satisfaction is **nominal**, via an `impl: Trait for Type ;` block confined by an
 orphan rule to the trait's or the type's own defining module; `Copy`/`Ord` become
@@ -296,19 +302,25 @@ declaration; a member name colliding across one variable's bound set is a locate
 rejection. The lowering mechanism is settled as a per-instantiation dispatch record
 (check mints, lowering only looks up, so "lowering never re-runs resolution" stands);
 probing confirmed the check-time and lowering-time monomorph symbols are byte-identical,
-so the key is sound — for a leaf word. **Still open:** a bounded poly word calling another
-poly word has no coherent key (`module.instantiations` is span-keyed and excludes nested
-poly calls), so the slice must either restrict bounded bodies to leaf calls with a located
-rejection or specify obligation propagation.
+so the key is sound — for a leaf word. **Resolved:** a bounded poly word calling another
+poly word already gets a located rejection for free — `poly_calls_poly_word_error`
+(P8.S2's R6b, landed independently of this slice) rejects a poly-word callee from a poly
+body whether the caller is bounded or not, same module or cross-module, with no new
+mechanism needed. The spec restricts bound-satisfying members to leaf calls and cites this
+existing diagnostic rather than building a new one.
 **A third trait kind is likely needed, beyond predicate and member kinds:** a
 *compiler-known, library-declared* trait, so intrinsic compiler logic can be written
 against a library implementation. `bool` is already exactly this shape — a library-declared
 enum the compiler knows by a reserved registry position (`src/ast.rs:779`) with its `.`
 overload injected (`:816`). A `Fallible`-style bound satisfied by `Result`/`Option` would
-let fallible slice indexing (deferred from S3c), a failing allocator (P9.S2), and P9.S4's fallible push share
-one desugaring. **Test before designing it as a trait:** if there is only ever one carrier
-type and users cannot add their own, this wants to be a lang *type* like `bool`, not a
-lang trait — a trait earns its keep only with two or more carriers.
+let fallible slice indexing (deferred from S3c — S3c landed and deferred it, not locked it,
+so there is no retrofit risk yet), a failing allocator (P9.S2), and P9.S4's fallible push
+share one desugaring. **Test before designing it as a trait:** if there is only ever one
+carrier type and users cannot add their own, this wants to be a lang *type* like `bool`,
+not a lang trait — a trait earns its keep only with two or more carriers. Out of this
+slice's initial scope: no consumer within S3e forces it (the array `sort`/collision goldens
+need only `Copy`/`Ord`/hand-declared traits), so ship predicate- and member-kind traits
+first and revisit against `Fallible` once S3c's deferred accessor needs it.
 **Exit:** a user can declare a bound naming required word signatures, a polymorphic word
 can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with
