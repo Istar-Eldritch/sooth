@@ -5830,6 +5830,70 @@ mod tests {
         );
     }
     #[test]
+    fn poly_self_tail_reference_to_a_local_across_the_back_edge_through_an_eliminator_arm_is_error()
+    {
+        // P7.S3g-follow (1a) follow-up: an eliminator arm inherits the call's
+        // own tail-ness in `poly_eliminator_call` ("every eliminator arm runs
+        // ... in the call's own position"), exactly as an `if`/`unless` arm
+        // does, so the same back-edge hazard reached through `Bool?` instead
+        // of `if` must be caught by the same guard. Same body as
+        // `poly_self_tail_reference_to_a_local_across_the_back_edge_is_error`,
+        // with the `if` swapped for the `Bool?` eliminator `if` lowers
+        // through, and a `drop` in each arm for the narrowed variant `Bool?`
+        // hands each arm (payload-less, but still a stack value) that `if`
+        // never gives its arms.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero\n\
+             ~[ ( False ) drop r drop &!a b dup n 1 sub loopg ]\n\
+             ~[ ( True ) drop drop r drop 0 ]\n\
+             Bool? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 5)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_dropped_borrow_then_forwarded_ref_is_over_conservative() {
+        // `poly_combinator_call`'s doc comment on `tail_slots` (and the spec)
+        // claim a concrete cost for crediting every arm with the call's own
+        // tail-ness instead of refining per arm: a body that borrows a local
+        // in *any* arm and then tail-recurses is rejected whichever arm the
+        // borrow sat in, even when that borrow is dropped before the
+        // back-edge and only a forwarded parameter reference actually rides
+        // it. Pinned here rather than left to a doc comment, so a later
+        // per-arm refinement has something to flip green. The monomorphic
+        // twin (same body, `'T` replaced by `i64` and no residual bound slot)
+        // accepts it: `check_reference_across_back_edge` sees the borrow of
+        // `a` already dropped and only `r` -- an incoming reference parameter
+        // -- crossing.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 4)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+        check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( &![i64 4] [i64 4] [i64 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the monomorphic twin's dropped borrow does not ride the back-edge");
+    }
+    #[test]
     fn poly_self_tail_reference_parameter_forwarded_across_the_back_edge_is_ok() {
         // The accept case the guard must not swallow: `r` is the *incoming*
         // reference parameter, whose referent lives in an ancestor frame that

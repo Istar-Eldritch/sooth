@@ -226,10 +226,12 @@ concrete guards defer both.
 **One conjunct is unwitnessable by a source program**: the per-arm refinement in
 `poly_combinator_call` (`tail && tail_slots.contains(&i)`, so `times`' body does not
 inherit tail position while `if`'s arms do). Kept for lockstep with
-`tail_position_calls`/`lower_terms`, and its cost of being unpinned is recorded at the
-site: the coarse borrow liveness rejects any body that borrows a local in *one* arm and
-tail-recurses with a reference argument in *another*, so no program can tell which arm
-the borrow sat in.
+`tail_position_calls`/`lower_terms`. Its cost is a real, pinned rejection rather than a
+prose claim: `poly_self_tail_dropped_borrow_then_forwarded_ref_is_over_conservative`
+builds a body that borrows a local in one arm, drops that borrow, and only forwards a
+reference *parameter* across the back-edge — accepted by the monomorphic twin, rejected
+in the poly body because the coarse borrow liveness cannot tell which arm the dropped
+borrow sat in.
 
 ### Piece 2 — compute `self_tail` at the two `lower_word_parts` call sites (lowering plumbing)
 
@@ -317,13 +319,20 @@ records why `&!['T 4]` is the only reference parameter a body borrow can match.
 - `poly_self_tail_unconsumed_linear_local_is_error` and
   `poly_self_tail_linear_stranded_below_the_call_window_is_not_well_typed` — the two
   reasons 1b needs no guard, pinned rather than asserted in prose.
+- `poly_self_tail_reference_to_a_local_across_the_back_edge_through_an_eliminator_arm_is_error`
+  — 1c's hazard reached through `poly_eliminator_call`'s per-arm `tail` (a `Bool?`
+  eliminator swapped in for `if`), not just its combinator-arm twin.
+- `poly_self_tail_dropped_borrow_then_forwarded_ref_is_over_conservative` — pins the
+  `tail_slots` refinement's documented cost (see above) instead of leaving it as prose:
+  the poly body rejects, its monomorphic twin accepts.
 - The existing `loopg` goldens still typecheck clean (`--lib` and the S3g suite).
 
 Every clause was mutation-tested: deleting the guard call, either half of the gate, the
 reference precondition, the locals filter, scanning `stack[..base]` instead of the args,
-and dropping `tail && at == last` are each killed by a named test above. The one
-surviving mutation (the per-arm `tail_slots` refinement) is documented at its site as
-unwitnessable, with the reason.
+dropping `tail && at == last`, and crediting an eliminator arm's `tail` as always `false`
+are each killed by a named test above. The one surviving mutation (the per-arm
+`tail_slots` refinement in `poly_combinator_call`) is unwitnessable by a source program
+(see above) and is pinned by its cost, not its absence.
 
 ### Lowering (Phase 2/3)
 
