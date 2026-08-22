@@ -3029,8 +3029,9 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 /// declared `Type::Quotation`. A quotation argument to a declared quotation
 /// parameter is now accepted and inlined (R18); this fires only for the other
 /// positions (a non-quotation user parameter, a generated constructor/setter
-/// slot, an `extern` argument). Only the stale "Phase 6" parenthetical is
-/// reworded to point a runtime quotation value at slice 7 (R26).
+/// slot, an `extern` argument). P7.S3f (R4) retired the stale "a runtime
+/// quotation value is slice 7" parenthetical outright, since 7a/7b gave it a
+/// real runtime representation.
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
     let word = crate::resolve::demangle_word(word);
     format!(

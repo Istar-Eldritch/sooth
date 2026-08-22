@@ -354,7 +354,7 @@ the stale "slice 7" wording is retired
 (`docs/roadmap/P7/slice3f-spec.md`, `tests/phase7_slice3f.rs`).
 **"Any caller" overclaims two cases, named rather than silently absorbed:** an
 *overloaded* poly name still rejects a quotation argument outright
-(`resolve_poly_overload`'s `saw_quotation` short-circuit, `src/check/poly.rs:2976-2999`)
+(`resolve_poly_overload`'s `saw_quotation` short-circuit, `src/check/poly.rs:3038-3067`)
 without ever reaching this slice's per-position check -- a single-candidate poly name
 only. And a still-**abstract** `PolyType::Quotation(ins, outs, ..)` parameter (one whose
 brackets still mention a type variable, e.g. `[ 'T -- 'T ]`) unifies correctly at the
@@ -546,7 +546,7 @@ as an unreachable diagnostic (`tests/phase8_slice2.rs`'s narrowing test is retir
 
 **P7.S3l -- A poly body calling a bound instantiation of an abstract quotation parameter.**
 Named at P7.S3f's exit, out of scope there. `unify_poly_input`'s `PolyType::Quotation` arm
-(`src/check/poly.rs:3434-3471`) already unifies a still-abstract declared quotation parameter
+(`src/check/poly.rs:3495-3535`) already unifies a still-abstract declared quotation parameter
 (one whose brackets mention a type variable, e.g. `[ 'T -- 'T ]`) correctly at the call-site
 argument boundary, row-pointwise, binding any variable the row mentions. The gap left open is
 the body side: `poly_call_term`'s `call` handling still has no arm for a bound instantiation
@@ -558,3 +558,17 @@ grounds to) rather than a body-local literal.
 **Exit:** a poly body may `call` its own declared, still-abstract quotation parameter once
 bound by the caller's instantiation, popping/pushing against the row grounded through that
 call's `Subst`, the same way S3f's R3 does for the already-ground case.
+
+**P7.S3m -- A declared quotation effect with two or more outputs cannot be lowered.**
+Named at P7.S3f's exit (its ">=2-output lowering gap" finding), pre-existing on the concrete
+path and confirmed reachable (without being caused) on the poly path once S3f's R3 landed.
+`intern_output_bundles` (`src/check.rs:913`) interns an output-tuple bundle only for a
+*declared word*'s outputs, walking `module.words`; a quotation effect's own output row is
+never interned, so `bundle_of` returns `None` in `lower_indirect_call`
+(`src/ir/func_builder/quotation.rs:226`) and a `call` on a `[ ... -- A B ]`-shaped (two or
+more outputs) quotation panics in the backend the moment a consumer reads the second output.
+Probe: `: call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add print ;` panics identically whether
+`call_it` is concrete or (per S3f's R3) polymorphic. **Exit:** a declared quotation effect
+with two or more outputs interns an output bundle the same way a declared word does, and
+`call`ing one on either the concrete or polymorphic path pushes all declared outputs rather
+than panicking.

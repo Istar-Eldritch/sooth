@@ -44,7 +44,7 @@ this slice's own R1 leaves rejecting.
 
 **Not in scope:** the genuinely abstract `PolyType::Quotation(ins, outs, ..)` case (a
 declared `[ 'T -- 'T ]` parameter that is not fully concrete). `unify_poly_input`'s own
-`PolyType::Quotation` arm (`poly.rs:3434-3471`) already unifies this shape correctly at
+`PolyType::Quotation` arm (`poly.rs:3495-3535`) already unifies this shape correctly at
 the call-site boundary; the gap left open is that a poly *body* cannot `call` a bound
 instantiation of it. Nothing in this slice's probe pass touched that case; it is
 recorded as a follow-up (see Out of scope).
@@ -557,15 +557,18 @@ so R4 does not touch it. Green is
 
 ## Exit findings (required)
 
-- **Lowering confirmation (L4).** No lowering changes were needed. The
-  argument-boundary and body-boundary goldens
-  (`argument_boundary_materializes_ground_quotation_param`,
-  `body_boundary_calls_ground_quotation_param`, `argument_and_body_boundary_together`)
-  build and run correctly against the monomorphization pass unchanged, the same finding
-  P7.S3d's OQ3 recorded for its own two consumers: R2's materialized `Slot` is an
-  ordinary `Type::Quotation`-typed value by the time lowering sees it, and R3's
-  pop/push is checker-only bookkeeping over values already carried through the poly
-  body's existing ABI.
+- **Lowering confirmation (L4) — the finding is negative, not confirmed.** Phase 1
+  needed a real lowering change: `lower_poly_call` had no step materializing a
+  monomorphized callee's phantom quotation argument into a `(code, env)` aggregate
+  before the call, so the argument-boundary golden crashed QBE without it. Phase 1
+  added `CallInst::quot_inputs` (`src/ast.rs:1500`) to carry the materialized positions
+  and a `materialize_quot_args` step (`src/ir/func_builder/quotation.rs:361`) that runs
+  it in `lower_poly_call`. This does not fall out of the existing monomorphization pass
+  unchanged, and does not match the finding P7.S3d's OQ3 recorded for its own two
+  consumers — that finding held for a *literal* spliced in place; a genuine argument
+  crossing the poly call boundary needed its own materialization step. R3's `call` on
+  the resulting value is checker-only bookkeeping (that half of L4 does hold); R1/R2's
+  argument-boundary crossing is not.
 - **R9p's second check-site (R2's note).** Still genuinely unreachable, confirmed by
   construction rather than by test: `check_poly_call` operates over `Vec<Slot>` (the
   monomorphic caller's stack), and `Slot` has no `QuotLit`-shaped variant at all --
@@ -590,14 +593,19 @@ so R4 does not touch it. Green is
   those functions; it added a sibling arm to `poly_call_term` (the *caller* of that
   machinery), not to the machinery itself. Trigger not met. **Deferred again**, same
   reason and same named extraction shape as S3b-follow's exit.
-- **The >=2-output lowering gap (qualifies L4).** Record the pre-existing gap named in
-  L4: a quotation effect with two or more declared outputs type-checks and then panics
-  in the backend, because `intern_output_bundles` interns output tuples only for
-  declared words. State that R3 reaches it (a poly body `call`ing such a parameter was a
-  located rejection before this slice) without causing it, and name the follow-up slice
-  for the interning fix. Do **not** close it by gating R3 on `outputs.len() < 2`: that
-  would diverge from the concrete `call` twin, which admits the same shape, and would
-  reject programs that become legal the moment the interning is fixed.
+- **The >=2-output lowering gap (qualifies L4).** Confirmed present after this slice,
+  on both the poly and concrete paths: `: call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T )
+  3 swap call . . ;` panics at `src/ir/func_builder/calls.rs:514: print: value`, and the
+  concrete twin (`( [ i64 -- i64 i64 ] -- ) ...`) panics identically, because
+  `intern_output_bundles` (`check.rs:913`) interns output tuples only for declared
+  words, never for a quotation effect's own output row. R3 reaches this gap (a poly
+  body `call`ing a two-or-more-output quotation parameter was a located rejection
+  before this slice; now it type-checks and panics in the backend instead) without
+  causing it — the identical concrete-path panic proves the gap predates this slice.
+  Registered as **P7.S3m** in `P7-language-prereqs.md` for the `intern_output_bundles`
+  fix. Do **not** close it by gating R3 on `outputs.len() < 2`: that would diverge from
+  the concrete `call` twin, which admits the same shape, and would reject programs that
+  become legal the moment the interning is fixed.
 - **Phase 2's fixture deviations from this spec.** Three of this spec's own body-boundary
   fixtures were wrong and phase 2 corrected them; record the corrections so the spec is
   not read back as the delivered shape. (1) The body-boundary golden written here as
@@ -622,7 +630,7 @@ so R4 does not touch it. Green is
   is marked `[ done ]` with its `Exit:` line narrowed to "the argument boundary of a
   ground ... parameter" rather than "any caller", and a new paragraph names both gaps
   this slice does not close: `resolve_poly_overload`'s multi-candidate `saw_quotation`
-  short-circuit (`poly.rs:2976-2999`), which rejects a quotation argument
+  short-circuit (`poly.rs:3038-3067`), which rejects a quotation argument
   unconditionally for any **overloaded** poly name without ever reaching R1's
   per-position check, and the abstract-`PolyType::Quotation` body-call gap now named
   P7.S3l above.
@@ -631,7 +639,7 @@ so R4 does not touch it. Green is
 
 - **The abstract `PolyType::Quotation(ins, outs, ..)` case** — a declared quotation
   parameter that still carries a free type or row variable (e.g. `[ 'T -- 'T ]`).
-  `unify_poly_input`'s own `PolyType::Quotation` arm (`poly.rs:3434-3471`) already
+  `unify_poly_input`'s own `PolyType::Quotation` arm (`poly.rs:3495-3535`) already
   unifies this correctly at the call-site boundary (row-pointwise, binding any variable
   the row mentions); the open gap is that the poly body itself cannot `call` a bound
   instantiation of it once bound. This slice's probe pass found no evidence this needs
@@ -650,7 +658,7 @@ so R4 does not touch it. Green is
 - Row-typed inline combinator dispatch (`if`/`times`/`unless`/...) — P7.S3b-follow's own
   territory, untouched.
 - `resolve_poly_overload`'s multi-candidate `PolyOverloadMiss::Quotation` classification
-  (`poly.rs:2976-2999`) — an **overloaded** poly name with a quotation argument still
+  (`poly.rs:3038-3067`) — an **overloaded** poly name with a quotation argument still
   rejects outright even if one candidate's signature would admit it at a ground
   position, mirroring the completeness gap P7.S3d's own R2 recorded (and did not fix)
   for an overloaded concrete name. Recorded, not fixed.
