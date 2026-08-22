@@ -860,7 +860,7 @@ mod tests {
     /// never the shared poly name (absent from `env`, so the ordinary
     /// dispatch would panic on it) and never the sibling instantiation's
     /// symbol. Asserted at two instantiations, since one alone cannot tell
-    /// "its own symbol" from "the only symbol there is". No back-edge: the
+    /// "its own symbol" from "the only symbol there is". No loop header: the
     /// loop transform stays deferred (D3), so the body really recurses.
     #[test]
     fn poly_self_call_lowers_to_ordinary_recursive_call() {
@@ -900,11 +900,24 @@ mod tests {
                 "{} must not target the bare poly name: {targets:?}",
                 f.name
             );
-            assert!(
-                !f.blocks
+            // What passing `self_tail: true` here actually builds is a loop
+            // *header*: the entry block jumps into a phi-carrying block that
+            // re-tests the condition. A backward `Jmp` is the wrong thing to
+            // look for -- a back-edge only forms once a tail self-call is
+            // recognized, which is keyed on the monomorphic name a poly
+            // self-name never equals, so it is unreachable either way and an
+            // assertion against it cannot fail.
+            let header = match f.blocks[0].term {
+                Terminator::Jmp(to) => f
+                    .blocks
                     .iter()
-                    .any(|b| matches!(b.term, Terminator::Jmp(to) if to.0 <= b.id.0)),
-                "{} must not lower to a loop (D3 defers the back-edge)",
+                    .find(|b| b.id == to)
+                    .is_some_and(|b| b.instrs.iter().any(|i| matches!(i, Instr::Phi(..)))),
+                _ => false,
+            };
+            assert!(
+                !header,
+                "{} must not lower to a loop (D3 defers the loop transform)",
                 f.name
             );
         }

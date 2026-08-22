@@ -424,6 +424,23 @@ body) and a lowering back-edge case beside R2's arm (the monomorphization loop p
 `self_tail: false`). The cost left standing is stack depth only — one frame per recursion
 level — not correctness.
 
+**R2's arm does not reach a materialized quotation body, and nothing today can put a self-call
+there.** `lower_word_parts` lowers each quotation that a materialization boundary turned into a
+value through its own `lower_materialized` call (`src/ir/func_builder/mod.rs:877`), which passes
+`None` where the monomorphization loop passes `Some(inst.callee)`, so a self-call inside a
+materialized body would decline R2's arm and panic on the `env` lookup below it. Unreachable
+today: a self-call needs the walking word's whole operand window, so `'T` has to cross into the
+quotation, and every spelling that both carries `'T` in *and* materializes is refused earlier.
+Probed, one program each: `call` on a quotation literal bound to a local, `call` on a poly word's
+declared quotation parameter, a quotation type as a word *output* (still slice 7), a quotation type
+as a struct field (a parse error), and passing a `'T`-capturing quotation to a concrete
+`[ i64 -- i64 ]` parameter (operand mismatch). The one spelling that does compile,
+`[ x n 1 sub loopg ] call` inside a poly body, typechecks and runs correctly at two
+instantiations but *splices*: the binary carries no `__quot` symbol, so `lower_materialized` is
+never called. Whichever later slice makes one of those forms legal (slice 7's runtime quotation
+values being the likely one) has to thread the current instantiation through
+`lower_materialized` in the same change.
+
 **`poly.rs` split signals, re-run at exit: still defer, unchanged.** `poly.rs` stands at 7223
 lines. This slice added one 36-line arm inside `poly_call_term` and five unit tests; it pulled
 in no new dependency (the arm uses `sig`, `ctx`, `poly_type_str` and

@@ -63,12 +63,18 @@ fn build_and_run(src: &Path) -> (String, i32) {
 /// coincidentally matching the only instantiation there is.
 ///
 /// The recursive arm prints the counter before it recurses, so the *number of
-/// recursion levels* is observable in stdout: a self-call lowered to the wrong
-/// callee, or to a loop that ran the wrong number of times, changes the
-/// transcript rather than merely the build. Deleting R1's checker arm makes
-/// this fail to compile with `poly_calls_poly_word_error`; deleting R2's
-/// lowering arm makes it die at lowering, on the poly self-name `env` has no
-/// entry for.
+/// recursion levels* is observable in stdout. That is what this golden
+/// witnesses -- reaching the base case, the right number of times -- and not
+/// *which* instantiation ran: the two bodies differ only in the type of the
+/// `'T` they carry past the recursion, and a poly body cannot print its own
+/// `'T` (`.` has no generic overload), so pinning both instantiations to one
+/// symbol leaves this transcript unchanged. Callee identity is asserted
+/// structurally instead, by `poly_self_call_lowers_to_ordinary_recursive_call`
+/// in `src/ir/driver.rs`.
+///
+/// Deleting R1's checker arm makes this fail to compile with
+/// `poly_calls_poly_word_error`; deleting R2's lowering arm makes it die at
+/// lowering, on the poly self-name `env` has no entry for.
 #[test]
 fn self_recursive_poly_word_runs_to_base_case() {
     let scratch = Scratch::write(
