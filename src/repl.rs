@@ -1438,6 +1438,7 @@ impl Session {
             };
             funcs.extend(ir::lower_instantiation(
                 &inst.symbol,
+                &inst.callee,
                 sig,
                 &entry.builtin_overloads,
                 // A generic body rejects a field projection outright

@@ -195,6 +195,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &w.effect,
                 &w.body,
                 self_tail,
+                None,
                 &env,
                 &resolve,
                 regs,
@@ -253,17 +254,20 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &module.generics,
         );
         // R7/R14: a self-recursive polymorphic word is a nested polymorphic
-        // call (the body calling the very word being instantiated), out of
-        // scope this slice; `self_tail` stays `false` here rather than
-        // reusing `has_self_tail_call` (which only recognizes a plain-name
-        // `Call`, never a `CallInst` lookup), so such a body still lowers
-        // correctly as an ordinary recursive call, just without the
-        // loop/back-edge transform a monomorphic self-tail word gets.
+        // call (the body calling the very word being instantiated), routed by
+        // `inst.callee` below (P7 slice 3g, R2) rather than through the
+        // `CallInst`/`env` paths, neither of which holds a poly self-name.
+        // `self_tail` stays `false` rather than reusing `has_self_tail_call`
+        // (which only recognizes a plain-name `Call`, never a `CallInst`
+        // lookup), so such a body lowers as an ordinary recursive call,
+        // without the loop/back-edge transform a monomorphic self-tail word
+        // gets -- one stack frame per recursion level (S3g D3, deferred).
         funcs.extend(lower_word_parts(
             &symbol,
             &effect,
             &word.body,
             false,
+            Some(inst.callee.as_str()),
             &env,
             &resolve,
             regs,
@@ -739,6 +743,7 @@ pub(crate) fn lower_word(
         &word.effect,
         &word.body,
         self_tail,
+        None,
         env,
         resolve,
         regs,
@@ -769,6 +774,7 @@ pub(crate) fn lower_word(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_instantiation(
     symbol: &str,
+    callee: &str,
     sig: &PolySig,
     builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
@@ -788,6 +794,7 @@ pub(crate) fn lower_instantiation(
         &effect,
         body,
         false,
+        Some(callee),
         env,
         resolve,
         regs,
@@ -844,6 +851,61 @@ mod tests {
             assert_eq!(
                 checker, lowered_a_loop,
                 "check and lowering must agree on whether the splice is a loop ({callee})"
+            );
+        }
+    }
+
+    /// P7 slice 3g (R2): a self-call inside a polymorphic body lowers to an
+    /// ordinary `Instr::Call` targeting *this instantiation's own* symbol --
+    /// never the shared poly name (absent from `env`, so the ordinary
+    /// dispatch would panic on it) and never the sibling instantiation's
+    /// symbol. Asserted at two instantiations, since one alone cannot tell
+    /// "its own symbol" from "the only symbol there is". No back-edge: the
+    /// loop transform stays deferred (D3), so the body really recurses.
+    #[test]
+    fn poly_self_call_lowers_to_ordinary_recursive_call() {
+        let src = ": iszero ( i64 -- bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy i64 -- 'T )\n\
+               dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+             : main ( -- ) 5 3 loopg . true 3 loopg . ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let ir = lower(&module).unwrap();
+
+        let all: Vec<&str> = ir.funcs.iter().map(|f| f.name.as_str()).collect();
+        let insts: Vec<&IrFunc> = ir
+            .funcs
+            .iter()
+            .filter(|f| f.name.contains("loopg"))
+            .collect();
+        assert_eq!(insts.len(), 2, "two instantiations, one per theta: {all:?}");
+        for f in insts {
+            let targets: Vec<&str> = f
+                .blocks
+                .iter()
+                .flat_map(|b| &b.instrs)
+                .filter_map(|i| match i {
+                    Instr::Call(_, sym, _) => Some(sym.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                targets.contains(&f.name.as_str()),
+                "{} must recurse into itself, called: {targets:?}",
+                f.name
+            );
+            assert!(
+                !targets.contains(&"loopg"),
+                "{} must not target the bare poly name: {targets:?}",
+                f.name
+            );
+            assert!(
+                !f.blocks
+                    .iter()
+                    .any(|b| matches!(b.term, Terminator::Jmp(to) if to.0 <= b.id.0)),
+                "{} must not lower to a loop (D3 defers the back-edge)",
+                f.name
             );
         }
     }

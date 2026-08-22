@@ -651,6 +651,27 @@ impl<'a> FuncBuilder<'a> {
                     self.lower_enum_call(ew, span, tail);
                     return;
                 }
+                // P7 slice 3g (R2): a self-call inside a monomorphized
+                // polymorphic body. The checker records no `CallInst` for it
+                // (the poly-body walk is abstract, with no concrete θ to
+                // record) and `env` excludes every poly word, so the two
+                // paths an ordinary call takes both miss -- the `env` lookup
+                // below would panic on the poly self-name. Its callee is
+                // whichever instantiation is being lowered right now, so it
+                // targets `cur_word_name` with this instantiation's own
+                // concrete arity. An ordinary recursive call, not a loop
+                // back-edge: `self_tail` is `false` for every instantiation
+                // (D3, the loop transform is deferred), and the R7 block
+                // below is keyed on `cur_word_name`, which a poly self-name
+                // never equals.
+                if let Some((callee, arity)) = &self.cur_poly_callee {
+                    if callee == name {
+                        let arity = arity.clone();
+                        let symbol = self.cur_word_name.clone();
+                        self.emit_user_call(&arity, symbol);
+                        return;
+                    }
+                }
                 // R7: a tail-position self-call is a back-edge to the loop
                 // header, not a real call. `self.header` is `Some` iff the word
                 // is self-tail-recursive (R6), and `tail` marks the syntactic
@@ -681,40 +702,50 @@ impl<'a> FuncBuilder<'a> {
                     self.terminated = true;
                     return;
                 }
-                let (in_arity, out_arity, ret_ty, quot_inputs) = {
-                    let a = self.env.get(name).expect("checked user word exists");
-                    (a.in_arity, a.out_arity, a.ret_ty, a.quot_inputs.clone())
-                };
-                let split = self.stack.len() - in_arity;
-                let mut args = self.stack.split_off(split);
-                // R-D3: an ordinary `[ ... ]` parameter is a real call, so a
-                // phantom quotation argument becomes its `(code, env)`
-                // aggregate here, before it can reach `Instr::Call`.
-                self.materialize_quot_args(&mut args, &quot_inputs);
-                // R11: a multi-output callee returns one bundle, unpacked back
-                // onto the stack below, so the lowering stack matches the
-                // stack the checker verified. The discriminator is the
-                // bundle's own flag, not `out_arity >= 2`: the REPL's env
-                // derives a multi-output `ret_ty` from the first output alone
-                // and interns no bundle, and must not enter this branch.
-                let bundle = match ret_ty {
-                    Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
-                    _ => None,
-                };
-                let ret = if out_arity == 1 || bundle.is_some() {
-                    Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
-                } else {
-                    None
-                };
+                let arity = self
+                    .env
+                    .get(name)
+                    .expect("checked user word exists")
+                    .clone();
                 let sym = (self.resolve)(name);
-                self.push_instr(Instr::Call(ret, sym, args));
-                if let Some(v) = ret {
-                    self.stack.push(v);
-                }
-                if let Some(id) = bundle {
-                    self.unpack_bundle(id);
-                }
+                self.emit_user_call(&arity, sym);
             }
+        }
+    }
+
+    /// Pop `arity.in_arity` operands and emit the `Instr::Call` to `symbol`,
+    /// leaving the callee's declared result on the stack. Shared by the
+    /// ordinary name-keyed user-word dispatch and the polymorphic self-call
+    /// (P7 slice 3g, R2), so the two cannot disagree about phantom-quotation
+    /// materialization or bundle unpacking.
+    fn emit_user_call(&mut self, arity: &Arity, symbol: String) {
+        let split = self.stack.len() - arity.in_arity;
+        let mut args = self.stack.split_off(split);
+        // R-D3: an ordinary `[ ... ]` parameter is a real call, so a
+        // phantom quotation argument becomes its `(code, env)`
+        // aggregate here, before it can reach `Instr::Call`.
+        self.materialize_quot_args(&mut args, &arity.quot_inputs);
+        // R11: a multi-output callee returns one bundle, unpacked back
+        // onto the stack below, so the lowering stack matches the
+        // stack the checker verified. The discriminator is the
+        // bundle's own flag, not `out_arity >= 2`: the REPL's env
+        // derives a multi-output `ret_ty` from the first output alone
+        // and interns no bundle, and must not enter this branch.
+        let bundle = match arity.ret_ty {
+            Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+            _ => None,
+        };
+        let ret = if arity.out_arity == 1 || bundle.is_some() {
+            Some(self.fresh_value(arity.ret_ty.unwrap_or(IrType::I64)))
+        } else {
+            None
+        };
+        self.push_instr(Instr::Call(ret, symbol, args));
+        if let Some(v) = ret {
+            self.stack.push(v);
+        }
+        if let Some(id) = bundle {
+            self.unpack_bundle(id);
         }
     }
 

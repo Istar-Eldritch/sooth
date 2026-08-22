@@ -208,6 +208,16 @@ pub(super) struct FuncBuilder<'a> {
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     pub(super) cur_word_name: String,
+    /// P7 slice 3g (R2): when this func is a monomorphized instantiation of a
+    /// polymorphic word, that word's own (mangled) name plus the arity of
+    /// *this* instantiation's concrete effect. A `Call` of that name inside
+    /// the body is a self-call: the checker records no `CallInst` for it (a
+    /// poly body walks abstractly, with no concrete θ to record) and `env`
+    /// excludes every poly word, so it resolves through neither of the two
+    /// paths an ordinary call takes. Its callee is whichever instantiation is
+    /// currently being lowered, i.e. `cur_word_name`. `None` for a
+    /// monomorphic word, whose self-calls keep going through `env`.
+    pub(super) cur_poly_callee: Option<(String, Arity)>,
     /// Slice 7a (R11): the `IrType` of each declared output, in order. A branch
     /// join in tail position maps its merged slot `i` to `cur_outputs[i]`; a
     /// differing phantom-quotation pair whose target is `IrType::Quotation` is
@@ -360,6 +370,7 @@ impl<'a> FuncBuilder<'a> {
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
+            cur_poly_callee: None,
             cur_outputs: Vec::new(),
             cur_combinator: None,
             header: None,
@@ -699,6 +710,8 @@ fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value
 /// its mangled symbol against a `θ`-substituted concrete effect. The
 /// instantiation table and poly-arity map thread through so a call to a
 /// polymorphic word inside this body resolves to its per-site symbol (R14).
+/// `poly_callee` is the polymorphic word this func instantiates, if any, so a
+/// self-call in its body can find its way back to `name` (P7 slice 3g, R2).
 /// Lives here rather than in `driver` so `destructors` can call it without a
 /// `destructors` → `driver` back-edge (Q2: shared code at the shared root).
 #[allow(clippy::too_many_arguments)]
@@ -707,6 +720,7 @@ pub(super) fn lower_word_parts(
     effect: &StackEffect,
     body: &[Term],
     self_tail: bool,
+    poly_callee: Option<&str>,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
@@ -739,6 +753,20 @@ pub(super) fn lower_word_parts(
     // R11: the declared output row's `IrType`s, so a tail branch join can find
     // the target quotation type for the slot it materializes.
     b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    // P7 slice 3g (R2): the self-call target's arity comes from *this*
+    // instantiation's concrete effect, the same way `driver` derives an
+    // ordinary word's `env` entry -- a poly word has no `env` entry to read.
+    b.cur_poly_callee = poly_callee.map(|callee| {
+        (
+            callee.to_string(),
+            Arity {
+                in_arity: effect.inputs.len(),
+                out_arity: effect.outputs.len(),
+                ret_ty: ret,
+                quot_inputs: quot_input_slots(effect.inputs.iter().map(|s| s.ty)),
+            },
+        )
+    });
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -900,6 +928,7 @@ pub(super) fn lower_materialized(
             &effect,
             &m.body,
             false,
+            None,
             env,
             resolve,
             regs,
