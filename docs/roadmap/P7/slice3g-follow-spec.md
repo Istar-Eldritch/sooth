@@ -17,23 +17,19 @@ position (the last term of the `if` combinator's recursive-arm quotation) yet ge
   dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;
 ```
 
-The slice has three pieces, located by the brief's recon and corrected/completed by a
-round-1 review pass (the concrete precedent of "locate-and-reject, don't yet implement
-back-edge disposal" is mirrored throughout; one sub-piece, 1c, is a required
-investigation rather than a locked design — see "Design, Piece 1"):
+The slice has three pieces, located by the brief's recon, corrected/completed by a
+round-1 review pass, and re-scoped by Phase 1's own probes (the concrete precedent of
+"locate-and-reject, don't yet implement back-edge disposal" is mirrored throughout; the
+guard the brief scoped is not the one that was needed — see "Design, Piece 1"):
 
 1. **A checker-side guard, larger than first scoped**: net-new tail-position threading
    through the poly walker (`poly_walk`/`poly_term`/`poly_call_term`/
    `poly_walk_arms`/`poly_combinator_call` carry no tail state today), plus a poly-side
-   equivalent of the concrete `check_linear_across_back_edge`
-   (`src/check/terms.rs:1058`) for a linear value stranded below the recursive call's
-   argument window (typechecks clean at HEAD; the loop transform would otherwise reach
-   it with no destructor plan), plus a required investigation into whether the
-   concrete `check_reference_across_back_edge`'s hazard (a reference to a local
-   crossing the back-edge) is even reachable given `PolySlot` carries no
-   `deriv`/owned-root data. Both guards, if needed, are *located rejections*, mirroring
-   the concrete guards, which are themselves still only located rejections, not full
-   back-edge disposal.
+   guard on what may cross the back-edge. Phase 1 resolved *which* guard: the linear
+   hazard the brief chased needs none (unreachable, or already rejected — see 1b), and
+   the sibling `check_reference_across_back_edge` hazard is the reachable one, silent at
+   HEAD (see 1c). The guard is a *located rejection*, mirroring the concrete guards,
+   which are themselves still only located rejections, not full back-edge disposal.
 2. **Two small plumbing changes** at the `lower_word_parts` call sites (native
    `driver.rs`, REPL `lower_instantiation`), each of which already holds everything
    `has_self_tail_call` needs and hardcodes `false`.
@@ -42,8 +38,8 @@ investigation rather than a locked design — see "Design, Piece 1"):
    than `self.env.get(name)` (which panics on a poly name).
 
 The checker guard (piece 1) must land **before** the lowering pieces (2, 3), so the
-loop transform never reaches a stranded-linear program without a rejection in front
-of it. That is the exact regression the brief's open-question-1 probe found.
+loop transform never reaches an unguarded program: a reference to a local of the frame
+riding the back-edge into a header that rebinds that local.
 
 ## Load-bearing facts (verified against HEAD by the brief)
 
@@ -97,6 +93,10 @@ position plumbing and misdescribed the concrete precedent (it does not carry tai
 on `Ctx` — verified below), and omitted a second sibling guard the concrete side runs
 at the same site. Both are corrected here with a concrete, source-verified design.
 
+**Phase 1 outcome:** that second sibling guard (1c) is the whole of the checker work;
+the guard the brief scoped (1b) is not needed at all. Both sub-sections below are
+rewritten to what was probed and delivered.
+
 #### 1a. Tail-position threading through `poly_walk` (net-new plumbing, not a tweak)
 
 Verified against HEAD: **no poly-walk function carries or computes tail position
@@ -119,100 +119,117 @@ The mechanical, source-verified port:
   terms.iter().enumerate()` — add `let last = terms.len().wrapping_sub(1);` and pass
   `tail && at == last` into each `poly_term` call, exactly mirroring
   `check_terms_relaxed`'s existing `tail && i == last`.
-- `poly_walk_arms` (`poly.rs:1798-1850+`) calls `poly_walk(&body, arm.input, ...)` once
-  per arm (`poly.rs:1837`) with no tail argument today; thread the caller's `tail`
-  straight into that call, mirroring `inline_combinator`'s pass-through of `tail` into
-  each concrete arm's `check_terms_relaxed`. `poly_combinator_call` (the `if`/`times`
-  dispatch itself, `poly.rs:2148`) takes the same new `tail` parameter and forwards it
-  unchanged into `poly_walk_arms`.
-- `poly_call_term`'s self-call arm (`poly.rs:1297`) gates the new scan (1b below) on
-  its own received `tail` parameter directly — no separate `self_tail`-vs-per-term
-  distinction needed beyond what's already there: `has_self_tail_call(word,
-  combinators)` (computed once in `check_poly_body`, via
-  `combinators.tail()` — `check_poly_body` receives `combinators: &CombinatorEnv`,
-  not `&CombinatorIndex`; `CombinatorEnv::tail()` (`combinators.rs:30`) is the accessor
-  that produces the `&CombinatorIndex` `has_self_tail_call` needs) decides whether this
-  *word* ever back-edges at all, and the per-call `tail` flag (threaded per 1a) decides
-  whether *this* self-call is the one back-edge site. Do not read from `poly.rs:420`'s
-  dead `&CombinatorIndex::new()` — that call site is unrelated (it feeds
-  `Ctx::Word.self_tail_call`, which nothing in `poly.rs` reads) and must not be reused
-  as the source of this new flag.
+- `poly_walk_arms` (`poly.rs:1798-1850+`) walks each arm body; arm tail-ness is *per
+  arm*, exactly as the concrete `LiteralBoundary::is_arm` is (`if`'s arms inherit the
+  call's tail position, `times`' body never does), so it rides `PolyArm.tail` rather
+  than a parameter of `poly_walk_arms` itself. `poly_combinator_call` sets it from the
+  shared accessor the concrete argument site uses (`tail_called_param_slots`), and
+  `poly_eliminator_call` sets it from its own `tail` for every arm (an eliminator arm
+  runs at most once, in place, in the call's position). Both take the new `tail`
+  parameter; `poly_ground_quotation_literal`'s walk takes `false` (a materialized
+  quotation argument is not spliced in place), matching the concrete non-arm boundary.
+- `poly_call_term`'s self-call arm (`poly.rs:1297`) gates the guard on its own received
+  `tail` **and** `ctx.is_self_tail_call()`, character for character the concrete gate at
+  `terms.rs:823`. **Deviation from an earlier draft of this section**, which forbade
+  reading `ctx` and asked for a second threaded bool: `word_ctx`'s `combs` argument
+  feeds nothing but `self_tail_call`, `ctx.is_self_tail_call()` is read nowhere else
+  reachable from the poly walk (`poly.rs` never enters `check_terms`), and
+  `check_poly_body` already holds the `CombinatorEnv`. So passing `combinators.tail()`
+  where the dead `&CombinatorIndex::new()` was costs one line, deletes a stale comment
+  that claimed the empty index was *correct*, and spares a second bare `bool` at five
+  14-argument call sites. The two halves are pinned separately:
+  `poly_non_tail_self_call_carrying_a_local_reference_is_ok` fails if the per-term half
+  is dropped, and `poly_self_tail_call_in_a_builtin_named_word_skips_the_back_edge_guard`
+  if the word-level half is (`has_self_tail_call` refuses every builtin spelling, so a
+  generic `lt` gets no loop header however its body is written).
 
-#### 1b. Linear value stranded below the self-call's argument window
+#### 1b. Linear value across the back-edge — resolved in Phase 1: no guard needed
 
-Add a poly analogue of `check_linear_across_back_edge` (`terms.rs:1058`, not
-`1041-1075` as an earlier draft of this section cited), adapted to `PolySlot` / the
-poly stack representation. Location: the poly self-call arm at `poly.rs:1297`. Gate on
-`tail && has_self_tail_call(word, combinators)` (1a). Before truncating `stack[..base]`,
-scan the stranded slots (everything below the `n`-wide argument window the self-call
-consumes) for a linear `PolyType`, using the poly linearity predicate (`poly_is_copy`
-over `sig`, `structs`, `enums`, `arrays`). If one is found, return a located rejection:
-the poly-side analogue of `linear_across_back_edge_error`, naming the word, the
-stranded type, and the self-tail callee, wording mirroring the concrete message
-("linear values across a loop are not supported yet ... consume it before the
-recursive call"). The argument-window suffix is *forwarded into* the call, not live
-across the edge, so it stays legal — only slots below the window are the hazard.
+Phase 1 probed both clauses of the concrete `check_linear_across_back_edge`
+(`terms.rs:1058`) against the poly walk. Neither needs a port, and the spec's original
+probe program was misread.
 
-**Scope correction on `frame_floor`:** the concrete guard's `frame_floor` parameter is
-`Some` at a *spliced* self-tail combinator site and `None` at the *whole-word* TCO
-site (`terms.rs:1041-1056`'s doc). `loopg`'s self-call is spliced through `if`, so on
-the concrete side this is the `frame_floor = Some(..)` shape, not the whole-word one —
-an earlier draft of this section named the wrong site. This distinction only matters
-for the concrete guard's *second* clause (an unconsumed linear **local** bound below
-the floor, not a stack-stranded value); it does not affect 1b's stack-stranded check,
-which fires identically either way. **Whether that second clause needs its own poly
-port is a required Phase 1 sub-task, not assumed here**: the poly checker already
-rejects any unconsumed linear local at end-of-scope via its own general local-tracking
-(`poly_arm_local_not_consumed_error` or equivalent) independent of self-tail-call
-location, which may already subsume it. Confirm with a probe (a linear local bound
-inside a self-tail `if` arm, left unconsumed past the recursive call) before deciding
-whether 1b needs a second clause or the existing general check already covers it; do
-not silently drop this without checking.
+**The stack-stranded clause is unreachable in a generic body.** A tail self-call is the
+last term of a context whose exit row *is* the word's declared outputs (the body
+residual, or an `if`/eliminator arm's exit, which the call's exit then is), and the
+self-call pushes exactly `sig.outputs`. So `stranded ++ outputs == outputs`, which forces
+`stranded` empty. A generic body also cannot reach the shape from below the way an inline
+combinator can: `check_poly_body` seeds the walk stack at `sig.inputs`, so there is no
+caller row underneath. Written, the shape presents as the two arms disagreeing on their
+exit row, which is what
+`poly_self_tail_linear_stranded_below_the_call_window_is_not_well_typed` pins — a
+tripwire, so that if the exit-row rule ever loosens, the clause has to be written.
 
-#### 1c. Reference derived from a local, passed as a back-edge argument (new finding, unresolved — required Phase 1 investigation)
+**The unconsumed-linear-local clause is already rejected**, by the general
+end-of-body/arm local tracking (`poly_local_unconsumed_error` /
+`poly_arm_local_not_consumed_error`), with `error: linear value `s` is never consumed`.
+The concrete clause's own doc says that clause is not what makes disposal safe — its only
+job is to *locate* the same rejection at the back-edge — so a second poly rule that only
+relocates a message is not worth the second rule.
+`poly_self_tail_unconsumed_linear_local_is_error` pins the subsumption.
+
+**The spec's own probe program is legal, not a rejection.** In
+
+```sooth
+: loopg ( Spy 'T: Copy i64 -- Spy 'T )
+  dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;
+```
+
+the self-call's declared window is all three inputs, so the `Spy` is *moved into* the
+call and forwarded as a back-edge operand — the concrete guard's own accept case. It
+stays clean, pinned by `poly_self_tail_linear_forwarded_into_the_call_window_is_ok`;
+open question 1's premise (a linear value stranded *below* the window) does not hold of
+it. **Phase 3 must not add a rejection golden for this program.**
+
+#### 1c. Reference derived from a local, passed as a back-edge argument — reachable, guarded in Phase 1
 
 The concrete checker runs a **second** guard at the identical gate
 (`tail && ctx.mangled_name() == Some(name) && ctx.is_self_tail_call()`,
 `terms.rs:822-828`): `check_reference_across_back_edge` (`check.rs:1548-1568`), which
-rejects a reference-typed *argument to the call itself* (not a stranded value —
-`stack[base..]`, the args, not `stack[..base]`) whose `Deriv::owned_root` is a local of
-this frame: the loop header rebinds locals each iteration, so a reference derived from
-one would alias a reused slot. An earlier draft of this spec ported only 1b and
-omitted this sibling entirely.
+rejects a reference-typed *argument to the call itself* (`stack[base..]`, the args, not
+`stack[..base]`) whose `Deriv::owned_root` is a local of this frame: the loop header
+rebinds locals each iteration, so a reference derived from one would alias a reused slot.
 
-**This cannot be ported mechanically the way 1b can, and is left as an open
-investigation for whoever implements Phase 1, not resolved here.** `PolySlot`
-(`poly.rs:116-127`) carries only `pt`, `int_val`, `quot` — no `deriv`/`owned_root`
-equivalent at all; the poly walk's only borrow-provenance tracking found
-(`PolyBorrow`, `poly.rs:102-111`: `place`/`mutable`/`span`) is a side-table
-(`arm_borrows` in `poly_walk_arms`) unrelated to a stack slot's own derivation history.
-So `check_reference_across_back_edge`'s exact mechanism has no poly-side data to read.
-Before writing any guard here, **probe whether the hazard is even constructible**: does
-a poly self-tail word's declared signature admit a concrete reference-typed parameter
-(recall the standing note that a poly body's *local* borrows already work for concrete
-types, per prior P7 slices), and if so, can a reference derived from a local bound
-*inside* the loop body be passed into that parameter at the recursive call? If
-unreachable today (e.g., because nothing in the poly walk currently lets a call
-argument be a borrow of a same-body local at all), state that plainly, cite the check
-that forecloses it, and this sub-piece is a no-op. If reachable, it needs its own
-guard built from whatever borrow-tracking the poly walk does carry (`PolyBorrow`'s
-`place` is the closest available handle), not a literal port of `check.rs:1548`'s
-`Deriv`-based one.
+**Phase 1 finding: the hazard is reachable, and was silent.** One shape reaches it, and
+it is the shape both representations allow to meet:
+
+```sooth
+: iszero ( i64 -- Bool ) 0 eq ;
+: loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )
+  | r a b n |
+  n iszero ~[ drop r drop 0 ] ~[ r drop &!a b dup n 1 sub loopg ] if ;
+```
+
+A poly-body borrow always yields `PolyType::Ref(..)`, while a fully concrete `&!Cell`
+parameter folds to `Concrete(Type::Ref(..))` at parse time, and the self-call's pointwise
+match never equates the two (it reports the memorable `expected &!Cell, found &!Cell`).
+So the referent has to stay variable-bearing, and an *array* local is then the only
+borrowable one a generic body admits (a bare `'T` might instantiate to a scalar; a
+`Generic` application is not on the borrowable list). Above, `&!a` crosses the back-edge
+and typechecked clean at HEAD, while the monomorphic twin of the same body was already
+rejected.
+
+**The guard** (`check_poly_reference_across_back_edge`) is not a literal port: `PolySlot`
+carries no `Deriv`, so nothing traces *which* argument a recorded borrow flowed into. It
+is the conjunction the available data supports — a reference among the call's arguments,
+and a live `PolyScope::borrows` record whose place is a **local** (a static's
+data-segment storage survives every iteration, the concrete R3 exemption). A reference
+*parameter* is exempt for free: a body that borrows nothing records nothing. The rule can
+therefore reject a program the concrete side accepts (a dead local borrow beside a
+forwarded parameter reference), which is the coarseness `prune_dead_borrows` already
+documents and the message states (`POLY_BORROW_LIVENESS_NOTE`).
 
 Both 1b and 1c are **located rejections**, not disposal/soundness-repair support: no
 back-edge destructor and no aliasing-safe representation is built, exactly as the
 concrete guards defer both.
 
-Probe program that must be rejected after this phase (open question 1, verified clean
-at HEAD):
-
-```sooth
-type: Spy tag i64 ;
-: drop ( Spy -- ) | s | s Spy> drop ;
-: iszero ( i64 -- Bool ) 0 eq ;
-: loopg ( Spy 'T: Copy i64 -- Spy 'T )
-  dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;
-```
+**One conjunct is unwitnessable by a source program**: the per-arm refinement in
+`poly_combinator_call` (`tail && tail_slots.contains(&i)`, so `times`' body does not
+inherit tail position while `if`'s arms do). Kept for lockstep with
+`tail_position_calls`/`lower_terms`, and its cost of being unpinned is recorded at the
+site: the coarse borrow liveness rejects any body that borrows a local in *one* arm and
+tail-recurses with a reference argument in *another*, so no program can tell which arm
+the borrow sat in.
 
 ### Piece 2 — compute `self_tail` at the two `lower_word_parts` call sites (lowering plumbing)
 
@@ -231,6 +248,15 @@ type: Spy tag i64 ;
 Also in this piece: **rewrite the stale comment** at `driver.rs:264-272` to name the
 real, still-valid reason `self_tail` was previously `false` (D3's now-being-closed
 lowering deferral), not the disproven `CallInst`-lookup claim.
+
+**Phase 1 note for whoever does this:** the checker's word-level gate now reads
+`has_self_tail_call` off the same `CombinatorEnv` each path already passes to
+`check_poly_body` (`combinator_bodies` natively, `checker_combinators(&self.combinators)`
+at the REPL). Piece 2's `self_tail` must come from an index of the same contents on both
+paths, or the guard and the transform disagree about whether a word back-edges: a splice
+the checker's index cannot follow (an `if` missing from a session's retained combinators,
+say) makes the checker treat the self-call as ordinary recursion, and lowering must reach
+the same conclusion or it back-edges past an unrun guard.
 
 ### Piece 3 — back-edge dispatch inside the poly self-call arm (lowering)
 
@@ -269,27 +295,35 @@ depends on re-deriving it. (No open sub-question remains here.)
 Unit tests beside the stage code, `thing_condition_expected` naming, diagnostics
 tested by exact message.
 
-### Checker (Phase 1)
+### Checker (Phase 1) — as delivered
 
-- `poly_self_tail_linear_stranded_below_call_window_is_error` — the `Spy`/`loopg`
-  program above is rejected, asserting the exact located message (word name, stranded
-  `Spy`, self-tail callee). Beside `poly.rs`.
-- `poly_self_tail_linear_forwarded_into_call_window_is_ok` — a linear value *moved
-  into* the recursive call's argument window (forwarded, not stranded) stays legal.
-- `poly_non_tail_self_call_with_linear_below_is_ok` — a non-tail-position self-call
-  in a self-tail word does not trigger the guard (it lowers as an ordinary call).
-  Mutation-guard: this test must fail if the tail gating is dropped.
-- Existing `loopg` (`'T: Copy`, no linear) still typechecks clean — the guard fires
-  only on a genuinely linear stranded slot.
-- `poly_self_tail_unconsumed_linear_local_in_arm_is_error` (or a note explaining why
-  an existing test already covers it) — resolving 1b's `frame_floor`/second-clause
-  question: a linear local bound inside a self-tail `if` arm, left unconsumed past the
-  recursive call, must be rejected either by this guard's own second clause or by an
-  identified pre-existing general check. Do not skip writing this probe.
-- Piece 1c's outcome, either way: if the reference-across-back-edge hazard is
-  reachable, a `poly_self_tail_reference_to_local_across_back_edge_is_error` test
-  (or equivalent); if unreachable, a short comment at the investigation site citing
-  what forecloses it, and no test is required for a shape that cannot be constructed.
+All beside `poly.rs`, all built from one fixture helper (`self_tail_ref_loop`) whose doc
+records why `&!['T 4]` is the only reference parameter a body borrow can match.
+
+- `poly_self_tail_reference_to_a_local_across_the_back_edge_is_error` — 1c's hazard,
+  exact message.
+- `poly_self_tail_reference_parameter_forwarded_across_the_back_edge_is_ok` — the
+  incoming reference parameter still crosses freely.
+- `poly_non_tail_self_call_carrying_a_local_reference_is_ok` — the per-term half of the
+  gate; the word's real back-edge sits in the sibling arm, so only `tail` tells the two
+  self-calls apart.
+- `poly_self_tail_call_in_a_builtin_named_word_skips_the_back_edge_guard` — the
+  word-level half.
+- `poly_self_tail_reference_rooted_in_a_static_is_ok` — the static exemption.
+- `poly_self_tail_call_with_no_reference_argument_ignores_a_live_local_borrow` — the
+  rule's other precondition: a live local borrow alone is not a hazard.
+- `poly_self_tail_linear_forwarded_into_the_call_window_is_ok` — the spec's original
+  probe program, which is this accept case and not a rejection.
+- `poly_self_tail_unconsumed_linear_local_is_error` and
+  `poly_self_tail_linear_stranded_below_the_call_window_is_not_well_typed` — the two
+  reasons 1b needs no guard, pinned rather than asserted in prose.
+- The existing `loopg` goldens still typecheck clean (`--lib` and the S3g suite).
+
+Every clause was mutation-tested: deleting the guard call, either half of the gate, the
+reference precondition, the locals filter, scanning `stack[..base]` instead of the args,
+and dropping `tail && at == last` are each killed by a named test above. The one
+surviving mutation (the per-arm `tail_slots` refinement) is documented at its site as
+unwitnessable, with the reason.
 
 ### Lowering (Phase 2/3)
 
@@ -320,8 +354,9 @@ tested by exact message.
   into the large-counter constant-stack golden below (verified against `git show
   b49ef63 -- tests/phase7_slice3g.rs`; an earlier draft of this spec miscounted this
   as two tests needing migration).
-- **Rejection golden**: the `Spy`/`loopg` program produces the poly-side
-  linear-across-back-edge located diagnostic (source-in → expected-diagnostic-out).
+- **Rejection golden**: the `&!['T 4]` program of 1c produces the poly-side
+  reference-across-back-edge located diagnostic (source-in → expected-diagnostic-out).
+  *Not* the `Spy`/`loopg` program: that one is legal and stays legal (see 1b).
 
 ## Out of scope
 
@@ -337,14 +372,14 @@ tested by exact message.
 
 ## Open questions
 
-One genuinely open item, deliberately left for Phase 1 rather than guessed here:
-**piece 1c** (does a poly self-tail body ever admit a reference-to-a-local as a
-back-edge argument, and if so what guard fits `PolySlot`'s representation) is an
-explicit required investigation, not a locked design — see "Design, Piece 1c" above.
-Everything else is resolved: open question 1's core hazard (linear-stranded) is
-specified as Phase 1's 1b; the `frame_floor` second clause is scoped as a Phase 1
-probe task (1b); open question 2 (test migration) is corrected to exactly one test,
-not two, per round-1 review; open question 3 (θ non-interaction) needs no code.
+All resolved. Phase 1 answered the two it left open, and both answers moved work:
+**1c** (the reference-across-back-edge hazard) is reachable and is what Phase 1 guards;
+**1b** (the linear hazard, open question 1) needs no guard at all — its stack-stranded
+clause cannot be well-typed in a generic body and its unconsumed-local clause is already
+rejected, and the program the brief offered as the witness is the *forwarded* accept
+case, so **Phase 3 must not add a linear rejection golden for it**. Open question 2 (test
+migration) stands as corrected to exactly one test; open question 3 (θ non-interaction)
+needs no code.
 
 ## Phased delivery plan
 
@@ -353,18 +388,16 @@ unguarded hazard. Phase 1 grew a third sub-piece (1c) after round-1 review; it s
 one phase since 1a/1b/1c share the same self-call-arm location and tail-plumbing
 prerequisite.
 
-- **Phase 1 — tail-position plumbing plus both poly-side back-edge guards.** 1a:
-  thread `tail: bool` through `poly_walk`/`poly_term`/`poly_call_term`/
-  `poly_walk_arms`/`poly_combinator_call` (net-new parameter on all five, per the
-  concrete-precedent design above — this is real, nontrivial checker-walk work, not a
-  one-line change). 1b: the linear-stranded-below-window located rejection, plus
-  resolving the `frame_floor` second-clause question with a probe. 1c: the
-  reference-across-back-edge investigation — resolve whether the hazard is reachable
-  before deciding whether it needs a guard; either outcome is an acceptable Phase 1
-  exit, but the investigation itself is not optional. Exit: the `Spy`/`loopg` program
-  is rejected with the exact analogue message; the forwarded-linear and non-tail-self
-  cases stay legal; existing `loopg` still typechecks; 1c's reachability question is
-  answered and (if reachable) guarded.
+- **Phase 1 (delivered) — tail-position plumbing plus the poly-side back-edge guard.**
+  1a: `tail: bool` threaded through `poly_walk`/`poly_term`/`poly_call_term`/
+  `poly_combinator_call`/`poly_eliminator_call`, per-arm via `PolyArm.tail`, and the
+  word-level half read off `ctx.is_self_tail_call()` with the dead empty combinator
+  index in `check_poly_body` fixed. 1b: no guard — both clauses are unreachable or
+  already rejected, and the spec's probe program turned out to be the accept case. 1c:
+  the hazard is reachable and was silent; `check_poly_reference_across_back_edge` is the
+  rejection. Exit met: the `&!['T 4]` program is rejected with a located message, the
+  forwarded-reference/forwarded-linear/non-tail/builtin-named/static cases stay legal,
+  and existing `loopg` still typechecks.
 - **Phase 2 — compute `self_tail` and add the back-edge dispatch.** Thread
   `has_self_tail_call` into the two `lower_word_parts` call sites (`driver.rs`,
   `repl.rs`, via `CombinatorEnv::tail()` where a `CombinatorIndex` is needed); add the
@@ -385,7 +418,7 @@ prerequisite.
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "Thread tail-position through poly_walk/poly_term/poly_call_term/poly_walk_arms/poly_combinator_call; add the poly-side linear-stranded-below-window guard gated on has_self_tail_call and tail; investigate and resolve the reference-across-back-edge (1c) reachability question", "effort": "M", "difficulty": "hard" },
+    { "phase": 1, "focus": "Thread tail-position through poly_walk/poly_term/poly_call_term/poly_walk_arms/poly_combinator_call; guard the poly self-tail back-edge against a reference derived from a local (1c, the reachable hazard) gated on has_self_tail_call and tail; record why the linear hazard (1b) needs no guard", "effort": "M", "difficulty": "hard" },
     { "phase": 2, "focus": "Compute self_tail at both lower_word_parts call sites and add the poly self-call back-edge dispatch in func_builder/calls.rs; fix the stale driver.rs comment", "effort": "M", "difficulty": "hard" },
     { "phase": 3, "focus": "Migrate the one true S3g absence-of-header test to a non-tail fixture, extend the existing loopg run golden into the constant-stack golden, confirm all other existing goldens pass, add the rejection golden", "effort": "S", "difficulty": "standard" }
   ]
