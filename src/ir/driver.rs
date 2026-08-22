@@ -89,17 +89,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // *declares* one -- which every program using `core::bool` does -- would add
     // a function and its string constants to a build that never prints a bool.
     //
-    // Three ways to reach one, so three ways to keep it. A bare `.` in a body is
-    // a builtin name, so 8a dispatch records the chosen candidate per span
-    // (`builtin_overloads`) rather than leaving the name in the term. A
+    // Two ways to reach one, so two ways to keep it. A bare `.` in a body is a
+    // builtin name, so 8a dispatch records the chosen candidate per span
+    // (`builtin_overloads`) rather than leaving the name in the term; a
     // *qualified* call (`b::.`) is rewritten to the declaration's own mangled
-    // spelling and dispatched as an ordinary call, which does name it. And a
-    // module-0 declaration is the program's (or the REPL line's) own, which is
-    // being compiled *because* it was declared, not because something imported
-    // it -- an entry file or session is entitled to its own uncalled word.
+    // spelling and dispatched as an ordinary call, which does name it.
     //
     // The name is demangled for the operator test alone: a closure rewrites
     // every module-0 word to `{name}__m0`, and `.__m0` is the same overload.
+    // The REPL reaches none of this: a session definition lowers through
+    // `lower_word` directly, so its own uncalled overload is emitted regardless.
     let called = called_names(&module.words);
     let uncalled_operator_overloads: std::collections::HashSet<usize> = module
         .words
@@ -107,7 +106,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .enumerate()
         .filter(|(idx, w)| {
             crate::check::is_builtin_operator_name(crate::resolve::demangle_word(&w.name))
-                && w.module != 0
                 && !called.contains(w.name.as_str())
                 && !module
                     .builtin_overloads
