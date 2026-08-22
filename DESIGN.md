@@ -476,8 +476,11 @@ primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`, one per comparison shape, each
 signed / unsigned / float behaviour from its operand type.
 
 Everything typed is a library word over them, in the `core` package: `core::bool` and
-`core::cmp`, which a program reaches by `import:` like any other module (only `bool` the
-*type* is compiler-known). `if` and `unless` are term-body combinators
+`core::cmp`, which a program reaches by `import:` like any other module. The *type* `bool`
+is one of `core::bool`'s declarations too (`type: bool | False | True ;`), reached the same
+way -- with one wrinkle a program feels: a type name resolves against its declaring module,
+so unlike a word it does not follow `core::prelude`'s re-export, and a file spelling `bool`
+in an effect names `core::bool` directly. `if` and `unless` are term-body combinators
 (`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
 condition's discriminant with `tag` and `branch`es on the flag); `eq`/`lt`/`gt`/`lte`/`gte`/`ne`
 are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
