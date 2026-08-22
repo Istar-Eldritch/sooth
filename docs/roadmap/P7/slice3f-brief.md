@@ -98,37 +98,58 @@ way**, and orthogonal to S3e's trait-bound work.
    "order matters" claim without triple-checking arity first.**
 
 3. **The concrete-side materialization boundary (P4.S7a's own R8, distinct from
-   R9p) is the mechanism this slice's fix would extend, not invent.** A concrete
-   word's `Type::Quotation`-typed parameter already accepts and materializes a
-   literal argument (`apply_quot` above). Once R9p is narrowed to only reject a
-   quotation argument destined for a genuine `PolyType::Var` position, the
-   remaining question is whether the poly-callee case reuses that same
-   materialization path unchanged, or needs its own — not yet traced; flagged as
-   OQ1.
+   R9p) is the mechanism this slice's fix extends, not invents — confirmed by OQ1's
+   probe below.** A concrete word's `Type::Quotation`-typed parameter already
+   accepts and materializes a literal argument (`apply_quot` above); once R9p is
+   narrowed to only reject a quotation argument destined for a genuine
+   `PolyType::Var` position, the poly-callee case needs that same
+   `materialize_quotation_at_boundary` step invoked, which `check_poly_call` cannot
+   do without a signature change (OQ1).
 
 ## Open questions
 
-1. **Does narrowing R9p to spare a `PolyType::Concrete(Type::Quotation(..))`
+1. ~~Does narrowing R9p to spare a `PolyType::Concrete(Type::Quotation(..))`
    position reuse P4.S7a's existing materialization path unchanged, or does a poly
-   callee's per-instantiation body-check need its own?** Untraced. The concrete twin
-   materializes at check time into an ordinary `Slot` with `quot: None`; a poly
-   callee's `PolySlot` (used only during the generic, pre-instantiation body-check in
-   `check_poly_body`) is a different type from `Slot` — confirm whether the
-   materialized value needs to survive as a `PolyType::Concrete(Type::Quotation(..))`
-   slot through the *generic* body-check (before any instantiation exists) with no
-   analogue of `.quot`/`.surviving` needed, since the generic body only ever sees the
-   ground type, never the literal itself.
+   callee's per-instantiation body-check need its own?~~ **Resolved: it needs the
+   same materialization step, but `check_poly_call` cannot reach it today without a
+   signature change.** Probed by patching a scratch copy of the tree: narrowing R9p
+   to spare a declared ground `Type::Quotation` input lets the argument's `.quot`
+   marker through, but `unify_poly_input`'s subsequent `PolyType::Concrete(t)` arm
+   then compares the operand's *raw* `Slot.ty` — still the `Cstr` placeholder a
+   literal carries before materialization — against the declared `Type::Quotation`,
+   and fails (`` `run_it` expected `[ i64 -- i64 ]`, found `cstr` ``). The concrete
+   side's own materialization boundary, `materialize_quotation_at_boundary`
+   (`src/check/captures.rs:287-`), is exactly the function that needs to run here
+   too — it is what turns a `Known` literal into a real, `quot: None`,
+   `Type::Quotation`-typed value, invoked at the concrete call-argument loop's own
+   R8 site (`src/check/terms.rs:773-785`). But `check_poly_call`
+   (`poly.rs:3262-3274`) cannot call it as-is: it takes `prov: &Provenance` and
+   `scope: &Scope` (both read-only), while `materialize_quotation_at_boundary`
+   needs both `&mut`, plus `env`, `cells`, and `slices`, none of which
+   `check_poly_call` currently receives. **This is real, scoped plumbing, not a new
+   IR/lowering mechanism** — the same shape of signature-threading change S3b-follow
+   already made to `poly_walk` (adding `combinators`/`poly_words`) — but it is not
+   free, and a spec must budget for widening `check_poly_call`'s signature and every
+   one of its call sites.
 
-2. **Does the abstract-parameter case (Gap 1) need new machinery, or does closing
-   Gap 2 change what "abstract" means here?** Gap 1's guard (`poly.rs:953-958`) fires
-   when `top.quot.is_none()` — i.e., the operand is *any* real parameter, concrete or
-   variable-typed, not a spliced literal. Once Gap 2 lets a concrete
-   `Type::Quotation`-typed argument actually reach the body as a materialized value,
-   does `call` on *that* parameter still hit this same rejection (since it's still
-   not a literal marker), or does it need its own carve-out alongside Gap 2's fix? If
-   so, both gaps may resolve together at the same guard rather than needing two
-   independent changes — untraced, and the roadmap's own framing of them as two
-   separate mechanisms may need revisiting once this is probed.
+2. ~~Does the abstract-parameter case (Gap 1) need new machinery, or does closing
+   Gap 2 change what "abstract" means here?~~ **Resolved: they are the same guard,
+   and both need their own fix; narrowing one does not subsume the other.** Probed
+   directly: once R9p is narrowed (OQ1's probe), the very next thing that fails is
+   Gap 1's own guard in `poly_call_term`'s `call` handling (`poly.rs:953-958`) — it
+   still rejects, now with a different rendering (`` `call` is not permitted on
+   `[ i64 -- i64 ]` `` — the `PolyType::Concrete(t)` arm of
+   `poly_op_on_variable_error`, not the `PolyType::Quotation(..)` arm Gap 1's own
+   probe hits). This confirms they share one code path, but resolving Gap 2 does not
+   implicitly resolve Gap 1: `poly_call_term`'s `call` handling only knows how to
+   splice a literal's interned body (`scope.quotation(quot)`); a genuine parameter
+   has no body to splice; a probe patch adding a poly analogue of the concrete
+   side's `check_abstract_quotation_call` (`src/check/terms.rs:1123-1145` — pop the
+   declared inputs, push the declared outputs, no splice) checked correctly once its
+   own test program's stack shape was fixed. **The spec needs two changes at one
+   shared guard, not one:** OQ1's materialization fix at the call-site argument
+   boundary, and a new `call`-on-a-ground-parameter arm (the poly analogue of R8) at
+   the body's own `call` site.
 
 3. **What does `PolyType::Quotation(ins, outs, ..)` (the *non-folded*, genuinely
    abstract case — e.g. `[ 'T -- 'T ]`) need for Gap 1, distinct from the
@@ -158,9 +179,31 @@ way**, and orthogonal to S3e's trait-bound work.
 
 ## Ready to spec?
 
-**Not yet.** OQ1 and OQ2 both bear on whether this is one mechanism or two, and
-neither is probe-verified — they're the two things worth a paper dogfood or a probe
-pass before locking a spec's exit criteria, per this project's own convention (a
-spec's exit criteria should be probed, not inferred). The recon above is otherwise
-solid: both gaps are real, precisely located, and their messages are cited exactly;
-what's missing is the shape of the fix, not the diagnosis.
+**Yes.** Both open questions are now probe-verified against a patched scratch copy of
+the compiler, not inferred:
+
+- **Three changes, not one, are needed**, all at or adjacent to the same guard
+  family in `src/check/poly.rs`:
+  1. Narrow R9p (`check_poly_call`, `poly.rs:3270-3271`) to spare a declared ground
+     `Type::Quotation` input, rejecting only the genuinely unsound case (a bare
+     `PolyType::Var` position).
+  2. Thread `materialize_quotation_at_boundary`
+     (`src/check/captures.rs:287-`) into `check_poly_call` for that spared case —
+     which needs `check_poly_call`'s signature widened (`prov`/`scope` from `&`/`&`
+     to `&mut`/`&mut`, plus `env`, `cells`, `slices` added) and every call site
+     updated, the same shape of change S3b-follow already made to `poly_walk`.
+  3. Add a poly analogue of the concrete side's `check_abstract_quotation_call`
+     (`src/check/terms.rs:1123-1145`) to `poly_call_term`'s `call` handling
+     (`poly.rs:953-958`), for when the top-of-stack operand is a genuine
+     (materialized, non-literal) ground `Type::Quotation` parameter: pop the
+     declared inputs, push the declared outputs, no splice.
+- **No new IR, lowering, or runtime representation is needed** for the concrete
+  (ground `Type::Quotation`) case — confirmed by literally reusing the concrete
+  side's own two small helper functions rather than inventing poly-specific ones.
+  The abstract (`PolyType::Quotation(ins, outs, ..)`, genuinely variable-bearing)
+  case from OQ3 is untouched by this probe pass and remains open for the spec to
+  scope in or explicitly defer.
+- Both retracted-and-recovered findings above (the position-independence
+  correction, and this probe pass) should be treated as load-bearing recon, not
+  just narrative: they're what makes the fix's shape ordinary plumbing instead of
+  an unknown-sized redesign.
