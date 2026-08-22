@@ -322,13 +322,17 @@ one would just reinvent plain `[ ]` under a different sigil. But ordinary `[ ]` 
 (`Type::Quotation`) already have a real runtime representation, landed and marked
 `Implemented.` in Phase 4 Slices 7a/7b: a concrete word taking one and `call`ing it works
 today, probe-verified. What does not work is that value crossing the **polymorphism**
-boundary, on either side, both probe-verified stale rather than designed: a poly body
-calling an abstract (non-literal, parameter-bound) quotation slot fails with
-`` unknown word `call` `` (`poly_call_term` never special-cases `call` for anything but a
-literal marker, `slot.quot.is_some()`); and any caller — concrete or poly — passing a real
-quotation *argument* into a poly callee's signature is rejected outright by
-`check_poly_call`'s R9p (`src/check/poly.rs:2416-2419`, `reject_quotation_argument`), whose
-message still reads "a runtime quotation value is slice 7" as if 7a/7b never shipped.
+boundary, on either side: a poly body calling an abstract (non-literal, parameter-bound)
+quotation slot is rejected by `poly_call_term`'s `call` handling
+(`src/check/poly.rs:953-958`, `` `call` is not permitted on a quotation in `{word}` `` —
+re-probed and re-cited this session; the message text has moved on since this entry was
+first written, but the gap has not closed); and any caller — concrete or poly — passing a
+real quotation *argument* into a poly callee's signature is rejected outright by
+`check_poly_call`'s R9p (`src/check/poly.rs:3270-3271`, `reject_quotation_argument`),
+regardless of that parameter's position in the signature (re-probed this session at all
+three positions after an earlier pass wrongly reported this as position-dependent — see
+`slice3f-brief.md`'s recon #2 for the retraction), whose message still reads "a runtime
+quotation value is slice 7" as if 7a/7b never shipped.
 **Independent of S3d, not a prerequisite either way.** S3d's gap is a quotation *literal*
 written inside a poly body (`poly_call_term`'s `QuotLit`-marker path); this slice's gap is
 an *abstract parameter* and the *call-site argument boundary* (`check_poly_call`), a
@@ -336,12 +340,13 @@ different code path in the same file. Nothing traced so far makes one need the o
 **This, not S3d, is what would let `sort`/`bin_search` become genuinely non-inline** —
 S3d's `call`-on-a-literal fix cannot reach a comparator *parameter* at all (a non-inline
 word still can't declare `~[ ]`); this slice's `call`-on-a-parameter fix, paired with an
-ordinary `[ ]` (not `~[ ]`) comparator type, is the mechanism that actually would. Needs its
-own recon before a spec: `reject_quotation_argument`'s R9p comment ("binds `'T` to the
-placeholder and monomorphizes over a phantom") names a real hazard — unifying a bare `'T`
-against a quotation's `Type` needs the same care S3b took with `PolySlot`, not a bare
-removal of the guard — and lowering a `call` through an abstract quotation parameter inside
-a monomorphized (not spliced) poly word is untraced.
+ordinary `[ ]` (not `~[ ]`) comparator type, is the mechanism that actually would. See
+`docs/roadmap/P7/slice3f-brief.md` for full recon: R9p's guard fires unconditionally on
+any quotation-marked operand, without checking whether the declared input is actually the
+unsound bare `'T` case its own comment names, or a harmless ground
+`Type::Quotation`-shaped parameter that should be materialized like the concrete twin
+already is — the brief's open questions cover whether closing this and Gap 1 turn out to
+be one mechanism or two.
 **Exit:** a polymorphic word can declare an ordinary (non-`~`) quotation-typed parameter,
 call it inside its own body via an indirect call, and receive a real quotation value from
 any caller at a concrete instantiation; the stale "slice 7" wording is retired.
