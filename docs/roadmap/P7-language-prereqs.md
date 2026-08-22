@@ -314,7 +314,7 @@ can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with
 a located error naming the missing word and the trait.
 
-**P7.S3f — Runtime quotation values crossing the polymorphism boundary.** Discovered
+**P7.S3f — Runtime quotation values crossing the polymorphism boundary.** `[ done ]` Discovered
 while scoping S3d, not planned: a *non-inline* word cannot declare a `~[ ]`
 (`InlineQuotation`) parameter, and that gate is correct, not a gap — `~[ ]` is splice-only
 by design (`src/check/word_entry.rs:112-142`), has no runtime representation, and giving it
@@ -348,8 +348,18 @@ unsound bare `'T` case its own comment names, or a harmless ground
 already is — the brief's open questions cover whether closing this and Gap 1 turn out to
 be one mechanism or two.
 **Exit:** a polymorphic word can declare an ordinary (non-`~`) quotation-typed parameter,
-call it inside its own body via an indirect call, and receive a real quotation value from
-any caller at a concrete instantiation; the stale "slice 7" wording is retired.
+call it inside its own body via an indirect call, and receive a real quotation value at the
+argument boundary of a **ground** (fully concrete) declared `Type::Quotation` parameter;
+the stale "slice 7" wording is retired
+(`docs/roadmap/P7/slice3f-spec.md`, `tests/phase7_slice3f.rs`).
+**"Any caller" overclaims two cases, named rather than silently absorbed:** an
+*overloaded* poly name still rejects a quotation argument outright
+(`resolve_poly_overload`'s `saw_quotation` short-circuit, `src/check/poly.rs:2976-2999`)
+without ever reaching this slice's per-position check -- a single-candidate poly name
+only. And a still-**abstract** `PolyType::Quotation(ins, outs, ..)` parameter (one whose
+brackets still mention a type variable, e.g. `[ 'T -- 'T ]`) unifies correctly at the
+call-site boundary already, but a poly body still cannot `call` a *bound instantiation* of
+it -- see **P7.S3l** below.
 
 **P7.S3g — Self-recursion in a non-inline generic body.** `[ done ]` A non-inline
 polymorphic word may call itself, so a generic word that loops over an inductively-shaped
@@ -533,3 +543,18 @@ concrete caller's generic callees already are; a callee whose bound the caller's
 does not satisfy is a located error, not a hang or a monomorphization-time panic; and
 `poly_calls_poly_word_error`'s message is deleted along with the gap it named, not left behind
 as an unreachable diagnostic (`tests/phase8_slice2.rs`'s narrowing test is retired with it).
+
+**P7.S3l -- A poly body calling a bound instantiation of an abstract quotation parameter.**
+Named at P7.S3f's exit, out of scope there. `unify_poly_input`'s `PolyType::Quotation` arm
+(`src/check/poly.rs:3434-3471`) already unifies a still-abstract declared quotation parameter
+(one whose brackets mention a type variable, e.g. `[ 'T -- 'T ]`) correctly at the call-site
+argument boundary, row-pointwise, binding any variable the row mentions. The gap left open is
+the body side: `poly_call_term`'s `call` handling still has no arm for a bound instantiation
+of that shape, so `call` on it falls through to `poly_op_on_variable_error`'s generic
+rendering, unchanged since before S3f. S3f's own probe pass found no evidence this needs a new
+representation -- only a new `poly_call_term` dispatch arm parallel to S3f's R3, grounded
+against the concretely bound instantiation (the `Subst` already carries what each variable
+grounds to) rather than a body-local literal.
+**Exit:** a poly body may `call` its own declared, still-abstract quotation parameter once
+bound by the caller's instantiation, popping/pushing against the row grounded through that
+call's `Subst`, the same way S3f's R3 does for the already-ground case.

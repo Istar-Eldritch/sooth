@@ -557,22 +557,39 @@ so R4 does not touch it. Green is
 
 ## Exit findings (required)
 
-At Phase 3 (final), record:
-
-- **Lowering confirmation (L4).** State whether the argument-boundary and body-boundary
-  goldens build and run correctly with **no** lowering changes, the way P7.S3d's OQ3
-  confirmed for its own two consumers, or name what had to change and why.
-- **R9p's second check-site (R2's note).** Confirm `unify_poly_input`'s `PolyType::QuotLit`
-  `unreachable!()` arm is still genuinely unreachable after this slice — i.e. that no
-  path threads a `QuotLit`-marked `PolySlot` into `check_poly_call`'s `Vec<Slot>` stack
-  (they are different stack representations, per recon 2, but confirm rather than
-  assume).
-- **`poly.rs` split signals, re-run.** Per CLAUDE.md, re-run the five split signals
-  against `poly.rs` as it stands after this slice (line count, responsibility mix,
-  import divergence, uncalled-neighbour formatters, circular-dependency pressure) and
-  record the decision — P7.S3b-follow's own exit already deferred with a named
-  trigger condition; state whether this slice's additions (R2's widened signature, R3's
-  new dispatch arm) meet or fall short of that condition.
+- **Lowering confirmation (L4).** No lowering changes were needed. The
+  argument-boundary and body-boundary goldens
+  (`argument_boundary_materializes_ground_quotation_param`,
+  `body_boundary_calls_ground_quotation_param`, `argument_and_body_boundary_together`)
+  build and run correctly against the monomorphization pass unchanged, the same finding
+  P7.S3d's OQ3 recorded for its own two consumers: R2's materialized `Slot` is an
+  ordinary `Type::Quotation`-typed value by the time lowering sees it, and R3's
+  pop/push is checker-only bookkeeping over values already carried through the poly
+  body's existing ABI.
+- **R9p's second check-site (R2's note).** Still genuinely unreachable, confirmed by
+  construction rather than by test: `check_poly_call` operates over `Vec<Slot>` (the
+  monomorphic caller's stack), and `Slot` has no `QuotLit`-shaped variant at all --
+  that marker exists only on `Vec<PolySlot>`, the poly *body's* own stack. No value of
+  type `Slot` can ever carry a `QuotLit` tag, so `unify_poly_input`'s
+  `PolyType::QuotLit => unreachable!(...)` arm (`poly.rs:3438`) cannot be reached from
+  `check_poly_call`'s call site regardless of what this slice changed -- the two stack
+  representations are disjoint types, not merely disjoint in practice.
+- **`poly.rs` split signals, re-run.** `poly.rs` is 7387 lines after this slice (up
+  from 6299 at P7.S3b-follow's own exit re-run). Import divergence still does not fire
+  (a single `use super::*`); no circular dependency forces a split. The
+  responsibility-mix and uncalled-neighbour signals fire for the same reason
+  S3b-follow's exit already recorded (the abstract term walk, shuffle/ref ops,
+  eliminator dispatch, combinator dispatch, and ~40 diagnostics coexist, many
+  formatters uncalled by their neighbours) -- this slice did not change that shape; it
+  added one function (`poly_call_ground_quotation_param`) and two diagnostic arms to
+  the existing dispatch, not a new responsibility category. S3b-follow's named trigger
+  ("a third consumer, or an unrelated phase that already has to touch this
+  neighbourhood") targets a specific extraction shape --
+  `poly_eliminator_call`/`poly_combinator_call`/`poly_walk_arms`/`poly_row_combinator`/
+  `poly_declared_arm` into `check/poly_arms.rs` -- and this slice touched none of
+  those functions; it added a sibling arm to `poly_call_term` (the *caller* of that
+  machinery), not to the machinery itself. Trigger not met. **Deferred again**, same
+  reason and same named extraction shape as S3b-follow's exit.
 - **The >=2-output lowering gap (qualifies L4).** Record the pre-existing gap named in
   L4: a quotation effect with two or more declared outputs type-checks and then panics
   in the backend, because `intern_output_bundles` interns output tuples only for
@@ -593,20 +610,22 @@ At Phase 3 (final), record:
   a bare `'T`-bound local was listed among the goldens but is a checker fact with no
   runnable program, so it landed as the unit test
   `poly_call_on_a_variable_local_is_still_error`.
-- **The abstract `PolyType::Quotation` follow-up, named.** State explicitly whether the
-  open case from Out of scope (a poly body `call`ing a bound instantiation of a
-  declared `[ 'T -- 'T ]`-shaped parameter) needs a new roadmap slice, and if so name it
-  (the roadmap document, `P7-language-prereqs.md`, is the place to register it — do not
-  silently fold it into this slice's own exit criteria).
-- **The roadmap's "any caller" wording is broader than what this slice delivers —
-  say so explicitly when closing out the entry.** `resolve_poly_overload`'s
-  multi-candidate `saw_quotation` short-circuit (Out of scope, `poly.rs:2976-2999`)
-  rejects a quotation argument unconditionally for any **overloaded** poly name,
-  never reaching R1's per-position check at all. `P7-language-prereqs.md`'s S3f exit
-  clause ("receive a real quotation value from any caller") must not be marked
-  satisfied against that case — whoever closes out the roadmap entry should carry this
-  caveat forward, either by narrowing the exit wording or by naming the multi-candidate
-  gap as its own still-open item.
+- **The abstract `PolyType::Quotation` follow-up, named.** Yes, it needs its own
+  roadmap slice: registered as **P7.S3l** in `P7-language-prereqs.md`. A poly body
+  still cannot `call` a *bound instantiation* of a still-abstract declared quotation
+  parameter (`[ 'T -- 'T ]`); `unify_poly_input`'s `PolyType::Quotation` arm already
+  unifies it correctly at the call-site boundary, so the gap is body-side only, and
+  the fix is expected to be a `poly_call_term` dispatch arm parallel to this slice's
+  R3, grounded against the caller's `Subst` rather than a body-local literal.
+- **The roadmap's "any caller" wording is broader than what this slice delivers --
+  said explicitly when closing out the entry.** `P7-language-prereqs.md`'s S3f entry
+  is marked `[ done ]` with its `Exit:` line narrowed to "the argument boundary of a
+  ground ... parameter" rather than "any caller", and a new paragraph names both gaps
+  this slice does not close: `resolve_poly_overload`'s multi-candidate `saw_quotation`
+  short-circuit (`poly.rs:2976-2999`), which rejects a quotation argument
+  unconditionally for any **overloaded** poly name without ever reaching R1's
+  per-position check, and the abstract-`PolyType::Quotation` body-call gap now named
+  P7.S3l above.
 
 ## Out of scope
 
