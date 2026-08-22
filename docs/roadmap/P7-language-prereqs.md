@@ -118,8 +118,9 @@ the same rule the concrete path applies, so a generic body is not the laxer of t
 Elimination is the only quotation consumer this slice gives a generic body: the row-typed
 combinators (`if`/`unless`/`times`) need a declared row grounded against an abstract stack,
 and land in **P7.S3b-follow**; the `call`/`branch`/`tag` primitives declare no `~[ ]`
-parameter to dispatch off, and `call` on a literal is **P7.S3d**'s own exit criterion —
-`branch`/`tag` stay a located rejection naming no slice yet scoped to resolve them. A quotation may not
+parameter to dispatch off, and `call` on a literal was **P7.S3d**'s own exit criterion
+(landed) — `branch`/`tag` stay a located rejection naming no slice yet scoped to resolve
+them. A quotation may not
 be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
 route is its own located error.
 Two standing limits bound what can be written against this today: field projection (`&w`) is
@@ -157,8 +158,9 @@ callee's declared `PolySig`, not by name, so one mechanism covers `if`, `unless`
 and a user's own row-typed combinator alike; `unless` is the witness it is not name-driven,
 since it never reached the old rejection at all (it landed on an unrelated operand-window
 error instead). `call`, `branch`, `tag` are deliberately **not** delivered — `call` on a
-literal is P7.S3d's own exit criterion, and `branch`/`tag` keep the located rejection,
-naming no slice yet scoped to resolve them. An arm operand that is not a splice-consumed
+literal was P7.S3d's own exit criterion (landed), and `branch`/`tag` keep the located
+rejection, naming no slice yet scoped to resolve them. An arm operand that is not a
+splice-consumed
 quotation literal (a value, or one that lost its identity through a local bind) is a located
 rejection reusing S3b's materialisation diagnostics, never an inherited backend panic — this
 forecloses the pre-existing `while`-over-an-erased-quotation ICE from being reached through
@@ -211,28 +213,35 @@ view interned per `(element, mutable)` and lowered as a 16-byte `{ptr, len}` agg
 `&>`/`&!>`/`len` dispatching on it alongside their existing array arms
 (`docs/roadmap/P7/slice3c-spec.md`, `tests/phase7_slice3c.rs`).
 
-**P7.S3d — Rowless quotation-consumer splice.** S3b's eliminator intercept admits a
-quotation marker only where an enum eliminator collects it; every other consumer is
-denied, row-typed or not — probe-verified: `~[ -- ] call` and a fully concrete
-`inline ( ~[ -- ] -- )` helper both fail today even though neither needs any row
+**P7.S3d — Rowless quotation-consumer splice.** `[ done ]` S3b's eliminator intercept
+admitted a quotation marker only where an enum eliminator collects it; every other
+consumer was denied, row-typed or not — probe-verified: `~[ -- ] call` and a fully
+concrete `inline ( ~[ -- ] -- )` helper both failed even though neither needs any row
 unification (`` `call` on a quotation ... is not yet supported ``,
 `` ... is not permitted on a quotation literal ``). The family splits into two tiers by
-cost. This slice is the cheap tier: splice a second, fully concrete quotation consumer
-(no `..a`/`..b` in its signature, e.g. a comparator `~[ &'T &'T -- Ordering ]`) through the
-poly walk, no row unification against an abstract stack required. The row-typed
-combinators (`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) are the
-expensive tier and are **P7.S3b-follow**'s, which shipped them by grounding the declared
-row against the poly walk's abstract stack. What this slice inherits alongside its own
-rowless consumer is the `call` primitive: compiler-known, so it carries no declared
-`PolySig`, and its located rejection names this slice. `branch`/`tag` are compiler-known
-the same way, but stay rejected, unchanged (`slice3d-spec.md`'s own scope exclusion), so
-their located rejection names no slice yet.
-This is also the second quotation consumer S3b's own exit findings named as the trigger
-for re-running `poly.rs`'s deferred split signals. Ordered after S3c and ahead of S3e,
-because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
-already shipped.
-**Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
-`branch`/`tag` keep a located rejection naming no slice yet scoped to resolve them.
+cost. This slice is the cheap tier: splices a `call` on a quotation *literal* written
+directly in a non-inline poly body in place against the live poly stack (C1), and grounds
+a body-local literal passed as an argument to a **concrete** callee's declared, ground
+`Type::Quotation` parameter (C2) — no `..a`/`..b` in either shape's signature, so no row
+unification against an abstract stack. The row-typed combinators
+(`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) are the expensive tier
+and are **P7.S3b-follow**'s, shipped separately by grounding the declared row against the
+poly walk's abstract stack. `branch`/`tag` are compiler-known primitives that declare no
+`~[ ]` parameter to dispatch off and stay a located rejection, unchanged (this slice's own
+scope exclusion), naming no follow-up slice yet.
+This was also the second quotation consumer S3b's own exit findings named as the trigger
+for re-running `poly.rs`'s deferred split signals; the re-run found 3 of 5 signals still
+firing and both previously-rejected splits still wrong, so the split stays deferred.
+Ordered after S3c and ahead of S3e, because it is what actually unblocks `sort`'s
+comparator call — not branching, which S3b-follow already shipped. **Does not** reach a
+comparator declared as a `~[ ]` *parameter* (a non-inline word still cannot declare one,
+R6) or an abstract/forwarded quotation crossing the polymorphism boundary — both are
+P7.S3f's gap, independent of this slice either way.
+**Exit:** a poly body can `call` a quotation literal written in its own body (splicing it
+in place) or pass one as an argument to a concrete word's ground `Type::Quotation`
+parameter (grounding it against that declared effect); `branch`/`tag` keep a located
+rejection naming no follow-up slice yet
+(`docs/roadmap/P7/slice3d-spec.md`, `tests/phase7_slice3d.rs`).
 
 **P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
@@ -266,7 +275,7 @@ invariant and needs that invariant's owner to weigh in). The other real work is 
 body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
 bounded type variable — required members take `&'T`, per the dogfood) may be used for
 has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a (landed), S3b (landed), and S3d — and the consumer scope is not settled,
+**Depends on S3a (landed), S3b (landed), and S3d (landed) — and the consumer scope is not settled,
 because probing falsified one candidate and corrected another.** `Map['K 'V]` is *not*
 writable: a generic struct whose field is an array of its own type variable (`keys ['K 8]`,
 or `slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
