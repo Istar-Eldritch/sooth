@@ -1,105 +1,172 @@
 # Sooth
 
-A small, statically-checked concatenative language in the Forth/Factor/Kitten
-lineage, compiled to native code with no external runtime. A craft language: built
-for the pleasure of writing it and writing programs in it, not as a product. See
-[DESIGN.md](./DESIGN.md) for the why and [ROADMAP.md](./docs/roadmap/ROADMAP.md) for the plan.
+A small, statically-checked concatenative language, compiled to native 
+code with no external runtime. See [DESIGN.md](./DESIGN.md) for the why and
+[ROADMAP.md](./docs/roadmap/ROADMAP.md) for the plan.
 
 The one bet that makes it more than a tidy Forth: in a stack language the stack
-discipline already is move semantics, so linear types fall out for free. `dup` is the
-explicit copy, and `drop` is the explicit destructor point (use exactly once, forgetting
-is a compile error).
+discipline already is move semantics, so linear types fall out for free. `dup`
+is the explicit copy, and `drop` is the explicit destructor point (use exactly
+once; forgetting is a compile error, nothing auto-drops). A DMA transfer *is* an
+ownership transfer; "don't touch the buffer while the controller owns it"
+becomes a type error instead of a comment in a driver.
 
-```forth
+```factor
+import: core::prelude * ;
+
 : gcd ( i64 i64 -- i64 )
-  dup 0 eq ~[
-    drop
-  ] ~[
-    swap over mod gcd
-  ] if ;
+  | a b |
+  b 0 eq 
+  ~[ a ] 
+  ~[ b a b mod gcd ] 
+  if
+;
+
+: main ( -- )
+  10 15 gcd . \ prints 5
+;    
 ```
 
-## Status
+## What it is
 
-**Phases 0-3 complete; Phase 4 (minimal polymorphism + quotations) well underway** (see
-ROADMAP.md for the slice-by-slice detail). The pipeline is implemented end to end: the
-examples compile to native binaries and run, and `cargo run -- repl` gives an interactive
-session where words are compiled to shared objects and `dlopen`'d in as you define them.
+A concatenative language with two ergonomics Forth lacks: statically-checked
+stack effects and named locals. Every word declares its effect (`( int int --
+int )`), the compiler verifies the body against it, and a stack underflow
+becomes a compile error, the signature failure mode of Forth, caught at
+compile time rather than as a wrong number at runtime.
 
-Phase 2 delivered the **typed core**, all of it heap-free: a `Type` per stack slot, unified
-at branch joins; the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit
-target-only conversions (`>i8`..`>u64`); floating point (`f32`/`f64`); bitwise operators;
-boolean logic with the full comparison set (`eq lt gt lte gte ne`); **structs** (the `type:`
-form, inline-aggregate layout, generated constructor/accessor words); **enums/ADTs**
-(`|`-separated variants, tagged inline aggregates, exhaustiveness-checked elimination
-through the generated eliminator word, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
-lowered to a jump; and a bytecode VM as the exit dogfood.
+```factor
+: oops ( i64 -- i64 )
+  | a | a a add add 
+;
 
-Phase 3 made the linear spine real: move-by-default with `dup` gated on `Copy` and `drop`
-as an explicit destructor call; `^T`, a compiler-known single heap cell that is always
-linear and propagates linearity transitively through structs and enums, behind a
-`malloc`/`free` shim with an OOM trap; recursive heap data (lists, trees, mutually
-recursive shapes) whose synthesized destructors dispose in **constant stack**, verified
-past a million nodes under a 1 MB stack; **general locals**, where `| names |` binds at
-any point in a body and REPL lines can bind too; **second-class references**, where
-`&a`/`&!a` borrows a local, projection reaches a field, element or cell payload, and
-`@`/`!`/`+!` read and mutate through a reference, governed by per-place exclusivity and
-structural escape prevention rather than by any lifetime system; typed foreign calls
-(`extern:`) and string slices; and resources as linear values with user-definable
-destructor bodies (`drop` overrides). Opt-in reference counting (`Rc`/`Arc`) is deferred
-to Phase 6, alongside the rest of the stdlib layering.
-
-Phase 4 adds bounded polymorphism (`'T`/`'N`/`..s` type, length, and row variables,
-monomorphized per instantiation, no vtables) and quotations: `[ ... ]` literals, `call`,
-and an internal loop primitive that lowers self-tail recursion to a constant-stack back-edge
-rather than an unrolled splice. On top of that, a combinator library written in Sooth
-itself (`lib/combinators.sth`: `each`/`map`/`fold`/`filter`/`while`/`times`), inlined by a
-term-splicing compiler pass rather than minting a function per call site; multi-file
-modules with word/type imports, natively and at the REPL; and quotations as real runtime
-values (non-capturing closures, storable and passable to non-inlined higher-order code).
-No combinator is compiler-known: `times` is ordinary Sooth source over a
-self-tail-recursive helper, like the rest. Nor is `if`: it is a `core::bool` word
-taking a `bool` and two quotations, over the machine primitives `branch` and `tag`,
-imported by name like anything else.
-In progress: capturing closures and static ad-hoc overloading (`docs/roadmap/P4/slice7b-brief.md`,
-`docs/roadmap/P4/slice8a-brief.md`).
-
-The compiler is a Rust bootstrap; the language will later self-host.
-
-Pipeline: `source → lex → parse → stack-effect check → backend-neutral IR → QBE IL
-→ native binary`. Backend is [QBE](https://c9x.me/compile/), invoked from `PATH`
-alongside the system `cc`. WASM is a planned sibling lowering off the neutral IR.
-
-## Build and run
-
-Requires `qbe` and a C compiler (`cc`) on your `PATH`. Needs a reasonably modern QBE:
-Debian's packaged `qbe` (1.2) predates the unsigned int/float conversion ops
-(`uwtof`/`ultof`/`stoui`/`dtoui`) and fails with `unknown keyword` on those; build
-from [c9x.me/git/qbe.git](https://c9x.me/git/qbe.git) if so.
-
-```sh
-cargo build
-cargo test                            # unit tests + the goldens
-cargo run -- run   examples/gcd.sth   # compile and run (prints 5)
-cargo run -- build examples/gcd.sth   # just compile, to examples/gcd
-cargo run -- repl                     # interactive session
+\ error: stack effect mismatch in `oops`
+\   declared ( i64 -- i64 ), but body has net effect ( i64 -- ⊥ )
+\   a a add add
+\           ^ `add` needs 2 values, stack holds 1 here
 ```
 
-A REPL session compiles each line to a shared object and `dlopen`s it into the
-process, with a stack that persists across lines (no prompt is printed in Phase 1;
-lines below are input, other lines are the session's output):
+The type system is deliberately small: concrete monomorphic types, ADTs,
+minimal row polymorphism for honest `dup`/`swap`/`max` signatures, and a
+`Copy` marker that distinguishes copyable data from linear resources. No full HM
+inference, no refinement types, no effect rows, no borrow checker.
 
-```forth
-: sq ( i64 -- i64 ) | n | n n mul ;
-defined sq
-5 sq
-stack: 25
-1 2 3
-stack: 25 1 2 3
-| a b | a b add .
-5
-stack: 25 1
+## Features
+
+**Linear types.** Plain data is `Copy`, reuse is free, `dup` copies the bits.
+A resource is linear: `dup` on something that owns a resource is a type error.
+`drop` is the sole disposal primitive; forgetting to dispose is a compile error.
+This gives resource safety, deterministic destruction, and data-race-free concurrency
+without a borrow checker or `Send`/`Sync` apparatus.
+
+```factor
+: leak ( File -- File File )
+  dup
+;
+
+\ error: cannot `dup` a value of type File
+\   File is linear: it owns an OS handle and has no Copy instance
 ```
 
-The last line binds two values the *previous* line left on the session stack. A line's
-names are scoped to that line; the stack is what persists.
+**Checked stack effects.** Every word body must net to its declared effect. A
+forgotten `int` and a forgotten `File` surface through the same check.
+
+**ADTs and structural dispatch.** Enums with exhaustiveness-checked
+elimination through the generated eliminator word (`Shape?`), no inline `match`:
+
+```factor
+type: Shape
+  | Circle r f64
+  | Rect   w f64 h f64
+;
+
+: area ( Shape -- f64 )
+  ~[ ( Circle ) Circle> dup mul PI mul ]
+  ~[ ( Rect )   Rect> | w h | w h mul ]
+  Shape? ;
+```
+
+**Second-class references.** `&a`/`&!a` borrows a local, `@`/`!`/`+!` reads and
+mutates through a reference. Governed by per-place exclusivity, not by a
+lifetime system, references can't escape their scope, so no lifetime variables
+or region annotations are needed.
+
+**Resources with user-definable destructors.** A linear type with a `drop`
+overload runs its destructor exactly where the programmer writes disposal. The
+FFI is the explicit unsafe hole, wrapped in safe words:
+
+```factor
+extern: open     ( cstr i64 -- i64 )              "open" ;
+extern: close-fd ( i64 -- i64 )                   "close" ;
+
+type: Fd n i64 ;
+: drop ( Fd -- ) | h | h Fd> close-fd drop ;
+
+type: File fd Fd ;          \ derived glue disposes Fd through its own drop
+: close ( File -- ) drop ;
+```
+
+**Bounded polymorphism.** `'T`/`'N`/`..s` type, length, and row variables,
+monomorphized per instantiation, no vtables. `dup`/`swap`/`max` get honest
+generic signatures.
+
+**Quotations and combinators.** `[ ... ]` literals, `call`, and an internal
+loop primitive that lowers self-tail recursion to constant stack. The
+combinator library (`each`/`map`/`fold`/`filter`/`while`/`times`) is written in
+Sooth itself, inlined at call sites by a term-splicing pass, no per-element
+call overhead. No combinator is compiler-known, not even `if`, which is a
+`core::bool` word over the machine primitives `branch` and `tag`.
+
+```factor
+import: core::combinators | times | ;
+
+: main ( -- )
+  0 1000000 ~[ 1 add add ] times . ;   \ prints 500000500000
+```
+
+**Modules and packages.** A file is a compilation unit, a directory tree under
+a `sooth.pkg` manifest is a package. `import:`/`export:` with qualified access,
+selective imports, and transitive dependency resolution. Works natively and at
+the REPL.
+
+**Recursion.** Self-tail-recursion is a guaranteed constant-stack transform
+(tail self-call → jump). A recursive list destructor disposes in constant stack,
+verified past a million nodes under a 1 MB stack:
+
+```factor
+type: List 
+  | Nil 
+  | Cons 
+    v i64 
+    next ^List 
+;
+
+: push-front ( List i64 -- List )
+  | rest v | v rest ^ Cons ;
+
+: build ( i64 List -- List )
+  | n acc | 
+  n 0 eq 
+  ~[ acc ] 
+  ~[ n 1 sub acc n push-front build ] 
+  if
+;
+
+: main ( -- )
+  10 Nil build           \ build a 10-element list
+  3 0 sum-first Summed>  \ sum the first 3
+  . drop ;               \ drop disposes the rest (constant-stack)
+```
+
+## Design philosophy
+
+Sooth is built for the pleasure of building it and writing programs in it. It
+stays small enough to hold in one head, with a compiler legible enough to read.
+Where a decision trades reach or peak performance for simplicity and legibility,
+simplicity wins.
+
+But it is not a toy. The target domain is embedded and real-time systems.
+This is where the linear spine has something new: 
+A DMA transfer is an ownership transfer, unsynchronised ISR/mainline sharing 
+is a set intersection the checker can compute, and "deterministic destruction 
+at a statically-known time" is the default.
