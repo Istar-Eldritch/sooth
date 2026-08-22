@@ -15,10 +15,36 @@ fn check_err(src: &str) -> String {
 /// Negative: a self-call whose operand window does not structurally match
 /// the walking word's own `sig.inputs` is a located `type mismatch`, naming
 /// the enclosing word, the self-call and the expected/found operand types --
-/// never an infinite check-time loop and never a backend panic (D1's
-/// termination witness).
+/// never an infinite check-time loop and never a backend panic. This is D1's
+/// actual termination witness: `'T` recursing at `Box['T]` is the shape the
+/// roadmap's polymorphic-recursion hazard is about (a self-call at a
+/// *different* type argument, which under monomorphizing codegen would
+/// demand a fresh instantiation per level). An ordinary concrete-vs-concrete
+/// mismatch (e.g. `bool` vs `i64`) exercises the same code path but is not
+/// evidence for D1 specifically, since it says nothing about recursion at a
+/// different type argument.
 #[test]
-fn self_call_operand_mismatch_is_located_type_error() {
+fn self_call_recursing_at_a_different_type_argument_is_located_type_error() {
+    let err = check_err(
+        "type: Box 'T | Box 'T ;\n\
+         : rec ( 'T i64 -- 'T )\n\
+           drop Box 3 rec\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: type mismatch in `rec` (line 3)\n  `rec` expected `'T`, found `Box['T]`\n  note: declared ( -- )",
+        "{err}"
+    );
+}
+
+/// Negative: an ordinary concrete-vs-concrete operand mismatch ahead of a
+/// self-call is likewise a located `type mismatch`, not a bespoke self-call
+/// diagnostic -- the self-call arm reuses the same per-slot comparison any
+/// other operand/signature mismatch goes through.
+#[test]
+fn self_call_concrete_operand_mismatch_is_located_type_error() {
     let err = check_err(
         ": rec ( 'T i64 -- 'T )\n\
            drop true rec\n\
@@ -55,4 +81,15 @@ fn different_poly_word_call_still_names_the_narrowing() {
         ),
         "unexpected message: {err}"
     );
+}
+
+#[test]
+fn tmp_probe_add() {
+    let err = check_err(
+        ": add ( 'T: Copy 'T i64 -- 'T )\n\
+           drop 3 add\n\
+         ;\n\
+         : main ( -- ) 1 3 add drop ;\n",
+    );
+    panic!("{err}");
 }
