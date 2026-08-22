@@ -103,6 +103,13 @@ pub(super) struct PolyBorrow {
     place: String,
     mutable: bool,
     span: Span,
+    /// P7.S3g-follow (1c): whether `place` resolved to a static rather than a
+    /// local, decided here at the borrow site because that is the only point
+    /// where the answer is reliable. A later lookup cannot reconstruct it: a
+    /// `call`-splice or eliminator-arm exit drops the arm's locals from scope
+    /// while its borrow records survive, and a local shadowing a static of
+    /// the same name resolves to the local here but to the static there.
+    static_rooted: bool,
 }
 
 /// P7 slice 3b (R1): one entry of the poly walk's virtual stack, replacing
@@ -1383,6 +1390,13 @@ pub(super) fn poly_call_term(
 /// exemption is: a static's data-segment storage survives every iteration. A
 /// reference *parameter* (or one projected from it) is exempt for free, since
 /// nothing in this body borrowed anything to record.
+///
+/// The local/static split is read off `PolyBorrow::static_rooted`, not off
+/// `scope.locals`: a borrow taken inside a `call`-splice or an eliminator arm
+/// outlives the locals of the block that took it (both exits `retain` locals
+/// but keep borrow records, and `poly_walk_arms` unions each arm's borrows
+/// back into the parent), so a lookup here would read a real frame-local
+/// borrow as a static and exempt it.
 fn check_poly_reference_across_back_edge(
     ctx: &Ctx,
     span: Span,
@@ -1394,10 +1408,7 @@ fn check_poly_reference_across_back_edge(
         return Ok(());
     }
     // Push order, so a body holding two live borrows names the earlier one.
-    let rooted = scope
-        .borrows
-        .iter()
-        .find(|borrow| scope.locals.contains_key(&borrow.place));
+    let rooted = scope.borrows.iter().find(|borrow| !borrow.static_rooted);
     match rooted {
         Some(borrow) => Err(poly_reference_across_back_edge_error(
             ctx,
@@ -2866,7 +2877,9 @@ pub(super) fn poly_reference_word(
             }
             // R1's resolution order: a bound local first, then a static of
             // this module, mirroring the monomorphic `check_reference_word`.
-            let referent_pt = if let Some(local_pt) = scope.locals.get(rest).cloned() {
+            let (referent_pt, static_rooted) = if let Some(local_pt) =
+                scope.locals.get(rest).cloned()
+            {
                 // D5: only an aggregate local is borrowable -- a bare type
                 // variable might instantiate to a scalar, which has no
                 // address, so the conservative rule refuses every
@@ -2902,13 +2915,13 @@ pub(super) fn poly_reference_word(
                 if let Some(site) = scope.moves.moved_site(rest) {
                     return Err(poly_use_after_move_error(ctx, span, rest, site));
                 }
-                local_pt
+                (local_pt, false)
             } else if let Some(static_ty) = ctx.static_type(rest) {
                 // R1: a *scalar* static is borrowable though a scalar local
                 // is not -- a static has a data-symbol address to hand out.
                 // Never moved or dropped, so the move gate above has nothing
                 // to say about it.
-                PolyType::Concrete(static_ty)
+                (PolyType::Concrete(static_ty), true)
             } else if receiver_is_aggregate_projection(stack) {
                 // P7 slice 1 (R1): `&f` carries no `>`, so the guard above
                 // cannot see that this is a field projection. Reached only
@@ -2938,6 +2951,7 @@ pub(super) fn poly_reference_word(
                 place: rest.to_string(),
                 mutable,
                 span,
+                static_rooted,
             });
             stack.push(PolySlot::new(PolyType::Ref(Box::new(referent_pt), mutable)));
         }
@@ -5856,6 +5870,49 @@ mod tests {
         assert_eq!(
             err,
             "error: a reference to a local cannot cross a loop in `loopg` (line 5)\n  a reference derived from `a`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_reference_rooted_in_a_spliced_block_local_is_error() {
+        // P7.S3g-follow (1c): the same hazard one `call`-splice deeper. `x` is
+        // a local of the *spliced* block, whose storage is a slot of this same
+        // frame, so a reference to it dies at the back-edge exactly as `&!a`
+        // does. The splice exit `retain`s the enclosing locals but keeps the
+        // borrow records, so `x` is gone from `scope.locals` by the time the
+        // self-call is checked -- which is why the guard reads
+        // `PolyBorrow::static_rooted` instead of looking the place up.
+        let err = check_src(
+            ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r a b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ r drop a ~[ | x | &!x ] call b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 4)\n  a reference derived from `x`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+    #[test]
+    fn poly_self_tail_reference_rooted_in_a_local_shadowing_a_static_is_error() {
+        // The second reason the guard cannot re-look-up the place: `A` names
+        // both a static and a local here, and the borrow site resolves locals
+        // first, so the record is rooted in the frame's slot however the name
+        // reads from outside. Answering "is this a static?" by name at the
+        // self-call would exempt it and let a dead reference cross.
+        let err = check_src(
+            "static: A i64 = 0 ;\n\
+             : iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             | r A b n |\n\
+             n iszero ~[ drop r drop 0 ] ~[ r drop &!A b dup n 1 sub loopg ] if ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference to a local cannot cross a loop in `loopg` (line 5)\n  a reference derived from `A`, a local of this frame, crosses the self-tail-call back-edge to `loopg`: that local's storage does not survive to the next iteration\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
         );
     }
     #[test]

@@ -212,9 +212,18 @@ rejected.
 **The guard** (`check_poly_reference_across_back_edge`) is not a literal port: `PolySlot`
 carries no `Deriv`, so nothing traces *which* argument a recorded borrow flowed into. It
 is the conjunction the available data supports — a reference among the call's arguments,
-and a live `PolyScope::borrows` record whose place is a **local** (a static's
+and a live `PolyScope::borrows` record that is **not rooted in a static** (a static's
 data-segment storage survives every iteration, the concrete R3 exemption). A reference
-*parameter* is exempt for free: a body that borrows nothing records nothing. The rule can
+*parameter* is exempt for free: a body that borrows nothing records nothing.
+
+Local-vs-static is decided at the **borrow site** and carried on the record
+(`PolyBorrow::static_rooted`), not re-derived at the self-call. Two shapes make a lookup
+there wrong, both probed: a borrow taken inside a `call`-splice or an eliminator arm
+outlives the locals of the block that took it (each exit `retain`s the enclosing locals
+while keeping the borrow records, and `poly_walk_arms` unions each arm's borrows back
+into the parent), so `scope.locals` misses a real frame-local; and a local *shadowing* a
+static of the same name resolves to the local at the borrow site but to the static under
+a name-keyed `ctx.static_type` test. Either reading exempts a live hazard. The rule can
 therefore reject a program the concrete side accepts (a dead local borrow beside a
 forwarded parameter reference), which is the coarseness `prune_dead_borrows` already
 documents and the message states (`POLY_BORROW_LIVENESS_NOTE`).
@@ -312,6 +321,11 @@ records why `&!['T 4]` is the only reference parameter a body borrow can match.
 - `poly_self_tail_call_in_a_builtin_named_word_skips_the_back_edge_guard` — the
   word-level half.
 - `poly_self_tail_reference_rooted_in_a_static_is_ok` — the static exemption.
+- `poly_self_tail_reference_rooted_in_a_spliced_block_local_is_error` and
+  `poly_self_tail_reference_rooted_in_a_local_shadowing_a_static_is_error` — the two
+  shapes that force `static_rooted` to be recorded at the borrow site rather than looked
+  up at the call (see 1c). Each is accepted by exactly one of the two lookup
+  formulations and by neither of the guard's real clauses.
 - `poly_self_tail_call_with_no_reference_argument_ignores_a_live_local_borrow` — the
   rule's other precondition: a live local borrow alone is not a hazard.
 - `poly_self_tail_linear_forwarded_into_the_call_window_is_ok` — the spec's original
@@ -328,7 +342,9 @@ records why `&!['T 4]` is the only reference parameter a body borrow can match.
 - The existing `loopg` goldens still typecheck clean (`--lib` and the S3g suite).
 
 Every clause was mutation-tested: deleting the guard call, either half of the gate, the
-reference precondition, the locals filter, scanning `stack[..base]` instead of the args,
+reference precondition, the static-rooted filter (both its two wrong formulations,
+`scope.locals` and `ctx.static_type`, and forging the flag at the borrow site),
+scanning `stack[..base]` instead of the args,
 dropping `tail && at == last`, and crediting an eliminator arm's `tail` as always `false`
 are each killed by a named test above. The one surviving mutation (the per-arm
 `tail_slots` refinement in `poly_combinator_call`) is unwitnessable by a source program
