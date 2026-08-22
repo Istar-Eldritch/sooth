@@ -4927,7 +4927,8 @@ mod tests {
         // ordinary `core::bool` word now (`lib/bool.sth`) and this test's
         // hand-parsed source has to declare it itself to have it registered
         // in `combinators` at all.
-        let src = ": rowed inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call ;\n\
+        let src = "type: bool | False | True ;\n\
+                   : rowed inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call ;\n\
                    : rowless inline ( ['T 4] ~[ 'T -- 'T ] -- ['T 4] ) | f | f call ;\n\
                    : plain ( i64 -- i64 ) 1 add ;\n\
                    : if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\

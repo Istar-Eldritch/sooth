@@ -65,6 +65,8 @@ fn check_err(src: &str) -> String {
 #[test]
 fn c1_call_on_literal_splices_body_in_place() {
     let src = "import: intrinsics * ;\n\
+               type: bool | False | True ;\n\
+               : . ( bool -- ) ~[ ( False ) drop \"false\\n\" . ] ~[ ( True ) drop \"true\\n\" . ] bool? ;\n\
                : bump ( 'T: Copy -- 'T 'T )\n\
                | x | [ x x ] call\n\
                ;\n\
@@ -110,6 +112,8 @@ fn c1_call_on_non_literal_operand_is_located_rejection() {
 #[test]
 fn c2_literal_grounds_against_concrete_quotation_param() {
     let src = "import: intrinsics * ;\n\
+             type: bool | False | True ;\n\
+             : . ( bool -- ) ~[ ( False ) drop \"false\\n\" . ] ~[ ( True ) drop \"true\\n\" . ] bool? ;\n\
              : run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
                swap call\n\
              ;\n\
