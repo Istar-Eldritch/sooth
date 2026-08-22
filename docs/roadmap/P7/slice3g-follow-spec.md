@@ -162,7 +162,7 @@ tripwire, so that if the exit-row rule ever loosens, the clause has to be writte
 
 **The unconsumed-linear-local clause is already rejected**, by the general
 end-of-body/arm local tracking (`poly_local_unconsumed_error` /
-`poly_arm_local_not_consumed_error`), with `error: linear value `s` is never consumed`.
+`poly_arm_local_not_consumed_error`), with `error: linear value`s`is never consumed`.
 The concrete clause's own doc says that clause is not what makes disposal safe — its only
 job is to *locate* the same rejection at the back-edge — so a second poly rule that only
 relocates a message is not worth the second rule.
