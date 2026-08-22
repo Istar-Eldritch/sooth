@@ -92,6 +92,58 @@ fn self_recursive_poly_word_runs_to_base_case() {
     assert_eq!(code, 0);
 }
 
+/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code
+/// (`None` on a signal death, e.g. a stack-overflow `SIGSEGV`) and trimmed
+/// stdout. Mirrors `tests/phase4_slice10a_exit_witnesses.rs`'s own copy of
+/// this helper.
+fn run_at_stack_limit(binary: &Path, limit_kb: u32) -> (Option<i32>, String) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -s {limit_kb} && exec \"{}\"",
+            binary.display()
+        ))
+        .output()
+        .expect("binary should run");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
+}
+
+/// P7.S3g-follow's own exit criterion (roadmap: "a generic countdown over a
+/// large counter runs in constant stack"), extending the base-case golden
+/// above rather than migrating it: the *same* self-tail-recursive `loopg`,
+/// this time counted down from far enough (one million) that S3g's old
+/// per-level `Instr::Call` would overflow a reduced stack long before
+/// reaching the base case, run under `ulimit -s 1024`. The loop body prints
+/// nothing per iteration (a million-line transcript would swamp the
+/// assertion, not strengthen it); only the final `'T` value is observable,
+/// exactly as `poly_self_tail_call_lowers_to_loop_back_edge`
+/// (`src/ir/driver.rs`) asserts the loop shape this depends on.
+#[test]
+fn self_recursive_poly_word_runs_a_large_counter_in_constant_stack() {
+    let scratch = Scratch::write(
+        "loopg-1m",
+        ": iszero ( i64 -- Bool ) 0 eq ;\n\
+         : loopg ( 'T: Copy i64 -- 'T )\n\
+           dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+         : main ( -- ) 7 1000000 loopg . ;\n",
+    );
+    let binary = driver::build_with_manifest(
+        scratch.path(),
+        common::manifest_for(scratch.path()).as_deref(),
+    )
+    .expect("program should build");
+    let (code, stdout) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, stdout.as_str()),
+        (Some(0), "7"),
+        "a self-tail poly word must run a million-deep countdown to completion in constant stack"
+    );
+}
+
 fn check_err(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).unwrap();
     let mut module = sooth::parser::parse(&tokens).unwrap();
