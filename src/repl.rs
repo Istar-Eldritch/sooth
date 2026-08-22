@@ -1562,6 +1562,7 @@ impl Session {
                 ir::empty_resolved_fields(),
                 &inst.subst,
                 &entry.word.body,
+                check::has_self_tail_call(&entry.word, &bodies),
                 &entry.ir_lower_env,
                 &resolve,
                 regs,

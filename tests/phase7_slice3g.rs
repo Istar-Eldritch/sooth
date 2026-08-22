@@ -169,3 +169,54 @@ fn different_poly_word_call_still_names_the_narrowing() {
         "unexpected message: {err}"
     );
 }
+
+/// Drive a REPL session over `input` in a fresh process, returning its stdout.
+fn repl_session(input: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the sooth binary spawns");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("the session exits");
+    String::from_utf8(out.stdout).expect("stdout should be utf8")
+}
+
+/// P7 slice 3g-follow: the REPL's own instantiation lowering must reach the
+/// same self-tail verdict the native path does. It is the one call site with
+/// no IR to assert against (`emit_instantiations` hands its funcs straight to
+/// the session's `.so`), so the witness is behavioural: a counter deep enough
+/// that one real frame per level overflows the process stack, where a
+/// back-edge runs it in constant space. Hardcoding `self_tail: false` here,
+/// as this path did before the slice, aborts the session instead of printing.
+///
+/// The library imports are quoted-path, absolute: a REPL session can resolve
+/// neither a module-name import nor a wildcard one, and `eq`/`if` are library
+/// words, not intrinsics.
+#[test]
+fn repl_self_tail_poly_word_runs_a_deep_counter_in_constant_stack() {
+    let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+    let session = format!(
+        "import: \"{cmp}\" c | eq | ;\n\
+         import: \"{b}\" b | if | ;\n\
+         : iszero ( i64 -- Bool ) 0 eq ;\n\
+         : loopg ( 'T: Copy i64 -- 'T ) dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+         7 2000000 loopg .\n",
+        cmp = lib.join("cmp.sth").display(),
+        b = lib.join("bool.sth").display(),
+    );
+    assert_eq!(
+        repl_session(&session),
+        "imported c\nimported b\ndefined iszero\ndefined loopg\n7\nstack: (empty)\n"
+    );
+}

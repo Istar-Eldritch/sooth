@@ -659,14 +659,27 @@ impl<'a> FuncBuilder<'a> {
                 // below would panic on the poly self-name. Its callee is
                 // whichever instantiation is being lowered right now, so it
                 // targets `cur_word_name` with this instantiation's own
-                // concrete arity. An ordinary recursive call, not a loop
-                // back-edge: `self_tail` is `false` for every instantiation
-                // (D3, the loop transform is deferred), and the R7 block
-                // below is keyed on `cur_word_name`, which a poly self-name
-                // never equals.
+                // concrete arity.
+                //
+                // P7 slice 3g-follow: in tail position under a loop header it
+                // is a back-edge instead, the same transform R7 below runs for
+                // a monomorphic word. R7 itself stays unreachable from here --
+                // it is keyed on `cur_word_name`, which a poly self-name never
+                // equals, and its `env` lookup would panic on that name -- so
+                // the arity comes from `cur_poly_callee`'s own concrete
+                // effect, which is what seeded the header phis.
                 if let Some((callee, arity)) = &self.cur_poly_callee {
                     if callee == name {
                         let arity = arity.clone();
+                        if tail && self.header.is_some() {
+                            let split = self.stack.len() - arity.in_arity;
+                            let mut args = self.stack.split_off(split);
+                            self.materialize_quot_args(&mut args, &arity.quot_inputs);
+                            self.back_edges.push((self.cur_id, args));
+                            self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+                            self.terminated = true;
+                            return;
+                        }
                         let symbol = self.cur_word_name.clone();
                         self.emit_user_call(&arity, symbol);
                         return;

@@ -265,16 +265,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         // call (the body calling the very word being instantiated), routed by
         // `inst.callee` below (P7 slice 3g, R2) rather than through the
         // `CallInst`/`env` paths, neither of which holds a poly self-name.
-        // `self_tail` stays `false` rather than reusing `has_self_tail_call`
-        // (which only recognizes a plain-name `Call`, never a `CallInst`
-        // lookup), so such a body lowers as an ordinary recursive call,
-        // without the loop/back-edge transform a monomorphic self-tail word
-        // gets -- one stack frame per recursion level (S3g D3, deferred).
+        // `has_self_tail_call` is the same syntactic predicate a monomorphic
+        // word asks (it is already poly-aware: `declared_input_count` reads
+        // `word.poly`), so a tail self-call in a generic body gets the loop
+        // header and back-edge too, rather than the one-frame-per-level
+        // ordinary recursion S3g's D3 deferred (P7 slice 3g-follow).
         funcs.extend(lower_word_parts(
             &symbol,
             &effect,
             &word.body,
-            false,
+            crate::check::has_self_tail_call(word, &combinator_bodies),
             Some(inst.callee.as_str()),
             &env,
             &resolve,
@@ -773,6 +773,11 @@ pub(crate) fn lower_word(
 /// this body's meaning. Nested polymorphic calls are out of scope (Slice 1
 /// R14), so the body carries no instantiation table of its own.
 ///
+/// `self_tail` is the caller's `has_self_tail_call` verdict for the retained
+/// word (the REPL holds the whole `WordDef`; this function only has its body),
+/// so a tail self-call in a generic body lowers to a loop back-edge here the
+/// same way it does on the native path (P7 slice 3g-follow).
+///
 /// Phase 6 slice 3 (R6): the variant-field table is hardcoded empty rather
 /// than taken as a parameter for the same reason the caller passes an empty
 /// `resolved_fields` -- `poly_reference_word` rejects a field projection in a
@@ -788,6 +793,7 @@ pub(crate) fn lower_instantiation(
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     subst: &Subst,
     body: &[Term],
+    self_tail: bool,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
@@ -801,7 +807,7 @@ pub(crate) fn lower_instantiation(
         symbol,
         &effect,
         body,
-        false,
+        self_tail,
         Some(callee),
         env,
         resolve,
@@ -890,13 +896,17 @@ mod tests {
     /// never the shared poly name (absent from `env`, so the ordinary
     /// dispatch would panic on it) and never the sibling instantiation's
     /// symbol. Asserted at two instantiations, since one alone cannot tell
-    /// "its own symbol" from "the only symbol there is". No loop header: the
-    /// loop transform stays deferred (D3), so the body really recurses.
+    /// "its own symbol" from "the only symbol there is".
+    ///
+    /// P7 slice 3g-follow: the fixture's self-call sits in *non*-tail
+    /// position (`dup drop` follows it), which is what keeps this the
+    /// no-loop-header case now that a tail one back-edges -- see
+    /// `poly_self_tail_call_lowers_to_loop_back_edge` for the other side.
     #[test]
     fn poly_self_call_lowers_to_ordinary_recursive_call() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
              : loopg ( 'T: Copy i64 -- 'T )\n\
-               dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+               dup iszero ~[ drop ] ~[ 1 sub loopg dup drop ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -930,13 +940,6 @@ mod tests {
                 "{} must not target the bare poly name: {targets:?}",
                 f.name
             );
-            // What passing `self_tail: true` here actually builds is a loop
-            // *header*: the entry block jumps into a phi-carrying block that
-            // re-tests the condition. A backward `Jmp` is the wrong thing to
-            // look for -- a back-edge only forms once a tail self-call is
-            // recognized, which is keyed on the monomorphic name a poly
-            // self-name never equals, so it is unreachable either way and an
-            // assertion against it cannot fail.
             let header = match f.blocks[0].term {
                 Terminator::Jmp(to) => f
                     .blocks
@@ -947,7 +950,110 @@ mod tests {
             };
             assert!(
                 !header,
-                "{} must not lower to a loop (D3 defers the loop transform)",
+                "{} must not lower to a loop: its self-call is not in tail position",
+                f.name
+            );
+        }
+    }
+
+    /// P7 slice 3g-follow: the same body with the self-call left in tail
+    /// position lowers to a loop instead -- a phi-carrying header the entry
+    /// block jumps into, and a backward `Jmp` where S3g emitted a recursive
+    /// `Instr::Call`. Asserted on the IR because an instantiation cannot
+    /// report its own theta at runtime; both instantiations are checked so
+    /// the transform is not one theta's accident.
+    #[test]
+    fn poly_self_tail_call_lowers_to_loop_back_edge() {
+        let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy i64 -- 'T )\n\
+               dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+             : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let ir = lower(&module).unwrap();
+
+        let all: Vec<&str> = ir.funcs.iter().map(|f| f.name.as_str()).collect();
+        let insts: Vec<&IrFunc> = ir
+            .funcs
+            .iter()
+            .filter(|f| f.name.contains("loopg"))
+            .collect();
+        assert_eq!(insts.len(), 2, "two instantiations, one per theta: {all:?}");
+        for f in insts {
+            let header = match f.blocks[0].term {
+                Terminator::Jmp(to) => f
+                    .blocks
+                    .iter()
+                    .find(|b| b.id == to)
+                    .filter(|b| b.instrs.iter().any(|i| matches!(i, Instr::Phi(..))))
+                    .map(|b| b.id),
+                _ => None,
+            };
+            let header = header.unwrap_or_else(|| panic!("{} must open a loop header", f.name));
+            assert!(
+                f.blocks
+                    .iter()
+                    .any(|b| matches!(b.term, Terminator::Jmp(to) if to == header)
+                        && b.id != f.blocks[0].id),
+                "{} must back-edge to its header",
+                f.name
+            );
+            let targets: Vec<&str> = f
+                .blocks
+                .iter()
+                .flat_map(|b| &b.instrs)
+                .filter_map(|i| match i {
+                    Instr::Call(_, sym, _) => Some(sym.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !targets.contains(&f.name.as_str()),
+                "{} must not also recurse by call: {targets:?}",
+                f.name
+            );
+        }
+    }
+
+    /// P7 slice 3g-follow: the back-edge is gated on tail position, not merely
+    /// on the word having a loop header. This body holds both self-calls at
+    /// once -- a trailing one that back-edges and an earlier one that cannot --
+    /// so the earlier one must still lower to an ordinary recursive
+    /// `Instr::Call` into the very header-carrying func it sits in.
+    #[test]
+    fn poly_non_tail_self_call_in_a_self_tail_body_stays_an_ordinary_call() {
+        let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
+             : loopg ( 'T: Copy i64 -- 'T )\n\
+               dup iszero ~[ drop ] ~[ 1 sub loopg 0 loopg ] if ;\n\
+             : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let ir = lower(&module).unwrap();
+
+        let insts: Vec<&IrFunc> = ir
+            .funcs
+            .iter()
+            .filter(|f| f.name.contains("loopg"))
+            .collect();
+        assert_eq!(insts.len(), 2, "two instantiations, one per theta");
+        for f in insts {
+            let back_edges = f
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.term, Terminator::Jmp(to) if to.0 <= b.id.0))
+                .count();
+            assert_eq!(back_edges, 1, "{} must keep exactly one back-edge", f.name);
+            let self_calls = f
+                .blocks
+                .iter()
+                .flat_map(|b| &b.instrs)
+                .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+                .count();
+            assert_eq!(
+                self_calls, 1,
+                "{}'s non-tail self-call must stay a call",
                 f.name
             );
         }
