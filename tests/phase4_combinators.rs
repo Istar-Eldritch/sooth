@@ -453,18 +453,34 @@ fn quotation_parameter_used_twice_splices_twice() {
 
 #[test]
 fn quotation_against_non_quotation_parameter_is_error() {
-    // Still rejected, reworded off "Phase 6" to slice 7 (R26).
+    // Still rejected; the "slice 7" wording is retired (P7.S3f R4) since a
+    // runtime quotation value has existed since 7a/7b.
     let err = check_error(
         ": f ( i64 -- i64 ) ;\n\
          : main ( -- ) [ 1 add ] f . ;\n",
     );
     assert!(
-        err.contains("a quotation cannot be passed to `f`") && err.contains("slice 7"),
-        "a non-quotation parameter should reject, reworded to slice 7, got: {err}"
+        err.contains("a quotation cannot be passed to `f`"),
+        "a non-quotation parameter should reject, got: {err}"
     );
     assert!(
         !err.contains("Phase 6"),
         "the diagnostic must not point at the stale `Phase 6`, got: {err}"
+    );
+}
+
+#[test]
+fn reject_quotation_argument_wording_at_concrete_boundary() {
+    // R4: `reject_quotation_argument`'s new exact wording at the concrete
+    // argument boundary's own R9 call site (terms.rs:786-788) -- the "slice
+    // 7" parenthetical is retired, and the rest of the message is unchanged.
+    let err = check_error(
+        ": f ( i64 -- i64 ) ;\n\
+         : main ( -- ) [ 1 add ] f . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: a quotation cannot be passed to `f`; only `call` accepts one in `main` (line 2)"
     );
 }
 

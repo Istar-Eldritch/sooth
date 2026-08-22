@@ -3034,7 +3034,7 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
     let word = crate::resolve::demangle_word(word);
     format!(
-        "error: a quotation cannot be passed to `{word}`; only `call` accepts one (a runtime quotation value is slice 7){} (line {})",
+        "error: a quotation cannot be passed to `{word}`; only `call` accepts one{} (line {})",
         in_word(ctx),
         span.line,
     )

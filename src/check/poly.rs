@@ -4719,6 +4719,21 @@ mod tests {
             "check_poly_call should name `dupit`, got: {err}"
         );
     }
+    /// R4: `reject_quotation_argument`'s new exact wording at `check_poly_call`'s
+    /// own R9p call site (a bare `PolyType::Var` position) -- the "slice 7"
+    /// parenthetical is retired, and the rest of the message is unchanged.
+    #[test]
+    fn reject_quotation_argument_wording_at_poly_var_position() {
+        let err = check_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) [ add ] dupit drop drop ;\n",
+        )
+        .expect_err("a quotation passed to a polymorphic word should be rejected");
+        assert_eq!(
+            err,
+            "error: a quotation cannot be passed to `dupit`; only `call` accepts one in `main` (line 2)"
+        );
+    }
     /// P7 slice 3f (R1/R2): a `Known` literal quotation argument at a declared
     /// ground `Type::Quotation` input materializes and the call succeeds, with
     /// the quotation-typed input first among the declared inputs.
