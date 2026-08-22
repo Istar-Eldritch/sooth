@@ -99,11 +99,26 @@ stated as a ruling, not a menu.
    comparison, no new plumbing.
 
    **Ruling: a trait named in a bound (`'T: Order`) or in a qualified disambiguating call
-   (decision 6/R12) IS in scope this slice**, resolved through the same qualified-name
-   path a type reference already uses -- but this is real, not free, plumbing: neither
-   `NameTables::build` (`src/resolve.rs:184-204`) nor `Resolver::rewrite`
-   (`src/resolve.rs:238`) has a trait-shaped branch today, only type and word branches.
-   See R18.
+   (decision 6/R12) IS in scope this slice.** **Correction (round-2 review):** the
+   round-1 correction wrongly modeled this as a `Resolver::rewrite` branch. `rewrite`
+   (`src/resolve.rs:723`) rewrites call *names in term bodies*, post-parse
+   (`resolve_modules` runs on an already-parsed `&mut Module`, `src/driver.rs:533`). A
+   bound is baked into a `Bound::User(TraitId)` at **parse time**, inside
+   `parse_capabilities` (`src/parser.rs:2299-2320`) -- by the time `rewrite` runs, the
+   trait name is no longer a token to rewrite. A bound-side trait name resolves through
+   the parser's own machinery instead, the same `self.imports`/`type_is_exported` gate
+   `resolve_type_or_apply` already uses for a qualified generic type header
+   (`src/parser.rs:3455-3460`, `:3080`) -- not a new `NameTables`/`rewrite` branch. See
+   R18 (corrected).
+
+   R12's qualified member call (`qualifier::member`) needs no new `rewrite` branch
+   either: an unrecognized qualified word already falls through `rewrite`'s existing
+   word branch to `Ok(None)` (`:288`), left raw for the checker -- which is exactly what
+   a bound-directed obligation lookup needs. The one real gap: if the qualifier's target
+   module happens to export an unrelated concrete word sharing the member's name,
+   `rewrite` mangles the call before the checker ever sees it (`:289-292`), silently
+   discarding trait-member intent. R18 states this ordering explicitly rather than
+   leaving it implicit.
 
 5. **Multi-bound member-name collision is a call-site rejection, not a declaration-site
    one.** v1's R8 rejected `'T: A B` outright if both traits require a same-named
@@ -162,6 +177,27 @@ stated as a ruling, not a menu.
    invariant renegotiation, because it makes both of those problems not exist rather
    than solving them under the wrong design.
 
+   **Correction (round-1 review, then re-corrected in round-2 review):** round-1 found
+   that `lower_instantiation` never receives a `CallInst`, and (over-)corrected by
+   rejecting the `CallInst` field entirely and redirecting the map through
+   `lower_instantiation`. Round-2 found this redirection targets the wrong function:
+   `lower_instantiation` (`src/ir/driver.rs:788`) has exactly one call site in the whole
+   tree, `src/repl.rs:1554` -- it is **REPL-only**. The compiled build never calls it;
+   `lower` inlines monomorphized instantiations directly (`src/ir/driver.rs:249-286`,
+   `for (symbol, inst) in distinct`), and at that loop `inst: &CallInst` **is already in
+   hand** (`:270`) before calling `lower_word_parts` directly (`:271`) with
+   `&module.builtin_overloads` (`:282`). So the original `CallInst` field design (Part 2
+   above) was right for the path that matters; round-1's blanket claim ("`CallInst` does
+   not reach the lowering site that needs this data") was true only of the REPL path and
+   wrongly generalized. **Restored ruling:** the per-instantiation map IS a new field on
+   `CallInst` (or `Module`, whichever the existing `subst`/output-type fields already
+   live on for the compiled instantiation record -- confirm at implementation time), read
+   at `src/ir/driver.rs:271-286`'s existing loop and threaded into `lower_word_parts`
+   exactly the way `builtin_overloads` already is there. The REPL path
+   (`lower_instantiation`/`repl.rs:1554`) is explicitly out of scope for this field --
+   consistent with the already-documented REPL-bypass pattern for `uncalled_operator_overloads`
+   (R15) -- and must not be assumed to gain trait-dispatch coverage by this slice.
+
 9. **A trait member is callable via a bound without importing the implementing word's
    name; a direct call to that name still needs an ordinary import.** Dispatch through a
    bound resolves via the trait table (for the signature) and the whole-program impl
@@ -195,14 +231,43 @@ stated as a ruling, not a menu.
    ones; the obligation pre-pass's map must be scratch there too, or a combinator's
    obligations would leak into real instantiations.
 
-11. **A trait name in a bound, or in a qualified disambiguating call, needs its own
-   name-resolution branch.** **Found in round-1 review:** decision 4's "mirrors
-   `type:`/`extern:` exactly" claim covered export/import gating but not *reference*
-   resolution. `NameTables::build` (`src/resolve.rs:184-204`) and `Resolver::rewrite`
-   (`src/resolve.rs:238`) currently branch only on type names and word names; a trait
-   name is a third category with no route today. Ruled in scope this slice (R18) since a
-   bound already needs to name a trait by some resolution path, and R12's
-   qualified-call disambiguation needs the identical mechanism.
+11. **A trait name in a bound resolves at parse time, not via `Resolver::rewrite`; a
+   qualified member call needs an explicit fallthrough-ordering ruling, not a new
+   branch.** **Found in round-1 review, corrected again in round-2 review:** round-1's
+   R18 modeled bound-side trait resolution as a new `NameTables::build`/`rewrite` branch.
+   Round-2 found this backwards: `rewrite` operates post-parse on term bodies
+   (`src/resolve.rs:723`), but a bound is already baked into `Bound::User(TraitId)` at
+   parse time by `parse_capabilities` (`src/parser.rs:2299-2320`) -- by the time
+   `rewrite` would run, there is no trait-name token left to rewrite. The correct
+   mechanism is the parser's own qualified-name resolution, the same
+   `self.imports`/`type_is_exported` gate `resolve_type_or_apply` already uses for a
+   qualified generic type header (`src/parser.rs:3455-3460`, `:3080`), invoked while
+   `parse_capabilities` builds the bound. Separately, R12's qualified member call
+   (`qualifier::member`) needs no new branch at all: an unrecognized qualified word
+   already falls through `rewrite`'s existing branch to `Ok(None)` (`:288`), which is the
+   behavior a bound-directed obligation lookup wants. The one real gap `rewrite`
+   introduces: if the qualifier's target module happens to export an unrelated concrete
+   word sharing the member's name, `rewrite` mangles the call before the checker ever
+   sees it (`:289-292`), silently discarding the trait-member intent -- R18 states this
+   ordering explicitly (the obligation-recording branch must run, or be checked for,
+   before this mangling can apply) rather than leaving it as an implicit assumption.
+
+12. **Three additional gaps in the export/import and duplicate-declaration story,
+   found in round-2 review.** (a) `local_decl_names`
+   (`src/check/declarations.rs:562-586`) is a *third* hand-rolled per-kind name list,
+   feeding `check_selective_imports`' local-vs-selective-import collision check
+   (`:514`) -- it also needs a `traits` branch, or a locally declared `trait: Show`
+   alongside `import: dep | Show |` produces two live, uncaught `Show` bindings. (b) The
+   parse-time qualified-type export gate (`resolve_type_or_apply`'s
+   `type_is_exported`/`not_exported_error`, `src/parser.rs:3455-3460`/`:3080`) has no
+   trait-shaped twin; a qualified trait reference in a bound (`'T: q::Order`) needs the
+   identical gate, not `Resolver::rewrite`'s post-parse mechanism (see decision 11). (c)
+   No shared cross-kind duplicate-name check exists today -- `check_duplicate_type_names`
+   (`src/check/declarations.rs:873`), `check_duplicate_word_names` (`:932`), and
+   `duplicate_static_error` (`:376`) are each independently scoped to their own kind, so
+   R2's "fails as an ordinary duplicate-declaration error" needs its own new
+   `check_duplicate_trait_names`, and nothing today would reject `trait: Point`
+   coexisting with `type: Point` in one module. All three are folded into R1/R18 below.
 
 ## Requirements
 
@@ -211,10 +276,16 @@ stated as a ruling, not a menu.
   type variable (single-type-variable traits only, dogfood-confirmed sufficient -- see
   brief OQ3). A trait declaration is module-scoped and requires explicit `export:` to
   cross a module boundary, exactly like `type:`/`extern:` (decision 4). Concretely, this
-  means `exportable_names` (`src/resolve.rs:496`) gains a `traits` loop mirroring its
+  requires a `traits` branch in three places, all found by round-1/round-2 review, not
+  one: (a) `exportable_names` (`src/resolve.rs:496`) gains a `traits` loop mirroring its
   existing `generic_structs` loop -- without it, `export: TraitName ;` fails with a
-  no-origin error before reaching the existing `not_exported_error` check (`:270`);
-  there is no other implicit-export special case.
+  no-origin error before reaching the existing `not_exported_error` check (`:270`); (b)
+  `local_decl_names` (`src/check/declarations.rs:562-586`) gains a `traits` loop, or a
+  locally declared trait colliding with a selectively imported one of the same name goes
+  uncaught by `check_selective_imports` (`:514`); (c) a new `check_duplicate_trait_names`
+  function, mirroring `check_duplicate_type_names` (`:873`)/`check_duplicate_word_names`
+  (`:932`), since no shared cross-kind duplicate check exists today -- without it,
+  `trait: Point` and `type: Point` in the same module both silently declare.
 
 - **R2.** The parser must replace the two hardcoded string compares for `Copy`/`Ord` in
   `parse_capabilities` (`src/parser.rs:2299`, string matches at `:2305`/`:2309`) with a
@@ -287,23 +358,35 @@ stated as a ruling, not a menu.
   happens -- once, at check time, with the concrete `Subst` already in hand -- so
   "lowering never re-runs resolution" is preserved for real rather than by wording.
 
-- **R9.** Lowering makes no resolution decision. **Correction (round-1 review):** the
-  spec's original wording ("reads `CallInst.trait_calls` the same way it already reads
-  `builtin_overloads`/`quot_inputs`") overstated how free this is: `lower_instantiation`
-  (`src/ir/driver.rs:788-823`) does not receive a `CallInst` at all today, and
-  `quot_inputs` is consumed at a structurally different site (caller-side, positional,
-  read once by `lower_poly_call` which already holds the relevant `CallInst` as a
-  parameter) -- it is a field-shape precedent, not a threading precedent. The real,
-  workable precedent is `builtin_overloads`: a per-module `HashMap<Span, String>`
-  already threaded through `lower_word_parts` onto `FuncBuilder`
-  (`src/ir/driver.rs:283,428`). This slice adds the equivalent *per-instantiation*
-  version -- a `HashMap<Span, String>` (or equivalent) built from R8's resolution,
-  passed into `lower_instantiation` and threaded through `lower_word_parts` onto
-  `FuncBuilder` alongside the existing module-global `builtin_overloads` map -- and
-  lowering reads spans from it exactly the way it already reads `builtin_overloads`.
-  This is small, bounded new plumbing (two functions, one new builder field), not a
-  zero-plumbing field read. No new lowering pass, no new `IrFunc` emission path -- an
-  impl member is an ordinary concrete word (R4/R11) and lowers through the existing
+- **R9.** Lowering makes no resolution decision. **Correction (round-1 review), then
+  re-corrected (round-2 review):** round-1 found the original wording ("reads
+  `CallInst.trait_calls` the same way it already reads `builtin_overloads`/`quot_inputs`")
+  overstated how free this is, since `quot_inputs` is consumed at a structurally
+  different, caller-side site -- true, but round-1 then over-corrected by redirecting the
+  map through `lower_instantiation`, which round-2 found is **REPL-only**
+  (`src/ir/driver.rs:788`, one call site in the whole tree: `src/repl.rs:1554`). The
+  compiled build never calls it; `lower` inlines monomorphized instantiations directly
+  (`src/ir/driver.rs:249-286`), and at that loop `inst: &CallInst` **is already in hand**
+  (`:270`) before `lower_word_parts` is called directly (`:271`) with
+  `&module.builtin_overloads` (`:282`). **Restored ruling:** the per-instantiation map IS
+  a new field alongside `CallInst`'s existing per-instantiation data (confirm the exact
+  host struct/field layout at implementation time against the compiled-path record that
+  already carries `subst`/output types for this loop -- not the REPL's `PolyWordEntry`,
+  which is REPL-only), populated by R8's resolution and read at
+  `src/ir/driver.rs:271-286`'s existing loop, threaded into `lower_word_parts`
+  (`src/ir/func_builder/mod.rs:718`, assignment at `:748`, `FuncBuilder` field at
+  `:185` -- correcting the round-1 citation, which pointed at `driver.rs:283,428`,
+  `:428` being `lower_line`'s REPL-line assignment, not `lower_word_parts`'s) exactly the
+  way `builtin_overloads` already is. `lower_word_parts`'s other callers
+  (`driver.rs:200`, `:759` `lower_word`, `func_builder/mod.rs:936`,
+  `ir/destructors.rs:384`, and existing test call sites) pass an empty default via the
+  existing `empty_builtin_overloads()` convention (`src/ir.rs:69`) for the new parameter,
+  the same way they already do for `builtin_overloads` on paths that don't need it. The
+  REPL path (`lower_instantiation`/`repl.rs:1554`) is explicitly out of scope for this
+  field -- consistent with the already-documented REPL-bypass pattern for
+  `uncalled_operator_overloads` (R15) -- and must not be assumed to gain trait-dispatch
+  coverage by this slice. No new lowering pass, no new `IrFunc` emission path -- an impl
+  member is an ordinary concrete word (R4/R11) and lowers through the existing
   word-lowering path exactly once, regardless of how many poly-word instantiations call
   it.
 
@@ -370,23 +453,53 @@ stated as a ruling, not a menu.
   and the two existing predicate-kind traits (`Copy`/`Ord`) only, per the brief's OQ3
   and its "test before designing it as a trait" ruling on the third kind.
 
-- **R17.** *(added, round-1 review; decision 10)* Obligation recording (R7) is
-  order-independent: a pre-pass collects obligations for every poly word in the module
-  before the main check loop (`src/check.rs:758`) runs `check_poly_call` for any call
-  site, so a monomorphic caller declared before its polymorphic callee's obligations are
-  recorded still sees them at resolution time. If R8's resolution step finds no matching
-  pre-pass obligation for a call span it expected one for, this is a located
-  internal-consistency error, not a silent no-op. The pre-pass's obligation map is
-  scratch (not module-level state) inside the poly-combinator-standalone check path
-  (`src/check.rs:772-782`), matching that path's existing scratch-map handling for
-  everything else it tracks.
+- **R17.** *(added, round-1 review; decision 10; identity ruled in round-2 review)*
+  Obligation recording (R7) is order-independent: a pre-pass collects obligations for
+  every poly word in the module before the main check loop (`src/check.rs:758`) runs
+  `check_poly_call` for any call site, so a monomorphic caller declared before its
+  polymorphic callee's obligations are recorded still sees them at resolution time.
+  **Ruling (round-2 review found this unruled in round-1):** the pre-pass **is
+  `check_poly_body` hoisted**, not a second, parallel obligation-only walk -- a separate
+  walk would have to duplicate `check_poly_body`'s traversal and trait-member resolution
+  exactly, which is strictly worse (two places that must agree forever) than running the
+  real thing once, earlier. This has a real consequence the risk table must carry: since
+  `check_poly_body`'s errors propagate with `?` (`src/check.rs:810-822`), hoisting it
+  means **every poly-body diagnostic in a module now fires before any monomorphic word's
+  diagnostic**, changing first-error ordering for any file mixing both kinds of error.
+  This is a new regression-risk row (see Risks table), not just an implementation
+  footnote. If R8's resolution step finds no matching pre-pass obligation for a call
+  span it expected one for, this is a located internal-consistency error, not a silent
+  no-op. The pre-pass's obligation map is scratch (not module-level state) inside the
+  poly-combinator-standalone check path (`src/check.rs:772-782`), matching that path's
+  existing scratch-map handling for everything else it tracks. Round-2 review also
+  confirmed there is no second, cross-module ordering hazard: `assemble_module`
+  (`src/driver.rs:290-299`) flattens the whole import closure into one `Module` before
+  checking runs, so "every poly word in the module" already means every poly word in the
+  program, and a poly body calling another poly word is independently a hard error
+  (`poly_calls_poly_word_error`, `src/check/poly.rs:1364`) -- so the pre-pass's
+  dependency graph is depth-1 by construction, never chained.
 
-- **R18.** *(added, round-1 review; decision 11)* A trait name in a bound (`'T: Order`)
-  and a module qualifier disambiguating a multi-trait member collision (R12) resolve
-  through a new trait-shaped branch in `NameTables::build` (`src/resolve.rs:184-204`)
-  and `Resolver::rewrite` (`src/resolve.rs:238`), alongside the existing type and word
-  branches -- confirmed neither exists today. In scope this slice, not deferred: a bound
-  cannot name a trait without this.
+- **R18.** *(added, round-1 review, decision 11; mechanism corrected in round-2 review)*
+  A trait name in a bound (`'T: Order`) resolves at **parse time**, through the same
+  `self.imports`/`type_is_exported` gate `resolve_type_or_apply` already uses for a
+  qualified generic type header (`src/parser.rs:3455-3460`, `:3080`), invoked from
+  inside `parse_capabilities` (`src/parser.rs:2299-2320`) as it builds the bound.
+  **Correction (round-2 review):** round-1's R18 wrongly modeled this as a
+  `NameTables::build`/`Resolver::rewrite` branch; `rewrite` operates post-parse on term
+  bodies (`src/resolve.rs:723`), but a bound is already baked into a concrete
+  `Bound::User(TraitId)` at parse time, before `rewrite` ever runs -- there is no
+  trait-name token left for `rewrite` to see. Separately, R12's qualified member call
+  (`qualifier::member`) needs **no new branch**: an unrecognized qualified word already
+  falls through `rewrite`'s existing word branch to `Ok(None)` (`:288`), left raw for the
+  checker, which is exactly the behavior a bound-directed obligation lookup wants. The
+  one real ordering gap this leaves: if the qualifier's target module happens to export
+  an unrelated concrete word sharing the member's name, `rewrite` mangles the call before
+  the checker ever sees it (`:289-292`), silently discarding the trait-member intent --
+  the obligation-recording branch (R7) must be checked, and take precedence, before this
+  mangling is allowed to apply. This is a located requirement (not an assumption): a
+  golden must exercise exactly this collision shape (a qualified member call where the
+  qualifier's module also exports an unrelated same-named concrete word) and assert the
+  trait-member call wins.
 
 ## Success Criteria
 
@@ -441,13 +554,19 @@ stated as a ruling, not a menu.
   recording, including the order-independence pre-pass (R17).
 - The `Bound::User` arm in `check_poly_call`'s bound loop (R8), including concrete
   resolution and population of a new per-instantiation span->symbol map (R9).
-- The new per-instantiation span->symbol map itself, threaded through
-  `lower_instantiation`/`lower_word_parts`/`FuncBuilder` alongside the existing
-  module-global `builtin_overloads` map (R9).
+- The new per-instantiation span->symbol map itself, as a new `CallInst` field, read at
+  the compiled-path instantiation loop (`src/ir/driver.rs:249-286`) and threaded
+  through `lower_word_parts`/`FuncBuilder` alongside the existing module-global
+  `builtin_overloads` map (R9) -- NOT through `lower_instantiation`, which is REPL-only.
 - The `uncalled_operator_overloads` extension (R15).
-- Ambiguous-member-call rejection and qualified-call disambiguation (R12), including the
-  new trait-shaped `NameTables::build`/`Resolver::rewrite` branch (R18).
-- The `exportable_names` extension for `trait:` (R1).
+- Ambiguous-member-call rejection and qualified-call disambiguation (R12) -- no new
+  `Resolver::rewrite` branch needed (an unrecognized qualified word already falls
+  through); the ordering ruling that a trait obligation must pre-empt `rewrite`'s
+  ordinary word mangling (R18).
+- A bound's trait name resolving at parse time via `parse_capabilities`, reusing
+  `resolve_type_or_apply`'s existing `self.imports`/`type_is_exported` gate (R18).
+- The `exportable_names`, `local_decl_names`, and new `check_duplicate_trait_names`
+  extensions for `trait:` (R1).
 - Unit and golden tests per R13.
 
 **Out of scope:**
@@ -496,26 +615,32 @@ symbol. `check_poly_call` (`src/check/poly.rs:3460`) runs per call site with a c
 first and only point where `θ(T)` is known, so it is the first and only point capable of
 resolving a concrete symbol.
 
-**Correction (round-1 review, decision 10/R17):** `check_poly_body` and `check_poly_call`
-are not two clean sequential passes -- both run interleaved inside one source-order loop
-(`src/check.rs:758`). Without a pre-pass, a monomorphic word declared before its
-polymorphic callee would reach `check_poly_call`'s bound loop before that callee's own
-`check_poly_body` pass has recorded any obligations. R17 closes this with a pre-pass:
-collect every poly word's obligations before the main loop runs any call-site check, and
-make an unmatched obligation at resolution time (R8) a located internal-consistency
-error rather than a silent no-op.
+**Correction (round-1 review, decision 10/R17; identity ruled in round-2 review):**
+`check_poly_body` and `check_poly_call` are not two clean sequential passes -- both run
+interleaved inside one source-order loop (`src/check.rs:758`). Without a pre-pass, a
+monomorphic word declared before its polymorphic callee would reach `check_poly_call`'s
+bound loop before that callee's own `check_poly_body` pass has recorded any obligations.
+R17 closes this with a pre-pass, ruled to be `check_poly_body` **hoisted** (run once,
+early, for every poly word) rather than a second parallel obligation-only walk -- a
+separate walk would have to duplicate `check_poly_body`'s traversal exactly, which is a
+permanent two-places-must-agree liability the hoist avoids. This changes first-error
+ordering (every poly-body diagnostic now fires before any monomorphic word's, since
+`check_poly_body`'s errors propagate with `?` at `src/check.rs:810-822`) -- a named risk,
+not an implementation footnote (see Risks table). An unmatched obligation at resolution
+time (R8) is a located internal-consistency error rather than a silent no-op.
 
 The obligation list, once collected by the pre-pass, threads from the body walk to the
 call site (both already operate on the same `PolySig`/call context), and a new
-per-instantiation span->symbol map (see R9's correction; *not* a `CallInst.trait_calls`
-field -- `CallInst` does not reach the lowering site that needs this data, see below)
-carries the resolved `(span, symbol)` pairs onward to lowering.
+per-instantiation span->symbol map (see R9's correction) carries the resolved `(span,
+symbol)` pairs onward to lowering.
 
-**Lowering layer.** **Correction (round-1 review):** the original two-bullet version of
-this layer assumed `lower_instantiation` already holds a `CallInst` to read
-`trait_calls` from; it does not (`src/ir/driver.rs:788-823` takes
-`symbol/callee/sig/subst/body`, no `CallInst`, and explicitly passes
-`empty_instantiations()`). Corrected mechanism, three parts:
+**Lowering layer.** **Correction (round-1 review), re-corrected (round-2 review):**
+round-1 found the original version assumed `lower_instantiation` already holds a
+`CallInst`; it does not. Round-1 then redirected the map through `lower_instantiation`,
+which round-2 found is **REPL-only** (`src/ir/driver.rs:788`, sole call site
+`src/repl.rs:1554`). The compiled build inlines monomorphized instantiations directly
+(`src/ir/driver.rs:249-286`), where `inst: &CallInst` is already in hand (`:270`) before
+`lower_word_parts` is called (`:271`). Corrected mechanism, three parts:
 
 - *Impl members lower as ordinary words.* Since R4 requires an `impl:` binding's target
   to be an already-declared, already-concrete word, there is nothing impl-specific to
@@ -523,14 +648,18 @@ this layer assumed `lower_instantiation` already holds a `CallInst` to read
   path (`resolve::mangle`, `lower()`'s `module.words` walk) exactly once, the same as
   any other concrete word, regardless of how many poly-word instantiations dispatch to
   it via a bound. No new `IrFunc` emission path, satisfying R9 directly.
-- *Bound-directed calls lower as ordinary calls, via a new per-instantiation map,
-  precedented by `builtin_overloads` (not `quot_inputs`).* R8's resolution produces a
-  `HashMap<Span, String>` per instantiation. This is passed into `lower_instantiation`
-  and threaded through `lower_word_parts` onto `FuncBuilder`
-  (`src/ir/driver.rs:283,428` is the existing analogous thread for the module-global
-  `builtin_overloads` map) as its own field, read alongside `builtin_overloads` when
-  lowering emits a call at a given span. This is new, real plumbing -- two functions gain
-  a parameter, `FuncBuilder` gains a field -- not a pre-existing read path.
+- *Bound-directed calls lower as ordinary calls, via a new per-instantiation map on the
+  compiled-path instantiation record, precedented by `builtin_overloads` (not
+  `quot_inputs`, and not routed through `lower_instantiation`).* R8's resolution produces
+  a `HashMap<Span, String>` per instantiation, stored alongside `CallInst`'s existing
+  per-instantiation data and read at the existing `src/ir/driver.rs:249-286` loop, then
+  threaded into `lower_word_parts` (`src/ir/func_builder/mod.rs:718`, `FuncBuilder`
+  field `:185`, assignment `:748` -- the real precedent pair; not `driver.rs:283,428`,
+  where `:428` is `lower_line`'s REPL-line assignment) alongside `builtin_overloads`.
+  `lower_word_parts`'s other callers pass an empty default via the existing
+  `empty_builtin_overloads()` convention (`src/ir.rs:69`). This is new, real plumbing --
+  not a pre-existing read path -- and is explicitly compiled-path-only; the REPL's
+  `lower_instantiation`/`PolyWordEntry` path does not gain this data this slice.
 - *Dead-code pruning (R15).* `uncalled_operator_overloads`
   (`src/ir/driver.rs:102-116`) must also treat a symbol appearing in some
   instantiation's new per-instantiation map as "called," the same way it already treats
@@ -540,13 +669,21 @@ this layer assumed `lower_instantiation` already holds a `CallInst` to read
   must exactly match `overload_symbols`'s spelling (`:99`), and this filter does not run
   for the REPL's `lower_word` path.
 
-**Ambiguity and qualification (R12).** The obligation-recording branch in `poly_call_term`
-(R7) walks `v`'s bound set looking for a trait declaring the called name; finding two is
-the natural, no-extra-pass detection point for the ambiguous-call rejection. A
-module-qualified call (`qualifier::name`) is parsed and resolved exactly the way any
-other qualified name is (`src/parser.rs:3449`, `self.imports.get(qualifier)`) -- the
-obligation-recording branch, on seeing a qualifier, restricts its search to the trait
-declared in that qualifier's target module rather than searching the whole bound set.
+**Ambiguity and qualification (R12), and bound-side trait resolution (R18).** The
+obligation-recording branch in `poly_call_term` (R7) walks `v`'s bound set looking for a
+trait declaring the called name; finding two is the natural, no-extra-pass detection
+point for the ambiguous-call rejection. A module-qualified call (`qualifier::name`) is
+parsed and resolved exactly the way any other qualified name is (`src/parser.rs:3449`,
+`self.imports.get(qualifier)`) -- no new `Resolver::rewrite` branch is needed, since an
+unrecognized qualified word already falls through to `Ok(None)` there (`:288`); the
+obligation-recording branch, seeing a qualifier, restricts its search to the trait
+declared in that qualifier's target module. **Correction (round-2 review):** a trait
+name *in a bound* is a separate, earlier concern -- it resolves at **parse time**, inside
+`parse_capabilities`, through the same `self.imports`/`type_is_exported` gate
+`resolve_type_or_apply` already uses for a qualified generic type header
+(`src/parser.rs:3455-3460`, `:3080`), not through `Resolver::rewrite` (which runs
+post-parse on term bodies and never sees a bound's trait name, already baked into
+`Bound::User(TraitId)` by then).
 
 **Project convention compliance:** unit tests beside every new/modified function
 (`#[cfg(test)] mod tests`, happy path + at least one error case); one golden test file,
@@ -563,7 +700,7 @@ signals at phase exit, not before.
 | `src/ast.rs:1283` | `pub enum Bound { Copy, Ord }` | Add `User(TraitId)` |
 | `src/ast.rs:375-436` | `StructDecl`/`EnumDecl` (existing shape to mirror) | `TraitDecl` copies this shape exactly: flat whole-program `Vec`, `module: u32` field per entry |
 | `src/ast.rs:18` | `Module` struct | Add the whole-program trait registry and impl registry fields (exact placement/shape TBD against current field layout at implementation time -- confirm whether structs/enums live directly on `Module` or on a shared registry it holds, and match that, not a `HashMap` guess) |
-| `src/ast.rs:1419-1438` | `CallInst`, incl. `quot_inputs` (field-shape precedent only) | No change needed here -- `quot_inputs` is consumed caller-side by `lower_poly_call`, a structurally different site than where trait-call resolution is needed; do not add a `trait_calls` field here (round-1 correction) |
+| `src/ast.rs:1419-1438` | `CallInst`, incl. `quot_inputs` | Add the new per-instantiation span->symbol map here (restored round-2 ruling -- round-1 wrongly rejected `CallInst` as unreachable from lowering; it is reachable at the compiled-path loop, `driver.rs:249-286`, just not from `lower_instantiation`, which is REPL-only). `quot_inputs` remains a field-shape precedent only, not a threading precedent (it is consumed at a different, caller-side site). |
 | `src/parser.rs:2299` (`:2305`/`:2309` are the two hardcoded string compares) | `parse_capabilities` | Replace with a trait-table lookup; `Copy`/`Ord` become pre-seeded predicate-kind entries |
 | `src/parser.rs:974-977`, `:2107-2141`, `:2136` | `intern_ty_var`/`parse_poly_ty_var`/`bound_on_use_error` | Confirms R5's "first occurrence" bound rule is already how binding-vs-use is tracked; no change needed here, cited for the implementer's confidence |
 | `src/parser.rs:3449` | Qualified-name resolution (`qualifier::base`, `self.imports.get(qualifier)`) | Reused as-is for R12's qualified-call disambiguation; this is a *module*-alias lookup, not a trait-name namespace -- do not add a second qualifier kind |
@@ -579,11 +716,15 @@ signals at phase exit, not before.
 | `src/check/poly.rs:3535-3548` | `check_poly_call`'s bound loop (`for (v, bound) in &sig.bounds`) | Add the `Bound::User(trait_id)` arm: registry lookup, diagnostic on miss, per-instantiation span->symbol map population on hit (R8/R9) |
 | `src/ir/driver.rs:99` | `overload_symbols` | The spelling R15's stored symbols must match byte-for-byte |
 | `src/ir/driver.rs:102-116` | `uncalled_operator_overloads` | Extend to also spare a symbol appearing in some instantiation's new trait-call map (R15) |
-| `src/ir/driver.rs:283,428` | `builtin_overloads` threading through `lower_word_parts`/`FuncBuilder` | The real precedent for R9's new per-instantiation map (not `quot_inputs`) |
-| `src/ir/driver.rs:788-823` | `lower_instantiation` | Gains a new parameter (the per-instantiation span->symbol map) and threads it through `lower_word_parts` -- does not receive a `CallInst` today, round-1 correction |
+| `src/ir/func_builder/mod.rs:718` (assignment `:748`, field `:185`) | `lower_word_parts`/`FuncBuilder` `builtin_overloads` threading | The real precedent for R9's new per-instantiation map (not `quot_inputs`); corrects round-1's citation of `driver.rs:283,428` (`:428` is `lower_line`'s REPL-line assignment, a different function) |
+| `src/ir/driver.rs:249-286` | Compiled-path instantiation loop (`for (symbol, inst) in distinct`) | **The actual read site (round-2 correction).** `inst: &CallInst` is already in hand at `:270`, before `lower_word_parts` is called at `:271` -- this is where the new per-instantiation map is read and threaded, not `lower_instantiation`, which is REPL-only (`:788-823`, sole caller `src/repl.rs:1554`) and out of scope for this field |
+| `src/ir.rs:69` | `empty_builtin_overloads()` | The existing default-value convention `lower_word_parts`'s other callers use for a parameter they don't need -- reuse for the new parameter's default |
 | `src/resolve.rs:496` | `exportable_names` | The actual per-kind gate `trait:` export must extend (R1) -- `:270`'s `not_exported_error` is downstream of this, not a substitute for it |
 | `src/resolve.rs:270` | `not_exported_error` | Downstream check; correct but incomplete on its own (decision 4 correction) |
-| `src/resolve.rs:184-204`, `:238` | `NameTables::build`, `Resolver::rewrite` | Need a new trait-shaped branch alongside the existing type/word branches (R18) |
+| `src/check/declarations.rs:562-586` | `local_decl_names` | Needs a `traits` loop alongside structs/enums/words/externs, or a local trait colliding with a selectively imported one goes uncaught (R1) |
+| `src/check/declarations.rs:873`, `:932`, `:376` | `check_duplicate_type_names`, `check_duplicate_word_names`, `duplicate_static_error` | No shared cross-kind check exists; a new `check_duplicate_trait_names` is needed, mirroring these (R1/R2) |
+| `src/parser.rs:3455-3460` (`type_is_exported`/`not_exported_error` def `:3080`), inside `resolve_type_or_apply` | Parse-time qualified-type export gate | The actual mechanism a trait name in a bound must reuse (R18, round-2 correction) -- NOT `NameTables::build`/`Resolver::rewrite`, which run post-parse and never see a bound's trait name (already baked into `Bound::User(TraitId)` by parse time) |
+| `src/resolve.rs:723`, `:288` | `Resolver::rewrite`, its word-branch fallthrough | R12's qualified member call needs no new branch here -- an unrecognized qualified word already falls to `Ok(None)`; the gap is ordering (`:289-292`'s mangling must not pre-empt a matching trait obligation), not a missing branch |
 | `tests/phase7_slice3e.rs` (new, one file) | Golden + unit tests | Matches `tests/phase7_slice3{a,b,c,d,f,g,i}.rs`'s existing single-file convention |
 
 **Load-bearing constraints:**
@@ -598,6 +739,11 @@ signals at phase exit, not before.
 - Do not skip R17's pre-pass on the assumption that source order will happen to work --
   `check.rs`'s check loop is a single interleaved pass, not two, and this is exactly the
   shape that produces an order-dependent silent bug if skipped.
+- Do not model R18 as a new `NameTables::build`/`Resolver::rewrite` branch -- round-2
+  review found this backwards; a bound's trait name resolves at parse time and never
+  reaches `rewrite`.
+- Do not route the per-instantiation span->symbol map through `lower_instantiation` --
+  round-2 review found it is REPL-only; the compiled path never calls it.
 
 ## Open Questions
 
@@ -615,8 +761,11 @@ this slice.
 | The `Vec<(u32, Bound)>`/`PolySig.bounds` change to add `User(TraitId)` breaks an existing exhaustive match somewhere outside `poly.rs` | Low | `Bound` is crate-internal; grep every `match bound`/`Bound::Copy \| Bound::Ord` site before starting Phase 1 and confirm the compiler's non-exhaustiveness errors surface all of them (do not rely on grep alone). |
 | Module-qualified disambiguation (R12) is under-tested for the same-module-collision non-escape case | Medium | A golden proving the same-module case still rejects even with a qualifier attempted, alongside the cross-module success case, so both halves of decision 6 are pinned. |
 | R17's pre-pass is skipped or scoped only to the current module's top-level words, silently reproducing the source-order hazard it exists to close | Medium | A pinned golden with a monomorphic word declared *before* its polymorphic, bounded callee in source order (`round-1 review` found this ships broken without R17); assert it resolves correctly, not just that some ordering happens to work. |
+| R17's hoisted `check_poly_body` pre-pass changes first-error ordering for any file mixing a poly-body error with a monomorphic-word error (found in round-2 review) | Medium | A regression test asserting which diagnostic fires first for a file with both kinds of error before and after this slice lands; if any existing golden relies on monomorphic-error-first ordering, it must be identified and updated deliberately, not silently broken. |
 | R10's pinned tests cover only the non-builtin-named barrier (`poly_var_to_concrete_error`) and miss the other two (`poly_delegate_op`, `poly_op_on_variable_error`), leaving a builtin-named trait member untested | Medium | A trait requiring an operator-spelled member (e.g. `+`) is one of R10's mandated goldens, not optional -- ship it in Phase 2, not deferred to Phase 4's `sort` consumer (which uses `cmp`, a non-operator name, and would not catch this). |
 | R15's dead-code-pruning fix gives false confidence about REPL coverage of bound-directed dispatch | Low | State explicitly in the golden's comment that this is a compiled-build-only guarantee (round-1 finding); do not write a REPL-session test claiming R15 coverage there. |
+| R1's three-place export/duplicate-name fix (`exportable_names`, `local_decl_names`, a new `check_duplicate_trait_names`) is implemented as only the first, most-obviously-named place (found in round-2 review) | Medium | Each of the three needs its own golden: cross-module export, local-vs-selective-import collision, and same-module cross-kind collision (`trait: Point` alongside `type: Point`) -- do not accept one test standing in for all three. |
+| R18's qualified-call-vs-mangling ordering (a qualified member call must win over `rewrite`'s ordinary word mangling when both are possible) ships unspecified in code review, relying on incidental branch order (found in round-2 review) | Medium | The dedicated golden R18 requires (a qualified member call where the qualifier's module also exports an unrelated same-named concrete word) must assert the trait-member call wins, not just that some call succeeds. |
 
 ## Delivery Plan
 
@@ -627,9 +776,7 @@ parse into the new AST, land in a flat whole-program registry mirroring
 `StructDecl`/`EnumDecl`'s shape, and require explicit `export:`/`import:` exactly like
 `type:`/`extern:` (no implicit-export exception).
 
-**Requirements Covered:** R1, R2, R3, R4 (parse-time half), R11, R18 (declaration-side
-half only -- the trait/impl AST and export gate; the `NameTables`/`rewrite` resolution
-branch itself is exercised by a bound or qualified call, which land in Phase 2)
+**Requirements Covered:** R1, R2, R3, R4 (parse-time half), R11
 
 **Scope:**
 
@@ -639,25 +786,29 @@ branch itself is exercised by a bound or qualified call, which land in Phase 2)
     field layout (read it first, don't assume a shape).
   - `src/parser.rs`: `parse_trait_decl`, `parse_impl_decl` (bare-pair grammar, no `| |`,
     no body), `parse_capabilities`'s trait-table rewrite (R2).
-  - `src/resolve.rs`: `exportable_names` (`:496`) gains a `traits` loop (R1); this is
-    the actual gate, not `:270`'s `not_exported_error` alone (decision 4 correction --
-    v1's spec wrongly assumed `:270` was sufficient and that the gate existed at all;
-    neither is true, confirmed by grep). `NameTables::build` (`:184-204`) and
-    `Resolver::rewrite` (`:238`) gain a trait-shaped branch (R18) so a trait name is
-    resolvable at all -- Phase 1 adds the branch, Phase 2 is the first phase that
-    exercises it via a real bound.
+  - `src/resolve.rs`: `exportable_names` (`:496`) gains a `traits` loop; this is the
+    actual export gate, not `:270`'s `not_exported_error` alone (decision 4 correction).
+  - `src/check/declarations.rs`: `local_decl_names` (`:562-586`) gains a `traits` loop
+    (R1, round-2 finding); a new `check_duplicate_trait_names`, mirroring
+    `check_duplicate_type_names` (`:873`)/`check_duplicate_word_names` (`:932`) (R1/R2,
+    round-2 finding -- no shared cross-kind check exists today).
 - Files to create: none yet (tests land in the single `tests/phase7_slice3e.rs`, created
   in this phase and extended by later phases).
-- Out of scope: any bound syntax consumption (`'T: Show`), body-side dispatch, call-site
-  satisfaction checking -- pure declaration/export/import surface only.
+- Out of scope: any bound syntax consumption (`'T: Show`, including its parse-time
+  resolution -- R18 lands in Phase 2, not here, since it needs a real bound to exercise
+  against), body-side dispatch, call-site satisfaction checking -- pure
+  declaration/export/import/duplicate-check surface only.
 
 **Entry Conditions:** none beyond the existing `type:`/`extern:` parsing being in place
 (it is).
 
 **Exit Criteria:**
 
-- A trait declares, duplicate-rejects, and requires `export:` to cross a module
-  boundary, with the identical error shape `type:` already produces.
+- A trait declares, duplicate-rejects (same-kind AND cross-kind, e.g. `trait: Point`
+  alongside `type: Point` in one module -- round-2 finding), and requires `export:` to
+  cross a module boundary, with the identical error shape `type:` already produces.
+- A locally declared trait colliding with a selectively imported one of the same name is
+  rejected (round-2 finding, `local_decl_names`).
 - An `impl:` binding validates member-signature match, the orphan rule, and rejects a
   polymorphic implementing word (decision 2) at the `impl:` site.
 - Full existing suite green (no regressions from the `parse_capabilities` rewrite --
@@ -679,21 +830,23 @@ than resolving a symbol; two colliding bounds on one variable are legal to decla
 rejected only at an ambiguous unqualified call (R12), with qualified-call
 disambiguation working across module boundaries.
 
-**Requirements Covered:** R5, R6, R7, R10, R12, R17, R18 (resolution-side half)
+**Requirements Covered:** R5, R6, R7, R10, R12, R17, R18
 
 **Scope:**
 
 - Files to modify:
-  - `src/check.rs`: the obligation pre-pass (R17), inserted before the main check loop
+  - `src/check.rs`: the obligation pre-pass (R17) -- **is `check_poly_body` hoisted**
+    (round-2 ruling, not a new parallel walk), inserted before the main check loop
     (`:758`); its map must be scratch inside the poly-combinator-standalone path
     (`:772-782`), not module-level state.
   - `src/check/poly.rs`: the new branch before `poly_call_term`'s `env.get(name)`
     lookup (`:1197`), obligation recording, the ambiguous-member-call rejection and its
     qualified-call escape (R12).
-  - `src/resolve.rs`: the trait-shaped branch in `NameTables::build`/`Resolver::rewrite`
-    (R18) is exercised for real here for the first time (a bound naming a trait, or a
-    qualified disambiguating call).
-- Files to extend: `tests/phase7_slice3e.rs`.
+  - `src/parser.rs`: `parse_capabilities` (`:2299-2320`) resolves a bound's trait name at
+    parse time via the same `self.imports`/`type_is_exported` gate
+    `resolve_type_or_apply` uses (`:3455-3460`, `:3080`) -- R18's corrected mechanism
+    (round-2 finding: NOT a `NameTables`/`rewrite` branch, which cannot see a bound's
+    trait name post-parse).
 - Out of scope: concrete resolution against `θ` (Phase 3), the per-instantiation
   span->symbol map population (Phase 3), lowering (Phase 4).
 
@@ -730,18 +883,15 @@ logic, and R17's pre-pass is new check-ordering machinery, not a lookup extensio
 
 **Goal:** `check_poly_call`'s bound loop resolves each recorded obligation against the
 concrete `θ`, emits the bound-satisfaction diagnostic on a missing impl, and records
-`(span, symbol)` in a new per-instantiation `HashMap<Span, String>` for lowering to
-read (round-1 correction: this is *not* a `CallInst` field -- see R9/Codebase Map).
+`(span, symbol)` as a new field on `CallInst` (round-2 ruling: `CallInst` IS the right
+home -- round-1 wrongly rejected it based on a REPL-only fact, see R9/Codebase Map).
 
 **Requirements Covered:** R8
 
 **Scope:**
 
-- Files to modify: `src/check/poly.rs`'s bound loop (`:3535-3548`); wherever the
-  per-instantiation record that already carries `subst`/`body` for lowering lives (the
-  natural home for the new span->symbol map -- confirm the exact struct at
-  implementation time rather than assuming `CallInst`, which does not reach
-  `lower_instantiation`).
+- Files to modify: `src/check/poly.rs`'s bound loop (`:3535-3548`); `src/ast.rs`'s
+  `CallInst` gains the new per-instantiation span->symbol map field.
 - Files to extend: `tests/phase7_slice3e.rs`.
 - Out of scope: lowering (Phase 4).
 
@@ -770,23 +920,29 @@ monomorph symbols at both sites).
 
 ### Phase 4: Lowering, dead-code-pruning fix, and the `sort` consumer golden
 
-**Goal:** `lower_instantiation` and `lower_word_parts` gain a new parameter threading
-the per-instantiation span->symbol map onto `FuncBuilder` (round-1 correction: this is
-real, bounded new plumbing, precedented by `builtin_overloads`, not a pre-existing field
-read); impl members lower as ordinary concrete words; the dead-code-pruning gap (R15) is
-closed; the array `sort` consumer (the slice's forcing consumer) compiles, lowers, and
-runs correctly at two concrete instantiations.
+**Goal:** The compiled-path instantiation loop (`src/ir/driver.rs:249-286`, round-2
+correction -- NOT `lower_instantiation`, which is REPL-only) reads the new `CallInst`
+field and threads it through `lower_word_parts` onto `FuncBuilder` (real, bounded new
+plumbing, precedented by `builtin_overloads`); impl members lower as ordinary concrete
+words; the dead-code-pruning gap (R15) is closed; the array `sort` consumer (the
+slice's forcing consumer) compiles, lowers, and runs correctly at two concrete
+instantiations.
 
 **Requirements Covered:** R9, R13, R15, R16 (scope confirmation)
 
 **Scope:**
 
 - Files to modify:
-  - `src/ir/driver.rs`: `lower_instantiation` (`:788-823`) gains the new map parameter
-    and threads it through `lower_word_parts` onto `FuncBuilder`, mirroring the existing
-    `builtin_overloads` thread (`:283,428`) -- no new pass; `uncalled_operator_overloads`
-    (`:102-116`) extended per R15, matching `overload_symbols`'s spelling (`:99`)
-    exactly.
+  - `src/ir/driver.rs`: the compiled-path loop (`:249-286`) reads the new `CallInst`
+    field (already in hand as `inst` at `:270`) and passes it into `lower_word_parts`
+    (`:271`); `uncalled_operator_overloads` (`:102-116`) extended per R15, matching
+    `overload_symbols`'s spelling (`:99`) exactly.
+  - `src/ir/func_builder/mod.rs`: `lower_word_parts` (`:718`) gains the new parameter,
+    `FuncBuilder` (`:185`) gains the new field, mirroring the existing
+    `builtin_overloads` thread (assignment `:748`) -- no new pass. Other callers
+    (`driver.rs:200`, `:759` `lower_word`, `func_builder/mod.rs:936`,
+    `ir/destructors.rs:384`, existing test call sites) pass the existing
+    `empty_builtin_overloads()`-style default (`src/ir.rs:69`).
 - Files to extend: `tests/phase7_slice3e.rs` with the `sort` golden (`type: Ordering |
   Less | Equal | Greater ;`, `trait: Order 'T cmp ( &'T &'T -- Ordering ) ;`, two
   `impl:` bindings on `i64` and a second concrete type, the insertion-sort body from
