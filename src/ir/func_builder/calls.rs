@@ -672,12 +672,7 @@ impl<'a> FuncBuilder<'a> {
                     if callee == name {
                         let arity = arity.clone();
                         if tail && self.header.is_some() {
-                            let split = self.stack.len() - arity.in_arity;
-                            let mut args = self.stack.split_off(split);
-                            self.materialize_quot_args(&mut args, &arity.quot_inputs);
-                            self.back_edges.push((self.cur_id, args));
-                            self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
-                            self.terminated = true;
+                            self.emit_back_edge(arity.in_arity, &arity.quot_inputs);
                             return;
                         }
                         let symbol = self.cur_word_name.clone();
@@ -703,16 +698,7 @@ impl<'a> FuncBuilder<'a> {
                         let a = self.env.get(name).expect("checked user word exists");
                         (a.in_arity, a.quot_inputs.clone())
                     };
-                    let split = self.stack.len() - in_arity;
-                    let mut args = self.stack.split_off(split);
-                    // R-D3 applies to the back-edge the same as the ordinary
-                    // dispatch below: a phantom quotation carried around the
-                    // loop must be materialized before it reaches the header
-                    // phi, or the blit at the loop header sees a phantom type.
-                    self.materialize_quot_args(&mut args, &quot_inputs);
-                    self.back_edges.push((self.cur_id, args));
-                    self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
-                    self.terminated = true;
+                    self.emit_back_edge(in_arity, &quot_inputs);
                     return;
                 }
                 let arity = self
@@ -724,6 +710,20 @@ impl<'a> FuncBuilder<'a> {
                 self.emit_user_call(&arity, sym);
             }
         }
+    }
+
+    /// Pop `in_arity` operands as this iteration's back-edge phi operands and
+    /// jump to the loop header (R7; extended to poly self-calls by P7 slice
+    /// 3g-follow). Shared by the two back-edge sites so they cannot disagree
+    /// about phantom-quotation materialization (R-D3) the way `emit_user_call`
+    /// already guarantees for ordinary calls.
+    fn emit_back_edge(&mut self, in_arity: usize, quot_inputs: &[(usize, IrType)]) {
+        let split = self.stack.len() - in_arity;
+        let mut args = self.stack.split_off(split);
+        self.materialize_quot_args(&mut args, quot_inputs);
+        self.back_edges.push((self.cur_id, args));
+        self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+        self.terminated = true;
     }
 
     /// Pop `arity.in_arity` operands and emit the `Instr::Call` to `symbol`,

@@ -430,22 +430,25 @@ prerequisite.
   arity from `self.cur_poly_callee`; rewrite the stale `driver.rs:264-272` comment.
   Exit: `loopg` lowers to a loop header + back-edge (IR assertion) and the
   constant-stack golden runs.
-- **Phase 3 — test migration and regressions.** Migrate exactly one existing test
-  (`poly_self_call_lowers_to_ordinary_recursive_call`, `driver.rs`) onto a
-  non-tail-self-call fixture (it becomes the negative regression); extend
+- **Phase 3 — constant-stack golden and regressions.** The one true test migration
+  (`poly_self_call_lowers_to_ordinary_recursive_call`, `driver.rs`, onto a
+  non-tail-self-call fixture) landed in Phase 2, alongside the IR-assertion loop-header
+  golden; no rejection golden exists to add (1b's own conclusion: the linear hazard is
+  either unreachable or already rejected on other grounds, and its probe program is the
+  accept case). Phase 3's own work is to extend
   `self_recursive_poly_word_runs_to_base_case` (`tests/phase7_slice3g.rs`) into the
   large-counter constant-stack golden rather than migrating it (round-1 review
   correction — it asserts no header today and needs none migrated away); confirm every
   other existing S3g golden/mangled-name/mismatch test passes unchanged; record the θ
-  non-interaction note. Exit: full suite green, the rejection golden and the
-  constant-stack golden both present.
+  non-interaction note. Exit: full suite green, the large-counter constant-stack golden
+  present.
 
 ```json
 {
   "phases": [
     { "phase": 1, "focus": "Thread tail-position through poly_walk/poly_term/poly_call_term/poly_walk_arms/poly_combinator_call; guard the poly self-tail back-edge against a reference derived from a local (1c, the reachable hazard) gated on has_self_tail_call and tail; record why the linear hazard (1b) needs no guard", "effort": "M", "difficulty": "hard" },
     { "phase": 2, "focus": "Compute self_tail at both lower_word_parts call sites and add the poly self-call back-edge dispatch in func_builder/calls.rs; fix the stale driver.rs comment", "effort": "M", "difficulty": "hard" },
-    { "phase": 3, "focus": "Migrate the one true S3g absence-of-header test to a non-tail fixture, extend the existing loopg run golden into the constant-stack golden, confirm all other existing goldens pass, add the rejection golden", "effort": "S", "difficulty": "standard" }
+    { "phase": 3, "focus": "Extend the existing loopg run golden into a large-counter constant-stack golden, confirm all other existing goldens pass, record the theta non-interaction note (no rejection golden: Phase 1 concluded none is needed, and the one test migration already landed in Phase 2)", "effort": "S", "difficulty": "standard" }
   ]
 }
 ```
