@@ -398,6 +398,64 @@ fn repl_imported_enum_named_bool_is_not_the_session_bool() {
     );
 }
 
+/// R2/R4 (fix): the fold's shape test alone is not enough to keep a stranger
+/// out. An unrelated module can declare its own `type: bool | On | Off ;` --
+/// two payload-free variants, the same name, exactly `resolve_bool_type`'s
+/// shape -- and nothing forces that to collide with the session's `core::bool`
+/// any more (the injection that used to guarantee it is gone). Folding it
+/// anyway would alias the session's own `true`/`false` onto the stranger's
+/// `On`/`Off` tags: before this fix, `true`/`false` type-checked as valid
+/// arguments to the stranger's own `f`, silently routed through the wrong
+/// discriminant (`true`, tag 1, hit the `Off` arm), and a residual stranger
+/// value rendered on `:stack` as `false`. The fold now also requires the
+/// candidate's variant spellings, in order, to match the session's own `bool`
+/// (`False`, `True`) -- so the stranger keeps an id of its own: the session's
+/// `true`/`false` are rejected as a type mismatch against `f`, and a residual
+/// stranger value renders as the unrelated aggregate it is.
+#[test]
+fn repl_imported_enum_shaped_like_bool_but_named_differently_is_not_the_session_bool() {
+    let t = Tree::new("r2-shape-stranger");
+    let sibling = t.write_raw(
+        "mybool.sth",
+        "import: intrinsics | drop | ;\n\
+         export: bool mkon mkoff f ;\n\
+         type: bool | On | Off ;\n\
+         : mkon ( -- bool ) On ;\n\
+         : mkoff ( -- bool ) Off ;\n\
+         : f ( bool -- i64 ) ~[ ( On ) drop 1 ] ~[ ( Off ) drop 0 ] bool? ;\n",
+    );
+    let import = format!("import: \"{}\" m | mkon mkoff f | ;", sibling.display());
+    let out = run_session(&[
+        &import,
+        "mkon f .",
+        "mkoff f .",
+        "true f .",
+        "false f .",
+        "mkon",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines[..5],
+        ["imported m", "1", "stack: (empty)", "0", "stack: (empty)"],
+        "unexpected session transcript: {out}"
+    );
+    assert!(
+        lines[5].contains("type mismatch") && lines[5].contains("::f"),
+        "session `true` should be rejected as a type mismatch against the \
+         stranger's `f`, not silently folded onto it: {out}"
+    );
+    assert!(
+        lines[6].contains("type mismatch") && lines[6].contains("::f"),
+        "session `false` should likewise be rejected: {out}"
+    );
+    assert_eq!(
+        lines.last(),
+        Some(&"stack: <bool>"),
+        "a residual stranger value must render as the unrelated aggregate it \
+         is, not be misread as the session's own `bool`: {out}"
+    );
+}
+
 /// R2: the folded slot is *skipped* when the closure's enums are appended, so
 /// every enum after it shifts by one less than the ones before. Shifting them
 /// all alike renames each later enum to its neighbour: here the closure's

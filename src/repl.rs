@@ -200,12 +200,26 @@ fn import_symbol(name: &str, epoch: u64) -> String {
 /// one less -- left out, that slot's absence would silently rename every
 /// later enum to its neighbour.
 ///
-/// Which slot folds is decided by `resolve_bool_type`, the same shape test the
+/// Which slot folds starts from `resolve_bool_type`, the same shape test the
 /// rest of the compiler resolves `bool` by, never by the name alone: an
 /// imported enum that merely happens to be *called* `bool` (a payload-carrying
 /// or three-variant one) is an unrelated type, and folding it onto the
 /// session's one-cell scalar would read its tagged aggregate at the wrong
 /// width.
+///
+/// Shape alone is not enough, though: an unrelated module can declare its own
+/// `type: bool | On | Off ;` -- two payload-free variants, same name, and
+/// nothing (no injection, not this module's own import) makes that a
+/// `duplicate type` against the session's `core::bool` any more (P7 slice 3i
+/// deleted the injection that used to guarantee it). `resolve_bool_type` alone
+/// cannot tell that stranger from a real re-import of `core::bool`, so the
+/// fold also requires the candidate's variant *spellings*, in order, to match
+/// the session's own `bool` declaration (`False`, `True`) exactly. Folding the
+/// stranger anyway would alias its `EnumId` onto the session's, so its own
+/// discriminants (`On`=0/`Off`=1) get read against the session's tag meaning
+/// (`False`=0/`True`=1): a session `true`/`false` would silently become a
+/// legal argument to the stranger's own words, routed by tag through the
+/// wrong arm.
 #[derive(Clone, Copy)]
 struct EnumRemap {
     base: usize,
@@ -214,9 +228,22 @@ struct EnumRemap {
 }
 
 impl EnumRemap {
-    fn new(module: &Module, base: usize, session_bool: EnumId) -> EnumRemap {
+    fn new(
+        module: &Module,
+        base: usize,
+        session_bool: EnumId,
+        session_bool_variants: &[&'static str],
+    ) -> EnumRemap {
         let folded_bool = match crate::ast::resolve_bool_type(&module.enums) {
-            Some(Type::Enum(id, _)) => Some(id),
+            Some(Type::Enum(id, _))
+                if module.enums[id.index()]
+                    .variants
+                    .iter()
+                    .map(|v| v.name_static)
+                    .eq(session_bool_variants.iter().copied()) =>
+            {
+                Some(id)
+            }
             _ => None,
         };
         EnumRemap {
@@ -2082,7 +2109,15 @@ impl Session {
         let selective_names: HashSet<&str> = selective.iter().map(|(n, _)| n.as_str()).collect();
         let struct_base = self.structs.len();
         let enum_base = self.enums.len();
-        let enum_remap = EnumRemap::new(module, enum_base, self.bool_enum);
+        // The session's own `bool` variant spellings, snapshotted before any
+        // append below -- `&'static str` is `Copy`, so this borrows nothing
+        // and is safe to hold across the mutation loop that follows.
+        let session_bool_variants: Vec<&'static str> = self.enums[self.bool_enum.index()]
+            .variants
+            .iter()
+            .map(|v| v.name_static)
+            .collect();
+        let enum_remap = EnumRemap::new(module, enum_base, self.bool_enum, &session_bool_variants);
         let array_base = self.arrays.len();
         let cell_base = self.owned_cells.len();
         let ref_base = self.refs.len();
