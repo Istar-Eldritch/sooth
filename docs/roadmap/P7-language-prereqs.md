@@ -351,41 +351,32 @@ be one mechanism or two.
 call it inside its own body via an indirect call, and receive a real quotation value from
 any caller at a concrete instantiation; the stale "slice 7" wording is retired.
 
-**P7.S3g — Self-recursion in a non-inline generic body.** A non-inline polymorphic word
-cannot call itself: `: loopg ( 'T: Copy 'T i64 -- 'T ) 1 sub loopg ;` fails with
-`` unknown word `loopg__m0` ``, which is the *generic-word-calls-generic-word* diagnostic
-and misdescribes what is wrong. Recursion is the ordinary way to write a loop over an
-abstract stack, so its absence is what forces every looping generic word to be `inline`
-and spliced at each call site.
-**Smaller than the general generic-calls-generic limit it currently reports as, and the
-lowering half is already done.** The general case is blocked because `poly_call_term`
-cannot see `poly_env` (`src/check/poly.rs:846`), so no polymorphic callee is registered on
-that path. A *self*-call needs no registry: its signature is the `PolySig` the walk
-already holds. On the lowering side, a comment inside the native monomorphization loop
-already states the case works -- "a self-recursive polymorphic word is a nested
-polymorphic call ... so such a body still lowers correctly as an ordinary recursive call,
-just without the loop/back-edge transform a monomorphic self-tail word gets"
-(`src/ir/driver.rs:250-259`). So the slice is a checker
-gap plus an optional codegen improvement, not new machinery.
-Two pieces, and the second is optional: resolve the self-name against the body's own `sig`
-in the poly walk; and decide whether to lift the hardcoded `self_tail = false` for
-instantiations (`poly.rs:392`) so a self-*tail* call lowers to a back-edge instead of real
-recursion. Without the second the feature is correct but consumes stack, which is the
-difference between `times-helper` running in constant stack and not.
-**Polymorphic recursion is excluded by the backend, and this slice's design keeps it
-unreachable rather than guarding against it at runtime.** A self-call at *different* type
-arguments (`'T` recursing at `['T 2]`) would demand a fresh instantiation per level, so
-monomorphization would never terminate if such a call were ever accepted. This is a
-consequence of Sooth's monomorphizing codegen, not of the type system: an erased or boxed
-uniform representation compiles it fine, which is precisely what DESIGN.md declines (no
-trait objects, no vtables, no hidden allocation). The slice's self-call check is a pure
-structural match against the word's own declared signature, with no unification or
-re-instantiation, so an operand shaped for a different instantiation is simply rejected as
-an ordinary type mismatch against that signature -- there is no instantiation-worklist
-expansion to guard against, because no fresh instantiation is ever derived from a self-call
-in the first place.
+**P7.S3g — Self-recursion in a non-inline generic body.** `[ done ]` A non-inline
+polymorphic word may call itself, so a generic word that loops over an inductively-shaped
+value no longer has to be `inline` and spliced at each call site to do it.
+**A self-call needs no registry lookup, which is what separates it from the general
+generic-calls-generic case (P7.S3k).** The general case is blocked because `poly_call_term`
+cannot see `poly_env`, so no polymorphic callee is registered on that path; a *self*-call
+resolves against the walk's own `sig`. `poly_call_term` recognizes the self-name by
+`ctx.mangled_name()` — the *mangled* spelling, since `resolve::mangle` rewrites a self-call
+body reference alongside the declaration it names — and matches the operand window against
+`sig.inputs` **pointwise and structurally**, producing `sig.outputs`: the same comparison
+the walk already runs against `sig.outputs` at body exit, run mid-body. No unification, no
+`Subst`, no fresh `GenericTypes` mint; the rigid type-variable ids carry through unchanged.
+A call to a *different* poly word is untouched and still hits the fall-through.
+**Polymorphic recursion is unreachable through bare self-call syntax, and so needs no
+termination guard.** A self-call at *different* type arguments (`'T` recursing at
+`['T 2]`) would demand a fresh instantiation per level, and monomorphization would never
+terminate. Under the structural match it never reaches the instantiation worklist: an
+operand shaped `Array('T, 2)` does not structurally equal `Var('T)`, so it is an ordinary
+located operand/signature mismatch at the call site, rejected exactly as any other
+declared-type mismatch is. That is a consequence of the checker's own comparison, not of a
+separate guard. The underlying exclusion is still Sooth's monomorphizing codegen, not the
+type system: an erased or boxed uniform representation compiles polymorphic recursion fine,
+which is precisely what DESIGN.md declines (no trait objects, no vtables, no hidden
+allocation).
 **S3e's traits do not unlock it, and the two are orthogonal.** A bound answers *what
-operations `'T` admits*, an abstraction question; polymorphic recursion is blocked by *how
+operations `'T` admits*, an abstraction question; polymorphic recursion is excluded by *how
 many instantiations must be emitted*, a termination question, and a bound does not reduce
 that count -- a polymorphically recursive word still demands a distinct instantiation per
 depth whether or not its variable carries a bound. S3e is explicit that a satisfied bound
@@ -394,13 +385,33 @@ allocation", which is the opposite of the uniform representation this would need
 *objects* would change the answer, and S3e declines them on purpose. Bounded-depth
 monomorphization (a fixed instantiation limit, as C++ templates effectively have) is
 declined too: it is a larger finite bound with a worse error message, not a solution.
-**Exit:** a non-inline generic word can call itself at its own type arguments and run; a
-self-call at different type arguments cannot be spelled through this mechanism at all: the
-self-call is checked by a pure structural match against the word's own declared signature,
-so an operand that does not match is rejected as an ordinary located type-mismatch error
-against that signature, never treated as a request for a new instantiation, and so is not a
-hang and not the `g__m0` message; and the `g__m0` diagnostic no longer claims a self-call
-is a generic-calls-generic call.
+On the lowering side a self-call resolves through neither of the two paths an ordinary call
+takes: the checker records no `CallInst` for it (the poly-body walk is abstract, with no
+concrete θ to record) and the lowering `env` excludes every poly word. Its callee is
+whichever instantiation is currently being emitted, so `lower_word_parts` carries the poly
+word's own name (`cur_poly_callee`) and dispatches such a call to `cur_word_name`, this
+instantiation's symbol, at that instantiation's own concrete arity. Both real entry points
+thread it: the native monomorphization loop and the REPL's `lower_instantiation`.
+**Exit:** a non-inline generic word can call itself at its own type arguments, compile at
+two instantiations and run; a self-call at different type arguments is a located type
+mismatch at the call site, not a hang; and the generic-calls-generic diagnostic no longer
+claims a self-call is a call to another generic word
+(`docs/roadmap/P7/slice3g-spec.md`, `tests/phase7_slice3g.rs`).
+
+**P7.S3g-follow — The self-tail loop transform for a polymorphic body.** S3g ships an
+ordinary recursive call, deliberately: a self-recursive generic word is *correct* but
+consumes one stack frame per recursion level, where a monomorphic self-tail word lowers to
+a loop. Two pieces, both absent. On the checker side `check_poly_body` builds its `Ctx`
+with an empty `CombinatorIndex`, so `has_self_tail_call` returns `false` for every poly
+body and `Ctx::Word.self_tail_call` is always `false`; tail-position detection has to run
+over a poly body first. On the lowering side the monomorphization loop passes
+`self_tail: false` into `lower_word_parts`, so no header/phi loop is built and the self-call
+arm in the user-word dispatch emits a real `Instr::Call`; a back-edge case has to join it,
+keyed on the poly callee's name rather than on `cur_word_name`. The cost of leaving it
+standing is stack depth only, which is the difference between a generic `times-helper`
+running in constant stack and not.
+**Exit:** a self-*tail* call in a non-inline generic body lowers to a loop back-edge, and a
+generic countdown over a large counter runs in constant stack.
 
 **P7.S3h — An escaping closure may capture a linear value (closure env disposal).**
 Capture into a *materialized* (escaping) closure is restricted to `Copy` values

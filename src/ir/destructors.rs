@@ -376,6 +376,7 @@ fn synthesize_struct_destructor_override(
         &word.effect,
         &word.body,
         crate::check::has_self_tail_call(word, combinators),
+        None,
         env,
         resolve,
         regs,

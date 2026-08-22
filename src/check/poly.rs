@@ -1272,6 +1272,42 @@ pub(super) fn poly_call_term(
     if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
         return Ok(next);
     }
+    // P7 slice 3g (R1): a self-call -- the term names the very word being
+    // walked. `sig` already *is* the callee's signature, with the same rigid
+    // type-variable ids the walk is using, so this is a pure structural
+    // pointwise match against `sig.inputs`/`sig.outputs`, never a fresh
+    // unification or `Subst` (D1): an operand shaped `['T 2]` does not
+    // structurally equal `'T`, so recursing at a different type argument is
+    // an ordinary mismatch here, not a request for a new instantiation --
+    // this is what keeps the roadmap's termination hazard unreachable
+    // through bare self-call syntax. Compared against `ctx.mangled_name()`,
+    // never `ctx.word_name()`: `resolve::mangle` rewrites a self-call body
+    // reference to the mangled spelling `word.name` already carries, so the
+    // demangled display name would miss a multi-module closure.
+    if ctx.mangled_name() == Some(name) {
+        let n = sig.inputs.len();
+        if stack.len() < n {
+            return Err(need(n, stack.len()));
+        }
+        let base = stack.len() - n;
+        for (i, inp) in sig.inputs.iter().enumerate() {
+            let found = &stack[base + i].pt;
+            if found != inp {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(inp, sig),
+                    &poly_type_str(found, sig),
+                ));
+            }
+        }
+        stack.truncate(base);
+        for out in &sig.outputs {
+            stack.push(PolySlot::new(out.clone()));
+        }
+        return Ok(stack);
+    }
     // P8 S2 (R6b): a polymorphic callee is registered in `poly_env`, which this
     // path cannot see, so a poly word calling one lands here rather than
     // dispatching. That is the generic-calls-generic gap, not an unknown name:
@@ -5316,6 +5352,62 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("collides with the variant name `Some`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn poly_self_call_structural_match_produces_outputs() {
+        // P7 slice 3g (R1): a self-call whose operand window structurally
+        // matches the walking word's own `sig.inputs` truncates and pushes
+        // `sig.outputs`, letting the body finish typechecking to the
+        // declared effect.
+        check_src(": rec ( 'T i64 -- 'T ) drop 3 rec ;\n: main ( -- ) ;\n")
+            .expect("a structurally matching self-call typechecks");
+    }
+    #[test]
+    fn poly_self_call_operand_mismatch_is_located_error() {
+        // D1's termination witness: a self-call whose operand window does
+        // not structurally match `sig.inputs` is an ordinary located type
+        // mismatch (`poly_rendered_type_mismatch_error`), never a check-time
+        // loop or a backend panic.
+        let err =
+            check_src(": rec ( 'T i64 -- 'T ) drop True rec ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("type mismatch in `rec`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("`rec` expected `i64`, found `Bool`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn poly_self_call_underflow_reuses_arity_error() {
+        // Too few operands ahead of a self-call is an ordinary arity
+        // shortfall: the same underflow diagnostic any other operand-arity
+        // gap produces, not a bespoke self-call message.
+        let err = check_src(": rec ( 'T i64 -- 'T ) drop rec ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("`rec` needs 2 values, but the stack holds 1"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn poly_different_word_call_still_rejects() {
+        // R3: a call to a *different* polymorphic word (not the walking
+        // word's own name) is unchanged -- still `poly_calls_poly_word_error`,
+        // the P8 S2 generic-calls-generic gap this slice does not close.
+        let err =
+            check_src(": other ( 'T -- 'T ) ;\n: caller ( 'T -- 'T ) other ;\n: main ( -- ) ;\n")
+                .unwrap_err();
+        assert!(
+            err.contains("cannot call the polymorphic word"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains(
+                "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
+            ),
             "unexpected message: {err}"
         );
     }
