@@ -1,55 +1,29 @@
 # Sooth — design notes
 
-A small, statically-checked concatenative language in the Forth/Factor/Kitten
-lineage, compiled straight to native code with no external runtime. Working notes,
-not a spec.
+A small, statically-checked concatenative language compiled straight to native
+code with no external runtime. Working notes,not a spec.
 
 ## What this is: a craft language
 
-Sooth is built for the pleasure of building and writing it, not for a market. That
-is a deliberate scope decision, made after arguing the alternative and rejecting
-it (see "Why craft, not product" below). The consequences run through every choice
-here: the language stays small enough to hold in one head, the compiler stays small and legible, and its one backend dependency
-(QBE) is itself small enough to read rather than an opaque black box. Where a decision
-trades reach or peak
-performance for simplicity and legibility, simplicity wins.
+Sooth is built for the pleasure of building and writing it, not for a market. The
+consequences run through every choice here: the language stays small enough to hold
+in one head, the compiler stays small and legible, and its one backend dependency
+(QBE) is itself small enough to read rather than an opaque black box. Where a
+decision trades reach or peak performance for simplicity and legibility,
+simplicity wins.
 
 The one intellectual bet that makes Sooth more than a tidy Forth clone: **in a
 stack language the stack discipline already is move semantics.** Every word
 consumes its inputs and produces its outputs, so a value is moved by default and
 keeping a copy requires an explicit `dup`. Linear types therefore fall out for
 free: `dup` is the explicit copy, and `drop` is the explicit, checked destructor
-point. That
-single idea pays off three times over (resource safety, deterministic destruction,
-data-race-free concurrency) and is the reason to write programs in Sooth rather
-than in Forth or Rust.
+point. That single idea pays off three times over (resource safety, deterministic
+destruction, data-race-free concurrency) and is the reason to write programs in
+Sooth rather than in Forth or Rust.
 
-## Why craft, not product
-
-Recorded so the scope decision isn't re-litigated by accident.
-
-- **No market gap for a general-purpose version.** Every axis a serious version
-  would compete on is already held: memory-safe no-GC systems work by Rust,
-  proven-real-time by Ada/SPARK, refinement+SMT by F*/Dafny/Liquid Haskell,
-  effects by Koka, data-race-free actors by Pony. A new general-purpose language
-  faces a brutal adoption bar against incumbents that keep improving.
-- **Therefore, for a general-purpose production language, use a mainstream one**
-  (Rust when its guarantees are needed, Go/typed-Python when they aren't).
-
-Nothing below is justified by market need. It's justified by being interesting to
-build and to write in.
-
-**One real target domain, which is not the same as becoming a product.**
-Embedded/real-time is a first-class target and Sooth is expected to be *used* there,
-starting with the goggles firmware. That does not reopen the market argument above,
-which still holds for the general-purpose case: it narrows to a domain where the
-linear spine has something the incumbents don't, and supplies the thing a craft
-project otherwise lacks, a consumer that says no. The craft constraints are unchanged
-(small enough to hold in one head, legible compiler, simplicity over reach); what
-changes is that "nobody depends on this" stops being an excuse for leaving a hole
-where a hard problem should be. Where the linear spine pays off concretely: a DMA
-transfer *is* an ownership transfer, so "don't touch the buffer while the controller
-owns it" becomes a type error instead of a comment in a driver.
+But it is not a toy. Embedded and real-time is a first-class target, and Sooth is
+expected to be *used* there. That narrows to a domain where the linear spine adds value. The craft
+constraints are unchanged (small enough to hold in one head, legible compiler, simplicity over reach). 
 
 ## Surface language
 
@@ -66,16 +40,16 @@ rather than the whole word:
 ```forth
 : gcd ( int int -- int )
   | a b |
-  b 0 eq ~[
-    a
-  ] ~[
-    b  a b mod  gcd
-  ] if ;
+  b 0 eq 
+  ~[ a ] 
+  ~[ b  a b mod  gcd ] 
+  if
+;
 ```
 
-Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
-one- or two-value words stay point-free (`square`, below, is just `dup mul`). Reach for
-`| … |` only when shuffling would read worse than names, typically three-plus live
+Locals are opt-in, not the default. If you prefer the stack, `dup`/`swap`/`drop` most
+one- or two-value words stay point-free (`square`, below, is just `dup mul`). You ceach for
+`| … |` when shuffling would read worse than names, typically three-plus live
 values reused out of order, like a formula:
 
 ```forth
@@ -84,9 +58,17 @@ values reused out of order, like a formula:
 ```
 
 `gcd` above sits on the line: two values, each reused and reordered in the recursive
-call. It is shown with names here, but `swap`/`over` write it just as legibly (that
-version is in the README), which is the point: two values is where the judgment call
-lives, and `lerp`'s three is where names clearly win.
+call. It is shown with names here, but `swap`/`over` write it just as legibly,
+which is the point: two values is where the judgment call lives, and `lerp`'s three is where names clearly win.
+
+```forth
+: gcd ( int int -- int )        \ ( a b )
+  dup 0 eq                      \ test b (the top) directly
+  ~[ drop ]                     \ ( a b ) → a
+  ~[ tuck mod gcd ]             \ ( a b ) → ( b, a mod b )
+  if
+;
+```
 
 Checked stack effects are the cheap, high-value feature: Forth's signature failure
 mode (a silent underflow producing a wrong number at runtime) becomes a compile
