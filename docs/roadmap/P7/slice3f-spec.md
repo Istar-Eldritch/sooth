@@ -16,7 +16,7 @@ parameter's position:
    before `unify_poly_input` is ever consulted.
 2. **Body boundary** — a poly body `call`ing its own ground `Type::Quotation`
    parameter (a real value, not a literal it can splice) is rejected by
-   `poly_call_term`'s `call` handling (`src/check/poly.rs:953-1005`), which only knows
+   `poly_call_term`'s `call` handling (`src/check/poly.rs:953-1010`), which only knows
    how to splice a literal's interned body and has no arm for a genuine parameter.
 
 Three independently phaseable changes close this, all in `src/check/poly.rs` or its one
@@ -30,15 +30,17 @@ call site:
   added) and its one call site (`src/check/terms.rs:710-712`) updated to match — the
   same shape of change P7.S3b-follow already made to `poly_walk`.
 - **R3** — add a poly analogue of the concrete path's `check_abstract_quotation_call`
-  (`src/check/terms.rs:1123-1145`) to `poly_call_term`'s `call` handling: pop the
+  (`src/check/terms.rs:1123-1147`) to `poly_call_term`'s `call` handling: pop the
   declared ground inputs, push the declared ground outputs, no splice, for when the
   top-of-stack operand is a genuine (materialized, non-literal) ground `Type::Quotation`
   parameter.
 
 Also retired: the stale "(a runtime quotation value is slice 7)" clause in
-`reject_quotation_argument` (`src/check.rs:3032-3039`) — 7a/7b shipped this long ago,
-and the clause is user-facing and wrong on every message this slice's own R1 leaves
-rejecting.
+`reject_quotation_argument` (`src/check.rs:3032-3039`) — the clause is a deliberate
+prior rewording (the function's own doc comment names it R26, off a stale "Phase 6"
+parenthetical it replaced), not simply forgotten cruft, but it has been wrong again
+since 7a/7b shipped a real runtime representation, and is user-facing on every message
+this slice's own R1 leaves rejecting.
 
 **Not in scope:** the genuinely abstract `PolyType::Quotation(ins, outs, ..)` case (a
 declared `[ 'T -- 'T ]` parameter that is not fully concrete). `unify_poly_input`'s own
@@ -161,7 +163,7 @@ error: `call` is not permitted on a quotation in `call_it` (line 1)
    `prov: &Provenance` and `scope: &Scope` (read-only) and receives no `env`, `cells`,
    or `slices` at all.
 
-5. **`poly_call_term`'s `call` handling (`poly.rs:953-1005`) has exactly one branch: a
+5. **`poly_call_term`'s `call` handling (`poly.rs:953-1010`) has exactly one branch: a
    literal, or a located rejection.**
 
    ```rust
@@ -197,7 +199,7 @@ error: `call` is not permitted on a quotation in `call_it` (line 1)
    different fixes (recon of this file's own out-of-scope boundary).
 
 6. **The concrete twin already exists and needs no new logic invented, only ported.**
-   `check_abstract_quotation_call` (`terms.rs:1114-1145`):
+   `check_abstract_quotation_call` (`terms.rs:1123-1147`):
 
    ```rust
    fn check_abstract_quotation_call(
@@ -250,12 +252,16 @@ error: `call` is not permitted on a quotation in `call_it` (line 1)
    is shared between R9p (`check_poly_call`) and the concrete argument boundary's own
    R9 (`terms.rs:786-788`); both call sites keep saying "is slice 7" about a value type
    that has had a runtime representation since 7a/7b. **Out of scope, noted but not
-   touched:** `reject_quotation_operand` (`check.rs:3018-3024`) carries the identical
-   stale clause for a different diagnostic (a quotation passed as a *shuffle* operand,
-   not a call argument). It is not named by the brief's OQ4 and not touched by this
-   slice — retiring it is an unowned, separately-scoped sweep (per
-   `project_diagnostics_double_error_prefix`-style precedent: a shared stale phrase
-   across sibling diagnostics is not, by itself, licence to widen this slice's edit).
+   touched:** two other sibling functions carry the identical stale clause for
+   different diagnostics. `reject_quotation_operand` (`check.rs:3018-3024`) renders it
+   for a quotation passed as a *shuffle* operand, not a call argument.
+   `call_needs_quotation_error` (`terms.rs:1104-1114`) renders it for a bare `call`
+   with nothing quotation-shaped on the stack (`` a quotation cannot be a runtime
+   value; a runtime quotation value is slice 7 ``). Neither is named by the brief's
+   OQ4 and neither is touched by this slice — retiring either is an unowned,
+   separately-scoped sweep (per `project_diagnostics_double_error_prefix`-style
+   precedent: a shared stale phrase across sibling diagnostics is not, by itself,
+   licence to widen this slice's edit).
 
 8. **Only one call site of `check_poly_call` exists** (`grep -n
    "check_poly_call("`: `terms.rs:710`, `poly.rs:3234` (the definition)), so R2's
@@ -347,15 +353,25 @@ helper (working name `poly_call_ground_quotation_param`) instead of erroring:
 - `n = eff.inputs.len()`; underflow (reusing `underflow_error`) if the stack beneath the
   popped top has fewer than `n` slots.
 - For each declared input `want` (deepest-first), check the corresponding operand slot's
-  `pt` is `PolyType::Concrete(*want)`; anything else (a `Var`, a mismatched `Concrete`,
-  ...) is a located type mismatch (`poly_rendered_type_mismatch_error` or
-  `type_mismatch_error`, whichever already renders a bare `Type` on one side — pick the
-  one `unify_poly_input`'s own `Concrete` arm uses, `type_mismatch_error`, for
-  consistency with the R2 boundary this pairs with).
+  `pt` is `PolyType::Concrete(*want)`; anything else is a located type mismatch, and
+  **the renderer choice must split on the mismatched operand's own shape** — there is
+  no single function that renders both sides of every case:
+  - If the operand's `pt` is `PolyType::Concrete(t)` (a ground type that simply isn't
+    `*want`): use `type_mismatch_error(ctx, span, op, *want, t)` (`check.rs:1377`,
+    takes two ground `Type`s), matching `unify_poly_input`'s own `Concrete` arm
+    (recon 3) exactly.
+  - If the operand's `pt` is anything else (a bare `PolyType::Var`, an abstract
+    `PolyType::Quotation`, ...) — it has no ground `Type` to hand `type_mismatch_error`
+    for `found`, so that function cannot render it. Use
+    `poly_rendered_type_mismatch_error(ctx, span, op, expected_str, found_str)`
+    (`poly.rs:3580`) instead, rendering both sides through `poly_type_str`.
+  An implementer following only "pick one renderer for consistency" would hit a type
+  error trying to hand a non-`Concrete` `PolyType` to `type_mismatch_error`'s `Type`
+  parameter; the split above is what the two functions' actual signatures require.
 - Truncate to the base and push one `PolySlot::new(PolyType::Concrete(out))` per
   declared output. No `int_val`, no `quot` marker — an ordinary value slot, matching how
   every other `PolyType::Concrete` result is pushed elsewhere in this file
-  (`poly.rs:2904`).
+  (`poly.rs:872`, `poly.rs:1254-1255`).
 - No splice, no `poly_walk` recursion, no snapshot/retain teardown (L3): this is a
   straight pop/push against a declared effect, the same shape
   `check_abstract_quotation_call` already is on the concrete side.
@@ -364,6 +380,19 @@ Only the ground case dispatches here. A `PolyType::Quotation(ins, outs, ..)` (ab
 still carrying a variable) top-of-stack operand still falls through to
 `poly_op_on_variable_error`'s `"a quotation".to_string()` arm, unchanged — recorded as
 the open follow-up (Out of scope), not silently subsumed.
+
+**R3's own unit tests are independently writable before Phase 1 lands** — they can
+construct a `PolySlot` stack directly and call `poly_call_term`/the new dispatch arm
+without going through `check_poly_call`'s argument boundary at all (the same shape as
+the existing `poly_walk_arms_rejects_an_arm_local_left_unconsumed` test,
+`poly.rs:4876-4908`, which seeds a stack directly rather than driving it through a
+full program). **`body_boundary_calls_ground_quotation_param` (the golden) is not**:
+it drives a real `.sth` program through `main`, so the literal argument reaching
+`call_it` must first survive `check_poly_call`'s R9p guard — without Phase 1's
+narrowing landed first, that golden fails at the argument boundary before `call_it`'s
+body — where R3's fix lives — is ever reached. The three changes are independently
+*implementable*, not independently *golden-testable*: sequence Phase 1 before Phase 2
+for that reason, not just for tidiness.
 
 ### R4 Retire the stale clause
 
@@ -381,6 +410,12 @@ change beyond dropping the stale clause. Every existing caller of this function
 (`check_poly_call`'s R9p, and the concrete argument boundary's own R9 at
 `terms.rs:786-788`) picks up the reworded message automatically; do not special-case
 either call site.
+
+**This wording change breaks an existing test, and fixing it is part of R4, not a
+separate cleanup:** `tests/phase4_combinators.rs`'s
+`quotation_against_non_quotation_parameter_is_error` (line ~455) asserts a `"slice 7"`
+substring against this exact function's output; update that assertion to drop the
+`"slice 7"` half (see Testing's regression section for the precise before/after).
 
 ## Testing
 
@@ -487,9 +522,25 @@ restore to a clean `git status`; commit before mutation testing; a mutation copy
 - R4's wording change (revert → the negative tests assert the new text and fail against
   the reverted one, proving they are not placebos that merely check for failure).
 
+**Regression requiring an update, not left untouched (R4's blast radius):**
+`tests/phase4_combinators.rs`'s `quotation_against_non_quotation_parameter_is_error`
+(line ~455) asserts `err.contains("a quotation cannot be passed to \`f\`") &&
+err.contains("slice 7")` against `reject_quotation_argument`'s output at the concrete
+argument boundary (`terms.rs:786-788`, the same function R4 edits). R4 deletes the
+"slice 7" substring outright, so this assertion fails the moment R4 lands. **Phase 3's
+task list must include updating this test's assertion** (drop the`"slice 7"` half of
+the `&&`, keep the `` a quotation cannot be passed to`f` `` half and the sibling
+`!err.contains("Phase 6")` assertion, both unaffected by R4) — this is not optional
+cleanup, it is a required part of landing R4 without breaking the suite.
+
 Regression, green and untouched: `tests/phase7_slice3d.rs`, `tests/phase7_slice3b.rs`,
 `tests/phase7_slice3b_follow.rs`, `tests/phase7_slice3a.rs`, the `tests/phase6_*`
-eliminator suites, `tests/qbe_baseline.rs`. Green is
+eliminator suites, `tests/qbe_baseline.rs`, and
+`tests/phase4_generics.rs`'s `quotation_passed_to_polymorphic_word_is_error`
+(line ~780, the golden-level twin of the `dupit` unit test L2 re-pins,
+`poly.rs:4586-4600`) — verified it asserts only
+`` err.contains("a quotation cannot be passed to `dupit`") ``, no `"slice 7"` substring,
+so R4 does not touch it. Green is
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
 
 ## Exit findings (required)
@@ -515,6 +566,15 @@ At Phase 3 (final), record:
   declared `[ 'T -- 'T ]`-shaped parameter) needs a new roadmap slice, and if so name it
   (the roadmap document, `P7-language-prereqs.md`, is the place to register it — do not
   silently fold it into this slice's own exit criteria).
+- **The roadmap's "any caller" wording is broader than what this slice delivers —
+  say so explicitly when closing out the entry.** `resolve_poly_overload`'s
+  multi-candidate `saw_quotation` short-circuit (Out of scope, `poly.rs:2976-2999`)
+  rejects a quotation argument unconditionally for any **overloaded** poly name,
+  never reaching R1's per-position check at all. `P7-language-prereqs.md`'s S3f exit
+  clause ("receive a real quotation value from any caller") must not be marked
+  satisfied against that case — whoever closes out the roadmap entry should carry this
+  caveat forward, either by narrowing the exit wording or by naming the multi-candidate
+  gap as its own still-open item.
 
 ## Out of scope
 
@@ -528,8 +588,10 @@ At Phase 3 (final), record:
   grounded against the concretely *bound* instantiation, not a body-local literal — but
   it is untouched here and must not be silently folded in. Flag as a follow-up slice at
   exit (see Exit findings), not expanded into this one.
-- `~[ ]` (`InlineQuotation`) crossing this boundary at all — a non-inline word cannot
-  declare one (`word_entry.rs:112-142`), and that gate is correct, not a gap.
+- `~[ ]` (`InlineQuotation`) crossing this boundary at all — a non-inline word declaring
+  one is rejected by a located diagnostic at word-declaration checking
+  (`check_inline_quotation_requires_inline`, `word_entry.rs:122-146`), not a parser-level
+  restriction, and that gate is correct, not a gap.
 - Anything already covered by P7.S3d (a quotation *literal* written inside a poly body,
   splicing in place, or grounding against a **concrete** callee's declared quotation
   parameter — that slice's own C1/C2). This slice's gap is the parameter/argument-boundary
@@ -569,13 +631,13 @@ At Phase 3 (final), record:
     },
     {
       "phase": 2,
-      "focus": "Body boundary (R3): add a poly analogue of check_abstract_quotation_call (terms.rs:1123-1145) to poly_call_term's `call` handling (poly.rs:953-960), dispatching when the top-of-stack operand's pt is PolyType::Concrete(Type::Quotation(eff)) and quot is None -- pop declared inputs, push declared outputs, no splice, no poly_walk recursion. Coverage: the pop/push unit test, the type-mismatch negative, the unchanged abstract-PolyType::Quotation rejection (exact text), the body-boundary golden, and the round-trip golden (argument and body boundary composing)",
+      "focus": "Body boundary (R3): add a poly analogue of check_abstract_quotation_call (terms.rs:1123-1147) to poly_call_term's `call` handling (poly.rs:953-960), dispatching when the top-of-stack operand's pt is PolyType::Concrete(Type::Quotation(eff)) and quot is None -- pop declared inputs, push declared outputs, no splice, no poly_walk recursion. R3's own unit tests are independently writable now (seed a PolySlot stack directly, no Phase 1 dependency), but the body-boundary and round-trip goldens require Phase 1 to have landed first (the literal argument must survive check_poly_call's R9p guard before call_it's body is ever reached). Coverage: the pop/push unit test, the type-mismatch negative, the unchanged abstract-PolyType::Quotation rejection (exact text), the body-boundary golden, and the round-trip golden (argument and body boundary composing)",
       "effort": "S",
       "difficulty": "standard"
     },
     {
       "phase": 3,
-      "focus": "Retire the stale reject_quotation_argument wording (R4, check.rs:3032-3039) and assert the new exact text at both surviving call sites; run all mutation-tested guards for R1-R3; write the required exit findings (lowering confirmation, unify_poly_input's QuotLit-unreachable re-check, the poly.rs split-signal re-run, and naming the abstract-PolyType::Quotation follow-up)",
+      "focus": "Retire the stale reject_quotation_argument wording (R4, check.rs:3032-3039) and assert the new exact text at both surviving call sites; update tests/phase4_combinators.rs's quotation_against_non_quotation_parameter_is_error (line ~455) to drop its now-stale 'slice 7' substring assertion, which R4 breaks; run all mutation-tested guards for R1-R3; write the required exit findings (lowering confirmation, unify_poly_input's QuotLit-unreachable re-check, the poly.rs split-signal re-run, naming the abstract-PolyType::Quotation follow-up, and flagging that the roadmap's 'any caller' exit wording overclaims against the untouched multi-candidate overload gap)",
       "effort": "S",
       "difficulty": "standard"
     }
