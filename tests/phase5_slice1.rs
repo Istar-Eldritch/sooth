@@ -82,7 +82,7 @@ fn generic_type_declared_but_never_used_builds_and_runs() {
 fn generic_instantiations_reach_the_backend_and_run() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-instantiations",
-        "type: Box 'T val 'T ;\ntype: Wrap i Box[i64] b Box[bool] ;\n: f ( Box[i64] -- Box[i64] ) ;\n: main ( -- ) 42 . ;\n",
+        "type: Box 'T val 'T ;\ntype: Wrap i Box[i64] b Box[Bool] ;\n: f ( Box[i64] -- Box[i64] ) ;\n: main ( -- ) 42 . ;\n",
     );
     assert_eq!(stdout, "42\n");
     assert_eq!(code, 0);
@@ -94,7 +94,7 @@ fn generic_instantiations_reach_the_backend_and_run() {
 fn generic_enum_instantiation_reaches_the_backend_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-enum-instantiation",
-        "type: Res 'T 'E | Ok val 'T | Err val 'E ;\n: f ( Res[i64 bool] -- Res[i64 bool] ) ;\n: main ( -- ) 9 . ;\n",
+        "type: Res 'T 'E | Ok val 'T | Err val 'E ;\n: f ( Res[i64 Bool] -- Res[i64 Bool] ) ;\n: main ( -- ) 9 . ;\n",
     );
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
@@ -140,10 +140,10 @@ fn generic_enum_declared_but_never_used_builds_and_runs() {
 fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-shared-surface-dispatch",
-        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[bool] ;\n\
-         : main ( -- )\n  7 Box &val @ . drop\n  true Box &val @ . drop\n;\n",
+        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[Bool] ;\n\
+         : main ( -- )\n  7 Box &val @ . drop\n  True Box &val @ . drop\n;\n",
     );
-    assert_eq!(stdout, "7\ntrue\n");
+    assert_eq!(stdout, "7\nTrue\n");
     assert_eq!(code, 0);
 }
 

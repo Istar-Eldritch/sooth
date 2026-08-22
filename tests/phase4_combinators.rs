@@ -500,12 +500,12 @@ fn stale_phase6_diagnostics_are_reworded() {
         ),
         // two different quotations at an `if` join.
         (
-            ": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n",
+            ": main ( -- ) True ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n",
             "leave different quotations",
         ),
         // a quotation on one `if` arm, a value on the other.
         (
-            ": main ( -- ) true ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n",
+            ": main ( -- ) True ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n",
             "leaves a quotation and the other does not",
         ),
     ];
@@ -749,7 +749,7 @@ fn filter_checks_standalone() {
     // own def site with no call site and no compiler change. Combinators
     // splice at the concrete call site (recon 1), so the polymorphic-`if`
     // rejection never gates this.
-    let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize )\n\
+    let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- ['T 'N] usize )\n\
                   | p | len >i64 | n | | arr |\n\
                   0 n ~[ | i | &arr i >usize &> @ dup p call ~[\n\
                           | v | &!arr over >usize &!> v ! 1 add\n\
@@ -822,7 +822,7 @@ fn self_tail_combinator_edge_is_allowed() {
     // tail-only condition deleted, so the twin below
     // (`non_tail_combinator_self_call_is_still_a_cycle_error`) pins that
     // deleting it flips a *non-tail* program from reject to accept.
-    check_ok(": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n");
+    check_ok(": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n");
 }
 
 #[test]
@@ -848,19 +848,19 @@ fn mutual_combinator_cycle_through_an_ambiguous_overloaded_name_is_still_caught(
     // the inliner splice forever rather than merely mis-detect a runtime
     // optimization the way the tail-call cycle guard's analogous narrowing
     // does). `b`'s own operand types mean it really does resolve to the
-    // `bool` candidate of `a`, closing a genuine cycle: a(bool) -> b -> a(bool).
+    // `Bool` candidate of `a`, closing a genuine cycle: a(Bool) -> b -> a(Bool).
     // Declared with the cycling candidate *first* and the unrelated one
     // last: a name-to-single-index map built by plain `.collect()` keeps
     // whichever candidate is declared last, so it would point `b`'s edge at
     // the i64 candidate (a leaf, no edge back to `b`) and miss the cycle
-    // through the bool one entirely -- accepting a program that should be
+    // through the Bool one entirely -- accepting a program that should be
     // rejected, rather than merely detecting the wrong optimization
     // opportunity the way the tail-call cycle guard's analogous narrowing
     // does.
     let err = check_error(
-        ": a inline ( bool [ bool -- bool ] -- bool ) b ;\n\
+        ": a inline ( Bool [ Bool -- Bool ] -- Bool ) b ;\n\
          : a inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         : b inline ( bool [ bool -- bool ] -- bool ) a ;\n\
+         : b inline ( Bool [ Bool -- Bool ] -- Bool ) a ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -911,7 +911,7 @@ fn while_runs_to_a_fixpoint() {
     // Criterion 7 (R10/R13): the canonical fixpoint. `while` threads the
     // counter through the predicate until it reaches 5, then leaves it.
     let src = format!(
-        "{}: main ( -- ) 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_fixpoint", &src);
@@ -927,7 +927,7 @@ fn while_carrying_an_aggregate_state_runs() {
     let src = format!(
         "{}type: Box n i64 ;\n\
          : main ( -- )\n\
-           0 Box ~[ | b | &b &n @ dup 5 lt ~[ 1 add Box true ] ~[ Box false ] if ] c::while\n\
+           0 Box ~[ | b | &b &n @ dup 5 lt ~[ 1 add Box True ] ~[ Box False ] if ] c::while\n\
            | r | &r &n @ . ;\n",
         combinators_import("c")
     );
@@ -939,11 +939,11 @@ fn while_carrying_an_aggregate_state_runs() {
 #[test]
 fn while_empty_false_arm_falls_through() {
     // Criterion 9 (R12): `while`'s `else end` arm is empty and must fall
-    // through leaving the state. A predicate that is false on the first call
+    // through leaving the state. A predicate that is False on the first call
     // exits immediately with the initial state (7) untouched, exercising the
     // fall-through arm directly.
     let src = format!(
-        "{}: main ( -- ) 7 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 7 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_falls_through", &src);
@@ -957,9 +957,9 @@ fn while_empty_false_arm_falls_through() {
 fn while_body_linear_local_across_back_edge_is_error() {
     // Criterion 10 (R8), re-pointed by 10b's P0. The shape this used to use
     // (an outer linear parked across the loop and disposed on the next line)
-    // now compiles: it was a false rejection, and its own justification --
+    // now compiles: it was a False rejection, and its own justification --
     // "it would ride into the next iteration with nobody to dispose it" -- was
-    // false about its own program. The golden moves to a self-tail combinator
+    // False about its own program. The golden moves to a self-tail combinator
     // whose *own* body binds a linear inside the tail `if` arm and reaches the
     // back-edge with it unconsumed, which is above the floor and still
     // rejected here.
@@ -971,9 +971,9 @@ fn while_body_linear_local_across_back_edge_is_error() {
     // message names the callee, which is what the assertion below reads.
     let src = format!(
         "{SPY_DEF}\
-         : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
+         : while ( i64 [ i64 -- i64 Bool ] -- i64 )\n\
            | p | p call ~[ 3 Spy | leak | p while ] ~[ ] if ;\n\
-         : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n"
+         : main ( -- ) 0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n"
     );
     let err = check_error(&src);
     assert!(
@@ -995,7 +995,7 @@ fn while_body_reference_across_back_edge_is_error() {
         "{}type: V x i64 ;\n\
          : main ( -- )\n\
            0 V | v |\n\
-           &v ~[ | r | r true ] c::while\n\
+           &v ~[ | r | r True ] c::while\n\
            drop\n\
            v drop ;\n",
         combinators_import("c")
@@ -1019,7 +1019,7 @@ fn while_inside_a_times_body_runs_to_fixpoint() {
     // counts `0` up to `5` with the inner `while` and prints it.
     let src = format!(
         "{}: main ( -- )\n\
-           3 ~[ | i | 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ] c::times ;\n",
+           3 ~[ | i | 0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ] c::times ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_times", &src);
@@ -1041,7 +1041,7 @@ fn times_inside_a_self_tail_combinator_body_runs() {
     // counts `0` up to `5`.
     let src = format!(
         "{}: main ( -- )\n\
-           0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+           0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("times_in_while", &src);
@@ -1064,8 +1064,8 @@ fn while_inside_a_while_body_runs() {
     // `while` runs to its own fixpoint each step but drops its result.
     let src = format!(
         "{}: main ( -- )\n\
-           0 ~[ dup 3 lt ~[ 0 ~[ dup 2 lt ~[ 1 add true ] ~[ false ] if ] c::while drop\n\
-                        1 add true ] ~[ false ] if ] c::while . ;\n",
+           0 ~[ dup 3 lt ~[ 0 ~[ dup 2 lt ~[ 1 add True ] ~[ False ] if ] c::while drop\n\
+                        1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_while", &src);
@@ -1188,7 +1188,7 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
     // dropped inside a `times` body, 200_000 times, each round building and
     // freeing a 5-node list (1,000,000 nodes total, the same total work as
     // `tests/phase0.rs`'s `deep_list_disposes_in_constant_stack`, split across
-    // rounds). The destructor's fused loop opens at its own `IrFunc`'s true
+    // rounds). The destructor's fused loop opens at its own `IrFunc`'s True
     // entry, so its preheader and alloca home already coincide exactly as the
     // top-level case does (Q4: it inherits D2 for free) -- a destructor
     // *called* from inside a user loop runs in a fresh per-call frame freed on
@@ -1229,7 +1229,7 @@ fn while_and_hand_threaded_loop_agree_across_stack_limits() {
     // `while_lowers_to_a_back_edge_not_an_infinite_splice` unit.
     const N: usize = 10_000;
     let comb = format!(
-        "{}: main ( -- ) 0 ~[ dup {N} lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+        "{}: main ( -- ) 0 ~[ dup {N} lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let hand = format!(
@@ -1345,7 +1345,7 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
     // Criterion 12c (item 4): the spec's "Accepted narrowings" claimed 12c was
     // unreachable because a combinator whose quotation parameter has a
     // reference *output* row is rejected at its own def site. Both halves are
-    // false. `refout` (a `[ 'T -- &i64 ]` parameter, a reference output row)
+    // False. `refout` (a `[ 'T -- &i64 ]` parameter, a reference output row)
     // compiles clean standalone, and before item 3 a caller literal that
     // creates a borrow of a captured enclosing local and leaves the `&i64` on
     // its output row -- exactly 12c's scenario, inside a `times` loop -- was
@@ -1514,8 +1514,8 @@ fn repl_error(input: &str) -> String {
 // and (for `filter`, since 10b retired the intrinsic) a session-defined
 // `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
-    ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n";
-const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
+    ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n";
+const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
 
 // A REPL expr line's residual stack is what the in-process driver writes to the
 // capture buffer; the runtime `.` word prints to the real process stdout, which
@@ -1588,7 +1588,7 @@ fn repl_while_define_runs_to_fixpoint() {
     // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
     // stack), not an infinite splice or a link failure to a never-minted symbol.
     let transcript = repl_error(&format!(
-        "{}{WHILE_DEF}0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while\n:quit\n",
+        "{}{WHILE_DEF}0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while\n:quit\n",
         common::repl_core_lines()
     ));
     assert_eq!(
@@ -2044,7 +2044,7 @@ fn repl_imported_while_runs_to_fixpoint() {
     // deleted, the self-call would miss the recognizer and the splice would
     // recurse forever.
     let transcript = repl_error(&format!(
-        "{}{}0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while\n:quit\n",
+        "{}{}0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while\n:quit\n",
         common::repl_core_lines(),
         combinators_import("c")
     ));
@@ -2117,7 +2117,7 @@ fn repl_combinators_dogfood_matches_native() {
          &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
          &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
         "scores ~[ 4 gt ] c::filter | n | | out | out drop n",
-        "0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while"
+        "0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while"
     ));
     assert_eq!(
         transcript,
@@ -2387,7 +2387,7 @@ fn combinator_called_from_drop_override_body_lowers_correctly() {
 /// when the body *named* the parameter with a leading `| p |` (the `while`
 /// idiom); a body that reaches it with `dup` instead left the phantom in the
 /// row, where `begin_loop` staged it as an aggregate (`is_aggregate` answers
-/// `true` for `IrType::Quotation`) and blitted from a phantom that owns no
+/// `True` for `IrType::Quotation`) and blitted from a phantom that owns no
 /// bytes. The first `call` then found no `quot_bodies` entry, fell to the
 /// indirect path, and hit its `unreachable!` -- an ICE, not a diagnostic.
 #[test]

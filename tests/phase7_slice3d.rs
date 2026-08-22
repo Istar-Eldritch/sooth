@@ -65,21 +65,21 @@ fn check_err(src: &str) -> String {
 #[test]
 fn c1_call_on_literal_splices_body_in_place() {
     let src = "import: intrinsics * ;\n\
-               type: bool | False | True ;\n\
-               : . ( bool -- ) ~[ ( False ) drop \"false\\n\" . ] ~[ ( True ) drop \"true\\n\" . ] bool? ;\n\
+               type: Bool | False | True ;\n\
+               : . ( Bool -- ) ~[ ( False ) drop \"False\\n\" . ] ~[ ( True ) drop \"True\\n\" . ] Bool? ;\n\
                : bump ( 'T: Copy -- 'T 'T )\n\
                | x | [ x x ] call\n\
                ;\n\
                : main ( -- )\n\
                  5 bump . .\n\
-                 true bump . .\n\
+                 True bump . .\n\
                ;\n";
     let prog = Scratch::write("c1-behavioural", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "5\n5\ntrue\ntrue\n",
+        stdout, "5\n5\nTrue\nTrue\n",
         "each instantiation must carry `x x` through the splice independently"
     );
 }
@@ -112,8 +112,8 @@ fn c1_call_on_non_literal_operand_is_located_rejection() {
 #[test]
 fn c2_literal_grounds_against_concrete_quotation_param() {
     let src = "import: intrinsics * ;\n\
-             type: bool | False | True ;\n\
-             : . ( bool -- ) ~[ ( False ) drop \"false\\n\" . ] ~[ ( True ) drop \"true\\n\" . ] bool? ;\n\
+             type: Bool | False | True ;\n\
+             : . ( Bool -- ) ~[ ( False ) drop \"False\\n\" . ] ~[ ( True ) drop \"True\\n\" . ] Bool? ;\n\
              : run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
                swap call\n\
              ;\n\
@@ -122,14 +122,14 @@ fn c2_literal_grounds_against_concrete_quotation_param() {
              ;\n\
              : main ( -- )\n\
                5 c2_apply_and_pass_through . .\n\
-               true c2_apply_and_pass_through . .\n\
+               True c2_apply_and_pass_through . .\n\
              ;\n";
     let prog = Scratch::write("c2-behavioural", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "3\n5\n3\ntrue\n",
+        stdout, "3\n5\n3\nTrue\n",
         "each instantiation must ground and apply the literal independently"
     );
 }
@@ -210,7 +210,7 @@ fn c2_overloaded_candidate_with_quotation_literal_is_located_rejection() {
 /// still `env`'s sole candidate for that name, but `ast::overload_symbols`
 /// suffixes its mangled symbol anyway. C2's carve-out must not ground through
 /// such a candidate: it records no `builtin_overloads` entry (a literal is
-/// never `PolyType::Concrete`, so `exact` is false), so lowering is left to
+/// never `PolyType::Concrete`, so `exact` is False), so lowering is left to
 /// resolve a bare name it cannot find and panics (L1: never an inherited
 /// backend panic) instead of reporting this located rejection.
 #[test]

@@ -144,7 +144,7 @@ fn parked_linear_local_crosses_while() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while .\n\
+         \x20 0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while .\n\
          \x20 sp drop ;\n",
         combinators_import("c")
     );
@@ -166,9 +166,9 @@ fn own_frame_linear_bound_before_the_tail_if_is_error() {
     // or removed, the shape starts compiling and this goes red.
     let src = format!(
         "{SPY_DEF}\
-         : while inline ( i64 [ i64 -- i64 bool ] -- i64 )\n\
+         : while inline ( i64 [ i64 -- i64 Bool ] -- i64 )\n\
          \x20 | p | 9 Spy | own | p call ~[ p while ] ~[ ] if ;\n\
-         : main ( -- ) 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n"
+         : main ( -- ) 0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n"
     );
     let err = build_check_error("10b_own_frame_linear", &src);
     assert!(
@@ -200,7 +200,7 @@ fn quotation_consuming_an_enclosing_linear_is_rejected_by_capture_admission() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ sp drop dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ sp drop dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_consume", &src);
@@ -223,7 +223,7 @@ fn quotation_consuming_an_enclosing_linear_on_one_branch_is_rejected() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 lt ~[ dup 2 gt ~[ sp drop ] ~[ ] if 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ dup 2 gt ~[ sp drop ] ~[ ] if 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_branch", &src);
@@ -242,7 +242,7 @@ fn linear_bound_inside_a_loop_body_and_left_unconsumed_is_rejected() {
     // runs at all, so this rejection is independent of P0 either way.
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
-         \x20 0 ~[ dup 5 lt ~[ 5 Spy | tmp | 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ 5 Spy | tmp | 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_body_local", &src);
@@ -266,7 +266,7 @@ fn parked_linear_local_never_disposed_at_all_is_rejected() {
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
          \x20 7 Spy | sp |\n\
-         \x20 0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let err = build_check_error("10b_hazard_never_disposed", &src);
@@ -288,7 +288,7 @@ fn spliced_body_disposes_a_locally_declared_linear() {
     // are visible in stdout before the final counter.
     let src = format!(
         "{SPY_DEF}{}: main ( -- )\n\
-         \x20 0 ~[ dup 3 lt ~[ dup Spy drop 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ dup 3 lt ~[ dup Spy drop 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_r10_accept", &src);
@@ -490,7 +490,7 @@ fn while_carries_an_untouched_quotation_through_the_row() {
     // the counting condition never touches the row-riding quotation below it.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 ~[ 10 add ] 0 ~[ dup 3 lt ~[ 1 add true ] ~[ false ] if ] c::while . drop ;\n",
+         \x20 ~[ 10 add ] 0 ~[ dup 3 lt ~[ 1 add True ] ~[ False ] if ] c::while . drop ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_while_row_quotation", &src);
@@ -552,7 +552,7 @@ fn times_nested_inside_an_outer_times_runs() {
     let src = format!(
         "{}: main ( -- )\n\
          \x20 0 3 ~[ | i | 2 ~[ | j | 1 add ] c::times ] c::times .\n\
-         \x20 0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ;\n",
+         \x20 0 ~[ 2 ~[ | i | ] c::times dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("10b_times_in_times", &src);

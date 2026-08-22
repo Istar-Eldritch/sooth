@@ -1652,13 +1652,13 @@ mod tests {
         // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
         // both arms (one literal bound before the `if`, read in each) is safe:
         // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
-        let different = check_src(": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n")
+        let different = check_src(": main ( -- ) True ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n")
             .expect_err("two different quotations at a join should be rejected");
         assert!(
             different.contains("these two branches leave different quotations"),
             "the join guard should fire, got: {different}"
         );
-        check_src(": main ( -- ) [ add ] | q | true ~[ q ] ~[ q ] if drop ;\n")
+        check_src(": main ( -- ) [ add ] | q | True ~[ q ] ~[ q ] if drop ;\n")
             .expect("the same `Known` id in both arms is safe and must not error");
     }
     #[test]
@@ -1666,7 +1666,7 @@ mod tests {
         // R8/R10: a word with two outputs gets a bundle struct in the same
         // registry the layout pass reads, flagged as a bundle and carrying the
         // output tuple in order (deepest output first).
-        let module = checked_module(": pair ( -- i64 bool ) 1 true ; : main ( -- ) ;");
+        let module = checked_module(": pair ( -- i64 Bool ) 1 True ; : main ( -- ) ;");
         let bool_ty = resolve_bool_type(&module.enums).expect("`core::bool` is seeded");
         let bundles: Vec<&StructDecl> = module.structs.iter().filter(|d| d.is_bundle).collect();
         assert_eq!(bundles.len(), 1);
@@ -1692,7 +1692,7 @@ mod tests {
         let module = checked_module(
             ": pair ( i64 -- i64 i64 ) dup ;\n\
              : twice ( i64 -- i64 i64 ) dup ;\n\
-             : flags ( -- i64 bool ) 1 true ;\n\
+             : flags ( -- i64 Bool ) 1 True ;\n\
              : main ( -- ) ;",
         );
         assert_eq!(module.structs.iter().filter(|d| d.is_bundle).count(), 2);
@@ -2103,7 +2103,7 @@ mod tests {
         }
     }
 
-    /// U1 (R1): the grant handed into a nested block of a `back_edge = true`
+    /// U1 (R1): the grant handed into a nested block of a `back_edge = True`
     /// body, over a `Liveness` really built by `scan`. `a` is mentioned at
     /// term 0, *before* the block, so the pre-R1 rule ("not referenced in the
     /// remaining siblings") grants it -- and a back-edge body wraps around to
@@ -2113,7 +2113,7 @@ mod tests {
     /// not to withhold from every ancestor indiscriminately.
     #[test]
     fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
-        let tokens = lex("a drop true ~[ 1 . ] ~[ ] if").expect("lexing should succeed");
+        let tokens = lex("a drop True ~[ 1 . ] ~[ ] if").expect("lexing should succeed");
         let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),

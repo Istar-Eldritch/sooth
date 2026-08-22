@@ -137,35 +137,35 @@ fn poly_word_constructs_a_monomorph_no_other_site_materializes() {
     let src = format!(
         "{RESULT_AND_REORDER}\
          : wrap ( 'T -- Result['T i64] ) Ok ;\n\
-         : show ( Result[bool i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
-         : main ( -- ) true wrap show ;\n"
+         : show ( Result[Bool i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
+         : main ( -- ) True wrap show ;\n"
     );
     let prog = Scratch::write("t3", &src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    assert_eq!(stdout, "true\n");
+    assert_eq!(stdout, "True\n");
 }
 
 /// T-nontail: a poly body constructs a generic value and then moves a
 /// *different* output into tail position (`swap` after `Ok`), so the
 /// constructed value is not in 1:1 tail position -- proving the exit-time
 /// `unify_poly_input` backstop (R3's soundness argument) actually fires
-/// against the reordered residual stack, rather than being assumed true of
+/// against the reordered residual stack, rather than being assumed True of
 /// whatever `poly_call_term` just pushed.
 #[test]
 fn poly_body_constructor_off_tail_position_unifies_at_exit() {
     let src = format!(
         "{RESULT_AND_REORDER}\
          : mk ( 'T -- i64 Result['T i64] ) Ok 42 swap ;\n\
-         : show ( i64 Result[bool i64] -- ) ~[ ( Ok ) Ok> . drop ] ~[ ( Err ) Err> . drop ] Result? ;\n\
-         : main ( -- ) true mk show ;\n"
+         : show ( i64 Result[Bool i64] -- ) ~[ ( Ok ) Ok> . drop ] ~[ ( Err ) Err> . drop ] Result? ;\n\
+         : main ( -- ) True mk show ;\n"
     );
     let prog = Scratch::write("t-nontail", &src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    assert_eq!(stdout, "true\n");
+    assert_eq!(stdout, "True\n");
 }
 
 /// T4 (R5.1): a generic applied to a type variable at nesting depth > 1

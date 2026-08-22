@@ -443,8 +443,8 @@ fn a_poly_word_calling_an_imported_poly_word_names_the_narrowing() {
         &t,
         "main.sth",
         "import: intrinsics * ;\nimport: core::prelude * ;\n\
-         import: core::bool cb | bool | ;\n\
-         : mylt ( 'T: Copy Ord 'T -- bool ) lt ;\n\
+         import: core::bool cb | Bool | ;\n\
+         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
          : main ( -- ) 1 2 mylt drop ;\n",
     );
     let build = Command::new(env!("CARGO_BIN_EXE_sooth"))

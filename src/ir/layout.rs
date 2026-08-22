@@ -995,14 +995,14 @@ mod tests {
     #[test]
     fn build_statics_widths_and_zero_values_follow_the_declared_type() {
         // D1/D3: the slot width is the declared type's, and an elided
-        // initialiser is that type's zero -- `0`, `false`, and for `str` the
+        // initialiser is that type's zero -- `0`, `False`, and for `str` the
         // empty string, which is a descriptor like any other content.
         // Source order is preserved so the emitted preamble is deterministic.
         let ir = lower_src(
             "static: N i64 = 10 ;\n\
              static: W u32 ;\n\
-             static: F bool = true ;\n\
-             static: G bool ;\n\
+             static: F Bool = True ;\n\
+             static: G Bool ;\n\
              static: T str = \"hi\" ;\n\
              static: E str ;\n\
              : main ( -- ) ;",
@@ -1015,7 +1015,7 @@ mod tests {
         let expected: Vec<(&str, u32, StaticValue)> = vec![
             ("N", 8, StaticValue::Int(10)),
             ("W", 4, StaticValue::Int(0)),
-            // `bool` is an all-unit-variant enum, one byte, so its width comes
+            // `Bool` is an all-unit-variant enum, one byte, so its width comes
             // from the enum registry rather than `scalar_size_align`.
             ("F", 1, StaticValue::Int(1)),
             ("G", 1, StaticValue::Int(0)),

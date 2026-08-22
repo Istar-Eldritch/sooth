@@ -218,7 +218,7 @@ fn narrowed_guard_keeps_branch_and_tag_located() {
     // The *second* line is pinned too, and separately: it is the one that
     // says neither `branch` nor `tag` has a follow-up slice named yet.
     // Asserting the first line alone leaves that claim unguarded.
-    // `branch`'s condition is a `true` literal rather than a computed
+    // `branch`'s condition is a `True` literal rather than a computed
     // comparison (as it is below, at `bad`'s other call sites): this program
     // is never built successfully (the assertion is on the rejection), so the
     // condition's actual value never matters, and a comparison would only
@@ -226,7 +226,7 @@ fn narrowed_guard_keeps_branch_and_tag_located() {
     // generic word, comparisons included) before ever reaching the rejection
     // this test is pinning.
     for (name, body) in [
-        ("branch", "true ~[ drop ] ~[ swap drop ] branch"),
+        ("branch", "True ~[ drop ] ~[ swap drop ] branch"),
         ("tag", "~[ dup ] tag drop"),
     ] {
         let err = build_err(
@@ -249,7 +249,7 @@ fn narrowed_guard_keeps_branch_and_tag_located() {
 #[test]
 fn shape_changing_if_in_a_non_inline_generic_body_compiles_and_runs() {
     // R3, the shape-changing exit criterion. `if` declares
-    // `( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`: nothing fixes the
+    // `( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`: nothing fixes the
     // exit row, so the arms are held to *each other* and the call's exit is
     // what they agreed on. Both arms consume one slot of the two-slot row they
     // enter with, so an exit taken from the *entry* row would be one slot too
@@ -270,7 +270,7 @@ fn shape_changing_if_in_a_non_inline_generic_body_compiles_and_runs() {
     // named and scoped but not yet delivered. The comparison is still real
     // per-instantiation data computed at each call, not a hardcoded literal,
     // so arm routing stays genuinely non-vacuous.
-    let src = ": mymax ( 'T 'T bool -- 'T ) ~[ drop ] ~[ swap drop ] if ;\n\
+    let src = ": mymax ( 'T 'T Bool -- 'T ) ~[ drop ] ~[ swap drop ] if ;\n\
                : main ( -- )\n\
                  2 9 over over gt mymax .\n\
                  9 2 over over gt mymax .\n\
@@ -296,7 +296,7 @@ fn unless_reaches_the_dispatch_rather_than_the_operand_window() {
     //
     // `gt` is computed by `main` for the same reason `mymax` above computes
     // it there: P7.S3k (not yet delivered).
-    let src = ": mymin ( 'T 'T bool -- 'T ) ~[ drop ] ~[ swap drop ] unless ;\n\
+    let src = ": mymin ( 'T 'T Bool -- 'T ) ~[ drop ] ~[ swap drop ] unless ;\n\
                : main ( -- )\n\
                  2 9 over over gt mymin .\n\
                  9 2 over over gt mymin .\n\
@@ -317,7 +317,7 @@ fn shape_changing_arms_disagreeing_on_a_rigid_variable_is_error() {
     // checked) is what the rejection refuses.
     let err = build_err(
         "if-rigid",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) true ~[ drop ] ~[ drop drop 1 ] if ;\n\
+        ": bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop ] ~[ drop drop 1 ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -335,7 +335,7 @@ fn shape_changing_arms_disagreeing_on_depth_is_error() {
     // shorter arm's slots all agree with the longer arm's prefix.
     let err = build_err(
         "if-depth",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) true ~[ drop ] ~[ swap ] if ;\n\
+        ": bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop ] ~[ swap ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -359,7 +359,7 @@ fn non_literal_arm_operand_is_located_and_does_not_panic() {
     // tell the two apart.
     let not_a_quotation = build_err(
         "oq4-value",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) true 1 ~[ swap drop ] if ;\n\
+        ": bad ( 'T: Copy Ord 'T -- 'T ) True 1 ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -370,7 +370,7 @@ fn non_literal_arm_operand_is_located_and_does_not_panic() {
     );
     let through_a_local = build_err(
         "oq4-local",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) ~[ drop ] | f | true f ~[ swap drop ] if ;\n\
+        ": bad ( 'T: Copy Ord 'T -- 'T ) ~[ drop ] | f | True f ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -389,7 +389,7 @@ fn ordinary_bracket_arm_is_the_inline_parameter_diagnostic() {
     // mistake, so the two paths do not disagree about one spelling.
     let err = build_err(
         "ordinary-bracket",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) true [ drop ] ~[ swap drop ] if ;\n\
+        ": bad ( 'T: Copy Ord 'T -- 'T ) True [ drop ] ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -402,7 +402,7 @@ fn ordinary_bracket_arm_is_the_inline_parameter_diagnostic() {
 
 #[test]
 fn arm_borrows_are_unioned_not_picked() {
-    // L3, the false-accept guard, now reached through the *combinator*
+    // L3, the False-accept guard, now reached through the *combinator*
     // dispatch rather than the eliminator. `PolyScope`'s borrow table is keyed
     // by place and a **missing** record reads as "no conflict", so a merge that
     // picked one arm silently admits a later use of the place the other arm
@@ -412,7 +412,7 @@ fn arm_borrows_are_unioned_not_picked() {
         format!(
             "type: P a i64 ;\n\
              : bad ( 'T: Copy P P -- 'T )\n\
-               | x y | true ~[ &!x ] ~[ &!y ] if\n\
+               | x y | True ~[ &!x ] ~[ &!y ] if\n\
                {later} drop drop ;\n\
              : main ( -- ) ;\n"
         )
@@ -437,7 +437,7 @@ fn cross_arm_borrow_mutability_disagreement_is_error() {
     let err = build_err(
         "mutability",
         "type: P a i64 ;\n\
-         : bad ( 'T: Copy P -- 'T ) | x | true ~[ &!x @ drop ] ~[ &x @ drop ] if ;\n\
+         : bad ( 'T: Copy P -- 'T ) | x | True ~[ &!x @ drop ] ~[ &x @ drop ] if ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -458,7 +458,7 @@ fn arm_local_bound_and_leaked_is_error_and_one_sided_binding_is_not() {
     let err = build_err(
         "leak",
         &format!(
-            "{SPY}: bad ( 'T Spy -- 'T ) true ~[ | z | ] ~[ | z | z drop ] if ;\n\
+            "{SPY}: bad ( 'T Spy -- 'T ) True ~[ | z | ] ~[ | z | z drop ] if ;\n\
              : main ( -- ) ;\n"
         ),
     );
@@ -471,7 +471,7 @@ fn arm_local_bound_and_leaked_is_error_and_one_sided_binding_is_not() {
     // other does not. `Moves::join` indexes the sibling's map by this arm's
     // keys, so without the truncation this pair panics rather than compiling.
     let src = format!(
-        "{SPY}: ok ( 'T Spy -- 'T ) true ~[ | z | z drop ] ~[ drop ] if ;\n\
+        "{SPY}: ok ( 'T Spy -- 'T ) True ~[ | z | z drop ] ~[ drop ] if ;\n\
          : main ( -- ) 7 9 Spy ok . ;\n"
     );
     let scratch = Scratch::write("one-sided-bind", &src);
@@ -496,9 +496,9 @@ fn a_slot_declared_above_a_produced_row_is_located() {
     // (`attempt to subtract with overflow`), not just a worse diagnostic.
     let err = build_err(
         "above-the-row",
-        ": pick inline ( ..a bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T i64 ) true ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T i64 ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
          : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
@@ -548,7 +548,7 @@ fn inline_generic_body_still_splices_a_row_combinator() {
 /// fresh every iteration against the loop-carried `val`, so unlike `mymax`/
 /// `mymin` above it cannot be hoisted out to a monomorphic caller and passed
 /// in -- the whole point is a *fresh* comparison each pass. Every other route
-/// to a runtime `bool` inside a non-inline generic body is blocked too: the
+/// to a runtime `Bool` inside a non-inline generic body is blocked too: the
 /// raw comparison intrinsics (`ugt` et al.) only set a condition `branch`
 /// consumes, and `branch` itself is one of the three primitives this slice's
 /// own R4 keeps as a located rejection in a non-inline body (`call`/`branch`/

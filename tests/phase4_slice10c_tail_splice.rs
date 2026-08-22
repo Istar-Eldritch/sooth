@@ -17,13 +17,13 @@ mod common;
 
 /// A two-way branch whose two quotation parameters are each `call`ed in tail
 /// position, so both inherit their caller's tail position.
-const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+const BOOL_Q: &str = ": decide inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
      | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n";
 
 /// Recon 4's negative twin: each arm `call`s one parameter and *then* drops the
 /// other, so `drop` holds the tail position and neither parameter is
 /// tail-called. Identical callers must stay ordinary recursion.
-const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+const BOOL_D: &str = ": decide! inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
      | e | | t | | c | c ~[ t call e drop ] ~[ e call t drop ] if ;\n";
 
 fn sum_to(branch: &str, iterations: u32) -> String {
@@ -31,7 +31,11 @@ fn sum_to(branch: &str, iterations: u32) -> String {
         "{branch}: sum-to ( i64 i64 -- i64 )\n\
          | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] {caller} ;\n\
          : main ( -- ) 0 {iterations} sum-to . ;\n",
-        caller = if branch == BOOL_Q { "Bool?" } else { "Bool!?" }
+        caller = if branch == BOOL_Q {
+            "decide"
+        } else {
+            "decide!"
+        }
     )
 }
 
@@ -199,7 +203,7 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
     // R-P1-3: `rec`'s bind follows the quotation literal itself, a non-leading
     // term, so `param_binds` never tracks it and `TailWalk` cannot see through
     // the local to walk the literal it holds -- the walk declines,
-    // `has_self_tail_call` is `false`, and lowering keeps ordinary recursion
+    // `has_self_tail_call` is `False`, and lowering keeps ordinary recursion
     // for `spin`, never a loop.
     //
     // Before the review fix, the checker's back-edge-only reference guard
@@ -212,12 +216,12 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
     // the reference is safe; the two sides just disagreed about whether this
     // was a loop.
     let src = "type: V x i64 ;\n\
-        : Bool? inline ( bool ~[ -- ] ~[ -- ] -- )\n\
+        : decide inline ( Bool ~[ -- ] ~[ -- ] -- )\n\
         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n\
         : spin ( &!V i64 -- )\n\
         | r n |\n\
         ~[ 0 V | x | &!x n 1 sub spin ] | rec |\n\
-        n 0 eq ~[ ] rec Bool? ;\n\
+        n 0 eq ~[ ] rec decide ;\n\
         : main ( -- )\n\
         0 V | v | &!v 3 spin ;\n";
     let funcs = lowered(src);
@@ -253,10 +257,10 @@ fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
     let out = run_session(&[
         &cmp,
         &boolean,
-        ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
+        ": decide inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
          | e | | t | | c | c ~[ t call ] ~[ e call ] if ;",
         ": sum-to ( i64 i64 -- i64 ) \
-         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] Bool? ;",
+         | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] decide ;",
         "0 1000000 sum-to",
     ]);
     assert!(
@@ -279,7 +283,7 @@ fn linear_value_across_the_spliced_back_edge_is_error() {
          : drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n\
          {BOOL_Q}: spin ( i64 -- i64 )\n\
          | n | 9 Spy | s |\n\
-         n 0 eq ~[ 0 ] ~[ n 1 sub spin ] Bool? ;\n\
+         n 0 eq ~[ 0 ] ~[ n 1 sub spin ] decide ;\n\
          : main ( -- ) 3 spin . ;\n"
     );
     let err = check_error(&src);
@@ -298,10 +302,10 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
     // (the `Spy` rides the carried row) and disposes exactly once.
     let src = "type: Spy tag i64 ;\n\
         : drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n\
-        : Bool? inline ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
+        : decide inline ( Spy Bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n\
         : spin ( Spy i64 -- i64 )\n\
-        | n | n 0 eq ~[ | s | s drop 0 ] ~[ | s | s n 1 sub spin ] Bool? ;\n\
+        | n | n 0 eq ~[ | s | s drop 0 ] ~[ | s | s n 1 sub spin ] decide ;\n\
         : main ( -- ) 0 Spy 3 spin . ;\n";
     let funcs = lowered(src);
     let spin = func(&funcs, "spin");

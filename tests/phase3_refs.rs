@@ -792,7 +792,7 @@ fn mutable_borrow_dead_before_an_if_arm_is_accepted() {
 fn mutable_borrow_dead_before_a_times_body_is_accepted() {
     // OR-2: same shape as OR-1, but the reborrow is inside a `times` body
     // instead of an `if` arm. `p` has no use anywhere in the body, so it is
-    // dead throughout it (`back_edge = true`'s "unused anywhere -> dead
+    // dead throughout it (`back_edge = True`'s "unused anywhere -> dead
     // throughout" half, not the fine per-use half `if` arms get).
     let (stdout, code) = run_src(
         "borrow-dead-before-times-body",
@@ -895,7 +895,7 @@ fn mutable_borrow_dead_before_two_levels_of_nested_if_arms_is_accepted() {
         "borrow-dead-before-two-levels-of-nested-if-arms",
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
-         n 0 eq ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
+         n 0 eq ~[\n    True ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
          &!a 0 f\n  &a &len @ .\n  a drop ;\n",
     );
@@ -911,7 +911,7 @@ fn mutable_borrow_used_after_two_levels_of_nested_if_arms_is_still_error() {
     let err = check_error(
         "type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
-         n 0 eq ~[\n    true ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
+         n 0 eq ~[\n    True ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
          p @ drop ;\n\
          : main ( -- ) ;\n",
     );
@@ -1777,7 +1777,7 @@ fn mutable_borrow_captured_only_inside_an_if_arm_of_a_quotation_body_is_error() 
     // find it, the same way it recurses into a nested quotation literal.
     let err = check_error(&format!(
         "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
-         [ 1 drop true ~[ out 0 >usize &!> 9 ! ] ~[ 0 drop ] if ] | q |\n  \
+         [ 1 drop True ~[ out 0 >usize &!> 9 ! ] ~[ 0 drop ] if ] | q |\n  \
          &!arr | out2 |\n  out2 1 >usize &!> 7 !\n  q call arr drop ;\n"
     ));
     assert!(
@@ -1962,7 +1962,7 @@ fn borrow_on_one_arm_only_is_error() {
     // about that, so it must be rejected as a disagreement at the join.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  1 3 V | w |\n  true ~[\n    &!v\n  ] ~[\n    &!w\n  ] if\n  \
+         : main ( -- )\n  1 2 V | v |\n  1 3 V | w |\n  True ~[\n    &!v\n  ] ~[\n    &!w\n  ] if\n  \
          &!x 1 +!\n  v drop\n  w drop ;\n",
     );
     assert!(
@@ -1982,7 +1982,7 @@ fn borrow_live_on_both_arms_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-live-on-both-arms",
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  true ~[\n    &!v\n  ] ~[\n    &!v\n  ] if\n  \
+         : main ( -- )\n  1 2 V | v |\n  True ~[\n    &!v\n  ] ~[\n    &!v\n  ] if\n  \
          &!x 1 +!\n  v V> . . ;\n",
     );
     assert_eq!(stdout, "2\n2\n");
@@ -2000,7 +2000,7 @@ fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
     let err = check_error(
         "type: Buf  data ^[u8 64]  len usize ;\n\
          : two-parents ( &!Buf &!Buf -- )\n  | p q |\n  \
-         true ~[ p ] ~[ q ] if\n  &!len\n  q &!len 1 +!\n  1 +! ;\n\
+         True ~[ p ] ~[ q ] if\n  &!len\n  q &!len 1 +!\n  1 +! ;\n\
          : main ( -- ) ;\n",
     );
     assert!(

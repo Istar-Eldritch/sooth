@@ -24,4 +24,4 @@ import: core::combinators c ;
   scores ~[ 4 gt ] c::filter | n | | out | \ kept: 7 9 5, n = 3
   n .
   out drop
-  0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while . ; \ fixpoint: 5
+  0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while . ; \ fixpoint: 5

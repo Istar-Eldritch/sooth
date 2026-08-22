@@ -361,24 +361,29 @@ and spliced at each call site.
 lowering half is already done.** The general case is blocked because `poly_call_term`
 cannot see `poly_env` (`src/check/poly.rs:846`), so no polymorphic callee is registered on
 that path. A *self*-call needs no registry: its signature is the `PolySig` the walk
-already holds. On the lowering side `lower_instantiation` already states the case works --
-"a self-recursive polymorphic word is a nested polymorphic call ... so such a body still
-lowers correctly as an ordinary recursive call, just without the loop/back-edge transform
-a monomorphic self-tail word gets" (`src/ir/driver.rs:250-259`). So the slice is a checker
+already holds. On the lowering side, a comment inside the native monomorphization loop
+already states the case works -- "a self-recursive polymorphic word is a nested
+polymorphic call ... so such a body still lowers correctly as an ordinary recursive call,
+just without the loop/back-edge transform a monomorphic self-tail word gets"
+(`src/ir/driver.rs:250-259`). So the slice is a checker
 gap plus an optional codegen improvement, not new machinery.
 Two pieces, and the second is optional: resolve the self-name against the body's own `sig`
 in the poly walk; and decide whether to lift the hardcoded `self_tail = false` for
 instantiations (`poly.rs:392`) so a self-*tail* call lowers to a back-edge instead of real
 recursion. Without the second the feature is correct but consumes stack, which is the
 difference between `times-helper` running in constant stack and not.
-**Polymorphic recursion is excluded by the backend, and must be a located rejection
-rather than a to-do.** A self-call at *different* type arguments (`'T` recursing at
-`['T 2]`) demands a fresh instantiation per level, so monomorphization never terminates.
-This is a consequence of Sooth's monomorphizing codegen, not of the type system: an erased
-or boxed uniform representation compiles it fine, which is precisely what DESIGN.md
-declines (no trait objects, no vtables, no hidden allocation). The slice therefore needs a
-guard on the instantiation worklist that reports the expansion as a located error, or a
-sufficiently deep generic program hangs the compiler instead of failing.
+**Polymorphic recursion is excluded by the backend, and this slice's design keeps it
+unreachable rather than guarding against it at runtime.** A self-call at *different* type
+arguments (`'T` recursing at `['T 2]`) would demand a fresh instantiation per level, so
+monomorphization would never terminate if such a call were ever accepted. This is a
+consequence of Sooth's monomorphizing codegen, not of the type system: an erased or boxed
+uniform representation compiles it fine, which is precisely what DESIGN.md declines (no
+trait objects, no vtables, no hidden allocation). The slice's self-call check is a pure
+structural match against the word's own declared signature, with no unification or
+re-instantiation, so an operand shaped for a different instantiation is simply rejected as
+an ordinary type mismatch against that signature -- there is no instantiation-worklist
+expansion to guard against, because no fresh instantiation is ever derived from a self-call
+in the first place.
 **S3e's traits do not unlock it, and the two are orthogonal.** A bound answers *what
 operations `'T` admits*, an abstraction question; polymorphic recursion is blocked by *how
 many instantiations must be emitted*, a termination question, and a bound does not reduce
@@ -390,8 +395,11 @@ allocation", which is the opposite of the uniform representation this would need
 monomorphization (a fixed instantiation limit, as C++ templates effectively have) is
 declined too: it is a larger finite bound with a worse error message, not a solution.
 **Exit:** a non-inline generic word can call itself at its own type arguments and run; a
-self-call at different type arguments is a located error naming polymorphic recursion, not
-a hang and not the `g__m0` message; and the `g__m0` diagnostic no longer claims a self-call
+self-call at different type arguments cannot be spelled through this mechanism at all: the
+self-call is checked by a pure structural match against the word's own declared signature,
+so an operand that does not match is rejected as an ordinary located type-mismatch error
+against that signature, never treated as a request for a new instantiation, and so is not a
+hang and not the `g__m0` message; and the `g__m0` diagnostic no longer claims a self-call
 is a generic-calls-generic call.
 
 **P7.S3h — An escaping closure may capture a linear value (closure env disposal).**

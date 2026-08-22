@@ -448,11 +448,11 @@ fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
     let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or Bool type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: type mismatch: `{op}` requires two operands of the same integer or bool type, found `{a}` and `{b}`"
+            "error: type mismatch: `{op}` requires two operands of the same integer or Bool type, found `{a}` and `{b}`"
         ),
     }
 }
@@ -461,11 +461,11 @@ fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
 fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `not` requires an integer or bool operand, found `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `not` requires an integer or Bool operand, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: type mismatch: `not` requires an integer or bool operand, found `{found}`"
+            "error: type mismatch: `not` requires an integer or Bool operand, found `{found}`"
         ),
     }
 }
@@ -609,7 +609,7 @@ mod tests {
     #[test]
     fn check_symbolic_comparison_is_unknown_word() {
         // The retired `<` is gone from `core::cmp` too, not just the table.
-        let err = check_src(": w ( i64 i64 -- bool ) < ;").unwrap_err();
+        let err = check_src(": w ( i64 i64 -- Bool ) < ;").unwrap_err();
         assert!(
             err.contains("unknown word `<`"),
             "unexpected message: {err}"
@@ -647,16 +647,16 @@ mod tests {
     }
     #[test]
     fn check_declared_output_type_mismatch_is_error() {
-        let src = ": w ( i64 -- bool ) 1 add ;";
+        let src = ": w ( i64 -- Bool ) 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("type mismatch"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_shuffle_dup_bool_is_type_transparent() {
-        // `dup` of a `bool` yields two `bool`s and satisfies the declaration.
-        check_src(": w ( bool -- bool bool ) dup ;").unwrap();
+        // `dup` of a `Bool` yields two `Bool`s and satisfies the declaration.
+        check_src(": w ( Bool -- Bool Bool ) dup ;").unwrap();
     }
     #[test]
     fn check_arith_same_width_ok() {
@@ -682,7 +682,7 @@ mod tests {
         // 10c: `lt` is a `'T: Copy Ord` library word now, so the rejection is
         // the variable-conflict one rather than the builtin operand-pair one;
         // both operand types are still named.
-        let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
+        let src = ": w ( -- Bool ) 200 >u8 5 >i8 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
@@ -708,7 +708,7 @@ mod tests {
         // X2: mixed float-width comparison names both operand types (slice
         // 10c: through the library `lt`'s variable conflict, see
         // `check_cmp_mixed_sign_is_error`).
-        let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
+        let src = ": w ( -- Bool ) 1.0 >f32 2.0 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
@@ -776,7 +776,7 @@ mod tests {
         let src = ": w ( -- i64 ) 1 >i32 2 and ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same integer or bool type"),
+            err.contains("same integer or Bool type"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -786,18 +786,18 @@ mod tests {
     fn check_bitwise_and_or_xor_on_bool_is_ok() {
         // Bool is now an accepted homogeneous operand class for `and`/`or`/`xor`
         // (logical-and on two 0/1 bools coincides with bitwise-and).
-        check_src(": w ( -- bool ) true false and true false or drop true false xor drop ;")
+        check_src(": w ( -- Bool ) True False and True False or drop True False xor drop ;")
             .unwrap();
     }
     #[test]
     fn check_bitwise_and_mixed_bool_int_is_error() {
-        let src = ": w ( -- bool ) true 5 and ;";
+        let src = ": w ( -- Bool ) True 5 and ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same integer or bool type"),
+            err.contains("same integer or Bool type"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
     #[test]
@@ -821,32 +821,32 @@ mod tests {
     }
     #[test]
     fn check_not_on_bool_is_ok() {
-        // `not` is type-directed: on a `bool` it is logical negation, not
+        // `not` is type-directed: on a `Bool` it is logical negation, not
         // the integer bitwise complement (R9-ext).
-        check_src(": w ( -- bool ) true not ;").unwrap();
+        check_src(": w ( -- Bool ) True not ;").unwrap();
     }
     #[test]
     fn check_cmp_le_ge_ne_numeric_same_type_ok() {
-        check_src(": w ( -- bool bool bool ) 1 2 lte 1 2 gte 1 2 ne ;").unwrap();
+        check_src(": w ( -- Bool Bool Bool ) 1 2 lte 1 2 gte 1 2 ne ;").unwrap();
     }
     #[test]
     fn check_cmp_le_ge_ne_on_bool_is_error() {
-        // Comparisons stay numeric-only: `bool` is never accepted, even
+        // Comparisons stay numeric-only: `Bool` is never accepted, even
         // though it now is for `and`/`or`/`xor`.
-        let src = ": w ( -- bool ) true false lte ;";
+        let src = ": w ( -- Bool ) True False lte ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_cmp_ne_mixed_type_is_error() {
         // Slice 10c: D8's literal coercion covers the two size types only, so
         // a fresh `2` beside an `i32` is still a mismatch; the rejection is
         // now the library `ne`'s variable conflict.
-        let err = check_src(": w ( -- bool ) 1 >i32 2 ne ;").unwrap_err();
+        let err = check_src(": w ( -- Bool ) 1 >i32 2 ne ;").unwrap_err();
         assert!(
             err.contains("resolved `'T` to both"),
             "unexpected message: {err}"
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn check_usize_arithmetic_and_comparison_ok() {
         check_src(": w ( -- usize ) 5 3 >usize add ;").unwrap();
-        check_src(": w ( -- bool ) 5 3 >usize lt ;").unwrap();
+        check_src(": w ( -- Bool ) 5 3 >usize lt ;").unwrap();
     }
     #[test]
     fn check_usize_literal_coerces_into_usize_position_ok() {
@@ -917,16 +917,16 @@ mod tests {
     }
     #[test]
     fn check_usize_mixed_with_bool_is_error() {
-        // X9: `usize` mixed with a non-coercible operand (`bool`) names both.
-        let src = ": w ( -- usize ) 5 >usize true and ;";
+        // X9: `usize` mixed with a non-coercible operand (`Bool`) names both.
+        let src = ": w ( -- usize ) 5 >usize True and ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`usize`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_usize_mixed_with_float_is_error() {
         // X9: `usize` mixed with `f64` (both numeric, not coercible).
-        let src = ": w ( -- bool ) 5 >usize 1.0 lt ;";
+        let src = ": w ( -- Bool ) 5 >usize 1.0 lt ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`usize`"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
@@ -945,7 +945,7 @@ mod tests {
         // `usize` and `isize` are sibling size types but do not coerce
         // into each other; mixing them is a plain type mismatch naming both
         // backticked types.
-        let src = ": w ( -- bool ) 5 >usize 3 >isize lt ;";
+        let src = ": w ( -- Bool ) 5 >usize 3 >isize lt ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`usize`"), "unexpected message: {err}");
         assert!(err.contains("`isize`"), "unexpected message: {err}");
@@ -967,8 +967,8 @@ mod tests {
         // merge to a coercible literal: on the computed arm's runtime path a
         // computed `i64` would fill the `usize` output without `>usize` (X10).
         for src in [
-            ": w ( bool -- usize ) ~[ 5 ] ~[ 1 1 add ] if ;",
-            ": w ( bool -- usize ) ~[ 1 1 add ] ~[ 5 ] if ;",
+            ": w ( Bool -- usize ) ~[ 5 ] ~[ 1 1 add ] if ;",
+            ": w ( Bool -- usize ) ~[ 1 1 add ] ~[ 5 ] if ;",
         ] {
             let err = check_src(src).unwrap_err();
             assert!(err.contains("usize"), "unexpected message: {err}");
@@ -979,7 +979,7 @@ mod tests {
     fn check_usize_branch_merge_both_literals_coerces_ok() {
         // Both arms leave a literal, so the merged slot stays a coercible
         // literal and fills the `usize` output.
-        check_src(": w ( bool -- usize ) ~[ 5 ] ~[ 6 ] if ;").unwrap();
+        check_src(": w ( Bool -- usize ) ~[ 5 ] ~[ 6 ] if ;").unwrap();
     }
     #[test]
     fn check_usize_call_argument_literal_coerces_ok() {
@@ -1004,11 +1004,11 @@ mod tests {
     }
     #[test]
     fn check_conv_float_target_of_bool_is_error() {
-        // X5: a conversion to a float target applied to a `bool` source.
-        let src = ": w ( -- f64 ) true >f64 ;";
+        // X5: a conversion to a float target applied to a `Bool` source.
+        let src = ": w ( -- f64 ) True >f64 ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_conv_unknown_float_target_is_error() {
@@ -1032,11 +1032,11 @@ mod tests {
     }
     #[test]
     fn check_conv_of_bool_is_error() {
-        // A conversion applied to `bool` is a type error (X5).
-        let src = ": w ( -- i32 ) true >i32 ;";
+        // A conversion applied to `Bool` is a type error (X5).
+        let src = ": w ( -- i32 ) True >i32 ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_declared_output_needs_conversion_is_error() {
@@ -1061,8 +1061,8 @@ mod tests {
     }
     #[test]
     fn check_shuffle_swap_mixed_types_is_type_transparent() {
-        // `swap` reorders a mixed `bool`/`i64` pair with no fixed signature.
-        check_src(": w ( bool i64 -- i64 bool ) swap ;").unwrap();
+        // `swap` reorders a mixed `Bool`/`i64` pair with no fixed signature.
+        check_src(": w ( Bool i64 -- i64 Bool ) swap ;").unwrap();
     }
     #[test]
     fn check_print_accepts_every_printable_scalar() {
@@ -1077,20 +1077,20 @@ mod tests {
     }
     #[test]
     fn check_print_of_a_bool_needs_the_core_bool_overload() {
-        // P7 slice 3i (R3): `bool` is not in the builtin printable set, so the
+        // P7 slice 3i (R3): `Bool` is not in the builtin printable set, so the
         // operator itself refuses it -- printing one is `core::bool`'s `.`
         // overload, reached by 8a's overload dispatch on a builtin-row miss.
         // `check_src_mangled` runs the resolve pass first, which is what puts
         // the overload under the mangled key `scoped_operator_overloads` reads
         // (a bare parse-then-check leaves it unfound, hence the bare-`check_src`
         // rejection below).
-        let err = check_src(": w ( -- ) true . ;").unwrap_err();
+        let err = check_src(": w ( -- ) True . ;").unwrap_err();
         assert!(
-            err.contains("`.` requires a printable scalar, found `bool`"),
+            err.contains("`.` requires a printable scalar, found `Bool`"),
             "unexpected message: {err}"
         );
-        check_src_mangled(": w ( -- ) true . ;")
-            .expect("`core::bool`'s `.` overload prints a bool");
+        check_src_mangled(": w ( -- ) True . ;")
+            .expect("`core::bool`'s `.` overload prints a Bool");
     }
     #[test]
     fn check_not_on_literal_count_is_not_a_literal_for_fill() {

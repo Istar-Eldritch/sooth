@@ -13,13 +13,13 @@ import: core::prelude * ;
 \ `bool` names a type in an effect below and a bool is printed with `.`, and
 \ neither a type name nor an operator overload follows the prelude hub's
 \ re-export: both come from the declaring module.
-import: core::bool b | bool . | ;
+import: core::bool b | Bool . | ;
 
 import: core::combinators c | times | ;
 
 : dirty ( -- ) 99 10 fill drop ;
 : dirty_i8 ( -- ) 99 >i8 200 fill drop ;
-: dirty_bool ( -- ) true 200 fill drop ;
+: dirty_bool ( -- ) True 200 fill drop ;
 
 \ `[ i64 ; 10 ]`: index 9 reads 0 after the dirty preamble.
 : probe10 ( -- i64 )
@@ -34,10 +34,10 @@ import: core::combinators c | times | ;
   &guard 0 >usize &> @ | g | guard drop
   v g ;
 
-\ `[ bool ; 4 ]`: every slot is variant 0 (`false`), not a garbage byte (which
-\ prints `true`), so a `false`x4 output can only come from the zero-init.
+\ `[ Bool ; 4 ]`: every slot is variant 0 (`False`), not a garbage byte (which
+\ prints `True`), so a `False`x4 output can only come from the zero-init.
 : probe_bool ( -- )
-  [ bool ; 4 ] | a |
+  [ Bool ; 4 ] | a |
   &a 0 >usize &> @ .
   &a 1 >usize &> @ .
   &a 2 >usize &> @ .
@@ -68,7 +68,7 @@ import: core::combinators c | times | ;
 : main ( -- )
   dirty probe10 .        \ 0
   dirty_i8 probe_i8 . .  \ 5 0
-  dirty_bool probe_bool  \ false false false false
+  dirty_bool probe_bool  \ False False False False
   dirty probe_after      \ 100 0 1 2 200
   [ 5 ] withbuf .        \ 5
   dirty 3 recur ;        \ 3 2 1 0

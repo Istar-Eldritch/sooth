@@ -111,7 +111,7 @@ fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
 /// it mints no symbol for it and emits the jump-and-join directly.
 #[test]
 fn a_call_to_if_splices_the_library_definition() {
-    let funcs = lowered(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) true w . ;\n");
+    let funcs = lowered(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) True w . ;\n");
     assert!(
         !funcs.iter().any(|f| f.name.starts_with("if")),
         "no `IrFunc` is minted for `if`"
@@ -165,7 +165,7 @@ fn term_kind_if_has_no_remaining_references() {
 /// word (`if` itself now parses fine -- it is an ordinary call).
 #[test]
 fn the_if_else_end_grammar_no_longer_parses() {
-    let tokens = lexer::lex(": w ( bool -- i64 ) if 1 else 2 end ;").expect("lexing succeeds");
+    let tokens = lexer::lex(": w ( Bool -- i64 ) if 1 else 2 end ;").expect("lexing succeeds");
     let err = test_support::parse_with_core(&tokens).expect_err("the old grammar is gone");
     assert!(err.contains("`else`"), "unexpected message: {err}");
     assert!(
@@ -185,7 +185,7 @@ fn the_if_else_end_grammar_no_longer_parses() {
 /// make it read a discriminant field and a `FieldLoad` appears.
 #[test]
 fn tag_on_a_scalar_enum_is_a_no_op() {
-    let funcs = lowered(": w ( bool -- u32 ) tag ;\n: main ( -- ) true w drop ;\n");
+    let funcs = lowered(": w ( Bool -- u32 ) tag ;\n: main ( -- ) True w drop ;\n");
     let w = func(&funcs, "w");
     let body = instrs(w);
     let tag = body
@@ -418,7 +418,7 @@ fn word_w_assembly(src: &str) -> String {
 /// library `eq`/`if` mint no call and add one `Cmp`; this pins the stronger
 /// claim the spec's R-P3-3a actually makes: the library form costs *nothing*
 /// over the raw primitives. `eq [ 1 ] [ 2 ] if` lowers to two branch-and-
-/// construct diamonds in QBE IL (one for `eq`'s `bool`, one for `if`); the raw
+/// construct diamonds in QBE IL (one for `eq`'s `Bool`, one for `if`); the raw
 /// primitive `ueq [ 1 ] [ 2 ] branch` lowers to one. QBE folds both to the same
 /// branchless machine code, so the abstraction is free.
 ///
@@ -431,7 +431,7 @@ fn word_w_assembly(src: &str) -> String {
 /// `eq` + `TermKind::If`), whose `w` was the same `cmov`.
 ///
 /// Mutation: if the library `if`/`eq` stop splicing (a real `call`, an
-/// unfoldable extra `bool` materialisation, a lost `inline`) the two blocks
+/// unfoldable extra `Bool` materialisation, a lost `inline`) the two blocks
 /// diverge or the build breaks.
 #[test]
 fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
@@ -531,8 +531,8 @@ fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
                : main ( -- )\n  \
                3 classify .\n  \
                30 classify .\n  \
-               true ~[ 0 ] ~[ 1 ] unless .\n  \
-               0 ~[ dup 5 lt ~[ 1 add true ] ~[ false ] if ] c::while .\n  \
+               True ~[ 0 ] ~[ 1 ] unless .\n  \
+               0 ~[ dup 5 lt ~[ 1 add True ] ~[ False ] if ] c::while .\n  \
                0 100 countdown . ;\n",
         env!("CARGO_MANIFEST_DIR")
     );

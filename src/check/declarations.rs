@@ -337,7 +337,7 @@ pub fn check_static_decls(module: &Module) -> Result<(), String> {
 /// all payload-free.
 fn static_non_scalar_enum_error(decl: &StaticDecl, name: &str) -> String {
     format!(
-        "error: static `{}` has a non-scalar type `{name}` (line {}, col {}): a static's enum type must be exactly two variants, each carrying no payload\n  note: only `i64`, `u32`, `bool` and `str` are supported this slice",
+        "error: static `{}` has a non-scalar type `{name}` (line {}, col {}): a static's enum type must be exactly two variants, each carrying no payload\n  note: only `i64`, `u32`, `Bool` and `str` are supported this slice",
         decl.name, decl.span.line, decl.span.col
     )
 }
@@ -2493,16 +2493,16 @@ mod tests {
         // existing operand-class diagnostic, byte-for-byte, even when a
         // *different* struct's overload of the same name exists in the
         // module (importing `Vec2` does not bring `add` for it, and a local
-        // `Vec2 add` overload does not answer an `i64 bool` call site
+        // `Vec2 add` overload does not answer an `i64 Bool` call site
         // either).
         let src = "type: Vec2 x i64 y i64 ;\n\
 : add ( Vec2 Vec2 -- Vec2 ) drop ;\n\
-: main ( -- ) 1 true add drop ;\n";
+: main ( -- ) 1 True add drop ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("requires two operands of the same numeric type")
                 && err.contains("`i64`")
-                && err.contains("`bool`"),
+                && err.contains("`Bool`"),
             "unexpected message: {err}"
         );
 
@@ -2538,7 +2538,7 @@ mod tests {
         let err = check_src(underflow).unwrap_err();
         assert!(err.contains("strlen"), "unexpected message: {err}");
         let wrong_type =
-            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) true strlen . ;";
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) True strlen . ;";
         let err = check_src(wrong_type).unwrap_err();
         assert!(err.contains("strlen"), "unexpected message: {err}");
     }
@@ -2581,7 +2581,7 @@ mod tests {
     fn check_extern_accepts_the_full_r2_boundary_type_set() {
         // R2: the numeric tower, `bool`, `&T`/`&!T`, and `cstr` may all cross
         // an `extern:` boundary in either position.
-        let src = "extern: f1 ( i64 u8 usize isize f64 f32 bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( cstr -- cstr ) \"f3\" ;";
+        let src = "extern: f1 ( i64 u8 usize isize f64 f32 Bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( cstr -- cstr ) \"f3\" ;";
         check_src(src).unwrap();
     }
     #[test]
@@ -3110,11 +3110,11 @@ mod tests {
     #[test]
     fn check_struct_constructor_field_type_mismatch_is_error() {
         // X4: a `bool` where an `i64` field is expected, naming struct+field type.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 true Vec2 ;";
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 True Vec2 ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("Vec2"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_struct_print_is_error() {
@@ -3127,7 +3127,7 @@ mod tests {
     #[test]
     fn check_struct_equality_operator_is_error() {
         // X7: `eq` on two structs is scalar-only, naming the struct type.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 eq ;";
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Bool ) 1 2 Vec2 1 2 Vec2 eq ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("same numeric type"),
@@ -3151,7 +3151,7 @@ mod tests {
         // R10: a struct type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Vec2 x i64 y i64 ;
-             : pick ( bool -- Vec2 ) ~[ 1 2 Vec2 ] ~[ 3 4 Vec2 ] if ;",
+             : pick ( Bool -- Vec2 ) ~[ 1 2 Vec2 ] ~[ 3 4 Vec2 ] if ;",
         )
         .unwrap();
     }
@@ -3211,17 +3211,17 @@ mod tests {
     #[test]
     fn check_enum_constructor_field_type_mismatch_is_error() {
         // X9: a `bool` where an `f64` field is expected, naming both types.
-        let src = "type: Shape | Circle r f64 ; : main ( -- Shape ) true Circle ;";
+        let src = "type: Shape | Circle r f64 ; : main ( -- Shape ) True Circle ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`f64`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_enum_unifies_through_if_else_join_ok() {
         // R10: an enum type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Shape | Circle r f64 | Square s f64 ;
-             : pick ( bool -- Shape ) ~[ 1.0 Circle ] ~[ 2.0 Square ] if ;",
+             : pick ( Bool -- Shape ) ~[ 1.0 Circle ] ~[ 2.0 Square ] if ;",
         )
         .unwrap();
     }
@@ -3256,7 +3256,7 @@ mod tests {
     fn check_enum_equality_operator_is_error() {
         // X10/M2: `eq` on two enums reaches the operand-pair guard.
         let err =
-            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) eq ;").unwrap_err();
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Bool ) eq ;").unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
         assert!(err.contains("Shape"), "unexpected message: {err}");
     }

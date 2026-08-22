@@ -103,7 +103,7 @@ fn mid_body_binding_leftmost_name_takes_deepest_value() {
 fn local_bound_in_if_arm_is_not_visible_after_end() {
     // Criterion 3: the arm is the extent (R2), so `x` past `end` is not a name
     // at all: it resolves as a word, and there is no such word.
-    let err = check_error(": w ( bool -- i64 )\n  ~[ 7 | x | x ] ~[ 0 ] if\n  x ;\n");
+    let err = check_error(": w ( Bool -- i64 )\n  ~[ 7 | x | x ] ~[ 0 ] if\n  x ;\n");
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("`x`"), "unexpected message: {err}");
 }
@@ -115,8 +115,8 @@ fn name_bound_in_one_arm_can_be_rebound_in_sibling_arm() {
     // happens (each arm's locals truncate at its exit).
     let (stdout, code) = run_src(
         "sibling-arm-rebind",
-        ": pick ( bool -- i64 )\n  ~[ 1 | v | v 10 mul ] ~[ 2 | v | v 100 mul ] if ;\n\n\
-: main ( -- )\n  true pick .\n  false pick . ;\n",
+        ": pick ( Bool -- i64 )\n  ~[ 1 | v | v 10 mul ] ~[ 2 | v | v 100 mul ] if ;\n\n\
+: main ( -- )\n  True pick .\n  False pick . ;\n",
     );
     assert_eq!(stdout, "10\n200\n");
     assert_eq!(code, 0);
@@ -176,8 +176,8 @@ fn unconsumed_linear_local_errors_at_block_end() {
     // that literal's own `]`, not the deleted `else`/`end` keywords.
     // `SPY_DEF` is two lines, so `w`'s own line 3 lands on line 5.
     let at_then = check_error(&format!(
-        "{SPY_DEF}: w ( bool -- )\n  ~[ 7 Spy | s | 0 .\n  ] ~[ 0 . ] if ;\n\
-: main ( -- ) true w ;\n"
+        "{SPY_DEF}: w ( Bool -- )\n  ~[ 7 Spy | s | 0 .\n  ] ~[ 0 . ] if ;\n\
+: main ( -- ) True w ;\n"
     ));
     assert!(
         at_then.contains("linear value `s` is never consumed"),
@@ -189,8 +189,8 @@ fn unconsumed_linear_local_errors_at_block_end() {
     );
 
     let at_else = check_error(&format!(
-        "{SPY_DEF}: w ( bool -- )\n  ~[ 0 . ] ~[\n  7 Spy | s | 0 .\n  ] if ;\n\
-: main ( -- ) true w ;\n"
+        "{SPY_DEF}: w ( Bool -- )\n  ~[ 0 . ] ~[\n  7 Spy | s | 0 .\n  ] if ;\n\
+: main ( -- ) True w ;\n"
     ));
     assert!(
         at_else.contains("scope ends at the `branch arm` on line 4, col 12"),
@@ -208,7 +208,7 @@ fn linear_local_bound_in_arm_and_moved_on_one_nested_path_is_error() {
     // `SPY_DEF` is two lines, so the outer arm opening on `w`'s own line 2
     // lands on line 4.
     let err = check_error(&format!(
-        "{SPY_DEF}: w ( bool bool -- )\n  ~[\n    7 Spy | s |\n    ~[ s drop ] ~[ 1 . ] if\n  ] ~[ drop 0 . ] if ;\n: main ( -- ) true true w ;\n"
+        "{SPY_DEF}: w ( Bool Bool -- )\n  ~[\n    7 Spy | s |\n    ~[ s drop ] ~[ 1 . ] if\n  ] ~[ drop 0 . ] if ;\n: main ( -- ) True True w ;\n"
     ));
     assert!(
         err.contains("is not consumed on every path"),
@@ -228,8 +228,8 @@ fn linear_local_bound_and_consumed_in_arm_is_accepted() {
     let (stdout, code) = run_src(
         "linear-local-consumed-in-arm",
         &format!(
-            "{SPY_DEF}: w ( bool -- )\n  ~[ 7 Spy | s | s drop\n  ] ~[ 0 . ] if ;\n\n\
-: main ( -- )\n  true w\n  false w ;\n"
+            "{SPY_DEF}: w ( Bool -- )\n  ~[ 7 Spy | s | s drop\n  ] ~[ 0 . ] if ;\n\n\
+: main ( -- )\n  True w\n  False w ;\n"
         ),
     );
     assert_eq!(stdout, "drop 7\n0\n");

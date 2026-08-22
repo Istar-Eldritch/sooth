@@ -44,7 +44,7 @@ fn annotated_literal_body_mismatch_diagnostic() {
     let err = build_check_error("phase6_slice1_body_mismatch", src);
     assert_eq!(
         err,
-        "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 bool ]` in `w` (line 1)"
+        "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 Bool ]` in `w` (line 1)"
     );
 }
 
@@ -55,25 +55,25 @@ fn annotated_literal_body_mismatch_diagnostic() {
 #[test]
 fn annotated_literal_parameter_mismatch_diagnostic() {
     let src = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n\
-        : main ( -- ) true ~[ ( i64 -- i64 ) dup drop ] on drop ;\n";
+        : main ( -- ) True ~[ ( i64 -- i64 ) dup drop ] on drop ;\n";
     let err = build_check_error("phase6_slice1_param_mismatch", src);
     assert_eq!(
         err,
-        "error: the quotation passed to `on` is annotated `~[ i64 -- i64 ]` but `on` declares it `~[ bool -- bool ]` in `main` (line 2)"
+        "error: the quotation passed to `on` is annotated `~[ i64 -- i64 ]` but `on` declares it `~[ Bool -- Bool ]` in `main` (line 2)"
     );
 }
 
 /// Exit: additive, agreeing case is accepted. One literal is checked
 /// standalone against a concrete annotation that matches its body, and a
 /// second fills `on`'s poly parameter with an annotation that matches the
-/// grounded `bool` effect.
+/// grounded `Bool` effect.
 #[test]
 fn annotated_literal_agreeing_builds() {
     let src = ": on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;\n\
         : main ( -- )\n\
-        \x20 [ ( i64 -- i64 bool ) dup 10 lt ] drop\n\
-        \x20 true ~[ ( bool -- bool ) dup drop ] on . ;\n";
+        \x20 [ ( i64 -- i64 Bool ) dup 10 lt ] drop\n\
+        \x20 True ~[ ( Bool -- Bool ) dup drop ] on . ;\n";
     let (stdout, code) = run_src("phase6_slice1_agreeing", src);
-    assert_eq!(stdout, "true\n");
+    assert_eq!(stdout, "True\n");
     assert_eq!(code, 0);
 }

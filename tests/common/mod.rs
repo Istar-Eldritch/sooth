@@ -145,16 +145,16 @@ fn fixture_imports(src: &str) -> String {
 /// `core::bool` here and the prelude line stays words-only.
 fn bool_imports(src: &str, tokens: &[&str], declared: &[&str]) -> String {
     // A fixture that declares any of these itself -- the in-process shape, and
-    // the subject of the "no import, no `bool`" goldens -- gets nothing added.
-    let own = ["bool", "False", "True"];
+    // the subject of the "no import, no `Bool`" goldens -- gets nothing added.
+    let own = ["Bool", "False", "True"];
     if src.contains("import: core::bool") || own.iter().any(|n| declared.contains(n)) {
         return String::new();
     }
     let mut names: Vec<&str> = Vec::new();
-    if src.contains("bool") {
-        names.push("bool");
+    if src.contains("Bool") {
+        names.push("Bool");
     }
-    if tokens.contains(&"true") || tokens.contains(&"false") {
+    if tokens.contains(&"True") || tokens.contains(&"False") {
         names.push("False");
         names.push("True");
     }

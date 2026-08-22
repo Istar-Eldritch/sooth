@@ -111,7 +111,7 @@ fn if_inside_a_loop_reading_an_alias_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 ~[ | i | a | arr | &a 0 >usize &> @ . true ~[ &!arr 0 >usize &!> 9 ! ] ~[ ] if arr drop ] times ;\n"
+         2 ~[ | i | a | arr | &a 0 >usize &> @ . True ~[ &!arr 0 >usize &!> 9 ! ] ~[ ] if arr drop ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -125,7 +125,7 @@ fn read_and_mutate_inside_a_looped_grant_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 ~[ | i | true ~[ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
+         2 ~[ | i | True ~[ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -141,7 +141,7 @@ fn single_call_body_naming_the_alias_is_an_error() {
     let err = check_error(
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         [ true ~[ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] ~[ ] if ] call ;\n",
+         [ True ~[ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] ~[ ] if ] call ;\n",
     );
     assert_aliased_by(&err, "arr", "a");
 }
@@ -156,7 +156,7 @@ fn write_only_across_a_back_edge_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 ~[ | i | true ~[ a | arr | &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
+         2 ~[ | i | True ~[ a | arr | &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -175,8 +175,8 @@ fn two_level_execute_once_grant_still_accepted() {
         "6g-nest2",
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         true ~[\n\
-         true ~[\n\
+         True ~[\n\
+         True ~[\n\
          a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop\n\
          ] ~[ ] if\n\
          ] ~[ ] if ;\n",
@@ -326,7 +326,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the
     // body). Must keep rejecting under the full R1+D1+R2 fix -- proves
     // T-while is not accidentally over-permissive.
     // (This still rejects under a full R1 revert and under both `back_edge`
-    // flags false, so it is a boundary guard, not a witness that any single
+    // flags False, so it is a boundary guard, not a witness that any single
     // mechanism -- `IMMORTAL_IN_BODY` included -- is what does the work.)
     let err = build_err_with_import(
         "6g-while-read",

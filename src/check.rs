@@ -3440,8 +3440,8 @@ mod tests {
     /// exists to prevent).
     #[test]
     fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
-        let src = ": g inline ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
-             : demo ( i64 -- i64 i64 ) true ~[ dup 1 eq ] g ;\n";
+        let src = ": g inline ( ..i Bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
+             : demo ( i64 -- i64 i64 ) True ~[ dup 1 eq ] g ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("declared") && err.contains("effect"),
@@ -3566,7 +3566,7 @@ mod tests {
     /// is `i64 -- i64 bool`, not `i64 -- bool`.)
     #[test]
     fn check_annotation_matches_body_ok() {
-        check_src(": w ( -- ) [ ( i64 -- i64 bool ) dup 10 lt ] drop ;").unwrap();
+        check_src(": w ( -- ) [ ( i64 -- i64 Bool ) dup 10 lt ] drop ;").unwrap();
     }
 
     /// R3: the disagreement is located at the annotation and fires with no
@@ -3576,7 +3576,7 @@ mod tests {
         let err = check_src(": w ( -- ) [ ( i64 -- i64 ) dup 10 lt ] drop ;").unwrap_err();
         assert_eq!(
             err,
-            "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 bool ]` in `w` (line 1)"
+            "error: this quotation is annotated `[ i64 -- i64 ]` but its body has effect `[ i64 -- i64 Bool ]` in `w` (line 1)"
         );
     }
 
@@ -3590,11 +3590,11 @@ mod tests {
     /// unrelated rejection firing for the wrong reason.
     #[test]
     fn check_annotation_disagrees_with_poly_parameter_is_error() {
-        let src = format!("{ON_DEF}: w ( -- ) true ~[ ( i64 -- i64 ) dup drop ] on drop ;\n");
+        let src = format!("{ON_DEF}: w ( -- ) True ~[ ( i64 -- i64 ) dup drop ] on drop ;\n");
         let err = check_src(&src).unwrap_err();
         assert_eq!(
             err,
-            "error: the quotation passed to `on` is annotated `~[ i64 -- i64 ]` but `on` declares it `~[ bool -- bool ]` in `w` (line 2)"
+            "error: the quotation passed to `on` is annotated `~[ i64 -- i64 ]` but `on` declares it `~[ Bool -- Bool ]` in `w` (line 2)"
         );
     }
 
@@ -3602,7 +3602,7 @@ mod tests {
     /// identity no-op, not a narrowing to argue about.
     #[test]
     fn check_annotation_agrees_with_poly_parameter_ok() {
-        let src = format!("{ON_DEF}: w ( -- ) true ~[ ( bool -- bool ) dup drop ] on drop ;\n");
+        let src = format!("{ON_DEF}: w ( -- ) True ~[ ( Bool -- Bool ) dup drop ] on drop ;\n");
         check_src(&src).unwrap();
     }
 
@@ -3615,11 +3615,11 @@ mod tests {
     #[test]
     fn check_annotation_disagrees_with_shape_changing_parameter_is_error() {
         let src = ": sc inline ( ..i i64 ~[ ..i i64 -- ..o i64 ] -- ..o i64 ) | f | f call ;\n\
-             : w ( -- ) 5 ~[ ( bool -- bool ) dup drop ] sc . ;\n";
+             : w ( -- ) 5 ~[ ( Bool -- Bool ) dup drop ] sc . ;\n";
         let err = check_src(src).unwrap_err();
         assert_eq!(
             err,
-            "error: the quotation passed to `sc` is annotated `~[ bool -- bool ]` but `sc` declares it `~[ i64 -- i64 ]` in `w` (line 2)"
+            "error: the quotation passed to `sc` is annotated `~[ Bool -- Bool ]` but `sc` declares it `~[ i64 -- i64 ]` in `w` (line 2)"
         );
     }
 
@@ -3784,7 +3784,7 @@ mod tests {
         // Slice 10c: the arms are quotation literals now, so the disagreement
         // is caught at the *argument* site (R-P2-3), comparing one arm's
         // actual exit shape against its sibling's, rather than at the join.
-        let src = ": w ( bool -- i64 ) ~[ 1 1 ] ~[ 1 ] if ;";
+        let src = ": w ( Bool -- i64 ) ~[ 1 1 ] ~[ 1 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
@@ -3805,9 +3805,9 @@ mod tests {
             depth.contains("the two branch arms leave different stack depths (then: 2, else: 1)"),
             "unexpected message: {depth}"
         );
-        let ty = check_src(": w ( u32 -- i64 ) | c | c [ 1 ] [ true ] branch ;").unwrap_err();
+        let ty = check_src(": w ( u32 -- i64 ) | c | c [ 1 ] [ True ] branch ;").unwrap_err();
         assert!(
-            ty.contains("the two branch arms leave different types (then: `i64`, else: `bool`)"),
+            ty.contains("the two branch arms leave different types (then: `i64`, else: `Bool`)"),
             "unexpected message: {ty}"
         );
         for err in [&depth, &ty] {
@@ -3820,19 +3820,19 @@ mod tests {
     #[test]
     fn check_branch_join_types_agree_ok() {
         // Both arms leave a single `i64`: the join unifies cleanly.
-        check_src(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;").unwrap();
+        check_src(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;").unwrap();
     }
     #[test]
     fn check_branch_join_type_mismatch_is_error() {
         // `then` leaves an `i64`, `else` leaves a `bool`: same depth, different type.
-        let src = ": w ( bool -- i64 ) ~[ 1 ] ~[ true ] if ;";
+        let src = ": w ( Bool -- i64 ) ~[ 1 ] ~[ True ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`i64`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     #[test]
     fn check_declared_output_mismatch_is_error() {
@@ -3907,15 +3907,15 @@ mod tests {
     fn check_if_condition_not_bool_is_error() {
         let src = ": w ( -- i64 ) 5 ~[ 1 ] ~[ 2 ] if ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("expected `bool`"), "unexpected message: {err}");
+        assert!(err.contains("expected `Bool`"), "unexpected message: {err}");
         assert!(err.contains("found `i64`"), "unexpected message: {err}");
     }
     #[test]
     fn check_operand_type_mismatch_is_error() {
-        let src = ": w ( -- i64 ) true 1 add ;";
+        let src = ": w ( -- i64 ) True 1 add ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`i64`"), "unexpected message: {err}");
-        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`Bool`"), "unexpected message: {err}");
     }
     // Array words: fill / len type-checking.
 
@@ -4059,7 +4059,7 @@ mod tests {
     #[test]
     fn check_equality_on_array_is_error() {
         // X7/R13: `eq` on arrays reaches the operand guard naming the type.
-        let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill eq ;").unwrap_err();
+        let err = check_src(": w ( -- Bool ) 0 4 fill 0 4 fill eq ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
     #[test]
@@ -4081,7 +4081,7 @@ mod tests {
     #[test]
     fn check_branch_join_float_widths_mismatch_is_error() {
         // `if` branches leaving `f32` vs `f64` disagree at the join (R12).
-        let src = ": w ( bool -- f64 ) ~[ 1.0 >f32 ] ~[ 2.0 ] if ;";
+        let src = ": w ( Bool -- f64 ) ~[ 1.0 >f32 ] ~[ 2.0 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
@@ -4092,7 +4092,7 @@ mod tests {
     }
     #[test]
     fn check_branch_join_float_types_agree_ok() {
-        check_src(": w ( bool -- f64 ) ~[ 1.0 ] ~[ 2.0 ] if ;").unwrap();
+        check_src(": w ( Bool -- f64 ) ~[ 1.0 ] ~[ 2.0 ] if ;").unwrap();
     }
     #[test]
     fn infer_line_net_effect_expected() {
@@ -4106,11 +4106,11 @@ mod tests {
     }
     #[test]
     fn infer_line_carries_slot_types_expected() {
-        // A comparison line leaves a `bool` on the carried stack -- the enum
+        // A comparison line leaves a `Bool` on the carried stack -- the enum
         // `core::bool` declares, which the helper seeds exactly as a session
         // does.
         let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
-            .expect("`core::bool` declares `bool`");
+            .expect("`core::bool` declares `Bool`");
         assert_eq!(infer_src("5 3 gt", &[]).unwrap(), vec![bool_ty]);
     }
     #[test]
@@ -4191,14 +4191,14 @@ mod tests {
         // R14: `Moved` in both arms joins to `Moved`, not `MaybeMoved`, even
         // though the two move sites differ.
         check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ s drop ] if ;"
+            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ s drop ] if ;"
         ))
         .unwrap();
     }
     #[test]
     fn check_linear_local_moved_in_one_arm_then_used_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;"
+            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -4207,7 +4207,7 @@ mod tests {
     #[test]
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;"
+            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -4306,7 +4306,7 @@ mod tests {
     #[test]
     fn while_self_tail_still_checks_after_back_edge_rewrite() {
         check_src(
-            ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n",
+            ": while inline ( 'a ~[ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n",
         )
         .expect("`while` still type-checks after the back-edge rewrite");
     }
@@ -4424,7 +4424,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("the quotations passed to `Shape?` leave different stack shapes")
-                && err.contains("an earlier one leaves `i64`, this one leaves `bool`"),
+                && err.contains("an earlier one leaves `i64`, this one leaves `Bool`"),
             "unexpected message: {err}"
         );
     }
@@ -4442,16 +4442,16 @@ mod tests {
         //
         // The pairing itself (baseline as `expected`, offender as `found`) is
         // pinned by structure in `arm_exit_row_mismatch_pairs_baseline_first`;
-        // here `bool` and `i64` `Display` distinctly, so the rendered message
+        // here `Bool` and `i64` `Display` distinctly, so the rendered message
         // discriminates the ordering too.
         let err = check_src(&format!(
             "{SHAPE_DECL}\
-             : area ( Shape -- bool ) ~[ ( Rect ) Rect> lt ] ~[ ( Circle ) Circle> ] Shape? ;\n\
+             : area ( Shape -- Bool ) ~[ ( Rect ) Rect> lt ] ~[ ( Circle ) Circle> ] Shape? ;\n\
              : main ( -- ) 3 Circle area . ;\n"
         ))
         .unwrap_err();
         assert!(
-            err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
+            err.contains("an earlier one leaves `Bool`, this one leaves `i64`"),
             "the written-first (`Rect`) arm must set the baseline: {err}"
         );
     }
@@ -4482,19 +4482,19 @@ mod tests {
     fn check_eliminator_call_pop_order_does_not_set_baseline() {
         // Three arms whose written order (B, C, A), declaration order
         // (A, B, C) and stack-pop order (A, C, B) are pairwise different. The
-        // baseline must be the written-*first* arm (`B`, leaving `bool`).
+        // baseline must be the written-*first* arm (`B`, leaving `Bool`).
         // Using the collected arms in pop order -- the order they come off the
         // stack, without the reversal back to written order -- makes `A`'s
         // `i64` the baseline instead, which the written-vs-declaration test
         // above cannot catch (there, pop order and declaration order agree).
         let err = check_src(&format!(
             "{ABC_DECL}\
-             : f ( Abc -- bool ) ~[ ( B ) B> 0 lt ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
+             : f ( Abc -- Bool ) ~[ ( B ) B> 0 lt ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
              : main ( -- ) 3 A f . ;\n"
         ))
         .unwrap_err();
         assert!(
-            err.contains("an earlier one leaves `bool`, this one leaves `i64`"),
+            err.contains("an earlier one leaves `Bool`, this one leaves `i64`"),
             "the written-first (`B`) arm must set the baseline: {err}"
         );
     }
@@ -4945,7 +4945,7 @@ mod tests {
         // out of the `&!Shape` it was handed and leaves it live, so the
         // caller still knows `s` is exclusively borrowed and the `&!s` after
         // the call conflicts -- exactly what the spliced-`if` shape
-        // (`&!p true ~[ &!x ] ~[ &!x ] if &!p`) already reports, which the
+        // (`&!p True ~[ &!x ] ~[ &!x ] if &!p`) already reports, which the
         // eliminator used to accept because it routed the scrutinee through
         // `eff.inputs` (always erased) rather than through the row.
         let err = check_src(&format!(

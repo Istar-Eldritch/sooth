@@ -698,7 +698,7 @@ mod tests {
         let ir = lower_src(
             ": pair ( i64 -- i64 i64 ) dup ;\n\
              : twice ( i64 -- i64 i64 ) dup ;\n\
-             : flags ( -- bool bool ) true false ;\n\
+             : flags ( -- Bool Bool ) True False ;\n\
              : main ( -- ) ;",
         );
         assert_eq!(ir.structs.iter().filter(|l| l.bundle).count(), 2);
@@ -723,7 +723,7 @@ mod tests {
         // Single-output words each, so neither triggers R10's bundle-return
         // packing (which would add its own, unrelated `Instr::Alloc` for the
         // bundle struct and muddy the "no aggregate" assertion below).
-        let ir = lower_src(": t ( -- bool ) true ; : f ( -- bool ) false ;");
+        let ir = lower_src(": t ( -- Bool ) True ; : f ( -- Bool ) False ;");
         let t = ir.funcs.iter().find(|f| f.name == "t").unwrap();
         let f = ir.funcs.iter().find(|f| f.name == "f").unwrap();
         assert_eq!(

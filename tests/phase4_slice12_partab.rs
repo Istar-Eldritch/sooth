@@ -92,9 +92,9 @@ fn migrated_library_words_still_run() {
          0 4 fill ~[ 1 add ] c::map drop\n\
          0 4 fill 0 ~[ add ] c::fold drop\n\
          0 4 fill ~[ 2 gt ] c::filter drop drop\n\
-         0 ~[ dup 3 lt ~[ 1 add true ] ~[ false ] if ] c::while drop\n\
-         true ~[ 1 ] ~[ 2 ] if drop\n\
-         false ~[ 1 ] ~[ 2 ] unless drop ;\n",
+         0 ~[ dup 3 lt ~[ 1 add True ] ~[ False ] if ] c::while drop\n\
+         True ~[ 1 ] ~[ 2 ] if drop\n\
+         False ~[ 1 ] ~[ 2 ] unless drop ;\n",
         combinators_import("c"),
     );
     let (binary, _stdout, code) = build_and_run("slice12-partab-run", &src);

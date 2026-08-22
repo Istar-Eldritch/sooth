@@ -543,7 +543,7 @@ mod tests {
     fn builtin_table_has_a_row_per_printable_type_for_print() {
         // Rule 6: `.` dispatches over 14 printable types, each a `(T -- )` row
         // lowering a `Print`. Mutation-check: dropping the printable loop or a
-        // `push` in `printable_types` fails this. `bool` is not among them
+        // `push` in `printable_types` fails this. `Bool` is not among them
         // (slice 9 R6): it dispatches through the injected library overload.
         let table = builtin_table();
         let rows = table.get(".").expect("`.` is a builtin operator");
@@ -566,12 +566,12 @@ mod tests {
 
     #[test]
     fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
-        // P7 slice 3i: `bool` is `core::bool`'s enum, so it is named through
+        // P7 slice 3i: `Bool` is `core::bool`'s enum, so it is named through
         // that registry rather than `Type::from_name`, and its entry must be
         // present for `is_copy`'s enum arm to resolve it.
         let bool_enums = crate::test_support::core_bool_enums();
-        let bool_ty = resolve_bool_type(&bool_enums).expect("`core::bool` declares `bool`");
-        assert!(is_copy(bool_ty, &[], &bool_enums, &[]), "bool is Copy");
+        let bool_ty = resolve_bool_type(&bool_enums).expect("`core::bool` declares `Bool`");
+        assert!(is_copy(bool_ty, &[], &bool_enums, &[]), "Bool is Copy");
         for name in ["i8", "u64", "f32", "f64", "usize"] {
             assert!(
                 is_copy(Type::from_name(name).unwrap(), &[], &bool_enums, &[]),

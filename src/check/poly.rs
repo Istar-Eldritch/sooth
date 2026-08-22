@@ -4525,7 +4525,7 @@ mod tests {
         check_src(
             "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
              : wrap ( 'T -- Result['T i64] ) Ok ;\n\
-             : main ( -- ) true wrap drop ;\n",
+             : main ( -- ) True wrap drop ;\n",
         )
         .expect("a phantom argument recovers from the declared output");
     }
@@ -4765,7 +4765,7 @@ mod tests {
     fn poly_arm_join_unions_borrows() {
         // S3b L4 (restated as S3b-follow L3): the arms' borrow tables are
         // unioned, not picked between. A missing record reads as "no
-        // conflict", so dropping either arm's is a silent false accept -- both
+        // conflict", so dropping either arm's is a silent False accept -- both
         // directions are asserted, since "pick arm A" keeps `x` and drops `y`
         // and an `x`-only assertion would not flip.
         let program = |later: &str| {
@@ -4927,11 +4927,11 @@ mod tests {
         // ordinary `core::bool` word now (`lib/bool.sth`) and this test's
         // hand-parsed source has to declare it itself to have it registered
         // in `combinators` at all.
-        let src = "type: bool | False | True ;\n\
+        let src = "type: Bool | False | True ;\n\
                    : rowed inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call ;\n\
                    : rowless inline ( ['T 4] ~[ 'T -- 'T ] -- ['T 4] ) | f | f call ;\n\
                    : plain ( i64 -- i64 ) 1 add ;\n\
-                   : if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\
+                   : if inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\
                      | e | | t | | c | c tag t e branch ;\n";
         let tokens = lex(src).unwrap();
         let module = crate::parser::parse(&tokens).unwrap();
@@ -4984,9 +4984,9 @@ mod tests {
         // the other. `same` and `differ` are otherwise identical, which is
         // what makes this a routing test rather than two unrelated checks.
         const BOTH: &str =
-            ": same   inline ( ..a bool ~[ ..a -- ..a ] ~[ ..a -- ..a ] -- ..a )\n\
+            ": same   inline ( ..a Bool ~[ ..a -- ..a ] ~[ ..a -- ..a ] -- ..a )\n\
                | same--e | | same--t | | same--c | same--c tag same--t same--e branch ;\n\
-             : differ inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\
+             : differ inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\
                | differ--e | | differ--t | | differ--c | differ--c tag differ--t differ--e branch ;\n";
         // Both arms consume a slot of the row they entered with: a shape
         // change the siblings agree on, and a violation of a row declared the
@@ -5031,7 +5031,7 @@ mod tests {
         // itself, rather than answered with the entry row the declaration
         // explicitly differs from.
         let err = check_src(
-            ": weird inline ( ..a bool ~[ ..a -- ..a ] -- ..b ) | weird--f | | weird--c | weird--c tag weird--f weird--f branch ;\n\
+            ": weird inline ( ..a Bool ~[ ..a -- ..a ] -- ..b ) | weird--f | | weird--c | weird--c tag weird--f weird--f branch ;\n\
              : g ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ ] weird ;\n",
         )
         .expect_err("the declared output row is ungroundable");
@@ -5072,7 +5072,7 @@ mod tests {
         // exercise it. A single-variant enum is exhaustive with one arm and
         // reaches this guard directly. Stubbing it out here builds and
         // double-drops the linear `Spy` payload underneath, since `is_copy`
-        // falls through `Type::Variant` to `true`.
+        // falls through `Type::Variant` to `True`.
         let err = check_src(&format!(
             "{SPY}\
              type: One | A p Spy ;\n\
@@ -5177,9 +5177,9 @@ mod tests {
         // R8/R14: each distinct ground θ is recorded once, keyed by call span.
         let module = checked_module(
             ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
-             : main ( -- ) 5 dupit drop drop true dupit drop drop ;",
+             : main ( -- ) 5 dupit drop drop True dupit drop drop ;",
         );
-        // Two call sites, two distinct θ (i64 and bool): two instantiations.
+        // Two call sites, two distinct θ (i64 and Bool): two instantiations.
         let symbols: std::collections::HashSet<&str> = module
             .instantiations
             .values()
@@ -5192,7 +5192,7 @@ mod tests {
     fn check_poly_ord_word_accepts_comparison_body() {
         // R7: a `'T: Ord` variable may be compared; the body and a numeric
         // instantiation both check.
-        check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+        check_src(": less ( 'T: Ord 'T -- Bool ) gt ;\n: main ( -- ) 3 4 less drop ;").unwrap();
     }
     #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
@@ -5220,13 +5220,13 @@ mod tests {
     }
     #[test]
     fn check_x4_type_variable_forced_to_two_concretes_names_both() {
-        // X4: one `'T` unified to both `i64` and `bool` at one call site names
+        // X4: one `'T` unified to both `i64` and `Bool` at one call site names
         // both concrete types.
-        let err = check_src(": pairwise ( 'T 'T -- ) drop drop ;\n: main ( -- ) 1 true pairwise ;")
+        let err = check_src(": pairwise ( 'T 'T -- ) drop drop ;\n: main ( -- ) 1 True pairwise ;")
             .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("i64"), "unexpected message: {err}");
-        assert!(err.contains("bool"), "unexpected message: {err}");
+        assert!(err.contains("Bool"), "unexpected message: {err}");
     }
     #[test]
     fn check_x5_copy_bound_on_linear_type_names_variable_type_and_reason() {
@@ -5243,7 +5243,7 @@ mod tests {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
         let err =
-            check_src(": less ( 'T: Ord 'T -- bool ) gt ;\n: main ( -- ) true false less drop ;")
+            check_src(": less ( 'T: Ord 'T -- Bool ) gt ;\n: main ( -- ) True False less drop ;")
                 .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
@@ -5259,7 +5259,7 @@ mod tests {
     #[test]
     fn check_x8_compare_of_unbounded_variable_requires_ord() {
         // X8: `gt` on an unbounded `'T` inside a body requires an `Ord` bound.
-        let err = check_src(": bad ( 'T 'T -- bool ) gt ;\n: main ( -- ) ;").unwrap_err();
+        let err = check_src(": bad ( 'T 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -5331,7 +5331,7 @@ mod tests {
         // wrongly rejected at the word end (M1).
         assert!(
             check_src(
-                ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;\n: main ( -- ) 1 2 true choose drop ;",
+                ": choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;\n: main ( -- ) 1 2 True choose drop ;",
             )
             .is_ok(),
             "choose should type-check"
@@ -5350,7 +5350,7 @@ mod tests {
     fn check_arm_local_unconsumed_is_error() {
         // T2: `y` is bound inside the `then` arm and never consumed in it.
         let err = check_src(&format!(
-            "{SPY}: arm_leak ( Spy Spy bool -- Spy ) | a b flag | flag ~[ a b | y | ] ~[ a drop b ] if ;\n: main ( -- ) ;",
+            "{SPY}: arm_leak ( Spy Spy Bool -- Spy ) | a b flag | flag ~[ a b | y | ] ~[ a drop b ] if ;\n: main ( -- ) ;",
         ))
         .unwrap_err();
         assert!(err.contains('y'), "names the arm-local: {err}");
@@ -5362,7 +5362,7 @@ mod tests {
         // nothing leaks at the word end.
         assert!(
             check_src(
-                ": both inline ( 'T 'T bool -- ) | a b flag | flag ~[ a drop b drop ] ~[ b drop a drop ] if ;\n: main ( -- ) ;",
+                ": both inline ( 'T 'T Bool -- ) | a b flag | flag ~[ a drop b drop ] ~[ b drop a drop ] if ;\n: main ( -- ) ;",
             )
             .is_ok(),
             "both should type-check"
@@ -5374,7 +5374,7 @@ mod tests {
         // `MaybeMoved`), which the leak check must count as still-unconsumed
         // (M3).
         let err = check_src(&format!(
-            "{SPY}: one ( Spy bool -- ) | x flag | flag ~[ x drop ] ~[ ] if ;\n: main ( -- ) ;"
+            "{SPY}: one ( Spy Bool -- ) | x flag | flag ~[ x drop ] ~[ ] if ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains('x'), "names the leaked local: {err}");
@@ -5388,7 +5388,7 @@ mod tests {
         // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
         // parked in a local across a branch still leaks at the word end (M4).
         let err = check_src(&format!(
-            "{SPY}: none ( Spy bool -- ) | x flag | flag ~[ ] ~[ ] if ;\n: main ( -- ) ;"
+            "{SPY}: none ( Spy Bool -- ) | x flag | flag ~[ ] ~[ ] if ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains('x'), "names the leaked local: {err}");
@@ -5396,7 +5396,7 @@ mod tests {
     }
     #[test]
     fn check_branch_condition_not_bool_is_error() {
-        // T6: `if`'s condition must be a `bool`. Slice 10c: the guard is now
+        // T6: `if`'s condition must be a `Bool`. Slice 10c: the guard is now
         // `if`'s own declared parameter type rather than a hand-written arm,
         // and a spliced poly body reports the operand at its instantiated
         // stand-in type.
@@ -5404,7 +5404,7 @@ mod tests {
             check_src(": bad inline ( 'T 'T -- 'T ) ~[ drop ] ~[ drop ] if ;\n: main ( -- ) ;")
                 .unwrap_err();
         assert!(err.contains("if"), "names the `if`: {err}");
-        assert!(err.contains("`bool`"), "names the expected type: {err}");
+        assert!(err.contains("`Bool`"), "names the expected type: {err}");
     }
     #[test]
     fn check_branch_depth_mismatch_is_error() {
@@ -5415,7 +5415,7 @@ mod tests {
         // carries a `Copy` bound so the repeated reads are not use-after-move,
         // leaving the depth mismatch as the sole failure this test proves.
         let err = check_src(
-            ": bad inline ( 'T: Copy bool -- 'T ) | x flag | flag ~[ x ] ~[ x x ] if ;\n: main ( -- ) ;",
+            ": bad inline ( 'T: Copy Bool -- 'T ) | x flag | flag ~[ x ] ~[ x x ] if ;\n: main ( -- ) ;",
         )
         .unwrap_err();
         assert!(
@@ -5428,7 +5428,7 @@ mod tests {
         // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
         // after the branch is a second read: use-after-move, not a leak.
         let err = check_src(&format!(
-            "{SPY}: bad ( Spy bool -- ) | x flag | flag ~[ x drop ] ~[ x drop ] if x drop ;\n: main ( -- ) ;"
+            "{SPY}: bad ( Spy Bool -- ) | x flag | flag ~[ x drop ] ~[ x drop ] if x drop ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -5990,7 +5990,7 @@ mod tests {
     fn poly_is_copy_tracks_a_reference_mutability_not_its_referent() {
         // Slice 13 (D3/R-A5): mirrors the monomorphic `is_copy` on
         // `Type::Ref` -- shared is `Copy`, mutable is not, and the referent's
-        // own linearity is irrelevant either way. Answering `true`
+        // own linearity is irrelevant either way. Answering `True`
         // unconditionally would let a generic body freely `dup` an exclusive
         // borrow, an acceptance every concrete instantiation rejects.
         let sig = ref_sig();
@@ -6223,7 +6223,7 @@ mod tests {
         // wording (`poly_borrow_of_quotation_local_error`), not the generic
         // "not an aggregate" text -- a non-`inline` word's ordinary `[ ... ]`
         // parameter *is* a two-word aggregate at the ABI level, so that claim
-        // is false at the representation the backend emits even though the
+        // is False at the representation the backend emits even though the
         // type system still refuses the borrow.
         let err = check_src(
             ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 add ] ap . ;\n",
@@ -6932,7 +6932,7 @@ mod tests {
     fn poly_quotlit_disagreeing_annotation_is_error() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 ) | x | x [ ( bool -- bool ) dup drop ] 2 run1 ;\n\
+             : apply ( 'T: Copy -- 'T i64 ) | x | x [ ( Bool -- Bool ) dup drop ] 2 run1 ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err(
@@ -7063,13 +7063,13 @@ mod tests {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
              : apply ( 'T: Copy -- 'T i64 )\n\
-               | x | x [ true ] 2 run1\n\
+               | x | x [ True ] 2 run1\n\
              ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err("a literal whose grounded body leaves the wrong output shape must be rejected");
         assert!(
-            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `i64 bool`"),
+            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `i64 Bool`"),
             "{err}"
         );
     }
@@ -7085,7 +7085,7 @@ mod tests {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
              : apply ( 'T: Copy -- 'T i64 )\n\
-               | x | x [ drop true ] 2 run1\n\
+               | x | x [ drop True ] 2 run1\n\
              ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
         )
@@ -7093,7 +7093,7 @@ mod tests {
             "a same-arity output whose type differs from the declared effect must still be rejected",
         );
         assert!(
-            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `bool`"),
+            err.contains("`run1` expected `[ i64 -- i64 ]`") && err.contains("found `Bool`"),
             "{err}"
         );
     }
@@ -7112,7 +7112,7 @@ mod tests {
         // compiler-known primitive, never a `CombinatorEnv` entry, so it
         // still reaches this guard regardless of what the harness loads.
         let err = check_src(
-            ": apply ( 'T: Copy -- 'T ) | x | true [ ] [ ] branch drop ;\n : main ( -- ) 5 apply drop ;\n",
+            ": apply ( 'T: Copy -- 'T ) | x | True [ ] [ ] branch drop ;\n : main ( -- ) 5 apply drop ;\n",
         )
         .expect_err("`branch` on a quotation should stay rejected");
         assert!(

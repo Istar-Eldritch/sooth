@@ -161,8 +161,8 @@ fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
     // carried `true` printed `1` (the old backend `Bool` Print arm was
     // unreachable from the carried path) instead of `true`. Same-line
     // `true .` was always correct; only the carried path degraded.
-    let out = run_session(&["true", "."]);
-    assert_eq!(out, "stack: true\ntrue\nstack: (empty)\n");
+    let out = run_session(&["True", "."]);
+    assert_eq!(out, "stack: True\nTrue\nstack: (empty)\n");
 }
 
 #[test]
@@ -174,8 +174,8 @@ fn bool_print_dispatches_to_library_overload_same_line() {
     // `leap_year_dogfood_compiles_and_runs`'s native coverage, proving the
     // session's own copy (`Session::new`'s `eval_def`) resolves too, with no
     // fall-through to the deleted builtin `Instr::Print` arm (R7).
-    let out = run_session(&["true .", "false ."]);
-    assert_eq!(out, "true\nstack: (empty)\nfalse\nstack: (empty)\n");
+    let out = run_session(&["True .", "False ."]);
+    assert_eq!(out, "True\nstack: (empty)\nFalse\nstack: (empty)\n");
 }
 
 #[test]
@@ -199,10 +199,10 @@ fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
     let cmp = common::repl_core_import("cmp", "lt");
     let same_line = run_session(&[&cmp, "\"h\" len \"hh\" len sub \"hh\" len lt ."]);
     let carried = run_session(&[&cmp, "\"h\" len \"hh\" len sub", "\"hh\" len lt ."]);
-    assert_eq!(same_line, "imported cmp\nfalse\nstack: (empty)\n");
+    assert_eq!(same_line, "imported cmp\nFalse\nstack: (empty)\n");
     assert_eq!(
         carried,
-        "imported cmp\nstack: 18446744073709551615\nfalse\nstack: (empty)\n"
+        "imported cmp\nstack: 18446744073709551615\nFalse\nstack: (empty)\n"
     );
 }
 

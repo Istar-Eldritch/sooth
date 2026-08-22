@@ -217,9 +217,9 @@ fn while_is_unaffected_by_the_row_and_back_edge_rewrite() {
     // rewrite had to keep agreeing with; this is the value-level twin of
     // `while_self_tail_still_checks_after_back_edge_rewrite`
     // (`src/check.rs`), run end to end.
-    let src = ": while inline ( 'a [ 'a -- 'a bool ] -- 'a )\n\
+    let src = ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a )\n\
                | p | p call ~[ p while ] ~[ ] if ;\n\
-               : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n";
+               : main ( -- ) 0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n";
     let (stdout, code) = run_src("while-unaffected", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);

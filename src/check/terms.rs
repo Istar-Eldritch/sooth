@@ -1753,7 +1753,7 @@ mod tests {
         check_src(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
             .expect("two quotation literals splice at the call site");
         check_src(
-            ": myif inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
+            ": myif inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
              : main ( -- ) 1 2 eq ~[ 7 ] ~[ 8 ] myif . ;\n",
         )
@@ -1807,10 +1807,10 @@ mod tests {
             arm.contains("`branch` requires two quotation operands"),
             "unexpected message: {arm}"
         );
-        let flag = check_src(": main ( -- ) true [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
+        let flag = check_src(": main ( -- ) True [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
         assert!(
             flag.contains("`branch`") && flag.contains("`u32`"),
-            "`branch` knows a 32-bit flag, not `bool`: {flag}"
+            "`branch` knows a 32-bit flag, not `Bool`: {flag}"
         );
     }
 

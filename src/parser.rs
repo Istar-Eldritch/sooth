@@ -164,7 +164,7 @@ fn shadowed_access_word_error(name: &str, span: Span) -> String {
 /// here and get the same message.
 fn static_scalar_type_error(name: &str, ty_name: &str, span: Span) -> String {
     format!(
-        "error: static `{name}` has a non-scalar type `{ty_name}` (only `i64`, `u32`, `bool`, and `str` are supported this slice; struct-typed statics are deferred) at line {}, col {}",
+        "error: static `{name}` has a non-scalar type `{ty_name}` (only `i64`, `u32`, `Bool`, and `str` are supported this slice; struct-typed statics are deferred) at line {}, col {}",
         span.line, span.col
     )
 }
@@ -1718,7 +1718,7 @@ impl<'t> Parser<'t> {
             "i64" => Type::I64,
             "u32" => Type::U32,
             "str" => Type::Str,
-            "bool" => self.resolve_type(&ty_name, ty_span)?,
+            "Bool" => self.resolve_type(&ty_name, ty_span)?,
             _ => return Err(static_scalar_type_error(&name, &ty_name, ty_span)),
         };
         let init = if matches!(self.peek(), Some((Token::Word(w), _)) if w == "=") {
@@ -1769,9 +1769,9 @@ impl<'t> Parser<'t> {
                 Ok(StaticInit::Str(s))
             }
             Some((Token::Word(w), _))
-                if matches!(ty, Type::Enum(..)) && (w == "true" || w == "false") =>
+                if matches!(ty, Type::Enum(..)) && (w == "True" || w == "False") =>
             {
-                let b = w == "true";
+                let b = w == "True";
                 self.pos += 1;
                 Ok(StaticInit::Bool(b))
             }
@@ -3716,17 +3716,12 @@ impl<'t> Parser<'t> {
                 kind: TermKind::StrLit(s),
                 span,
             }),
-            // Slice 9 (D-D/R2): `true`/`false` stay accepted surface spellings
-            // but now construct the `True`/`False` variants of the builtin
-            // `bool` enum; there is no distinct boolean literal term.
-            Token::Word(w) if w == "true" => Ok(Term {
-                kind: TermKind::Call("True".to_string()),
-                span,
-            }),
-            Token::Word(w) if w == "false" => Ok(Term {
-                kind: TermKind::Call("False".to_string()),
-                span,
-            }),
+            // `true`/`false` are no longer accepted surface spellings
+            // (the parser sugar that rewrote them to `True`/`False` calls is
+            // deleted); they are ordinary words now and resolve only if
+            // imported.  `True`/`False` fall through to the generic
+            // `Token::Word` arm below like any other word call.
+            //
             // Slice 10c (R-P3-5): `if`/`else`/`end` was the last construct the
             // grammar knew. `if` is an ordinary `lib/` word now, spelled
             // postfix over two quotations (`[ T ] [ E ] if`), so `if` here is
@@ -3827,7 +3822,7 @@ mod tests {
     /// resolves no `import:`, so a source that names it declares it. Appended
     /// by `parse_src_with_bool`, never prepended, so a fixture's own line
     /// numbers stay the ones its diagnostics report.
-    const BOOL_DEF: &str = "\ntype: bool | False | True ;\n";
+    const BOOL_DEF: &str = "\ntype: Bool | False | True ;\n";
 
     fn parse_src_with_bool(src: &str) -> Result<Module, String> {
         parse_src(&format!("{src}{BOOL_DEF}"))
@@ -3835,7 +3830,7 @@ mod tests {
 
     /// The parsed module's boolean type.
     fn bool_ty(module: &Module) -> Type {
-        crate::ast::resolve_bool_type(&module.enums).expect("the fixture declares `bool`")
+        crate::ast::resolve_bool_type(&module.enums).expect("the fixture declares `Bool`")
     }
 
     /// The qualifier and selective names of a `Qualified` import, for the
@@ -4138,7 +4133,7 @@ mod tests {
 
     #[test]
     fn parse_slot_resolves_i64_and_bool_expected() {
-        let module = parse_src_with_bool(": w ( i64 bool -- bool ) drop ;").unwrap();
+        let module = parse_src_with_bool(": w ( i64 Bool -- Bool ) drop ;").unwrap();
         let w = &module.words[0];
         assert_eq!(w.effect.inputs[0].ty, Type::I64);
         assert_eq!(w.effect.inputs[1].ty, bool_ty(&module));
@@ -4166,7 +4161,7 @@ mod tests {
 
     #[test]
     fn parse_true_false_construct_bool_variants() {
-        let module = parse_src_with_bool(": w ( -- bool bool ) true false ;").unwrap();
+        let module = parse_src_with_bool(": w ( -- Bool Bool ) True False ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "True"));
         assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
@@ -4177,7 +4172,7 @@ mod tests {
     /// diagnostic naming the replacement rather than a bare unknown word.
     #[test]
     fn parse_if_else_end_grammar_is_error() {
-        let err = parse_src_with_bool(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
+        let err = parse_src_with_bool(": w ( Bool -- i64 ) if 1 else 2 end ;").unwrap_err();
         assert!(err.contains("`else`"), "unexpected message: {err}");
         assert!(
             err.contains("~[ then ] ~[ else ] if"),
@@ -4257,7 +4252,7 @@ mod tests {
     #[test]
     fn parse_quotation_annotation_full_form_ok() {
         let module =
-            parse_src_with_bool(": w ( -- ) [ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
+            parse_src_with_bool(": w ( -- ) [ ( i64 -- Bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3, "the body is read by the untouched reader");
@@ -4276,7 +4271,7 @@ mod tests {
     #[test]
     fn parse_quotation_annotation_inline_flavour_ok() {
         let module =
-            parse_src_with_bool(": w ( -- ) ~[ ( i64 -- bool ) dup 10 lt ] drop ;").unwrap();
+            parse_src_with_bool(": w ( -- ) ~[ ( i64 -- Bool ) dup 10 lt ] drop ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
             TermKind::Quotation(terms, is_inline, Some(annot)) => {
                 assert_eq!(terms.len(), 3);
@@ -4306,7 +4301,7 @@ mod tests {
     /// with no `--` is a located error rather than an elided effect.
     #[test]
     fn parse_quotation_annotation_missing_arrow_is_error() {
-        let err = parse_src_with_bool(": w ( -- ) [ ( i64 bool ) dup 10 lt ] drop ;").unwrap_err();
+        let err = parse_src_with_bool(": w ( -- ) [ ( i64 Bool ) dup 10 lt ] drop ;").unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
         assert!(err.contains("line 1, col 25"), "unexpected: {err}");
     }
@@ -4377,7 +4372,7 @@ mod tests {
     #[test]
     fn parse_quotation_annotation_variant_tag_extra_token_no_arrow_is_error() {
         let err = parse_src_with_bool(
-            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle bool ) drop ] drop ;",
+            "type: Shape | Circle | Rect w i64 h i64 ; : w ( -- ) [ ( Circle Bool ) drop ] drop ;",
         )
         .unwrap_err();
         assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
@@ -4693,11 +4688,11 @@ mod tests {
     /// (`gte` is its bound replacement, R-P3-3/Decision 2).
     #[test]
     fn ge_is_not_read_as_a_type_conversion() {
-        let module = parse_src_with_bool(": w ( i64 i64 -- bool ) >= ;").unwrap();
+        let module = parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
         let err = crate::check::check(
-            &mut parse_src_with_bool(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;")
+            &mut parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;\n: main ( -- ) 1 2 w drop ;")
                 .unwrap(),
         )
         .unwrap_err();
@@ -6208,7 +6203,7 @@ mod tests {
 
     #[test]
     fn parse_static_bool_elided_zero_ok() {
-        let module = parse_src_with_bool("static: FLAG bool ;").unwrap();
+        let module = parse_src_with_bool("static: FLAG Bool ;").unwrap();
         let decl = &module.statics[0];
         assert_eq!(decl.ty, bool_ty(&module));
         assert_eq!(decl.init, StaticInit::Zero);
@@ -6228,7 +6223,7 @@ mod tests {
     #[test]
     fn parse_static_bool_and_str_initializer_ok() {
         let module =
-            parse_src_with_bool("static: FLAG bool = true ;\nstatic: TAG str = \"x\" ;").unwrap();
+            parse_src_with_bool("static: FLAG Bool = True ;\nstatic: TAG str = \"x\" ;").unwrap();
         assert_eq!(module.statics[0].init, StaticInit::Bool(true));
         assert_eq!(module.statics[1].init, StaticInit::Str("x".to_string()));
     }
@@ -6665,7 +6660,7 @@ mod tests {
         // (INV-INLINE-COMBINATOR), never a carried region on a back-edge, so
         // it is not the 10a same-row restriction's concern.
         let module = parse_src_with_bool(
-            ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
+            ": myif ( ..i Bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
              | e | | t | | c | c [ t call ] [ e call ] if ;",
         )
         .unwrap();
@@ -6715,13 +6710,13 @@ mod tests {
         // top-level row is bound to it yet at this point in the signature.
         // Removing the first quotation (the only thing that had interned
         // `..o`) must not change whether the second one is accepted.
-        let err = parse_src_with_bool(": f ( ..i bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;")
+        let err = parse_src_with_bool(": f ( ..i Bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;")
             .unwrap_err();
         assert!(err.contains("..o"), "unexpected message: {err}");
         assert!(err.contains("top-level row"), "unexpected message: {err}");
 
         let err = parse_src_with_bool(
-            ": f ( ..i bool ~[ ..i -- ..o ] ~[ ..o -- ..o ] -- ..o ) \
+            ": f ( ..i Bool ~[ ..i -- ..o ] ~[ ..o -- ..o ] -- ..o ) \
              | d | | c | c call d call ;",
         )
         .unwrap_err();
@@ -6924,7 +6919,7 @@ mod tests {
     #[test]
     fn unterminated_quotation_without_a_semicolon_still_reports_unterminated() {
         // A `;`-containing unterminated quotation has never reported
-        // "unterminated" (the depth scan returns `false` at EOF); this is the
+        // "unterminated" (the depth scan returns `False` at EOF); this is the
         // no-`;` case, which must keep today's message. No closing `]` and no
         // `;` at all, mirroring the grounding fact's own probe.
         let err = parse_src(": w ( -- ) [ 1 2 drop").unwrap_err();

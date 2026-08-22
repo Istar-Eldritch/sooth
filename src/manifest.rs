@@ -368,7 +368,7 @@ mod tests {
             package: core ;
             layer: core ;
             depends: text path "../text" ;
-            module: bool cmp text ;
+            module: Bool cmp text ;
         "#;
         let m = parse_manifest(src, &p()).unwrap();
         assert_eq!(m.package, "core");
@@ -376,7 +376,7 @@ mod tests {
         assert_eq!(m.depends.len(), 1);
         assert_eq!(m.depends[0].pkg_name, "text");
         assert_eq!(m.depends[0].path, PathBuf::from("../text"));
-        assert_eq!(m.modules, vec!["bool", "cmp", "text"]);
+        assert_eq!(m.modules, vec!["Bool", "cmp", "text"]);
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn parse_user_manifest_rejects_module_line() {
-        let err = parse_user_manifest("module: bool ;", &p()).unwrap_err();
+        let err = parse_user_manifest("module: Bool ;", &p()).unwrap_err();
         assert!(
             err.contains("`module:` is not allowed in a user-level manifest"),
             "unexpected message: {err}"

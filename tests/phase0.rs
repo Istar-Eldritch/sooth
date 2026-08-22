@@ -175,7 +175,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
     // unsigned sub-word target must canonicalize to the target's convention.
     // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
     // logical unsigned value `65480`, not the sign-extended bit pattern, so
-    // comparing it against a clean `u16` `65535` must be `true`.
+    // comparing it against a clean `u16` `65535` must be `True`.
     let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 lt ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-widen-subword-cmp-golden-{}.sth",
@@ -212,7 +212,7 @@ fn mixed_sign_comparison_reports_both_types() {
     // 10c: `lt` is a `'T: Copy Ord` library word now, so the rejection is its
     // variable conflict rather than the retired builtin row's operand-pair
     // message; both operand types are still named.
-    let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
+    let src = ": w ( -- Bool ) 200 >u8 5 >i8 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -239,14 +239,14 @@ fn declared_output_needs_conversion_reports_diagnostic() {
 
 #[test]
 fn conversion_of_bool_reports_diagnostic() {
-    // X4: `>i32` applied to a `bool` is a type error naming the source is not an integer.
-    let src = ": w ( -- i32 ) true >i32 ;";
+    // X4: `>i32` applied to a `Bool` is a type error naming the source is not an integer.
+    let src = ": w ( -- i32 ) True >i32 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -268,26 +268,26 @@ fn if_condition_not_bool_reports_diagnostic() {
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
-    assert!(err.contains("expected `bool`"), "unexpected message: {err}");
+    assert!(err.contains("expected `Bool`"), "unexpected message: {err}");
     assert!(err.contains("found `i64`"), "unexpected message: {err}");
 }
 
 #[test]
 fn operand_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( -- i64 )\n  true 1 add ;\n";
+    let src = ": oops ( -- i64 )\n  True 1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`i64`"), "unexpected message: {err}");
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
 fn branch_join_type_mismatch_reports_diagnostic() {
     // Slice 10c: the arms are quotation literals, so their disagreement is
     // caught at the argument site (R-P2-3) rather than at the join.
-    let src = ": oops ( bool -- i64 )\n  ~[ 1 ] ~[ true ] if ;\n";
+    let src = ": oops ( Bool -- i64 )\n  ~[ 1 ] ~[ True ] if ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -297,19 +297,19 @@ fn branch_join_type_mismatch_reports_diagnostic() {
         "unexpected message: {err}"
     );
     assert!(err.contains("`i64`"), "unexpected message: {err}");
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
 fn declared_output_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( i64 -- bool )\n  1 add ;\n";
+    let src = ": oops ( i64 -- Bool )\n  1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("type mismatch"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -393,7 +393,7 @@ fn float_arithmetic_runs_on_both_widths_end_to_end() {
 #[test]
 fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
     // S3: `1.0 0.0 div` is inf, `0.0 0.0 div` is NaN, with no trap, and NaN is
-    // detectable via `x = x` (false only for NaN, D4). `fdiv` runs the
+    // detectable via `x = x` (False only for NaN, D4). `fdiv` runs the
     // division through a real call boundary so QBE cannot constant-fold the
     // literal `0.0 0.0 div` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
@@ -415,14 +415,14 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
         "expected a NaN rendering: {}",
         lines[1]
     );
-    assert_eq!(lines[2], "0", "NaN eq NaN must be false");
+    assert_eq!(lines[2], "0", "NaN eq NaN must be False");
     assert_eq!(code, 0);
 }
 
 #[test]
 fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // S4: an ordered comparison gives the expected boolean, and every
-    // comparison involving a NaN produced by `0.0 0.0 div` is false, including
+    // comparison involving a NaN produced by `0.0 0.0 div` is False, including
     // `lt` and `gt` against a NaN (not just `eq`, RISK 1).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  1.0 2.0 lt ~[ 1 ] ~[ 0 ] if .\n  2.0 1.0 lt ~[ 1 ] ~[ 0 ] if .\n  \
@@ -521,7 +521,7 @@ fn mixed_float_width_comparison_reports_diagnostic() {
     // X2: `f32` and `f64` fed to `lt` names both differing operand types
     // (slice 10c: through the library `lt`'s variable conflict, see
     // `mixed_sign_comparison_reports_both_types`).
-    let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
+    let src = ": w ( -- Bool ) 1.0 >f32 2.0 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -562,15 +562,15 @@ fn float_mod_reports_diagnostic() {
 
 #[test]
 fn bool_to_float_conversion_reports_diagnostic() {
-    // X5: `>f64` applied to a `bool` names the source and states it must be
+    // X5: `>f64` applied to a `Bool` names the source and states it must be
     // numeric.
-    let src = ": w ( -- f64 ) true >f64 ;";
+    let src = ": w ( -- f64 ) True >f64 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -600,9 +600,9 @@ fn bitwise_op_on_float_reports_diagnostic() {
 
 #[test]
 fn bitwise_op_on_bool_is_now_accepted() {
-    // `and`/`or`/`xor` are type-directed: `bool` is now a valid homogeneous
+    // `and`/`or`/`xor` are type-directed: `Bool` is now a valid homogeneous
     // operand class, not just the integer tower.
-    let src = ": w ( -- bool ) true false and ;";
+    let src = ": w ( -- Bool ) True False and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
@@ -610,16 +610,16 @@ fn bitwise_op_on_bool_is_now_accepted() {
 
 #[test]
 fn mixed_bool_int_and_reports_both_types() {
-    let src = ": w ( -- bool ) true 5 and ;";
+    let src = ": w ( -- Bool ) True 5 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer or bool type"),
+        err.contains("same integer or Bool type"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
 }
 
@@ -631,7 +631,7 @@ fn mixed_type_and_reports_both_types() {
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer or bool type"),
+        err.contains("same integer or Bool type"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -762,12 +762,12 @@ fn negative_shift_count_masks_to_type_width() {
     assert_eq!(code, 0);
 }
 
-// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `lte gte ne`
+// Boolean logical ops (`and`/`or`/`xor`/`not` on `Bool`) + the `lte gte ne`
 // comparison completion: diagnostics + goldens.
 
 #[test]
 fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
-    let src = ": w ( -- bool ) true false lte ;";
+    let src = ": w ( -- Bool ) True False lte ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -776,22 +776,22 @@ fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
         err.contains("same numeric type"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`Bool`"), "unexpected message: {err}");
 }
 
 #[test]
 fn logical_and_or_xor_truth_table_on_bools() {
-    // `and`/`or`/`xor` on `bool` operands ARE logical and/or/xor (an eager
+    // `and`/`or`/`xor` on `Bool` operands ARE logical and/or/xor (an eager
     // stack language already evaluates both operands, so bitwise-on-0/1 and
     // logical coincide): T and T = T, T and F = F, T or F = T, F or F = F,
     // T xor F = T, T xor T = F.
     let src = ": main ( -- )\n  \
-  true true and ~[ 1 ] ~[ 0 ] if .\n  \
-  true false and ~[ 1 ] ~[ 0 ] if .\n  \
-  true false or ~[ 1 ] ~[ 0 ] if .\n  \
-  false false or ~[ 1 ] ~[ 0 ] if .\n  \
-  true false xor ~[ 1 ] ~[ 0 ] if .\n  \
-  true true xor ~[ 1 ] ~[ 0 ] if . ;\n";
+  True True and ~[ 1 ] ~[ 0 ] if .\n  \
+  True False and ~[ 1 ] ~[ 0 ] if .\n  \
+  True False or ~[ 1 ] ~[ 0 ] if .\n  \
+  False False or ~[ 1 ] ~[ 0 ] if .\n  \
+  True False xor ~[ 1 ] ~[ 0 ] if .\n  \
+  True True xor ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-logical-and-or-xor-truth-table-{}.sth",
         std::process::id()
@@ -806,15 +806,15 @@ fn logical_and_or_xor_truth_table_on_bools() {
 
 #[test]
 fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
-    // `not` is type-directed: on a `bool` it is logical negation
-    // (`true not` -> false), giving a DIFFERENT result than the integer
+    // `not` is type-directed: on a `Bool` it is logical negation
+    // (`True not` -> False), giving a DIFFERENT result than the integer
     // bitwise complement on the same underlying bit pattern (`0 >u8 not` ->
     // 255, not 1).
     let src = ": main ( -- )\n  \
-  true not ~[ 1 ] ~[ 0 ] if .\n  \
+  True not ~[ 1 ] ~[ 0 ] if .\n  \
   0 >u8 not >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
-        "sooth-not-type-directed-bool-vs-int-{}.sth",
+        "sooth-not-type-directed-Bool-vs-int-{}.sth",
         std::process::id()
     ));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
@@ -829,7 +829,7 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
 fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // The same bit pattern (200) compares differently as `i8` (-56, negative)
     // vs `u8` (200, positive) against 5: `lte`/`gte` flip with the sign, while
-    // `ne` stays true either way (not-equal is sign-agnostic like `eq`).
+    // `ne` stays True either way (not-equal is sign-agnostic like `eq`).
     let src = ": main ( -- )\n  \
   200 >i8 5 >i8 lte ~[ 1 ] ~[ 0 ] if .\n  \
   200 >u8 5 >u8 lte ~[ 1 ] ~[ 0 ] if .\n  \
@@ -852,8 +852,8 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
 #[test]
 fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
     // A real NaN (`0.0 0.0 div`, routed through a call so it isn't
-    // constant-folded away) must report false for the ordered comparisons
-    // `lte`/`gte`/`eq`, and true for `ne` (RISK 1): `ne` is the one comparison
+    // constant-folded away) must report False for the ordered comparisons
+    // `lte`/`gte`/`eq`, and True for `ne` (RISK 1): `ne` is the one comparison
     // where "NaN involved" flips the answer relative to `eq`.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  \
@@ -873,7 +873,7 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
 #[test]
 fn leap_year_dogfood_compiles_and_runs() {
     let (stdout, code) = run_and_capture_stdout("examples/leap.sth");
-    assert_eq!(stdout, "true\nfalse\ntrue\n");
+    assert_eq!(stdout, "True\nFalse\nTrue\n");
     assert_eq!(code, 0);
 }
 
@@ -949,14 +949,14 @@ fn print_float_f64_and_f32_via_dot() {
 fn print_bool_prints_true_or_false_not_zero_or_one() {
     let src = ": main ( -- )\n  2 3 lt .\n  3 2 lt . ;\n";
     let path = std::env::temp_dir().join(format!(
-        "sooth-print-bool-true-false-{}.sth",
+        "sooth-print-Bool-True-False-{}.sth",
         std::process::id()
     ));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "true\nfalse\n");
+    assert_eq!(stdout, "True\nFalse\n");
     assert_eq!(code, 0);
 }
 
@@ -1222,7 +1222,7 @@ fn usize_arithmetic_comparison_and_conversion_native() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "9\n7\ntrue\nfalse\n8\n9\n");
+    assert_eq!(stdout, "9\n7\nTrue\nFalse\n8\n9\n");
     assert_eq!(code, 0);
 }
 
@@ -1253,7 +1253,7 @@ fn isize_round_trips_arithmetic_and_conversion() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "9\n-7\ntrue\nfalse\ntrue\nfalse\n-4\n-1\n8\n9\n");
+    assert_eq!(stdout, "9\n-7\nTrue\nFalse\nTrue\nFalse\n-4\n-1\n8\n9\n");
     assert_eq!(code, 0);
 }
 
@@ -1601,8 +1601,8 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
     // carried `[Op 2]`, dispatch, and self-tail-call; naive recursion at that
     // depth overflows the default 8MB host stack, which `run_and_capture_stdout`
     // catches as a signal death (no exit code) and turns a no-op Slice 6
-    // transform red. `idx` goes bool -> index via `if 1 else 0 end >usize`
-    // (a conversion word on a `bool` is a checker error), and `fetch` reads
+    // transform red. `idx` goes Bool -> index via `if 1 else 0 end >usize`
+    // (a conversion word on a `Bool` is a checker error), and `fetch` reads
     // the enum through a reference (`&>` then `@`) rather than `get`.
     let src = "type: Op | Step | Stop ;\n\
 : idx ( i64 -- usize ) | count | count 0 eq ~[ 1 ] ~[ 0 ] if >usize ;\n\
@@ -1956,8 +1956,8 @@ fn both_arms_consume_linear_ok() {
     let stdout = run_linear_golden(
         "both-arms",
         &format!(
-            "{SPY_DEF}: dispose ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 99 . s drop ] if ;\n\
-: main ( -- )\n  7 Spy true dispose\n  8 Spy false dispose ;\n"
+            "{SPY_DEF}: dispose ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 99 . s drop ] if ;\n\
+: main ( -- )\n  7 Spy True dispose\n  8 Spy False dispose ;\n"
         ),
     );
     assert_eq!(stdout, "drop 7\n99\ndrop 8\n");
@@ -1968,7 +1968,7 @@ fn divergent_arm_use_is_error() {
     // Criterion 10b: consumed in one arm only, then referenced past the join.
     // The join yields `MaybeMoved`, so the later use is a use-after-move.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;\n"
+        "{SPY_DEF}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;\n"
     ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -1981,7 +1981,7 @@ fn divergent_arm_unconsumed_is_error() {
     // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
     // was never touched: the bug is the `else` arm forgetting it.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;\n"
+        "{SPY_DEF}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;\n"
     ));
     assert!(
         err.contains("not consumed on every path"),
@@ -2177,7 +2177,7 @@ fn projection_read_of_linear_field_is_error() {
 
 #[test]
 fn dup_of_linear_enum_is_error() {
-    // The hole Phase 2 left open: `is_copy` used to return `true` for every
+    // The hole Phase 2 left open: `is_copy` used to return `True` for every
     // enum, so an enum with a linear payload was silently duplicable and this
     // exact source compiled, ran, and printed nothing (an exactly-once
     // violation with no diagnostic). It is now rejected like any other linear
@@ -2226,8 +2226,8 @@ fn drop_of_linear_enum_dispatches_on_tag() {
         "enum-tag-dispatch",
         &format!(
             "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
-: main ( -- )\n  1 .\n  true ~[ 5 Spy Full ] ~[ Empty ] if drop\n  2 .\n\
-  false ~[ 9 Spy Full ] ~[ Empty ] if drop\n  3 . ;\n"
+: main ( -- )\n  1 .\n  True ~[ 5 Spy Full ] ~[ Empty ] if drop\n  2 .\n\
+  False ~[ 9 Spy Full ] ~[ Empty ] if drop\n  3 . ;\n"
         ),
     );
     assert_eq!(stdout, "1\ndrop 5\n2\n3\n");
@@ -2617,7 +2617,7 @@ fn peek_owned_copy_payload_keeps_cell_live() {
         "peek-twice",
         ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . eq . drop ;\n",
     );
-    assert_eq!(stdout, "alloc 8\n5\ntrue\nfree 8\n");
+    assert_eq!(stdout, "alloc 8\n5\nTrue\nfree 8\n");
 }
 
 #[test]
@@ -2667,8 +2667,8 @@ fn enum_variant_with_owned_frees_on_drop() {
     let stdout = run_owned_traced_golden(
         "enum-variant",
         "type: Item | Empty | Full v ^i64 ;\n\
-: main ( -- )\n  true ~[ 5 ^ Full ] ~[ Empty ] if drop\n  \
-false ~[ 9 ^ Full ] ~[ Empty ] if drop ;\n",
+: main ( -- )\n  True ~[ 5 ^ Full ] ~[ Empty ] if drop\n  \
+False ~[ 9 ^ Full ] ~[ Empty ] if drop ;\n",
     );
     assert_eq!(stdout, "alloc 8\nfree 8\n");
 }
@@ -2875,7 +2875,7 @@ drop 1\ndrop 2\nfree 32\ndrop 3\ndrop 4\nfree 32\ndrop 5\ndrop 6\nfree 32\n"
 #[test]
 fn non_recursive_cell_shapes_are_not_treated_as_recursive() {
     // Criterion 11 (R13/R15): three near misses for the detection pass, each
-    // of which must keep straight-line synthesis. A false positive would blit
+    // of which must keep straight-line synthesis. A False positive would blit
     // the enclosing type's bytes out of a cell that does not hold one, so the
     // spy tags and the sizes are both load-bearing: `Outer` holds a cell of a
     // *different* struct, `Twice` is a `^^Spy` whose inner payload is a cell
@@ -2915,7 +2915,7 @@ fn recursive_disposal_path_backtracks_past_a_misleading_last_field() {
     // back to ordinary recursion; either way this golden's fused loop would
     // never fire and `deep_recursive_chain_disposes_within_bounded_memory`'s
     // sibling shapes are the ones that would actually catch the regression at
-    // scale, but this small trace pins the *order* a false positive on `bait`
+    // scale, but this small trace pins the *order* a False positive on `bait`
     // would scramble.
     let stdout = run_owned_traced_golden(
         "misleading-last-field",
@@ -3680,17 +3680,17 @@ fn overloads_of_a_combinator_name_are_both_reachable() {
     // single-value map, so the second candidate silently displaced the first
     // exactly as env's Sig did before B1 (and poly_env did for a poly word).
     let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-: apply inline ( bool [ bool -- bool ] -- bool ) call ;\n\
-: main ( -- ) 5 [ 2 mul ] apply . true [ not ] apply . ;\n";
+: apply inline ( Bool [ Bool -- Bool ] -- Bool ) call ;\n\
+: main ( -- ) 5 [ 2 mul ] apply . True [ not ] apply . ;\n";
     let (stdout, code) = run_overload_src("combinator-overload", src);
-    assert_eq!(stdout, "10\nfalse\n");
+    assert_eq!(stdout, "10\nFalse\n");
     assert_eq!(code, 0);
 }
 
 #[test]
 fn a_combinator_call_matching_no_overload_names_the_candidates() {
     let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-: apply inline ( bool [ bool -- bool ] -- bool ) call ;\n\
+: apply inline ( Bool [ Bool -- Bool ] -- Bool ) call ;\n\
 : main ( -- ) \"x\" [ drop \"y\" ] apply drop ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-combinator-overload-nomatch-{}.sth",
@@ -3705,7 +3705,7 @@ fn a_combinator_call_matching_no_overload_names_the_candidates() {
         "unexpected message: {err}"
     );
     assert!(
-        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        err.contains("candidate: `i64`") && err.contains("candidate: `Bool`"),
         "expected both candidates listed: {err}"
     );
 }
@@ -3717,8 +3717,8 @@ fn overloads_of_a_polymorphic_word_name_are_both_reachable() {
     // single-value map, so the second candidate silently displaced the first
     // exactly as env's Sig did before B1.
     let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
-: idpair ( 'T bool -- 'T ) drop ;\n\
-: main ( -- ) 1 2 idpair . 7 true idpair . ;\n";
+: idpair ( 'T Bool -- 'T ) drop ;\n\
+: main ( -- ) 1 2 idpair . 7 True idpair . ;\n";
     let (stdout, code) = run_overload_src("poly-overload", src);
     assert_eq!(stdout, "1\n7\n");
     assert_eq!(code, 0);
@@ -3727,7 +3727,7 @@ fn overloads_of_a_polymorphic_word_name_are_both_reachable() {
 #[test]
 fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
     let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
-: idpair ( 'T bool -- 'T ) drop ;\n\
+: idpair ( 'T Bool -- 'T ) drop ;\n\
 : main ( -- ) 1 2.5 idpair . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-poly-overload-nomatch-{}.sth",
@@ -3743,7 +3743,7 @@ fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
     );
     assert!(
         err.contains("candidate: : idpair ( 'T 'T -- 'T )")
-            && err.contains("candidate: : idpair ( 'T bool -- 'T )"),
+            && err.contains("candidate: : idpair ( 'T Bool -- 'T )"),
         "expected both candidate signatures listed: {err}"
     );
 }
@@ -3806,14 +3806,14 @@ fn two_poly_words_declaring_an_alpha_equivalent_signature_is_a_duplicate_error()
 fn overloads_of_an_ordinary_word_name_are_both_reachable() {
     // R1 widened the duplicate-word key to admit these two definitions, but
     // the checking env held one `Sig` per name, so the second silently
-    // displaced the first: the call `42 show` then failed against the `bool`
+    // displaced the first: the call `42 show` then failed against the `Bool`
     // signature and the `i64` body was unreachable code. Both candidates must
     // resolve, which is what makes the widened key mean anything.
     let src = ": show ( i64 -- ) . ;\n\
-: show ( bool -- ) . ;\n\
-: main ( -- ) 42 show true show ;\n";
+: show ( Bool -- ) . ;\n\
+: main ( -- ) 42 show True show ;\n";
     let (stdout, code) = run_overload_src("user-name-overloads", src);
-    assert_eq!(stdout, "42\ntrue\n");
+    assert_eq!(stdout, "42\nTrue\n");
     assert_eq!(code, 0);
 }
 
@@ -3839,7 +3839,7 @@ fn a_call_matching_no_overload_names_the_candidates() {
     // accept, rather than reporting a mismatch against whichever candidate
     // happened to be stored last.
     let src = ": show ( i64 -- ) . ;\n\
-: show ( bool -- ) . ;\n\
+: show ( Bool -- ) . ;\n\
 : main ( -- ) 1.5 show ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-overload-nomatch-{}.sth", std::process::id()));
@@ -3852,7 +3852,7 @@ fn a_call_matching_no_overload_names_the_candidates() {
         "unexpected message: {err}"
     );
     assert!(
-        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        err.contains("candidate: `i64`") && err.contains("candidate: `Bool`"),
         "expected both candidates listed: {err}"
     );
 }
@@ -3893,13 +3893,13 @@ fn overload_vec2_lt_dispatches_to_user_word() {
     // pointers' addresses rather than dispatching to the user overload, so
     // the printed boolean tracks allocation order, not the operands' values.
     // Negative coordinates whose semantic sum is negative (so the correct
-    // answer is `false`) still allocate `a` before `b` (a lower address), so
-    // the old pointer-compare silently printed `true` here.
+    // answer is `False`) still allocate `a` before `b` (a lower address), so
+    // the old pointer-compare silently printed `True` here.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add add 0 gt ;\n\
+: lt ( Vec2 Vec2 -- Bool ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add add 0 gt ;\n\
 : main ( -- ) -3 -4 Vec2 -1 -2 Vec2 lt . ;\n";
     let (stdout, code) = run_overload_src("lt", src);
-    assert_eq!(stdout, "false\n");
+    assert_eq!(stdout, "False\n");
     assert_eq!(code, 0);
 }
 

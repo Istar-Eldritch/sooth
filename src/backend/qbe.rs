@@ -105,7 +105,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     // Slice 9: emitted in `idx` order, not `HashMap` iteration order -- a
     // module with two or more distinct string literals (previously never
     // exercised by the corpus; the injected `bool` print overload's
-    // `"false\n"`/`"true\n"` literals are the first) produced nondeterministic
+    // `"False\n"`/`"True\n"` literals are the first) produced nondeterministic
     // `$strb{N}` declaration order across process runs otherwise, since each
     // content's `idx` binding was already fixed but the printing loop wasn't.
     let mut ordered_lits: Vec<(&String, usize)> = str_lits
@@ -1285,7 +1285,7 @@ fn emit_instr(
             // never through `Instr::Print`. Reaching this arm is a checker or
             // lowering bug.
             IrType::Bool => {
-                unreachable!("`bool` prints through the library `.` overload, not `Instr::Print`")
+                unreachable!("`Bool` prints through the library `.` overload, not `Instr::Print`")
             }
             IrType::OwnedCell(_) => {
                 unreachable!("a cell is not a printable scalar; checker rejects it")
@@ -1577,7 +1577,7 @@ mod tests {
         let il = emit_src(
             "static: N i64 = 10 ;\n\
              static: W u32 = 3 ;\n\
-             static: F bool = true ;\n\
+             static: F Bool = True ;\n\
              : main ( -- ) &N @ . ;",
         );
         assert!(il.contains("data $N = { l 10 }\n"), "{il}");
@@ -1763,7 +1763,7 @@ mod tests {
     #[test]
     fn bool_print_routes_through_eliminator_not_boolstrs() {
         let dir = std::env::temp_dir().join(format!(
-            "sooth-bool-print-probe-{}-{}",
+            "sooth-Bool-print-probe-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1784,7 +1784,7 @@ mod tests {
         std::fs::write(
             &entry,
             format!(
-                ": main ( -- ) true . ;\nimport: intrinsics * ;\nimport: \"{}/lib/bool.sth\" b | bool True False . | ;\n",
+                ": main ( -- ) True . ;\nimport: intrinsics * ;\nimport: \"{}/lib/bool.sth\" b | Bool True False . | ;\n",
                 env!("CARGO_MANIFEST_DIR")
             ),
         )
@@ -1811,11 +1811,11 @@ mod tests {
         // unconditionally so a bare `contains("$strfmt")` would be vacuous.
         assert!(
             il.contains("call $printf(l $strfmt"),
-            "bool print must route through str's `.` (expected $strfmt printf call): {il}"
+            "Bool print must route through str's `.` (expected $strfmt printf call): {il}"
         );
         assert!(
             !il.contains("call $printf(l $sfmt,"),
-            "bool print must not use the old `%s` ($sfmt) boolstrs path: {il}"
+            "Bool print must not use the old `%s` ($sfmt) boolstrs path: {il}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1923,7 +1923,7 @@ mod tests {
 
     #[test]
     fn emit_if_has_jnz_and_phi() {
-        let il = emit_src(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
+        let il = emit_src(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
     }
@@ -1995,7 +1995,7 @@ mod tests {
 
     #[test]
     fn emit_bool_value_uses_w_width() {
-        let il = emit_src(": w ( -- bool ) true ;");
+        let il = emit_src(": w ( -- Bool ) True ;");
         assert!(il.contains("=w copy 1"), "unexpected IL: {il}");
     }
 

@@ -824,7 +824,7 @@ mod tests {
     /// no quotation parameter anywhere in its effect. Constructed directly (an
     /// e2e build cannot discriminate the flag from a quotation parameter) and
     /// asserted both ways round, so the `|| word.declares_inline` disjunct is
-    /// what the `true` rests on.
+    /// what the `True` rests on.
     #[test]
     fn is_combinator_true_for_inline_non_quotation_word() {
         use crate::ast::TypedSlot;

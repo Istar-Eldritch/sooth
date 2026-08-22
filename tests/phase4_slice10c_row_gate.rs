@@ -16,7 +16,7 @@ mod common;
 
 /// A row-polymorphic `if`, hand-written over the primitive `if` (the library
 /// `if` arrives in P3): `..i`/`..o` may differ, per P2's parser lift.
-const MYIF: &str = ": myif inline ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o )\n\
+const MYIF: &str = ": myif inline ( ..i Bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o )\n\
      | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n";
 
 fn lowered(src: &str) -> Vec<IrFunc> {
@@ -107,9 +107,9 @@ fn shape_changing_myif_checks_and_runs_with_a_surviving_carried_value() {
     // writes, so it survives the call untouched -- the "carried value
     // survives" half of E-P2-2.
     let src = format!(
-        "{MYIF}: demo ( i64 i64 bool -- i64 i64 i64 )\n\
+        "{MYIF}: demo ( i64 i64 Bool -- i64 i64 i64 )\n\
          ~[ dup 10 add ] ~[ dup 20 add ] myif ;\n\
-         : main ( -- ) 99 5 true demo . . . 99 5 false demo . . . ;\n"
+         : main ( -- ) 99 5 True demo . . . 99 5 False demo . . . ;\n"
     );
     let out = run(&src);
     assert_eq!(
@@ -122,15 +122,15 @@ fn shape_changing_myif_checks_and_runs_with_a_surviving_carried_value() {
 
 #[test]
 fn contradicting_branch_output_is_rejected_at_the_argument_site() {
-    // The `true` branch leaves the carried value plus one computed value
-    // (net +1), the `false` branch drops it (net -1): they share one
+    // The `True` branch leaves the carried value plus one computed value
+    // (net +1), the `False` branch drops it (net -1): they share one
     // declared `..o`, so the second literal checked contradicts the first
     // and must be rejected right there, naming both shapes and locating the
     // second literal -- not the generic splice-site message a bare
     // stack-depth mismatch would produce once the callee body is actually
     // spliced.
     let src = format!(
-        "{MYIF}: demo ( i64 bool -- i64 )\n\
+        "{MYIF}: demo ( i64 Bool -- i64 )\n\
          ~[ dup 10 add ] ~[ drop ] myif ;\n"
     );
     let err = check_error(&src);

@@ -117,7 +117,7 @@ fn nested_projection_chain_runs() {
 /// own instantiation, so the two generic applications read two different
 /// layouts. Deliberately asymmetric: the two type arguments have *different
 /// sizes*, so `tag` sits at a different offset in each. A symmetric pair
-/// (`Box[i64]` against `Box[bool]`) lays both instantiations out identically
+/// (`Box[i64]` against `Box[Bool]`) lays both instantiations out identically
 /// and could not tell a correct resolution from a swapped one.
 #[test]
 fn projection_resolves_per_instantiation() {

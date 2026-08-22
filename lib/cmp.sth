@@ -15,13 +15,13 @@
 \ deliberately no operation turning a machine word back into an enum, only
 \ these two named variants.
 import: intrinsics i | ueq ult ugt ulte ugte une branch | ;
-import: self::bool b | bool False True | ;
+import: self::bool b | Bool False True | ;
 
 export: eq lt gt lte gte ne ;
 
-: eq  inline ( 'T: Copy Ord 'T -- bool ) ueq  [ true ] [ false ] branch ;
-: lt  inline ( 'T: Copy Ord 'T -- bool ) ult  [ true ] [ false ] branch ;
-: gt  inline ( 'T: Copy Ord 'T -- bool ) ugt  [ true ] [ false ] branch ;
-: lte inline ( 'T: Copy Ord 'T -- bool ) ulte [ true ] [ false ] branch ;
-: gte inline ( 'T: Copy Ord 'T -- bool ) ugte [ true ] [ false ] branch ;
-: ne  inline ( 'T: Copy Ord 'T -- bool ) une  [ true ] [ false ] branch ;
+: eq  inline ( 'T: Copy Ord 'T -- Bool ) ueq  [ True ] [ False ] branch ;
+: lt  inline ( 'T: Copy Ord 'T -- Bool ) ult  [ True ] [ False ] branch ;
+: gt  inline ( 'T: Copy Ord 'T -- Bool ) ugt  [ True ] [ False ] branch ;
+: lte inline ( 'T: Copy Ord 'T -- Bool ) ulte [ True ] [ False ] branch ;
+: gte inline ( 'T: Copy Ord 'T -- Bool ) ugte [ True ] [ False ] branch ;
+: ne  inline ( 'T: Copy Ord 'T -- Bool ) une  [ True ] [ False ] branch ;

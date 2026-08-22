@@ -377,7 +377,7 @@ fn grounded_row_region_is_type_only_so_a_caller_borrow_is_not_flagged() {
     // R9: the prepended row region is type-only (`Slot::computed`, `deriv:
     // None`). A live borrow `&v` riding untouched in the caller row must not be
     // reported by the exit-row borrow guard as `quotation borrows place` -- a
-    // false positive that prepending the caller's *real* slots would produce.
+    // False positive that prepending the caller's *real* slots would produce.
     // `[ drop ]` consumes the fixed `i64` and leaves the row (the borrow)
     // untouched.
     let src = format!(

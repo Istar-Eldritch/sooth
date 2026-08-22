@@ -119,12 +119,12 @@ fn bad_line_reports_and_session_survives() {
 
 #[test]
 fn type_error_line_reports_and_session_survives() {
-    let out = run_session(&["5", "true 1 add", "1 add"]);
+    let out = run_session(&["5", "True 1 add", "1 add"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
     assert!(
-        lines[1].contains("`i64`") && lines[1].contains("`bool`"),
+        lines[1].contains("`i64`") && lines[1].contains("`Bool`"),
         "expected a type-mismatch diagnostic: {}",
         lines[1]
     );
@@ -185,9 +185,9 @@ fn sign_definable_and_callable_in_repl() {
 #[test]
 fn bool_residual_displays_as_true_or_false() {
     // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
-    let out = run_session(&["true", "false"]);
+    let out = run_session(&["True", "False"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["stack: true", "stack: true false"]);
+    assert_eq!(lines, vec!["stack: True", "stack: True False"]);
 }
 
 #[test]

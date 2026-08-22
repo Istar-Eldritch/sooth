@@ -413,7 +413,7 @@ mod tests {
         // pulled out of the deleted prelude -- with nothing injected, `eq` is
         // an ordinary name a source may define.
         const EQ: &str =
-            ": eq inline ( 'T: Copy Ord 'T -- bool ) ueq [ true ] [ false ] branch ;\n";
+            ": eq inline ( 'T: Copy Ord 'T -- Bool ) ueq [ True ] [ False ] branch ;\n";
         let tokens = lex(EQ).unwrap();
         let eq = crate::test_support::parse_with_core(&tokens)
             .unwrap()

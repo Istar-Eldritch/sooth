@@ -108,7 +108,7 @@ fn option_constructs_monomorphizes_and_eliminates_both_arms() {
 /// `Option` instantiated over a pointer type (`^Node`), the nullability
 /// shape DESIGN.md names as `Option`'s actual reason for existing: `^T`
 /// stays non-null, `Option['T]` is the named answer. Every existing generic
-/// instantiation test in this codebase applies `i64`/`bool`/aggregates only,
+/// instantiation test in this codebase applies `i64`/`Bool`/aggregates only,
 /// never a pointer argument, so this shape is otherwise unwitnessed.
 #[test]
 fn option_instantiates_over_a_pointer_type() {

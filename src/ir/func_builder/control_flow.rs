@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn lower_if_emits_phi_at_join() {
-        let ir = lower_src(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
+        let ir = lower_src(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
         let w = &ir.funcs[0];
         let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
         assert!(has_phi);
@@ -352,7 +352,7 @@ mod tests {
                 bits: 32,
                 signed: false
             },
-            "`branch` knows a 32-bit flag, never `bool`"
+            "`branch` knows a 32-bit flag, never `Bool`"
         );
     }
 

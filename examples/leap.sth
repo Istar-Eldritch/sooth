@@ -6,9 +6,9 @@ import: core::prelude * ;
 \ `bool` names a type in an effect below and a bool is printed with `.`, and
 \ neither a type name nor an operator overload follows the prelude hub's
 \ re-export: both come from the declaring module.
-import: core::bool b | bool . | ;
+import: core::bool b | Bool . | ;
 
-: leap ( i64 -- bool )
+: leap ( i64 -- Bool )
   dup 4 mod 0 eq
   over 100 mod 0 eq not
   and
@@ -16,6 +16,6 @@ import: core::bool b | bool . | ;
   or ;
 
 : main ( -- )
-  2000 leap .    \ prints true (divisible by 400)
-  1900 leap .    \ prints false (divisible by 100, not 400)
-  2024 leap . ;  \ prints true (divisible by 4, not 100)
+  2000 leap .    \ prints True (divisible by 400)
+  1900 leap .    \ prints False (divisible by 100, not 400)
+  2024 leap . ;  \ prints True (divisible by 4, not 100)

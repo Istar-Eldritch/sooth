@@ -1054,7 +1054,7 @@ mod tests {
     /// width is converted.
     #[test]
     fn lower_tag_of_a_scalar_enum_reads_no_memory_and_converts_no_width() {
-        let ir = lower_src(": w ( bool -- u32 ) tag ;");
+        let ir = lower_src(": w ( Bool -- u32 ) tag ;");
         let w = &ir.funcs[0];
         let body = instrs(w);
         let (dst, src) = body
@@ -1210,12 +1210,12 @@ mod tests {
         // Type-directed `not`: on a `bool` it must flip the low bit
         // (`xor operand, 1`), not the integer-complement `xor operand, -1`,
         // since `-1`/`-2` are not valid canonical `bool` values.
-        let ir = lower_src(": w ( -- bool ) true not ;");
+        let ir = lower_src(": w ( -- Bool ) True not ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         assert!(
             !is.iter().any(|i| matches!(i, Instr::Const(_, -1))),
-            "bool `not` must not use a -1 mask"
+            "Bool `not` must not use a -1 mask"
         );
         let (xor_v, mask_operand) = is
             .iter()
@@ -1235,7 +1235,7 @@ mod tests {
     #[test]
     fn lower_bitwise_and_or_xor_accept_bool_operands() {
         let ir =
-            lower_src(": w ( -- bool ) true false and true false or drop true false xor drop ;");
+            lower_src(": w ( -- Bool ) True False and True False or drop True False xor drop ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         for op in [BinOp::And, BinOp::Or, BinOp::Xor] {
@@ -1252,7 +1252,7 @@ mod tests {
 
     #[test]
     fn lower_le_ge_ne_route_to_matching_cmpop() {
-        let ir = lower_src(": w ( -- bool bool bool ) 1 2 lte 1 2 gte 1 2 ne ;");
+        let ir = lower_src(": w ( -- Bool Bool Bool ) 1 2 lte 1 2 gte 1 2 ne ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         for op in [CmpOp::Le, CmpOp::Ge, CmpOp::Ne] {
@@ -1725,8 +1725,8 @@ mod tests {
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
         let ir = lower_src(
-            ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 lt ~[ 1 add true ] ~[ false ] if ] while . ;\n",
+            ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
+             : main ( -- ) 0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

@@ -23,7 +23,7 @@ pub(super) fn bool_ir_type(module: &IrModule) -> IrType {
         .enums
         .iter()
         .position(|l| l.name == crate::ast::BOOL_TYPE_NAME)
-        .expect("a lowered module that names `bool` has its layout");
+        .expect("a lowered module that names `Bool` has its layout");
     IrType::Enum(crate::ast::EnumId::from_index(idx))
 }
 

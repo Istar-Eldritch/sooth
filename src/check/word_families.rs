@@ -1872,13 +1872,13 @@ mod tests {
     /// lowering panic. Happy path, both error shapes.
     #[test]
     fn check_tag_word_accepts_a_scalar_enum_and_locates_both_rejections() {
-        check_src(": w ( bool -- u32 ) tag ;\n: main ( -- ) true w drop ;\n")
-            .expect("`bool` is payload-free, so its value is its discriminant");
+        check_src(": w ( Bool -- u32 ) tag ;\n: main ( -- ) True w drop ;\n")
+            .expect("`Bool` is payload-free, so its value is its discriminant");
         check_src(
             "type: Dir | N | S | E | W ;\n: w ( Dir -- u32 ) tag ;\n\
              : main ( -- ) N w drop ;\n",
         )
-        .expect("`bool` is not a carve-out: any all-unit-variant enum works");
+        .expect("`Bool` is not a carve-out: any all-unit-variant enum works");
 
         let payload = check_src(
             "type: E | None | Some v i64 ;\n: w ( E -- u32 ) tag ;\n\
@@ -1942,13 +1942,13 @@ mod tests {
     #[test]
     fn check_peek_of_non_cell_is_error() {
         // `^|>` on a plain `bool` names the word and the offending type.
-        let err = check_src(": w ( -- bool bool ) true ^|> ;").unwrap_err();
+        let err = check_src(": w ( -- Bool Bool ) True ^|> ;").unwrap_err();
         assert!(err.contains("`^|>`"), "unexpected message: {err}");
         assert!(
             err.contains("requires an owning-cell operand"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("found `bool`"), "unexpected message: {err}");
+        assert!(err.contains("found `Bool`"), "unexpected message: {err}");
     }
 
     // --- Phase 6 slice 2 (R10): the variant accessor family, per mechanism.

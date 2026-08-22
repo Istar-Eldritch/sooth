@@ -23,7 +23,7 @@ import: self::prelude * ;
 \ `bool` names a type in `filter`/`while`'s effects, and a type name resolves
 \ against its declaring module rather than following the hub's re-export, so it
 \ comes from `core::bool` directly.
-import: self::bool b | bool | ;
+import: self::bool b | Bool | ;
 
 export: each map fold filter while times times-helper ;
 
@@ -67,7 +67,7 @@ export: each map fold filter while times times-helper ;
 \ because the body `dup`s the element; no non-`Copy`-element array can be
 \ built today (`fill` rejects a linear element), so the bound is currently
 \ inert but honest.
-: filter inline ( ['T: Copy 'N] ~[ 'T -- bool ] -- ['T 'N] usize )
+: filter inline ( ['T: Copy 'N] ~[ 'T -- Bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
           | v | &!arr over >usize &!> v ! 1 add
@@ -80,5 +80,5 @@ export: each map fold filter while times times-helper ;
 \ endless splice, so `while` runs in constant stack. The self-edge is the only
 \ recursion 6b's relaxed cycle check (D5) admits; the quotation `p` is `Copy`
 \ and re-resolved statically each iteration, carried in no loop phi.
-: while inline ( 'a ~[ 'a -- 'a bool ] -- 'a )
+: while inline ( 'a ~[ 'a -- 'a Bool ] -- 'a )
   | p | p call ~[ p while ] ~[ ] if ;

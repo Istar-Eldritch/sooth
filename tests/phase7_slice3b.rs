@@ -250,7 +250,7 @@ fn poly_eliminator_reference_scrutinee_is_located_error() {
     }
 }
 
-/// L4, the false-accept guard. `PolyScope`'s borrow table is keyed by place
+/// L4, the False-accept guard. `PolyScope`'s borrow table is keyed by place
 /// and a *missing* record reads as "no conflict", so the arm merge must
 /// **union** both arms' records: a merge that picked one arm would silently
 /// admit a later use of the place the other arm borrowed.

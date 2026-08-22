@@ -314,20 +314,20 @@ fn static_ref_captured_into_an_escaping_closure_env_no_ice() {
 }
 
 /// D1/D3: every static type this slice accepts round-trips through emitted
-/// storage, elided initialiser included -- `bool`'s zero is `false`, `str`'s is
+/// storage, elided initialiser included -- `Bool`'s zero is `False`, `str`'s is
 /// the empty string, and a `u32` reads back at its own width rather than
 /// through an oversized slot.
 #[test]
 fn every_scalar_static_type_round_trips_through_its_storage() {
     let (stdout, code) = run_program(
         "kinds",
-        "static: FLAG bool = true ;\n\
+        "static: FLAG Bool = True ;\n\
          static: WIDE u32 ;\n\
          static: TAG str = \"hi\" ;\n\
          static: EMPTY str ;\n\
          : main ( -- )\n\
            &FLAG @ .\n\
-           &!FLAG false !\n\
+           &!FLAG False !\n\
            &FLAG @ .\n\
            &WIDE @ .\n\
            &!WIDE 7 >u32 !\n\
@@ -338,6 +338,6 @@ fn every_scalar_static_type_round_trips_through_its_storage() {
     );
     // `str` prints with no trailing newline, so `TAG` and the empty `EMPTY`
     // run into the final `0`.
-    assert_eq!(stdout, "true\nfalse\n0\n7\nhi0\n");
+    assert_eq!(stdout, "True\nFalse\n0\n7\nhi0\n");
     assert_eq!(code, 0);
 }

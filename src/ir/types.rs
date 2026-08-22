@@ -598,9 +598,9 @@ mod tests {
         // memory aggregate is decided by `EnumLayout::is_scalar`, not by a
         // hard-coded arm here (which has no registry access to consult).
         let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
-            .expect("`core::bool` declares `bool`");
+            .expect("`core::bool` declares `Bool`");
         let Type::Enum(bool_id, _) = bool_ty else {
-            panic!("`bool` is an enum");
+            panic!("`Bool` is an enum");
         };
         assert_eq!(ir_type_of(bool_ty), IrType::Enum(bool_id));
     }

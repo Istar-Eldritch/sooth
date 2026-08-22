@@ -3,21 +3,21 @@
 \ this module's whole intrinsic surface in one line.
 import: intrinsics i | branch tag drop . | ;
 
-export: bool False True if unless . ;
+export: Bool False True if unless . ;
 
-\ `bool` is an ordinary two-variant enum declared here in source, not a type
+\ `Bool` is an ordinary two-variant enum declared here in source, not a type
 \ the compiler injects into every program: a module reaches it, its variants
-\ and the `true`/`false` spellings that construct them through an `import:`
+\ and the `True`/`False` spellings that construct them through an `import:`
 \ like any other type. `False` is variant 0 and `True` variant 1, so their
 \ discriminants are the `0`/`1` that `tag` hands `branch`. Both variants carry
-\ an empty payload, so the general zero-payload-enum layout rule lowers a bool
+\ an empty payload, so the general zero-payload-enum layout rule lowers a Bool
 \ to a bare scalar.
-type: bool
+type: Bool
 | False
 | True
 ;
 
-\ `if` reads its `bool`'s discriminant and branches on it. Both quotations are
+\ `if` reads its `Bool`'s discriminant and branches on it. Both quotations are
 \ `~` (inline-only) and share the input row `..a` and the output row `..b`, so
 \ a branch may change the stack shape as long as both agree; the shape change
 \ is splice-local and reconciled by the branch's own join.
@@ -35,21 +35,21 @@ type: bool
 \ Its tail term is `branch`, whose tail-called parameters are both quotations,
 \ so a caller's `... ~[ base ] ~[ ... rec ] if` self-tails through it and lowers
 \ to a loop back-edge rather than recursion.
-: if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+: if inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | if--else-arm | | if--then-arm | | if--cond |
   if--cond tag if--then-arm if--else-arm branch ;
 
 \ `unless` is `if` with the arms swapped: the first quotation runs when the
 \ condition is false.
-: unless inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+: unless inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | unless--else-arm | | unless--then-arm | | unless--cond |
   unless--cond tag unless--else-arm unless--then-arm branch ;
 
-\ `.` on a bool: an ordinary library overload of the print operator, reached
+\ `.` on a Bool: an ordinary library overload of the print operator, reached
 \ through the builtin-row exact miss like any user overload. It eliminates over
 \ the two variants and delegates to the still-primitive `str` row, so the
 \ backend needs no boolean print arm of its own.
-: . ( bool -- )
-  ~[ ( False ) drop "false\n" . ]
-  ~[ ( True )  drop "true\n" . ]
-  bool? ;
+: . ( Bool -- )
+  ~[ ( False ) drop "False\n" . ]
+  ~[ ( True )  drop "True\n" . ]
+  Bool? ;

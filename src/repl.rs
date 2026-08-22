@@ -705,7 +705,7 @@ pub fn format_stack(
             // scalar-layout check states that one-cell read directly.
             Type::Enum(id, _) if *id == bool_enum && enum_layouts[id.index()].is_scalar => {
                 let v = buf[cell];
-                vals.push(if v != 0 { "true" } else { "false" }.to_string());
+                vals.push(if v != 0 { "True" } else { "False" }.to_string());
                 cell += 1;
             }
             Type::Struct(id, name) => {
@@ -839,7 +839,7 @@ fn render_rich_value(
     cell_payloads: &[ir::IrType],
 ) -> String {
     match ty {
-        ir::IrType::Bool => if region[0] != 0 { "true" } else { "false" }.to_string(),
+        ir::IrType::Bool => if region[0] != 0 { "True" } else { "False" }.to_string(),
         ir::IrType::Int { bits, signed } => {
             let raw = read_uint_le(region, (bits / 8) as usize);
             let kind = if signed { 'i' } else { 'u' };
@@ -1181,7 +1181,7 @@ impl Session {
                     Type::Enum(id, _) => Some(id.index()),
                     _ => None,
                 })
-                .expect("`lib/bool.sth` declares the `bool` enum"),
+                .expect("`lib/bool.sth` declares the `Bool` enum"),
         );
         let mut session = Session {
             env: HashMap::new(),
@@ -1223,7 +1223,7 @@ impl Session {
             .words
             .into_iter()
             .find(|w| w.name == "." && w.poly.is_none())
-            .expect("`lib/bool.sth` declares the bool `.` overload");
+            .expect("`lib/bool.sth` declares the Bool `.` overload");
         session
             .eval_def(print, &mut std::io::sink())
             .expect("`core::bool`'s `.` overload always checks and compiles");
@@ -3951,7 +3951,7 @@ mod tests {
                 &[],
                 EnumId::from_index(0)
             ),
-            "stack: true false"
+            "stack: True False"
         );
     }
 
@@ -3972,7 +3972,7 @@ mod tests {
                 &[],
                 EnumId::from_index(0)
             ),
-            "stack: <bool> 7"
+            "stack: <Bool> 7"
         );
     }
 
@@ -3991,7 +3991,7 @@ mod tests {
         ];
         assert_eq!(
             format_stack(&[1], &[stranger], &[], &layouts, &[], EnumId::from_index(0)),
-            "stack: <bool>"
+            "stack: <Bool>"
         );
     }
 

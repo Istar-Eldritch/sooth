@@ -879,7 +879,7 @@ mod tests {
         // neither of these.
         let src = "type: File fd i64 ; \
                    : shut ( File -- ) drop ; \
-                   : drop ( File -- ) | f | true ~[ f shut ] ~[ f shut ] if 1 . ; \
+                   : drop ( File -- ) | f | True ~[ f shut ] ~[ f shut ] if 1 . ; \
                    : main ( -- ) 1 File drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -1090,7 +1090,7 @@ mod tests {
         // `tail_position_calls` still reports the name (it is syntactic);
         // only the self-call conclusion changes.
         let w = first_word(
-            "type: Vec2 x i64 y i64 ; : lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;",
+            "type: Vec2 x i64 y i64 ; : lt ( Vec2 Vec2 -- Bool ) | a b | &a &x @ &b &x @ lt ;",
         );
         assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["lt"]);
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
@@ -1173,11 +1173,11 @@ mod tests {
     /// A hand-written two-way branch over the primitive `if`, whose two
     /// quotation parameters are each `call`ed in tail position: the shape
     /// whose tail-called-parameter set is `{1, 2}`.
-    const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+    const BOOL_Q: &str = ": decide inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
          | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n";
     /// Recon 4's negative: each arm `call`s one parameter and *then* drops the
     /// other, so the tail term is `drop` and neither parameter is tail-called.
-    const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+    const BOOL_D: &str = ": Bool!? inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
          | e | | t | | c | c ~[ t call e drop ] ~[ e call t drop ] if ;\n";
 
     fn words_of(src: &str) -> Vec<WordDef> {
@@ -1195,7 +1195,7 @@ mod tests {
         // the literal inherits `sum-to`'s tail position.
         let words = words_of(&format!(
             "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] Bool? ;\n"
+             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] decide ;\n"
         ));
         let combs = combinator_index(&words);
         assert!(has_self_tail_call(named(&words, "sum-to"), &combs));
@@ -1230,7 +1230,7 @@ mod tests {
         // never correctness.
         let words = words_of(&format!(
             "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | [ acc n add n 1 sub sum-to ] | rec | n 0 eq [ acc ] rec Bool? ;\n"
+             | n | | acc | [ acc n add n 1 sub sum-to ] | rec | n 0 eq [ acc ] rec decide ;\n"
         ));
         assert!(!has_self_tail_call(
             named(&words, "sum-to"),
@@ -1243,13 +1243,13 @@ mod tests {
         // R-P1-4: two always-spliced words share the name, so which body the
         // call reaches cannot be decided syntactically.
         let words = words_of(&format!(
-            "{BOOL_Q}: Bool? inline ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+            "{BOOL_Q}: decide inline ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c drop t call e drop ;\n\
              : sum-to ( i64 i64 -- i64 )\n\
-             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] Bool? ;\n"
+             | n | | acc | n 0 eq [ acc ] [ acc n add n 1 sub sum-to ] decide ;\n"
         ));
         let combs = combinator_index(&words);
-        assert!(combs["Bool?"].ambiguous);
+        assert!(combs["decide"].ambiguous);
         assert!(!has_self_tail_call(named(&words, "sum-to"), &combs));
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
         // `docs/roadmap/P4/slice10c-spec.md` before "fixing" a survivor there.
         let recon2 = words_of(&format!(
             "{BOOL_Q}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
-             | f | | n | n 0 eq [ f call ] [ n 1 sub f walk ] Bool? ;\n"
+             | f | | n | n 0 eq [ f call ] [ n 1 sub f walk ] decide ;\n"
         ));
         let recon4 = words_of(&format!(
             "{BOOL_D}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
@@ -1308,7 +1308,7 @@ mod tests {
         // be kept away from.
         for src in [
             "type: Vec2 x i64 y i64 ;\n\
-             : lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;\n",
+             : lt ( Vec2 Vec2 -- Bool ) | a b | &a &x @ &b &x @ lt ;\n",
             ": branch inline ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c t e branch ;\n",
         ] {
@@ -1376,9 +1376,9 @@ mod tests {
         // multi-name `| c t e |`, whose *leftmost* name takes the deepest
         // value, does.
         for (src, name) in [
-            (BOOL_Q, "Bool?"),
+            (BOOL_Q, "decide"),
             (
-                ": Pick inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+                ": Pick inline ( Bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
                  | c t e | c ~[ t call ] ~[ e call ] if ;\n",
                 "Pick",
             ),
@@ -1413,7 +1413,7 @@ mod tests {
     #[test]
     fn check_non_tail_mutual_recursion_is_ok() {
         // Both words call each other only in non-tail position (`x 1 add`), so no
-        // tail-call edge exists and X1 must not fire (R4 no-false-positive).
+        // tail-call edge exists and X1 must not fire (R4 no-False-positive).
         check_src(
             ": a ( i64 -- i64 ) dup 0 gt ~[ b 1 add ] ~[ drop 0 ] if ; \
              : b ( i64 -- i64 ) dup 0 gt ~[ a 1 add ] ~[ drop 0 ] if ;",

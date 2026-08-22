@@ -904,7 +904,7 @@ impl EnumId {
 /// P7 slice 3i: the source spelling of the boolean type, named once so the
 /// registry lookup and the REPL's own bool-keyed arms cannot drift from
 /// `lib/bool.sth`'s declaration.
-pub const BOOL_TYPE_NAME: &str = "bool";
+pub const BOOL_TYPE_NAME: &str = "Bool";
 
 /// P7 slice 3i (R4): the boolean type this build resolved -- the enum named
 /// `bool`, declared once as ordinary source in `core::bool` and reached like any
@@ -2187,7 +2187,7 @@ mod tests {
         // therefore only through an `import:`), which is what
         // `resolve_bool_type` reads and what makes an unimported `bool` a
         // located `unknown type`.
-        assert_eq!(Type::from_name("bool"), None);
+        assert_eq!(Type::from_name("Bool"), None);
     }
 
     /// A `bool`-shaped registry: the declaration `lib/bool.sth` holds, built
@@ -2196,7 +2196,7 @@ mod tests {
         let variant = |name: &'static str| VariantDecl {
             name: name.to_string(),
             name_static: name,
-            display_static: "bool.V",
+            display_static: "Bool.V",
             fields: Vec::new(),
             span: Span::default(),
         };
@@ -2249,7 +2249,7 @@ mod tests {
         enums[0].variants.push(VariantDecl {
             name: "Maybe".to_string(),
             name_static: "Maybe",
-            display_static: "bool.V",
+            display_static: "Bool.V",
             fields: Vec::new(),
             span: Span::default(),
         });

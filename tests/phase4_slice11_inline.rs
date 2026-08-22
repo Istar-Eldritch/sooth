@@ -546,14 +546,14 @@ fn combinators_source(quotation_kind: &str) -> String {
   acc count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
+: filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- Bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
           | v | &!arr over >usize &!> v ! 1 add
         ] ~[ drop ] if ] times
   | wf | arr wf >usize ;
 
-: while inline ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
+: while inline ( 'a {quotation_kind}[ 'a -- 'a Bool ] -- 'a )
   | p | p call ~[ p while ] ~[ ] if ;
 "#
     )
@@ -575,7 +575,7 @@ fn combinators_main(quotation_kind: &str) -> String {
   mkarr {quotation_kind}[ 2 mul ] map {quotation_kind}[ 1 add drop ] each
   mkarr 0 {quotation_kind}[ add ] fold .
   mkarr {quotation_kind}[ 2 gt ] filter drop drop
-  0 {quotation_kind}[ | n | n 3 lt ~[ n 1 add true ] ~[ n false ] if ] while . ;
+  0 {quotation_kind}[ | n | n 3 lt ~[ n 1 add True ] ~[ n False ] if ] while . ;
 "
     )
 }
@@ -658,8 +658,8 @@ fn combinators_library_uses_tilde_quotation_parameters() {
         ("each", "~[ 'T -- ]"),
         ("map", "~[ 'T -- 'T ]"),
         ("fold", "~[ 'A 'T -- 'A ]"),
-        ("filter", "~[ 'T -- bool ]"),
-        ("while", "~[ 'a -- 'a bool ]"),
+        ("filter", "~[ 'T -- Bool ]"),
+        ("while", "~[ 'a -- 'a Bool ]"),
     ] {
         assert!(
             lib.contains(quotation),

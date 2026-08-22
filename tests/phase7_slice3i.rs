@@ -85,7 +85,7 @@ fn true_without_importing_core_bool_is_an_unknown_word() {
     let t = Tree::new("g1-word");
     let entry = t.write_raw(
         "main.sth",
-        "import: intrinsics * ;\n: main ( -- ) true drop ;\n",
+        "import: intrinsics * ;\n: main ( -- ) True drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -102,11 +102,11 @@ fn bool_in_an_effect_without_importing_core_bool_is_an_unknown_type() {
     let t = Tree::new("g1-type");
     let entry = t.write_raw(
         "main.sth",
-        "import: intrinsics * ;\n: w ( bool -- ) drop ;\n: main ( -- ) ;\n",
+        "import: intrinsics * ;\n: w ( Bool -- ) drop ;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("unknown type `bool` at line 2"),
+        err.contains("unknown type `Bool` at line 2"),
         "unexpected diagnostic: {err}"
     );
 }
@@ -122,7 +122,7 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
     let t = Tree::new("g1-hub");
     let ok = t.write_raw(
         "ctors.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) true drop false drop ;\n",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) True drop False drop ;\n",
     );
     let build = sooth_build(&ok);
     assert!(
@@ -133,11 +133,11 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
 
     let entry = t.write_raw(
         "named.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n: w ( bool -- ) drop ;\n: main ( -- ) ;\n",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n: w ( Bool -- ) drop ;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("unknown type `bool` at line 3"),
+        err.contains("unknown type `Bool` at line 3"),
         "unexpected diagnostic: {err}"
     );
 
@@ -146,11 +146,11 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
     // above does not mean printing does.
     let print_entry = t.write_raw(
         "print.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) true . ;\n",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) True . ;\n",
     );
     let print_err = build_error(&print_entry);
     assert!(
-        print_err.contains("`.` requires a printable scalar, found `bool`"),
+        print_err.contains("`.` requires a printable scalar, found `Bool`"),
         "unexpected diagnostic: {print_err}"
     );
 }
@@ -165,22 +165,22 @@ fn importing_core_bool_gives_the_type_constructors_branch_and_print() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         import: core::bool b | bool False True if unless . | ;\n\
-         : flip ( bool -- bool )\n\
+         import: core::bool b | Bool False True if unless . | ;\n\
+         : flip ( Bool -- Bool )\n\
            ~[ False ] ~[ True ] if ;\n\
          : main ( -- )\n\
-           true .\n\
-           false .\n\
-           true flip .\n\
-           false ~[ 1 ] ~[ 2 ] unless . ;\n",
+           True .\n\
+           False .\n\
+           True flip .\n\
+           False ~[ 1 ] ~[ 2 ] unless . ;\n",
     );
-    assert_eq!(build_and_run(&entry), "true\nfalse\nfalse\n1\n");
+    assert_eq!(build_and_run(&entry), "True\nFalse\nFalse\n1\n");
 }
 
 // -- G3 (R1): a boolean static requires the import too ----------------------
 
 /// R1: the static's *type annotation* is the gate. Without `core::bool` in
-/// scope it is a located unknown type at the annotation, and the `= true`
+/// scope it is a located unknown type at the annotation, and the `= True`
 /// initializer is never reached -- the same rule the body position obeys, not a
 /// second initializer-specific check.
 #[test]
@@ -188,33 +188,33 @@ fn boolean_static_without_importing_core_bool_is_an_unknown_type() {
     let t = Tree::new("g3-missing");
     let entry = t.write_raw(
         "main.sth",
-        "import: intrinsics * ;\nstatic: FLAG bool = true ;\n: main ( -- ) ;\n",
+        "import: intrinsics * ;\nstatic: FLAG Bool = True ;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("unknown type `bool` at line 2"),
+        err.contains("unknown type `Bool` at line 2"),
         "unexpected diagnostic: {err}"
     );
 }
 
 /// R1, the other side: with the import the static declares, initializes and
-/// reads back as `true`.
+/// reads back as `True`.
 #[test]
 fn boolean_static_with_the_import_holds_its_initializer() {
     let t = Tree::new("g3-present");
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         import: core::bool b | bool False True if . | ;\n\
-         static: FLAG bool = true ;\n\
+         import: core::bool b | Bool False True if . | ;\n\
+         static: FLAG Bool = True ;\n\
          : main ( -- )\n\
            &!FLAG @ .\n\
            &!FLAG @ ~[ 10 ] ~[ 20 ] if . ;\n",
     );
-    assert_eq!(build_and_run(&entry), "true\n10\n");
+    assert_eq!(build_and_run(&entry), "True\n10\n");
 }
 
-/// R1's shape half: `bool` resolves through the registry now, so a module can
+/// R1's shape half: `Bool` resolves through the registry now, so a module can
 /// declare an enum of its own under that name -- and a static may not be
 /// declared at one whose variants carry a payload, whatever it is called. The
 /// parser cannot see this (variant fields are filled in after declaration
@@ -225,13 +225,13 @@ fn static_at_a_payload_carrying_enum_named_bool_is_an_error() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         type: bool | A n i64 | B ;\n\
-         static: FLAG bool = true ;\n\
+         type: Bool | A n i64 | B ;\n\
+         static: FLAG Bool = True ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("static `FLAG` has a non-scalar type `bool`")
+        err.contains("static `FLAG` has a non-scalar type `Bool`")
             && err.contains("must be exactly two variants, each carrying no payload"),
         "unexpected diagnostic: {err}"
     );
@@ -239,8 +239,8 @@ fn static_at_a_payload_carrying_enum_named_bool_is_an_error() {
 
 /// R1's shape half, the payload-free forgery: a same-named enum with three
 /// payload-free variants passes the old "all variants payload-free" test but
-/// is still not the logical two-variant `bool` `resolve_bool_type` resolves,
-/// so a `= true` initializer would write a bare 0/1 discriminant into a type
+/// is still not the logical two-variant `Bool` `resolve_bool_type` resolves,
+/// so a `= True` initializer would write a bare 0/1 discriminant into a type
 /// whose third variant gives that discriminant space a different meaning.
 #[test]
 fn static_at_a_three_variant_enum_named_bool_is_an_error() {
@@ -248,21 +248,21 @@ fn static_at_a_three_variant_enum_named_bool_is_an_error() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         type: bool | Maybe | False | True ;\n\
-         static: FLAG bool = true ;\n\
+         type: Bool | Maybe | False | True ;\n\
+         static: FLAG Bool = True ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("static `FLAG` has a non-scalar type `bool`")
+        err.contains("static `FLAG` has a non-scalar type `Bool`")
             && err.contains("must be exactly two variants, each carrying no payload"),
         "unexpected diagnostic: {err}"
     );
 }
 
-/// A same-named enum whose variants carry a payload is not the logical `bool`:
+/// A same-named enum whose variants carry a payload is not the logical `Bool`:
 /// `resolve_bool_type` requires both variants payload-free, the shape that makes
-/// a bool a register-resident scalar. `not` on a two-cell tagged aggregate
+/// a Bool a register-resident scalar. `not` on a two-cell tagged aggregate
 /// therefore falls through to the bitwise-only path and is rejected, rather than
 /// `xor 1`-ing whichever word the discriminant happens to occupy.
 #[test]
@@ -271,17 +271,17 @@ fn not_on_a_payload_carrying_enum_named_bool_is_an_error() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         type: bool | A n i64 | B ;\n\
+         type: Bool | A n i64 | B ;\n\
          : main ( -- ) 1 A not drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("`not` requires an integer or bool operand, found `bool`"),
+        err.contains("`not` requires an integer or Bool operand, found `Bool`"),
         "unexpected diagnostic: {err}"
     );
 }
 
-/// A same-named enum with a third payload-free variant is not the logical `bool`
+/// A same-named enum with a third payload-free variant is not the logical `Bool`
 /// either: `resolve_bool_type` requires exactly two variants (the count the
 /// `xor 1` lowering of `not` assumes), so `not` on it is rejected rather than
 /// silently misrouting a three-way discriminant through a two-way eliminator.
@@ -291,12 +291,12 @@ fn not_on_a_three_variant_enum_named_bool_is_an_error() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         type: bool | A | B | C ;\n\
+         type: Bool | A | B | C ;\n\
          : main ( -- ) C not drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("`not` requires an integer or bool operand, found `bool`"),
+        err.contains("`not` requires an integer or Bool operand, found `Bool`"),
         "unexpected diagnostic: {err}"
     );
 }
@@ -322,23 +322,23 @@ fn run_session(lines: &[&str]) -> String {
 }
 
 /// R2: a session resolves no package-name import at all, so it seeds
-/// `core::bool` at startup from the real `lib/bool.sth`. `true` works on the
-/// first line, `.` prints it as `true`/`false`, and `:stack` renders it the same
+/// `core::bool` at startup from the real `lib/bool.sth`. `True` works on the
+/// first line, `.` prints it as `True`/`False`, and `:stack` renders it the same
 /// way -- with no import written.
 #[test]
 fn repl_seeds_core_bool_so_a_bare_true_works_on_the_first_line() {
-    let out = run_session(&["true", ":stack", "true .", "false .", "true false"]);
+    let out = run_session(&["True", ":stack", "True .", "False .", "True False"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         vec![
-            "stack: true",
-            "stack: true",
-            "true",
-            "stack: true",
-            "false",
-            "stack: true",
-            "stack: true true false",
+            "stack: True",
+            "stack: True",
+            "True",
+            "stack: True",
+            "False",
+            "stack: True",
+            "stack: True True False",
         ],
         "unexpected session transcript: {out}"
     );
@@ -346,7 +346,7 @@ fn repl_seeds_core_bool_so_a_bare_true_works_on_the_first_line() {
 
 /// R2: an imported closure's own `core::bool` folds onto the one the session
 /// seeded, rather than being appended as a second, non-equal type. That fold is
-/// what lets a session `true` reach an imported `if` at all, and it is the
+/// what lets a session `True` reach an imported `if` at all, and it is the
 /// behaviour the shape test below has to keep while refusing a stranger.
 #[test]
 fn repl_imported_core_bool_folds_onto_the_session_seed() {
@@ -354,7 +354,7 @@ fn repl_imported_core_bool_folds_onto_the_session_seed() {
         "import: \"{}/lib/bool.sth\" b | if | ;",
         env!("CARGO_MANIFEST_DIR")
     );
-    let out = run_session(&[&import, "true ~[ 1 ] ~[ 2 ] if ."]);
+    let out = run_session(&[&import, "True ~[ 1 ] ~[ 2 ] if ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -376,13 +376,13 @@ fn repl_imported_enum_named_bool_is_not_the_session_bool() {
     let sibling = t.write_raw(
         "mybool.sth",
         "import: intrinsics | drop | ;\n\
-         export: bool mk un ;\n\
-         type: bool | A n i64 | B ;\n\
-         : mk ( i64 -- bool ) A ;\n\
-         : un ( bool -- i64 ) ~[ ( A ) A> ] ~[ ( B ) drop 0 ] bool? ;\n",
+         export: Bool mk un ;\n\
+         type: Bool | A n i64 | B ;\n\
+         : mk ( i64 -- Bool ) A ;\n\
+         : un ( Bool -- i64 ) ~[ ( A ) A> ] ~[ ( B ) drop 0 ] Bool? ;\n",
     );
     let import = format!("import: \"{}\" m | mk un | ;", sibling.display());
-    let out = run_session(&[&import, "5 mk un .", "true .", "5 mk"]);
+    let out = run_session(&[&import, "5 mk un .", "True .", "5 mk"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -390,9 +390,9 @@ fn repl_imported_enum_named_bool_is_not_the_session_bool() {
             "imported m",
             "5",
             "stack: (empty)",
-            "true",
+            "True",
             "stack: (empty)",
-            "stack: <bool>",
+            "stack: <Bool>",
         ],
         "unexpected session transcript: {out}"
     );
@@ -418,19 +418,19 @@ fn repl_imported_enum_shaped_like_bool_but_named_differently_is_not_the_session_
     let sibling = t.write_raw(
         "mybool.sth",
         "import: intrinsics | drop | ;\n\
-         export: bool mkon mkoff f ;\n\
-         type: bool | On | Off ;\n\
-         : mkon ( -- bool ) On ;\n\
-         : mkoff ( -- bool ) Off ;\n\
-         : f ( bool -- i64 ) ~[ ( On ) drop 1 ] ~[ ( Off ) drop 0 ] bool? ;\n",
+         export: Bool mkon mkoff f ;\n\
+         type: Bool | On | Off ;\n\
+         : mkon ( -- Bool ) On ;\n\
+         : mkoff ( -- Bool ) Off ;\n\
+         : f ( Bool -- i64 ) ~[ ( On ) drop 1 ] ~[ ( Off ) drop 0 ] Bool? ;\n",
     );
     let import = format!("import: \"{}\" m | mkon mkoff f | ;", sibling.display());
     let out = run_session(&[
         &import,
         "mkon f .",
         "mkoff f .",
-        "true f .",
-        "false f .",
+        "True f .",
+        "False f .",
         "mkon",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -441,18 +441,18 @@ fn repl_imported_enum_shaped_like_bool_but_named_differently_is_not_the_session_
     );
     assert!(
         lines[5].contains("type mismatch") && lines[5].contains("::f"),
-        "session `true` should be rejected as a type mismatch against the \
+        "session `True` should be rejected as a type mismatch against the \
          stranger's `f`, not silently folded onto it: {out}"
     );
     assert!(
         lines[6].contains("type mismatch") && lines[6].contains("::f"),
-        "session `false` should likewise be rejected: {out}"
+        "session `False` should likewise be rejected: {out}"
     );
     assert_eq!(
         lines.last(),
-        Some(&"stack: <bool>"),
+        Some(&"stack: <Bool>"),
         "a residual stranger value must render as the unrelated aggregate it \
-         is, not be misread as the session's own `bool`: {out}"
+         is, not be misread as the session's own `Bool`: {out}"
     );
 }
 
@@ -475,11 +475,11 @@ fn repl_import_shifts_an_enum_declared_after_the_folded_bool() {
         "import: core::bool * ;\n\
          import: self::col c | Color mkred | ;\n\
          export: pick top ;\n\
-         : pick ( bool -- i64 ) ~[ 7 ] ~[ 9 ] if ;\n\
+         : pick ( Bool -- i64 ) ~[ 7 ] ~[ 9 ] if ;\n\
          : top ( -- Color ) mkred ;\n",
     );
     let import = format!("import: \"{}\" p | pick top | ;", entry.display());
-    let out = run_session(&[&import, "top", "true p::pick ."]);
+    let out = run_session(&[&import, "top", "True p::pick ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -498,7 +498,7 @@ fn repl_session_enum_constructs_and_eliminates_across_lines() {
         ": which ( Color -- i64 ) ~[ ( Green ) drop 2 ] ~[ ( Red ) drop 1 ] Color? ;",
         "Green which .",
         "Red which .",
-        "true",
+        "True",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -510,7 +510,7 @@ fn repl_session_enum_constructs_and_eliminates_across_lines() {
             "stack: (empty)",
             "1",
             "stack: (empty)",
-            "stack: true",
+            "stack: True",
         ],
         "unexpected session transcript: {out}"
     );

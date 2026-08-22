@@ -222,20 +222,20 @@ fn capturing_scalar_through_nested_quotation_snapshots() {
     assert_eq!(code, 0);
 }
 
-// -- T-repoint-bool/f32/f64/ints: every scalar type R15 case 1 admits --------
+// -- T-repoint-Bool/f32/f64/ints: every scalar type R15 case 1 admits --------
 // -- round-trips correctly through the one-word env slot (B2 review fix) -----
 
 #[test]
 fn capturing_bool_scalar_snapshots_into_env() {
-    // `x` is a captured `bool`, snapshotted into the env and read back. Before
+    // `x` is a captured `Bool`, snapshotted into the env and read back. Before
     // the fix, reinterpreting the one-word env slot with a typed add-of-zero
-    // segfaulted for `bool` (narrower than the env slot's own width, so the
+    // segfaulted for `Bool` (narrower than the env slot's own width, so the
     // add read garbage upper bytes); the fix round-trips through a scratch
     // slot at each type's own width instead.
-    let src = "type: BoolHolder q [ -- bool ] ;\n\
-               : main ( -- ) true | x | [ x ] BoolHolder BoolHolder> call . ;\n";
+    let src = "type: BoolHolder q [ -- Bool ] ;\n\
+               : main ( -- ) True | x | [ x ] BoolHolder BoolHolder> call . ;\n";
     let (stdout, code) = run_src("qcapbool", src);
-    assert_eq!(stdout, "true\n");
+    assert_eq!(stdout, "True\n");
     assert_eq!(code, 0);
 }
 
@@ -473,8 +473,8 @@ fn two_differing_quotation_arms_materialize_and_call() {
     // splice, so it materializes each against the word's declared
     // `[ i64 -- i64 ]` output (R11) and `call` at the site dispatches
     // indirectly through whichever aggregate the branch left.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) ~[ [ 1 add ] ] ~[ [ 2 add ] ] if ;\n\
-               : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
+    let src = ": pick ( Bool -- [ i64 -- i64 ] ) ~[ [ 1 add ] ] ~[ [ 2 add ] ] if ;\n\
+               : main ( -- ) True pick 4 swap call . False pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qjoin", src);
     assert_eq!(stdout, "5\n6\n");
     assert_eq!(code, 0);
@@ -491,7 +491,7 @@ fn same_quotation_both_arms_still_splices() {
     // One literal bound before the `if`, named in both arms: the equal `Known`
     // ids forward the marker (no `Phi`, no materialization), so `call` after
     // the join splices exactly as today and emits no indirect call.
-    let src = ": main ( -- ) [ 1 add ] | q | true ~[ q ] ~[ q ] if 5 swap call . ;\n";
+    let src = ": main ( -- ) [ 1 add ] | q | True ~[ q ] ~[ q ] if 5 swap call . ;\n";
     let (stdout, code) = run_src("qjoinsame", src);
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
@@ -506,11 +506,11 @@ fn same_quotation_both_arms_still_splices() {
 #[test]
 fn capturing_scalar_at_join_snapshots() {
     // A materializing join (the word declares a `[ i64 -- i64 ]` output) whose
-    // `true` arm captures the scalar `x`. 7b re-points 7a's rejection: the arm
-    // snapshots `x = 10` and both arms materialize (the `false` arm captures
-    // nothing, a null env). `true`: 4 + 10 = 14; `false`: 4 + 2 = 6.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | ~[ [ x add ] ] ~[ [ 2 add ] ] if ;\n\
-               : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
+    // `True` arm captures the scalar `x`. 7b re-points 7a's rejection: the arm
+    // snapshots `x = 10` and both arms materialize (the `False` arm captures
+    // nothing, a null env). `True`: 4 + 10 = 14; `False`: 4 + 2 = 6.
+    let src = ": pick ( Bool -- [ i64 -- i64 ] ) 10 | x | ~[ [ x add ] ] ~[ [ 2 add ] ] if ;\n\
+               : main ( -- ) True pick 4 swap call . False pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapjoin", src);
     assert_eq!(stdout, "14\n6\n");
     assert_eq!(code, 0);
@@ -946,7 +946,7 @@ fn join_of_two_capturing_arms_unions_capture_sets() {
                10 2 fill | a |\n\
                &a | r |\n\
                [ 0 ] Holder | h |\n\
-               &!h &!q true ~[ [ r 0 >usize &> @ ] ] ~[ [ r 1 >usize &> @ ] ] if !\n\
+               &!h &!q True ~[ [ r 0 >usize &> @ ] ] ~[ [ r 1 >usize &> @ ] ] if !\n\
                h Holder> call .\n\
                a drop ;\n";
     let (stdout, code) = run_src("qjoinunion", src);
@@ -975,7 +975,7 @@ fn join_capture_union_kills_either_arm_referent_is_past_last_use() {
              &a | ra |\n\
              &b | rb |\n\
              [ 0 ] Holder | h |\n\
-             &!h &!q true ~[ [ ra 0 >usize &> @ ] ] ~[ [ rb 0 >usize &> @ ] ] if !\n\
+             &!h &!q True ~[ [ ra 0 >usize &> @ ] ] ~[ [ rb 0 >usize &> @ ] ] if !\n\
              &!{kill} 0 >usize &!> 9 !\n\
              h Holder> call .\n\
              a drop b drop ;\n"

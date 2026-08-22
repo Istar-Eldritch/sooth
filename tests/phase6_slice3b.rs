@@ -115,14 +115,14 @@ fn stray_generic_arm_tag_outside_an_eliminator_call_is_error() {
 }
 
 /// T11: a missing arm over a generic enum names the *surface* variant and enum,
-/// not the instantiation-suffixed (`Err[i64 bool]`) or mangled (`Result__m0`)
+/// not the instantiation-suffixed (`Err[i64 Bool]`) or mangled (`Result__m0`)
 /// spelling -- the same wording the concrete case is pinned to.
 #[test]
 fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
     let err = build_err(
         "s3b-nonexhaustive-generic",
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
-         : to-int ( Result[i64 bool] -- i64 ) ~[ ( Ok ) Ok> ] Result? ;\n\
+         : to-int ( Result[i64 Bool] -- i64 ) ~[ ( Ok ) Ok> ] Result? ;\n\
          : main ( -- ) 42 Ok to-int . ;\n",
     );
     assert!(
@@ -139,7 +139,7 @@ fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
 /// is rendered under the family's *surface* name. Only a generic gate can show
 /// this: the registry retains one arbitrary instantiation (last write wins), so
 /// without the surface-name normalization this blames the scrutinee for not
-/// being `Result[i64 bool]` -- an instantiation the offending word never
+/// being `Result[i64 Bool]` -- an instantiation the offending word never
 /// mentions, and which would change with declaration order. The concrete
 /// counterpart in `check.rs` cannot discriminate it, since there the
 /// normalization is a no-op.
@@ -149,7 +149,7 @@ fn wrong_family_scrutinee_names_the_generic_surface_family() {
         "s3b-wrong-family-generic",
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
          type: Abc | A a i64 | B b i64 | C c i64 ;\n\
-         : to-int ( Result[i64 bool] -- i64 )\n  \
+         : to-int ( Result[i64 Bool] -- i64 )\n  \
            ~[ ( Ok ) Ok> ]\n  \
            ~[ ( Err ) Err> ~[ 1 ] ~[ 0 ] if ]\n  \
            Result? ;\n\
@@ -191,25 +191,25 @@ fn forward_declared_generic_type_eliminates_after_the_matching_word() {
 }
 
 /// T6/T7 (R5, decision 5): **one word** eliminates two *asymmetric*
-/// instantiations of the same generic enum -- `Result[i64 bool]` and
-/// `Result[bool i64]`, which can only be told apart because they are not the
+/// instantiations of the same generic enum -- `Result[i64 Bool]` and
+/// `Result[Bool i64]`, which can only be told apart because they are not the
 /// same instantiation (`Result[i64 i64]` could not distinguish `Ok 'T | Err
 /// 'E` from its swap). The word calls `Result?` twice, once per
 /// instantiation, so the eliminator registry keys both calls to the same
 /// base-family entry (a bare `"Result?"` -- an instantiation's mangle lands
-/// after its arguments, `Result[i64 bool]__m0`, so the surface-name strip
+/// after its arguments, `Result[i64 Bool]__m0`, so the surface-name strip
 /// takes the module tag with it; last write wins): this only routes
 /// each call correctly if its operative `EnumId` is read from its own
 /// scrutinee rather than from whichever instantiation the registry happened
-/// to retain (R5). T7 rides along: `Result[i64 bool]`'s stored variant name
-/// is `Ok[i64 bool]`, so a bare `( Ok )` arm only matches it if both sides
+/// to retain (R5). T7 rides along: `Result[i64 Bool]`'s stored variant name
+/// is `Ok[i64 Bool]`, so a bare `( Ok )` arm only matches it if both sides
 /// normalize to the surface name `Ok`.
 #[test]
 fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
     let (stdout, code) = build_and_run(
         "s3b-two-asymmetric-instantiations",
         "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
-         : elim-both ( Result[i64 bool] Result[bool i64] -- i64 i64 )\n  \
+         : elim-both ( Result[i64 Bool] Result[Bool i64] -- i64 i64 )\n  \
            ~[ ( Ok ) Ok> ~[ 10 ] ~[ 20 ] if ]\n  \
            ~[ ( Err ) Err> ]\n  \
            Result?\n  \
@@ -220,7 +220,7 @@ fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
            swap ;\n\
          : main ( -- )\n  \
            42 Ok 7 Err elim-both . .\n  \
-           true Err true Ok elim-both . . ;\n",
+           True Err True Ok elim-both . . ;\n",
     );
     assert_eq!(stdout, "7\n42\n10\n1\n");
     assert_eq!(code, 0);

@@ -108,11 +108,11 @@ fn core_shuffles_are_polymorphic_over_i64_bool_and_a_struct() {
         "type: Vec2 x i64 y i64 ;\n\
          : main ( -- )\n\
          5 dup . .\n\
-         true false swap . .\n\
+         True False swap . .\n\
          1 2 Vec2 &x @ . &y @ . drop ;\n",
         false,
     );
-    assert_eq!(stdout, "5\n5\ntrue\nfalse\n1\n2\n");
+    assert_eq!(stdout, "5\n5\nTrue\nFalse\n1\n2\n");
     assert_eq!(code, 0);
 }
 
@@ -136,10 +136,10 @@ fn two_output_word_outputs_arrive_deepest_first() {
     // output is deepest, so the two prints come off top-first.
     let (stdout, code) = run_src(
         "order",
-        ": two ( -- i64 bool ) 1 true ;\n: main ( -- ) two . . ;\n",
+        ": two ( -- i64 Bool ) 1 True ;\n: main ( -- ) two . . ;\n",
         false,
     );
-    assert_eq!(stdout, "true\n1\n");
+    assert_eq!(stdout, "True\n1\n");
     assert_eq!(code, 0);
 }
 
@@ -151,11 +151,11 @@ fn three_output_word_with_an_aggregate_output_runs() {
     let (stdout, code) = run_src(
         "three",
         "type: Vec2 x i64 y i64 ;\n\
-         : spread ( -- i64 Vec2 bool ) 1 2 3 Vec2 true ;\n\
+         : spread ( -- i64 Vec2 Bool ) 1 2 3 Vec2 True ;\n\
          : main ( -- ) spread . &y @ . drop . ;\n",
         false,
     );
-    assert_eq!(stdout, "true\n3\n1\n");
+    assert_eq!(stdout, "True\n3\n1\n");
     assert_eq!(code, 0);
 }
 
@@ -178,16 +178,16 @@ fn two_output_word_with_a_linear_output_frees_its_cell_exactly_once() {
 #[test]
 fn copy_bounded_type_variable_word_runs_at_two_concrete_types() {
     // Criterion 3 (R1, R4–R7, R9, R14): a `'T: Copy` word `dup`s its variable
-    // and is called at `i64` and `bool`. Each call site resolves to its own
+    // and is called at `i64` and `Bool`. Each call site resolves to its own
     // monomorphized `IrFunc` through the instantiation table, so both
     // instantiations run and print both copies.
     let (stdout, code) = run_src(
         "dupit",
         ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
-         : main ( -- ) 5 dupit . . true dupit . . ;\n",
+         : main ( -- ) 5 dupit . . True dupit . . ;\n",
         false,
     );
-    assert_eq!(stdout, "5\n5\ntrue\ntrue\n");
+    assert_eq!(stdout, "5\n5\nTrue\nTrue\n");
     assert_eq!(code, 0);
 }
 
@@ -718,7 +718,7 @@ fn different_quotations_at_a_join_are_error() {
     // 10c: the arms are quotation literals passed to a `lib/` word, so the
     // join is located at the first arm rather than at `branch` itself, which
     // sits in library source the user did not write.
-    let err = check_error(": main ( -- ) true ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n");
+    let err = check_error(": main ( -- ) True ~[ [ 1 add ] ] ~[ [ 1 sub ] ] if drop ;\n");
     assert!(
         err.contains("these two branches leave different quotations") && err.contains("line 1"),
         "R7 should fire at the join, got: {err}"
@@ -730,7 +730,7 @@ fn quotation_versus_value_at_a_join_is_error() {
     // R7n: one arm leaves a quotation, the other a *real* `cstr`. Their `ty`s
     // are equal (the placeholder is `Cstr`), so the ordinary branch mismatch
     // never fires; the join guard's second phrasing catches it.
-    let err = check_error(": main ( -- ) true ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n");
+    let err = check_error(": main ( -- ) True ~[ [ 1 add ] ] ~[ \"x\" cstr ] if drop ;\n");
     assert!(
         err.contains("one branch of the `if`")
             && err.contains("leaves a quotation and the other does not"),
@@ -828,11 +828,11 @@ fn quotation_as_if_condition_is_error() {
     let err = check_error(": main ( -- ) ~[ add ] ~[ 1 . ] ~[ 2 . ] if ;\n");
     assert!(
         err.contains("`if`") && err.contains("a quotation cannot be passed to"),
-        "R11if should name `if`, not a bool mismatch, got: {err}"
+        "R11if should name `if`, not a Bool mismatch, got: {err}"
     );
     assert!(
-        !err.contains("bool"),
-        "R11if must not leak a bool mismatch, got: {err}"
+        !err.contains("Bool"),
+        "R11if must not leak a Bool mismatch, got: {err}"
     );
 }
 
@@ -1126,8 +1126,8 @@ fn poly_choose_runs_at_i64_and_f64() {
     // operand.
     let (stdout, code) = run_src(
         "poly-choose",
-        ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;\n\
-         : main ( -- ) 1 2 true choose . 1.0 2.0 false choose . ;\n",
+        ": choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;\n\
+         : main ( -- ) 1 2 True choose . 1.0 2.0 False choose . ;\n",
         false,
     );
     assert_eq!(stdout, "1\n2\n");
