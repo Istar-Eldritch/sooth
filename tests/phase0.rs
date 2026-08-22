@@ -4,7 +4,9 @@
 
 use std::path::Path;
 
-use sooth::{check, driver, lexer, parser};
+use sooth::{check, driver, lexer, test_support};
+
+mod common;
 
 fn run_and_capture_stdout(path: &str) -> (String, i32) {
     run_binary(path, false)
@@ -19,7 +21,11 @@ fn run_and_capture_traced_stdout(path: &str) -> (String, i32) {
 }
 
 fn run_binary(path: &str, trace: bool) -> (String, i32) {
-    let binary = driver::build(Path::new(path)).expect("build should succeed");
+    let binary = driver::build_with_manifest(
+        Path::new(path),
+        common::manifest_for(Path::new(path)).as_deref(),
+    )
+    .expect("build should succeed");
     let mut cmd = std::process::Command::new(&binary);
     // The gate is set or cleared explicitly, so an ambient value in the caller's
     // environment can neither hide a trace nor add one.
@@ -103,7 +109,7 @@ fn signed_vs_unsigned_compare_differ_on_same_bit_pattern() {
         "sooth-signed-vs-unsigned-cmp-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -119,7 +125,7 @@ fn narrowing_conversion_truncates_and_widens_back_correctly() {
         "sooth-truncation-golden-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -137,7 +143,7 @@ fn float_to_int_truncates_toward_zero_end_to_end() {
         "sooth-float-to-int-trunc-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -155,7 +161,7 @@ fn signed_widen_surfaces_negative_end_to_end() {
         "sooth-signed-widen-golden-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -175,7 +181,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
         "sooth-widen-subword-cmp-golden-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -189,7 +195,7 @@ fn mixed_width_arithmetic_reports_both_types() {
     // operand-pair-mismatch diagnostic specifically.
     let src = ": f ( -- i32 ) 1 >i32 5 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -208,7 +214,7 @@ fn mixed_sign_comparison_reports_both_types() {
     // message; both operand types are still named.
     let src = ": w ( -- bool ) 200 >u8 5 >i8 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -224,7 +230,7 @@ fn declared_output_needs_conversion_reports_diagnostic() {
     // X3: literal is `i64`, declared output is `u8`; requires an explicit conversion.
     let src = ": f ( -- u8 ) 5 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -236,7 +242,7 @@ fn conversion_of_bool_reports_diagnostic() {
     // X4: `>i32` applied to a `bool` is a type error naming the source is not an integer.
     let src = ": w ( -- i32 ) true >i32 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
@@ -248,7 +254,7 @@ fn conversion_unknown_target_reports_diagnostic() {
     // X5: `>i128` reads as an unknown conversion target.
     let src = ": w ( -- i64 ) 5 >i128 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("unknown type"), "unexpected message: {err}");
@@ -259,7 +265,7 @@ fn conversion_unknown_target_reports_diagnostic() {
 fn if_condition_not_bool_reports_diagnostic() {
     let src = ": oops ( -- i64 )\n  5 ~[ 1 ] ~[ 2 ] if ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("expected `bool`"), "unexpected message: {err}");
@@ -270,7 +276,7 @@ fn if_condition_not_bool_reports_diagnostic() {
 fn operand_type_mismatch_reports_diagnostic() {
     let src = ": oops ( -- i64 )\n  true 1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -283,7 +289,7 @@ fn branch_join_type_mismatch_reports_diagnostic() {
     // caught at the argument site (R-P2-3) rather than at the join.
     let src = ": oops ( bool -- i64 )\n  ~[ 1 ] ~[ true ] if ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -298,7 +304,7 @@ fn branch_join_type_mismatch_reports_diagnostic() {
 fn declared_output_type_mismatch_reports_diagnostic() {
     let src = ": oops ( i64 -- bool )\n  1 add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("type mismatch"), "unexpected message: {err}");
@@ -310,7 +316,7 @@ fn declared_output_type_mismatch_reports_diagnostic() {
 fn unknown_type_name_reports_diagnostic() {
     let src = ": oops ( foo -- i64 )\n  1 ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let err = parser::parse(&tokens).expect_err("parsing should fail");
+    let err = test_support::parse_with_core(&tokens).expect_err("parsing should fail");
 
     assert!(err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("foo"), "unexpected message: {err}");
@@ -320,7 +326,7 @@ fn unknown_type_name_reports_diagnostic() {
 fn stack_effect_mismatch_reports_diagnostic() {
     let src = ": oops ( i64 -- i64 )\n  | a | a a add add ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("oops"), "error should name the word: {err}");
@@ -343,9 +349,10 @@ fn stack_effect_mismatch_reports_diagnostic() {
 fn build_surfaces_checker_error() {
     let src = ": oops ( i64 -- i64 )\n  | a | a a add add ;\n";
     let path = std::env::temp_dir().join(format!("sooth-badsrc-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
 
-    let err = driver::build(&path).expect_err("build should fail on a bad program");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail on a bad program");
     std::fs::remove_file(&path).ok();
 
     assert!(
@@ -375,7 +382,7 @@ fn float_arithmetic_runs_on_both_widths_end_to_end() {
         "sooth-float-arith-both-widths-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -396,7 +403,7 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
         "sooth-float-div-inf-nan-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -424,7 +431,7 @@ fn float_comparison_is_ieee_ordered_and_false_for_nan() {
         "sooth-float-cmp-ordered-nan-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -440,7 +447,7 @@ fn int_to_float_and_float_to_float_conversions_run_end_to_end() {
 10 >f32 >f64 . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-int-float-conv-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -463,7 +470,7 @@ fn unsigned_int_to_float_conversions_run_end_to_end() {
         "sooth-unsigned-int-to-float-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -484,7 +491,7 @@ fn float_to_unsigned_int_conversions_run_end_to_end() {
         "sooth-float-to-unsigned-int-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -498,7 +505,7 @@ fn mixed_int_float_arithmetic_reports_diagnostic() {
     // differing types via the operand-pair-mismatch diagnostic.
     let src = ": f ( -- f64 ) 1 3.0 add ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -516,7 +523,7 @@ fn mixed_float_width_comparison_reports_diagnostic() {
     // `mixed_sign_comparison_reports_both_types`).
     let src = ": w ( -- bool ) 1.0 >f32 2.0 lt ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -532,7 +539,7 @@ fn integer_division_reports_diagnostic() {
     // X3: `div` requires floats; two `i64` operands is an error.
     let src = ": f ( -- i64 ) 6 2 div ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("div"), "unexpected message: {err}");
@@ -545,7 +552,7 @@ fn float_mod_reports_diagnostic() {
     // X4: `mod` stays integer-only; two `f64` operands is an error.
     let src = ": f ( -- f64 ) 6.0 2.0 mod ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("mod"), "unexpected message: {err}");
@@ -559,7 +566,7 @@ fn bool_to_float_conversion_reports_diagnostic() {
     // numeric.
     let src = ": w ( -- f64 ) true >f64 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
@@ -571,7 +578,7 @@ fn unknown_float_conversion_target_reports_diagnostic() {
     // X6: `>f128` is an unknown conversion target.
     let src = ": w ( -- f64 ) 5.0 >f128 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("unknown type"), "unexpected message: {err}");
@@ -584,7 +591,7 @@ fn unknown_float_conversion_target_reports_diagnostic() {
 fn bitwise_op_on_float_reports_diagnostic() {
     let src = ": w ( -- f64 ) 3.0 5.0 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("integer"), "unexpected message: {err}");
@@ -597,7 +604,7 @@ fn bitwise_op_on_bool_is_now_accepted() {
     // operand class, not just the integer tower.
     let src = ": w ( -- bool ) true false and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
 }
 
@@ -605,7 +612,7 @@ fn bitwise_op_on_bool_is_now_accepted() {
 fn mixed_bool_int_and_reports_both_types() {
     let src = ": w ( -- bool ) true 5 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -620,7 +627,7 @@ fn mixed_bool_int_and_reports_both_types() {
 fn mixed_type_and_reports_both_types() {
     let src = ": w ( -- i64 ) 1 >i32 2 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -635,7 +642,7 @@ fn mixed_type_and_reports_both_types() {
 fn shift_with_non_i64_count_reports_diagnostic() {
     let src = ": w ( -- u8 ) 1 >u8 3 >i32 shl ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`shl`"), "unexpected message: {err}");
@@ -650,7 +657,7 @@ fn bitwise_and_or_xor_not_produce_known_values() {
         "sooth-bitwise-and-or-xor-not-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -667,7 +674,7 @@ fn shr_is_type_directed_arithmetic_for_signed_logical_for_unsigned() {
         "sooth-shr-type-directed-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -687,7 +694,7 @@ fn subword_shift_masks_overshift_count_to_type_width() {
         "sooth-subword-shift-overshift-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -711,7 +718,7 @@ fn unsigned_subword_not_canonicalizes_to_type_width() {
         "sooth-unsigned-subword-not-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -729,7 +736,7 @@ fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
         "sooth-signed-subword-shift-compare-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -747,7 +754,7 @@ fn negative_shift_count_masks_to_type_width() {
         "sooth-negative-shift-count-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -762,7 +769,7 @@ fn negative_shift_count_masks_to_type_width() {
 fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
     let src = ": w ( -- bool ) true false lte ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
@@ -789,7 +796,7 @@ fn logical_and_or_xor_truth_table_on_bools() {
         "sooth-logical-and-or-xor-truth-table-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -810,7 +817,7 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
         "sooth-not-type-directed-bool-vs-int-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -834,7 +841,7 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
         "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -855,7 +862,7 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
   0.0 0.0 fdiv dup ne ~[ 1 ] ~[ 0 ] if .\n  \
   0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -879,7 +886,7 @@ fn print_signed_negative_i64_prints_signed_decimal() {
         "sooth-print-signed-negative-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -896,7 +903,7 @@ fn print_unsigned_u64_high_bit_set_prints_unsigned_decimal() {
         "sooth-print-unsigned-u64-high-bit-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -913,7 +920,7 @@ fn print_unsigned_subword_widths_print_unsigned_decimal() {
         "sooth-print-unsigned-subword-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -930,7 +937,7 @@ fn print_float_f64_and_f32_via_dot() {
         "sooth-print-float-widths-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -945,7 +952,7 @@ fn print_bool_prints_true_or_false_not_zero_or_one() {
         "sooth-print-bool-true-false-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -958,7 +965,7 @@ fn f_dot_is_now_an_unknown_word() {
     // `f.` is removed entirely: it reads as any other unknown word.
     let src = ": w ( f64 -- ) f. ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail: `f.` no longer exists");
 
     assert!(err.contains("unknown word"), "unexpected message: {err}");
@@ -970,7 +977,7 @@ fn f_dot_is_now_an_unknown_word() {
 
 fn run_struct_golden(tag: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-struct-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
     assert_eq!(code, 0, "struct golden `{tag}` should exit 0");
@@ -1071,7 +1078,7 @@ fn enum_crosses_word_call_boundary_with_scalar_underneath_native() {
         "sooth-enum-call-boundary-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1119,7 +1126,7 @@ fn eliminator_over_three_plus_variant_enum_dispatches_correctly() {
   Cmd? ;\n\
 : main ( -- )\n  99 Halt run .\n  1 20 Push run .\n  10 Add run .\n  10 Dbl run . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-nway-elim-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1143,7 +1150,7 @@ type: Wrap s Shape ;\n\
   Shape? ;\n\
 : main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap> px . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-nested-elim-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1164,7 +1171,7 @@ fn single_variant_eliminator_returns_payload_native() {
 : main ( -- )\n  42 Wrap unwrap . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-single-variant-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1187,7 +1194,7 @@ fn eliminator_arm_containing_if_joins_correctly() {
   Item? ;\n\
 : main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-arm-if-else-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1211,7 +1218,7 @@ fn usize_arithmetic_comparison_and_conversion_native() {
   7 >usize >i64 1 add .\n\
   9 >usize dup . drop ;\n";
     let path = std::env::temp_dir().join(format!("sooth-usize-tower-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1242,7 +1249,7 @@ fn isize_round_trips_arithmetic_and_conversion() {
   7 >isize >i64 1 add .\n\
   9 >isize dup . drop ;\n";
     let path = std::env::temp_dir().join(format!("sooth-isize-tower-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1262,7 +1269,7 @@ fn fill_constructs_and_reads_every_element_back_native() {
   &a 2 &> @ .\n\
   &a 3 &> @ . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-fill-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1284,7 +1291,7 @@ fn in_place_mutation_of_a_duped_array_leaves_the_original_untouched_native() {
   &b 2 &> @ .\n\
   &b 0 &> @ . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-set-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1300,7 +1307,7 @@ fn constant_out_of_range_array_index_is_compile_error() {
     // error naming the length and the index.
     let src = ": w ( -- )\n  0 4 fill | a |\n  &a 9 &> drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("out of range"), "unexpected message: {err}");
@@ -1314,7 +1321,7 @@ fn constant_index_at_length_boundary_is_compile_error() {
     // distinct off-by-one boundary from the gross violation above.
     let src = ": w ( -- )\n  0 4 fill | a |\n  &a 4 &> drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("out of range"), "unexpected message: {err}");
@@ -1337,8 +1344,9 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
   &a 3 4 add >usize &> @ drop\n\
   99 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-trap-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
 
     let output = std::process::Command::new(&binary)
@@ -1385,8 +1393,9 @@ fn runtime_index_at_length_boundary_traps_and_aborts_native() {
         "sooth-array-trap-boundary-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
 
     let output = std::process::Command::new(&binary)
@@ -1456,7 +1465,7 @@ type: Box arr [i64 3] ;\n\
   dup 0 box-at .\n\
   2 box-at . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-nesting-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1498,7 +1507,7 @@ fn locals_rebind_correctly_across_tail_iterations_native() {
   ] if ;\n\
 : main ( -- ) 0 5 digits . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-locals-rebind-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1528,7 +1537,7 @@ fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
 : main ( -- ) 0 1000000 both-tail . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-both-arms-tail-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1549,7 +1558,7 @@ fn eliminator_multi_tail_runs_in_constant_stack_native() {
 : main ( -- ) 0 1000000 Even sum-parity . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-elim-multi-tail-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1574,7 +1583,7 @@ fn mixed_eliminator_back_edge_and_base_case_runs_in_constant_stack_native() {
 : main ( -- ) 0 1000000 Go run-mix . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-mixed-elim-tail-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1611,7 +1620,7 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
 : start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
 : main ( -- ) build start . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-vm-smoke-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1775,7 +1784,7 @@ type: VmPop vm Vm val i64 ;\n\
   Vm\n\
   fetch Fetched> run . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-vm-small-n-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
@@ -1819,7 +1828,7 @@ fn non_tail_factorial_still_a_real_call_native() {
 
 fn run_linear_golden(tag: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-linear-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
     assert_eq!(code, 0, "linear golden `{tag}` should exit 0");
@@ -1828,7 +1837,7 @@ fn run_linear_golden(tag: &str, src: &str) -> String {
 
 fn linear_check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -2411,7 +2420,7 @@ fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
 
 fn run_owned_golden(tag: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
     assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
@@ -2420,7 +2429,7 @@ fn run_owned_golden(tag: &str, src: &str) -> String {
 
 fn run_owned_traced_golden(tag: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_traced_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
     assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
@@ -2547,8 +2556,9 @@ fn alloc_trace_is_silent_when_unset() {
 
 fn run_owned_memory_bounded_golden(tag: &str, src: &str, limit_kb: u64) -> i32 {
     let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     // Gate off (the env var is removed, not just unset in this process)
     // under a `limit_kb` `RLIMIT_AS` (`ulimit -v`, in KB): repeated leaked
@@ -2741,8 +2751,9 @@ fn caret_field_suffix_is_unknown_word() {
 /// naming the wrong thing).
 fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
     let path = std::env::temp_dir().join(format!("sooth-deep-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     std::fs::remove_file(&path).ok();
     // `exec` replaces the shell, so the child's signal death propagates as the
     // shell's own status rather than being flattened into an exit code.
@@ -3561,8 +3572,8 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
         "sooth-qbe-name-injective-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let built = driver::build(&path);
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let built = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref());
     std::fs::remove_file(&path).ok();
     let binary = built.expect("two distinctly-sanitized word names build cleanly");
 
@@ -3592,8 +3603,9 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
 fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
     let path =
         std::env::temp_dir().join(format!("sooth-overload-{tag}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -3607,17 +3619,23 @@ fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
 
 #[test]
 fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
-    // `foo` ends in the builtin `lt` on two `i64`s. The tail-call cycle pass
+    // `foo` ends in the builtin `add` on two `i64`s. The tail-call cycle pass
     // runs before any body is checked, so it saw only the name and credited
-    // an edge `foo -> lt` to the `Vec2` overload, closing a cycle with that
+    // an edge `foo -> add` to the `Vec2` overload, closing a cycle with that
     // overload's tail call to `foo` and rejecting this valid program as
     // `mutual tail recursion`.
+    //
+    // P8.S2 (R3a): the witness is `add`, not `lt`. The six surface
+    // comparisons left `is_operator_dispatch_name` with the prelude, so a
+    // module declaring its own `lt` binds every bare `lt` in it to that
+    // overload rather than reaching `check_operator`'s operand dispatch --
+    // `add` is where a builtin name still carries the dispatch this guards.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: foo ( i64 i64 -- bool ) lt ;\n\
-: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ foo ;\n\
-: main ( -- ) 1 0 Vec2 5 0 Vec2 lt . ;\n";
+: foo ( i64 i64 -- i64 ) add ;\n\
+: add ( Vec2 Vec2 -- i64 ) | a b | &a &x @ &b &x @ foo ;\n\
+: main ( -- ) 1 0 Vec2 5 0 Vec2 add . ;\n";
     let (stdout, code) = run_overload_src("tail-cycle-builtin", src);
-    assert_eq!(stdout, "true\n");
+    assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
 }
 
@@ -3644,8 +3662,9 @@ fn mutual_tail_recursion_between_ordinary_words_is_still_an_error() {
     // which is the case it exists for.
     let src = ": a ( i64 -- i64 ) b ;\n: b ( i64 -- i64 ) a ;\n: main ( -- ) 1 a . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-tail-cycle-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("mutual tail recursion") && err.contains("`a`") && err.contains("`b`"),
@@ -3677,8 +3696,9 @@ fn a_combinator_call_matching_no_overload_names_the_candidates() {
         "sooth-combinator-overload-nomatch-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("no overload of `apply`") && err.contains("accepts these operands"),
@@ -3713,8 +3733,9 @@ fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
         "sooth-poly-overload-nomatch-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("no overload of `idpair`") && err.contains("accepts these operands"),
@@ -3745,7 +3766,8 @@ fn two_poly_words_declaring_the_same_signature_is_a_duplicate_error() {
 : main ( -- ) 1 2 idpair . ;\n",
     )
     .expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("duplicate overload") && err.contains(": idpair ( 'T 'T -- 'T )"),
@@ -3771,7 +3793,8 @@ fn two_poly_words_declaring_an_alpha_equivalent_signature_is_a_duplicate_error()
 : main ( -- ) 1 2 idpair . ;\n",
     )
     .expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("duplicate overload"),
@@ -3820,8 +3843,9 @@ fn a_call_matching_no_overload_names_the_candidates() {
 : main ( -- ) 1.5 show ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-overload-nomatch-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = driver::build(&path).expect_err("build should fail");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     assert!(
         err.contains("no overload of `show`") && err.contains("accepts these operands"),
@@ -3881,18 +3905,21 @@ fn overload_vec2_lt_dispatches_to_user_word() {
 
 #[test]
 fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
-    // The tail term `lt` shares the enclosing word's name but resolves to the
-    // *builtin* `lt` on two `i64` fields, not to a recursive call. Before the
+    // The tail term `add` shares the enclosing word's name but resolves to the
+    // *builtin* `add` on two `i64` fields, not to a recursive call. Before the
     // fix `has_self_tail_call` matched on the bare name, so the word was
     // treated as self-tail-recursive: lowering opened loop machinery, the
     // back-edge pushed the two `i64`s as phi operands for a header expecting
     // two `Vec2`s, and the compiler panicked on the missing header block
-    // (`expect("header block")`) rather than emitting a comparison.
+    // (`expect("header block")`) rather than emitting the arithmetic.
+    //
+    // P8.S2 (R3a): `add`, not `lt`, for the reason spelled out in
+    // `a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload`.
     let src = "type: Vec2 x i64 y i64 ;\n\
-: lt ( Vec2 Vec2 -- bool ) | a b | &a &x @ &b &x @ lt ;\n\
-: main ( -- ) 1 2 Vec2 3 4 Vec2 lt . ;\n";
-    let (stdout, code) = run_overload_src("lt-tail-self-name", src);
-    assert_eq!(stdout, "true\n");
+: add ( Vec2 Vec2 -- i64 ) | a b | &a &x @ &b &x @ add ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 add . ;\n";
+    let (stdout, code) = run_overload_src("add-tail-self-name", src);
+    assert_eq!(stdout, "4\n");
     assert_eq!(code, 0);
 }
 

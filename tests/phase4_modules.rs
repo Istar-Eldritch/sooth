@@ -28,7 +28,7 @@ impl Closure {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source(name, contents)).unwrap();
         path
     }
 
@@ -45,7 +45,8 @@ impl Drop for Closure {
 
 /// Build and run the entry file, returning `(stdout, exit_code)`.
 fn build_and_run(entry: &Path) -> (String, i32) {
-    let binary = driver::build(entry).expect("build should succeed");
+    let binary = driver::build_with_manifest(entry, common::manifest_for(entry).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -58,7 +59,7 @@ fn build_and_run(entry: &Path) -> (String, i32) {
 
 /// Build the entry file, expecting a diagnostic (the closure never links).
 fn build_err(entry: &Path) -> String {
-    match driver::build(entry) {
+    match driver::build_with_manifest(entry, common::manifest_for(entry).as_deref()) {
         Ok(_) => panic!("build should have failed"),
         Err(e) => e,
     }
@@ -171,20 +172,23 @@ fn diamond_import_dedupes_by_canonical_path() {
 }
 
 #[test]
-fn prelude_word_called_from_an_imported_module_resolves() {
-    // Slice 10c (R-P3-4): `lib/core.sth`'s words are injected once and reached
-    // by bare name from every module, so `resolve::mangle` must leave their
-    // names alone. Only an imported module can witness that: the entry module
-    // resolves them either way, while a mangled prelude name is unresolvable
-    // from anywhere but the injected copy's own module.
-    let c = Closure::new("prelude-import");
+fn core_word_called_from_an_imported_module_resolves() {
+    // P8.S2 (R3/R8): `if`/`eq` are `core` words reached by `import:` now, not a
+    // prelude injected into every module, so the interesting witness moved: an
+    // *imported* module importing `core` itself and using both. It is a real
+    // package because `--manifest` resolves the entry file only (S1b R3), so a
+    // dependency that names `core` needs an ancestor manifest of its own --
+    // which also makes its sibling import a module name rather than a path.
+    let c = Closure::new("core-import");
+    c.write("sooth.pkg", &common::fixture_package("modfx"));
     c.write(
         "parity.sth",
-        ": parity ( i64 -- i64 ) 2 mod 0 eq ~[ 10 ] ~[ 20 ] if ;\nexport: parity ;\n",
+        "import: core::prelude * ;\n\
+         : parity ( i64 -- i64 ) 2 mod 0 eq ~[ 10 ] ~[ 20 ] if ;\nexport: parity ;\n",
     );
     let entry = c.write(
         "main.sth",
-        "import: \"parity.sth\" p ;\n: main ( -- ) 7 p::parity . ;\n",
+        "import: self::parity p ;\n: main ( -- ) 7 p::parity . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "20\n");

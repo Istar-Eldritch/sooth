@@ -13,7 +13,7 @@
 
 use sooth::ast::{Term, TermKind};
 use sooth::ir::{Instr, IrType};
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -21,8 +21,9 @@ mod common;
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -40,7 +41,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -69,7 +70,7 @@ fn emits_call_indirect(src: &str) -> bool {
 /// iteration).
 fn count_call_indirect(src: &str) -> usize {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = sooth::ir::lower(&module).expect("lower should succeed");
     ir.funcs
@@ -84,7 +85,7 @@ fn count_call_indirect(src: &str) -> usize {
 /// `__quot`), for the 7b env-parameter shape assertions.
 fn materialized_quot_params(src: &str) -> Vec<IrType> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = sooth::ir::lower(&module).expect("lower should succeed");
     let mut mats: Vec<&sooth::ir::IrFunc> = ir
@@ -101,7 +102,7 @@ fn materialized_quot_params(src: &str) -> Vec<IrType> {
 /// from the one-word inline env a single capture keeps.
 fn alloc_sizes(src: &str, func: &str) -> Vec<u32> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = sooth::ir::lower(&module).expect("lower should succeed");
     ir.funcs
@@ -1041,7 +1042,8 @@ fn vm_table_dispatch_matches_eliminator_version() {
     // lowering. A dispatch is two things, and either one alone gives it away:
     // a call to the generated `Op?` and a variant-tagged arm quotation.
     let tokens = lexer::lex(&src).expect("lexing vm_table.sth should succeed");
-    let module = parser::parse(&tokens).expect("parsing vm_table.sth should succeed");
+    let module =
+        test_support::parse_with_core(&tokens).expect("parsing vm_table.sth should succeed");
     let handler_names = [
         "h-push", "h-add", "h-sub", "h-mul", "h-load", "h-store", "h-jz", "h-jmp", "h-halt",
     ];

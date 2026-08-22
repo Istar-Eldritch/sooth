@@ -6,7 +6,9 @@
 \ outer round `times`, the same shape `each`'s internal loop takes once
 \ spliced.
 
-import: "../lib/combinators.sth" c | times | ;
+import: intrinsics * ;
+
+import: core::combinators c | times | ;
 
 : mk ( i64 -- [i64 3] )
   | base | 0 3 fill | s |

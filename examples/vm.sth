@@ -22,6 +22,9 @@
 \ operand stack and memory arrays through a borrowed element reference
 \ (`&>`/`&!>` then `@`/`!`).
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 type: Op
 | Push v i64
 | Add

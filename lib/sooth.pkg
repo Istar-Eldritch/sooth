@@ -1,0 +1,7 @@
+\ The standard library, one package at the bottom layer. `bool` and `cmp` are
+\ the typed core the compiler used to inject; `prelude` is the hub that
+\ re-exports both, so a consumer spends one `import:` line on the typed
+\ surface instead of one per module.
+package: core ;
+layer: core ;
+module: bool cmp prelude combinators option result ;

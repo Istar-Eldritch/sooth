@@ -132,6 +132,41 @@ pub struct ModuleInfo {
     /// base name is in this map, with no separate enumeration of its
     /// accessors needed.
     pub selective: std::collections::HashMap<String, u32>,
+    /// P8 S2 (R2): which of the compiler-provided intrinsics this module's
+    /// `import: intrinsics ...` lines make visible to it.
+    pub intrinsics: IntrinsicVisibility,
+}
+
+/// P8 S2 (R2): a module's view of the `intrinsics` module. The `BUILTIN_WORDS`
+/// table itself does not move and is not per module; only visibility is gated,
+/// so this says which of those names a body in this module may call bare.
+///
+/// Both `parser::parse` (the REPL, every in-process test) and
+/// `driver::assemble_module` set this field explicitly on every `ModuleInfo`
+/// they build, so nothing reads the derived `Default`. It fails closed to
+/// `None` anyway: a build path that forgot to set it should reject every
+/// bare intrinsic rather than silently admit all of them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum IntrinsicVisibility {
+    All,
+    /// `import: intrinsics | dup add | ;` -- only the listed names.
+    Only(std::collections::HashSet<String>),
+    /// No `import: intrinsics` line at all.
+    #[default]
+    None,
+}
+
+impl IntrinsicVisibility {
+    /// Whether a bare call to the intrinsic `name` is visible here. The caller
+    /// decides what counts as an intrinsic name (the gate set); this only
+    /// answers the import question.
+    pub fn admits(&self, name: &str) -> bool {
+        match self {
+            IntrinsicVisibility::All => true,
+            IntrinsicVisibility::Only(names) => names.contains(name),
+            IntrinsicVisibility::None => false,
+        }
+    }
 }
 
 /// P8 slice 1a (F2): where a module-name import's first segment is rooted.

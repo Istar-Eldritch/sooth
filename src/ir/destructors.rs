@@ -491,7 +491,6 @@ mod tests {
     use super::*;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     #[test]
     fn two_drop_overloads_for_different_structs_do_not_collide() {
@@ -526,7 +525,7 @@ mod tests {
         // as linear and substitute the override, not silently emit nothing.
         let src = format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;");
         let tokens = lex(&src).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let ir_module = lower(&module).unwrap();
         let file = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);

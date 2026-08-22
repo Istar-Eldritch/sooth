@@ -1,3 +1,6 @@
+import: intrinsics * ;
+import: core::prelude * ;
+
 : sum-to ( i64 i64 -- i64 )
   | acc n |
   n 0 eq ~[

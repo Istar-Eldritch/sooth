@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/phase7_slice3a.rs`'s
 /// own pattern).
 struct Scratch(PathBuf);
@@ -19,7 +21,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3b-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -37,7 +39,8 @@ impl Drop for Scratch {
 }
 
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
-    let binary = driver::build(src).expect("program should build");
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -53,7 +56,7 @@ fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
 
 fn check_err(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
+    let mut module = sooth::test_support::parse_with_core(&tokens).unwrap();
     sooth::check::check(&mut module).expect_err("this program should be rejected")
 }
 
@@ -509,16 +512,15 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     assert!(!deep.contains("needs 2 values"), "{deep}");
 }
 
-/// OQ6: the row-typed quotation-*consuming* combinator family is deferred to
-/// P7.S3b-follow, and says so. Never an `unknown word` fallthrough, which is
-/// what these emit otherwise -- `poly_call_term` cannot see the poly env, so
-/// none of them is even registered on this path.
-///
-/// P7.S3d (R1) narrowed this guard: `call` on a quotation *literal* is no
-/// longer a member of this deferred family -- it splices the literal's body
-/// in place instead (its own coverage lives in `tests/phase7_slice3d.rs`).
-/// `branch` pins that the retained guard still fires for the row-typed names
-/// that stay deferred.
+/// OQ6: the row-typed quotation-*consuming* combinator family is deferred,
+/// and says so. Never an `unknown word` fallthrough, which is what these emit
+/// otherwise -- `poly_call_term` cannot see the poly env, so none of them is
+/// even registered on this path. S3b-follow shipped the row-typed combinators
+/// (`times`/`if`/user `~[ ]` combinators), and P7.S3d (R1) delivered `call`
+/// on a quotation *literal* (it splices the literal's body in place instead;
+/// its own coverage lives in `tests/phase7_slice3d.rs`). `branch` pins that
+/// the retained guard still fires for the two compiler primitives that stay
+/// deferred with no follow-up slice named yet (`branch`/`tag`).
 #[test]
 fn poly_body_branch_on_a_quotation_is_located_error() {
     let err = check_err(
@@ -527,7 +529,8 @@ fn poly_body_branch_on_a_quotation_is_located_error() {
     );
     assert!(
         err.contains("`branch` on a quotation in the polymorphic body of `bad`")
-            && err.contains("P7.S3b-follow"),
+            && err.contains("not yet supported")
+            && err.contains("name no follow-up slice yet"),
         "{err}"
     );
     assert!(!err.contains("unknown word"), "{err}");

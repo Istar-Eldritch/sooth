@@ -4,10 +4,12 @@
 //! scrutinee's own instantiation, so `Option[i64]`'s `( Some )` needs no type
 //! arguments anywhere in the annotation.
 
+mod common;
 fn build_and_run(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -25,8 +27,9 @@ fn build_and_run(name: &str, src: &str) -> (String, i32) {
 
 fn build_err(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let err = sooth::driver::build(&path).expect_err("build should fail");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail");
     std::fs::remove_file(&path).ok();
     err
 }

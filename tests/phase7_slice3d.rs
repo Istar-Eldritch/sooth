@@ -64,7 +64,8 @@ fn check_err(src: &str) -> String {
 /// carried rigidly rather than coincidentally matching.
 #[test]
 fn c1_call_on_literal_splices_body_in_place() {
-    let src = ": bump ( 'T: Copy -- 'T 'T )\n\
+    let src = "import: intrinsics * ;\n\
+               : bump ( 'T: Copy -- 'T 'T )\n\
                | x | [ x x ] call\n\
                ;\n\
                : main ( -- )\n\
@@ -108,7 +109,8 @@ fn c1_call_on_non_literal_operand_is_located_rejection() {
 /// on the same call), run at two distinct instantiations of the outer `'T`.
 #[test]
 fn c2_literal_grounds_against_concrete_quotation_param() {
-    let src = ": run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
+    let src = "import: intrinsics * ;\n\
+             : run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
                swap call\n\
              ;\n\
              : c2_apply_and_pass_through ( 'T: Copy -- 'T i64 )\n\
@@ -133,15 +135,25 @@ fn c2_literal_grounds_against_concrete_quotation_param() {
 /// asserted individually since dropping `if` or `tag` from the retained
 /// guard is otherwise unobserved by any other test in the suite.
 #[test]
-fn c2_branch_if_times_tag_on_quotation_still_rejected() {
-    for name in ["branch", "if", "times", "tag"] {
+fn c2_branch_tag_on_quotation_still_rejected() {
+    // `if`/`times` are not in this list: `main` already carries S3b-follow's
+    // real row-typed combinator dispatch for them (`poly_row_combinator`),
+    // so a quotation reaching either one now actually dispatches rather than
+    // hitting this slice's retained guard -- that is S3b-follow's own
+    // coverage (`tests/phase7_slice3b_follow.rs`), not this slice's. Only
+    // `branch`/`tag` are compiler primitives with no combinator dispatch to
+    // fall into, so only they still reach the located "not yet supported"
+    // rejection this slice's own name guard (narrowed by R1 to drop `call`)
+    // still renders.
+    for name in ["branch", "tag"] {
         let err = check_err(&format!(
             ": bad ( 'T: Copy -- 'T ) [ ] {name} ;\n : main ( -- ) 5 bad drop ;\n"
         ));
         assert!(
             err.contains(&format!(
                 "`{name}` on a quotation in the polymorphic body of `bad`"
-            )) && err.contains("P7.S3b-follow"),
+            )) && err.contains("not yet supported")
+                && err.contains("name no follow-up slice yet"),
             "{name}: {err}"
         );
     }

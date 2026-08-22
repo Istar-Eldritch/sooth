@@ -2,6 +2,8 @@
 \ before the call and must survive it, both past the call (read in `main`'s
 \ tail) and from inside an arm.
 
+import: intrinsics * ;
+
 type: Shape
 | Circle r i64
 | Rect   w i64 h i64

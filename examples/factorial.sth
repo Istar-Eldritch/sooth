@@ -1,3 +1,6 @@
+import: intrinsics * ;
+import: core::prelude * ;
+
 : factorial ( i64 -- i64 )
   dup 0 eq ~[
     drop 1

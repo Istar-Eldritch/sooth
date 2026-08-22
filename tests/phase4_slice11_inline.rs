@@ -9,7 +9,9 @@
 use std::io::BufReader;
 
 use sooth::ir::{lower, Instr};
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
+
+mod common;
 
 const CLKDIV: &str = ": ClkDiv inline ( -- u32 u32 ) 8 >u32 4 >u32 ;\n";
 
@@ -19,8 +21,9 @@ const CLKDIV: &str = ": ClkDiv inline ( -- u32 u32 ) 8 >u32 4 >u32 ;\n";
 /// in parallel).
 fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -42,10 +45,12 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
 fn build_and_run_closure(name: &str, lib: &str, main: &str) -> (std::path::PathBuf, String, i32) {
     let dir = std::env::temp_dir().join(format!("sooth-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("creating the closure dir should succeed");
-    std::fs::write(dir.join("lib.sth"), lib).expect("writing the library should succeed");
+    common::write_fixture(&dir.join("lib.sth"), lib).expect("writing the library should succeed");
     let entry = dir.join("main.sth");
-    std::fs::write(&entry, main).expect("writing the entry should succeed");
-    let binary = sooth::driver::build(&entry).expect("build should succeed");
+    common::write_fixture(&entry, main).expect("writing the entry should succeed");
+    let binary =
+        sooth::driver::build_with_manifest(&entry, common::manifest_for(&entry).as_deref())
+            .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -62,7 +67,7 @@ fn build_and_run_closure(name: &str, lib: &str, main: &str) -> (std::path::PathB
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
@@ -113,7 +118,7 @@ fn inline_word_caller_emits_no_call() {
     // `>u32` conversions are pure ops, not calls.
     let src = format!("{CLKDIV}: main ( -- ) ClkDiv drop drop ;\n");
     let tokens = lexer::lex(&src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     assert!(
@@ -184,7 +189,7 @@ fn inline_word_calling_inline_word_splices_transitively() {
     assert_eq!(code, 0);
 
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     let names: Vec<&String> = ir.funcs.iter().map(|f| &f.name).collect();
@@ -216,12 +221,12 @@ fn inline_word_polymorphic_signature_is_accepted() {
     // Slice 10c (R-P3-3b) **reverses R3's polymorphic half**, which its own
     // doc admitted was a policy rule and not a soundness one: the splice
     // already handles a variable-bearing body. The reversal is what lets the
-    // six `lib/core.sth` comparison words be both `'T: Copy Ord`-polymorphic
+    // six `core::cmp` comparison words be both `'T: Copy Ord`-polymorphic
     // and `inline`. R3's other rejections (`main`, a builtin operator name)
     // are untouched, and the tests above still pin them.
     let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n")
         .expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("a polymorphic `inline` word is spliced, not rejected");
 }
 
@@ -292,7 +297,7 @@ fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     assert_eq!(code, 0);
 
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     assert!(
@@ -330,7 +335,7 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     assert_eq!(code, 0);
 
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     assert!(
@@ -589,13 +594,19 @@ fn combinators_retype_output_byte_identical() {
         std::env::temp_dir().join(format!("sooth-slice11-pre-{}.sth", std::process::id()));
     let post_path =
         std::env::temp_dir().join(format!("sooth-slice11-post-{}.sth", std::process::id()));
-    std::fs::write(&pre_path, &pre).expect("writing pre-retype source should succeed");
-    std::fs::write(&post_path, &post).expect("writing post-retype source should succeed");
+    common::write_fixture(&pre_path, &pre).expect("writing pre-retype source should succeed");
+    common::write_fixture(&post_path, &post).expect("writing post-retype source should succeed");
 
-    let pre_ssa =
-        sooth::driver::emit_ssa(&pre_path).expect("emitting pre-retype QBE should succeed");
-    let post_ssa =
-        sooth::driver::emit_ssa(&post_path).expect("emitting post-retype QBE should succeed");
+    let pre_ssa = sooth::driver::emit_ssa_with_manifest(
+        &pre_path,
+        common::manifest_for(&pre_path).as_deref(),
+    )
+    .expect("emitting pre-retype QBE should succeed");
+    let post_ssa = sooth::driver::emit_ssa_with_manifest(
+        &post_path,
+        common::manifest_for(&post_path).as_deref(),
+    )
+    .expect("emitting post-retype QBE should succeed");
     std::fs::remove_file(&pre_path).ok();
     std::fs::remove_file(&post_path).ok();
 

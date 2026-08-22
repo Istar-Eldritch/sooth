@@ -761,7 +761,6 @@ fn check_poly_combinator_args(
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     /// Slice 10a (R1): a monomorphic word whose input is a `~` still counts as
     /// declaring a quotation parameter (accessor-routed), so it is inlined
@@ -802,7 +801,7 @@ mod tests {
                    : apply-inline inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
                    : plain ( i64 -- i64 ) 1 add ;\n";
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
         let apply_inline = module
             .words
@@ -862,7 +861,7 @@ mod tests {
     fn check_inline_self_nontail_cycle_is_error() {
         let src = ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;";
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
@@ -871,7 +870,7 @@ mod tests {
 
         let tail_src = ": down inline ( i64 -- i64 ) dup 0 gt ~[ 1 sub down ] ~[ ] if ;";
         let tokens = lex(tail_src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
             .expect("a self-tail `inline` word is the R4-relaxed shape, not a cycle error");
     }

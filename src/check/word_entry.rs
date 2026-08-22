@@ -296,11 +296,10 @@ fn check_terms_word(
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     /// P7 slice 3c (R5 + R1.4): the two halves of this function answer a slice
@@ -408,14 +407,20 @@ mod tests {
     fn check_inline_polymorphic_signature_is_accepted() {
         check_src(": id inline ( 'T -- 'T ) ;\n: main ( -- ) ;")
             .expect("`inline` on a polymorphic signature is a splice, not a rejection");
-        // The witness is `lib/core.sth`'s own `eq`, driven straight through
-        // both gates: it cannot be *redeclared* in a test source (that is a
-        // duplicate overload of the injected one), and a neutral stand-in
-        // would not exercise the builtin-name gate at all.
-        let eq = crate::parser::prelude_words()
+        // The witness is a word named `eq`, declared here as `core::cmp`
+        // declares it. A neutral name would not exercise the builtin-name gate
+        // at all. P8 S2 (R3): this is declared in the test source rather than
+        // pulled out of the deleted prelude -- with nothing injected, `eq` is
+        // an ordinary name a source may define.
+        const EQ: &str =
+            ": eq inline ( 'T: Copy Ord 'T -- bool ) ueq [ true ] [ false ] branch ;\n";
+        let tokens = lex(EQ).unwrap();
+        let eq = crate::test_support::parse_with_core(&tokens)
+            .unwrap()
+            .words
             .into_iter()
             .find(|w| w.name == "eq")
-            .expect("`lib/core.sth` defines `eq`");
+            .expect("the witness source declares `eq`");
         assert!(eq.declares_inline, "`eq` is declared `inline`");
         let sig = eq.poly.as_ref().expect("`eq` is polymorphic");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);

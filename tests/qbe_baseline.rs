@@ -8,7 +8,10 @@
 //! is *intended* to change: `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline`,
 //! then review the diff.
 
+use sooth::test_support;
 use std::path::{Path, PathBuf};
+
+mod common;
 
 /// The `(gcd/factorial/strings/refs/resources)` cross-section the spec names:
 /// arithmetic + control flow, recursion, strings/`cstr`, references, and the
@@ -71,8 +74,11 @@ fn baseline_path(name: &str) -> PathBuf {
 fn corpus_qbe_stays_byte_identical_to_baseline() {
     let regen = std::env::var_os("REGEN_QBE_BASELINE").is_some();
     for (name, src) in CORPUS {
-        let ssa = sooth::driver::emit_ssa(Path::new(src))
-            .unwrap_or_else(|e| panic!("emitting QBE for {src}: {e}"));
+        let ssa = sooth::driver::emit_ssa_with_manifest(
+            Path::new(src),
+            common::manifest_for(Path::new(src)).as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("emitting QBE for {src}: {e}"));
         let path = baseline_path(name);
         if regen {
             std::fs::write(&path, &ssa)
@@ -98,7 +104,7 @@ fn corpus_qbe_stays_byte_identical_to_baseline() {
 /// can't break it.
 #[test]
 fn operator_i64_lowers_identically_after_table() {
-    use sooth::{backend, check, ir, lexer, parser};
+    use sooth::{backend, check, ir, lexer};
 
     // Slice 10c: the comparison *primitive*. `lt` is a `lib/` word now, and
     // its branch-and-construct body adds a diamond here that QBE folds away
@@ -107,7 +113,7 @@ fn operator_i64_lowers_identically_after_table() {
     // this test exists to pin.
     let src = ": ops ( i64 i64 -- i64 ) | a b | a b add a b sub mul a b ult drop ;";
     let tokens = lexer::lex(src).unwrap();
-    let mut module = parser::parse(&tokens).unwrap();
+    let mut module = test_support::parse_with_core(&tokens).unwrap();
     check::check(&mut module).unwrap();
     let ir = ir::lower(&module).unwrap();
     let ssa = backend::qbe::emit(&ir).unwrap();

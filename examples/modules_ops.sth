@@ -3,7 +3,9 @@
 \ imported by type from `examples/modules_point.sth` and exported for
 \ `examples/modules.sth` to call qualified.
 
-import: "modules_point.sth" point | Point | ;
+import: intrinsics * ;
+
+import: self::modules_point point | Point | ;
 
 : point-add ( Point Point -- Point )
   | a b |

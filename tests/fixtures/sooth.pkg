@@ -1,0 +1,10 @@
+\ One manifest for the whole migrating test suite (P8.S2 R7). Every file-based
+\ fixture depends on the same two things -- `core` and the compiler-provided
+\ `intrinsics` -- so a manifest per test grouping would be near-identical
+\ copies that drift. Passed on the command line (`--manifest`) rather than
+\ discovered, which is what keeps a fixture written to a temp directory
+\ reproducible: the path is named at the call site, never inherited from a
+\ developer's machine.
+package: fixtures ;
+layer: hosted ;
+depends: core path "../../lib" ;

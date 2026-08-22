@@ -1,6 +1,9 @@
 \ Leap-year predicate: compound boolean logic dogfood for `and`/`or`/`not` on
 \ `bool`. A year is leap if divisible by 4 and not by 100, or divisible by 400.
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 : leap ( i64 -- bool )
   dup 4 mod 0 eq
   over 100 mod 0 eq not

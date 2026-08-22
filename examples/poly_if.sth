@@ -3,6 +3,9 @@
 \ that nested `if` falls out of the recursive poly-walk rather than needing a
 \ dedicated mechanism.
 
+import: intrinsics * ;
+import: core::prelude * ;
+
 : mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;

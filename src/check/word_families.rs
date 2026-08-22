@@ -1052,6 +1052,50 @@ pub(super) fn is_name_visible_to_module(
     defining == caller || modules[caller as usize].selective.get(name) == Some(&defining)
 }
 
+/// P8 S2 (R2): whether `name` is an intrinsic the module that *wrote* this term
+/// never imported, so the builtin dispatch must not claim it here. True means
+/// "not a builtin in this module": the caller skips the builtin dispatch and
+/// lets the ordinary env/overload path have the name, and reports
+/// `ungated_intrinsic_error` if nothing else claims it either.
+///
+/// `span.module` (the module the term was written in), not `ctx.module()` (the
+/// module it is being checked in): the two differ under a combinator splice,
+/// where a caller's `~[ ... ]` argument is checked under the library's module
+/// (`Ctx::with_module`) and would otherwise be judged against the library's
+/// `import:` lines rather than its author's.
+///
+/// Never fires on the REPL/`Ctx::Line` path, where `ctx.modules()` is `None` --
+/// the same exemption the `drop` visibility gate has, and the reason the
+/// "no builtin without an `intrinsics` import" rule is a file/driver-path rule.
+pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool {
+    if !is_gated_intrinsic_name(name) {
+        return false;
+    }
+    // A term the compiler synthesized rather than parsed (`bool_print_word_def`
+    // and friends build their bodies with `Span::default()`) has no source
+    // location, and a lexed line is numbered from 1 -- so line 0 means there is
+    // no file to add an `import:` to and no author to hold to one.
+    if span.line == 0 {
+        return false;
+    }
+    match ctx.modules() {
+        Some(m) => !m[span.module as usize].intrinsics.admits(name),
+        None => false,
+    }
+}
+
+/// P8 S2 (R6a): the located diagnostic for a bare intrinsic call in a module
+/// with no `import: intrinsics` line covering it. Named ahead of the ordinary
+/// unknown-word error because the word does exist -- it is simply not imported
+/// here -- so the remedy is an import, not a definition.
+pub(super) fn ungated_intrinsic_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let caller = ctx.word_name().unwrap_or("this line");
+    format!(
+        "error: `{name}` is an intrinsic and is not imported in `{caller}` (line {}, col {})\n  add `import: intrinsics * ;` (or `import: intrinsics | {name} ... | ;`) to this file",
+        span.line, span.col
+    )
+}
+
 /// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
 /// module. `None` means "module scoping does not apply -- use the flat
 /// `env.get(name)`": only the REPL path, where `ctx.modules()` is `None`.
@@ -1555,12 +1599,12 @@ fn aliased_place_borrow_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::IntrinsicVisibility;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     /// `check_src` skips `resolve_modules` entirely, so it never mangles a
@@ -1569,7 +1613,7 @@ mod tests {
     /// even for a single file, so this helper runs that same pass first.
     fn check_src_mangled(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }
@@ -1622,6 +1666,64 @@ mod tests {
         let modules = vec![ModuleInfo::default(), caller];
         assert!(!is_name_visible_to_module(&modules, 1, 0, "Res"));
     }
+    /// P8 S2 (R2): the gate's three exemptions, each of which would otherwise
+    /// reject a program nobody could fix. `span.module` (not `ctx.module()`) is
+    /// covered end to end by the corpus instead: every `lib/` combinator spliced
+    /// into an example checks the caller's quotation arguments under the
+    /// library's module, and none of them imports the whole intrinsic surface.
+    #[test]
+    fn intrinsic_gate_exempts_the_repl_synthesized_terms_and_importing_modules() {
+        let effect = StackEffect::default();
+        let unimported = vec![ModuleInfo {
+            intrinsics: IntrinsicVisibility::None,
+            ..ModuleInfo::default()
+        }];
+        fn ctx<'a>(effect: &'a StackEffect, modules: Option<&'a [ModuleInfo]>) -> Ctx<'a> {
+            Ctx::Word {
+                name: "w",
+                mangled: "w",
+                effect,
+                structs: &[],
+                enums: &[],
+                statics: &[],
+                module: 0,
+                modules,
+                self_tail_call: false,
+                generics: None,
+            }
+        }
+        let at = |line: u32| Span {
+            line,
+            col: 1,
+            module: 0,
+        };
+        assert!(
+            intrinsic_is_gated_out(&ctx(&effect, Some(&unimported)), at(1), "add"),
+            "the gate fires for a real term in a module with no import"
+        );
+        assert!(
+            !intrinsic_is_gated_out(&ctx(&effect, None), at(1), "add"),
+            "the REPL path has no module view, so the gate never fires there"
+        );
+        assert!(
+            !intrinsic_is_gated_out(&ctx(&effect, Some(&unimported)), at(0), "add"),
+            "a compiler-synthesized term (line 0) has no file to add an import to"
+        );
+        let imported = vec![ModuleInfo {
+            intrinsics: IntrinsicVisibility::Only(["add".to_string()].into()),
+            ..ModuleInfo::default()
+        }];
+        assert!(!intrinsic_is_gated_out(
+            &ctx(&effect, Some(&imported)),
+            at(1),
+            "add"
+        ));
+        assert!(
+            intrinsic_is_gated_out(&ctx(&effect, Some(&imported)), at(1), "sub"),
+            "a selective import is a real subset"
+        );
+    }
+
     #[test]
     fn visibility_unrelated_module_is_not_visible() {
         let modules = vec![
@@ -1866,7 +1968,7 @@ mod tests {
 
     fn shape_module() -> Module {
         let tokens = lex(SHAPE_SRC).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         module
     }

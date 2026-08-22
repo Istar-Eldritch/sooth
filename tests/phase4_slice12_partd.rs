@@ -11,7 +11,10 @@
 use std::io::BufReader;
 
 use sooth::ir::{lower, Instr, IrType};
-use sooth::{check, lexer, parser};
+use sooth::test_support;
+use sooth::{check, lexer};
+
+mod common;
 
 /// Recon 5's shape: an ordinary `[ ... ]` parameter, called through, with no
 /// `inline`.
@@ -19,8 +22,9 @@ const APPLY: &str = ": apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call 
 
 fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -56,7 +60,7 @@ fn repl_transcript(input: &str) -> String {
 fn apply_call_argument_is_a_materialized_quotation() {
     let src = format!("{APPLY}: main ( -- ) [ 1 add ] 5 apply . ;\n");
     let tokens = lexer::lex(&src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
 
@@ -167,7 +171,7 @@ fn repl_import_gate_retains_an_inline_non_quotation_word() {
         "sooth-slice12-partd-importgate-{}.sth",
         std::process::id()
     ));
-    std::fs::write(
+    common::write_fixture(
         &lib_path,
         "export: bump ;\n: bump inline ( i64 -- i64 ) 1 add ;\n",
     )
@@ -196,7 +200,7 @@ fn tail_recursive_quotation_argument_is_materialized_at_the_back_edge() {
                : main ( -- ) [ 3 mul ] 2 go . ;\n";
 
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
     let go = ir
@@ -243,7 +247,7 @@ fn repl_importing_an_ordinary_quotation_parameter_word_is_a_located_error() {
         "sooth-slice12-partd-importapply-{}.sth",
         std::process::id()
     ));
-    std::fs::write(&lib_path, format!("export: apply ;\n{APPLY}"))
+    common::write_fixture(&lib_path, &format!("export: apply ;\n{APPLY}"))
         .expect("writing temp library should succeed");
     let transcript = repl_transcript(&format!(
         "import: \"{}\" a ;\n[ 1 add ] 5 a::apply\n:quit\n",

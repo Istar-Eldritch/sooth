@@ -333,7 +333,6 @@ pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     /// Assert `name`'s rows are exactly a homogeneous `(T T -- T)` set, one
     /// per type in `want`, all lowering `lower`. Shared shape for the
@@ -744,7 +743,7 @@ mod tests {
         // The predicate is transitive: a struct that merely *reaches* a
         // reference is rejected wherever a bare one would be.
         let tokens = lex("type: Plain x i64 ;\n").unwrap();
-        let module = parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let mut refs = Vec::new();
         let plain = Type::Struct(StructId::from_index(0), "Plain");
         assert!(!contains_reference(

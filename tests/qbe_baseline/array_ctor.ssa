@@ -143,7 +143,7 @@ export function l $probe10__m0() {
 	%v13 =w cultl %v11, %v12
 	jnz %v13, @blk4, @blk5
 @blk5
-	%v14 =l copy 19
+	%v14 =l copy 22
 	%v15 =l copy 10
 	call $sooth_oob_trap(l %v14, l %v11, l %v15)
 	jmp @blk4
@@ -198,7 +198,7 @@ export function :__ret_0 $probe_i8__m0() {
 	%v23 =w cultl %v21, %v22
 	jnz %v23, @blk7, @blk8
 @blk8
-	%v24 =l copy 26
+	%v24 =l copy 29
 	%v25 =l copy 10
 	call $sooth_oob_trap(l %v24, l %v21, l %v25)
 	jmp @blk7
@@ -213,7 +213,7 @@ export function :__ret_0 $probe_i8__m0() {
 	%v32 =w cultl %v30, %v31
 	jnz %v32, @blk9, @blk10
 @blk10
-	%v33 =l copy 27
+	%v33 =l copy 30
 	%v34 =l copy 3
 	call $sooth_oob_trap(l %v33, l %v30, l %v34)
 	jmp @blk9
@@ -255,7 +255,7 @@ export function $probe_bool__m0() {
 	%v13 =w cultl %v11, %v12
 	jnz %v13, @blk4, @blk5
 @blk5
-	%v14 =l copy 34
+	%v14 =l copy 37
 	%v15 =l copy 4
 	call $sooth_oob_trap(l %v14, l %v11, l %v15)
 	jmp @blk4
@@ -271,7 +271,7 @@ export function $probe_bool__m0() {
 	%v22 =w cultl %v20, %v21
 	jnz %v22, @blk6, @blk7
 @blk7
-	%v23 =l copy 35
+	%v23 =l copy 38
 	%v24 =l copy 4
 	call $sooth_oob_trap(l %v23, l %v20, l %v24)
 	jmp @blk6
@@ -287,7 +287,7 @@ export function $probe_bool__m0() {
 	%v31 =w cultl %v29, %v30
 	jnz %v31, @blk8, @blk9
 @blk9
-	%v32 =l copy 36
+	%v32 =l copy 39
 	%v33 =l copy 4
 	call $sooth_oob_trap(l %v32, l %v29, l %v33)
 	jmp @blk8
@@ -303,7 +303,7 @@ export function $probe_bool__m0() {
 	%v40 =w cultl %v38, %v39
 	jnz %v40, @blk10, @blk11
 @blk11
-	%v41 =l copy 37
+	%v41 =l copy 40
 	%v42 =l copy 4
 	call $sooth_oob_trap(l %v41, l %v38, l %v42)
 	jmp @blk10
@@ -396,7 +396,7 @@ export function $recur__m0(l %v0) {
 	%v15 =w cultl %v13, %v14
 	jnz %v15, @blk5, @blk6
 @blk6
-	%v16 =l copy 57
+	%v16 =l copy 60
 	%v17 =l copy 4
 	call $sooth_oob_trap(l %v16, l %v13, l %v17)
 	jmp @blk5
@@ -471,7 +471,7 @@ export function $sooth_main() {
 	%v20 =w cultl %v18, %v19
 	jnz %v20, @blk4, @blk5
 @blk5
-	%v21 =l copy 50
+	%v21 =l copy 53
 	%v22 =l copy 4
 	call $sooth_oob_trap(l %v21, l %v18, l %v22)
 	jmp @blk4

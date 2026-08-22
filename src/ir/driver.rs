@@ -807,7 +807,6 @@ mod tests {
     use crate::check::check;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     /// E-P1-4 (slice 10c): the checker's tail-splice predicate and the loop
     /// lowering actually built must answer the same question. Asked across the
@@ -828,7 +827,7 @@ mod tests {
                  : main ( -- ) 0 10 sum-to . ;\n"
             );
             let tokens = lex(&src).unwrap();
-            let mut module = parse(&tokens).unwrap();
+            let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
             check(&mut module).unwrap();
             let combs = crate::check::combinator_index(module.words.iter());
             let word = module.words.iter().find(|w| w.name == "sum-to").unwrap();
@@ -860,7 +859,7 @@ mod tests {
         let src = ": firstref ( &['T 4] -- ) drop ;\n\
              : main ( -- ) 7 4 fill | a | &a firstref a drop ;\n";
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
         lower(&module).expect("a monomorphic caller must ground the poly ref slot");
     }
@@ -1261,7 +1260,7 @@ mod tests {
         let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
         let (structs, enums, arrays, cells, refs) = {
             let tokens = lex(src).unwrap();
-            let mut module = parse(&tokens).unwrap();
+            let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
             check(&mut module).unwrap();
             build_registries(
                 &module.structs,

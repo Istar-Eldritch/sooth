@@ -44,7 +44,7 @@ export function l $scalar_last__m0() {
 	%v14 =w cultl %v12, %v13
 	jnz %v14, @blk4, @blk5
 @blk5
-	%v15 =l copy 11
+	%v15 =l copy 14
 	%v16 =l copy 8
 	call $sooth_oob_trap(l %v15, l %v12, l %v16)
 	jmp @blk4
@@ -88,7 +88,7 @@ export function :__ret_1 $struct_last__m0() {
 	%v18 =w cultl %v16, %v17
 	jnz %v18, @blk4, @blk5
 @blk5
-	%v19 =l copy 16
+	%v19 =l copy 19
 	%v20 =l copy 8
 	call $sooth_oob_trap(l %v19, l %v16, l %v20)
 	jmp @blk4
@@ -141,7 +141,7 @@ export function $countdown__m0(l %v0) {
 	%v16 =w cultl %v14, %v15
 	jnz %v16, @blk5, @blk6
 @blk6
-	%v17 =l copy 25
+	%v17 =l copy 28
 	%v18 =l copy 4
 	call $sooth_oob_trap(l %v17, l %v14, l %v18)
 	jmp @blk5

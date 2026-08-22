@@ -4,6 +4,8 @@
 \ `main`'s own `Shape` is still there to be measured again, grown, and finally
 \ eliminated by value.
 
+import: intrinsics * ;
+
 type: Shape
 | Circle r i64
 | Rect   w i64 h i64

@@ -458,11 +458,10 @@ pub(super) fn reject_quotation_type_position(ty: Type, position: &str) -> Result
 mod tests {
     use super::*;
     use crate::lexer::lex;
-    use crate::parser::parse;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let mut module = parse(&tokens).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
     #[test]
@@ -753,7 +752,7 @@ mod tests {
         check_src(src).unwrap();
 
         let tokens = crate::lexer::lex(src).unwrap();
-        let module = crate::parser::parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
         assert_eq!(
             registry.len(),
@@ -775,7 +774,7 @@ mod tests {
                    : drop ( A -- ) drop ; : drop ( B -- ) drop ; \
                    : main ( -- ) 1 A drop 2 B drop ;";
         let tokens = crate::lexer::lex(src).unwrap();
-        let module = crate::parser::parse(&tokens).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
         let overload_indices: HashSet<usize> = registry.values().copied().collect();
         let mut env: HashMap<String, Vec<Overload>> = HashMap::new();

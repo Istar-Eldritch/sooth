@@ -6,17 +6,19 @@
 //! region is stripped from mismatch diagnostics (R10), and the prepend is
 //! type-only so a caller borrow in the row is not falsely flagged.
 
-use sooth::{check, lexer, parser};
+use sooth::{check, lexer, test_support};
+
+mod common;
 
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
 
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    parser::parse(&tokens).expect_err("parsing should fail")
+    test_support::parse_with_core(&tokens).expect_err("parsing should fail")
 }
 
 static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -24,8 +26,9 @@ static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}-{id}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let binary = sooth::driver::build(&path).expect("build should succeed");
+    common::write_fixture(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()
@@ -166,7 +169,7 @@ fn tilde_bearing_signature_always_routes_to_the_poly_parser() {
     // from coincidence.
     let src = ": apply ( i64 ~[ i64 -- i64 ] -- i64 ) call ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     assert!(
         module.words[0].poly.is_some(),
         "a `~`-bearing signature must set `WordDef.poly`, even fully concrete"
@@ -184,7 +187,7 @@ fn inline_quotation_type_differs_from_ordinary_at_the_output_boundary() {
     assert!(inline_err.contains('~'));
     let ordinary_ok = ": mk ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n";
     let tokens = lexer::lex(ordinary_ok).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("an ordinary quotation output should still be legal");
 }
 
@@ -348,7 +351,7 @@ fn row_bearing_combinator_checks_standalone_with_empty_region() {
     // `i64` and leaves the (empty) row, matching the declared output. No call
     // site is present, yet `check` still checks the word.
     let tokens = lexer::lex(APPLY_WITH).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module)
         .expect("a row-bearing `~` combinator must check standalone against the empty region");
 }
@@ -362,7 +365,7 @@ fn row_bearing_inline_quotation_routes_to_the_poly_path() {
     // it to `check_poly_combinator_args` and never to the monomorphic
     // declared-parameter path.
     let tokens = lexer::lex(APPLY_WITH).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     assert!(
         module.words[0].poly.is_some(),
         "a row-bearing `~` signature must set `WordDef.poly`, routing to the poly path"
