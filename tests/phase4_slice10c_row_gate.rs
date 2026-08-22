@@ -64,22 +64,6 @@ fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     binary
 }
 
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 fn run(src: &str) -> String {
     let binary = build_binary("slice10c-rowgate", src);
     let out = std::process::Command::new(&binary)
@@ -169,7 +153,7 @@ fn spliced_self_tail_through_shape_changing_myif_runs_one_million_iterations_in_
          : main ( -- ) 0 1000000 sum-to . ;\n"
     );
     let binary = build_binary("slice10c-rowgate-1m", &src);
-    let (code, out) = run_at_stack_limit(&binary, 512);
+    let (code, out) = common::run_at_stack_limit(&binary, 512);
     std::fs::remove_file(&binary).ok();
     assert_eq!((code, out.as_str()), (Some(0), "500000500000"));
 }

@@ -91,24 +91,6 @@ fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
     binary
 }
 
-/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code
-/// (`None` on a signal death, e.g. a stack-overflow `SIGSEGV`) and stdout.
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -172,7 +154,7 @@ fn spliced_self_tail_runs_one_million_iterations_in_constant_stack() {
     // carried phis, which a back-edge wired to the wrong block would corrupt
     // while still exiting 0.
     let binary = build_binary("slice10c-splice-1m", &sum_to(BOOL_Q, 1_000_000));
-    let (code, out) = run_at_stack_limit(&binary, 512);
+    let (code, out) = common::run_at_stack_limit(&binary, 512);
     std::fs::remove_file(&binary).ok();
     assert_eq!((code, out.as_str()), (Some(0), "500000500000"));
 }
@@ -313,7 +295,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
     assert_eq!(back_edges(spin), 1);
 
     let binary = build_binary("slice10c-splice-linear", src);
-    let (code, out) = run_at_stack_limit(&binary, 512);
+    let (code, out) = common::run_at_stack_limit(&binary, 512);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, out.as_str()),

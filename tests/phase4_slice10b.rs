@@ -391,24 +391,6 @@ fn build_binary(name: &str, src: &str) -> PathBuf {
     binary
 }
 
-/// Run `binary` under `ulimit -s {limit_kb}`, returning the exit code (`None`
-/// if it died by signal, e.g. a `SIGSEGV` from an overflowed stack) and stdout.
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 #[test]
 fn times_sums_the_index_over_five_iterations() {
     // The headline value: `[ add ]` adds each 0-based index into the row seed,
@@ -434,7 +416,7 @@ fn times_runs_one_million_iterations_in_constant_stack() {
         combinators_import("c | times |")
     );
     let binary = build_binary("10b_times_1m", &src);
-    let (code, out) = run_at_stack_limit(&binary, 1024);
+    let (code, out) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!((code, out.as_str()), (Some(0), "1000000"));
 }

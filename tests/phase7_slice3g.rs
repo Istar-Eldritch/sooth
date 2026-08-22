@@ -69,8 +69,10 @@ fn build_and_run(src: &Path) -> (String, i32) {
 /// `'T` they carry past the recursion, and a poly body cannot print its own
 /// `'T` (`.` has no generic overload), so pinning both instantiations to one
 /// symbol leaves this transcript unchanged. Callee identity is asserted
-/// structurally instead, by `poly_self_call_lowers_to_ordinary_recursive_call`
-/// in `src/ir/driver.rs`.
+/// structurally instead, in `src/ir/driver.rs`: this body's self-call is in
+/// tail position, so `poly_self_tail_call_lowers_to_loop_back_edge` is the
+/// test that pins it -- each instantiation back-edging to its own header,
+/// with no `Instr::Call` reaching any other symbol.
 ///
 /// Deleting R1's checker arm makes this fail to compile with
 /// `poly_calls_poly_word_error`; deleting R2's lowering arm makes it die at
@@ -92,32 +94,13 @@ fn self_recursive_poly_word_runs_to_base_case() {
     assert_eq!(code, 0);
 }
 
-/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code
-/// (`None` on a signal death, e.g. a stack-overflow `SIGSEGV`) and trimmed
-/// stdout. Mirrors `tests/phase4_slice10a_exit_witnesses.rs`'s own copy of
-/// this helper.
-fn run_at_stack_limit(binary: &Path, limit_kb: u32) -> (Option<i32>, String) {
-    let out = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "ulimit -s {limit_kb} && exec \"{}\"",
-            binary.display()
-        ))
-        .output()
-        .expect("binary should run");
-    (
-        out.status.code(),
-        String::from_utf8_lossy(&out.stdout).trim().to_string(),
-    )
-}
-
 /// P7.S3g-follow's own exit criterion (roadmap: "a generic countdown over a
 /// large counter runs in constant stack"), extending the base-case golden
 /// above rather than migrating it: the *same* self-tail-recursive `loopg`,
-/// this time counted down from far enough (one million) that S3g's old
-/// per-level `Instr::Call` would overflow a reduced stack long before
-/// reaching the base case, run under `ulimit -s 1024`. The loop body prints
-/// nothing per iteration (a million-line transcript would swamp the
+/// this time counted down from far enough (one million) that one
+/// `Instr::Call` per recursion level would overflow a reduced stack long
+/// before reaching the base case, run under `ulimit -s 1024`. The loop body
+/// prints nothing per iteration (a million-line transcript would swamp the
 /// assertion, not strengthen it); only the final `'T` value is observable,
 /// exactly as `poly_self_tail_call_lowers_to_loop_back_edge`
 /// (`src/ir/driver.rs`) asserts the loop shape this depends on.
@@ -135,7 +118,7 @@ fn self_recursive_poly_word_runs_a_large_counter_in_constant_stack() {
         common::manifest_for(scratch.path()).as_deref(),
     )
     .expect("program should build");
-    let (code, stdout) = run_at_stack_limit(&binary, 1024);
+    let (code, stdout) = common::run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
         (code, stdout.as_str()),
@@ -249,8 +232,8 @@ fn repl_session(input: &str) -> String {
 /// no IR to assert against (`emit_instantiations` hands its funcs straight to
 /// the session's `.so`), so the witness is behavioural: a counter deep enough
 /// that one real frame per level overflows the process stack, where a
-/// back-edge runs it in constant space. Hardcoding `self_tail: false` here,
-/// as this path did before the slice, aborts the session instead of printing.
+/// back-edge runs it in constant space. Hardcoding `self_tail: false` here
+/// aborts the session instead of printing.
 ///
 /// The library imports are quoted-path, absolute: a REPL session can resolve
 /// neither a module-name import nor a wildcard one, and `eq`/`if` are library
