@@ -182,7 +182,7 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 - Checked stack effects (the compile-time virtual-stack pass, needed for codegen
   anyway).
 - Concrete monomorphic types: the numeric tower, `bool`, fixed arrays, slices,
-  string slices (`str`/`cstr`, see Memory model), records/structs, enums/ADTs.
+  string slices (`str`/`cstr`, see [memory model](./docs/design/memory-model.md)), records/structs, enums/ADTs.
 - Enough parametric polymorphism to give `dup`/`swap`/`max` honest signatures:
   type variables (`'T`) and a row variable (`..s`, the rest of the stack). This is
   Kitten-style row polymorphism, kept minimal.
@@ -207,302 +207,25 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 
 ## Memory model
 
-Ownership + linear types, deterministic explicit drop, **no tracing GC**. Reference counting
-is opt-in only (`Rc`/`Arc`-equivalent), reached for knowingly when shared ownership
-is genuinely needed, because dropping the last ref cascades frees synchronously.
-
-References are **second-class**, in the Hylo (mutable value semantics) mould, not
-Rust's full borrow checker: refs can be passed into a word but cannot be stored and
-cannot escape their scope. Because they can't escape, no *lifetime* system is
-needed: no lifetime variables, no region annotations, nothing that binds a
-reference's validity to a named scope. Lifetimes attach to named bindings; stack
-values are anonymous and shuffled by `swap`/`rot`, so a lifetime system is the worst
-possible fit here and stays deliberately avoided. Phase 3 Slice 6 shipped a narrower
-rule instead: per-place exclusivity (at most one live mutable reference to a place),
-checked at the point each place is consumed rather than by a liveness pass. That is
-not a lifetime system — it never asks how long a reference is allowed to live, only
-whether two live ones alias — and it works with none of the lifetime apparatus
-because a reference already can't escape its creating scope. Affine values plus
-non-escaping, exclusivity-checked refs give most of the safety with none of the
-lifetime apparatus.
-
-A `&!T` is consequently a third disposal category, neither `Copy` (so it cannot be
-`dup`ed) nor linear (so it carries no `drop` obligation): it owns nothing, so a
-reference-typed local simply expires, while a reference left on the stack is still a
-surplus value. Exclusivity is also keyed per place rather than per path, so two
-references into disjoint fields of one local conflict while both are live; sequencing
-them is the workaround.
-
-Borrow *liveness* is asymmetric, and only by accident deliberately so: a reference on the
-stack is live from the term that creates it until the term that consumes its slot, while a
-reference bound to a local is live for the whole block (`live_derivs` chains the stack
-slots with the scope's bindings). Chaining a borrow therefore compiles where naming it does
-not, and the rejection lands on the natural shape — borrow a place, write through the
-borrow, then consume the place. Ending a reference local's borrow at its *last use* would
-make the two consistent. That is not a lifetime system by the definition above (no lifetime
-variables, no regions, nothing binding a reference's validity to a named scope), only a
-rule about when a borrow ends inside one block, and the anonymous case already works that
-way. Deferred; see ROADMAP Phase 4 Slice 6f.
-
-The rule that specifying references actually forced into the open is not about references
-at all: **naming an aggregate does not copy it**, so two names can denote one region of
-memory. That was invisible while nothing could mutate in place, and `!`/`+!` make it
-observable. So taking a mutable reference to a place another live name denotes is an error,
-and the remedy is `dup`. Two things follow, and both are deliberate. The error fires at the
-*borrow*, never at the naming: two names for a value nothing mutates read identically, so
-rejecting the naming would refuse correct programs. And no copy is ever inserted for the
-programmer, even though that would be the friendlier fix, because `dup` is *the* explicit
-copy in a language whose whole point is that copying and destruction are visible, and
-because hard real-time here is carried by the programmer's own worst-case reasoning, which
-requires instruction counts to be readable off the source. A compiler-inserted copy is the
-same category of invisible behaviour as an auto-drop.
-
-The rule is `Copy`-only by construction, which bounds how bad it ever was: every route to a
-linear aggregate is closed independently, by move tracking, by `@`'s refusal to
-dereference a reference into a linear place, and by the standing ban on linear array
-elements. So the failure mode was a wrong *value*, never a double free or a
-use-after-free, and the linear spine was never at risk. It is still exactly the class of
-silent failure this language exists to turn into a compile error, which is why it is
-closed rather than documented.
-
-That same `Copy`-only construction has a payoff that only surfaced under Phase 4's
-combinators. A **linear** aggregate threaded through a loop as an accumulator needs no copy
-at all: passing it *moves* it, so the outer name is dead, the aliasing rule has nothing to
-fire on, and a body that borrows it mutably, writes through the borrow, and hands the same
-value back lowers to stores straight into the loop's carried slot. A `Copy` aggregate in
-the same position must copy, because another live name could observe the old value — the
-`dup` the aliasing rule demands, plus the loop's own back-edge staging. So linearity is not
-the awkward case for in-place iteration, it is the *enabling* one, and the awkward case is
-an aggregate that is `Copy` by inference. Two things follow. Linearity cannot be
-**declared**: `is_copy` derives it structurally, and the only way to opt a type out is to
-give it a `drop` overload, which spells "thread this in place" as "give this a destructor".
-And the `Copy` case is awkward only because the aliasing rule is keyed on names that are
-merely in lexical scope: measured, a `Copy` aggregate accumulator threads with the same zero
-copies once a name that is never used again stops counting as a second denoting name. Paying
-for a *performance* property with a *semantic* one (a destructor obligation, no free `dup`,
-move-on-every-use) is the wrong trade, so that relaxation rides with the borrow one; see
-ROADMAP Phase 4 Slice 6f.
-
-Because a branch merge can denote either arm's place, a value carries a *set* of regions
-rather than one. The merge unions both arms, so no aliasing rejection ever happens at a
-join: selecting one of two owned records takes no borrow and compiles, and the error waits
-for the borrow, where the diagnostic can name both ends.
-
-Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
-pointer type. Nullability, when a program wants it, is `Option['T]` (`lib/option.sth`),
-an ordinary generic enum built from Phase 5's `type:` declarations rather than a
-compiler primitive — a compiler-synthesized `Option` would be exactly the throwaway
-machinery generics exist to replace, so it is never built. The return stack is
-hidden or balance-checked; raw return addresses are never exposed.
-FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
-(same discipline as Rust std over libc), and only exists at the hosted layer.
+Ownership + linear types, deterministic explicit drop, **no tracing GC**. RC is
+opt-in (`alloc` layer). References are second-class (Hylo-style, not Rust's borrow
+checker): they can't escape their scope, so no lifetime system is needed — no
+lifetime variables, no region annotations. Per-place exclusivity (at most one live
+mutable reference to a place) replaces lifetimes, checked at consumption point.
+`&!T` is a third disposal category: neither `Copy` nor linear, it owns nothing.
+Pointers (`^T`) are non-null; `Option['T]` is an ordinary generic enum, not a
+compiler primitive. Full detail: [memory model](./docs/design/memory-model.md).
 
 ## Control flow and iteration
 
-Boolean branching is the library word `if` (`~[ then ] ~[ else ] if`, see below);
-structural dispatch is the generated eliminator word. There are deliberately **no loop
-keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
-matches the Factor/Kitten lineage, where iteration is expressed with combinators
-rather than syntax.
-
-The iteration story, top to bottom:
-
-- **Quotations are the only iteration primitive.** A quotation `[ ... ]` is a
-  first-class code value; `call` invokes it. This is the one piece that must be built
-  into the language (new syntax + a value kind); it cannot be a library.
-- **An internal loop primitive gives constant-stack iteration.** The IR has a
-  loop/back-edge construct (not surface syntax, not user-facing). It is what makes
-  iterating a large collection not overflow, independently of whether the TCO pass
-  exists.
-- **Combinators are library words, not keywords.** `each`, `map`, `filter`, `fold`,
-  `while`, `times` are ordinary higher-order words that take quotations, written in
-  Sooth. None is compiler-known: each bottoms out on a self-tail call, which the
-  compiler lowers to the loop primitive. Reserving them as keywords would bloat the
-  core for no reason.
-- **Combinators are inlined.** The compiler inlines the common combinators and their
-  quotation arguments at the call site, so `~[ ... ] each` lowers to a tight loop with
-  the body inlined, not a higher-order `call` per element. This is what makes "loops
-  are a library" perform as well as loop syntax would have.
-- **Raw recursion is legal but not the idiom.** A word may call itself; it is just a
-  word. But threading the stack across a self-call by hand is fiddly, so combinators
-  are the normal tool. Tail-call handling is therefore a convenience for hand-written
-  recursion, not the lifeline for iteration (combinators over the loop primitive are
-  that). Where it does apply it is a **guarantee, not a best-effort optimisation**: a
-  self-call in tail position is compiled to a jump, so self-tail-recursion runs in
-  constant stack (Scheme-style), and code may rely on it not overflowing.
-
-Quotations and the combinator library land in Phase 4; but the internal loop/back-edge
-primitive and the self-tail-call transform that sits on it are **brought forward to
-Phase 2**, because the bytecode-VM dogfood (the Phase 2 exit) needs an overflow-free
-dispatch loop and pulling quotations forward would be the larger change. Phases 0-1 and
-the scalar/aggregate slices need only shallow recursion; the VM is the first golden that
-needs real iteration.
-
-**Phase 4 Slice 4 shipped the quotation literal and the `times` floor**, landing the first
-bullet above narrower than the design implies and the second bullet exactly as designed. A
-quotation stays a **compile-time-only marker** rather than a first-class runtime value
-(D1): it carries the identity of its literal body, rides the checker's `Slot`/`Binding` and
-lowering's phantom `Value` verbatim through shuffles and binds (D2), and is consumed only by
-fusion — `call` splices a literal's body at the consumption site, type-checking identically
-to writing the body inline, because there is no standalone effect to infer for a bare body
-(D3). `call` therefore accepts only a statically-known literal; every position that would
-need a real runtime value instead (a branch join, an array element, a user or polymorphic
-word argument, an operator operand, a REPL residual stack) is a located rejection, not a
-panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
-runtime quotation type implies to the slice that gives escaping quotations a consumer for
-it (Phase 4 Slice 6). `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index
-and requires the body return the row it received, so effect realization only ever checks an
-inner row against itself (D6). It is library source, not a compiler-known word (slice 10b):
-a thin wrapper over a self-tail-recursive `times-helper`, whose tail call is what
-reaches the internal loop primitive (`begin_loop`/`finalize_loop`), and loops nest at any
-depth. Both names are exported: the REPL's `dlopen` import path retains only
-exported words, so a helper reached only transitively through a splice would
-be unresolvable. The quotation-literal fusion this slice owns (splicing a literal's body at its
-`call`) never crosses a `:` word boundary (D5); the interprocedural user-word inliner that
-lowers the combinator library itself is Slice 5's.
-
-**Phase 4 Slice 6a made a quotation nameable and shipped the inliner.** `Type`/`PolyType`
-gain a `Quotation` variant carrying an interned declared effect (`[ 'T -- ]`), with
-unification and `apply_subst` following, so a word may declare a quotation parameter and be
-checked standalone against it — `IrType` gains no variant and there is still no "statically
-known" bit on the type (D6): knownness stays a predicate on the value (`Slot.quot`), which is
-what lets slice 7 later admit a genuine runtime closure without unpicking unification or the
-monomorphization walk. `call`/`times` accept an *abstract* quotation typed only by a declared
-parameter, beside the literal they already accepted; a literal passed to a declared
-parameter is checked directionally against it, enforcing a `Copy`-only capture restriction on
-what it may read from its defining scope. Combinators are now ordinary Sooth library words
-(`lib/combinators.sth`'s `each`/`map`/`fold`), and every call to one is inlined by
-term-splicing the callee's AST body against the caller's live stack — the compiler's only
-inliner, generalizing slice 4's `call`/`times` fusion across a `:` boundary — transitively (a
-combinator forwarding its own quotation parameter to a nested combinator splices through both
-frames) and **totally**: with a quotation type but no runtime representation there is no
-fallback, so anything un-inlinable, starting with recursion among quotation-taking words, is a
-located error rather than a silent real call (D5). `each`/`map`/`fold` are leaf combinators
-rather than `map` and `fold` being written over `each`, but that is a cost preference, not
-an impossibility: `fold` and `map` over `each` are both expressible (the accumulator rides a
-captured one-element array reached by balanced borrows, which D3 accepts). Because inlining
-is total, library composition depth is code size at every call site, so building `map` on
-`each` would make every `map` call site depth 2 plus an extra array copy and a counter cell,
-where a leaf keeps the library flat at depth 1. "When to inline" becomes a real question
-only at slice 7, when a runtime representation first makes a genuine choice possible; until
-then "always" is the only implementable answer. The REPL
-stays a located rejection, both at a session line defining a quotation-taking word and at an
-imported closure exporting one (D7); 6c lifts it.
-
-**Phase 4 Slice 6b relaxed the self-tail edge of 6a's D5 and lowered it to a loop
-back-edge.** `filter` needed no compiler change at all: a combinator body is checked by
-term-splicing at the concrete call site, never through `poly_term`, so the polymorphic-`if`
-rejection never gates one. `while`'s blocker was 6a's own combinator-cycle rejection, which
-fired identically for a *monomorphic* self-recursive combinator, so it was never a
-polymorphism question. `check_combinator_cycles` now permits a self-edge iff every
-occurrence of the self-name is in tail position (its `all_calls` count equal to its
-`tail_position_calls` count); a non-tail self-call or any cycle of length ≥ 2 still returns
-`combinator_cycle_error` unchanged, since those need slice 7's runtime quotation values.
-`inline_combinator` gains a matching branch: while splicing a self-tail combinator's body, a
-tail-position self-call is not re-spliced (which would recurse forever) but is treated as the
-loop back-edge, discharging the same two obligations the whole-word self-tail transform
-already runs at its self-call site — `check_linear_across_back_edge` and
-`check_reference_across_back_edge` over the caller's residual and the self-call's input row
-— before terminating that branch; the third obligation, stack-row identity between the
-back-edge and the header, falls out of the ordinary `if`-join discipline, since both the
-self-call arm and the base arm must present the same declared row. Lowering composes two
-already-shipped ingredients rather than adding a third: `times`'s mid-body `begin_loop` open
-and the whole-word transform's self-call-driven back-edge (`back_edges.push` + `Jmp`, not an
-`Instr::Call` and not a re-splice), including the `stage_aggregates` stable-slot path for a
-carried aggregate state, reused verbatim from the slice-3 aggregate-return aliasing fix. The
-Copy quotation parameter itself carries no `IrType` and is excluded from the loop-carried
-phis, since it is the same literal every iteration and is re-resolved statically at each
-splice. `while` inherits the R18 nested-loop limit in both directions — opening a self-tail
-combinator loop while a loop is already open, and a `times` reached while splicing one — by
-raising and restoring the same counter `times` does (renamed `loop_depth`, since it now
-counts two kinds of loop); the limit is not lifted here (6d lifts it for all five combinators
-at once). The REPL chokepoint needed no change: it already rejects any quotation-declaring
-word at the definition site, self-tail or not.
-
-**Phase 4 Slice 6c lifted the REPL's two combinator rejections by retention, not by
-inventing a frozen resolver.** A combinator has no compile event of its own to freeze
-against: it mints no `IrFunc` and no symbol (D2 above), and it is inlined by term-splice,
-fresh, at every call site, re-checked and re-lowered against that site's own live env each
-time. Slice 2's precedent — a polymorphic word's frozen defining-line resolver, read once
-per instantiation at lowering — does not transfer, because a poly body is checked once and
-never re-checked, while a combinator body is re-checked and re-lowered at every splice site.
-So the fix is a session-level store, not a generation-tracking mechanism: `Session` gains
-`combinators: HashMap<String, WordDef>`, holding mono and poly combinators in one store
-(mirroring the checker's `is_combinator`/`collect_combinators`, which already treat both
-uniformly), replaced wholesale on redefinition and carrying no generation, epoch, or symbol.
-It is projected on demand into the two shapes the inline paths already read — a
-`HashMap<String, Combinator>` for the checker, a `HashMap<String, Vec<Term>>` for
-lowering — threaded into every REPL entry point that previously hardcoded an empty map:
-`check_def`, `check_def_collecting_drop_sites`, and `infer_line` on the checker side;
-`lower_word`, `lower_instantiation`, and `lower_line` on the lowering side. Defining a
-combinator at the REPL skips lowering entirely — check, then store, no `.so`, no symbol, no
-`dlopen` — against a view that already includes the definee itself, so a self-reference
-dispatches through the inline path rather than unknown-word, with `check_combinator_cycles`
-run over that view so a cycle formed across separate session lines is still the located
-error; a polymorphic combinator bypasses the ordinary poly-definition path's ≥2-outputs
-deferral, since a combinator is spliced inline and never lowered to a bundle-returning
-`IrFunc`, so that limitation cannot arise for it. The three now-mutually-exclusive
-name-shape stores (an ordinary word's `env`, a polymorphic word's `poly_words`, and the new
-combinators store) evict each other symmetrically on redefinition, since combinator dispatch
-is checked before both other stores and a stale entry in the wrong one would otherwise win
-silently. Importing a closure that exports a combinator retains it the same way: a module-0
-exported combinator is copied into the session store under its import-internal name, with
-its body's calls — including a self-tail call — rewritten to internal spellings, so an
-imported `while`'s self-call still resolves to itself and the self-tail recognizer still
-fires rather than recursing forever through an unrecognized name.
-
-**Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
-`bool` and two quotations (`~[ then ] ~[ else ] if`). Structural dispatch on ADTs is
-the **generated eliminator word** (`Shape?`), the sole enum eliminator: each variant
-gets a variant-tagged quotation arm written immediately before the call
-(`~[ ( Circle ) ... ] ~[ ( Rect ) ... ] Shape?`), exhaustiveness-checked, with no
-inline `match`. It is an ordinary term, so it composes mid-body and needs no
-definition of its own. The rejected Haskell-style machine — literal patterns, guards,
-match sugar — never shipped; tag-routed arms keep none of it, needing only variant
-names and ordinary quotation bodies. Haskell matches named positional arguments while
-Sooth's inputs are anonymous stack values (the same named-vs-position tension that
-rules out dependent types), which is why the guard and pattern apparatus stayed out
-while the per-variant arm won. Multi-way branching is a **`cond` combinator** (a
-library word taking `[ pred ] [ body ]` pairs), not syntax, so nested `if`s aren't the
-only option.
-
-**The machine layer and the library layer.** The compiler knows three machine-level
-primitives and nothing else about conditionals: `branch`, a two-way jump on a 32-bit
-flag taking two inline quotations (`( ..a u32 ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`,
-nonzero is true, and the single builtin exempt from the quotation-operand default-deny);
-`tag`, which reads a payload-free enum's discriminant as that flag and is a register
-relabel because such a value already *is* its discriminant; and the six comparison
-primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`, one per comparison shape, each deriving
-signed / unsigned / float behaviour from its operand type.
-
-Everything typed is a library word over them, in the `core` package: `core::bool` and
-`core::cmp`, which a program reaches by `import:` like any other module. The *type* `bool`
-is one of `core::bool`'s declarations too (`type: bool | False | True ;`), reached the same
-way -- with one wrinkle a program feels: a type name resolves against its declaring module,
-so unlike a word it does not follow `core::prelude`'s re-export, and a file spelling `bool`
-in an effect names `core::bool` directly. `if` and `unless` are term-body combinators
-(`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
-condition's discriminant with `tag` and `branch`es on the flag); `eq`/`lt`/`gt`/`lte`/`gte`/`ne`
-are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
-their `bool` by branching and naming a variant. That last detail is the point rather than
-an implementation accident: there is deliberately no operation turning a machine word
-back into an enum, since not every machine word is a valid discriminant, so an invalid
-`bool` is unconstructible rather than merely discouraged. `bool` has no special status
-in any of it; `branch` never sees one. `cond` is a documented future word, not shipped:
-a variadic `[ pred ] [ body ]` word is not fixed-arity.
-
-This shrinks the core the honest way, by making `if` a word rather than
-by replacing it with a bigger feature.
-
-**INV-INLINE-COMBINATOR.** A word declaring an `inline` `~[ ... ]` parameter is always
-inlined (spliced) at each call site and mints no `IrFunc`; it has no opaque call form. Its
-declared output row is discovered by forward checking of the spliced terms, never solved
-for by row unification. Both splice sites rest on this — the checker's tail walk reads a
-callee's body because there is only ever one, spliced, form of it, and lowering threads the
-caller's tail position into the splice because the body really does run in place of the
-call. A word declaring an ordinary `[ ... ]` parameter is the other form and none of the
-above holds of it: it is a genuine call that mints an `IrFunc` and receives the quotation
-as a `(code, env)` value.
+No loop keywords. Quotations (`~[ ... ]`) and `call` are the sole iteration
+primitive; an internal loop/back-edge construct gives constant-stack iteration.
+Combinators (`each`/`map`/`fold`/`filter`/`while`/`times`) are library words
+written in Sooth, inlined at call sites by term-splicing — no per-element call
+overhead. Self-tail-recursion is a guaranteed constant-stack transform. `if` is a
+`core::bool` word over the `branch` and `tag` primitives; the generated eliminator
+word (`Shape?`) is the sole enum eliminator. No combinator is compiler-known, not
+even `if`. Full detail: [control flow and iteration](./docs/design/control-flow.md).
 
 ## The irreducible core
 
@@ -549,338 +272,38 @@ carried by quotations, `call` and the self-tail-call transform alone.
 
 ## Modules and encapsulation
 
-A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b), and
-a directory tree under a `sooth.pkg` manifest is a **package**. `export: name... ;`
-(lines accumulate) is the only way a name leaves its file; a module with none exports
-nothing, so every pre-5a example is unaffected — it exports nothing and stays a
-program, not a library.
-
-**Inside a package an import names a module, not a file.** `import: <target> [<q>]
-[ | name... | ] ;` puts the target first and the qualifier last, because the common
-case wants no renaming at all: an elided qualifier defaults to the target's last
-segment, so `import: self::text::ascii ;` binds `ascii`. The target's anchor is
-syntactic and never inferred — a `self::` prefix is the importing file's own package,
-package-root-absolute (`self::text::ascii` is `text/ascii.sth` under the package
-root), and a bare first segment names a dependency the manifest's `depends:` lists
-(`import: core::cmp c ;`). A dependency named `text` and a local `text/` directory
-therefore coexist with no precedence rule and no ambiguity error. A module-name
-segment must lex as a single word, which keeps the file-to-module-name map
-one-to-one; `::` and a bare `*` are reserved for the separator and the wildcard
-target, so `42.sth` and `*.sth` are simply unnameable.
-
-A file with no ancestor manifest keeps the quoted-path form, `import: "path.sth" q ;`,
-resolved relative to the *importing* file with an explicit `.sth` and no search path
-(consistent with `extern:` naming its C symbol verbatim: no implicit extension is one
-fewer resolution rule to learn). Inside a package that form is a located error naming
-the module-name spelling to use instead: one file, one way to name it.
-
-**Why resolution has to happen as one merged pass, not a parse-then-merge.** The
-parser resolves every type name in a pre-pass over raw tokens *before any word body
-parses* (`prepass_type_decls`, then `build_registries`, both inside `parse`). An
-importing file's own pre-pass needs the imported file's type names present before its
-bodies can parse at all, so parsing each file independently and merging the two ASTs
-afterward would mean remapping every positional `StructId`/`EnumId`/`ArrayId` in the
-second file's already-parsed tree — strictly more work, and more places to get it
-wrong, than doing it once. The model instead: resolve the import graph from the entry
-file, canonicalize and dedupe by path (a diamond import is parsed once), order it
-topologically and reject a cycle or self-import with a located error naming both
-files, then run **one shared pre-pass** across the whole closure's tokens into **one
-shared registry set**, and only then parse bodies per file against that shared set.
-The closure still assembles into one `Module`, so `check::check` keeps its
-single-module signature; module identity rides on a per-decl owning-module tag, not on
-threading multiple `Module`s through the pipeline.
-
-**Name resolution is "own module first, then qualifier," not filtering at merge
-time.** The registry stores a bare name plus its owning module (rather than, say, a
-fully-qualified stored name), so an unqualified reference resolves in its own module
-first and a `q::base` splits on the qualifier, maps `q` through the current module's
-import table, and resolves in the target module subject to its export list. Every
-module's names are spliced into one shared environment and *marked* with their module
-and export status; rejecting an unqualified-but-private reference happens at the use
-site, never by hiding the name at merge time — filtering there would collapse two
-distinct failure modes (a name that exists but is private, vs. a name that is simply
-absent) into one `unknown word`, which is a worse diagnostic for a language that
-otherwise turns Forth's silent failures into sharp errors. Two modules may each
-declare `Point`; the duplicate-type-name check is per-module, not global. Same-named
-words in two modules mint distinct emitted symbols via a module-disambiguating
-component, added to `instantiation_symbol` the same way its `generation` suffix
-already is, so `::` never has to survive to the symbol sanitizer and a single-module
-closure (every pre-5a program, every REPL session) is byte-for-byte unchanged.
-
-**A `type:` declaration is a name-scope, and visibility is the ordinary export
-mechanism applied to it, not a special rule for types.** Its generated words — a bare
-constructor (`Type`) and a destructure (`Type>`) — are named by string concatenation, an
-ad-hoc qualified namespace the compiler already builds for every struct. Exporting
-`Type` therefore exports that whole name-scope as one unit: naming a type in `export:`
-is **transparent**, with no opacity mechanism and no per-member withholding in this
-slice. A consumer may name `q::Type` in an effect, construct one with `q::Type`, and
-destructure it with `q::Type>`. Individual fields are reached through `&field`/`&!field`
-(Phase 7 Slice 1), resolved against the receiver's type at each call site rather than
-through a per-type qualified name, so field projection is unqualified regardless of
-which module declared the type.
-
-This was a reversal mid-design, not the obvious choice: the first draft made export
-opaque by default, Elm-style, distinguishing "export the type" from "export its
-constructor." It didn't survive contact with what Sooth actually is. Structs are dumb
-data; a violated field invariant is a bug in the *consumer's* program, not unsoundness,
-because there is no UB, indexing traps at the bound, and linearity already prevents
-aliasing a value into two invariant-breaking places at once. And the resource argument
-for opacity has nothing to add: moving the fields out of a type with a `drop` override
-is rejected outright (`type: R tag i64 ;` with a `drop` override, then `r R>`, is a
-located error), and the field *read* that remains cannot launder a resource either,
-because `@` refuses a linear referent. So a consumer never obtains ownership of a field
-it did not construct, by two rules in the ownership checker that know nothing about
-modules — and hiding an accessor behind export visibility would protect nothing those
-rules don't already guarantee. Hiding an accessor behind a visibility rule is the OOP
-ceremony this language is declining to need; a withhold marker on `export:` is an
-additive feature for a real consumer that wants it, not a default this slice should
-guess at.
-
-The same rule holds across a file boundary as within one: a library consumer
-destructuring an imported linear type down to `Copy` leaves is rejected exactly as a
-single-file program's own destructure would be, since the rule lives in the ownership
-checker and knows nothing about modules.
-
-**Disposing an imported resource type requires that type to be visible to the disposing
-module.** `drop` is compiler-known and dispatches on the concrete type (Slice 3/8b), but
-a bare `drop` on an imported linear value runs a destructor the *owning* module declared,
-so the calling module must have that type in scope — imported by name, or declared
-locally — the same visibility a bare use of any other name from that module needs. A
-qualified-only import that never names the type is a located error at the `drop`, naming
-the remedy (add the type to the import, or dispose it in a module that declares it). A
-consumer that has imported the type by name can always discharge it, so the ROADMAP's
-hypothesized "an exported linear type must also export its discharging word" rule has
-nothing to fire on: the discharging word is `drop` itself, reached through the type's own
-visibility. It only becomes a live question once a polymorphic `drop ( 'T -- )` could be
-structurally total — exactly what Slice 8's own constraint forbids — so enforcement is
-deferred there, not decided here.
-
-**Declaration-site and selective-import rules round out encapsulation.** An exported
-word whose stack effect names a private, non-primitive type of its own module is
-rejected at the `export:` declaration itself (the module author's bug, not the
-consumer's), naming the word and the private type; exporting the type satisfies it.
-Selective import, `import: core::text s | split trim | ;`, is additive to the
-qualifier: `s` is always bound, and the listed names are *additionally* exposed
-unqualified (a selectively-imported type brings its generated words unqualified too,
-one unit as ever). The collision rule is deliberately dumb, with no precedence and no
-use-site disambiguation: two selective imports exposing the same unqualified name is
-an error at the second, naming both modules, and a selectively-exposed name colliding
-with a local definition is the same error.
-
-**REPL imports (Slice 5b) answer what an import means in a live session by treating it
-as an ordinary redefinition event applied to a batch of names, not a new rule.** The
-REPL's own top-level `import:` path resolves relative to the *process current working
-directory* (every transitive import inside the discovered closure keeps 5a's
-importer-relative rule unchanged, so exactly one frame of reference is new). Each
-`import:` line mints one fresh, session-wide import epoch and recompiles every word in
-the closure under it, exactly the way redefining an ordinary word mints a fresh
-generation every time: a caller already compiled against the old epoch stays frozen
-under `RTLD_GLOBAL`, while a fresh reference resolves against the new one. Splicing the
-closure into the session's flat, positionally-indexed registries (`StructId = index` and
-siblings) remaps every type id it carries from closure-local to session indices — the
-remap a fresh native compile never needs, since it never has an already-populated
-registry to append onto. Transitive re-export stays closed at the REPL exactly as
-natively: a third file imported by the imported file contributes no session-visible
-name. Registry growth on re-import is accepted, not deduplicated or capped, matching a
-redefined word's fresh generation every time. An imported file declaring `main` is a
-located rejection naming the file and the word, at import time — the native path's own
-exposure to the same collision (recon #4, ROADMAP) stays unfixed. `export:` as a REPL
-line is its own located rejection: a live session has no export boundary to cross.
-
-Out of scope for this slice, all deferred to Phase 8's eventual package/versioning
-layer or later: a serializable API description and semver enforcement (which will
-consume this slice's export list, not redefine it), package manifests and a registry,
-re-exports or aliasing an import to a different local qualifier, a `mod.sth`-style
-directory-mirrors-module-tree convention (declined: flat file-is-a-module plus
-qualified access covers the only consumer that exists), and generic type declarations
-crossing files (they don't exist yet).
+A file is a compilation unit; a directory tree under a `sooth.pkg` manifest is a
+package. `import:`/`export:` with qualified access, selective imports, and
+transitive dependency resolution. Name resolution is "own module first, then
+qualifier"; a `type:` declaration is a name-scope, and exporting a type is
+transparent (no opacity mechanism). Full detail: [modules and
+encapsulation](./docs/design/modules.md).
 
 ## Codegen and backend
 
-Codegen model (unchanged from first principles, it's the good part): don't model
-the data stack at runtime. Simulate it at compile time as an array of typed slots;
-push/pop manipulate the array, and when IR is emitted the slots become ordinary
-SSA/register values. Each word compiles to a function taking N stack args and
-returning M results. The `branch` primitive becomes basic blocks and a conditional
-jump; there are no loop keywords (see Control flow and iteration), and iteration
-lowers to an internal loop primitive with a back-edge. Branch and loop join points unify the virtual-stack state
-(depth and type) across predecessors; mismatched depth or type across arms is a
-compile error.
-
-**No LLVM, and not a hand-written backend either. Decided: QBE.** The joy in this
-project is the language and writing programs in it, not emitting machine code, so
-codegen is offloaded to the smallest backend that stays legible. QBE (~15k lines you
-could actually read) gives arm64/x86_64/riscv64 plus C-ABI struct classification for
-free, and can carry essentially the entire design: everything interesting (linear
-analysis, monomorphisation of the small polymorphic core, deterministic drop) is
-frontend/runtime work QBE is agnostic to. A hand-written native backend (own the
-vertical, direct syscalls) was the craft-purist alternative, set aside for
-now, and reconsidered after self-hosting, because it optimises for building the
-compiler, which isn't the point at this stage. LLVM was
-rejected outright: too large and opaque for a hold-in-head project, a perpetual
-dependency tax, and product-grade output the language doesn't need. Wanting LLVM's
-full-service codegen is a tell that the project has drifted back to product-think,
-where the honest answer was "use Rust."
-
-**RISC-V 32 is a committed eventual target; the backend to reach it is deferred to
-post-bootstrap.** QBE gives arm64/x86_64/riscv64, but has no rv32 target (and assumes a
-64-bit machine word in places), so emitting rv32 will mean either patching an rv32 target
-into QBE or the hand-written backend, a call taken after the language self-hosts, consistent
-with the "reconsidered after self-hosting" stance above. The commitment is recorded now not
-to build anything, but so the frontend stops accruing 64-bit assumptions before then (see
-next).
-
-QBE's costs, accepted: it emits assembly text, so you depend on the system assembler
-
-- linker (a cross-toolchain + sysroot when cross-compiling the hosted layer); it has no
-volatile or atomic primitives, patched in rather than worked around (see Embedded and
-Concurrency below). Its modest optimiser is a feature, not a bug: more predictable than
-LLVM's aggressive passes and friendlier to any later WCET work.
-
-**QBE is a tracked fork, not a system dependency.** `~/code/qbe` tracks canonical upstream
-(`git://c9x.me/qbe.git`) at v1.3 plus a few, matching the installed binary's target list
-(`amd64_sysv/apple/win`, `arm64`/`arm64_apple`, `rv64`) exactly. Forking it for volatile
-and atomics is accepted; that does not extend to a Thumb/ARMv6-M target, a full new
-backend and an unrelated order of magnitude, argued on its own terms rather than
-inheriting "we already patch QBE" as a precedent.
-
-**WASM is a sibling lowering, not routed through QBE.** Sooth's IR is already
-stack-shaped with structured control flow, exactly what WASM wants, so WASM hangs off
-the neutral IR in parallel to QBE (emit WASM, hand to binaryen for optimisation),
-never downstream of it (going through QBE would flatten the stack/structured-control
-shape only to rebuild it with a relooper). The "uxn that grew up" target: portable,
-AOT-to-native via wasm2c when a native binary is wanted.
-
-**Enabling decision, load-bearing from Phase 2:** keep pointer size and memory model
-abstract in the IR (`Ptr[T]` is an opaque handle, not a native `u64`), so the QBE
-(native pointers) and WASM (linear-memory offsets) lowerings each concretise it. A
-native-pointer assumption leaking into shared IR is the one thing that makes WASM
-chafe later.
-
-The same rule extends to integer width: **the IR never assumes a 64-bit machine word.**
-Word, pointer, and `usize`/`isize` width are a target parameter, not a constant, exactly as
-`Ptr[T]` is opaque. This is not abstract tidiness: the committed rv32 target (above) has
-32-bit pointers and makes `i64`/`u64` double-word there (synthesised as register pairs in
-the frontend), so `usize` is genuinely 32-bit there. `usize` is a target-width type
-introduced with fixed-size arrays (Phase 2, Slice 5), where indexing is its first real
-consumer; `isize` mirrors it but waited for Phase 3 Slice 3, since it had no consumer
-until recursive/heap data existed. Both resolve to 64-bit on current targets but must
-never be *assumed* 64-bit in shared IR. A corollary worth revisiting under a 32-bit target: the
-current "integer literals default to `i64`" stance is 64-bit-centric, since on rv32 the
-natural machine word is 32-bit, not `i64`.
-
-**Dropping LLVM means no in-process JIT, and it turns out to cost nothing.** LLVM's
-ORC would have let the REPL and a compile-time evaluator share one native engine. Two
-decisions remove the need for it outright:
-
-- **No compile-time execution.** There is no immediate-word / macro facility (see
-  Declined), so nothing runs Sooth at compile time and there is no comptime
-  interpreter to build.
-- **The REPL runs on the backend, not an interpreter.** Each new word is compiled
-  through the normal pipeline to a shared object and `dlopen`'d into the session, so
-  the process holds live, natively-compiled code it can call at once; redefinition
-  loads a new object and swaps the name→symbol entry. Whole-program `run`/watch takes
-  the simpler compile-to-binary + subprocess path. One execution semantics either way,
-  so the live loop exercises the real backend with nothing to keep in sync. This is
-  Factor's in-image model minus the sub-millisecond per-word compile: an assembler +
-  linker + load round-trip per definition, higher latency than a JIT, acceptable for
-  craft. Sub-millisecond would require owning a backend (see Open / deferred); not now.
-
-**The REPL's stack buffer is a driver artifact, not a runtime-stack feature.** Word
-bodies still compute entirely in SSA/registers; the compile-time-virtual-stack
-invariant is untouched. The buffer exists only to bridge separately-compiled `.so`
-units: each bare expression line is a wrapper that loads the whole carried stack from
-a `Vec<i64>`, runs the line's body in registers exactly like a word, and stores the
-result back. This is also a deliberate preview of the **uniform runtime stack**
-reserved for escaping quotations (Phase 4): the same "marshal to/from a byte buffer
-at a compiled boundary" shape, reused there for closures that must cross into `alloc`
-rather than for a REPL line. Neither case puts a runtime stack inside a word body.
+Compile-time virtual stack to native; words as functions. Backend is QBE (small,
+legible, multi-arch) — no LLVM, no hand-written backend (deferred, reconsider after
+self-hosting). WASM is a sibling lowering off the neutral IR, not routed through
+QBE. The IR keeps `Ptr[T]` abstract and never assumes a 64-bit machine word, so
+both lowerings concretise it. No in-process JIT; the REPL loads freshly compiled
+words via `dlopen`. Full detail: [codegen and backend](./docs/design/codegen.md).
 
 ## Concurrency: a library, not a core feature
 
-Only two things must be core intrinsics; everything else is a library.
-
-**Core intrinsics (cannot be synthesised from below):**
-
-- **Atomics + memory ordering** (compare-and-swap, acquire/release). Codegen must
-  respect them as barriers. QBE gets patched with real per-target CAS/fence ops (x86
-  `LOCK CMPXCHG`, arm64 `LDAXR`/`STLXR` or LSE `CAS`, rv64 `LR.W`/`SC.W` or `A`-extension
-  AMOs) rather than FFI to libc, sharing the volatile patch's touch points (the `Ins`
-  flag bit, `load.c`/`gvn.c`'s dedup passes, each target's `isel.c` dead-result guard).
-  **No single codegen strategy across targets**, and the embedded ones are where a
-  uniform one breaks: LL/SC/AMO where the ISA has it (arm64, RISC-V with `A`); a critical
-  section by interrupt masking (`cpsid i`/PRIMASK) where it doesn't (ARMv6-M has no
-  LDREX/STREX, a RISC-V core without `A` has neither AMO nor LR/SC) — the same technique
-  `libatomic` and Rust's `portable-atomic` use on those cores, sufficient against
-  anything that can only *preempt* (an ISR against mainline code on the same core); and a
-  hardware spinlock where masking can't reach, since masking is per-core (RP2040's SIO
-  spinlocks for its two Cortex-M0+ cores). Fences order accesses, they do not exclude a
-  concurrent one, so they aren't a fourth option.
-- **A spawn primitive.** Can be a thin FFI to `pthread_create` at the hosted layer
-  rather than a language feature.
-
-**Free from the linear spine:** data-race freedom. Sending a message *moves* the
-payload (the same `dup`-is-the-copy rule across a thread boundary), so there is no
-shared mutable aliasing by construction. Second-class refs can't cross a thread
-boundary because they can't escape a scope at all, so the dangerous case is already
-forbidden by machinery built for resources. No separate `Send`/`Sync` apparatus
-needed.
-
-**Library (the whole model as the user sees it):** channels, mutexes, condvars,
-pools, futures, and actors (a mailbox + a loop + move-only messages). Split-endpoint
-channels so nothing needs to be `dup`ed:
-
-```forth
-\ intrinsics: spawn ( q -- Thread ), cas ( p a b -- bool ). the rest is library.
-
-: worker ( Recv[Job] -- )
-  | ch |
-  begin
-    ch recv            \ ( -- ch Job )  ownership of the Job MOVES to us
-    handle
-  again ;
-
-: main ( -- )
-  chan                          \ ( -- Send[Job] Recv[Job] )  two linear ends
-  swap [ worker ] spawn drop    \ Recv end moves into the spawned quotation
-  ... ;                         \ Send end stays here, still owned, race-free
-```
-
-Note `spawn [ ... ]` uses an escaping quotation, so the convenient concurrency
-library is an alloc/hosted citizen. A `no_std`/real-time concurrency library is a
-distinct, more constrained one (static topology, fixed mailboxes, no escaping
-captures). Concurrency-as-a-library is two libraries, not one.
+Only atomics + memory ordering and a spawn primitive are core intrinsics;
+everything else (channels, mutexes, actors) is a library. Data-race freedom is free
+from the linear spine: sending a message moves the payload, and second-class refs
+can't cross a thread boundary. Atomics have no single codegen strategy across
+targets (LL/SC, interrupt masking, hardware spinlock). Full detail:
+[concurrency and real-time](./docs/design/concurrency.md).
 
 ## Real-time: capable, not guaranteed
 
-The core is a strong real-time foundation, better than most, because the two hardest
-RT properties come for free: no GC (no stop-the-world pauses) and deterministic drop
-(destruction at a statically-known time). Errors-as-values means no unwind-path
-jitter either.
-
-What was *not* built is the RT *guarantee* machinery:
-
-- **Soft real-time** (audio, games, robotics tolerant of occasional misses) works
-  essentially out of the box.
-- **Hard real-time** (deadline miss = failure) is achievable by discipline, not
-  turnkey. You add a heap-free layer, a bounded-mailbox/static-topology concurrency
-  library, and carry the WCET reasoning yourself. The enemies to keep off hot paths
-  are dynamic dispatch through escaping quotations and spawning during the loop;
-  the fix is static topology (spawn at init). Nothing in the design fights this; it
-  just isn't enforced by a type/effect system the way a product version would.
-
-The RT-safe subset is exactly: core + the fixed (no-alloc) layer + the no-escape
-concurrency library.
-
-**One piece of that moved from discipline to enforcement**: unsynchronised sharing
-between an interrupt handler and mainline code is a checked error, via the global-set
-analysis below. WCET reasoning stays the programmer's. **Ravenscar is the reference to
-check the RT concurrency library against**, not to derive it from scratch: Ada's
-restricted tasking profile (static task topology, no termination, no dynamic
-priorities, one entry per protected object, mandatory ceiling locking) is the same
-shape as "static topology, fixed mailboxes, no escaping captures", except it has
-already survived DO-178C level A certification in avionics and space. Deviating from
-it is allowed; deviating without noticing is not.
+No GC and deterministic drop give the two hardest RT properties for free.
+Soft-RT works out of the box; hard-RT by discipline (fixed layer + static
+topology), not by enforced guarantee. Unsynchronised ISR/mainline sharing is a
+checked error. Ravenscar is the reference for the RT concurrency library. Full
+detail: [concurrency and real-time](./docs/design/concurrency.md).
 
 ## `no_std` core and layering
 
@@ -921,94 +344,15 @@ script and entry point.
 
 ## Embedded: statics, MMIO, and interrupts
 
-Four things the language has no answer for, all of them prerequisites for the bare-metal
-milestone rather than extras on top of it. Ada is the prior art throughout, because it is
-the one language that solves all of this *in the language* rather than with macros (C) or
-generated `unsafe` peripheral crates (Rust).
-
-**Static storage is a third category, not a storage class.** The linear spine assumes a
-value has one owner that moves it forward and one checked `drop` endpoint. A static has
-neither: it exists before `main`, is reachable from arbitrarily many call sites, and is
-never consumed, because an embedded device does not shut down. So a static is a *place*,
-not a value: never owned, never moved, never dropped, reached only through a second-class
-ref. `Copy` already carves one exception into linearity, for cheap duplicable values; this
-is a second one, for permanent mutable state, and the must-consume rule needs an explicit
-carve-out saying so rather than an accident that happens to typecheck. Initialisers are
-compile-time constants (literals, zero) only, which is not a new restriction to argue for:
-it falls straight out of "no comptime interpreter". Ada tiers this (`Pure` / `Preelaborate`
-/ arbitrary startup code with binder-computed ordering); constants-only is the
-`Preelaborate` tier, and the tier above it is available if that ever proves too tight.
-Static state is declared at module level where it is nameable, never hidden inside a word
-the way C's function-local `static` allows, because the analysis below has to be able to
-name it.
-
-**MMIO is a typed overlay with a volatile aspect, not a cast.** Two flavours of static,
-and they are not the same feature: storage the compiler allocates (a ring buffer, a
-counter), and a *fixed address the hardware defines* with a type asserted onto it. The
-second is closer to `extern:` than to a variable, and the declaration site is the trust
-boundary exactly as it already is for foreign calls, so there is still no separate `unsafe`
-marker. Volatile is a property of the declaration, not a hope: for a register the access's
-*existence* is the side effect, so the backend may never elide, coalesce, or reorder it.
-**QBE does not model volatile**, so a discarded load, two loads of the same address, and a
-store followed by a load of the same address are all fair game for elimination, CSE, and
-forwarding respectively — all three matter for real registers (clear-on-read status bits, a
-FIFO data register, write-then-verify), so QBE gets patched with a `vol` flag rather than
-routing every access through an opaque call. `struct Ins`'s `op:30` field has a spare bit
-to give it at zero size cost. Three sites need to honour it: `load.c`'s redundant-load/
-store-forwarding elimination, `gvn.c`'s `dedupins` (must never call a volatile op equal to
-anything, including itself elsewhere), and the dead-result guard duplicated across each
-target's own `isel.c` (amd64/arm64/rv64, no longer one shared file). GCM's block-pinning
-already covers in-block ordering for free, since loads and stores are `pinned` in the op
-table, so a volatile access spinning in a loop is not hoisted out without any new work.
-Copy Ada's declaration-side triple wholesale: an address clause, a `Volatile` aspect, and
-record representation clauses that lay a control register out to the bit, so a register is
-a typed record with named fields instead of hand-rolled shifts and masks.
-
-**An ISR is an exported symbol, not a called word.** On Cortex-M the hardware stacks the
-caller-saved registers on exception entry, so a handler is an ordinary C-ABI `void(void)`
-function reached through a vector table. What's missing is only a way to give a word a
-fixed symbol name and linker section, which is a linker/attribute mechanism rather than a
-language design problem.
-
-**Shared state between an ISR and mainline code is the hard part, and it gets an
-analysis.** An interrupt has no call site, so there is no move point at which ownership
-could transfer: both sides genuinely touch the same object, which is precisely what the
-rest of the language is built to prevent. What makes it tractable is a **global set** per
-word, the statics it touches and in what mode, computed bottom-up over the call graph. The
-hazard is then a set intersection: any static reachable from both an interrupt handler and
-mainline code needs masking or a protected wrapper. Without that set the hazards cannot
-even be enumerated, which is why C and embedded Rust both leave this to human discipline.
-Ada goes further and makes the mutual exclusion structural (a handler *must* be a protected
-procedure, and ceiling locking compiles to interrupt masking); whether the wrapper here is
-a library type or a language construct is open, but the analysis is needed either way.
-
-**Inferred everywhere, declared at boundaries.** Global sets are inferred within a module
-and *declared* on exported words and ISR-attached words. That line is not a staging plan,
-it is where visibility ends: inside a module the compiler sees every body, across a module
-boundary a caller cannot. The argument for declaring is not documentation, it is blame
-localisation, and it is the same argument that already made stack effects declared rather
-than inferred: an inferred contract reports a violation wherever it surfaces, not where the
-mistake was made, so an access added three words deep is silently absorbed and detonates at
-an ISR boundary the author never read. A declaration is a ratchet, catching the change in
-contract at the moment of the change. It also buys SPARK's `Abstract_State` benefit for
-free: an exported word declares that it touches module state without publishing which
-variables, so refactoring internals doesn't churn callers' contracts. Inferring internally
-is what keeps the annotation burden off every intermediate helper, which is the specific
-friction that makes real Ada projects skip `Global` contracts.
-
-**This is a global clause, not effect rows, and the difference is the whole budget.**
-Effect rows mean row *variables*, polymorphism, unification, and inference threaded through
-the type system, which the type system section declines. A global set is a closed
-monomorphic list of names with modes, checked by set inclusion; the bottom-up computation
-is a fixpoint over the call graph, not HM unification, so "no inference" does not settle it
-either way. Higher-order code is normally exactly where that distinction collapses, since
-`each`'s effects would have to be whatever its quotation's are, and Sooth escapes it
-through a decision already made for other reasons: combinators are **inlined at call
-sites**, so `each` never exists as a separate callee needing a polymorphic contract. The
-exception is escaping quotations, which cannot be inlined, and those are already
-`alloc`-layer and already excluded from the RT subset. The restriction lands exactly on a
-boundary that exists anyway, which is the reason to believe the narrow version holds rather
-than sliding into the general one.
+Static storage is a third category beside linear and `Copy` — a *place*, never
+owned, moved, or dropped, reached only by second-class ref, constant-initialised,
+declared at module level. MMIO is a typed fixed-address overlay with a volatile
+aspect (QBE patched with a `vol` flag, not routed through opaque calls). An ISR is
+a word exported under a fixed symbol and section. Shared state between an ISR and
+mainline gets a global-set analysis: the hazard is a set intersection, computed
+bottom-up over the call graph, inferred within a module and declared at boundaries.
+Full detail: [embedded: statics, MMIO, and
+interrupts](./docs/design/embedded.md).
 
 ## Liveness and the craft discipline
 
@@ -1045,111 +389,26 @@ rows, no borrow analysis needed to write the compiler in it.
 
 ## Decided
 
-- Scope: craft language, not a product. Optimise for legibility, hold-in-head size,
-  and the joy of building and writing it.
-- Signature idea: linear (use exactly once) by default, `dup` is the explicit copy,
-  `drop` is the explicit destructor point the checker enforces.
-- Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if`/`unless`, ordinary `core::bool` words taking a `bool` and two
-  quotations over the `branch` and `tag` primitives (see The machine layer and the
-  library layer); the generated eliminator word (`Shape?`) over variant-tagged
-  quotation arms as the sole, exhaustive eliminator for enums (no inline `match`, no
-  guards or literal patterns); a `cond` combinator (library word) for multi-way
-  branching. No loop keywords.
-- Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
-  loop primitive for constant stack; combinators (`each`/`while`/`fold`/`times`/`map`)
-  are library words built on quotations and inlined at call sites. Raw recursion is
-  legal but not the idiom. Self-tail-recursion is a guaranteed constant-stack transform
-  (tail self-call → jump), implemented in Phase 2; mutual TCO is deferred (SCC
-  contraction, not a trampoline). A loop-carried aggregate gets an entry-hoisted stable
-  slot with a read-before-write staged move-blit on the back-edge, no header phi. Lowering
-  tracks two distinct blocks per function, not one doing double duty: an invariant alloca
-  home (where every hoisted allocation lands, reached exactly once per call, so QBE's
-  frame-bumping `alloc*` never grows the frame per iteration) and a per-loop preheader
-  (where a carried aggregate's seeding blit lands, re-run once per entry to *that* loop).
-  They coincide for a top-level loop but diverge once loops nest, which is what lets
-  `times`/`while` and the library combinators built on them compose inside each other and
-  inside a `times` body at any depth, in constant stack.
-- Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
-  marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
-  types.
-- Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in (deferred to
-  the `alloc` layer, Phase 9); second-class refs (Hylo-style), no lifetime-tracking borrow
-  checker; non-null pointers; hidden/checked return stack.
-- Strings: two types, taking Zig's *split* (a length-carrying view plus a bare C pointer) but not
-  its sentinel-in-the-type. `str` is pointer + length and promises nothing about `byte[len]`, so
-  Sooth code always reads the length and never scans. `cstr` is pointer-only with an unknown
-  length, which is what C hands back. `str` -> `cstr` is free *for a literal*, whose lowering
-  emits an uncounted NUL, and is not free in general: `core` has no allocator to copy with, so a
-  caller that owns a buffer writes the terminator itself. `cstr` -> `str` costs an explicit scan.
-  A whole-type NUL guarantee was rejected because a view over part of a buffer could never uphold
-  it, and an invariant a later slice must revoke is worse than one never claimed. Slicing a fixed
-  array into a general view landed as `Slice[T]` (shared) / `!Slice[T]` (mutable), its own
-  second-class, input-only type built from a `&[T N]` / `&![T N]` array reference, indexed with a
-  runtime bounds trap and no fallible accessor (Phase 7 Slice 3c); slicing `str` itself into a
-  substring view stays deferred, see Open / deferred.
-- Storage and view are two types with two costs, permanently. The length lives in the *storage*
-  type (`[T N]`: statically sized, so it can be a struct field and needs no allocator, which is
-  what makes the `fixed` layer possible at all) and is carried at runtime by the *view* type
-  (`Slice[T]`). So `len` on storage folds to a compile-time constant read off the type and leaves
-  the array in place, while `len` on a view is a runtime load of the descriptor's second word and
-  consumes the view. `'N` length polymorphism is how a word stays generic over storage without
-  taking a view, which is why it monomorphizes per length rather than erasing it.
-- A user-supplied destructor is an overload of `drop` for a concrete type, not a new
-  declaration form, and defining one *forces* that type linear regardless of what its fields
-  would otherwise imply. `Copy` and a user destructor are mutually exclusive, for the reason
-  Rust makes them so (E0184): a `Copy` type could be duplicated and each copy discarded, so a
-  destructive body would run more than once for one logical resource. The body runs *instead
-  of* the synthesized field glue, never before or alongside it, because "nothing auto-drops"
-  already makes the body answerable for its own fields via the ordinary must-consume rule.
-- Foreign calls: one typed declaration form (`extern:`, a symbol plus a stack effect) rather
-  than per-call compiler builtins or an untyped generic syscall word. A raw syscall word is
-  ruled out: it would force `Ptr[T]` to become an integer, breaking the backend-neutral
-  invariant the WASM lowering depends on, and syscall numbers are neither OS- nor
-  arch-portable. Scalars and references may cross; owned aggregates and `^` returns may not.
-  The declaration site is itself the trust boundary, so there is no separate `unsafe` marker.
-- Codegen: compile-time virtual stack to native; words as functions.
-- Backend: QBE (small, legible, multi-arch native + C ABI for free); no LLVM. Owning a
-  hand-written native backend is deferred, not ruled out (the joy is the language, not
-  codegen; reconsider after self-hosting, see Open / deferred). WASM is a sibling
-  lowering off the neutral IR via binaryen, not routed through QBE. IR keeps `Ptr[T]`
-  abstract so both lowerings concretise it. No in-process JIT and no comptime
-  interpreter: the REPL loads freshly compiled words in-process via `dlopen`;
-  whole-program run uses compile-to-binary + subprocess.
-- Errors as values, no THROW/CATCH, no unwinding.
-- Concurrency: library, not core. Only atomics + spawn are intrinsics; data-race
-  freedom is free from linear types + non-escaping refs.
-- Real-time: soft-RT out of the box; hard-RT by discipline (fixed layer + static
-  topology), not by enforced guarantee, with one exception now enforced
-  (unsynchronised ISR/mainline sharing is a checked error). WCET stays the
-  programmer's. Check the RT concurrency library against Ravenscar rather than
-  deriving it fresh.
-- `no_std` core with core / fixed / alloc / hosted layering; allocator interface in
-  core; seams fixed day one.
-- Embedded/RT is a first-class target, and the one domain where Sooth is meant to be
-  used rather than only built. Static storage is a third category beside linear and
-  `Copy` (a *place*: never owned, moved, or dropped, reached only by second-class ref,
-  constant-initialised, declared at module level); MMIO is a typed fixed-address
-  overlay with a volatile aspect and bit-level register layout, following Ada, with
-  the declaration site as the trust boundary as for `extern:`; an ISR is a word
-  exported under a fixed symbol and section.
-- Statics get a **global set** per word (which statics it touches, in what mode),
-  inferred within a module and declared at module-export and ISR boundaries, so
-  unsynchronised ISR/mainline sharing is a set intersection the checker can compute.
-  A closed monomorphic list, explicitly *not* effect rows; combinator inlining is what
-  keeps it monomorphic under higher-order code, and escaping quotations (the one case
-  that would break it) are already outside the RT subset.
-- Atomics and volatile are both **QBE patches**, landing as real ops (`Ins`'s spare flag
-  bit, `load.c`/`gvn.c`'s dedup passes, each target's `isel.c`) rather than FFI-to-libc or
-  an opaque-call escape; `~/code/qbe` tracks canonical upstream for this. Atomics have no
-  single implementation strategy per target: LL/SC or AMO where the ISA has it (arm64,
-  RISC-V with `A`), interrupt masking as a critical section where it doesn't (ARMv6-M,
-  RISC-V without `A`), and a hardware spinlock where masking cannot reach (across
-  RP2040's two cores). Fences order; they do not exclude. Forking QBE for this does not
-  pre-decide a Thumb/ARMv6-M backend, a different order of magnitude argued on its own
-  terms.
-- Bootstrap: host-language compiler then self-host a small subset, fixpoint-verify.
-  Host language now free choice; Rust the sensible default.
+- **Scope**: craft language, not a product. Legibility, hold-in-head size, joy of building.
+- **Signature idea**: linear (use exactly once) by default, `dup` is the explicit copy, `drop` is the checked destructor.
+- **Surface**: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
+- **Control flow**: `if`/`unless` are `core::bool` words over `branch`/`tag` primitives; generated eliminator word (`Shape?`) for enums; `cond` combinator for multi-way. No loop keywords. Detail: [control flow](./docs/design/control-flow.md).
+- **Iteration**: quotations + `call` are the sole primitive; combinators are library words, inlined at call sites; self-tail-recursion is a guaranteed constant-stack transform (tail self-call → jump). Detail: [control flow](./docs/design/control-flow.md).
+- **Type system**: small. Concrete types + ADTs + minimal row polymorphism + `Copy` marker. No full HM, no refinement/SMT, no effect rows, no dependent types.
+- **Memory**: ownership + linear types, deterministic explicit drop, no GC, RC opt-in; second-class refs (Hylo-style), no borrow checker; non-null pointers; hidden/checked return stack. Detail: [memory model](./docs/design/memory-model.md).
+- **Strings**: `str` (pointer + length) and `cstr` (pointer-only), following Zig's split without the sentinel-in-the-type. `Slice[T]`/`!Slice[T]` for array views (Phase 7 Slice 3c). Storage and view are two types: length lives in storage (`[T N]`), carried at runtime by the view (`Slice[T]`).
+- **Destructors**: `drop` overload for a concrete type, not a new declaration form. Forces linearity. `Copy` and a user destructor are mutually exclusive. The body runs instead of synthesized field glue.
+- **Foreign calls**: `extern:` (symbol + stack effect). Scalars and refs cross; owned aggregates and `^` returns may not. Declaration site is the trust boundary; no separate `unsafe` marker.
+- **Codegen**: compile-time virtual stack to native; words as functions. Detail: [codegen](./docs/design/codegen.md).
+- **Backend**: QBE (small, legible, multi-arch). No LLVM. Hand-written backend deferred (reconsider after self-hosting). WASM is a sibling lowering off the neutral IR via binaryen. IR keeps `Ptr[T]` abstract. No JIT; REPL via `dlopen`. Detail: [codegen](./docs/design/codegen.md).
+- **Errors**: values, no THROW/CATCH, no unwinding.
+- **Concurrency**: library, not core. Atomics + spawn are intrinsics; data-race freedom from linear types + non-escaping refs. Detail: [concurrency](./docs/design/concurrency.md).
+- **Real-time**: soft-RT out of the box; hard-RT by discipline (fixed layer + static topology). ISR/mainline sharing is a checked error. Ravenscar is the reference. Detail: [concurrency](./docs/design/concurrency.md).
+- **Layering**: `no_std` core with core / fixed / alloc / hosted layers; allocator interface in core; seams fixed day one.
+- **Embedded/RT**: first-class target. Statics as third category (a place); MMIO as typed overlay with volatile aspect; ISR as exported symbol; global-set analysis for ISR/mainline sharing. Detail: [embedded](./docs/design/embedded.md).
+- **Atomics and volatile**: QBE patches, not FFI. Per-target strategy (LL/SC, interrupt masking, hardware spinlock). Forking QBE for this does not pre-decide a Thumb/ARMv6-M backend. Detail: [embedded](./docs/design/embedded.md), [concurrency](./docs/design/concurrency.md).
+- **Modules**: file is a compilation unit; directory tree under `sooth.pkg` is a package. `import:`/`export:` with qualified access and selective imports. Detail: [modules](./docs/design/modules.md).
+- **Bootstrap**: host-language compiler then self-host a small subset, fixpoint-verify. Rust the sensible default.
 
 ## Tie-breakers
 
@@ -1164,7 +423,7 @@ that were argued out rather than assumed.
   example: a `Copy` aggregate accumulator could only be copied, at a full memcpy per loop
   iteration, because an aliasing rule was keyed on names merely in lexical scope, and the
   workaround on offer was to change the type's linearity. Fix the rule; do not bill the
-  programmer. This is the same instinct as the Memory model's "a compiler-inserted copy is
+  programmer. This is the same instinct as the [memory model's](./docs/design/memory-model.md) "a compiler-inserted copy is
   the same category of invisible behaviour as an auto-drop", pointed the other way: an
   invisible cost is a defect whether the compiler inserts it or the language extracts it.
 - **One diagnostic severity.** Everything the compiler says is an error. "Unused" is an
@@ -1182,132 +441,44 @@ that were argued out rather than assumed.
 
 ## Open / deferred
 
-- **Surface syntax for statics, the global clause, and register layout.** The
-  semantics are settled (see Embedded); the spellings are not. The global clause has
-  to attach to the stack effect without turning a one-line signature into three, and
-  register layout needs a bitfield form that doesn't grow a second declaration
-  language. Settle these in one brief, not four, since they all land in the same
-  declaration.
-- **Whether the ISR/mainline wrapper is a library type or a language construct.** Ada
-  makes it structural: a handler must be a protected procedure, and ceiling locking
-  compiles to interrupt masking. The cheap version here is a `fixed`-layer type whose
-  operations mask, with the global-set analysis catching anything that bypasses it;
-  the expensive version enforces that statics shared across a preemption boundary are
-  *only* reachable through such a type. Decide against a real driver, not in the
-  abstract.
-- **Whether an ISR's global set can be checked at all under separate compilation.**
-  The intersection is a whole-program question, and firmware links whole-program, so
-  this is likely a link-time check rather than a per-module one. Unresolved: what the
-  REPL's `dlopen` path does with it, where there is no link step and no ISR.
-- Exact surface syntax for quotations/closures and their captures (illustrative
-  above, not settled).
-- Whether to add optional HM inference later (kept possible by the `(value, type)`
-  slot representation, not planned).
-- **Mutual tail-call elimination (tier 2).** Self-tail-call → loop lands in Phase 2
-  (see Control flow and iteration); *mutual* tail recursion (a tail-call cycle A→B→A)
-  stays deferred. When taken, the mechanism is **not a trampoline** (a real trampoline
-  needs first-class function values / quotations, which are Phase 4) and **not** QBE
-  backend tail calls (QBE has none, and adding them forks the backend we chose not to
-  fork). It is **strongly-connected-component contraction**: detect the SCC of the
-  tail-call graph, merge its members into one function carrying a state tag (which
-  member we are in, an ordinary enum discriminant) plus the union of their live values,
-  lower every intra-SCC tail call as a back-edge jump, and keep thin public wrappers so
-  members stay callable from outside. Constrained to SCCs whose members share a return
-  signature (a divergent return type would want a result union, i.e. generic `type:`
-  declarations, Phase 5).
-  Until then, mutual tail recursion is a located compile error, not a silent overflow.
-- **Drop at the back-edge (co-design with deterministic drop).** The self-tail-call
-  transform is the point where the outgoing iteration's linear values that are *not*
-  forwarded must be dropped before the jump. In Phase 2 every type is `Copy`, so that
-  drop set is empty and the concern is vacuous; the back-edge is the **defined disposal
-  point**, so it has a home when a later Phase 3 slice lets a linear value ride a loop
-  (Phase 3 Slice 1 defers loop-carried linear values).
-- **Slicing `str` into a substring view.** Phase 7 Slice 3c delivered the general case for a
-  fixed array (see Memory model): `Slice[T]` / `!Slice[T]`, resolved as its own `Type`/`IrType`
-  variant rather than a `&`-prefixed borrow of the storage type, which is what kept `str` and
-  `cstr` from having to grow a rooting bit: no *existing* type's answer changed. The new variant
-  answers all three predicates itself, and those answers are the soundness core -- `is_ref` true
-  (a view is legal input, is not move-tracked, and is owed no `drop`), `is_copy` false for the
-  mutable view (duplicating it would put two names through one exclusive borrow), and
-  `contains_reference` true (so the no-declared-output-reference rule keeps covering a view).
-  `str` was probed as a source for the same mechanism and found closed for now, not by design
-  but by a prerequisite gap: a `str` *local* cannot be borrowed at all (the scalar-local gate
-  names `str` explicitly in its rejection), so the only `&str` obtainable today is a `str`
-  *static*, and even then a `str`'s `{bytes_ptr, len}`
-  descriptor is built statically per literal (`emit_str_literal`, `src/backend/qbe.rs`), a
-  representation a view sliced out of it at runtime cannot reuse without materializing a fresh
-  descriptor. Revisit once a `str` local (or a struct-typed `static:`, also undeclarable today)
-  exists as a sliceable source.
-- **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
-  a trailing newline for every type except `str`/`cstr` (slice 8a's R9). The decision is to make it
-  uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
-  explicitly by the caller, e.g. `: println ( i64 -- ) . "\n" . ;`. Consequence: `1 . 2 .` then prints
-  `12`, callers supplying every separator, not just newlines. Amends Phase 0's definition of `.`
-  (`docs/roadmap/P0/spec.md` defines it as `printf("%ld\n", …)` in three places) and touches
-  ~130 stdout assertions across five test files (`assert_eq!(stdout` count: 91 in
-  `tests/phase0.rs`, 24 in `tests/phase3_refs.rs`, 9 in `tests/phase3_strings.rs`, 6 in
-  `tests/phase3_locals.rs`, plus roughly 22 REPL-session assertions in `tests/phase1.rs`), plus
-  the backend's own format-string unit tests (`src/backend/qbe.rs`), so it lands as its own
-  scoped change, not folded into slice 8a. A single `print` covering every type needs Phase 4's
-  static overloading; until then it is one wrapper word per type, e.g. `: println ( i64 -- ) .
-  "\n" . ;`, or an explicit `"\n" .` at each call site — and the wrapper is only expressible
-  from slice 8a onward, since it needs a string literal.
-- **Bounded rows (`..N`), with variadic FFI as a consumer rather than the justification.**
-  `..s` is an *unbounded* row: opaque, passed through untouched, and checkable precisely
-  because nothing ever looks at it (`check_poly_body`, `src/check.rs`). A **bounded** row is
-  the missing sibling: N stack slots whose element types the checker reads off the concrete
-  stack at each call site. The better motivation is not FFI at all -- Forth's
-  depth-parameterized stack words (`ndrop`, `npick`, `nroll`) have no expressible signature in
-  Sooth today, since `..s` cannot be consumed and a fixed arity cannot vary. Variadic FFI then
-  falls out for free: in an `extern:` declaration the row's *position* marks the
-  fixed/variadic boundary, because C's fixed parameters are exactly the individually named
-  ones, so no C-specific keyword is needed anywhere in the language.
-  **N is a compile-time literal on top of the row** (precedent: `fill`'s count is already
-  required to be literal), so `"%d %d" 42 43 2 printf` reads format string deepest, then the
-  arguments, then the count.
-  **Rejected**: a zero-width boundary marker (`( cstr .. i64 -- i64 )`), which reads as
-  variable-arity when it consumes nothing and collides with `..s` occupying the same position
-  meaning nearly the opposite; and a separate `"printf" variadic 1` clause, which bolts a C
-  ABI fact onto the declaration form instead of using syntax that earns its place elsewhere.
-  **Open**: whether the literal count slot is spelled in the effect or implied by `..N`; how
-  `..N` relates to the existing `'N` length variables (shared namespace, or linked); and the
-  diagnostic when the literal disagrees with the stack's actual depth, which is the one real
-  cost of literal-on-top over encoding the count in the word name (`printf2`), since a name
-  cannot disagree with itself. Nothing blocks on this: Phase 4 slice 8a's `.` keeps its
-  backend lowering either way.
-- Owning a native backend (a hand-written machine-code emitter replacing QBE's
-  text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
-  `dlopen` cover native output and a live REPL without it. Reconsider after
-  self-hosting, and only if the pull to own the vertical is genuine or a
-  sub-millisecond in-image REPL is something you actually want; if taken, it is its
-  own phase, never welded to the self-hosting rewrite.
-- **REPL late binding for redefinition.** Every REPL word today is frozen at whichever
-  generation of its callees existed when it was compiled: redefining `f` after `g`
-  already calls it leaves `g` calling the old `f` forever, verified even across a
-  signature-incompatible redefinition (`f` going from `( -- i64 )` to `( -- bool )`
-  does not perturb an already-compiled `g`). This is not a chosen UX principle, it
-  falls straight out of the architecture: each line compiles once to native code via
-  `dlopen` (no in-process JIT, see Decided), calls are direct and baked at the calling
-  line's compile time, and nothing ever recompiles an earlier line. It also matches
-  Forth's own long-standing convention (a colon-definition compiles its calls to fixed
-  execution tokens; redefining a word a later definition already calls does not
-  retroactively change that definition), which is Sooth's actual reference class, not
-  the late-bound convention of Python/Lisp/JS REPLs, where redefining a helper
-  immediately updates every existing caller. Phase 4 Slice 2 (REPL monomorphization)
-  surfaced the question by needing to decide which env a polymorphic word's
-  instantiation binds its callees against, and kept the existing frozen rule there for
-  consistency with ordinary words rather than deciding the bigger question in passing.
-  Genuine late binding needs every call to go through a mutable dispatch slot that
-  redefinition updates, rather than a direct symbol reference, for every word, not just
-  polymorphic ones (doing it only for generics would make a caller's behavior on
-  redefinition depend on whether the callee happens to be generic, a worse
-  inconsistency than either uniform choice), and it is a breaking change to already-
-  shipped, already-tested ordinary-word REPL semantics. Revisit only if live-patching is
-  something actually wanted, as its own design track with its own brief, not as a side
-  effect of a generics or monomorphization slice. Import reload (Slice 5b) rides this
-  same frozen-generation rule rather than reopening it: a re-run `import:` line mints a
-  fresh epoch and recompiles every word in the closure under it, but an already-compiled
-  caller stays exactly as frozen as it would after any other word's redefinition.
+- **Surface syntax for statics, the global clause, and register layout.** Semantics
+  settled, spellings not. Settle in one brief, since they all land in the same
+  declaration. Detail: [embedded](./docs/design/embedded.md).
+- **Whether the ISR/mainline wrapper is a library type or a language construct.**
+  Decide against a real driver, not in the abstract. Detail:
+  [embedded](./docs/design/embedded.md).
+- **Whether an ISR's global set can be checked under separate compilation.**
+  Likely a link-time check, not per-module. What the REPL's `dlopen` path does with
+  it is unresolved. Detail: [embedded](./docs/design/embedded.md).
+- **Exact surface syntax for quotations/closures and their captures.** Illustrative
+  above, not fully settled. Detail: [control flow](./docs/design/control-flow.md).
+- **Optional HM inference later.** Kept possible by the `(value, type)` slot
+  representation, not planned.
+- **Mutual tail-call elimination (tier 2).** SCC contraction, not a trampoline and
+  not QBE tail calls. Until then, a located compile error. Detail: [control
+  flow](./docs/design/control-flow.md).
+- **Drop at the back-edge.** The defined disposal point for loop-carried linear
+  values not forwarded. Vacuous while all types are `Copy`; has a home once a linear
+  value rides a loop. Detail: [control flow](./docs/design/control-flow.md).
+- **Slicing `str` into a substring view.** Blocked by a prerequisite gap: `str`
+  locals can't be borrowed today, and `str` descriptors are built statically per
+  literal. Revisit once a `str` local exists as a sliceable source. Detail: [memory
+  model](./docs/design/memory-model.md).
+- **`.` appending no separator, for every type.** Decided, not yet implemented.
+  Today `.` appends a trailing newline for every type except `str`/`cstr`. The
+  decision is to make it uniform: `.` writes exactly the value, newline spelled by
+  the caller. Touches ~130 stdout assertions across test files; lands as its own
+  scoped change.
+- **Bounded rows (`..N`).** A bounded row sibling to `..s`, with variadic FFI as a
+  consumer rather than the justification. N is a compile-time literal on top of the
+  row. Open: count spelling, `..N`/`'N` relationship, diagnostic on disagreement.
+- **Owning a native backend.** Deferred. Reconsider after self-hosting, and only if
+  the pull is genuine or sub-millisecond REPL is wanted. Detail:
+  [codegen](./docs/design/codegen.md).
+- **REPL late binding for redefinition.** Words are frozen at their compile-time
+  generation; redefining a callee doesn't update existing callers. Falls out of
+  the `dlopen` architecture. Revisit only if live-patching is wanted, as its own
+  design track.
 
 ## Declined
 
