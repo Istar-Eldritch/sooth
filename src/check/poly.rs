@@ -4708,9 +4708,10 @@ mod tests {
         );
     }
     /// R2: a capturing literal at the argument boundary runs the existing R15
-    /// admission path -- proof this new call site actually invokes
-    /// `check_capture_admission`, not just present in the diff. `n` is an
-    /// in-frame (non-escaping) capture, so it is admitted.
+    /// admission path. An in-frame (non-escaping) capture is admitted; this
+    /// alone survives stubbing out the `check_capture_admission` call at this
+    /// call site, so it does not by itself prove the path is wired up -- see
+    /// the escaping-capture rejection below for that proof.
     #[test]
     fn check_poly_call_admits_a_capturing_literal_argument() {
         check_src(
@@ -4718,6 +4719,21 @@ mod tests {
              : main ( -- ) 3 | n | 7 [ n add ] run_it drop ;\n",
         )
         .expect("an in-frame capturing literal should be admitted at the argument boundary");
+    }
+    /// R2, discriminating: an escaping capture at the argument boundary must
+    /// hit `check_capture_admission`'s existing rejection -- proof this new
+    /// call site actually invokes it, not just present in the diff.
+    #[test]
+    fn check_poly_call_rejects_an_escaping_capturing_literal_argument() {
+        let err = check_src(
+            ": run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+             : main ( -- ) [ 1 add ] | q | 7 [ q call ] run_it drop ;\n",
+        )
+        .expect_err("an escaping capturing literal must be rejected at the argument boundary");
+        assert!(
+            err.contains("capturing a quotation value by name is deferred"),
+            "{err}"
+        );
     }
     #[test]
     fn poly_term_admits_a_quotation_literal_as_a_marker_slot() {
