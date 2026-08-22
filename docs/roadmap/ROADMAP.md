@@ -11,9 +11,10 @@ and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-
 (quotation effect annotations; variant types and accessors; the mode-polymorphic
 eliminator word) are done and merged; see [P6](./P6-enum-elimination.md) for the full
 slice breakdown. **Phase 7 (language prerequisites for the
-stdlib) is in progress**: Slice 1 (accessors as receiver-directed projections), Slice 2
-(static storage and global sets), and Slices 3a-3b (generic instantiation and quotations
-in a polymorphic body) are done and merged; see [P7](./P7-language-prereqs.md) for the
+stdlib) is in progress**: Slices 1-2 (accessors as receiver-directed projections; static
+storage and global sets) and Slices 3a-3d, 3f-3g (incl. 3g-follow), and 3i (generic
+instantiation, quotations and slicing, self-recursion and its loop transform, and `bool`
+as an ordinary enum) are done and merged; see [P7](./P7-language-prereqs.md) for the
 full slice breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
@@ -51,7 +52,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
-| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-3b) |
+| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-2, 3a-3d, 3f-3g, 3i) |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
 | **P10** | [Concurrency (library)](./P10-concurrency.md) | `[M]` |
