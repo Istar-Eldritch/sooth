@@ -2160,9 +2160,12 @@ enum ArmRule {
         want: Vec<PolySlot>,
         declared: String,
     },
-    /// The shape-changing case (`if`/`unless`): the declaration fixes no exit,
-    /// so the arms sharing this declared output row id are held to each other.
-    Row(u32),
+    /// The shape-changing case (`if`/`unless`): the declaration fixes no exit
+    /// row, only a suffix above it -- the arm's exit is `region ++ suffix`,
+    /// checked here against the declared suffix types (`outs`, `declared` for
+    /// rendering), and the stripped region is what the arms sharing this
+    /// declared output row id (`u32`) are held to against each other.
+    Row(u32, Vec<Type>, String),
 }
 
 /// Classify one declared parameter of a row-typed combinator. `Ok(None)` is an
@@ -2199,13 +2202,12 @@ fn poly_declared_arm(
             let row_out = match (row_in, row_out) {
                 (Some(a), Some(b)) if a != b => {
                     // Shape-changing (`if`/`unless`): nothing fixes the exit
-                    // but sibling agreement, and the produced row is read
-                    // straight off an arm's exit -- so a slot declared *above*
-                    // that row would have to be stripped back off first, a
-                    // rule neither quotation consumer shares.
-                    if !outs.is_empty() {
-                        return Err(abstract_());
-                    }
+                    // row but sibling agreement, and the produced row is read
+                    // straight off an arm's exit -- so a declared suffix
+                    // above that row (`outs`) is stripped back off it first
+                    // (`ArmRule::Row`), the poly port of
+                    // `check_literal_against_declared_effect`'s
+                    // shape-changing branch (`src/check.rs:2124`).
                     Some(*b)
                 }
                 // One row on both sides (`times`), or none at all (the P7.S3d
@@ -2368,7 +2370,7 @@ fn poly_combinator_call(
                 .map(|t| PolySlot::new(PolyType::Concrete(*t))),
         );
         rules.push(match decl.row_out {
-            Some(rid) => ArmRule::Row(rid),
+            Some(rid) => ArmRule::Row(rid, decl.outs.clone(), poly_type_str(pin, csig)),
             None => {
                 let mut want = region;
                 want.extend(
@@ -2435,13 +2437,43 @@ fn poly_combinator_call(
                         )),
                     }
                 }
-                ArmRule::Row(rid) => match shape_baseline.get(rid) {
-                    Some(want) => poly_arms_agree(want, &exit, ctx, literal_span, name, sig),
-                    None => {
-                        shape_baseline.insert(*rid, exit);
-                        Ok(())
+                ArmRule::Row(rid, suffix, declared) => {
+                    // R2: the arm's exit is `region ++ suffix` -- strip the
+                    // declared trailing slots back off first (the poly port
+                    // of `check_literal_against_declared_effect`'s
+                    // shape-changing branch, `src/check.rs:2124`), and hold
+                    // only the stripped region to the cross-arm agreement
+                    // below.
+                    let split_at = exit.len().saturating_sub(suffix.len());
+                    let (region, tail) = exit.split_at(split_at);
+                    let suffix_matches = tail.len() == suffix.len()
+                        && tail
+                            .iter()
+                            .zip(suffix)
+                            .all(|(s, t)| matches!(s.pt, PolyType::Concrete(u) if u == *t));
+                    if !suffix_matches {
+                        let want: Vec<PolySlot> = suffix
+                            .iter()
+                            .map(|t| PolySlot::new(PolyType::Concrete(*t)))
+                            .collect();
+                        return Err(poly_arm_declared_effect_mismatch_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            declared,
+                            &poly_row_str(tail, sig),
+                            &poly_row_str(&want, sig),
+                        ));
                     }
-                },
+                    let region = region.to_vec();
+                    match shape_baseline.get(rid) {
+                        Some(want) => poly_arms_agree(want, &region, ctx, literal_span, name, sig),
+                        None => {
+                            shape_baseline.insert(*rid, region);
+                            Ok(())
+                        }
+                    }
+                }
             }
         },
     )?;

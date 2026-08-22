@@ -482,18 +482,25 @@ fn arm_local_bound_and_leaked_is_error_and_one_sided_binding_is_not() {
 
 #[test]
 fn a_slot_declared_above_a_produced_row_is_located() {
-    // R3: the produced row is read straight off an arm's exit, so a parameter
-    // declaring a slot *above* that row (`~[ ..a -- ..b i64 ]`) would need
-    // that slot stripped back off first -- a rule neither quotation consumer
-    // shares. Located, and named against the declaration rather than against
-    // the arm, which is written correctly.
+    // P7.S3j (R3): the declared trailing `i64` above pick's produced row
+    // (`~[ ..a -- ..b i64 ]`) is now stripped off each arm's exit before the
+    // row `..b` is read (P7.S3j's fix, mirroring the monomorphic
+    // `check_literal_against_declared_effect`'s shape-changing branch), so
+    // the *pick call itself* grounds identically whether `bad` declares the
+    // stripped row (`-- 'T`, the sibling golden
+    // `a_slot_declared_above_a_produced_row_is_stripped_and_grounds`) or, as
+    // here, the un-stripped one (`-- 'T i64`): nothing at that call site can
+    // see which one is wrong, since `bad` declares no row of its own for
+    // pick's `..b` to answer to.
     //
-    // `bad` declares `-- 'T i64`, the *un-stripped* row itself, rather than
-    // just `-- 'T`: with the guard deleted, that is what lets this reach
-    // `ir/func_builder/quotation.rs`'s row-length arithmetic instead of being
-    // caught first by an ordinary stack-effect-mismatch check, so the guard
-    // is what stands between this program and a backend panic
-    // (`attempt to subtract with overflow`), not just a worse diagnostic.
+    // `bad`'s own declared effect is still checked, generically, against
+    // what its body actually leaves (`poly_output_mismatch_error`) --
+    // catching the same malformed program, before lowering, but as an
+    // ordinary declared-vs-actual mismatch rather than the combinator's own
+    // "cannot ground" wording (which no longer applies: the call did
+    // ground). The backend row-length panic this regression exists to keep
+    // unreachable is still unreachable: `bad` never typechecks, so nothing
+    // reaches `ir/func_builder/quotation.rs`.
     let err = build_err(
         "above-the-row",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
@@ -502,11 +509,28 @@ fn a_slot_declared_above_a_produced_row_is_located() {
          : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
-        err.contains(
-            "`pick` declares `~[ ..a -- ..b i64 ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
-        ),
+        err.contains("stack effect mismatch in `bad`")
+            && err.contains("body leaves `'T`, but the declared outputs are `'T i64`"),
         "{err}"
     );
+}
+
+#[test]
+fn a_slot_declared_above_a_produced_row_is_stripped_and_grounds() {
+    // R1/R2: the same combinator and arms as the R3 regression above, but the
+    // enclosing word's own declared effect correctly reflects the *stripped*
+    // row (`-- 'T`, not `-- 'T i64`) -- this is the well-formed case the fix
+    // admits: `pick`'s declared trailing `i64` is stripped off each arm's
+    // exit before the row `..b` is read, so `bad` grounds and returns `'T`
+    // alone.
+    let src = ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n";
+    let scratch = Scratch::write("above-the-row-stripped", src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
 }
 
 #[test]
