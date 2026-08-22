@@ -16,7 +16,7 @@ use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, ImportTarget, Line, OwnedCellDecl, OwnedCellId,
     PolySig, PolyType, RefDecl, RefId, SliceDecl, SliceId, Span, StackEffect, StructDecl, StructId,
-    Term, TermKind, Type, TypedSlot, VariantDecl, WordDef,
+    Term, TermKind, Type, TypedSlot, VariantDecl, WordDef, BOOL_TYPE_NAME,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -192,8 +192,10 @@ fn import_symbol(name: &str, epoch: u64) -> String {
 /// R9 (slice 5b): shift a closure-local `Type`'s registry id into session
 /// space by the session's registry lengths captured at splice time. A scalar
 /// type carries no id and passes through unchanged.
+#[allow(clippy::too_many_arguments)]
 fn remap_type(
     ty: Type,
+    bool_enum: EnumId,
     struct_base: usize,
     enum_base: usize,
     array_base: usize,
@@ -203,15 +205,14 @@ fn remap_type(
 ) -> Type {
     match ty {
         Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
-        // Slice 9 (R2): `bool` occupies the reserved `BOOL_ENUM_ID` in every
-        // module's own registry (parser.rs's `parse`, `driver.rs`'s
-        // `assemble_module`), including the imported module's -- it is the
-        // same builtin type everywhere, not a per-module declaration, so it
-        // must stay pinned to the *session's* `BOOL_ENUM_ID`, never shifted
-        // by `enum_base` into a distinct, non-equal id. (`splice_import`
-        // still appends the imported module's own redundant `bool` entry
-        // below; it is simply never referenced by any remapped `Type`.)
-        Type::Enum(id, _) if id == crate::ast::BOOL_ENUM_ID => Type::BOOL,
+        // P7 slice 3i (R2): the session seeds `core::bool` at startup, so an
+        // imported module's own `bool` is the same declaration the session
+        // already holds, not a per-module type of its own: it maps to the
+        // session's copy rather than being shifted by `enum_base` into a
+        // distinct, non-equal id (which would make a session `true` and an
+        // imported `if` disagree). `splice_import` skips appending the
+        // imported entry for the same reason.
+        Type::Enum(_, name) if name == BOOL_TYPE_NAME => Type::Enum(bool_enum, name),
         Type::Enum(id, n) => Type::Enum(EnumId::from_index(id.index() + enum_base), n),
         Type::Array(id, n) => Type::Array(ArrayId::from_index(id.index() + array_base), n),
         Type::OwnedCell(id, n) => {
@@ -233,8 +234,10 @@ fn remap_type(
 /// registry ids in a polymorphic signature into session space by the same
 /// bases. A type/length *variable* carries no id and passes through; a
 /// concrete or array-of type shifts its ids like every other imported decl.
+#[allow(clippy::too_many_arguments)]
 fn remap_poly_type(
     p: &PolyType,
+    bool_enum: EnumId,
     struct_base: usize,
     enum_base: usize,
     array_base: usize,
@@ -245,6 +248,7 @@ fn remap_poly_type(
     match p {
         PolyType::Concrete(t) => PolyType::Concrete(remap_type(
             *t,
+            bool_enum,
             struct_base,
             enum_base,
             array_base,
@@ -258,6 +262,7 @@ fn remap_poly_type(
         PolyType::Array(inner, len) => PolyType::Array(
             Box::new(remap_poly_type(
                 inner,
+                bool_enum,
                 struct_base,
                 enum_base,
                 array_base,
@@ -273,6 +278,7 @@ fn remap_poly_type(
         PolyType::Ref(referent, mutable) => PolyType::Ref(
             Box::new(remap_poly_type(
                 referent,
+                bool_enum,
                 struct_base,
                 enum_base,
                 array_base,
@@ -287,6 +293,7 @@ fn remap_poly_type(
                 .map(|q| {
                     remap_poly_type(
                         q,
+                        bool_enum,
                         struct_base,
                         enum_base,
                         array_base,
@@ -300,6 +307,7 @@ fn remap_poly_type(
                 .map(|q| {
                     remap_poly_type(
                         q,
+                        bool_enum,
                         struct_base,
                         enum_base,
                         array_base,
@@ -331,6 +339,7 @@ fn remap_poly_type(
                 .map(|a| {
                     remap_poly_type(
                         a,
+                        bool_enum,
                         struct_base,
                         enum_base,
                         array_base,
@@ -389,6 +398,7 @@ fn remap_imported_combinator(
     internal: &str,
     body_rename: &HashMap<String, String>,
     module_base: u32,
+    bool_enum: EnumId,
     struct_base: usize,
     enum_base: usize,
     array_base: usize,
@@ -400,6 +410,7 @@ fn remap_imported_combinator(
         name: s.name.clone(),
         ty: remap_type(
             s.ty,
+            bool_enum,
             struct_base,
             enum_base,
             array_base,
@@ -420,6 +431,7 @@ fn remap_imported_combinator(
             .map(|p| {
                 remap_poly_type(
                     p,
+                    bool_enum,
                     struct_base,
                     enum_base,
                     array_base,
@@ -435,6 +447,7 @@ fn remap_imported_combinator(
             .map(|p| {
                 remap_poly_type(
                     p,
+                    bool_enum,
                     struct_base,
                     enum_base,
                     array_base,
@@ -621,11 +634,13 @@ pub fn format_stack(
     let mut vals = Vec::with_capacity(types.len());
     for ty in types {
         match ty {
-            // Slice 9 (D-D): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`
-            // structurally, but the REPL still renders it as `true`/`false`
-            // rather than the generic `<TypeName>` enum placeholder below --
-            // this arm must precede the general `Type::Enum` one to win.
-            _ if *ty == Type::BOOL => {
+            // P7 slice 3i (R2): a bool is structurally an enum, but `:stack`
+            // renders it as `true`/`false` rather than the generic
+            // `<TypeName>` placeholder below, matching `.`; this arm must
+            // precede the general `Type::Enum` one to win. Keyed on the type
+            // name plus a scalar layout, which is what makes reading exactly
+            // one cell for it correct.
+            Type::Enum(id, BOOL_TYPE_NAME) if enum_layouts[id.index()].is_scalar => {
                 let v = buf[cell];
                 vals.push(if v != 0 { "true" } else { "false" }.to_string());
                 cell += 1;
@@ -1067,19 +1082,51 @@ pub struct Session {
     /// existing goldens byte-for-byte); `run_tty` sets this once, at entry,
     /// for an interactive session.
     rich_stack: bool,
+    /// P7 slice 3i (R2/R4): where `Session::new`'s `core::bool` seed landed in
+    /// `enums`. The session's *one* boolean type: an imported module's own
+    /// `bool` maps here (`remap_type`) rather than being appended a second
+    /// time, and `:stack` renders a slot of this type as `true`/`false`.
+    bool_enum: EnumId,
+}
+
+/// P7 slice 3i (R2): `core::bool` parsed from the real `lib/bool.sth`, the
+/// session's startup seed. Embedded at build time rather than read from disk:
+/// a session must resolve its boolean type without knowing where the library
+/// tree sits relative to the running binary, and this keeps `lib/bool.sth` the
+/// single source of the declaration all the same.
+fn core_bool_module() -> Module {
+    let tokens = lexer::lex(include_str!("../lib/bool.sth")).expect("`lib/bool.sth` lexes");
+    parser::parse(&tokens).expect("`lib/bool.sth` parses")
 }
 
 impl Session {
     pub fn new() -> Session {
+        // P7 slice 3i (R2): the session seeds `core::bool` from the real
+        // `lib/bool.sth` source, embedded rather than read from a path so a
+        // session does not depend on where the binary was installed relative
+        // to the library tree. This is the REPL's equivalent of a file's
+        // `import: core::bool ;`, and it is a seed rather than a written import
+        // because the REPL cannot resolve a package-name import at all: without
+        // it a bare `true` would be unusable in a session.
+        //
+        // Only the type and its `.` overload are seeded. `if`/`unless` are not:
+        // a session imports those exactly as a file does (P8 S2 R3).
+        let core_bool = core_bool_module();
+        let bool_enum = EnumId::from_index(
+            crate::ast::resolve_bool_type(&core_bool.enums)
+                .and_then(|ty| match ty {
+                    Type::Enum(id, _) => Some(id.index()),
+                    _ => None,
+                })
+                .expect("`lib/bool.sth` declares the `bool` enum"),
+        );
         let mut session = Session {
             env: HashMap::new(),
             structs: Vec::new(),
-            // Slice 9 (R2): the builtin `bool` enum occupies the reserved
-            // head of the registry (`BOOL_ENUM_ID`), mirroring `assemble_module`/
-            // `parser::parse` -- a REPL `true`/`false`/`bool` reference needs
-            // it present from the session's first line, not just a compiled
-            // program's.
-            enums: vec![crate::ast::bool_enum_decl()],
+            // The whole registry, order preserved, so every id in the seeded
+            // word's signature and body still indexes the entry it was parsed
+            // against -- no remap.
+            enums: core_bool.enums,
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
@@ -1103,16 +1150,20 @@ impl Session {
             import_selective_module: HashMap::new(),
             import_exports: Vec::new(),
             rich_stack: false,
+            bool_enum,
         };
-        // Slice 9 phase 2 (R6/R7): the library `.` overload for `bool`,
-        // defined through the ordinary `eval_def` path exactly as a user
-        // definition would be, so it dlopen's like any other REPL word and
-        // resolves through the same `builtin_overloads` dispatch a native
-        // module's injected copy uses -- no fall-through to a deleted
-        // builtin arm.
+        // The `.` overload goes in through the ordinary `eval_def` path exactly
+        // as a user definition would, so it dlopen's like any other REPL word
+        // and resolves through the same `builtin_overloads` dispatch a compiled
+        // module's imported copy uses.
+        let print = core_bool
+            .words
+            .into_iter()
+            .find(|w| w.name == "." && w.poly.is_none())
+            .expect("`lib/bool.sth` declares the bool `.` overload");
         session
-            .eval_def(crate::ast::bool_print_word_def(), &mut std::io::sink())
-            .expect("the injected `bool` print word always checks and compiles");
+            .eval_def(print, &mut std::io::sink())
+            .expect("`core::bool`'s `.` overload always checks and compiles");
         // P8 S2 (R3): nothing else is seeded. `if`, `unless` and the six
         // comparisons used to be injected here from the compiler-baked
         // prelude; they are ordinary `core` words now, so a session that wants
@@ -2001,6 +2052,7 @@ impl Session {
         let remap = |ty: Type| {
             remap_type(
                 ty,
+                self.bool_enum,
                 struct_base,
                 enum_base,
                 array_base,
@@ -2108,15 +2160,18 @@ impl Session {
         // No aliases are built this phase (enums are out of phase-1 fixtures),
         // but the ids must still remap so a later reference stays consistent.
         //
-        // Slice 9 (R2): index 0 is always the imported module's own copy of
-        // the builtin `bool` (`BOOL_ENUM_ID`, injected identically by every
-        // `parse`/`assemble_module`), never a real per-module declaration.
-        // Skip it: the session already has its own canonical `bool` at its
-        // own `BOOL_ENUM_ID`, and appending a second "bool" here would
-        // re-register `True`/`False` a second time, shadowing the session's
-        // own constructor words (a HashMap env, last write wins) and making
-        // every subsequent `true`/`false` construct the wrong enum.
-        for (i, e) in module.enums.iter().enumerate().skip(1) {
+        // P7 slice 3i (R2): the imported closure's own `core::bool` is skipped.
+        // The session seeded that same declaration at startup and `remap_type`
+        // maps every imported reference to it; appending a second `bool` would
+        // re-register `True`/`False` a second time, shadowing the session's own
+        // constructor words (a `HashMap` env, last write wins) and making every
+        // subsequent `true`/`false` construct the wrong enum.
+        for (i, e) in module
+            .enums
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.name_static != BOOL_TYPE_NAME)
+        {
             let variants = e
                 .variants
                 .iter()
@@ -2196,13 +2251,13 @@ impl Session {
                 || w.poly.is_some()
                 || w.name == "main"
                 || w.name == "drop"
-                // Slice 9 phase 2 (R6): `.` is `bool_print_word_def`,
-                // injected identically into every module 0 (including the
-                // session's own, `Session::new`) -- not a real per-file
-                // private word. Binding it as `q::.__importN` here would
-                // leak a redundant, un-aliased entry into completion for no
-                // benefit: a call to bare `.` inside a retained combinator's
-                // body already resolves through the session's own identical
+                // An operator overload named `.` is not a per-file private
+                // word to bind: the session seeds `core::bool`'s own copy
+                // (`Session::new`), and binding an imported one as
+                // `q::.__importN` here would leak a redundant, un-aliased
+                // entry into completion for no benefit -- a call to bare `.`
+                // inside a retained combinator's body already resolves
+                // through the session's own identical
                 // copy with no rename needed.
                 || w.name == "."
                 || check::is_combinator(w)
@@ -2297,6 +2352,7 @@ impl Session {
                 &internal,
                 &body_rename,
                 module_base,
+                self.bool_enum,
                 struct_base,
                 enum_base,
                 array_base,
@@ -2321,6 +2377,7 @@ impl Session {
                 &internal,
                 &body_rename,
                 module_base,
+                self.bool_enum,
                 struct_base,
                 enum_base,
                 array_base,
@@ -3776,12 +3833,51 @@ mod tests {
         );
     }
 
+    /// One `EnumLayout` under the given name, scalar or not: the layout half of
+    /// the `:stack` bool arm's test, which reads `is_scalar` as well as the name.
+    fn enum_layout_named(name: &'static str, is_scalar: bool) -> EnumLayout {
+        EnumLayout {
+            name,
+            tag_offset: 0,
+            tag_ty: ir::IrType::Int {
+                bits: 32,
+                signed: true,
+            },
+            payload_offset: 8,
+            size: if is_scalar { 1 } else { 16 },
+            align: if is_scalar { 1 } else { 8 },
+            variants: vec![
+                ir::VariantLayout { fields: vec![] },
+                ir::VariantLayout { fields: vec![] },
+            ],
+            is_scalar,
+            is_linear: false,
+            drop_generation: None,
+        }
+    }
+
     #[test]
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
+        let bool_ty = Type::Enum(EnumId::from_index(0), BOOL_TYPE_NAME);
+        let layouts = vec![enum_layout_named(BOOL_TYPE_NAME, true)];
         assert_eq!(
-            format_stack(&[1, 0], &[Type::BOOL, Type::BOOL], &[], &[], &[]),
+            format_stack(&[1, 0], &[bool_ty, bool_ty], &[], &layouts, &[]),
             "stack: true false"
+        );
+    }
+
+    #[test]
+    fn format_stack_non_scalar_enum_named_bool_shows_the_placeholder() {
+        // P7 slice 3i (R2): the arm is keyed on the type name *and* a scalar
+        // layout. `bool` is an ordinary declared name now, so a session enum
+        // that merely shares it must not be read as one cell of `true`/`false`
+        // -- it renders (and strides) like the aggregate it is.
+        let forged = Type::Enum(EnumId::from_index(0), BOOL_TYPE_NAME);
+        let layouts = vec![enum_layout_named(BOOL_TYPE_NAME, false)];
+        assert_eq!(
+            format_stack(&[1, 0, 7], &[forged, Type::I64], &[], &layouts, &[]),
+            "stack: <bool> 7"
         );
     }
 
@@ -3871,14 +3967,15 @@ mod tests {
     fn remap_type_rebases_sliceid_across_modules() {
         let mut slices = Vec::new();
         let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
-        let Type::Slice(id, m, name) = remap_type(mutable, 0, 0, 0, 0, 0, 3) else {
+        let no_bool = EnumId::from_index(0);
+        let Type::Slice(id, m, name) = remap_type(mutable, no_bool, 0, 0, 0, 0, 0, 3) else {
             panic!("a remapped slice is still a slice");
         };
         assert_eq!(id.index(), 3, "the id shifted by the session's slice base");
         assert!(m, "mutability rides along");
         assert_eq!(name, "!Slice[i64]");
         // A zero base is the identity, so a slice-free session is unaffected.
-        assert_eq!(remap_type(mutable, 9, 9, 9, 9, 9, 0), mutable);
+        assert_eq!(remap_type(mutable, no_bool, 9, 9, 9, 9, 9, 0), mutable);
     }
 
     #[test]
@@ -4345,8 +4442,8 @@ mod tests {
             "lib.sth",
             "type: P x i64 ;\n\
              type: H y i64 ;\n\
-             : ok? ( i64 -- bool ) drop true ;\n\
-             : hidden? ( i64 -- bool ) drop true ;\n\
+             : ok? ( i64 -- i64 ) drop 1 ;\n\
+             : hidden? ( i64 -- i64 ) drop 1 ;\n\
              export: ok? P ;\nimport: intrinsics * ;\n",
         );
         let mut session = Session::new();

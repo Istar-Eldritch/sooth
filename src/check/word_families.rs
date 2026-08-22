@@ -1071,10 +1071,10 @@ pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool 
     if !is_gated_intrinsic_name(name) {
         return false;
     }
-    // A term the compiler synthesized rather than parsed (`bool_print_word_def`
-    // and friends build their bodies with `Span::default()`) has no source
-    // location, and a lexed line is numbered from 1 -- so line 0 means there is
-    // no file to add an `import:` to and no author to hold to one.
+    // A term the compiler synthesized rather than parsed builds its body with
+    // `Span::default()` and so has no source location, and a lexed line is
+    // numbered from 1 -- so line 0 means there is no file to add an `import:`
+    // to and no author to hold to one.
     if span.line == 0 {
         return false;
     }
@@ -1623,10 +1623,10 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
-        // session seeds this at index 0 (`Session::new`); this bare-line
-        // helper mirrors that so a `bool`-producing comparison resolves.
-        let bool_enums = [crate::ast::bool_enum_decl()];
+        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
+        // session seeds at startup (`Session::new`); this bare-line helper
+        // mirrors that seed so a `bool`-producing comparison resolves.
+        let bool_enums = crate::test_support::core_bool_enums();
         infer_line(
             &terms,
             entry,
@@ -1974,7 +1974,12 @@ mod tests {
     }
 
     fn shape_variant(module: &Module, vi: usize) -> Type {
-        variant_type(&module.enums, EnumId::from_index(1), vi)
+        let idx = module
+            .enums
+            .iter()
+            .position(|d| d.name == "Shape")
+            .expect("`Shape` is registered");
+        variant_type(&module.enums, EnumId::from_index(idx), vi)
     }
 
     fn struct_ty(module: &Module, name: &str) -> Type {
@@ -2382,17 +2387,17 @@ mod tests {
     fn projection_same_field_name_on_two_structs_resolves_by_receiver() {
         assert!(check_src(
             "type: A n i64 ;\n\
-             type: B tag i64 n bool ;\n\
-             : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;",
+             type: B tag i64 n u32 ;\n\
+             : main ( -- ) 1 A &n @ . drop 2 7 >u32 B &n @ . drop ;",
         )
         .is_ok());
         // ... and the field's *type* is the receiver's, not the other's:
-        // `B`'s `n` is a `bool`, so printing it as an `i64` must not resolve.
+        // `B`'s `n` is a `u32`, so adding it to an `i64` must not resolve.
         let err = check_src(
             "type: A n i64 ;\n\
-             type: B tag i64 n bool ;\n\
+             type: B tag i64 n u32 ;\n\
              : sum ( i64 i64 -- i64 ) add ;\n\
-             : main ( -- ) 2 true B &n @ 1 sum . drop ;",
+             : main ( -- ) 2 7 >u32 B &n @ 1 sum . drop ;",
         )
         .unwrap_err();
         assert!(err.contains("`sum`"), "unexpected message: {err}");
@@ -2482,7 +2487,14 @@ mod tests {
         // would hand lowering an index into the wrong declaration table.
         assert_eq!(
             resolved_variant_fields.get(&span),
-            Some(&(EnumId::from_index(1), 0, 0)),
+            Some(&(
+                match shape_variant(&module, 0) {
+                    Type::Variant(id, ..) => id,
+                    other => panic!("expected a variant type, got {other:?}"),
+                },
+                0,
+                0
+            )),
             "a variant projection must record (EnumId, variant, field) in resolved_variant_fields"
         );
         assert!(

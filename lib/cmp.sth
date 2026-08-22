@@ -15,6 +15,7 @@
 \ deliberately no operation turning a machine word back into an enum, only
 \ these two named variants.
 import: intrinsics i | ueq ult ugt ulte ugte une branch | ;
+import: self::bool b | bool False True | ;
 
 export: eq lt gt lte gte ne ;
 

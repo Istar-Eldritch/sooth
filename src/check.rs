@@ -13,11 +13,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
-    intern_owned_cell_type, intern_ref_type, intern_slice_type, variant_type, ArrayDecl, Bound,
-    CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module,
-    ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span,
-    StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot,
-    VariantDecl, VariantTag, VariantTagMode, WordDef,
+    intern_owned_cell_type, intern_ref_type, intern_slice_type, resolve_bool_type, variant_type,
+    ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl,
+    Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl,
+    SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind, Type,
+    TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
 
 mod audits;
@@ -41,7 +41,9 @@ pub(crate) use self::audits::{
 };
 pub use self::builtins::builtin_table;
 use self::builtins::*;
-pub(crate) use self::builtins::{is_copy, is_linear, sig_of, Overload, Sig, COMPARISON_PRIMITIVES};
+pub(crate) use self::builtins::{
+    is_builtin_operator_name, is_copy, is_linear, sig_of, Overload, Sig, COMPARISON_PRIMITIVES,
+};
 use self::captures::*;
 pub use self::combinators::is_combinator;
 use self::combinators::*;
@@ -3474,14 +3476,14 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
-        // session seeds this at index 0 (`Session::new`); this bare-line
-        // helper mirrors that so a `bool`-producing comparison resolves.
+        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
+        // session seeds at startup (`Session::new`); this bare-line helper
+        // mirrors that seed so a `bool`-producing comparison resolves.
         // P8 S2 (R3/R7): a real session no longer seeds them -- it imports
         // `core::prelude` like a file does -- but this helper resolves no
         // `import:`, so it keeps seeding the typed core in process so a bare
         // line's `lt`/`if` still names something.
-        let bool_enums = [crate::ast::bool_enum_decl()];
+        let bool_enums = crate::test_support::core_bool_enums();
         let core = crate::test_support::core_lib_words();
         let mut combinators = CombinatorEnv::default();
         for word in &core {
@@ -4103,8 +4105,12 @@ mod tests {
     }
     #[test]
     fn infer_line_carries_slot_types_expected() {
-        // A comparison line leaves a `bool` on the carried stack.
-        assert_eq!(infer_src("5 3 gt", &[]).unwrap(), vec![Type::BOOL]);
+        // A comparison line leaves a `bool` on the carried stack -- the enum
+        // `core::bool` declares, which the helper seeds exactly as a session
+        // does.
+        let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
+            .expect("`core::bool` declares `bool`");
+        assert_eq!(infer_src("5 3 gt", &[]).unwrap(), vec![bool_ty]);
     }
     #[test]
     fn line_underflow_against_carried_stack_is_error() {
@@ -4310,8 +4316,8 @@ mod tests {
     #[test]
     fn resolved_fields_records_one_entry_per_call_site() {
         let tokens = lex("type: A n i64 ;\n\
-                          type: B tag i64 n bool ;\n\
-                          : main ( -- ) 1 A &n @ . drop 2 true B &n @ . drop ;")
+                          type: B tag i64 n u32 ;\n\
+                          : main ( -- ) 1 A &n @ . drop 2 7 >u32 B &n @ . drop ;")
         .unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).expect("both projections resolve");
@@ -4455,18 +4461,18 @@ mod tests {
     /// assertion whenever two shapes `Display` identically.
     #[test]
     fn arm_exit_row_mismatch_pairs_baseline_first() {
-        let baseline = [Slot::computed(Type::BOOL)];
-        let agreeing = [Slot::computed(Type::BOOL)];
+        let baseline = [Slot::computed(Type::U32)];
+        let agreeing = [Slot::computed(Type::U32)];
         let disagreeing = [Slot::computed(Type::I64)];
         assert_eq!(arm_exit_row_mismatch(&baseline, &agreeing), None);
         assert_eq!(
             arm_exit_row_mismatch(&baseline, &disagreeing),
-            Some((vec![Type::BOOL], vec![Type::I64])),
+            Some((vec![Type::U32], vec![Type::I64])),
             "the baseline's shape is `expected`, the arm's is `found`"
         );
         assert_eq!(
             arm_exit_row_mismatch(&baseline, &[]),
-            Some((vec![Type::BOOL], vec![])),
+            Some((vec![Type::U32], vec![])),
             "a differing row *length* is a disagreement, not a prefix match"
         );
     }

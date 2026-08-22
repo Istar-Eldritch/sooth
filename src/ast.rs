@@ -901,109 +901,28 @@ impl EnumId {
     }
 }
 
-/// Slice 9 (R2): the reserved registry position of the builtin `bool` enum.
-/// Injected at index 0 of every assembled module's enum registry ahead of any
-/// user enum (`bool_enum_decl`), so `Type::from_name("bool")` resolves to one
-/// fixed `Type::Enum` without threading the registry through a pure resolver.
-pub const BOOL_ENUM_ID: EnumId = EnumId(0);
+/// P7 slice 3i: the source spelling of the boolean type, named once so the
+/// registry lookup and the REPL's own bool-keyed arms cannot drift from
+/// `lib/bool.sth`'s declaration.
+pub const BOOL_TYPE_NAME: &str = "bool";
 
-/// Slice 9 (R2): the builtin `bool` enum declaration, `type: bool | False | True ;`,
-/// injected at `BOOL_ENUM_ID` in every assembled module. `False` is variant 0
-/// and `True` variant 1 by declaration order, so their discriminants are the
-/// `0`/`1` the retired `TermKind::BoolLit` produced. Both variants carry an
-/// empty payload, so the general zero-payload-enum layout rule lowers it to a
-/// bare scalar.
-pub fn bool_enum_decl() -> EnumDecl {
-    EnumDecl {
-        name: "bool".to_string(),
-        name_static: "bool",
-        variants: vec![
-            VariantDecl {
-                name: "False".to_string(),
-                name_static: "False",
-                display_static: "bool.False",
-                fields: Vec::new(),
-                span: Span::default(),
-            },
-            VariantDecl {
-                name: "True".to_string(),
-                name_static: "True",
-                display_static: "bool.True",
-                fields: Vec::new(),
-                span: Span::default(),
-            },
-        ],
-        span: Span::default(),
-        module: 0,
-    }
-}
-
-/// Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected into
-/// every assembled module's `words` (and REPL session at startup) exactly as
-/// `bool_enum_decl` injects the enum itself. Eliminates over `False`/`True`
-/// and prints `false`/`true` including the trailing newline the retired
-/// primitive `bool` printable row used to emit, by delegating to the still-
-/// primitive `str` row -- reached at call sites through 8a's
-/// `builtin_overloads` dispatch, not a checker builtin row.
-pub fn bool_print_word_def() -> WordDef {
-    fn arm(variant: &str, text: &str) -> Term {
-        Term {
-            kind: TermKind::Quotation(
-                vec![
-                    Term {
-                        kind: TermKind::Call("drop".to_string()),
-                        span: Span::default(),
-                    },
-                    Term {
-                        kind: TermKind::StrLit(text.to_string()),
-                        span: Span::default(),
-                    },
-                    Term {
-                        kind: TermKind::Call(".".to_string()),
-                        span: Span::default(),
-                    },
-                ],
-                true,
-                Some(QuotAnnot {
-                    inputs: Vec::new(),
-                    outputs: Vec::new(),
-                    row_in: None,
-                    row_out: None,
-                    ty_var_names: Vec::new(),
-                    row_var_names: Vec::new(),
-                    span: Span::default(),
-                    variant_tag: Some(VariantTag {
-                        name: variant.to_string(),
-                        mode: VariantTagMode::Owning,
-                    }),
-                }),
-            ),
-            span: Span::default(),
-        }
-    }
-    WordDef {
-        name: ".".to_string(),
-        effect: StackEffect {
-            inputs: vec![TypedSlot {
-                name: None,
-                ty: Type::BOOL,
-            }],
-            outputs: Vec::new(),
-        },
-        body: vec![
-            arm("False", "false\n"),
-            arm("True", "true\n"),
-            Term {
-                kind: TermKind::Call("bool?".to_string()),
-                span: Span::default(),
-            },
-        ],
-        poly: None,
-        declares_inline: false,
-        module: 0,
-        span: Span::default(),
-        declared_globals: None,
-    }
+/// P7 slice 3i (R4): the boolean type this build resolved -- the enum named
+/// `bool`, declared once as ordinary source in `core::bool` and reached like any
+/// other imported type. It is looked up rather than baked in as a constant
+/// because its registry position is discovery-order dependent: no reserved slot
+/// is held for it.
+///
+/// The shape test is load-bearing, not decoration. It is what the callers that
+/// treat a bool as a register-resident scalar (the logical operators, the
+/// `extern:` boundary set) rest on, so a same-named enum carrying a payload
+/// cannot inherit that treatment by naming alone.
+pub fn resolve_bool_type(enums: &[EnumDecl]) -> Option<Type> {
+    enums
+        .iter()
+        .position(|e| {
+            e.name_static == BOOL_TYPE_NAME && e.variants.iter().all(|v| v.fields.is_empty())
+        })
+        .map(|idx| Type::Enum(EnumId(idx), enums[idx].name_static))
 }
 
 /// A registered array type: its element type, compile-time count, and the
@@ -1853,20 +1772,13 @@ impl Type {
         signed: false,
     });
 
-    /// Slice 9 (D-A/R2): `bool` is no longer a primitive scalar type but the
-    /// two-variant zero-payload enum `type: Bool | False | True ;`, injected
-    /// at the reserved head of every module's enum registry (`BOOL_ENUM_ID`).
-    /// `Type::from_name("bool")` and every checker/IR spelling of the boolean
-    /// type is this one canonical `Type::Enum`; its representation stays a
-    /// register-resident scalar through the general zero-payload-enum layout
-    /// rule (`ir::EnumLayout::scalar`), never a per-`Bool` carve-out.
-    pub const BOOL: Type = Type::Enum(BOOL_ENUM_ID, "bool");
-
     /// Resolve a source type-name word to a `Type`, or `None` if unknown.
+    ///
+    /// P7 slice 3i: `bool` is deliberately absent. It is `core::bool`'s enum, so
+    /// it resolves through the registry like any other declared type -- which is
+    /// what makes it require an `import:` -- and a caller needing the boolean
+    /// type asks `resolve_bool_type` for it.
     pub fn from_name(name: &str) -> Option<Type> {
-        if name == "bool" {
-            return Some(Type::BOOL);
-        }
         if name == "usize" {
             return Some(Type::Usize);
         }
@@ -1910,11 +1822,6 @@ impl Type {
         self.is_int() || self.is_float()
     }
 
-    /// Whether this type is `bool` (the reserved zero-payload enum).
-    pub fn is_bool(&self) -> bool {
-        *self == Type::BOOL
-    }
-
     /// Whether this type is a reference (`&T` or `&!T`), or the other
     /// borrowed, second-class, non-owning shape: a `Slice[T]` view (R1.4).
     /// Load-bearing in both directions for a slice. It is what makes a slice
@@ -1931,13 +1838,6 @@ impl Type {
     /// temporary: the four shapes that have an address, and so the four that
     /// can be borrowed or denoted by a second name.
     pub fn is_aggregate(&self) -> bool {
-        // `bool` is an enum at the surface but a register-resident scalar in
-        // its representation (the general zero-payload-enum layout rule), so
-        // it has no address and is not borrowable, exactly as the retired
-        // primitive `Type::Bool` was not.
-        if *self == Type::BOOL {
-            return false;
-        }
         matches!(
             self,
             Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
@@ -2270,7 +2170,61 @@ mod tests {
                 "resolving {name}"
             );
         }
-        assert_eq!(Type::from_name("bool"), Some(Type::BOOL));
+        // P7 slice 3i (R1): `bool` is deliberately *not* a scalar-table name.
+        // It is `core::bool`'s enum, so it resolves through the registry (and
+        // therefore only through an `import:`), which is what
+        // `resolve_bool_type` reads and what makes an unimported `bool` a
+        // located `unknown type`.
+        assert_eq!(Type::from_name("bool"), None);
+    }
+
+    /// A `bool`-shaped registry: the declaration `lib/bool.sth` holds, built
+    /// here so the pure-`ast` tests below need no parse.
+    fn bool_registry() -> Vec<EnumDecl> {
+        let variant = |name: &'static str| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            display_static: "bool.V",
+            fields: Vec::new(),
+            span: Span::default(),
+        };
+        vec![EnumDecl {
+            name: BOOL_TYPE_NAME.to_string(),
+            name_static: BOOL_TYPE_NAME,
+            variants: vec![variant("False"), variant("True")],
+            span: Span::default(),
+            module: 0,
+        }]
+    }
+
+    #[test]
+    fn resolve_bool_type_finds_the_declared_enum_at_its_own_position() {
+        // R4: no slot is reserved, so the answer is wherever the declaration
+        // landed -- here behind a user enum that was declared first.
+        let mut enums = vec![EnumDecl {
+            name: "Shape".to_string(),
+            name_static: "Shape",
+            variants: Vec::new(),
+            span: Span::default(),
+            module: 0,
+        }];
+        enums.extend(bool_registry());
+        assert_eq!(
+            resolve_bool_type(&enums),
+            Some(Type::Enum(EnumId(1), BOOL_TYPE_NAME))
+        );
+        assert_eq!(resolve_bool_type(&[]), None);
+    }
+
+    #[test]
+    fn resolve_bool_type_rejects_a_same_named_enum_carrying_a_payload() {
+        // R4: the callers that resolve this treat the answer as a
+        // register-resident scalar (the logical operators, the `extern:`
+        // boundary set), so a payload-carrying enum that merely shares the
+        // name is not it.
+        let mut enums = bool_registry();
+        enums[0].variants[1].fields = vec![("n".to_string(), Type::I64)];
+        assert_eq!(resolve_bool_type(&enums), None);
     }
 
     #[test]
@@ -2284,14 +2238,18 @@ mod tests {
     #[test]
     fn type_display_roundtrip_expected() {
         let names = [
-            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "usize",
-            "isize",
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "usize", "isize",
         ];
         for name in names {
             let ty = Type::from_name(name).unwrap();
             assert_eq!(ty.name(), name);
             assert_eq!(ty.to_string(), name);
         }
+        // `bool` is not a scalar-table name (P7 slice 3i), but it renders and
+        // round-trips through the same two methods.
+        let bool_ty = resolve_bool_type(&bool_registry()).unwrap();
+        assert_eq!(bool_ty.name(), BOOL_TYPE_NAME);
+        assert_eq!(bool_ty.to_string(), BOOL_TYPE_NAME);
     }
 
     #[test]
@@ -2304,7 +2262,7 @@ mod tests {
         assert!(Type::Usize.is_int());
         assert!(Type::Usize.is_numeric());
         assert!(!Type::Usize.is_float());
-        assert!(!Type::Usize.is_bool());
+        assert_ne!(Type::Usize, resolve_bool_type(&bool_registry()).unwrap());
     }
 
     #[test]
@@ -2324,7 +2282,7 @@ mod tests {
         assert!(Type::Isize.is_int());
         assert!(Type::Isize.is_numeric());
         assert!(!Type::Isize.is_float());
-        assert!(!Type::Isize.is_bool());
+        assert_ne!(Type::Isize, resolve_bool_type(&bool_registry()).unwrap());
     }
 
     #[test]
@@ -2353,7 +2311,7 @@ mod tests {
         assert!(Type::from_name("f64").unwrap().is_numeric());
         assert!(Type::from_name("i64").unwrap().is_numeric());
         assert!(!Type::from_name("i64").unwrap().is_float());
-        assert!(!Type::BOOL.is_numeric());
+        assert!(!resolve_bool_type(&bool_registry()).unwrap().is_numeric());
     }
 
     fn module_with_struct(name: &str, fields: Vec<(String, Type)>) -> Module {
@@ -2670,17 +2628,14 @@ mod tests {
     #[test]
     fn intern_bundle_struct_same_tuple_dedups_expected() {
         let mut structs = Vec::new();
-        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
-        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::U32]);
+        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::U32]);
         assert_eq!(a, b);
         assert_eq!(structs.len(), 1);
         assert!(structs[0].is_bundle);
         assert_eq!(
             structs[0].fields,
-            vec![
-                ("f0".to_string(), Type::I64),
-                ("f1".to_string(), Type::BOOL)
-            ]
+            vec![("f0".to_string(), Type::I64), ("f1".to_string(), Type::U32)]
         );
     }
 
@@ -2702,12 +2657,12 @@ mod tests {
         generics.structs.push(decl);
         let a = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
         let b = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
-        let c = generics.instantiate_struct(0, &[Type::BOOL], 0, EMPTY_REGS);
+        let c = generics.instantiate_struct(0, &[Type::U32], 0, EMPTY_REGS);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(generics.inst_structs.len(), 2);
         assert_eq!(a, Type::Struct(StructId::from_index(3), "Box[i64]"));
-        assert_eq!(c, Type::Struct(StructId::from_index(4), "Box[bool]"));
+        assert_eq!(c, Type::Struct(StructId::from_index(4), "Box[u32]"));
         assert_eq!(
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
@@ -2747,7 +2702,7 @@ mod tests {
         // Downstream (check/lowering-time): a *different* argument list mints
         // a fresh entry, whose id must count from the post-flush length, not
         // from the stale base `a` was minted against.
-        let b = generics.instantiate_struct(0, &[Type::BOOL], 0, EMPTY_REGS);
+        let b = generics.instantiate_struct(0, &[Type::U32], 0, EMPTY_REGS);
         generics.flush_structs_into(&mut structs);
 
         assert_ne!(a, b, "a downstream mint of a distinct instantiation must not collide with the earlier parse-time one");
@@ -2765,12 +2720,12 @@ mod tests {
         );
         assert_eq!(
             structs[b_id.index()].fields,
-            vec![("val".to_string(), Type::BOOL)]
+            vec![("val".to_string(), Type::U32)]
         );
     }
 
-    /// The enum twin, including the `enum_base` the reserved `bool` entry
-    /// forces every real program to have.
+    /// The enum twin, over a non-zero `enum_base` so the instantiation's id is
+    /// counted from the base rather than from zero.
     #[test]
     fn instantiate_enum_dedups_and_counts_from_its_base() {
         let decl = GenericEnumDecl {
@@ -3022,9 +2977,9 @@ mod tests {
         // Two outputs of the same types in the other order are a different
         // bundle: the tuple is ordered, deepest output first.
         let mut structs = Vec::new();
-        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
-        let b = intern_bundle_struct(&mut structs, &[Type::BOOL, Type::I64]);
-        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL, Type::I64]);
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::U32]);
+        let b = intern_bundle_struct(&mut structs, &[Type::U32, Type::I64]);
+        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::U32, Type::I64]);
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_eq!(structs.len(), 3);

@@ -21,29 +21,6 @@ type :arr_5 = align 1 { b 200 }
 type :arr_6 = align 8 { b 24 }
 type :__ret_0 = { b, l }
 
-export function $.2e.__m0(w %v0) {
-@start
-	%v3 =w copy 0
-	%v4 =w ceqw %v0, %v3
-	jnz %v4, @blk1, @blk2
-@blk1
-	%v5 =l copy $strd0
-	%sptr0 =l loadl %v5
-	%slena1 =l add %v5, 8
-	%slen2 =l loadl %slena1
-	call $printf(l $strfmt, l %slen2, l %sptr0, ...)
-	jmp @blk3
-@blk2
-	%v6 =l copy $strd1
-	%sptr3 =l loadl %v6
-	%slena4 =l add %v6, 8
-	%slen5 =l loadl %slena4
-	call $printf(l $strfmt, l %slen5, l %sptr3, ...)
-	jmp @blk3
-@blk3
-	ret
-}
-
 export function $dirty__m0() {
 @start
 	%v0 =l copy 99
@@ -140,7 +117,7 @@ export function l $probe10__m0() {
 	%v13 =w cultl %v11, %v12
 	jnz %v13, @blk4, @blk5
 @blk5
-	%v14 =l copy 22
+	%v14 =l copy 26
 	%v15 =l copy 10
 	call $sooth_oob_trap(l %v14, l %v11, l %v15)
 	jmp @blk4
@@ -195,7 +172,7 @@ export function :__ret_0 $probe_i8__m0() {
 	%v23 =w cultl %v21, %v22
 	jnz %v23, @blk7, @blk8
 @blk8
-	%v24 =l copy 29
+	%v24 =l copy 33
 	%v25 =l copy 10
 	call $sooth_oob_trap(l %v24, l %v21, l %v25)
 	jmp @blk7
@@ -210,7 +187,7 @@ export function :__ret_0 $probe_i8__m0() {
 	%v32 =w cultl %v30, %v31
 	jnz %v32, @blk9, @blk10
 @blk10
-	%v33 =l copy 30
+	%v33 =l copy 34
 	%v34 =l copy 3
 	call $sooth_oob_trap(l %v33, l %v30, l %v34)
 	jmp @blk9
@@ -252,7 +229,7 @@ export function $probe_bool__m0() {
 	%v13 =w cultl %v11, %v12
 	jnz %v13, @blk4, @blk5
 @blk5
-	%v14 =l copy 37
+	%v14 =l copy 41
 	%v15 =l copy 4
 	call $sooth_oob_trap(l %v14, l %v11, l %v15)
 	jmp @blk4
@@ -260,7 +237,7 @@ export function $probe_bool__m0() {
 	%eoff1 =l mul %v11, 1
 	%v16 =l add %v9, %eoff1
 	%v17 =w loadub %v16
-	call $.2e.__m0(w %v17)
+	call $.2e.__m2(w %v17)
 	%v18 =l add %v0, 0
 	%v19 =l copy 1
 	%v20 =l copy %v19
@@ -268,7 +245,7 @@ export function $probe_bool__m0() {
 	%v22 =w cultl %v20, %v21
 	jnz %v22, @blk6, @blk7
 @blk7
-	%v23 =l copy 38
+	%v23 =l copy 42
 	%v24 =l copy 4
 	call $sooth_oob_trap(l %v23, l %v20, l %v24)
 	jmp @blk6
@@ -276,7 +253,7 @@ export function $probe_bool__m0() {
 	%eoff2 =l mul %v20, 1
 	%v25 =l add %v18, %eoff2
 	%v26 =w loadub %v25
-	call $.2e.__m0(w %v26)
+	call $.2e.__m2(w %v26)
 	%v27 =l add %v0, 0
 	%v28 =l copy 2
 	%v29 =l copy %v28
@@ -284,7 +261,7 @@ export function $probe_bool__m0() {
 	%v31 =w cultl %v29, %v30
 	jnz %v31, @blk8, @blk9
 @blk9
-	%v32 =l copy 39
+	%v32 =l copy 43
 	%v33 =l copy 4
 	call $sooth_oob_trap(l %v32, l %v29, l %v33)
 	jmp @blk8
@@ -292,7 +269,7 @@ export function $probe_bool__m0() {
 	%eoff3 =l mul %v29, 1
 	%v34 =l add %v27, %eoff3
 	%v35 =w loadub %v34
-	call $.2e.__m0(w %v35)
+	call $.2e.__m2(w %v35)
 	%v36 =l add %v0, 0
 	%v37 =l copy 3
 	%v38 =l copy %v37
@@ -300,7 +277,7 @@ export function $probe_bool__m0() {
 	%v40 =w cultl %v38, %v39
 	jnz %v40, @blk10, @blk11
 @blk11
-	%v41 =l copy 40
+	%v41 =l copy 44
 	%v42 =l copy 4
 	call $sooth_oob_trap(l %v41, l %v38, l %v42)
 	jmp @blk10
@@ -308,7 +285,7 @@ export function $probe_bool__m0() {
 	%eoff4 =l mul %v38, 1
 	%v43 =l add %v36, %eoff4
 	%v44 =w loadub %v43
-	call $.2e.__m0(w %v44)
+	call $.2e.__m2(w %v44)
 	ret
 }
 
@@ -393,7 +370,7 @@ export function $recur__m0(l %v0) {
 	%v15 =w cultl %v13, %v14
 	jnz %v15, @blk5, @blk6
 @blk6
-	%v16 =l copy 60
+	%v16 =l copy 64
 	%v17 =l copy 4
 	call $sooth_oob_trap(l %v16, l %v13, l %v17)
 	jmp @blk5
@@ -468,7 +445,7 @@ export function $sooth_main() {
 	%v20 =w cultl %v18, %v19
 	jnz %v20, @blk4, @blk5
 @blk5
-	%v21 =l copy 53
+	%v21 =l copy 57
 	%v22 =l copy 4
 	call $sooth_oob_trap(l %v21, l %v18, l %v22)
 	jmp @blk4
@@ -482,6 +459,29 @@ export function $sooth_main() {
 	call $dirty__m0()
 	%v27 =l copy 3
 	call $recur__m0(l %v27)
+	ret
+}
+
+export function $.2e.__m2(w %v0) {
+@start
+	%v3 =w copy 0
+	%v4 =w ceqw %v0, %v3
+	jnz %v4, @blk1, @blk2
+@blk1
+	%v5 =l copy $strd0
+	%sptr0 =l loadl %v5
+	%slena1 =l add %v5, 8
+	%slen2 =l loadl %slena1
+	call $printf(l $strfmt, l %slen2, l %sptr0, ...)
+	jmp @blk3
+@blk2
+	%v6 =l copy $strd1
+	%sptr3 =l loadl %v6
+	%slena4 =l add %v6, 8
+	%slen5 =l loadl %slena4
+	call $printf(l $strfmt, l %slen5, l %sptr3, ...)
+	jmp @blk3
+@blk3
 	ret
 }
 

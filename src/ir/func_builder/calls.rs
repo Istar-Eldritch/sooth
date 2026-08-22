@@ -439,11 +439,11 @@ impl<'a> FuncBuilder<'a> {
                 // give -1/-2, not 0/1.
                 let operand = self.stack.pop().expect("not: operand");
                 let ty = self.value_type(operand);
-                // `not`'s builtin row is `int_types() + Bool` only (checker-
+                // `not` accepts the integer tower and `bool` only (checker-
                 // guaranteed, R4): the operand is never anything else, so
-                // "not an int" identifies the `Bool` case exactly, whatever
-                // `Bool`'s own `IrType` migration makes it (Slice 9: it is
-                // `IrType::Enum(BOOL_ENUM_ID)`, not the retired `IrType::Bool`).
+                // "not an int" identifies the boolean case exactly, whatever
+                // `IrType` the boolean enum resolved to (P7 slice 3i: an
+                // `IrType::Enum` at a build-resolved id, not a fixed one).
                 let mask: i64 = if matches!(ty, IrType::Int { .. }) {
                     -1
                 } else {
@@ -772,7 +772,6 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
 
     #[test]
@@ -1092,11 +1091,18 @@ mod tests {
     }
 
     #[test]
-    fn lower_print_on_bool_and_float_emits_same_print_instr() {
+    fn lower_print_on_str_and_float_emits_same_print_instr() {
         // `.` lowers to one `Print` regardless of operand type: the IR stays
         // neutral and the backend dispatches on the value's own `IrType`.
-        let bool_ir = lower_src(": w ( bool -- ) . ;");
-        assert!(instrs(&bool_ir.funcs[0])
+        //
+        // A `bool` is deliberately not one of the two (P7 slice 3i R3): it is
+        // not in the builtin printable set at all, so it reaches
+        // `core::bool`'s `.` overload as an ordinary call, never an
+        // `Instr::Print` -- which is what makes the backend's boolean print
+        // arm dead. `str` and `f64` are the two operand *classes* the neutral
+        // lowering has to cover.
+        let str_ir = lower_src(": w ( str -- ) . ;");
+        assert!(instrs(&str_ir.funcs[0])
             .iter()
             .any(|i| matches!(i, Instr::Print(_))));
         let float_ir = lower_src(": w ( f64 -- ) . ;");
@@ -1218,7 +1224,7 @@ mod tests {
                 _ => None,
             })
             .expect("a xor bin op");
-        assert_eq!(w.value_types[xor_v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+        assert_eq!(w.value_types[xor_v.0 as usize], bool_ir_type(&ir));
         let mask_const = is.iter().find_map(|i| match i {
             Instr::Const(v, n) if *v == mask_operand => Some(*n),
             _ => None,
@@ -1240,7 +1246,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("expected a {op:?} bin op"));
-            assert_eq!(w.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+            assert_eq!(w.value_types[v.0 as usize], bool_ir_type(&ir));
         }
     }
 

@@ -1280,8 +1280,7 @@ fn emit_instr(
             }
             // `cstr` is a bare NUL-terminated byte pointer, printed via `%s`.
             IrType::Cstr => writeln!(out, "\tcall $printf(l $sfmt, l {}, ...)", val(*v)),
-            // `bool` prints through the library `.` overload
-            // (`bool_print_word_def`, injected by `assemble_module`), which
+            // `bool` prints through `core::bool`'s own `.` overload, which
             // eliminates over `True`/`False` and prints via `str`'s `.` --
             // never through `Instr::Print`. Reaching this arm is a checker or
             // lowering bug.
@@ -1753,15 +1752,14 @@ mod tests {
         );
     }
 
-    /// Regression guard (P8.S3i R3): `.` on a `bool` routes through the
-    /// library `.` overload (`bool_print_word_def`, injected by
-    /// `assemble_module`), eliminating over `True`/`False` and printing via
-    /// `str`'s own `.` — never through a backend `Instr::Print` on a bool.
-    /// The `$boolstrs`/`$true_str`/`$false_str` data symbols and the
+    /// Regression guard (P7.S3i R3): `.` on a `bool` routes through
+    /// `core::bool`'s own `.` overload, eliminating over `True`/`False` and
+    /// printing via `str`'s `.` — never through a backend `Instr::Print` on a
+    /// bool. The `$boolstrs`/`$true_str`/`$false_str` data symbols and the
     /// `IrType::Bool` Print arm are therefore dead from source; this probe
-    /// confirms their absence in a driver-path build (the path that injects
-    /// the overload) and is kept as a regression guard against reintroducing
-    /// the fast path.
+    /// confirms their absence in a driver-path build (the path that resolves
+    /// the import) and is kept as a regression guard against reintroducing the
+    /// fast path.
     #[test]
     fn bool_print_routes_through_eliminator_not_boolstrs() {
         let dir = std::env::temp_dir().join(format!(
@@ -1778,7 +1776,19 @@ mod tests {
         // eliminator (`bool?`) dispatches over; it resolves as a reserved
         // Dependency-anchored name with no file lookup, so a temp-dir entry is
         // fine (packages::resolve_import returns Ok(None) for it).
-        std::fs::write(&entry, ": main ( -- ) true . ;\nimport: intrinsics * ;\n").unwrap();
+        //
+        // `core::bool` comes in by quoted path: `bool`, its constructors and
+        // its `.` overload are ordinary imported names (P7 slice 3i), and a
+        // temp-dir entry has no ancestor manifest to resolve a package name
+        // through.
+        std::fs::write(
+            &entry,
+            format!(
+                ": main ( -- ) true . ;\nimport: intrinsics * ;\nimport: \"{}/lib/bool.sth\" b | bool True False . | ;\n",
+                env!("CARGO_MANIFEST_DIR")
+            ),
+        )
+        .unwrap();
         let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
         let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
         crate::check::check(&mut module).expect("checks");
@@ -1829,15 +1839,21 @@ mod tests {
     fn emit_print_of_cstr_uses_string_format() {
         // R9/criterion 9: `.` on a `cstr` prints via plain `%s` (`$sfmt`),
         // since it has no carried length to prefer.
+        //
+        // Scoped to `$w`'s own function body: the in-process seed brings
+        // `core::bool` in as source (P7 slice 3i), whose `.` overload prints
+        // through the `str` row and so legitimately emits a `$strfmt` call of
+        // its own elsewhere in the module.
         let il = emit_src(": w ( -- ) \"hi\" cstr . ;");
-        assert!(
-            il.contains("call $printf(l $sfmt, l "),
-            "unexpected IL: {il}"
-        );
-        assert!(
-            !il.contains("call $printf(l $strfmt"),
-            "unexpected IL: {il}"
-        );
+        let w = il
+            .split("export function $w()")
+            .nth(1)
+            .expect("the emitted `w`")
+            .split("\n}")
+            .next()
+            .expect("the body up to its closing brace");
+        assert!(w.contains("call $printf(l $sfmt, l "), "unexpected IL: {w}");
+        assert!(!w.contains("call $printf(l $strfmt"), "unexpected IL: {w}");
     }
 
     #[test]

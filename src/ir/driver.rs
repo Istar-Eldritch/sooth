@@ -83,29 +83,39 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // overloaded call reaches its candidate through the checker's per-span
     // record, which carries the same symbol.
     let symbols = crate::ast::overload_symbols(&module.words);
-    // Slice 9 phase 2 (R3/R18): `bool_print_word_def` is injected into every
-    // assembled module regardless of whether the program ever prints a
-    // `bool` (R6/R7 need it resolvable everywhere `.` is called), but R3
-    // demands the *unused* case stay byte-for-byte QBE -- an always-emitted
-    // `IrFunc` for it would add a function and two string constants to every
-    // build that never touches it. Recognized by its unmistakable synthetic
-    // span (no real source token ever parses to `Span::default()`, R2's
-    // `bool_enum_decl` uses the same tell); excluded from both `env` and
-    // `funcs` below unless some call site's `builtin_overloads` entry
-    // actually names its lowering symbol.
-    // Matched by its synthetic span alone, not by name: a multi-file closure
-    // mangles every module-0 word (`resolve::resolve_modules`) to `{name}__m0`,
-    // so `.` becomes `.__m0` there -- the span survives that rewrite unchanged.
-    let unused_bool_print_idx = module
+    // P7 slice 3i: an *operator* overload (a word declared under a builtin
+    // operator's own name, e.g. `core::bool`'s `: . ( bool -- )`) that nothing
+    // reaches is not emitted. Without this, importing a module that merely
+    // *declares* one -- which every program using `core::bool` does -- would add
+    // a function and its string constants to a build that never prints a bool.
+    //
+    // Three ways to reach one, so three ways to keep it. A bare `.` in a body is
+    // a builtin name, so 8a dispatch records the chosen candidate per span
+    // (`builtin_overloads`) rather than leaving the name in the term. A
+    // *qualified* call (`b::.`) is rewritten to the declaration's own mangled
+    // spelling and dispatched as an ordinary call, which does name it. And a
+    // module-0 declaration is the program's (or the REPL line's) own, which is
+    // being compiled *because* it was declared, not because something imported
+    // it -- an entry file or session is entitled to its own uncalled word.
+    //
+    // The name is demangled for the operator test alone: a closure rewrites
+    // every module-0 word to `{name}__m0`, and `.__m0` is the same overload.
+    let called = called_names(&module.words);
+    let uncalled_operator_overloads: std::collections::HashSet<usize> = module
         .words
         .iter()
-        .position(|w| w.span == Span::default() && w.name.starts_with('.'))
-        .filter(|&idx| {
-            !module
-                .builtin_overloads
-                .values()
-                .any(|s| s == &symbols[idx])
-        });
+        .enumerate()
+        .filter(|(idx, w)| {
+            crate::check::is_builtin_operator_name(crate::resolve::demangle_word(&w.name))
+                && w.module != 0
+                && !called.contains(w.name.as_str())
+                && !module
+                    .builtin_overloads
+                    .values()
+                    .any(|s| s == &symbols[*idx])
+        })
+        .map(|(idx, _)| idx)
+        .collect();
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -114,7 +124,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
-                && Some(*idx) != unused_bool_print_idx
+                && !uncalled_operator_overloads.contains(idx)
         })
         .map(|(idx, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
@@ -179,7 +189,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
-                && Some(*idx) != unused_bool_print_idx
+                && !uncalled_operator_overloads.contains(idx)
         })
         .flat_map(|(idx, w)| {
             // A word sharing its name with another candidate is not self-tail
@@ -801,6 +811,28 @@ pub(crate) fn lower_instantiation(
     )
 }
 
+/// Every word name called anywhere in `words`' bodies, quotation bodies
+/// included. Read by the uncalled-operator-overload filter in `lower`: a term
+/// naming a word is the one reach that leaves the name in the IR.
+fn called_names(words: &[WordDef]) -> std::collections::HashSet<&str> {
+    fn walk<'a>(terms: &'a [Term], out: &mut std::collections::HashSet<&'a str>) {
+        for t in terms {
+            match &t.kind {
+                TermKind::Call(name) => {
+                    out.insert(name.as_str());
+                }
+                TermKind::Quotation(body, ..) => walk(body, out),
+                _ => {}
+            }
+        }
+    }
+    let mut out = std::collections::HashSet::new();
+    for w in words {
+        walk(&w.body, &mut out);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1272,8 +1304,7 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        // `bool` occupies the reserved index 0 (Slice 9, R2), so `Shape` is 1.
-        let shape = Type::Enum(EnumId::from_index(1), "Shape");
+        let shape = Type::Enum(enum_id(&enums, "Shape"), "Shape");
         let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms(""),

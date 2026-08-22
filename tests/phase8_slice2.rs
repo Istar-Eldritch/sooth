@@ -364,7 +364,10 @@ fn every_gate_arm_refuses_its_builtin_without_an_import() {
     let cases: &[(&str, &str)] = &[
         ("branch", ": w ( u32 -- i64 ) [ 1 ] [ 2 ] branch ;\n"),
         ("dup", ": w ( i64 -- i64 i64 ) dup ;\n"),
-        ("tag", ": w ( bool -- u32 ) tag ;\n"),
+        (
+            "tag",
+            "type: Flag | Off | On ;\n: w ( Flag -- u32 ) tag ;\n",
+        ),
         ("len", ": w ( str -- usize ) len ;\n"),
     ];
     for (name, body) in cases {
@@ -440,6 +443,7 @@ fn a_poly_word_calling_an_imported_poly_word_names_the_narrowing() {
         &t,
         "main.sth",
         "import: intrinsics * ;\nimport: core::prelude * ;\n\
+         import: core::bool cb | bool | ;\n\
          : mylt ( 'T: Copy Ord 'T -- bool ) lt ;\n\
          : main ( -- ) 1 2 mylt drop ;\n",
     );

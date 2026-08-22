@@ -289,10 +289,7 @@ fn widen_intrinsics(current: IntrinsicVisibility, imp: &Import) -> IntrinsicVisi
 /// single-file no-op (it renames imported words to epoch symbols itself).
 pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<Module, String> {
     let mut structs = Vec::new();
-    // R2 (slice 9): the builtin `bool` enum occupies the reserved head of the
-    // merged registry (`BOOL_ENUM_ID`) ahead of every file's user enums, so
-    // each module's `enum_base` offset already accounts for it.
-    let mut enums = vec![crate::ast::bool_enum_decl()];
+    let mut enums = Vec::new();
     let mut struct_base = Vec::with_capacity(closure.nodes.len());
     let mut enum_base = Vec::with_capacity(closure.nodes.len());
     for (m, node) in closure.nodes.iter().enumerate() {
@@ -419,10 +416,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
     let mut slices = Vec::new();
-    // Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected
-    // ahead of every file's own words exactly as `bool_enum_decl` injects
-    // the enum it dispatches over.
-    let mut words = vec![crate::ast::bool_print_word_def()];
+    let mut words = Vec::new();
     let mut externs = Vec::new();
     let mut statics = Vec::new();
     // Phase 5 slice 1 (D5): shared across the closure, its instantiation ids
@@ -1833,11 +1827,11 @@ mod tests {
         // Both `&n` sites sit at the same line and column in their own file.
         s.write(
             "lib.sth",
-            ": show ( -- ) 1 true B &n @ drop drop ;\nexport: show ;\ntype: B tag i64 n bool ;\nexport: B ;\nimport: intrinsics * ;\n",
+            ": show ( -- ) 1 7 >u32 B &n @ drop drop ;\nexport: show ;\ntype: B tag i64 n u32 ;\nexport: B ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write(
             "main.sth",
-            ": main ( -- ) 7 A      &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\nimport: intrinsics * ;\n",
+            ": main ( -- ) 7 A        &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");

@@ -280,8 +280,8 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // `IrType` carries only the `StructId` so it stays `Copy`.
         Type::Struct(id, _) => IrType::Struct(id),
         // The tagged layout lives in the module's `EnumLayout` registry; the
-        // `IrType` carries only the `EnumId` so it stays `Copy`. `Bool` is
-        // `Type::Enum(BOOL_ENUM_ID, "bool")` and flows through this arm like
+        // `IrType` carries only the `EnumId` so it stays `Copy`. `bool` is
+        // `core::bool`'s enum and flows through this arm like
         // any other enum (Slice 9, D-A): whether its *value* ends up
         // register-resident or a memory aggregate is the general
         // zero-payload-enum rule in `EnumLayout`/`ensure_enum`, not a
@@ -524,7 +524,6 @@ pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
 
@@ -593,12 +592,17 @@ mod tests {
                 "mapping {name}"
             );
         }
-        // Slice 9 (R1/R2): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`, and
-        // flows through the general enum arm above like any other enum --
-        // whether its value ends up scalar or a memory aggregate is decided
-        // by `EnumLayout::is_scalar`, not by a hard-coded arm here (which has
-        // no registry access to consult).
-        assert_eq!(ir_type_of(Type::BOOL), IrType::Enum(BOOL_ENUM_ID));
+        // P7 slice 3i: `bool` is `core::bool`'s enum at whatever registry
+        // position the build resolved, and flows through the general enum arm
+        // above like any other enum -- whether its value ends up scalar or a
+        // memory aggregate is decided by `EnumLayout::is_scalar`, not by a
+        // hard-coded arm here (which has no registry access to consult).
+        let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
+            .expect("`core::bool` declares `bool`");
+        let Type::Enum(bool_id, _) = bool_ty else {
+            panic!("`bool` is an enum");
+        };
+        assert_eq!(ir_type_of(bool_ty), IrType::Enum(bool_id));
     }
 
     #[test]
@@ -666,7 +670,7 @@ mod tests {
         );
         assert_ne!(
             ir,
-            ir_type_of(quotation_type(vec![Type::I64], vec![Type::BOOL])),
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::U32])),
             "structurally different effects are distinct `IrType`s"
         );
         let layout = quotation_layout(WORD_WIDTH);

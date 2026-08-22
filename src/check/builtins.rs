@@ -116,7 +116,7 @@ pub(super) fn float_types() -> Vec<Type> {
 /// `str` and `cstr` (the `check_operator` `"."` predicate, cross-checked
 /// against the `Instr::Print` codegen arms). `bool` is no longer among them
 /// (slice 9 R6): its `.` overload is the library word
-/// `bool_print_word_def` injected into every module, reached through 8a's
+/// `core::bool`'s own `: . ( bool -- )`, reached through 8a's
 /// `builtin_overloads` dispatch on a builtin-row exact miss, not a row here.
 pub(super) fn printable_types() -> Vec<Type> {
     let mut v = numeric_types();
@@ -185,33 +185,28 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         row("shr", vec![ty, Type::I64], vec![ty], BuiltinLower::Shr);
         row("max", vec![ty, ty], vec![ty], BuiltinLower::Max);
     }
-    // `and`/`or`/`xor`/`not` are logical on `bool` as well as bitwise on the
-    // integers: a stack language evaluates both operands eagerly, so
-    // bitwise-on-0/1 and logical coincide.
-    row(
-        "and",
-        vec![Type::BOOL, Type::BOOL],
-        vec![Type::BOOL],
-        BuiltinLower::And,
-    );
-    row(
-        "or",
-        vec![Type::BOOL, Type::BOOL],
-        vec![Type::BOOL],
-        BuiltinLower::Or,
-    );
-    row(
-        "xor",
-        vec![Type::BOOL, Type::BOOL],
-        vec![Type::BOOL],
-        BuiltinLower::Xor,
-    );
-    row("not", vec![Type::BOOL], vec![Type::BOOL], BuiltinLower::Not);
     for ty in printable_types() {
         row(".", vec![ty], vec![], BuiltinLower::Print);
     }
     table
 }
+
+/// Whether `name` is a builtin *operator*: one of the names `check_operator`
+/// resolves against `BUILTIN_TABLE`. A user word declared under one of these
+/// names is an overload of it, and 8a dispatch reaches an overload only through
+/// the call site's recorded candidate, never by the literal name.
+pub(crate) fn is_builtin_operator_name(name: &str) -> bool {
+    BUILTIN_TABLE.contains_key(name)
+}
+
+/// P7 slice 3i (R4): `and`/`or`/`xor`/`not` are logical on `bool` as well as
+/// bitwise on the integers -- a stack language evaluates both operands eagerly,
+/// so bitwise-on-0/1 and logical coincide. These four cannot be rows in the
+/// table above: `bool` is `core::bool`'s enum, so the `Type` naming it is only
+/// known once a build has resolved the registry, while the table is built once
+/// per process. `check_operator` matches them by the boolean-type predicate
+/// instead and yields the operands' own type, which is that resolved `Type`.
+pub(super) const BOOL_LOGICAL_OPS: [&str; 4] = ["and", "or", "xor", "not"];
 
 /// The builtin table, built once. `check_operator` consults it on every
 /// operator occurrence; `builtin_table()` itself rebuilds a fresh map for the
@@ -448,34 +443,56 @@ mod tests {
         assert_homogeneous_binary_rows("max-total", float_types(), BuiltinLower::MaxTotal);
     }
     #[test]
-    fn builtin_table_and_has_a_row_per_int_type_plus_bool() {
+    fn builtin_table_and_has_a_row_per_int_type() {
         // `and`/`or`/`xor` are bitwise on every integer width and logical on
-        // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
-        // logical), so their domain is `int_types()` plus one `bool` row.
-        let mut want = int_types();
-        want.push(Type::BOOL);
-        assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
+        // `bool` too, but the bool half is not a row here: `bool` is
+        // `core::bool`'s enum, so the `Type` naming it is build-resolved while
+        // this table is built once per process (P7 slice 3i R4,
+        // `BOOL_LOGICAL_OPS`). The table's domain is exactly the integer tower.
+        assert_homogeneous_binary_rows("and", int_types(), BuiltinLower::And);
     }
     #[test]
-    fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
-        let mut want = int_types();
-        want.push(Type::BOOL);
-        assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
+    fn builtin_table_or_has_a_row_per_int_type() {
+        assert_homogeneous_binary_rows("or", int_types(), BuiltinLower::Or);
     }
     #[test]
-    fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
-        let mut want = int_types();
-        want.push(Type::BOOL);
-        assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
+    fn builtin_table_xor_has_a_row_per_int_type() {
+        assert_homogeneous_binary_rows("xor", int_types(), BuiltinLower::Xor);
     }
     #[test]
-    fn builtin_table_not_has_a_row_per_int_type_plus_bool() {
+    fn builtin_table_holds_no_bool_row_for_any_operator() {
+        // P7 slice 3i (R4): the whole table, not just the four logical names --
+        // a row whose type came from a registry position would name whatever
+        // enum happened to sit there.
+        for (name, rows) in builtin_table() {
+            for r in rows {
+                for ty in r.inputs.iter().chain(r.outputs.iter()) {
+                    assert!(
+                        !matches!(ty, Type::Enum(..)),
+                        "`{name}` has a row naming the enum `{ty}`"
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn bool_logical_ops_are_the_four_names_check_operator_resolves_by_predicate() {
+        // The list is what `check_operator` gates its resolved-bool match on;
+        // every entry must also be a real table name, or the match would sit
+        // behind a `BUILTIN_TABLE` miss and never run.
+        assert_eq!(BOOL_LOGICAL_OPS, ["and", "or", "xor", "not"]);
+        let table = builtin_table();
+        for name in BOOL_LOGICAL_OPS {
+            assert!(table.contains_key(name), "`{name}` is a table operator");
+        }
+    }
+    #[test]
+    fn builtin_table_not_has_a_row_per_int_type() {
         // `not` is unary, so it does not fit `assert_homogeneous_binary_rows`
         // (a `(T -- T)` shape, not `(T T -- T)`).
         let table = builtin_table();
         let rows = table.get("not").expect("`not` is a builtin operator");
         let mut want = int_types();
-        want.push(Type::BOOL);
         assert_eq!(rows.len(), want.len(), "row count for `not`");
         let mut got: Vec<Type> = rows
             .iter()
@@ -487,7 +504,7 @@ mod tests {
             .collect();
         got.sort_by_key(|t| t.name());
         want.sort_by_key(|t| t.name());
-        assert_eq!(got, want, "one `not` row per int type plus `bool`, no more");
+        assert_eq!(got, want, "one `not` row per int type, no more");
     }
     #[test]
     fn builtin_table_shl_rows_take_an_i64_count_regardless_of_element_type() {
@@ -568,11 +585,13 @@ mod tests {
 
     #[test]
     fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
-        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): its registry
-        // entry must be present, exactly as `assemble_module`/the REPL
-        // session seed it, for `is_copy`'s enum arm to resolve it.
-        let bool_enums = [crate::ast::bool_enum_decl()];
-        for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
+        // P7 slice 3i: `bool` is `core::bool`'s enum, so it is named through
+        // that registry rather than `Type::from_name`, and its entry must be
+        // present for `is_copy`'s enum arm to resolve it.
+        let bool_enums = crate::test_support::core_bool_enums();
+        let bool_ty = resolve_bool_type(&bool_enums).expect("`core::bool` declares `bool`");
+        assert!(is_copy(bool_ty, &[], &bool_enums, &[]), "bool is Copy");
+        for name in ["i8", "u64", "f32", "f64", "usize"] {
             assert!(
                 is_copy(Type::from_name(name).unwrap(), &[], &bool_enums, &[]),
                 "{name} is Copy"

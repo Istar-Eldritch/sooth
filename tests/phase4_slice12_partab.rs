@@ -66,7 +66,8 @@ fn migrated_library_words_are_declared_combinators() {
         let path = format!("{}/lib/{file}", env!("CARGO_MANIFEST_DIR"));
         let src = std::fs::read_to_string(&path).expect("a library file should be readable");
         let tokens = sooth::lexer::lex(&src).expect("a library file should lex");
-        let module = sooth::parser::parse(&tokens).expect("a library file should parse");
+        let module =
+            sooth::test_support::parse_with_core(&tokens).expect("a library file should parse");
         let word = module
             .words
             .iter()

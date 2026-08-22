@@ -631,12 +631,10 @@ mod tests {
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",
         );
-        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `List`
-        // (this source's only other enum) lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_1")
+            .find(|f| f.name == "sooth_enum_drop_0")
             .expect("a fused destructor was synthesized for the recursive enum");
         let header = loop_header(dtor);
         let phis = header_phis(header_block(dtor, header));
@@ -787,12 +785,10 @@ mod tests {
         // of loading a tag and comparing it (the `n == 1` branch of
         // `dispatch_on_tag`, otherwise unreached by the 2-variant goldens).
         let ir = lower_src(&format!("{SPY_DEF}type: Box | Full v Spy ; : w ( -- ) ;"));
-        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `Box`
-        // lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_1")
+            .find(|f| f.name == "sooth_enum_drop_0")
             .expect("a destructor was synthesized for the linear enum");
         assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 0);
         assert_eq!(
@@ -820,12 +816,10 @@ mod tests {
         let ir = lower_src(&format!(
             "{SPY_DEF}type: Item | Empty | Full v Spy | Named n i64 ; : w ( -- ) ;"
         ));
-        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `Item`
-        // lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_1")
+            .find(|f| f.name == "sooth_enum_drop_0")
             .expect("a destructor was synthesized for the linear enum");
         assert_eq!(dtor.blocks.len(), 5, "2 compares + 3 variant blocks");
         assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 2);
@@ -858,7 +852,7 @@ mod tests {
         assert_eq!(
             p.path(list),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("List"),
                 variants: vec![
                     None,
                     Some(vec![
@@ -882,7 +876,7 @@ mod tests {
                     cell: p.cell(list),
                 },
                 PathStep::Branch {
-                    enum_id: EnumId::from_index(1),
+                    enum_id: p.enum_id("List"),
                     variants: vec![None, Some(vec![PathStep::Project { field: 0 }])],
                 },
             ])
@@ -899,7 +893,7 @@ mod tests {
         assert_eq!(
             p.path(l),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("L"),
                 variants: vec![
                     None,
                     Some(vec![
@@ -927,7 +921,7 @@ mod tests {
         assert_eq!(
             p.path(a),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("A"),
                 variants: vec![
                     None,
                     Some(vec![
@@ -951,7 +945,7 @@ mod tests {
                     cell: p.cell(a),
                 },
                 PathStep::Branch {
-                    enum_id: EnumId::from_index(1),
+                    enum_id: p.enum_id("A"),
                     variants: vec![
                         None,
                         Some(vec![PathStep::Unwrap {
@@ -1009,7 +1003,7 @@ mod tests {
         assert_eq!(
             p.path(t),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("T"),
                 variants: vec![None, Some(step.clone()), Some(step)],
             }])
         );
@@ -1025,7 +1019,7 @@ mod tests {
         assert_eq!(
             p.path(a),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("A"),
                 variants: vec![
                     None,
                     Some(vec![
@@ -1034,7 +1028,7 @@ mod tests {
                             cell: p.cell(b),
                         },
                         PathStep::Branch {
-                            enum_id: EnumId::from_index(2),
+                            enum_id: p.enum_id("B"),
                             variants: vec![
                                 None,
                                 Some(vec![PathStep::Unwrap {
@@ -1142,7 +1136,7 @@ mod tests {
         assert_eq!(
             p.path(e),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(1),
+                enum_id: p.enum_id("E"),
                 variants: vec![
                     None,
                     Some(vec![PathStep::Unwrap {

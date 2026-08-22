@@ -14,6 +14,19 @@ pub(super) fn lower_src(src: &str) -> IrModule {
     lower(&module).unwrap()
 }
 
+/// P7 slice 3i: the `IrType` of a lowered module's `bool`. Read off the enum
+/// layouts by name rather than assumed to be a fixed id: `bool` is
+/// `core::bool`'s declaration now, so its registry position depends on what the
+/// source itself declared.
+pub(super) fn bool_ir_type(module: &IrModule) -> IrType {
+    let idx = module
+        .enums
+        .iter()
+        .position(|l| l.name == crate::ast::BOOL_TYPE_NAME)
+        .expect("a lowered module that names `bool` has its layout");
+    IrType::Enum(crate::ast::EnumId::from_index(idx))
+}
+
 /// A scalar-only resource with a `drop` overload whose body has one
 /// observable effect (a `Print` no synthesized glue ever emits), so "the
 /// override is the destructor" is assertable on instructions.
@@ -178,6 +191,16 @@ impl Probe {
         IrType::Enum(EnumId::from_index(idx))
     }
 
+    /// The `EnumId` behind `enum_ty`, for an expected `PathStep::Branch`: a
+    /// declaration's registry position is whatever its own source put it at, so
+    /// it is looked up by name rather than written as a literal index.
+    pub(super) fn enum_id(&self, name: &str) -> EnumId {
+        match self.enum_ty(name) {
+            IrType::Enum(id) => id,
+            other => unreachable!("{other:?}"),
+        }
+    }
+
     /// The interned cell holding `payload`, so an expected `Unwrap` names
     /// its cell by what it points at rather than by a guessed index.
     pub(super) fn cell(&self, payload: IrType) -> OwnedCellId {
@@ -201,6 +224,18 @@ pub(super) fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
 
 pub(super) fn enum_layout<'a>(e: &'a Enums, name: &str) -> &'a EnumLayout {
     e.layouts.iter().find(|l| l.name == name).expect("layout")
+}
+
+/// The `EnumId` of the named enum in a lowered registry, looked up rather than
+/// hardcoded: no registry position is reserved, so an enum's id is whatever its
+/// own source declared it into.
+pub(super) fn enum_id(e: &Enums, name: &str) -> crate::ast::EnumId {
+    crate::ast::EnumId::from_index(
+        e.layouts
+            .iter()
+            .position(|l| l.name == name)
+            .expect("layout"),
+    )
 }
 
 pub(super) fn instrs(func: &IrFunc) -> Vec<&Instr> {

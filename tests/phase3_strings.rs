@@ -169,8 +169,8 @@ fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
 fn bool_print_dispatches_to_library_overload_same_line() {
     // Slice 9 phase 2 (R6): the primitive `bool` printable row is gone from
     // `.`'s `BUILTIN_TABLE`; `true .`/`false .` now resolve through 8a's
-    // `builtin_overloads` dispatch to the injected library word
-    // (`bool_print_word_def`), which prints identically. A REPL twin of
+    // `builtin_overloads` dispatch to `core::bool`'s own `.` overload, which
+    // prints identically. A REPL twin of
     // `leap_year_dogfood_compiles_and_runs`'s native coverage, proving the
     // session's own copy (`Session::new`'s `eval_def`) resolves too, with no
     // fall-through to the deleted builtin `Instr::Print` arm (R7).
