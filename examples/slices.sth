@@ -4,7 +4,10 @@
 \ variable and threads no length parameter, so the same `sum`/`double` bodies
 \ run over any array size.
 
-import: "../lib/combinators.sth" c | times | ;
+import: intrinsics * ;
+import: core::prelude * ;
+
+import: core::combinators c | times | ;
 
 : sum ( Slice[i64] -- i64 )
   | s |

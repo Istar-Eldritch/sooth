@@ -115,15 +115,22 @@ stack.
 A quotation's identity rides its stack slot, so `dup`/`swap`/`drop` reorder arms with no
 special handling, while a *tagged* arm must still reach its eliminator by written adjacency —
 the same rule the concrete path applies, so a generic body is not the laxer of the two.
-Elimination is the only quotation consumer a generic body has: `call`/`branch`/`if`/`times`/
-`tag` each take a quotation as a row-typed parameter, which needs row unification against an
-abstract stack, and each is a located rejection naming **P7.S3b-follow**. A quotation may not
+Elimination is the only quotation consumer this slice gives a generic body: the row-typed
+combinators (`if`/`unless`/`times`) need a declared row grounded against an abstract stack,
+and land in **P7.S3b-follow**; the `call`/`branch`/`tag` primitives declare no `~[ ]`
+parameter to dispatch off, and `call` on a literal is **P7.S3d**'s own exit criterion —
+`branch`/`tag` stay a located rejection naming no slice yet scoped to resolve them. A quotation may not
 be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
 route is its own located error.
 Two standing limits bound what can be written against this today: field projection (`&w`) is
 rejected in every generic body, so an arm destructures (`Rect>`) rather than projects; and a
 generic word cannot call another generic word (`unknown word g__m0`), so a combinator written
-here composes concrete and builtin callees only. P6.S3b widens the consumer to generic enums;
+here composes concrete and builtin callees only. A third, narrower one: the arm join compares
+each slot's *type* and not the compile-time literal beside it, so arms disagreeing on an index
+literal leave the join carrying the first arm's — `~[ a 0 ] ~[ a 9 ]` joined over a `['T 4]`
+satisfies the static bounds check and traps at runtime instead. Memory-safe, and no laxer than
+the concrete path, which ICEs on the same program rather than rejecting it.
+P6.S3b widens the consumer to generic enums;
 P6.S4, by deleting `WordBody::Clauses`, makes this the only route to elimination that exists.
 **Exit:** a polymorphic word can eliminate an enum — quotation-literal arms in its body,
 dispatched to the generated eliminator — with the quotation's identity surviving a shuffle,
@@ -135,6 +142,40 @@ parallel `lits` vector beside it, a `QuotRef` index over a per-body literal inte
 (`poly_eliminator_call`), and an abstract N-arm join with a poly analogue of `Scope::leave`
 run per arm, over zero lowering change (`docs/roadmap/P7/slice3b-spec.md`,
 `tests/phase7_slice3b.rs`).
+
+**P7.S3b-follow — Row-typed quotation consumers in a polymorphic body.** `[ done ]` S3b
+shipped one quotation consumer, enum elimination; every row-typed inline combinator
+(`if`/`unless`/`times`, and any library or user `inline` word declaring `~[ ]` parameters)
+stayed a located rejection naming this slice. A **non-inline** polymorphic word can now
+consume one, so it can branch and loop as a **monomorphized function** — one compiled body
+per instantiation — instead of forcing every call site to splice its whole body. Scheduled
+on code size, not on an unwritable-program witness: every candidate motivating program
+turned out writable today with `inline` (a self-*tail*-recursive generic word already lowers
+to a loop back-edge, `inline` and all); what a non-spliced body actually saves is that a
+generic word's *callers* no longer each carry a full copy of it. Dispatch is driven by the
+callee's declared `PolySig`, not by name, so one mechanism covers `if`, `unless`, `times`,
+and a user's own row-typed combinator alike; `unless` is the witness it is not name-driven,
+since it never reached the old rejection at all (it landed on an unrelated operand-window
+error instead). `call`, `branch`, `tag` are deliberately **not** delivered — `call` on a
+literal is P7.S3d's own exit criterion, and `branch`/`tag` keep the located rejection,
+naming no slice yet scoped to resolve them. An arm operand that is not a splice-consumed
+quotation literal (a value, or one that lost its identity through a local bind) is a located
+rejection reusing S3b's materialisation diagnostics, never an inherited backend panic — this
+forecloses the pre-existing `while`-over-an-erased-quotation ICE from being reached through
+the new path. Type variables and rows stay rigid throughout (S3b's L1/L2, unchanged): no
+mid-body `Subst`, and a declared row grounds once, to the caller region beneath the
+combinator's fixed inputs, never solved for.
+**Exit:** a non-inline generic word can pass a quotation literal to a row-typed inline
+combinator's `~[ ]` parameter, in both the non-shape-changing (`times`) and shape-changing
+(`if`/`unless`) cases, with the arms' borrow table unioned and their exit rows checked
+structurally under rigid type variables — a single-arm combinator's declared row is
+pre-seeded as its own baseline (soundness: `times`'s one arm has no sibling to compare
+against), and shape-changing sibling arms are cross-checked by output-row id. Landed by
+extracting the eliminator's per-arm walk and N-arm join (borrow-union, `Scope::leave`
+analogue, `Moves::join`) into a shared `poly_walk_arms`, now called by both
+`poly_eliminator_call` and a new `poly_combinator_call`; a `poly_row_combinator` lookup in
+`poly_call_term` dispatches ahead of the narrowed `call`/`branch`/`tag` guard
+(`docs/roadmap/P7/slice3b-follow-spec.md`, `tests/phase7_slice3b_follow.rs`).
 
 **P7.S3c — Slicing a buffer into a view.** `[ done ]` DESIGN.md lists slices among
 `core`'s concrete types but defers the mechanism ("Slicing a buffer into a view is
@@ -178,16 +219,20 @@ unification (`` `call` on a quotation ... is not yet supported ``,
 `` ... is not permitted on a quotation literal ``). The family splits into two tiers by
 cost. This slice is the cheap tier: splice a second, fully concrete quotation consumer
 (no `..a`/`..b` in its signature, e.g. a comparator `~[ &'T &'T -- Ordering ]`) through the
-poly walk, no row unification against an abstract stack required. `if`/`branch`/`times`/
-`tag` stay deferred to **P7.S3b-follow**, the expensive tier: those are row-typed
-(`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) and need unifying a
-declared row against the poly walk's abstract stack, machinery this slice does not add.
+poly walk, no row unification against an abstract stack required. The row-typed
+combinators (`if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`) are the
+expensive tier and are **P7.S3b-follow**'s, which shipped them by grounding the declared
+row against the poly walk's abstract stack. What this slice inherits alongside its own
+rowless consumer is the `call` primitive: compiler-known, so it carries no declared
+`PolySig`, and its located rejection names this slice. `branch`/`tag` are compiler-known
+the same way, but stay rejected, unchanged (`slice3d-spec.md`'s own scope exclusion), so
+their located rejection names no slice yet.
 This is also the second quotation consumer S3b's own exit findings named as the trigger
 for re-running `poly.rs`'s deferred split signals. Ordered after S3c and ahead of S3e,
 because it is what actually unblocks `sort`'s comparator call — not branching, which S3b
 already shipped.
 **Exit:** a poly body can call a fully concrete (rowless) quotation parameter or literal;
-`if`/`branch`/`times`/`tag` remain a located rejection naming P7.S3b-follow.
+`branch`/`tag` keep a located rejection naming no slice yet scoped to resolve them.
 
 **P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
 two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
@@ -405,3 +450,57 @@ fixed-slot injection is deleted; the REPL's session-pinning logic resolves the s
 across session lines through the session's own import, not a global constant.
 **Dogfood:** a file that imports only `intrinsics` and calls `branch` cannot spell `true`; the
 same file importing `core::bool` can.
+
+**P7.S3j — A shape-changing combinator parameter declaring a slot above its row.**
+Discovered and located, not fixed, at P7.S3b-follow's phase 3 exit: a row-typed inline
+combinator whose quotation parameter declares a slot *above* its output row
+(`~[ ..a -- ..b i64 ]`, as a hand-written `pick` combinator might) is rejected from a
+generic body (`` `pick` declares `~[ ..a -- ..b i64 ]`, which a call ... cannot ground ``)
+but compiles from a monomorphic one, because `poly_combinator_call` reads the produced row
+straight off an arm's exit and has no rule for stripping a declared trailing slot back off
+first. Neither existing quotation consumer (the eliminator, or this slice's own `if`/`times`
+family) needs that rule, so nothing here builds it as a side effect. Memory-safe as it
+stands: the located rejection is what stands between this program and a backend panic
+(`ir/func_builder/quotation.rs`'s row-length arithmetic, `attempt to subtract with overflow`)
+rather than just being a worse diagnostic, and `if`/`times`/`unless` themselves declare no
+such parameter, so no shipped library word is narrower for it. **Exit:** a row-typed
+combinator parameter may declare a slot above its output row, and a generic body calling it
+grounds and strips that slot the same way the monomorphic path already does
+(`tests/phase7_slice3b_follow.rs`'s `a_slot_declared_above_a_produced_row_is_located` is the
+regression the fix must keep passing under the new, permissive path).
+
+**P7.S3k — A non-inline generic word calling another generic word.** `poly_call_term`
+dispatches a callee against `env` only (the concrete/monomorphic table); it never consults
+`poly_env` (`src/check.rs:625`), so **no** generic callee -- user-defined or library, same-
+module or imported -- is reachable from a non-inline generic body. `poly_calls_poly_word_error`
+(`src/check/poly.rs:1140`) is the located diagnostic this gap produces today, named and tested
+by P8.S2 (`tests/phase8_slice2.rs::a_poly_word_calling_an_imported_poly_word_names_the_narrowing`).
+The six comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) look exempt, but are not an instance of
+the general mechanism: `poly_call_term` carries a hand-written name-matched special case for
+exactly those six (the "comparisons need `Ord`" block) that never touches `poly_env` at all.
+Before P8.S2 that block's bare-name match happened to work because the prelude's comparisons
+were `mangle`-exempt (injected unmangled); P8.S2 correctly declined to special-case them back
+in ("a silent third option -- leaving the exemption in place for comparisons only -- is
+declined, since it keeps the hole this slice exists to close", `docs/roadmap/P8/slice2-brief.md`),
+so the six-name carve-out is dead code today, not a working narrow case. P7.S3g shipped the
+self-call case (`loopg` calling itself) precisely because a self-call needs no registry lookup
+at all -- it resolves against the walk's own `sig`. Calling a *different* generic word is the
+remaining, harder case S3g explicitly scoped out ("the general case is blocked because
+`poly_call_term` cannot see `poly_env`") and P8.S2 explicitly declined to pull forward
+("declare the generic-calls-generic fix a hard prerequisite of this slice ... moves work into
+P7 and grows the slice" -- rejected in favour of the located narrowing).
+**Harder than S3g in one specific way: the callee's own type variables are not the caller's.**
+A self-call reuses the walk's `sig` unchanged; calling a *different* generic word means
+grounding the callee's bound type variables against the caller's rigid ones (which may still
+be abstract at check time) and triggering the callee's monomorphization at whatever concrete
+types the caller ends up instantiated at -- one callee instantiation per caller instantiation,
+recursively, the same worklist shape `lower_instantiation` already walks for concrete callers.
+A bound mismatch (the callee needs `Ord` and the caller's `'T` carries none) must be a located
+rejection at the call site, not a deferred failure at some later monomorphization.
+**Exit:** a non-inline generic word may call another generic word -- same-module or imported,
+user-defined or a library word like `gt`/`lt` -- passing its own rigid type variables through;
+the callee is monomorphized once per concrete instantiation the caller reaches, the same way a
+concrete caller's generic callees already are; a callee whose bound the caller's type variable
+does not satisfy is a located error, not a hang or a monomorphization-time panic; and
+`poly_calls_poly_word_error`'s message is deleted along with the gap it named, not left behind
+as an unreachable diagnostic (`tests/phase8_slice2.rs`'s narrowing test is retired with it).

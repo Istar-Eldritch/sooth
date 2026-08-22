@@ -808,6 +808,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     word,
                     sig,
                     &env,
+                    &combinators,
                     structs,
                     enums,
                     arrays,
