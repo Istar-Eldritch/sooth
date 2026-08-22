@@ -488,10 +488,15 @@ fn reject_quotation_argument_wording_at_concrete_boundary() {
 
 #[test]
 fn stale_phase6_diagnostics_are_reworded() {
-    // R26: seven diagnostics that used to say "higher-order values are Phase
+    // R26: six diagnostics that used to say "higher-order values are Phase
     // 6" now name slice 7 (a *runtime* quotation value), since this slice
     // makes the type nameable and a quotation-taking word a library word --
     // "Phase 6" was never a real milestone name and is now flatly wrong.
+    //
+    // A seventh, `reject_quotation_argument`, no longer names any milestone:
+    // P7.S3f (R4) retired its clause once 7a/7b gave a runtime quotation
+    // value a real representation. Pinned by
+    // `reject_quotation_argument_wording_at_concrete_boundary` instead.
     //
     // An eighth row, `times` without a resolvable quotation on top, went with
     // the intrinsic in 10b: `times` is an ordinary library word now, and its
