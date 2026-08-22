@@ -930,7 +930,9 @@ pub fn resolve_bool_type(enums: &[EnumDecl]) -> Option<Type> {
     enums
         .iter()
         .position(|e| {
-            e.name_static == BOOL_TYPE_NAME && e.variants.iter().all(|v| v.fields.is_empty())
+            e.name_static == BOOL_TYPE_NAME
+                && e.variants.len() == 2
+                && e.variants.iter().all(|v| v.fields.is_empty())
         })
         .map(|idx| Type::Enum(EnumId(idx), enums[idx].name_static))
 }
@@ -2234,6 +2236,23 @@ mod tests {
         // name is not it.
         let mut enums = bool_registry();
         enums[0].variants[1].fields = vec![("n".to_string(), Type::I64)];
+        assert_eq!(resolve_bool_type(&enums), None);
+    }
+
+    #[test]
+    fn resolve_bool_type_rejects_a_same_named_enum_with_a_third_variant() {
+        // A third payload-free variant is still an `and`/`or`/`xor`/`not`
+        // hazard: those lower on the assumption of exactly two discriminants
+        // (`xor 1` for `not`), so a same-named 3-variant enum must not be
+        // mistaken for the logical bool.
+        let mut enums = bool_registry();
+        enums[0].variants.push(VariantDecl {
+            name: "Maybe".to_string(),
+            name_static: "Maybe",
+            display_static: "bool.V",
+            fields: Vec::new(),
+            span: Span::default(),
+        });
         assert_eq!(resolve_bool_type(&enums), None);
     }
 

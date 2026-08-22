@@ -140,6 +140,19 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
         err.contains("unknown type `bool` at line 3"),
         "unexpected diagnostic: {err}"
     );
+
+    // The `.` overload is the type name's twin: it too resolves against its
+    // declaring module, not a re-exporting hub, so the constructors working
+    // above does not mean printing does.
+    let print_entry = t.write_raw(
+        "print.sth",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) true . ;\n",
+    );
+    let print_err = build_error(&print_entry);
+    assert!(
+        print_err.contains("bool"),
+        "unexpected diagnostic: {print_err}"
+    );
 }
 
 // -- G2: with the import, everything boolean works --------------------------
@@ -222,6 +235,24 @@ fn static_at_a_payload_carrying_enum_named_bool_is_an_error() {
             && err.contains("must carry no payload"),
         "unexpected diagnostic: {err}"
     );
+}
+
+/// A same-named enum with a third payload-free variant is still not the
+/// logical `bool`: `resolve_bool_type` requires exactly two variants (the
+/// count the `xor 1` lowering of `not` assumes), so `not` on it falls through
+/// to the bitwise-only path and is rejected rather than silently misrouting a
+/// three-way discriminant through a two-way eliminator.
+#[test]
+fn not_on_a_three_variant_enum_named_bool_is_an_error() {
+    let t = Tree::new("g3-tristate");
+    let entry = t.write_raw(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         type: bool | A | B | C ;\n\
+         : main ( -- ) C not drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(err.contains("bool"), "unexpected diagnostic: {err}");
 }
 
 // -- R2: the REPL seeds `core::bool` itself ---------------------------------
