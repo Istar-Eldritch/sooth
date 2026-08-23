@@ -464,7 +464,7 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
 
 **Difficulty:** hard (new cross-signature mechanism + diagnostic surface).
 
-### Delivered, with five deviations from the plan above
+### Delivered, with six deviations from the plan above
 
 1. **A fifth diagnostic, `poly_cross_call_unsupported_error`.** The plan named
    three new diagnostics; a fourth is needed for the callee-signature shapes a
@@ -474,7 +474,10 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
    space `Image` does not model), a **user trait bound** (see phase 2 finding 3),
    and a compound *output* (`( 'U -- Box['U] )`). It is not the deleted
    whole-feature narrowing under a new name -- it fires for five named declared
-   shapes, and each names itself. All five are reachable from source; **review
+   shapes, and each names itself. Those five are the *signature*-side reasons;
+   deviations 5 and 6 add two more that are properties of a call's operand
+   rather than of the callee's declaration, so the diagnostic carries seven
+   reason strings in all. All five are reachable from source; **review
    fix:** the row shape was reachable but pinned by nothing (this section's
    original "all five ... pinned" was false for it) -- fixed by
    `check_cross_call_unsupported_callee_shapes_name_themselves`'s fourth
@@ -522,6 +525,33 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
    call succeed -- R6's accept case ("a fully-concrete image at any depth
    ... is allowed") is still not actually implemented, only honestly
    rejected. See phase 2 finding 5 for the real fix.
+
+6. **Review fix: the R3 `Copy` discharge panicked on a body-local generic
+   instantiation, and four structural guards were reachable but untested.**
+   `is_copy` resolves a struct or enum image by *indexing* `structs`/`enums`,
+   and an instantiation this body's own walk minted is not in those slices
+   yet: `check_poly_body` rebases the instantiator at entry but `check::check`
+   appends the batch only after it returns, so the id sits past the end and
+   indexing it panics. Five lines of source reach it
+   (`type: Box 'T | Box 'T ;  : h ( 'U: Copy -- ) drop ;
+   : g ( 'T -- 'T ) 1 Box h ;`), in both the generic-enum and generic-struct
+   forms -- a check-time panic at the exact arm N1 forbids one at. Fixed with
+   a `type_is_registered` guard that rejects the undecidable case honestly
+   (`poly_cross_call_unsupported_error`), the same posture and the same
+   underlying cause as deviation 5: deciding it needs a registry the walk does
+   not hold. `Bound::Ord` needs no guard (`is_ord` reads no registry) and a
+   user bound never reaches the loop (`poly_cross_signature_supported` rejects
+   one first). The root cause is wider than this slice and is **not** fixed
+   here -- see phase 2 finding 7. Also pinned this round: the four structural
+   guards in `poly_cross_match`/`poly_cross_relate` (operand count,
+   `Concrete`/`Concrete` equality, reference mutability, array length), each
+   reachable from source with a correct diagnostic yet deletable with the whole
+   suite green, and each failing *open* -- one into a subtract-overflow panic,
+   the other three into an accepted call (a `Bool` filling an `i64` parameter,
+   a shared borrow filling a mutable one, a `['T 4]` filling a `['U 3]`). Now
+   covered by `check_cross_call_operands_the_callee_cannot_accept_are_errors`
+   and `check_cross_call_copy_bound_on_a_body_local_instantiation_is_unsupported`,
+   both mutation-tested.
 
 The REPL deliberately keeps today's behaviour: it passes an empty registry, so
 a session line calling another polymorphic word still gets `unknown word`.
@@ -663,6 +693,35 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    follow-up slice, not phase 2 by default: phase 2's own scope list does not
    mention `Ctx` or `Image`'s shape, and widening either is a design decision
    a reviewer should make explicitly, not inherit silently.
+
+6. **Phase 1 turned a clean rejection of the slice's headline program into a
+   lowering panic, and nothing pins the interval.**
+   `: id ( 'T -- 'T ) ;  : g ( 'T -- 'T ) id ;  : main ( -- ) 1 g drop ;` --
+   the first success criterion above -- now checks clean and then panics at
+   `calls.rs:725` (`checked user word exists`). At `ac4eb2a` the same program
+   got the located `poly_calls_poly_word_error`. This is the phase split
+   working as designed (`[P1 check-clean; P2 IL]`), and deviation 3 gestures at
+   it, but the handover is *not* diagnostic-neutral: for a non-`inline` callee
+   there is no located error anywhere between the two phases, and no test says
+   so. Recorded explicitly so phase 2 does not read that panic as pre-existing
+   -- phase 1 caused this instance of it, and phase 2's routing arm is what
+   closes it. An `inline` callee is unaffected (deviation 4).
+
+7. **The registries a polymorphic body walks are stale for the instantiations
+   that body itself mints, and this slice only worked around it.**
+   `check_poly_body` rebases the instantiator at entry, but the minted batch is
+   flushed into `structs`/`enums` only after it returns, so for the duration of
+   the walk any body-local generic instantiation carries an id past the end of
+   the slices the walk holds. Every registry-indexing predicate reached from
+   the walk is exposed, not just deviation 6's cross-call arm: `dup` on the
+   same value panics identically through `poly_is_copy`
+   (`: g ( 'T -- 'T ) 1 Box dup drop drop ;`), on a program with no cross-call
+   at all, and it panics the same way at `ac4eb2a` -- so it is pre-existing and
+   was left alone. Phase 2 gets the flushed registries for free (its fixpoint
+   runs at `check.rs`, after every body), so it does **not** inherit the fix:
+   closing this needs the *walk* to see pending mints, either as a merged
+   read-only view or by restructuring the flush, and that is its own slice.
+   Deviation 6's honest rejection is what keeps phase 1 inside N1 until then.
 
 ## Phases (JSON)
 

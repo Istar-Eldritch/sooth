@@ -1720,6 +1720,26 @@ fn poly_cross_call(
             (Image::CallerVar(t), _) => (!sig.has_bound(*t, *bound)).then(|| {
                 poly_cross_bound_error(ctx, span, name, var, &sig.ty_var_names[*t as usize], *bound)
             }),
+            // N1: `is_copy` resolves a struct/enum id by indexing, and a
+            // generic instantiation this body's *own* walk minted (`1 Box`)
+            // is not in these slices yet -- `check::check` appends it only
+            // once `check_poly_body` returns, so the id sits past the end and
+            // indexing it panics. Rejected honestly, for the same reason
+            // R6's concrete-compound case is: deciding it needs a registry
+            // the walk does not hold. Depth one is the whole test -- a decl
+            // already in the registries had its fields resolved before this
+            // body started, so it cannot reach one minted during it.
+            (Image::Concrete(ty), Bound::Copy) if !type_is_registered(*ty, structs, enums) => {
+                Some(poly_cross_call_unsupported_error(
+                    ctx,
+                    span,
+                    name,
+                    &format!(
+                        "discharging `Copy` on the body-local generic instantiation `{}`",
+                        ty.name()
+                    ),
+                ))
+            }
             (Image::Concrete(ty), Bound::Copy) => (!is_copy(*ty, structs, enums, arrays))
                 .then(|| poly_copy_bound_error(ctx, span, name, var, *ty)),
             (Image::Concrete(ty), Bound::Ord) => {
@@ -1753,6 +1773,21 @@ fn poly_cross_call(
         stack.push(PolySlot::new(out));
     }
     Ok(stack)
+}
+
+/// P7.S3k (N1): whether `ty`'s own registry entry is one the poly-body walk
+/// can already index. A struct and an enum are the only two answers that can
+/// be `false`: they are the only things `GenericTypes` mints, and the only two
+/// `is_copy` indexes a registry for that a body-local mint can reach (its
+/// `Type::Array` arm indexes too, but no array is minted during the walk --
+/// there is no mutable array registry here to mint into). `Type::Variant` is
+/// deliberately absent: `is_copy` has no arm for it and so never indexes one.
+fn type_is_registered(ty: Type, structs: &[StructDecl], enums: &[EnumDecl]) -> bool {
+    match ty {
+        Type::Struct(id, _) => id.index() < structs.len(),
+        Type::Enum(id, _) => id.index() < enums.len(),
+        _ => true,
+    }
 }
 
 /// P7.S3k (R2): relate `callee`'s declared inputs to the caller's operand
@@ -7968,6 +8003,40 @@ mod tests {
         );
     }
 
+    /// P7.S3k (N1, review fix): the `Copy` discharge indexes the registries to
+    /// resolve a struct/enum image, and an instantiation this body's own walk
+    /// minted is not in them yet -- `check::check` appends it only after
+    /// `check_poly_body` returns. Both fixtures panicked inside `is_copy`'s
+    /// indexing before the guard, which N1 forbids outright; both are now
+    /// located. `Ord` needs no arm here (`is_ord` reads no registry) and a user
+    /// bound never reaches the loop (`poly_cross_signature_supported` rejects
+    /// one first).
+    ///
+    /// The wider bug is not this slice's: `dup` on the same body-local
+    /// instantiation still panics through `poly_is_copy`, on a program with no
+    /// cross-call at all. See the spec's phase 2 finding 7.
+    #[test]
+    fn check_cross_call_copy_bound_on_a_body_local_instantiation_is_unsupported() {
+        for (wrapper, ctor, rendered) in [
+            ("type: Box 'T | Box 'T ;\n", "Box", "Box[i64]"),
+            ("type: Cell 'T val 'T ;\n", "Cell", "Cell[i64]"),
+        ] {
+            let src = format!(
+                "{wrapper}\
+                 : h ( 'U: Copy -- ) drop ;\n\
+                 : g ( 'T -- 'T ) 1 {ctor} h ;\n\
+                 : main ( -- ) ;\n"
+            );
+            let err = check_src(&src).unwrap_err();
+            assert!(
+                err.contains(&format!(
+                    "discharging `Copy` on the body-local generic instantiation `{rendered}`"
+                )) && err.contains("is not yet supported from a polymorphic body"),
+                "unexpected message for {ctor}: {err}"
+            );
+        }
+    }
+
     /// P7.S3k (R6): the caller wraps its own `'T` before handing it over, so
     /// the image of the callee's bare `'U` is a compound over a caller
     /// variable -- the growing case, rejected at the call site.
@@ -8038,6 +8107,43 @@ mod tests {
             err.contains("expected `Wrap['A]`") && err.contains("found `Box['T]`"),
             "unexpected message: {err}"
         );
+    }
+
+    /// P7.S3k (R2, review fix): the four structural guards in
+    /// `poly_cross_match`/`poly_cross_relate` that no test reached. Each was
+    /// deletable with the whole suite green, and each fails *open* -- the
+    /// operand-count guard into a subtract-overflow panic, the other three into
+    /// an accepted call: a `Bool` filling an `i64` parameter, a shared borrow
+    /// filling a mutable one, and a `['T 4]` filling a `['U 3]`. Table-driven
+    /// because the four share one shape (a callee the caller's operands cannot
+    /// fill) and differ only in which conjunct rejects them.
+    #[test]
+    fn check_cross_call_operands_the_callee_cannot_accept_are_errors() {
+        for (fixture, expected) in [
+            (
+                ": h ( 'U 'U 'U -- ) drop drop drop ;\n\
+                 : g ( 'T -- ) h ;\n: main ( -- ) ;\n",
+                "`h` needs 3 values, but the stack holds 1",
+            ),
+            (
+                ": h ( 'U i64 -- 'U ) drop ;\n\
+                 : g ( 'T -- 'T ) True h ;\n: main ( -- ) ;\n",
+                "`h` expected `i64`, found `Bool`",
+            ),
+            (
+                ": h ( &!'U -- ) drop ;\n\
+                 : g ( &'T -- ) h ;\n: main ( -- ) ;\n",
+                "`h` expected `&!'U`, found `&'T`",
+            ),
+            (
+                ": h ( &['U 3] -- ) drop ;\n\
+                 : g ( &['T 4] -- ) h ;\n: main ( -- ) ;\n",
+                "`h` expected `['U 3]`, found `['T 4]`",
+            ),
+        ] {
+            let err = check_src(fixture).unwrap_err();
+            assert!(err.contains(expected), "expected `{expected}`, got: {err}");
+        }
     }
 
     /// P7.S3k (R2, the consistency requirement): one callee variable matched
