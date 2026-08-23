@@ -1874,9 +1874,9 @@ fn generic_nesting_depth_error(outer: &str, inner: &str, span: Span) -> String {
     )
 }
 
-/// Phase 5 slice 1 (R1): the one phantom-variable gate both `parse_generic_typedef`
-/// and `parse_generic_enum_typedef` call once their whole field/variant list is
-/// known.
+/// Phase 5 slice 1 (R1): the one phantom-variable gate both
+/// `parse_generic_typedef_fields` and `parse_generic_enum_typedef_variants`
+/// call once their whole field/variant list is known.
 fn check_no_phantom_ty_var(
     decl_name: &str,
     ty_vars: &[(String, Span)],
@@ -5184,9 +5184,9 @@ mod tests {
         assert_eq!(exports, vec!["Queue", "drain"]);
     }
 
-    /// Phase 5 slice 1 review fix: `parse_generic_typedef`/
-    /// `parse_generic_enum_typedef` stamp `module: self.module` on the decl
-    /// they build, but every other test in this file drives `parse_bodies`
+    /// Phase 5 slice 1 review fix: `parse_generic_typedefs`' stage (a) stamps
+    /// `module: self.module` on the placeholder decl it registers, but every
+    /// other test in this file drives `parse_bodies`
     /// with `module: 0`, so a hard-coded `0` there would pass unnoticed (this
     /// exact class of gap -- a span or id silently defaulting to module 0 --
     /// has bitten this codebase before). Drives `parse_bodies` directly with a
