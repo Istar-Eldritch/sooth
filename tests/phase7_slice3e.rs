@@ -1,9 +1,13 @@
-//! P7.S3e Phase 1 goldens: `trait:` declaration, `impl:` binding, and
-//! export/import parity with `type:`/`extern:`. Body-side bound consumption
-//! (`'T: Show`) is out of scope this phase (Phase 2's R18) -- these goldens
-//! cover declaration/export/import/duplicate-check surface only, through the
-//! real `sooth` binary so a cross-module scenario exercises the whole-closure
-//! trait pre-pass this phase adds in `driver::assemble_module`.
+//! P7.S3e goldens: `trait:` declaration, `impl:` binding, export/import
+//! parity with `type:`/`extern:`, and the body-side bound rejections.
+//!
+//! Driven through the real `sooth` binary, so a cross-module scenario
+//! exercises the whole-closure trait pre-pass in `driver::assemble_module`.
+//! Only *rejections* of bound consumption are golden here: a bound-directed
+//! call that check-passes has no lowering yet (the resolved symbol is Phase
+//! 3's `CallInst` field and Phase 4's plumbing), so its goldens land with
+//! that work. The accepting side is pinned at check level meanwhile, in
+//! `check::poly`'s and `driver`'s own tests.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -321,4 +325,72 @@ fn impl_inside_the_target_types_own_module_satisfies_the_orphan_rule() {
         "import: \"point.sth\" p | Point | ;\n: main ( -- ) ;\n",
     );
     build_ok(&entry);
+}
+
+/// R12/decision 5: composing two traits that require the same member name is
+/// legal to declare; the unqualified call to that member is the rejection.
+#[test]
+fn ambiguous_unqualified_member_call_is_rejected() {
+    let (_t, entry) = single_file(
+        "ambiguous-member",
+        "trait: A 'T t1 ( &'T -- ) ;\n\
+         trait: B 'T t1 ( &'T -- ) ;\n\
+         : f ( &'T: A B -- ) t1 ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("error: `t1` is required by both `A` and `B` on 'T (line 4, col 21)"),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "note: a member required by two of a variable's bounds cannot be called unqualified"
+        ),
+        "{err}"
+    );
+}
+
+/// R9/R17 scope cut (tracked as P7.S3o): a polymorphic combinator's body is
+/// checked standalone and its instantiation records never reach
+/// `Module::instantiations`, so a user bound on its own type variable has
+/// nowhere to resolve against -- an explicit, located rejection rather than a
+/// dispatch against records that do not survive.
+#[test]
+fn a_user_bound_on_a_poly_combinator_is_rejected() {
+    let (_t, entry) = single_file(
+        "combinator-bound",
+        "type: Point x i64 y i64 ;\n\
+         trait: Show 'T show ( &'T -- ) ;\n\
+         : point-show ( &Point -- ) drop ;\n\
+         impl: Show for Point  show point-show ;\n\
+         : shows inline ( &'T: Show -- ) show ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: `'T: Show` on the combinator `shows` at line 6, col 3 is not supported"
+        ),
+        "{err}"
+    );
+}
+
+/// R18(a): a bound naming a qualified trait whose qualifier is not one of this
+/// module's import aliases. `parse_capabilities` has no `resolve_type` to
+/// delegate to, so this needs its own located rejection rather than the
+/// generic unknown-capability message.
+#[test]
+fn an_unbound_qualifier_in_a_bound_is_rejected() {
+    let (_t, entry) = single_file(
+        "bound-unbound-qualifier",
+        ": shows ( &'T: q::Show -- ) drop ;\n: main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: unknown module qualifier `q` in bound `q::Show` at line 2, col 16 (a qualified bound names an import alias)"
+        ),
+        "{err}"
+    );
 }

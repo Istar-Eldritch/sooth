@@ -17,8 +17,8 @@ use crate::ast::{
     ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl,
     ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect,
     RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind,
-    TraitDecl, TraitId, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
-    RESERVED_TRAIT_MODULE,
+    TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
+    WordDef, RESERVED_TRAIT_MODULE,
 };
 
 mod audits;
@@ -68,7 +68,7 @@ use self::engine::*;
 pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
-pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
+pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str, TraitCtx};
 use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
@@ -527,6 +527,14 @@ fn check_array_element_gate(
 }
 
 pub fn check(module: &mut Module) -> Result<(), String> {
+    check_module(module).map(|_| ())
+}
+
+/// `check`, plus the trait obligations R17's pre-pass collected -- the one
+/// artifact of a check run that is otherwise invisible from outside, since
+/// nothing stores it on `Module` (a resolved obligation rides `CallInst`
+/// instead).
+fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligation>>, String> {
     // R1: recognized ahead of `check_types` so the ordering hazard against
     // `check_recursion` (run inside `check_types`) never arises.
     let drop_overloads = find_drop_overloads(&module.words, &module.structs)?;
@@ -701,7 +709,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         modules,
         statics,
         generics,
-        traits: _,
+        traits,
         impls: _,
     } = module;
     // P7 slice 3a phase 2 (R2): the live instantiator, wrapped so a poly
@@ -758,10 +766,67 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // filled as each monomorphic body resolves one against its stack, then
     // relayed to the module for lowering.
     let mut resolved_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
+    // P7.S3e (R17, decision 10): every non-combinator polymorphic body is
+    // checked *here*, before the loop below reaches any call site, rather than
+    // in source order interleaved with the monomorphic words. `check_poly_body`
+    // is what records a body's trait obligations, and a monomorphic word
+    // declared ahead of the polymorphic word it calls would otherwise reach the
+    // call-site bound loop while its callee's obligation list was still empty --
+    // an order-dependent silent miss, not a diagnostic.
+    //
+    // This *replaces* the in-loop call rather than supplementing it: a body is
+    // checked exactly once, just earlier. Two consequences the loop below no
+    // longer produces: every poly-body diagnostic in a module now precedes
+    // every monomorphic one, and generic-struct ids mint in poly-word order
+    // ahead of monomorphic-word order. A combinator stays on the in-loop
+    // `check_poly_combinator_standalone` path, which records nothing that
+    // survives it (R9's scope cut).
+    let mut trait_obligations: HashMap<String, Vec<TraitObligation>> = HashMap::new();
+    for word in words.iter() {
+        let Some(sig) = &word.poly else { continue };
+        if is_combinator(word) {
+            continue;
+        }
+        let mut obligations = Vec::new();
+        // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself at entry
+        // (to the live registries' current length); flushed right after it
+        // returns, so a mint this body triggers lands at an id the very next
+        // body's check can already see.
+        check_poly_body(
+            word,
+            sig,
+            &env,
+            &combinators,
+            structs,
+            enums,
+            arrays,
+            slices,
+            statics,
+            Some(modules),
+            &mut builtin_overloads,
+            &mut TraitCtx {
+                traits,
+                obligations: &mut obligations,
+            },
+            &poly_words,
+            Some(&generics_cell),
+        )?;
+        {
+            let mut g = generics_cell.borrow_mut();
+            g.flush_structs_into(structs);
+            g.flush_enums_into(enums);
+        }
+        trait_obligations.insert(word.name.clone(), obligations);
+    }
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
             if is_combinator(word) {
+                // P7.S3e (R9/R17 scope cut, tracked as P7.S3o): the scratch
+                // records below are exactly why a user trait bound cannot ride
+                // a combinator's own type variable -- nothing here survives to
+                // carry a resolved obligation.
+                reject_user_bound_on_combinator(word, sig, traits)?;
                 // R14-R17: a polymorphic combinator (`each`/`map`/`fold`) is
                 // checked standalone by instantiating its signature at
                 // concrete stand-in types and running the ordinary checker on
@@ -798,36 +863,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     Some(modules),
                     &mut poly,
                 )?;
-            } else {
-                // R7: a polymorphic body is checked over a `PolyType` stack by
-                // a dedicated pass, deliberately separate from the concrete
-                // walk.
-                //
-                // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself
-                // at entry (to the live registries' current length); flushed
-                // right after it returns, so a mint this body triggers lands
-                // at an id the very next word's own check can already see --
-                // `Ctx`'s structs/enums borrow is scoped to this one call, so
-                // the flush's `&mut` never conflicts with it.
-                check_poly_body(
-                    word,
-                    sig,
-                    &env,
-                    &combinators,
-                    structs,
-                    enums,
-                    arrays,
-                    slices,
-                    statics,
-                    Some(modules),
-                    &mut builtin_overloads,
-                    &poly_words,
-                    Some(&generics_cell),
-                )?;
-                let mut g = generics_cell.borrow_mut();
-                g.flush_structs_into(structs);
-                g.flush_enums_into(enums);
             }
+            // R7: a non-combinator polymorphic body was already checked by
+            // the obligation pre-pass above (R17), so there is nothing to do
+            // for it here.
         } else {
             let mut poly = PolyCtx {
                 env: &poly_env,
@@ -908,7 +947,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;
-    Ok(())
+    Ok(trait_obligations)
 }
 
 /// R10: one interned bundle struct per distinct output tuple of length >= 2,
@@ -3258,6 +3297,25 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
+    }
+
+    /// P7.S3e (R17): the obligation pre-pass hoists `check_poly_body` ahead of
+    /// the main per-word loop, so every polymorphic body's diagnostic now
+    /// precedes every monomorphic word's -- even when the monomorphic word is
+    /// declared first. A deliberate ordering change, pinned so it cannot be
+    /// reintroduced or reverted silently.
+    #[test]
+    fn a_poly_body_diagnostic_precedes_a_monomorphic_one_declared_before_it() {
+        let err = check_src(
+            ": bad-mono ( -- i64 ) ;\n\
+             : bad-poly ( 'T -- 'T 'T ) dup ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("bad-poly") && !err.contains("bad-mono"),
+            "the poly body's error must be the first one reported: {err}"
+        );
     }
 
     fn test_variant(fields: Vec<(String, Type)>) -> VariantDecl {

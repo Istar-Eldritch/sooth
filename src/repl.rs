@@ -2852,6 +2852,11 @@ impl Session {
             &[],
             None,
             &mut builtin_overloads,
+            // P7.S3e (R18): a session declares no `trait:`, so the only table
+            // entries are the pre-seeded `Copy`/`Ord` predicates and no
+            // `Bound::User` can reach here; the obligations it records are
+            // scratch, the same bypass `structs`/`enums` already follow.
+            &mut check::TraitCtx::scratch(&mut Vec::new()),
             // P8 S2 (R6b): a session's poly words are not in a module closure,
             // so no cross-module narrowing can arise here and there is nothing
             // to name.

@@ -1287,10 +1287,16 @@ pub enum GlobalMode {
 /// `Copy` gates `dup`/`over`; `Ord` gates `gt`/`max`. Both are resolved at the
 /// concrete instantiation by the existing predicates (`is_copy`, the numeric
 /// tower), Kitten-style, with no trait objects.
+///
+/// P7.S3e (R6): `User` is the third, user-declarable variant -- a `trait:`
+/// declaration satisfied nominally by an `impl:` binding, resolved at the
+/// concrete instantiation by a whole-program `(TraitId, Type)` registry
+/// lookup instead of a predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
     Copy,
     Ord,
+    User(TraitId),
 }
 
 /// P7.S3e (R3): a whole-program index into `Module::traits`, mirroring

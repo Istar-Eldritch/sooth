@@ -1489,7 +1489,18 @@ fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
 
 fn unknown_capability_error(name: &str, span: Span) -> String {
     format!(
-        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or `Ord`)",
+        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy`, `Ord`, or a trait in scope)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R18): a bound naming a qualified trait (`'T: q::Show`) whose
+/// qualifier is not one of this module's import aliases. `parse_capabilities`
+/// has no `resolve_type` to delegate to (the way `type_is_exported`'s callers
+/// do), so the unbound qualifier needs its own located rejection here.
+fn unbound_bound_qualifier_error(qualifier: &str, base: &str, span: Span) -> String {
+    format!(
+        "error: unknown module qualifier `{qualifier}` in bound `{qualifier}::{base}` at line {}, col {} (a qualified bound names an import alias)",
         span.line, span.col
     )
 }
@@ -2727,28 +2738,53 @@ impl<'t> Parser<'t> {
     /// entries (`seed_predicate_traits`), so a user `trait: Copy` collides
     /// with them as an ordinary duplicate declaration (`check_trait_decls`),
     /// not a bespoke reserved-word check. A `Nominal` (user-declared) trait
-    /// name is not yet consumed here -- `'T: Show`'s parse-time resolution is
-    /// Phase 2's R18, out of scope this phase -- so it still falls through to
-    /// the unknown-capability error unchanged.
+    /// name resolves through the same table (R18, `bound_trait_id`) and
+    /// yields `Bound::User`.
     fn parse_capabilities(&mut self, colon_span: Span) -> Result<Vec<Bound>, String> {
         let mut out = Vec::new();
-        loop {
-            match self.peek() {
-                Some((Token::Word(c), _)) if predicate_bound(self.traits, c).is_some() => {
-                    let bound = predicate_bound(self.traits, c).expect("checked above");
+        while let Some((Token::Word(c), span)) = self.peek() {
+            let (c, span) = (c.clone(), *span);
+            if let Some(bound) = predicate_bound(self.traits, &c) {
+                self.pos += 1;
+                out.push(bound);
+                continue;
+            }
+            match self.bound_trait_id(&c, span)? {
+                Some(id) => {
                     self.pos += 1;
-                    out.push(bound);
+                    out.push(Bound::User(id));
                 }
-                Some((Token::Word(c), span)) if out.is_empty() => {
-                    return Err(unknown_capability_error(c, *span));
-                }
-                _ => break,
+                // Not a trait name: the greedy list ends here and the word is
+                // the enclosing signature's next slot -- unless nothing has
+                // been read yet, where the colon has already committed to a
+                // bound (X3).
+                None if out.is_empty() => return Err(unknown_capability_error(&c, span)),
+                None => break,
             }
         }
         if out.is_empty() {
             return Err(unknown_capability_error("<none>", colon_span));
         }
         Ok(out)
+    }
+
+    /// P7.S3e (R18): resolve a bound's trait name at parse time, through the
+    /// same `self.imports`/`type_is_exported` gate `resolve_type_or_apply`
+    /// already uses for a qualified generic type header. A bound is baked
+    /// into `Bound::User(TraitId)` here, before `Resolver::rewrite` runs, so
+    /// there is never a trait-name token left for `rewrite` to see.
+    fn bound_trait_id(&self, name: &str, span: Span) -> Result<Option<TraitId>, String> {
+        let id = find_trait_in_module(self.traits, name, self.module, self.imports, self.selective);
+        let Some((qualifier, base)) = name.split_once("::") else {
+            return Ok(id);
+        };
+        if !self.imports.contains_key(qualifier) {
+            return Err(unbound_bound_qualifier_error(qualifier, base, span));
+        }
+        if id.is_some() && !self.type_is_exported(qualifier, base) {
+            return Err(not_exported_error(base, qualifier, span));
+        }
+        Ok(id)
     }
 
     /// Fold a parsed `RawTy` to a `PolyType`, interning any fully-concrete
@@ -6990,12 +7026,61 @@ mod tests {
 
     #[test]
     fn parse_capabilities_unknown_name_is_still_an_error() {
-        // A name that resolves to neither a pre-seeded predicate entry nor
-        // (this phase) a consumed nominal trait still falls through
-        // unchanged -- `'T: Show` is out of scope this phase (R18/Phase 2).
-        let err =
-            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap_err();
+        // A name that resolves to neither a pre-seeded predicate entry nor a
+        // declared trait is still X3.
+        let err = parse_src(": f ( 'T: Nope -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
+    }
+
+    #[test]
+    fn parse_capabilities_resolves_a_declared_trait_to_a_user_bound() {
+        // P7.S3e (R6/R18): a nominal trait name in a bound resolves against
+        // the same table `Copy`/`Ord` do, at parse time, and is baked into
+        // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 2
+        // because the two pre-seeded predicate entries occupy 0 and 1.
+        let module =
+            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+    }
+
+    #[test]
+    fn parse_capabilities_composes_a_predicate_and_a_user_trait() {
+        // R5: the capability list stays greedy across the two kinds, in
+        // source order.
+        let module =
+            parse_src("trait: Order 'T cmp ( &'T &'T -- i64 ) ;\n: f ( 'T: Copy Order -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(
+            sig.bounds,
+            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(2)))]
+        );
+    }
+
+    #[test]
+    fn parse_capabilities_stops_before_a_following_type_slot() {
+        // The greedy list ends at the first word the trait table does not
+        // know, which is then the enclosing signature's next input slot --
+        // not a capability, and not an error.
+        let module =
+            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show i64 -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+        assert_eq!(
+            sig.inputs,
+            vec![PolyType::Var(0), PolyType::Concrete(Type::I64)]
+        );
+    }
+
+    #[test]
+    fn parse_capabilities_rejects_an_unbound_qualifier_in_a_bound() {
+        // R18(a): `parse_capabilities` has no `resolve_type` to delegate to,
+        // so an unresolvable qualifier needs its own located rejection rather
+        // than falling through to the generic unknown-capability message.
+        let err = parse_src(": f ( 'T: q::Show -- 'T ) ;").unwrap_err();
+        assert!(err.contains("unknown module qualifier `q`"), "{err}");
+        assert!(err.contains("`q::Show`"), "{err}");
     }
 
     #[test]

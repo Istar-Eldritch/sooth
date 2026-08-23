@@ -4,6 +4,43 @@ use crate::ast::GenericTypes;
 
 use super::*;
 
+/// P7.S3e (R7): a trait-member call recorded abstractly while a polymorphic
+/// body is walked -- which trait, which member, on which of the walked word's
+/// own type variables. The *symbol* is deliberately absent: `'T` is still
+/// abstract here, so only the obligation is knowable. `check_poly_call`
+/// resolves it against a concrete `θ` (R8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TraitObligation {
+    pub span: Span,
+    /// Index into the *walked word's* `PolySig::ty_var_names`.
+    pub var: u32,
+    pub trait_id: TraitId,
+    pub member: String,
+}
+
+/// P7.S3e (R7): the trait-side context a polymorphic body's walk needs --
+/// the whole-program trait registry it looks a bound's members up in, and the
+/// obligation list it records into. Bundled rather than threaded as two more
+/// parameters through the eight functions that already carry
+/// `builtin_overloads` along the same path.
+pub(crate) struct TraitCtx<'a> {
+    pub traits: &'a [TraitDecl],
+    pub obligations: &'a mut Vec<TraitObligation>,
+}
+
+impl TraitCtx<'_> {
+    /// The scratch context for a path that records no obligation: the REPL's
+    /// per-line word check and the poly-combinator-standalone path, neither of
+    /// which can carry a `Bound::User` (the combinator case is a located
+    /// rejection, R9's scope cut).
+    pub(crate) fn scratch(obligations: &mut Vec<TraitObligation>) -> TraitCtx<'_> {
+        TraitCtx {
+            traits: crate::ast::predicate_traits(),
+            obligations,
+        }
+    }
+}
+
 /// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
 /// (every integer width, `usize`/`isize`, and both floats) is totally ordered
 /// for the comparison operators; nothing else is (`bool`, a struct, an array).
@@ -402,6 +439,7 @@ pub fn check_poly_body(
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
@@ -451,6 +489,7 @@ pub fn check_poly_body(
         arrays,
         slices,
         builtin_overloads,
+        tctx,
         poly_words,
         true,
     )?;
@@ -499,6 +538,7 @@ pub(super) fn poly_walk(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
@@ -533,6 +573,7 @@ pub(super) fn poly_walk(
             arrays,
             slices,
             builtin_overloads,
+            tctx,
             poly_words,
             tail && at == last,
         )?;
@@ -554,6 +595,7 @@ pub(super) fn poly_term(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
@@ -630,6 +672,7 @@ pub(super) fn poly_term(
                 arrays,
                 slices,
                 builtin_overloads,
+                tctx,
                 poly_words,
                 tail,
             );
@@ -673,6 +716,162 @@ pub(super) fn poly_term(
     Ok(stack)
 }
 
+/// P7.S3e (R7): the receiver a bound-directed call dispatches on -- the
+/// top-of-stack slot, bare `'T` or `&'T`. Any other shape is not a
+/// trait-member receiver, so a member whose *last* declared input is not the
+/// trait's own variable is unreachable through a bound this slice.
+fn receiver_ty_var(stack: &[PolySlot]) -> Option<u32> {
+    match &stack.last()?.pt {
+        PolyType::Var(v) => Some(*v),
+        PolyType::Ref(referent, _) => match referent.as_ref() {
+            PolyType::Var(v) => Some(*v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// P7.S3e (R7): a trait member's signature is written over the trait's own
+/// single type variable (id 0 in the member's own `PolySig`); dispatching it
+/// through a bound rewrites that variable to the bounded variable of the
+/// *calling* word's signature, so the result is comparable against the walk's
+/// stack directly.
+fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
+    match t {
+        PolyType::Var(_) => PolyType::Var(var),
+        PolyType::Ref(referent, mutable) => {
+            PolyType::Ref(Box::new(substitute_member_var(referent, var)), *mutable)
+        }
+        PolyType::Array(elem, len) => {
+            PolyType::Array(Box::new(substitute_member_var(elem, var)), len.clone())
+        }
+        other => other.clone(),
+    }
+}
+
+/// P7.S3e (R7/R12): the bound-directed dispatch branch. `Ok(None)` means this
+/// is no trait-member obligation and ordinary dispatch proceeds: the receiver
+/// is not one of this word's bounded type variables, or no `Bound::User` on it
+/// declares a member of this name.
+///
+/// The obligation records *which trait, which member, which variable* and no
+/// symbol: `'T` is still abstract here, so the implementing word is unknowable
+/// until a call site grounds it (R8).
+fn poly_trait_member_call(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<PolySlot>,
+    sig: &PolySig,
+    ctx: &Ctx,
+    tctx: &mut TraitCtx,
+) -> Result<Option<Vec<PolySlot>>, String> {
+    let Some(var) = receiver_ty_var(stack) else {
+        return Ok(None);
+    };
+    let traits = tctx.traits;
+    // R12/decision 6: a qualified call names a *module* alias, never a trait
+    // namespace -- it restricts the search to traits that module declares.
+    // `Resolver::rewrite` leaves an unrecognized qualified word raw, which is
+    // exactly what this needs.
+    //
+    // R18: matched raw, never demangled. `rewrite` runs before the checker, so
+    // a member name that also names a word the target module declares or
+    // re-exports has already been rewritten to that word's mangled symbol by
+    // the time control reaches here -- and nothing downstream can tell a trait
+    // member was intended. Un-mangling here would make the trait silently win
+    // that collision; leaving it mangled falls through to ordinary dispatch,
+    // which is the ruled rejection.
+    let (qualifier, member) = match name.split_once("::") {
+        Some((q, m)) => (Some(q), m),
+        None => (None, name),
+    };
+    let qualified_target = match qualifier {
+        Some(q) => match ctx
+            .modules()
+            .and_then(|ms| ms.get(ctx.module() as usize))
+            .and_then(|m| m.imports.get(q))
+        {
+            Some(&target) => Some(target),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let matched: Vec<(TraitId, &TraitMember)> = sig
+        .bounds
+        .iter()
+        .filter_map(|(v, bound)| match bound {
+            Bound::User(tid) if *v == var => Some(*tid),
+            _ => None,
+        })
+        .filter(|tid| qualified_target.is_none_or(|t| traits[tid.index()].module == t))
+        .filter_map(|tid| {
+            traits[tid.index()]
+                .members
+                .iter()
+                .find(|m| m.name == member)
+                .map(|m| (tid, m))
+        })
+        .collect();
+    let (trait_id, member_decl) = match matched.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        // R12/decision 5: composing two traits that happen to share a member
+        // name is legal to declare; only the ambiguous *call* is the error.
+        _ => {
+            let named: Vec<&str> = matched
+                .iter()
+                .map(|(tid, _)| traits[tid.index()].name.as_str())
+                .collect();
+            return Err(ambiguous_trait_member_error(
+                span,
+                member,
+                &named,
+                &sig.ty_var_names[var as usize],
+            ));
+        }
+    };
+    let inputs: Vec<PolyType> = member_decl
+        .sig
+        .inputs
+        .iter()
+        .map(|t| substitute_member_var(t, var))
+        .collect();
+    if stack.len() < inputs.len() {
+        return Err(underflow_error(
+            ctx,
+            span,
+            member,
+            inputs.len(),
+            stack.len(),
+        ));
+    }
+    let base = stack.len() - inputs.len();
+    for (i, expected) in inputs.iter().enumerate() {
+        if &stack[base + i].pt != expected {
+            return Err(trait_member_operand_error(
+                ctx,
+                span,
+                member,
+                &traits[trait_id.index()].name,
+                expected,
+                &stack[base + i].pt,
+                sig,
+            ));
+        }
+    }
+    stack.truncate(base);
+    for out in &member_decl.sig.outputs {
+        stack.push(PolySlot::new(substitute_member_var(out, var)));
+    }
+    tctx.obligations.push(TraitObligation {
+        span,
+        var,
+        trait_id,
+        member: member.to_string(),
+    });
+    Ok(Some(std::mem::take(stack)))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poly_call_term(
     name: &str,
@@ -688,6 +887,7 @@ pub(super) fn poly_call_term(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
@@ -1023,6 +1223,7 @@ pub(super) fn poly_call_term(
             arrays,
             slices,
             builtin_overloads,
+            tctx,
             poly_words,
             tail,
         )?;
@@ -1075,6 +1276,7 @@ pub(super) fn poly_call_term(
             arrays,
             slices,
             builtin_overloads,
+            tctx,
             poly_words,
             tail,
         );
@@ -1117,6 +1319,7 @@ pub(super) fn poly_call_term(
             arrays,
             slices,
             builtin_overloads,
+            tctx,
             poly_words,
             tail,
         );
@@ -1192,6 +1395,18 @@ pub(super) fn poly_call_term(
     if let Some(next) = poly_construct_generic(
         name, span, &mut stack, sig, ctx, env, structs, enums, arrays,
     )? {
+        return Ok(next);
+    }
+    // P7.S3e (R7/R10): a call whose receiver is one of this word's own bounded
+    // type variables and whose name a `Bound::User` trait declares as a member
+    // is an *obligation*, not an ordinary call: the signature is known here,
+    // the symbol is not. Ordered ahead of `env` because the three shapes it
+    // intercepts -- a bare or ref-to-bare variable at a concrete operand
+    // position -- were each an unconditional error below before this slice
+    // (`poly_var_to_concrete_error`, `poly_delegate_op`'s suffix truncation,
+    // `poly_op_on_variable_error`), so no concrete overload was ever reachable
+    // from them and the two dispatch paths partition rather than compete.
+    if let Some(next) = poly_trait_member_call(name, span, &mut stack, sig, ctx, tctx)? {
         return Ok(next);
     }
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
@@ -1284,6 +1499,7 @@ pub(super) fn poly_call_term(
                             arrays,
                             slices,
                             builtin_overloads,
+                            tctx,
                             poly_words,
                         )?;
                     }
@@ -1457,6 +1673,7 @@ fn poly_ground_quotation_literal(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
 ) -> Result<(), String> {
     let lit = scope.quotation(quot).clone();
@@ -1506,6 +1723,7 @@ fn poly_ground_quotation_literal(
         arrays,
         slices,
         builtin_overloads,
+        tctx,
         poly_words,
         false,
     )?;
@@ -1677,6 +1895,7 @@ fn poly_eliminator_call(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
@@ -1851,6 +2070,7 @@ fn poly_eliminator_call(
         arrays,
         slices,
         builtin_overloads,
+        tctx,
         poly_words,
         &mut |literal_span, exit| match &baseline {
             None => {
@@ -1915,6 +2135,7 @@ fn poly_walk_arms(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     cross_arm: &mut dyn FnMut(Span, Vec<PolySlot>) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -1953,6 +2174,7 @@ fn poly_walk_arms(
             arrays,
             slices,
             builtin_overloads,
+            tctx,
             poly_words,
             arm.tail,
         )?;
@@ -2269,6 +2491,7 @@ fn poly_combinator_call(
     arrays: &[ArrayDecl],
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
+    tctx: &mut TraitCtx,
     poly_words: &HashSet<String>,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
@@ -2442,6 +2665,7 @@ fn poly_combinator_call(
         arrays,
         slices,
         builtin_overloads,
+        tctx,
         poly_words,
         &mut |literal_span, exit| {
             let rule = &rules[at];
@@ -3595,16 +3819,19 @@ pub(super) fn check_poly_call(
     // variable to.
     for (v, bound) in &sig.bounds {
         let Some(ty) = subst.ty_of(*v) else { continue };
-        let ok = match bound {
-            Bound::Copy => is_copy(ty, ctx.structs(), ctx.enums(), arrays),
-            Bound::Ord => is_ord(ty),
+        let var = &sig.ty_var_names[*v as usize];
+        let unsatisfied = match bound {
+            Bound::Copy => (!is_copy(ty, ctx.structs(), ctx.enums(), arrays))
+                .then(|| poly_copy_bound_error(ctx, span, name, var, ty)),
+            Bound::Ord => (!is_ord(ty)).then(|| poly_ord_bound_error(ctx, span, name, var, ty)),
+            // P7.S3e (R8): satisfaction of a user trait is an `impl:` registry
+            // lookup keyed by `(TraitId, θ(v))`, and each recorded obligation
+            // then resolves to a concrete symbol against the same θ. Both are
+            // the call-site resolution phase's, which owns that registry read.
+            Bound::User(_) => None,
         };
-        if !ok {
-            let var = &sig.ty_var_names[*v as usize];
-            return Err(match bound {
-                Bound::Copy => poly_copy_bound_error(ctx, span, name, var, ty),
-                Bound::Ord => poly_ord_bound_error(ctx, span, name, var, ty),
-            });
+        if let Some(err) = unsatisfied {
+            return Err(err);
         }
     }
     let mut outputs: Vec<Type> = Vec::with_capacity(sig.outputs.len());
@@ -4145,6 +4372,78 @@ pub(super) fn poly_op_operand_mismatch_error(
         span.line,
         poly_type_str(a, sig),
         poly_type_str(b, sig),
+    )
+}
+
+/// P7.S3e (R12, decision 5): a member required by two of one variable's
+/// bounds, called unqualified. Composing the two traits stays legal; only the
+/// call is ambiguous, so the diagnostic sits here and not at the declaration.
+fn ambiguous_trait_member_error(span: Span, member: &str, traits: &[&str], var: &str) -> String {
+    let quoted: Vec<String> = traits.iter().map(|t| format!("`{t}`")).collect();
+    let listed = match quoted.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    };
+    format!(
+        "error: `{member}` is required by both {listed} on {var} (line {}, col {})\n  note: a member required by two of a variable's bounds cannot be called unqualified",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R7): a bound-directed member call whose operands do not match the
+/// trait's declared member signature, with the trait's own type variable
+/// rewritten to the bounded variable being dispatched on.
+#[allow(clippy::too_many_arguments)]
+fn trait_member_operand_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    expected: &PolyType,
+    found: &PolyType,
+    sig: &PolySig,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{member}` of `{trait_name}` in `{where_}` (line {}, col {}) expects `{}`, found `{}`",
+        span.line,
+        span.col,
+        poly_type_str(expected, sig),
+        poly_type_str(found, sig),
+    )
+}
+
+/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): reject a user trait bound on
+/// a polymorphic combinator's own type variable, before its body is checked.
+pub(super) fn reject_user_bound_on_combinator(
+    word: &WordDef,
+    sig: &PolySig,
+    traits: &[TraitDecl],
+) -> Result<(), String> {
+    let Some((v, tid)) = sig.bounds.iter().find_map(|(v, bound)| match bound {
+        Bound::User(tid) => Some((*v, *tid)),
+        _ => None,
+    }) else {
+        return Ok(());
+    };
+    Err(user_bound_on_combinator_error(
+        crate::resolve::demangle_word(&word.name),
+        &traits[tid.index()].name,
+        &sig.ty_var_names[v as usize],
+        word.span,
+    ))
+}
+
+/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): a polymorphic *combinator*'s
+/// body is checked standalone and its instantiation records are scratch --
+/// they never reach `Module::instantiations`, so there is no `CallInst` for a
+/// resolved trait obligation to live on. A user bound on such a word's own
+/// type variable is rejected rather than dispatched against stale records.
+fn user_bound_on_combinator_error(word: &str, trait_name: &str, var: &str, span: Span) -> String {
+    format!(
+        "error: `{var}: {trait_name}` on the combinator `{word}` at line {}, col {} is not supported\n  note: a combinator is spliced at its call sites and records no instantiation a trait bound could resolve against",
+        span.line, span.col
     )
 }
 
@@ -4797,6 +5096,214 @@ mod tests {
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
+
+    /// P7.S3e (R7/R17): the obligations the pre-pass recorded, keyed by the
+    /// polymorphic word whose body recorded them.
+    fn obligations_of(src: &str) -> HashMap<String, Vec<TraitObligation>> {
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        super::super::check_module(&mut module).expect("the fixture checks")
+    }
+
+    /// A trait, a concrete implementing word, and the `impl:` binding them --
+    /// the preamble every bound-dispatch fixture below needs. `Point` rather
+    /// than `i64` because a scalar local has no address to borrow.
+    const SHOW: &str = "type: Point x i64 y i64 ;\n\
+         trait: Show 'T show ( &'T -- ) ;\n\
+         : point-show ( &Point -- ) drop ;\n\
+         impl: Show for Point  show point-show ;\n";
+
+    /// P7.S3e (R7): a bounded body's member call records an obligation --
+    /// which trait, which member, which of the word's own type variables --
+    /// and no symbol: `'T` is still abstract at this point.
+    #[test]
+    fn trait_member_call_records_an_obligation() {
+        let recorded = obligations_of(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
+        ));
+        let obs = recorded
+            .get("shows")
+            .expect("the bounded word was pre-passed");
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].var, 0);
+        assert_eq!(obs[0].member, "show");
+        assert_eq!(obs[0].span.line, 5);
+        // Index 2: the two pre-seeded `Copy`/`Ord` predicate entries occupy 0
+        // and 1, so a whole-program `TraitId` is what was recorded, not a
+        // per-module or per-word one.
+        assert_eq!(obs[0].trait_id, TraitId::from_index(2));
+    }
+
+    /// The obligation list is keyed by every non-combinator poly word the
+    /// pre-pass reached, not only the ones that recorded something -- an
+    /// absent key means "never pre-passed", which is what makes R17's
+    /// order-independence claim checkable rather than indistinguishable from
+    /// "recorded nothing".
+    #[test]
+    fn the_prepass_keys_every_noncombinator_poly_word() {
+        let recorded = obligations_of(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : ident ( 'U -- 'U ) ;\n\
+             : main ( -- ) ;\n"
+        ));
+        assert_eq!(recorded["ident"], Vec::new());
+        assert_eq!(recorded["shows"].len(), 1);
+    }
+
+    /// R17/decision 10: `check_poly_body` and the call-site check used to run
+    /// interleaved in one source-order loop, so a monomorphic caller declared
+    /// *before* its polymorphic callee reached the bound loop while that
+    /// callee's obligations were still unrecorded. The pre-pass closes it: the
+    /// obligation is present whichever order the two are declared in.
+    #[test]
+    fn obligations_are_recorded_before_any_call_site_regardless_of_order() {
+        let caller_first = format!(
+            "{SHOW}: main ( -- ) 1 2 Point |p| &p shows p drop ;\n\
+             : shows ( &'T: Show -- ) show ;\n"
+        );
+        let callee_first = format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
+        );
+        assert_eq!(obligations_of(&caller_first)["shows"].len(), 1);
+        assert_eq!(obligations_of(&callee_first)["shows"].len(), 1);
+    }
+
+    /// R7: the member's declared outputs are pushed, with the trait's own type
+    /// variable rewritten to the bounded variable being dispatched on.
+    #[test]
+    fn trait_member_call_pushes_the_declared_outputs() {
+        check_src(
+            "type: Point x i64 y i64 ;\n\
+             trait: Clone 'T clone ( &'T -- 'T ) ;\n\
+             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
+             impl: Clone for Point  clone point-clone ;\n\
+             : cloned ( &'T: Clone -- 'T ) clone ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the member's `'T` output grounds to the caller's own variable");
+    }
+
+    /// The output really is the *member's*, not a pass-through: declaring the
+    /// wrong one is a stack-shape mismatch.
+    #[test]
+    fn trait_member_output_is_the_declared_one() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             trait: Clone 'T clone ( &'T -- 'T ) ;\n\
+             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
+             impl: Clone for Point  clone point-clone ;\n\
+             : cloned ( &'T: Clone -- ) clone ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("cloned"), "{err}");
+    }
+
+    /// R7: an operand that does not match the member's declared signature is a
+    /// located rejection naming the trait and the member.
+    #[test]
+    fn trait_member_operand_mismatch_is_located() {
+        let err = check_src(&format!(
+            "{SHOW}: shows ( 'T: Show -- ) show ;\n: main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`show` of `Show` in `shows` (line 5, col 25) expects `&'T`, found `'T`"),
+            "{err}"
+        );
+    }
+
+    /// R12/decision 5: composing two traits that happen to require the same
+    /// member name is legal to *declare* -- the rejection belongs to the
+    /// ambiguous call, not to a body that never makes one.
+    #[test]
+    fn two_bounds_sharing_a_member_name_are_legal_to_declare() {
+        check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             : f ( &'T: A B -- ) drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("declaring both bounds is legal without calling the shared member");
+    }
+
+    /// R12/decision 5: the ambiguous *call* is the error, naming both traits,
+    /// the member, and the bound variable.
+    #[test]
+    fn ambiguous_trait_member_call_is_rejected() {
+        let err = check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             : f ( &'T: A B -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 21)"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "a member required by two of a variable's bounds cannot be called unqualified"
+            ),
+            "{err}"
+        );
+    }
+
+    /// R9/R17 scope cut (P7.S3o): a polymorphic combinator's instantiation
+    /// records are scratch, so there is no `CallInst` a resolved obligation
+    /// could ride -- a user bound on its own type variable is rejected rather
+    /// than dispatched against records that do not survive.
+    #[test]
+    fn user_bound_on_a_combinator_is_rejected() {
+        let err = check_src(&format!(
+            "{SHOW}: shows inline ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`'T: Show` on the combinator `shows` at line 5, col 3 is not supported"),
+            "{err}"
+        );
+        assert!(err.contains("records no instantiation"), "{err}");
+    }
+
+    /// R10 barrier 1: a plain (non-builtin) member name over a *bare* type
+    /// variable. Before this slice such an operand reached
+    /// `poly_var_to_concrete_error` unconditionally, so bound-directed
+    /// dispatch takes nothing an ordinary `env` lookup could have had.
+    /// (Barrier 3, a `Ref`-to-variable operand, is
+    /// `trait_member_call_records_an_obligation` above; the coexistence half
+    /// of R10 needs real name mangling and lives in `driver`'s tests.)
+    #[test]
+    fn bound_dispatch_on_a_bare_variable_receiver() {
+        let recorded = obligations_of(
+            "trait: Eat 'T eat ( 'T -- ) ;\n\
+             : eats ( 'T: Eat -- ) eat ;\n\
+             : main ( -- ) ;\n",
+        );
+        assert_eq!(recorded["eats"].len(), 1);
+        assert_eq!(recorded["eats"][0].member, "eat");
+    }
+
+    /// R10 barrier 2: an operator-spelled member name. `exact` is never true
+    /// for a variable operand, so such a call never reached the concrete-arm
+    /// at all before this slice -- it fell to `poly_delegate_op`, whose
+    /// concrete-suffix extraction stops before the variable. Shipped here
+    /// rather than deferred to the `sort` consumer, whose `cmp` is not
+    /// operator-spelled and would not exercise this barrier.
+    #[test]
+    fn bound_dispatch_and_a_builtin_named_member_coexist() {
+        let recorded = obligations_of(
+            "type: Point x i64 y i64 ;\n\
+             trait: Sum 'T add ( &'T &'T -- i64 ) ;\n\
+             : sums ( &'T: Sum &'T -- i64 ) add ;\n\
+             : main ( -- ) 1 2 add drop ;\n",
+        );
+        assert_eq!(recorded["sums"].len(), 1);
+        assert_eq!(recorded["sums"][0].member, "add");
+    }
+
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy> drop ;\n";
@@ -5159,6 +5666,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             false,
         )
@@ -5209,6 +5717,7 @@ mod tests {
                 &[],
                 &mut Vec::new(),
                 &mut overloads,
+                &mut TraitCtx::scratch(&mut Vec::new()),
                 &HashSet::new(),
                 false,
             )
@@ -5387,6 +5896,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut HashMap::new(),
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             &mut |_, exit| {
                 exits.push(exit.into_iter().map(|slot| slot.pt).collect());
@@ -5432,6 +5942,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut HashMap::new(),
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             &mut |_, _| Ok(()),
         )
@@ -5658,6 +6169,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             false,
         )
@@ -5683,6 +6195,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             false,
         )
@@ -6685,6 +7198,7 @@ mod tests {
             &[],
             &mut Vec::new(),
             &mut overloads,
+            &mut TraitCtx::scratch(&mut Vec::new()),
             &HashSet::new(),
             false,
         )
