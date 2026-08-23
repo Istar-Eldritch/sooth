@@ -51,13 +51,12 @@ Ordering )`) rather than using the language's own `Ord` — because the language
   (`declarations.rs:3488-3507`). So `impl: SomeTrait for i64` inside the trait's own
   declaring module is already legal.
 - **A binary comparison member's receiver position is fine as-is.** `Order.cmp ( &'T
-  &'T -- Ordering )` (`examples/traits.sth`) has its bound variable as the *last*
-  declared input (`&'T`), so `member_ends_in_trait_var` (`declarations.rs:361-364`)
-  accepts it and `receiver_ty_var` dispatches it correctly today — **this slice does not
-  depend on P7.S3p** (the non-trailing-receiver gap) for a `cmp`-shaped `Ord`. It would
-  only become relevant if `Ord`'s member set grows a shape like `clamp ( &'T lo:'T hi:'T
-  -- 'T )` with the receiver non-trailing, which is not required to satisfy the roadmap's
-  own `Ord` semantics.
+  &'T -- Ordering )` (`examples/traits.sth`) binds its variable in an input, which is all
+  `member_binds_trait_var` (`declarations.rs`) asks, and `poly_trait_member_call`
+  dispatches off the bound rather than off the top of the stack, so position is no
+  constraint at all — **this slice does not depend on receiver position** for a
+  `cmp`-shaped `Ord`, and a later shape like `clamp ( &'T lo:'T hi:'T -- 'T )` with a
+  non-trailing receiver would dispatch too (P7.S3p).
 - **`lib/cmp.sth` already exists and is real, not a P8-planned dogfood sketch.** `eq`,
   `lt`, `gt`, `lte`, `gte`, `ne` are `'T: Copy Ord`-bounded `inline` words over the six
   raw comparison intrinsics (`ueq`/`ult`/.../`une`) and `bool`'s `branch`. (The identical
