@@ -289,11 +289,11 @@ fn find_combinator_cycle(
 /// R22: a located cycle rejection naming the members in order and closing the
 /// loop back to the first (`` `rec` -> `rec` `` for the self-recursive case).
 fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
-    let mut chain: Vec<&str> = cycle
+    let mut chain: Vec<std::borrow::Cow<str>> = cycle
         .iter()
         .map(|&i| crate::resolve::demangle_word(members[i].word.name.as_str()))
         .collect();
-    chain.push(chain[0]);
+    chain.push(chain[0].clone());
     let rendered = chain
         .iter()
         .map(|n| format!("`{n}`"))

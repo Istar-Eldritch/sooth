@@ -96,21 +96,39 @@ fn is_operator_dispatch_name(name: &str) -> bool {
 }
 
 /// Recover a word's source spelling for a *diagnostic*: strip the single
-/// trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`). A user
-/// diagnostic must never show the compiler-internal mangled spelling; it shows
-/// what the author wrote. Lookups keep using the mangled name, only the
-/// rendered string is stripped. `main`/`drop` are never mangled and pass
-/// through unchanged, as does any name `mangle` never touched. Kept beside
-/// `mangle` so the two stay in step.
-pub(crate) fn demangle_word(name: &str) -> &str {
-    let Some(idx) = name.rfind("__m") else {
-        return name;
+/// trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`), then, if
+/// what remains is a P7.S3r synthesized impl-member name (`member;Trait;Type`,
+/// R3), render it back to a form the user can read: `` `cmp` (member of trait
+/// `Order` for `Point`) ``. `;` is a hard lexer delimiter, so a name with that
+/// shape is never anything a user wrote by hand. A user diagnostic must never
+/// show the compiler-internal mangled or synthesized spelling; it shows what
+/// the author wrote, or what they would recognize. Lookups keep using the
+/// mangled/synthesized name, only the rendered string changes. `main`/`drop`
+/// are never mangled and pass through unchanged, as does any name `mangle`
+/// never touched. Kept beside `mangle` so the two stay in step.
+pub(crate) fn demangle_word(name: &str) -> std::borrow::Cow<'_, str> {
+    let stripped = match name.rfind("__m") {
+        Some(idx) => {
+            let digits = &name[idx + "__m".len()..];
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                name
+            } else {
+                &name[..idx]
+            }
+        }
+        None => name,
     };
-    let digits = &name[idx + "__m".len()..];
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return name;
+    // P7.S3r `synth_member_word_name`: `member;Trait;module;Type`. The trait's
+    // declaring module id is load-bearing for uniqueness (two same-named
+    // traits from different modules), but it is compiler bookkeeping, not
+    // something the user wrote or needs to read back.
+    let parts: Vec<&str> = stripped.split(';').collect();
+    if let [member, trait_name, _trait_module, type_name] = parts[..] {
+        return std::borrow::Cow::Owned(format!(
+            "`{member}` (member of trait `{trait_name}` for `{type_name}`)"
+        ));
     }
-    &name[..idx]
+    std::borrow::Cow::Borrowed(stripped)
 }
 
 /// `demangle_word` for a *call* name, which may carry one remaining
@@ -121,7 +139,7 @@ pub(crate) fn demangle_word(name: &str) -> &str {
 /// call (`P__m0`) has no suffix and falls straight through to `demangle_word`.
 pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
     let Some(head) = name.strip_suffix('>').or_else(|| name.strip_suffix('?')) else {
-        return std::borrow::Cow::Borrowed(demangle_word(name));
+        return demangle_word(name);
     };
     let suffix = &name[head.len()..];
     let demangled = demangle_word(head);
@@ -777,6 +795,23 @@ mod tests {
         assert_eq!(split_destructure_suffix("Point>"), ("Point", ">"));
         assert_eq!(split_destructure_suffix(">"), ("", ">"));
         assert_eq!(split_destructure_suffix("Shape?"), ("Shape", "?"));
+    }
+
+    /// P7.S3r phase 2 (R3): a synthesized impl-member name renders back to a
+    /// form the user can read, module-id component dropped; an ordinary name
+    /// (with or without `;`-free mangling) is unaffected.
+    #[test]
+    fn demangle_word_renders_a_synthesized_impl_member_name() {
+        assert_eq!(
+            demangle_word("cmp;Order;0;Point__m0"),
+            "`cmp` (member of trait `Order` for `Point`)"
+        );
+        assert_eq!(
+            demangle_word("cmp;Order;0;Point"),
+            "`cmp` (member of trait `Order` for `Point`)"
+        );
+        assert_eq!(demangle_word("push__m1"), "push");
+        assert_eq!(demangle_word("push"), "push");
     }
 
     #[test]

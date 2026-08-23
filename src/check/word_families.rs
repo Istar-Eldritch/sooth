@@ -1154,10 +1154,10 @@ pub(super) fn check_drop_import_visibility(
     decl: &StructDecl,
 ) -> Result<(), String> {
     let source = crate::resolve::demangle_word(&decl.name);
-    if is_name_visible_to_module(m, span.module, decl.module, source) {
+    if is_name_visible_to_module(m, span.module, decl.module, &source) {
         Ok(())
     } else {
-        Err(drop_import_visibility_error(ctx, span, m, decl, source))
+        Err(drop_import_visibility_error(ctx, span, m, decl, &source))
     }
 }
 
@@ -1680,7 +1680,7 @@ mod tests {
         }];
         fn ctx<'a>(effect: &'a StackEffect, modules: Option<&'a [ModuleInfo]>) -> Ctx<'a> {
             Ctx::Word {
-                name: "w",
+                name: "w".into(),
                 mangled: "w",
                 effect,
                 structs: &[],

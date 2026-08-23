@@ -510,11 +510,11 @@ fn find_tail_cycle(
 /// X1: a located mutual-tail-recursion error naming the cycle members in
 /// order, closing the loop back to the first (e.g. `` `a` -> `b` -> `a` ``).
 fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
-    let mut chain: Vec<&str> = cycle
+    let mut chain: Vec<std::borrow::Cow<str>> = cycle
         .iter()
         .map(|&i| crate::resolve::demangle_word(words[i].name.as_str()))
         .collect();
-    chain.push(chain[0]);
+    chain.push(chain[0].clone());
     let rendered = chain
         .iter()
         .map(|n| format!("`{n}`"))

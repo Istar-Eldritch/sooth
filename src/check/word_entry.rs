@@ -100,7 +100,7 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     // panic downstream. Widening `is_combinator` (R2) made the shape
     // reachable: an operator call site rejects a quotation operand outright,
     // so a builtin-name overload could not previously be a combinator.
-    if BUILTIN_TABLE.contains_key(name) {
+    if BUILTIN_TABLE.contains_key(name.as_ref()) {
         return Err(format!(
             "error: `inline` on `{name}`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line {}, col {})",
             span.line, span.col

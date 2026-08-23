@@ -270,7 +270,7 @@ pub(crate) fn audit_word_quotation_positions(
             audit_poly_input_quotation(pt, sig)?;
         }
     }
-    audit_poly_reference_free_signature(w, word, structs, enums, arrays)?;
+    audit_poly_reference_free_signature(w, &word, structs, enums, arrays)?;
     Ok(())
 }
 

@@ -1085,14 +1085,16 @@ pub(super) enum BlockEnd {
 /// Both carry the struct/enum registries `is_copy` needs to resolve a
 /// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
 /// works identically whether the caller is a compiled word or a REPL line.
+#[derive(Clone)]
 pub(super) enum Ctx<'a> {
     Word {
-        /// Demangled, so every diagnostic that interpolates it is correct by
-        /// default: `resolve` rewrites module 0's decls to `{name}__m{module}`
-        /// as soon as a file has an import, and `check` runs on those names.
-        /// Self-tail recognition compares against mangled *call* names, so it
-        /// reads `mangled` instead.
-        name: &'a str,
+        /// Demangled (and, for a P7.S3r synthesized impl-member word,
+        /// rendered to its readable form, R3), so every diagnostic that
+        /// interpolates it is correct by default: `resolve` rewrites module
+        /// 0's decls to `{name}__m{module}` as soon as a file has an import,
+        /// and `check` runs on those names. Self-tail recognition compares
+        /// against mangled *call* names, so it reads `mangled` instead.
+        name: std::borrow::Cow<'a, str>,
         mangled: &'a str,
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
@@ -1220,7 +1222,7 @@ impl Ctx<'_> {
     /// (R15). A bare REPL line has no word to recurse into.
     pub(super) fn word_name(&self) -> Option<&str> {
         match self {
-            Ctx::Word { name, .. } => Some(name),
+            Ctx::Word { name, .. } => Some(name.as_ref()),
             Ctx::Line { .. } => None,
         }
     }
@@ -1278,7 +1280,7 @@ impl<'a> Ctx<'a> {
     /// attributed to whichever module happened to call it. A no-op on
     /// `Ctx::Line`, which has no module to scope against.
     pub(super) fn with_module(&self, module: u32) -> Ctx<'a> {
-        match *self {
+        match self.clone() {
             Ctx::Word {
                 name,
                 mangled,

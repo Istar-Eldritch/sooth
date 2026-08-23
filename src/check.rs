@@ -2423,7 +2423,7 @@ fn check_eliminator_call(
                 prov.quotations[qid.0].span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         };
         if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
@@ -2432,7 +2432,7 @@ fn check_eliminator_call(
                 prov.quotations[qid.0].span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         }
         variant_indices.push(vi);
@@ -2445,7 +2445,7 @@ fn check_eliminator_call(
                 span,
                 name,
                 variant_surface,
-                enum_name,
+                &enum_name,
             ));
         }
     }

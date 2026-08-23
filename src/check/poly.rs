@@ -2043,7 +2043,7 @@ fn poly_eliminator_call(
         // already unwritable. Located rather than silently narrowed to an
         // owning scrutinee, which would let an arm consume a borrowed enum.
         PolyType::Ref(..) | PolyType::Concrete(_) => {
-            return Err(poly_reference_scrutinee_error(ctx, span, name, enum_name));
+            return Err(poly_reference_scrutinee_error(ctx, span, name, &enum_name));
         }
         // OQ2: an abstract scrutinee is a `'T` that is *some* enum, which is
         // not constructible without an enum-kind bound (P7.S3d).
@@ -2073,7 +2073,7 @@ fn poly_eliminator_call(
                 literal_span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         };
         if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
@@ -2082,7 +2082,7 @@ fn poly_eliminator_call(
                 literal_span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         }
         variant_indices.push(vi);
@@ -2095,7 +2095,7 @@ fn poly_eliminator_call(
                 span,
                 name,
                 variant_surface,
-                enum_name,
+                &enum_name,
             ));
         }
     }
@@ -4677,7 +4677,7 @@ pub(super) fn reject_user_bound_on_combinator(
         return Ok(());
     };
     Err(user_bound_on_combinator_error(
-        crate::resolve::demangle_word(&word.name),
+        &crate::resolve::demangle_word(&word.name),
         &traits[tid.index()].name,
         &sig.ty_var_names[v as usize],
         word.span,

@@ -484,6 +484,35 @@ fn impl_body_unterminated_block_absorbs_next_decl() {
     );
 }
 
+/// R3 (Phase 2): a body-form impl member whose body leaves the wrong effect is
+/// rejected by ordinary in-body stack-effect checking -- the retired
+/// signature-mismatch guard's intent, relocated (R6/Phase 4) -- and the message
+/// names the member readably, never the raw synthesized spelling a user never
+/// wrote and cannot type.
+#[test]
+fn impl_body_wrong_effect_names_readable_member() {
+    let (_t, entry) = program(
+        "wrong-effect",
+        "import: intrinsics * ;\n\
+         type: Ordering | Less | Equal | Greater ;\n\
+         type: Point x i64 y i64 ;\n\
+         trait: Order 'T cmp ( &'T &'T -- Ordering ) ;\n\
+         impl: Order for Point\n\
+           : cmp | a b | a drop b drop ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("`cmp` (member of trait `Order` for `Point`)"),
+        "{err}"
+    );
+    assert!(
+        !err.contains("cmp;Order"),
+        "the raw synthesized delimiter spelling must never leak into a diagnostic; {err}"
+    );
+}
+
 /// R7: a member body sees its own name, never its siblings'. `hash`'s body calls
 /// `eq`, which is *not* rewritten, so it resolves by ordinary lookup to
 /// `core::cmp`'s `eq` on two `i64`s -- not to the sibling member, whose grounded
