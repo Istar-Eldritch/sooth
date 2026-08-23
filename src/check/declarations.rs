@@ -345,11 +345,11 @@ fn static_non_scalar_enum_error(decl: &StaticDecl, name: &str) -> String {
 /// What else already holds `name`, if anything -- the shared cross-kind
 /// collision precedent (originally `StaticDecl`-only, generalized by P7.S3e
 /// R1 so a new `trait:` declaration can be checked against every other kind,
-/// including another trait). `span` is the *target's own* declaration span:
-/// a kind whose scan set includes the target's own kind (statics against
-/// statics, traits against traits) must exclude a self-match, which callers
-/// checking against a foreign kind alone (a static's original callers,
-/// pre-generalization) never needed to.
+/// including another trait). `span` is the *target's own* declaration span,
+/// so the `traits` arm can exclude a self-match; there is deliberately no
+/// `statics` arm, since a static-vs-static duplicate is `check_static_decls`'
+/// own `seen` pass and a static-vs-trait collision is reached from the static
+/// call site (which runs first) via the `traits` arm below.
 ///
 /// A pre-seeded `Copy`/`Ord` trait entry (`RESERVED_TRAIT_MODULE`) collides
 /// with every module (R2, decision 2): a user `trait: Copy` in any module is
@@ -386,13 +386,6 @@ fn colliding_name_kind(
             .any(|e| owns(e.module) && e.name_static == name)
     {
         return Some("type");
-    }
-    if module
-        .statics
-        .iter()
-        .any(|s| owns(s.module) && s.name == name && s.span != span)
-    {
-        return Some("static");
     }
     if module.traits.iter().any(|t| {
         (owns(t.module) || t.module == RESERVED_TRAIT_MODULE) && t.name == name && t.span != span
@@ -521,7 +514,12 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         let trait_name = module.traits[trait_id.index()].name.clone();
         let target_module = impl_target_module(target_ty, module);
         if impl_module != trait_decl_module && Some(impl_module) != target_module {
-            return Err(impl_orphan_error(&trait_name, target_ty, impl_span));
+            return Err(impl_orphan_error(
+                &trait_name,
+                target_ty,
+                target_module.is_some(),
+                impl_span,
+            ));
         }
         let mut bound_names: HashSet<&str> = HashSet::new();
         for (member_name, word_name) in &bindings {
@@ -612,10 +610,32 @@ fn duplicate_impl_error(imp: &ImplDecl, first: Span) -> String {
     )
 }
 
-fn impl_orphan_error(trait_name: &str, target_ty: Type, span: Span) -> String {
+/// P7.S3e (R4/R11, decision 1/2): the orphan rule's rejection. A target type
+/// that declares no module of its own (`impl_target_module` is `None`: a
+/// scalar or other builtin shape) leaves exactly one legal home, so pointing
+/// at "the module declaring `i64`" would be unactionable.
+fn impl_orphan_error(
+    trait_name: &str,
+    target_ty: Type,
+    target_declares_module: bool,
+    span: Span,
+) -> String {
+    let homes = if target_declares_module {
+        format!(
+            "must live in the module declaring `{trait_name}` or the module declaring `{}`",
+            target_ty.name()
+        )
+    } else {
+        format!(
+            "must live in the module declaring `{trait_name}` (`{}` declares no module of its own)",
+            target_ty.name()
+        )
+    };
     format!(
-        "error: `impl: {trait_name} for {}` at line {}, col {} must live in the module declaring `{trait_name}` or the module declaring `{}`",
-        target_ty.name(), span.line, span.col, target_ty.name()
+        "error: `impl: {trait_name} for {}` at line {}, col {} {homes}",
+        target_ty.name(),
+        span.line,
+        span.col
     )
 }
 
@@ -3685,6 +3705,56 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("polymorphic"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_polymorphic_member_with_a_zero_slot_member_is_error() {
+        // A poly word's `effect` is empty by construction, so a zero-slot
+        // member grounds to an empty expectation that a poly word's empty
+        // effect matches on both sides: `concrete_match`'s `w.poly.is_none()`
+        // conjunct is the only thing rejecting it, and the sibling test above
+        // (a `( &'T -- )` member) discriminates on slot count instead.
+        let err = impl_check_src(
+            "trait: Show 'T nothing ( -- ) ;\n\
+             : p ( 'U: Copy &'U -- ) drop ;\n\
+             impl: Show for i64  nothing p ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("polymorphic"), "{err}");
+        assert!(err.contains("`p`"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_orphan_scalar_target_names_only_the_trait_module() {
+        // A scalar declares no module of its own, so "or the module declaring
+        // `i64`" would name a home that cannot exist.
+        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module).unwrap();
+        module
+            .traits
+            .iter_mut()
+            .find(|t| t.name == "Show")
+            .unwrap()
+            .module = 1;
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(err.contains("declares no module of its own"), "{err}");
+        assert!(!err.contains("or the module declaring"), "{err}");
+    }
+
+    #[test]
+    fn check_static_decls_rejects_a_static_colliding_with_a_trait() {
+        // R1 wants statics in the trait scan set. `colliding_name_kind` has no
+        // `statics` arm: `check_static_decls` runs first (driver.rs), so the
+        // clash is caught from the static's own call site via the `traits`
+        // arm, whichever order the two are declared in.
+        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\nstatic: Show i64 = 0 ;").unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let err = check_static_decls(&module).unwrap_err();
+        assert!(err.contains("already the name of a trait"), "{err}");
     }
 
     #[test]

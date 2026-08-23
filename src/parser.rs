@@ -307,6 +307,29 @@ fn unsupported_trait_member_shape_error(trait_name: &str, span: Span) -> String 
     )
 }
 
+/// P7.S3e (R4/R8, R9's combinator descope): a trait member declaring a
+/// top-level row variable. A row is a `PolySig` field, not a slot shape, so
+/// `member_shape_is_supported` cannot see it and `check_impl_decls` compares
+/// only `inputs`/`outputs` -- without this rejection a row-typed member would
+/// silently accept a non-combinator implementing word.
+fn row_typed_trait_member_error(trait_name: &str, row: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}`'s member at line {}, col {} declares the row variable `{row}` (a stack-polymorphic member is not supported this slice)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R2): an `impl:` naming a reserved predicate trait (`Copy`/`Ord`).
+/// Their satisfaction is structural (`is_copy`/`is_ord`), and the reserved
+/// table entry has no real declaring module, so it can be neither implemented
+/// nor meaningfully orphan-checked.
+fn impl_for_predicate_trait_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}` cannot be implemented at line {}, col {} (it is a built-in predicate, satisfied by a type's own shape)",
+        span.line, span.col
+    )
+}
+
 /// P7.S3e (R16): a `trait:` header naming a second type variable, or a
 /// member signature mentioning a variable other than the header's --
 /// single-type-variable traits only this slice.
@@ -611,9 +634,7 @@ pub(crate) fn prepass_generic_typedefs(
         exports,
         selective,
         generics,
-        // A generic `type:` field cannot reference a trait (no such syntax
-        // exists), so this pass never looks one up.
-        traits: &[],
+        traits: crate::ast::predicate_traits(),
     };
     parser.parse_generic_typedefs()
 }
@@ -852,7 +873,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
-                traits: &[],
+                traits: crate::ast::predicate_traits(),
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -896,7 +917,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
-                traits: &[],
+                traits: crate::ast::predicate_traits(),
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -1045,7 +1066,7 @@ pub fn parse_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
-        traits: &[],
+        traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
@@ -1125,7 +1146,7 @@ pub fn parse_enum_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
-        traits: &[],
+        traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
@@ -2022,6 +2043,13 @@ impl<'t> Parser<'t> {
                 ));
             }
         }
+        if let Some(row) = sig.row_in.or(sig.row_out) {
+            return Err(row_typed_trait_member_error(
+                trait_name,
+                &sig.row_var_names[row as usize],
+                member_span,
+            ));
+        }
         Ok(sig)
     }
 
@@ -2047,6 +2075,9 @@ impl<'t> Parser<'t> {
             self.selective,
         )
         .ok_or_else(|| unknown_trait_error(&trait_name, trait_span))?;
+        if let TraitKind::Predicate(_) = self.traits[trait_id.index()].kind {
+            return Err(impl_for_predicate_trait_error(&trait_name, trait_span));
+        }
         if let Some((qualifier, base)) = trait_name.split_once("::") {
             if !self.type_is_exported(qualifier, base) {
                 return Err(not_exported_error(base, qualifier, trait_span));
@@ -2057,7 +2088,7 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some(_) => {
-                    let (member_name, member_span) = self.expect_word_any_spanned()?;
+                    let (member_name, _) = self.expect_word_any_spanned()?;
                     if let Some((Token::Semicolon, s)) = self.peek() {
                         return Err(format!(
                             "parse error: member `{member_name}` has no implementing word before `;` at line {}, col {} (odd binding-token count in `impl:` body)",
@@ -2065,7 +2096,6 @@ impl<'t> Parser<'t> {
                         ));
                     }
                     let (word, _) = self.expect_word_any_spanned()?;
-                    let _ = member_span;
                     bindings.push((member_name, word));
                 }
                 None => return Err(self.eof_error("`;` (unterminated `impl:` declaration)")),
@@ -6643,6 +6673,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_trait_decl_member_with_a_row_variable_is_error() {
+        // A row is a `PolySig` field, not a slot shape, so
+        // `member_shape_is_supported` never sees it and `check_impl_decls`
+        // compares `inputs`/`outputs` alone -- a row-typed member used to
+        // accept an ordinary non-combinator word, the row silently dropped
+        // from both sides of the comparison.
+        let err = parse_src("trait: F 'T go ( ..a &'T -- ..a ) ;").unwrap_err();
+        assert!(err.contains("declares the row variable `..a`"), "{err}");
+        // Input-side only, so the `row_in` arm is what rejects it (the case
+        // above sets `row_out` too, and would still be caught by that alone).
+        let err = parse_src("trait: F 'T go ( ..a &'T -- ) ;").unwrap_err();
+        assert!(err.contains("declares the row variable `..a`"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_member_with_an_output_only_row_variable_is_error() {
+        // The output side carries its own `row_out`, reached only when the
+        // input side declares none.
+        let err = parse_src("trait: F 'T go ( &'T -- ..b ) ;").unwrap_err();
+        assert!(err.contains("declares the row variable `..b`"), "{err}");
+    }
+
+    #[test]
+    fn parse_impl_decl_for_a_reserved_predicate_trait_is_error() {
+        // R2: the reserved `Copy`/`Ord` entries participate in no orphan-rule
+        // or export check, so an `impl: Copy for i64` used to fall through to
+        // the orphan rule and demand a module that cannot exist.
+        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Copy for i64  show int-show ;")
+            .unwrap_err();
+        assert!(err.contains("trait `Copy` cannot be implemented"), "{err}");
+        assert!(err.contains("built-in predicate"), "{err}");
+    }
+
+    #[test]
+    fn parse_impl_decl_for_reserved_ord_is_error() {
+        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Ord for i64  show int-show ;")
+            .unwrap_err();
+        assert!(err.contains("trait `Ord` cannot be implemented"), "{err}");
+    }
+
+    #[test]
     fn parse_trait_decl_member_with_a_length_variable_array_shape_is_error() {
         // A length-variable array (`&['T 'N]`) is not a supported member
         // shape: `ground_member_type` only grounds `Len::Concrete`, so this
@@ -6680,12 +6751,10 @@ mod tests {
             imp.bindings,
             vec![("show".to_string(), "int-show".to_string())]
         );
-        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(
             imp.trait_id,
             TraitId::from_index(module.traits.iter().position(|t| t.name == "Show").unwrap())
         );
-        let _ = show;
     }
 
     #[test]

@@ -1349,11 +1349,6 @@ pub struct TraitMember {
     pub sig: PolySig,
 }
 
-/// Pre-seed the whole-program trait registry with `Copy`/`Ord` as
-/// `Predicate`-kind entries (R2), so `parse_capabilities` looks them up
-/// through the same trait-table mechanism a user trait uses, rather than a
-/// bespoke reserved-word check. Called once, before any user `trait:`
-/// declaration is registered.
 /// The shared, lazily-built `Copy`/`Ord` entries (`seed_predicate_traits`),
 /// for a caller that only ever needs the reserved predicate table and no
 /// user `trait:` declarations -- the REPL's per-line word-definition path,
@@ -1365,6 +1360,11 @@ pub fn predicate_traits() -> &'static [TraitDecl] {
     TRAITS.get_or_init(seed_predicate_traits)
 }
 
+/// Pre-seed the whole-program trait registry with `Copy`/`Ord` as
+/// `Predicate`-kind entries (R2), so `parse_capabilities` looks them up
+/// through the same trait-table mechanism a user trait uses, rather than a
+/// bespoke reserved-word check. Called once, before any user `trait:`
+/// declaration is registered.
 pub fn seed_predicate_traits() -> Vec<TraitDecl> {
     vec![
         TraitDecl {
