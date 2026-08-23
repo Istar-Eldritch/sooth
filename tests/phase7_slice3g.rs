@@ -77,9 +77,13 @@ fn build_and_run(src: &Path) -> (String, i32) {
 /// test that pins it -- each instantiation back-edging to its own header,
 /// with no `Instr::Call` reaching any other symbol.
 ///
-/// Deleting R1's checker arm makes this fail to compile with
-/// `poly_calls_poly_word_error`; deleting R2's lowering arm makes it die at
-/// lowering, on the poly self-name `env` has no entry for.
+/// Deleting R2's lowering arm makes this die at lowering, on the poly
+/// self-name `env` has no entry for. R1's checker arm is *not* pinned by this
+/// transcript: with it stubbed, the S3k cross-call arm grounds the self-call
+/// and stdout is unchanged. What breaks then is the loop shape -- the level is
+/// reached as a cross-call, so it back-edges nowhere and recurses one frame
+/// deep per level -- which the large-counter golden below and
+/// `poly_self_tail_call_lowers_to_loop_back_edge` are the tests that catch.
 #[test]
 fn self_recursive_poly_word_runs_to_base_case() {
     let scratch = Scratch::write(
