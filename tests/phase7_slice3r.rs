@@ -360,6 +360,75 @@ fn impl_body_member_calls_itself_recursively() {
     assert_eq!(build_and_run(&entry), "3\n");
 }
 
+/// Recon O3's functional witness: two traits sharing a member name (`get`), both
+/// implemented for `Point`, reached through two different bounds. The literal-name
+/// mutation tests only prove the synthesized spelling *contains* the trait; this proves
+/// the trait component actually disambiguates the two call sites at dispatch time.
+#[test]
+fn impl_body_trait_qualifier_disambiguates_shared_member_name() {
+    let (_t, entry) = program(
+        "shared-member-name",
+        "import: intrinsics * ;\n\
+         type: Point x i64 y i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         trait: Setter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p &x @ ;\n\
+         ;\n\
+         impl: Setter for Point\n\
+           : get | p | p &y @ ;\n\
+         ;\n\
+         : via_getter ( &'T: Getter -- i64 ) get ;\n\
+         : via_setter ( &'T: Setter -- i64 ) get ;\n\
+         : main ( -- )\n\
+           3 4 Point | p |\n\
+           &p via_getter .\n\
+           &p via_setter .\n\
+           p drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "3\n4\n");
+}
+
+/// The unterminated-block EOF path: the block runs to end of file with no closing `;`
+/// at all, so the existing EOF diagnostic fires exactly as it did for the binding form.
+#[test]
+fn impl_body_unterminated_block_at_eof_is_error() {
+    let (_t, entry) = program(
+        "unterminated-eof",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p &n @ ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(err.contains("unterminated `impl:` declaration"), "{err}");
+}
+
+/// The unterminated-block absorption path: a missing closing `;` followed by another
+/// top-level `: name ... ;` declaration has no lookahead to distinguish that declaration
+/// from a further member, so it is consumed as an attempted member instead -- surfacing
+/// as a non-member error naming the absorbed declaration, not as an EOF error. Nothing is
+/// silently swallowed (the absorbed declaration is still rejected, just under a different
+/// diagnostic), but the two unterminated-block paths are different and both are pinned.
+#[test]
+fn impl_body_unterminated_block_absorbs_next_decl() {
+    let (_t, entry) = program(
+        "unterminated-absorbs",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p &n @ ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("`main` is not a member of trait `Getter`"),
+        "{err}"
+    );
+}
+
 /// R7: a member body sees its own name, never its siblings'. `hash`'s body calls
 /// `eq`, which is *not* rewritten, so it resolves by ordinary lookup to
 /// `core::cmp`'s `eq` on two `i64`s -- not to the sibling member, whose grounded

@@ -366,8 +366,16 @@ existing errors (`src/parser.rs:211`, rendered by `reserved_caret_name_error` at
 declaration. Emitting the "spelled as a builtin word" text for a caret name would be wrong on
 its face: a caret name is reserved syntax, not a builtin.
 
-Unterminated block (existing shape, reachable via the new branch): the current
-`;` (unterminated `impl:` declaration) EOF error, unchanged.
+Unterminated block (existing shape, reachable via the new branch): the loop between
+members has no lookahead past the next `:`, so what error surfaces depends on what
+follows the missing closing `;`. If the block runs to end of file, it is the current
+`;` (unterminated `impl:` declaration) EOF error, unchanged. If another `: name ...`
+declaration follows in the file, that declaration's tokens are consumed as an attempted
+next member instead, surfacing as a non-member or duplicate-member error naming the
+following declaration rather than as an EOF or a syntax error. Nothing is silently
+swallowed either way (every absorbable shape still hits a located error), but the two
+paths are different diagnostics and both are pinned by goldens rather than only the
+first.
 
 Exit goldens:
 
@@ -394,6 +402,14 @@ Exit goldens:
   words rather than name-dispatched builtins. Without this, a later tightening of the
   predicate to the raw `BUILTIN_WORDS` const would silently kill the `Eq` trait again.
 - `impl_body_member_calls_itself_recursively` (R4a): the recursion golden described above.
+- `impl_body_trait_qualifier_disambiguates_shared_member_name`: recon O3's functional
+  witness, not just the literal-name assertions the mutation tests already cover. Two
+  traits each declare a member named `get`, both implemented for one type, each reached
+  through a different bound; the program prints both results correctly, proving the
+  trait component of `member;Trait;Type` actually disambiguates rather than merely
+  appearing in the synthesized name.
+- `impl_body_unterminated_block_at_eof_is_error` / `impl_body_unterminated_block_absorbs_next_decl`:
+  the two diagnostics an unterminated block can produce, per the note above.
 - Coexistence: the existing binding-form goldens still pass unchanged.
 
 The Phase 1 positive golden source (complete, compilable under `examples/sooth.pkg`
@@ -457,6 +473,14 @@ impl: Show for Point
 ```
 
 Difficulty: **hard** (the desugar, grounding elevation, and the new parse path).
+
+Growth-structure re-check (CLAUDE.md, at phase exit): this phase adds the body-member
+branch, its rejections, and their helpers to `parser.rs`, growing it past 8000 lines. Kept
+as-is: the new code sits beside the other declaration parsers it extends
+(`parse_trait_decl`, `parse_impl_decl`), pulls no dependency the file doesn't already have,
+and none of the split signals (import divergence, X-and-Y-and-Z responsibilities, dead
+cross-calls, a forced circular dependency) fire together. Re-check again at Phase 4, once
+the binding-form branch it coexists with is deleted.
 
 ### Phase 2 — Readable rendering of a synthesized member name (R3)
 

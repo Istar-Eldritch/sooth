@@ -2680,7 +2680,10 @@ mod tests {
             .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
             .chain([">u8", ">usize"])
         {
-            assert!(is_name_dispatched_builtin(name), "`{name}` is gated");
+            assert!(
+                is_name_dispatched_builtin(name),
+                "`{name}` is name-dispatched"
+            );
         }
         assert!(is_name_dispatched_builtin("."), "`.` is a real intrinsic");
         assert!(
