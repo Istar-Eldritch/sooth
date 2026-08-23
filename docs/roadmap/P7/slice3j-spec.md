@@ -56,6 +56,9 @@ Each guard was mutation-tested: deleting what it guards leaves the rest of the s
 
 ## Untouched
 
-The monomorphic path, the eliminator, the `if`/`times`/`unless` family,
-`poly_combinator_abstract_signature_error`'s wording, and the `inline`-splice route
-(`inline_generic_body_still_splices_a_row_combinator` pins it).
+The monomorphic path, the eliminator, the `if`/`times`/`unless` family, and the
+`inline`-splice route (`inline_generic_body_still_splices_a_row_combinator` pins
+it). `poly_combinator_abstract_signature_error`'s *rejection* stays for a
+variable-carrying suffix, but its *wording* was narrowed (dropped the
+now-invalid "slot above a row" cause) since that ground is no longer a
+rejection reason -- a necessary correction, not an untouched surface.
