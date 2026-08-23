@@ -1,0 +1,389 @@
+//! P7.S3r goldens: `impl:` bodies. A `: member ... ;` inside an `impl:` block
+//! desugars at parse time to a synthesized top-level word whose effect is the
+//! trait member's signature grounded at the `for` type, plus the binding pair
+//! the hand-written form used to spell out. So these goldens assert the *whole*
+//! pipeline (the synthesized word must mangle, link, and run), the parse-time
+//! rejections the form introduces, and the resolution rules for a name inside a
+//! member body -- its own (rewritten to the synthesized word, so a member can
+//! recurse) and a sibling's (not rewritten, so it resolves by ordinary lookup).
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A scratch package tree naming this repo's own `lib/` as `core`, so a fixture
+/// can `import: core::prelude`/`core::bool` (every body form here needs `if`).
+/// Removed on drop.
+struct Tree(PathBuf);
+
+impl Tree {
+    fn new(tag: &str) -> Tree {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let seq = N.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("sooth-p7s3r-{}-{tag}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sooth.pkg"), common::fixture_package(tag)).unwrap();
+        Tree(dir)
+    }
+
+    fn entry(&self, src: &str) -> PathBuf {
+        let path = self.0.join("main.sth");
+        std::fs::write(&path, src).unwrap();
+        path
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn program(tag: &str, src: &str) -> (Tree, PathBuf) {
+    let t = Tree::new(tag);
+    let entry = t.entry(src);
+    (t, entry)
+}
+
+fn sooth_build(entry: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(entry)
+        .output()
+        .expect("sooth build should spawn")
+}
+
+fn build_ok(entry: &Path) {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    std::fs::remove_file(entry.with_extension("")).ok();
+}
+
+fn build_error(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(!build.status.success(), "build should have failed");
+    String::from_utf8(build.stderr).expect("stderr should be utf8")
+}
+
+fn build_and_run(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary)
+        .output()
+        .expect("the built binary should run");
+    assert!(run.status.success(), "the built binary should exit 0");
+    std::fs::remove_file(&binary).ok();
+    String::from_utf8_lossy(&run.stdout).into_owned()
+}
+
+/// Build, run, and also read the linked binary's symbol table: a synthesized
+/// member word is only real if it survives mangling and reaches the executable
+/// under the escaped spelling `qbe_name` gives its `;` delimiters.
+fn build_run_and_symbols(entry: &Path) -> (String, Vec<String>) {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary)
+        .output()
+        .expect("the built binary should run");
+    let nm = Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_file(&binary).ok();
+    assert!(run.status.success(), "the built binary should exit 0");
+    let names = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().last().map(str::to_string))
+        .collect();
+    (String::from_utf8_lossy(&run.stdout).into_owned(), names)
+}
+
+/// The dogfood program: two single-member traits, each implemented for `Point`
+/// by a body that never restates its signature. Both members are reached only
+/// through `show_larger`'s bound, so this is the whole path -- desugar, mangle,
+/// bound-directed dispatch, lowering, link -- in one program.
+#[test]
+fn impl_body_form_builds_and_runs() {
+    let (_t, entry) = program(
+        "body-form",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool lt gt | ;\n\
+         type: Ordering | Less | Equal | Greater ;\n\
+         trait: Order 'T\n\
+           cmp ( &'T &'T -- Ordering )\n\
+         ;\n\
+         trait: Show 'T\n\
+           show ( &'T -- )\n\
+         ;\n\
+         type: Point x i64 y i64 ;\n\
+         impl: Order for Point\n\
+           : cmp\n\
+             | a b |\n\
+             a &y @ | ay |\n\
+             b &y @ | by |\n\
+             ay by lt\n\
+             ~[ Less ]\n\
+             ~[\n\
+               ay by gt\n\
+               ~[ Greater ]\n\
+               ~[\n\
+                 a &x @ | ax |\n\
+                 b &x @ | bx |\n\
+                 ax bx lt\n\
+                 ~[ Less ]\n\
+                 ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if\n\
+               ] if\n\
+             ] if ;\n\
+         ;\n\
+         impl: Show for Point\n\
+           : show\n\
+             | p | \"(\" . p &x @ . \",\" . p &y @ . \")\" . ;\n\
+         ;\n\
+         : show_larger ( &'T: Order Show &'T -- )\n\
+           | b | | a |\n\
+           a b cmp\n\
+           ~[ ( Less ) drop b show ]\n\
+           ~[ ( Equal ) drop a show ]\n\
+           ~[ ( Greater ) drop a show ]\n\
+           Ordering? ;\n\
+         : main ( -- )\n\
+           0 0 Point | origin |\n\
+           3 4 Point | corner |\n\
+           &origin &corner show_larger\n\
+           origin drop\n\
+           corner drop ;\n",
+    );
+    let (stdout, symbols) = build_run_and_symbols(&entry);
+    assert_eq!(stdout, "(3\n,4\n)");
+    for synth in ["cmp.3b.Order.3b.Point__m0", "show.3b.Show.3b.Point__m0"] {
+        assert!(
+            symbols.iter().any(|s| s == synth),
+            "the desugared member must reach the binary as `{synth}`; nm found:\n{symbols:#?}"
+        );
+    }
+}
+
+/// R2: the inherited signature is the only one. Restating it at the impl site
+/// is a second spelling of the same thing, so it is rejected rather than
+/// compared.
+#[test]
+fn impl_body_restated_signature_is_rejected() {
+    let (_t, entry) = program(
+        "restated-signature",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get ( &Point -- i64 ) | p | p &n @ ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "impl member `get` must not restate its signature at line 5, col 7 \
+             (it is inherited from trait `Getter`'s `get` with the `for` type)"
+        ),
+        "{err}"
+    );
+}
+
+/// R6: a body naming something the trait does not require has no member to
+/// bind. Left to become a free module-private word it would silently swallow a
+/// misspelled member name.
+#[test]
+fn impl_body_non_member_is_rejected() {
+    let (_t, entry) = program(
+        "non-member",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p &n @ ;\n\
+           : bogus | p | p &n @ ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("`bogus` is not a member of trait `Getter` at line 6, col 3"),
+        "{err}"
+    );
+}
+
+/// R4a: the member name is the member's own word inside its body, so a `| ... |`
+/// binder cannot also claim it. The rewrite is unconditional token equality, so
+/// either reading would be a silent shadow.
+#[test]
+fn impl_body_binder_named_after_the_member_is_rejected() {
+    let (_t, entry) = program(
+        "binder-shadows-member",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | get | get &n @ ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "`get` binds a local inside its own impl body at line 5, col 7, \
+             where the name already refers to the member itself"
+        ),
+        "{err}"
+    );
+}
+
+/// R4: a member spelled as a name that resolves ahead of the word environment
+/// is rejected at the `trait:` declaration -- the site where the unimplementable
+/// member is written, and the site that also covers a trait no impl ever names.
+/// Each category carries its own message: two of the three are the rejections
+/// `parse_worddef` already produces for an ordinary word declaration, and
+/// calling a caret name "a builtin word" would be wrong on its face.
+#[test]
+fn trait_member_named_after_a_builtin_is_rejected() {
+    // The name-dispatched builtins: an operator, a shuffle, and a `>`-prefixed
+    // conversion (which the `BUILTIN_WORDS` const does not even list -- the
+    // predicate claims every non-empty `>`-prefixed name).
+    for member in ["max", "dup", ">u8"] {
+        let (_t, entry) = program(
+            "builtin-member",
+            &format!("trait: Getter 'T\n  {member} ( &'T -- i64 )\n;\n: main ( -- ) ;\n"),
+        );
+        let err = build_error(&entry);
+        assert!(
+            err.contains(&format!(
+                "trait `Getter` declares a member named `{member}`, which is a builtin word (line 2, col 3)"
+            )),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "note: a trait member becomes a word when implemented, and inside its own body \
+                 the name would shadow the builtin"
+            ),
+            "{err}"
+        );
+    }
+    let (_t, entry) = program(
+        "access-word-member",
+        "trait: Getter 'T\n  @ ( &'T -- i64 )\n;\n: main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "`@` is a builtin access word (`@`, `!`, `+!`) and cannot be redefined at line 2, col 3"
+        ),
+        "{err}"
+    );
+    let (_t, entry) = program(
+        "caret-member",
+        "trait: Getter 'T\n  ^cell ( &'T -- i64 )\n;\n: main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "`^cell` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be \
+             used as a word name at line 2, col 3"
+        ),
+        "{err}"
+    );
+}
+
+/// R4's negative space, and the regression guard on the one predicate choice
+/// that ruling could get wrong. The six surface comparisons sit in
+/// `BUILTIN_WORDS` for `has_self_tail_call`'s benefit only: they are `core::cmp`
+/// words, not name-dispatched, so an `eq` member's self-binding shadows a
+/// library word, which is exactly the shadowing the body form admits. Rejecting
+/// on the raw const instead would take the `Eq` trait with it.
+#[test]
+fn trait_member_named_after_a_comparison_is_accepted() {
+    let (_t, entry) = program(
+        "comparison-member",
+        "import: intrinsics * ;\n\
+         import: core::prelude | lt | ;\n\
+         import: core::bool | Bool | ;\n\
+         type: Point n i64 ;\n\
+         trait: Keyed 'T eq ( &'T &'T -- Bool ) ;\n\
+         impl: Keyed for Point\n\
+           : eq | a b | a &n @ b &n @ lt ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    build_ok(&entry);
+}
+
+/// R4a: a call of the member's own name inside its body is rewritten to the
+/// synthesized word, so a member body can recurse. Without the rewrite the bare
+/// `count` binds nothing at all (the member name is not a module-scope word --
+/// `main` reaches it only through `counted`'s bound), so this program is exactly
+/// as good at failing on a no-op implementation as at passing on a real one.
+#[test]
+fn impl_body_member_calls_itself_recursively() {
+    let (_t, entry) = program(
+        "recursive-member",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool gt | ;\n\
+         type: Counter n i64 ;\n\
+         trait: Countdown 'T count ( 'T -- i64 ) ;\n\
+         impl: Countdown for Counter\n\
+           : count\n\
+             | c |\n\
+             c Counter> | n |\n\
+             n 0 gt\n\
+             ~[ n 1 sub Counter count 1 add ]\n\
+             ~[ 0 ]\n\
+             if ;\n\
+         ;\n\
+         : counted ( 'T: Countdown -- i64 ) count ;\n\
+         : main ( -- ) 3 Counter counted . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "3\n");
+}
+
+/// R7: a member body sees its own name, never its siblings'. `hash`'s body calls
+/// `eq`, which is *not* rewritten, so it resolves by ordinary lookup to
+/// `core::cmp`'s `eq` on two `i64`s -- not to the sibling member, whose grounded
+/// effect (`&Point &Point -- Bool`) would reject those operands. Compiling and
+/// printing 7 is the witness. If sibling access is ever wanted, this is the
+/// golden that has to be consciously overturned.
+#[test]
+fn impl_body_sibling_call_does_not_reach_the_sibling() {
+    let (_t, entry) = program(
+        "sibling-call",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if eq lt | ;\n\
+         import: core::bool | Bool | ;\n\
+         type: Point n i64 ;\n\
+         trait: Keyed 'T\n\
+           eq ( &'T &'T -- Bool )\n\
+           hash ( &'T -- i64 )\n\
+         ;\n\
+         impl: Keyed for Point\n\
+           : eq | a b | a &n @ b &n @ lt ;\n\
+           : hash | p | p &n @ | n | n n eq ~[ 7 ] ~[ 9 ] if ;\n\
+         ;\n\
+         : hashed ( &'T: Keyed -- i64 ) hash ;\n\
+         : main ( -- ) 4 Point | p | &p hashed . p drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "7\n");
+}

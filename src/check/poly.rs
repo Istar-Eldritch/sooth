@@ -1013,7 +1013,7 @@ pub(super) fn poly_call_term(
     //
     // The bare spelling reaching here is always the builtin's own: a word the
     // module declared under that name arrives mangled (`dup__m0`), which
-    // `is_gated_intrinsic_name` does not match, and the two un-mangled
+    // `is_name_dispatched_builtin` does not match, and the two un-mangled
     // categories are not in `env` under the bare name either (an operator
     // decl is keyed mangled, and a user `drop` is type-directed, never an
     // `env` entry). So there is no candidate to defer to and nothing to check
@@ -5618,33 +5618,20 @@ mod tests {
         assert_eq!(recorded["eats"][0].member, "eat");
     }
 
-    /// R10 barrier 2: an operator-spelled member name. `exact` is never true
-    /// for a variable operand, so such a call never reached the concrete-arm
-    /// at all before this slice -- it fell to `poly_delegate_op`, whose
-    /// concrete-suffix extraction stops before the variable. Shipped here
-    /// rather than deferred to the `sort` consumer, whose `cmp` is not
-    /// operator-spelled and would not exercise this barrier.
-    #[test]
-    fn bound_dispatch_and_a_builtin_named_member_coexist() {
-        let recorded = obligations_of(
-            "type: Point x i64 y i64 ;\n\
-             trait: Sum 'T add ( &'T &'T -- i64 ) ;\n\
-             : sums ( &'T: Sum &'T -- i64 ) add ;\n\
-             : main ( -- ) 1 2 add drop ;\n",
-        );
-        assert_eq!(recorded["sums"].len(), 1);
-        assert_eq!(recorded["sums"][0].member, "add");
-    }
-
-    /// Review finding 3: `add` (the fixture above) never actually exercised
-    /// R10's claimed partition against the shuffles/comparisons/`call`
-    /// family, since none of the earlier dispatch-cascade arms match that
-    /// name -- `eq` does. Before `poly_trait_member_call` moved to the front
-    /// of `poly_call_term`, this member was unreachable: the comparisons
-    /// block (`matches!(name, "eq" | ...)`) intercepted it first and
-    /// demanded an `Ord` bound the trait never declared. `main` carries R10's
-    /// coexistence half for this barrier: the builtin still wins a concrete
-    /// receiver.
+    /// R10 barrier 2: a member spelled as a name the dispatch cascade
+    /// intercepts ahead of bound-directed dispatch. Before
+    /// `poly_trait_member_call` moved to the front of `poly_call_term`, this
+    /// member was unreachable: the comparisons block (`matches!(name, "eq" |
+    /// ...)`) intercepted it first and demanded an `Ord` bound the trait never
+    /// declared. `main` carries R10's coexistence half for this barrier: the
+    /// builtin still wins a concrete receiver.
+    ///
+    /// The six surface comparisons are the whole of that barrier now. P7.S3r
+    /// (R4) rejects a member spelled as a *name-dispatched* builtin at the
+    /// `trait:` declaration, so the operator-spelled sibling of this fixture (a
+    /// `Sum` trait with an `add` member) is no longer declarable -- and it never
+    /// exercised the partition anyway, since no dispatch-cascade arm matches
+    /// `add`.
     #[test]
     fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
         let recorded = obligations_of(

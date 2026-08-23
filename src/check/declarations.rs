@@ -119,19 +119,25 @@ pub(super) fn is_builtin_word_name(name: &str) -> bool {
     BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
 }
 
-/// P8 S2 (R2): the names the `intrinsics` import gates, which is
+/// The names `check_term` really does dispatch ahead of the word environment:
 /// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
 /// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
 /// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
-/// as a self-call. Their home is `core::cmp`, so gating them here would answer
-/// an unimported `lt` with "add `import: intrinsics *`", pointing at the wrong
-/// module.
+/// as a self-call.
+///
+/// Two consumers. P8 S2 (R2): the set the `intrinsics` import gates -- the six
+/// live in `core::cmp`, so gating them would answer an unimported `lt` with
+/// "add `import: intrinsics *`", pointing at the wrong module. P7.S3r (R4): the
+/// set a `trait:` member name may not be spelled as, since an impl body binds
+/// its own member name ahead of module scope and would shadow the builtin
+/// there; excluding the six keeps an `eq`/`lt` member legal, shadowing only a
+/// library word.
 ///
 /// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
 /// `Print` row per printable type, dispatched by `check_operator`) and does not
 /// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
 /// import error.
-pub(super) fn is_gated_intrinsic_name(name: &str) -> bool {
+pub(crate) fn is_name_dispatched_builtin(name: &str) -> bool {
     if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
         return false;
     }
@@ -481,37 +487,6 @@ fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
         Type::Struct(id, _) => Some(module.structs[id.index()].module),
         Type::Enum(id, _) => Some(module.enums[id.0].module),
         _ => None,
-    }
-}
-
-/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
-/// trait's sole implicit type variable, id 0) against a concrete `impl:`
-/// target, interning a fresh array/reference shape if the grounded shape is
-/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
-/// double-registers one already interned elsewhere). Trait member
-/// signatures are restricted to concrete/array/reference shapes over `'T`
-/// this slice (`parse_trait_member_effect` rejects anything else at
-/// declaration time), so every other `PolyType` shape is unreachable here.
-pub(super) fn ground_member_type(
-    pty: &PolyType,
-    target: Type,
-    arrays: &mut Vec<ArrayDecl>,
-    refs: &mut Vec<RefDecl>,
-) -> Type {
-    match pty {
-        PolyType::Concrete(t) => *t,
-        PolyType::Var(_) => target,
-        PolyType::Array(elem, Len::Concrete(n)) => {
-            let elem_ty = ground_member_type(elem, target, arrays, refs);
-            intern_array_type(arrays, elem_ty, *n)
-        }
-        PolyType::Ref(referent, mutable) => {
-            let r = ground_member_type(referent, target, arrays, refs);
-            intern_ref_type(refs, r, *mutable)
-        }
-        _ => unreachable!(
-            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
-        ),
     }
 }
 
@@ -2694,7 +2669,10 @@ mod tests {
                 is_builtin_word_name(name),
                 "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
             );
-            assert!(!is_gated_intrinsic_name(name), "`{name}` is a `core` word");
+            assert!(
+                !is_name_dispatched_builtin(name),
+                "`{name}` is a `core` word"
+            );
         }
         for name in BUILTIN_WORDS
             .iter()
@@ -2702,11 +2680,11 @@ mod tests {
             .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
             .chain([">u8", ">usize"])
         {
-            assert!(is_gated_intrinsic_name(name), "`{name}` is gated");
+            assert!(is_name_dispatched_builtin(name), "`{name}` is gated");
         }
-        assert!(is_gated_intrinsic_name("."), "`.` is a real intrinsic");
+        assert!(is_name_dispatched_builtin("."), "`.` is a real intrinsic");
         assert!(
-            !is_gated_intrinsic_name("call"),
+            !is_name_dispatched_builtin("call"),
             "`call` is not in the table"
         );
     }

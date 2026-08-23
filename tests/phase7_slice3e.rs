@@ -175,12 +175,15 @@ fn trait_member_with_a_sandwiched_receiver_is_rejected() {
 }
 
 /// The same rejection applies to a zero-input member (a constructor shape
-/// with no receiver slot at all).
+/// with no receiver slot at all). The member is spelled `fresh`, not `tag`:
+/// P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at the
+/// `trait:` declaration, which would preempt the receiver diagnostic this test
+/// is about.
 #[test]
 fn trait_member_with_a_zero_input_receiver_is_rejected() {
     let (_t, entry) = single_file(
         "zero-input-receiver",
-        "trait: Show 'T tag ( -- i64 ) ;\n\
+        "trait: Show 'T fresh ( -- i64 ) ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);

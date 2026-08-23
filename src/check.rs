@@ -12,13 +12,13 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
-    intern_owned_cell_type, intern_ref_type, intern_slice_type, resolve_bool_type, variant_type,
-    ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl,
-    ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect,
-    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind,
-    TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
-    WordDef, RESERVED_TRAIT_MODULE,
+    generic_surface_name, ground_member_type, instantiation_symbol, intern_array_type,
+    intern_bundle_struct, intern_owned_cell_type, intern_ref_type, intern_slice_type,
+    resolve_bool_type, variant_type, ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl,
+    GenericEnumDecl, GenericStructDecl, ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig,
+    PolyType, QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl,
+    StructId, Subst, Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl,
+    VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
 mod audits;
@@ -57,8 +57,8 @@ use self::declarations::*;
 pub(crate) use self::declarations::{
     check_exported_signatures, check_impl_decls, check_no_word_shadows_eliminator,
     check_selective_imports, check_slice_element_gate, check_static_decls, check_trait_decls,
-    check_types, enum_generated_sigs, selective_not_exported_error, struct_generated_sigs,
-    variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
+    check_types, enum_generated_sigs, is_name_dispatched_builtin, selective_not_exported_error,
+    struct_generated_sigs, variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{

@@ -1365,6 +1365,42 @@ pub struct TraitMember {
     pub sig: PolySig,
 }
 
+/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
+/// trait's sole implicit type variable, id 0) against a concrete `impl:`
+/// target, interning a fresh array/reference shape if the grounded shape is
+/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
+/// double-registers one already interned elsewhere). Trait member
+/// signatures are restricted to concrete/array/reference shapes over `'T`
+/// (`parse_trait_member_effect` rejects anything else at declaration time),
+/// so every other `PolyType` shape is unreachable here.
+///
+/// P7.S3r (R2): shared by the parser, which grounds the same member signature
+/// to synthesize an impl body's word, and by `check::check_impl_decls`, whose
+/// signature comparison against that synthesized word is only vacuous because
+/// both sides ground through this one function.
+pub fn ground_member_type(
+    pty: &PolyType,
+    target: Type,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Type {
+    match pty {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(_) => target,
+        PolyType::Array(elem, Len::Concrete(n)) => {
+            let elem_ty = ground_member_type(elem, target, arrays, refs);
+            intern_array_type(arrays, elem_ty, *n)
+        }
+        PolyType::Ref(referent, mutable) => {
+            let r = ground_member_type(referent, target, arrays, refs);
+            intern_ref_type(refs, r, *mutable)
+        }
+        _ => unreachable!(
+            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
+        ),
+    }
+}
+
 /// The shared, lazily-built `Copy`/`Ord` entries (`seed_predicate_traits`),
 /// for a caller that only ever needs the reserved predicate table and no
 /// user `trait:` declarations -- the REPL's per-line word-definition path,

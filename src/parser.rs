@@ -16,13 +16,14 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, ImplDecl, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility,
-    Len, Line, Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType,
-    QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
-    TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
-    VariantTagMode, WordDef,
+    ground_member_type, intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes,
+    GlobalEntry, GlobalMode, ImplDecl, Import, ImportAnchor, ImportBinding, ImportTarget,
+    IntrinsicVisibility, Len, Line, Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl,
+    PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit,
+    StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot,
+    VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
+use crate::check::is_name_dispatched_builtin;
 use crate::lexer::Token;
 use std::collections::HashMap;
 
@@ -365,6 +366,94 @@ fn impl_zero_bindings_error(trait_name: &str, span: Span) -> String {
     )
 }
 
+/// P7.S3r (R4): a `trait:` member spelled as a name `check_term` dispatches
+/// ahead of the word environment. A member becomes a word when implemented,
+/// and inside its own body the member name binds to that word (R4a's rewrite),
+/// so such a member would shadow a builtin there -- wider than the
+/// construct-scoped shadowing the body form admits. Rejected at the
+/// declaration, where the unimplementable member is written, rather than at
+/// each impl body that discovers it.
+fn builtin_named_trait_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}` declares a member named `{member}`, which is a builtin word (line {}, col {})\n  note: a trait member becomes a word when implemented, and inside its own body the name would shadow the builtin",
+        span.line, span.col
+    )
+}
+
+/// P7.S3r (R2): an `impl:` body member restating its signature. The
+/// synthesized word's effect is the trait member's, grounded at the `for`
+/// type, so a restated one is a second spelling of the same thing (and one
+/// that could disagree).
+fn impl_member_restated_signature_error(member: &str, trait_name: &str, span: Span) -> String {
+    format!(
+        "error: impl member `{member}` must not restate its signature at line {}, col {} (it is inherited from trait `{trait_name}`'s `{member}` with the `for` type)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3r (R6): an `impl:` body declaring a word that is not a member of the
+/// implemented trait. There is no member to bind, and a free module-private
+/// word here would silently swallow a misspelled member name.
+fn impl_non_member_body_error(member: &str, trait_name: &str, span: Span) -> String {
+    format!(
+        "error: `{member}` is not a member of trait `{trait_name}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S3r (R4a): a `| ... |` binder inside an impl member's own body sharing
+/// that member's name. The self-call rewrite is unconditional token equality,
+/// so the binder and the recursive call cannot coexist; a silent winner either
+/// way is the shadowing this language refuses.
+fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
+    format!(
+        "error: `{member}` binds a local inside its own impl body at line {}, col {}, where the name already refers to the member itself",
+        span.line, span.col
+    )
+}
+
+/// P7.S3r: the internal name of the word an `impl:` body member desugars to,
+/// `member;Trait;Type`. Trait-qualified because two traits may require a
+/// same-named member with the same grounded signature for one type, and
+/// unforgeable because `;` is a hard lexer delimiter: no source token can
+/// contain one. Never parsed back, so the `Type` component only needs to be
+/// injective -- the rendered type name is.
+fn synth_member_word_name(member: &str, trait_name: &str, target: Type) -> String {
+    format!("{member};{trait_name};{}", target.name())
+}
+
+/// P7.S3r (R4a): rewrite every call of `member` inside its own desugared body
+/// (nested quotations included) to the synthesized word's name, so a member
+/// body can recurse. A `| ... |` binder of the same name is rejected rather
+/// than silently shadowing or being silently rewritten away.
+fn rewrite_member_self_calls(
+    terms: &[Term],
+    member: &str,
+    synth: &str,
+) -> Result<Vec<Term>, String> {
+    terms
+        .iter()
+        .map(|term| {
+            let kind = match &term.kind {
+                TermKind::Bind(names) if names.iter().any(|n| n == member) => {
+                    return Err(impl_member_binder_shadows_itself_error(member, term.span));
+                }
+                TermKind::Call(name) if name == member => TermKind::Call(synth.to_string()),
+                TermKind::Quotation(inner, is_inline, annot) => TermKind::Quotation(
+                    rewrite_member_self_calls(inner, member, synth)?,
+                    *is_inline,
+                    annot.clone(),
+                ),
+                other => other.clone(),
+            };
+            Ok(Term {
+                kind,
+                span: term.span,
+            })
+        })
+        .collect()
+}
+
 /// P7.S3e (R4, decision 4): resolve a trait name to a `TraitId`, module-aware
 /// exactly like `resolve_type_name_in_module` -- own module first, then a
 /// pre-seeded reserved-module entry (`Copy`/`Ord`, visible everywhere), then
@@ -584,7 +673,9 @@ pub fn parse_bodies(
             // above); this loop only skips past it.
             parser.skip_typedef();
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "impl:") {
-            out.impls.push(parser.parse_impl_decl()?);
+            let (imp, members) = parser.parse_impl_decl()?;
+            out.impls.push(imp);
+            out.words.extend(members);
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "import:") {
             parser.parse_import()?;
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "export:") {
@@ -2001,6 +2092,22 @@ impl<'t> Parser<'t> {
                 Some((Token::Semicolon, _)) => break,
                 Some((Token::Word(_), _)) => {
                     let (member_name, member_span) = self.expect_word_any_spanned()?;
+                    // P7.S3r (R4): a member becomes a word when implemented, so
+                    // it inherits `parse_worddef`'s reserved-name policy, plus a
+                    // rejection of every name dispatched ahead of the word
+                    // environment (which an impl body's own member name would
+                    // shadow inside that body).
+                    reject_reserved_name("word", &member_name, member_span)?;
+                    if ACCESS_WORDS.contains(&member_name.as_str()) {
+                        return Err(shadowed_access_word_error(&member_name, member_span));
+                    }
+                    if is_name_dispatched_builtin(&member_name) {
+                        return Err(builtin_named_trait_member_error(
+                            &name,
+                            &member_name,
+                            member_span,
+                        ));
+                    }
                     self.expect(Token::LParen)?;
                     let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
                     self.expect(Token::RParen)?;
@@ -2084,16 +2191,20 @@ impl<'t> Parser<'t> {
         Ok(sig)
     }
 
-    /// P7.S3e (R4/R11, decision 1): `impl: Trait for Type  member1 word1
-    /// [member2 word2 ...] ;` -- a pure binding, bare `member word` pairs, no
-    /// `| ... |`, no body (decision 1). `Trait` resolves against the
-    /// whole-program trait registry (module-aware, mirroring a qualified
-    /// type name); `Type` resolves exactly as any other type expression
-    /// does. Member-signature/orphan-rule/polymorphic-member validation (R4)
-    /// is a check-time concern (`check::check_impl_decls`), not here: by the
-    /// time that check runs the whole program's `traits`/`impls`/`structs`
-    /// are fully assembled, regardless of this file's own declaration order.
-    fn parse_impl_decl(&mut self) -> Result<ImplDecl, String> {
+    /// P7.S3e (R4/R11, decision 1) / P7.S3r (R1): `impl: Trait for Type ... ;`.
+    /// `Trait` resolves against the whole-program trait registry (module-aware,
+    /// mirroring a qualified type name); `Type` resolves exactly as any other
+    /// type expression does. Orphan-rule/missing-member validation is a
+    /// check-time concern (`check::check_impl_decls`), not here: by the time
+    /// that check runs the whole program's `traits`/`impls`/`structs` are fully
+    /// assembled, regardless of this file's own declaration order.
+    ///
+    /// Two body shapes, discriminated by the single token after the `for` type:
+    /// a `:` opens P7.S3r's body form (`: member ... ;` per member, each
+    /// desugared to a synthesized top-level `WordDef` returned alongside the
+    /// decl), anything else is the bare `member word` binding form P7.S3r
+    /// deletes. Either way the decl carries only `(member, word-name)` pairs.
+    fn parse_impl_decl(&mut self) -> Result<(ImplDecl, Vec<WordDef>), String> {
         let span = self.expect_word("impl:")?;
         let (trait_name, trait_span) = self.expect_word_any_spanned()?;
         self.expect_word("for")?;
@@ -2115,9 +2226,16 @@ impl<'t> Parser<'t> {
             }
         }
         let mut bindings = Vec::new();
+        let mut words = Vec::new();
+        let body_form = matches!(self.peek(), Some((Token::Word(w), _)) if w == ":");
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
+                Some(_) if body_form => {
+                    let (member_name, word) = self.parse_impl_member_body(trait_id, target_ty)?;
+                    bindings.push((member_name, word.name.clone()));
+                    words.push(word);
+                }
                 Some(_) => {
                     let (member_name, _) = self.expect_word_any_spanned()?;
                     if let Some((Token::Semicolon, s)) = self.peek() {
@@ -2136,14 +2254,83 @@ impl<'t> Parser<'t> {
         if bindings.is_empty() {
             return Err(impl_zero_bindings_error(&trait_name, span));
         }
-        Ok(ImplDecl {
-            trait_id,
-            target_ty,
-            module: self.module,
-            span,
-            bindings,
-            resolved: Vec::new(),
-        })
+        Ok((
+            ImplDecl {
+                trait_id,
+                target_ty,
+                module: self.module,
+                span,
+                bindings,
+                resolved: Vec::new(),
+            },
+            words,
+        ))
+    }
+
+    /// P7.S3r (R2/R4a/R5/R6): one `: member [| binders |] body ;` inside an
+    /// `impl:` block, desugared to the top-level word the member binds to. The
+    /// declared effect is the trait member's signature grounded at the `for`
+    /// type through the same `ground_member_type` `check_impl_decls` grounds
+    /// with, so the comparison it makes against this word is byte-identical by
+    /// construction; there is no `(` to parse, since restating the inherited
+    /// signature is rejected.
+    fn parse_impl_member_body(
+        &mut self,
+        trait_id: TraitId,
+        target_ty: Type,
+    ) -> Result<(String, WordDef), String> {
+        self.expect_word(":")?;
+        let (member_name, member_span) = self.expect_word_any_spanned()?;
+        let trait_name = self.traits[trait_id.index()].name.clone();
+        let Some(sig) = self.traits[trait_id.index()]
+            .members
+            .iter()
+            .find(|m| m.name == member_name)
+            .map(|m| m.sig.clone())
+        else {
+            return Err(impl_non_member_body_error(
+                &member_name,
+                &trait_name,
+                member_span,
+            ));
+        };
+        if let Some((Token::LParen, s)) = self.peek() {
+            return Err(impl_member_restated_signature_error(
+                &member_name,
+                &trait_name,
+                *s,
+            ));
+        }
+        let ground = |slots: &[PolyType], arrays: &mut Vec<ArrayDecl>, refs: &mut Vec<RefDecl>| {
+            slots
+                .iter()
+                .map(|t| TypedSlot {
+                    name: None,
+                    ty: ground_member_type(t, target_ty, arrays, refs),
+                })
+                .collect()
+        };
+        let effect = StackEffect {
+            inputs: ground(&sig.inputs, self.arrays, self.refs),
+            outputs: ground(&sig.outputs, self.arrays, self.refs),
+        };
+        let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
+        self.expect(Token::Semicolon)?;
+        let name = synth_member_word_name(&member_name, &trait_name, target_ty);
+        let body = rewrite_member_self_calls(&body, &member_name, &name)?;
+        Ok((
+            member_name,
+            WordDef {
+                name,
+                effect,
+                body,
+                poly: None,
+                declares_inline: false,
+                module: self.module,
+                span: member_span,
+                declared_globals: None,
+            },
+        ))
     }
 
     /// `static:` declaration (D1): a module-level place, scalar-only this
@@ -6841,6 +7028,104 @@ mod tests {
         assert_eq!(
             imp.trait_id,
             TraitId::from_index(module.traits.iter().position(|t| t.name == "Show").unwrap())
+        );
+    }
+
+    /// P7.S3r (R2): the body form's whole desugar, read off the AST -- the
+    /// binding pair `check_impl_decls` will resolve, and the synthesized word
+    /// carrying the trait member's signature grounded at the `for` type
+    /// (concrete, never a `PolySig`, since there is no signature to restate).
+    #[test]
+    fn parse_impl_body_synthesizes_a_word_with_the_inherited_effect() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+             impl: Show for i64\n\
+               : show | p | p drop 7 ;\n\
+             ;",
+        )
+        .unwrap();
+        assert_eq!(
+            module.impls[0].bindings,
+            vec![("show".to_string(), "show;Show;i64".to_string())]
+        );
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "show;Show;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.poly.is_none());
+        assert!(!synth.declares_inline);
+        assert_eq!(
+            synth
+                .effect
+                .inputs
+                .iter()
+                .map(|s| s.ty.name())
+                .collect::<Vec<_>>(),
+            vec!["&i64"]
+        );
+        assert_eq!(
+            synth
+                .effect
+                .outputs
+                .iter()
+                .map(|s| s.ty.name())
+                .collect::<Vec<_>>(),
+            vec!["i64"]
+        );
+    }
+
+    /// P7.S3r (R4a): the member's own name binds to the synthesized word
+    /// throughout its body, nested quotations included -- otherwise a recursive
+    /// call would resolve against module scope, where the member name is not a
+    /// word at all.
+    #[test]
+    fn parse_impl_body_rewrites_the_members_own_name_inside_a_quotation() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+             impl: Show for i64\n\
+               : show | p | ~[ p show ] drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "show;Show;i64")
+            .unwrap();
+        let inner = synth
+            .body
+            .iter()
+            .find_map(|t| match &t.kind {
+                TermKind::Quotation(inner, ..) => Some(inner),
+                _ => None,
+            })
+            .expect("the body's quotation literal");
+        let calls: Vec<&str> = inner
+            .iter()
+            .filter_map(|t| match &t.kind {
+                TermKind::Call(n) => Some(n.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["p", "show;Show;i64"]);
+    }
+
+    /// P7.S3r (R4a): the rewrite is unconditional token equality, so a binder
+    /// of the same name cannot coexist with it -- and silently letting either
+    /// one win is the shadowing this language refuses.
+    #[test]
+    fn parse_impl_body_binder_named_after_the_member_is_error() {
+        let err = parse_src(
+            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+             impl: Show for i64\n\
+               : show | show | show drop 7 ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`show` binds a local inside its own impl body"),
+            "{err}"
         );
     }
 

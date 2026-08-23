@@ -1068,7 +1068,7 @@ pub(super) fn is_name_visible_to_module(
 /// the same exemption the `drop` visibility gate has, and the reason the
 /// "no builtin without an `intrinsics` import" rule is a file/driver-path rule.
 pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool {
-    if !is_gated_intrinsic_name(name) {
+    if !is_name_dispatched_builtin(name) {
         return false;
     }
     // A term the compiler synthesized rather than parsed builds its body with

@@ -160,11 +160,22 @@ The two sites are **mutually exclusive, not defence in depth.** With the declara
 guarded, an impl-body check for the same condition is unreachable, and an unreachable check is
 a placebo this project treats as a defect. Implement exactly one, here.
 
-Known in-tree casualty, which the implementer will otherwise hit as a red test:
-`tests/phase7_slice3e.rs:183` declares `trait: Show 'T tag ( -- i64 ) ;` purely to provoke the
-P7.S3p zero-input-receiver error, and `tag` is a rejected name (`BUILTIN_WORDS`, the slice-10c
-discriminant primitive). Rename that fixture's member to a non-builtin name so it still
-asserts the receiver diagnostic it is about; do not reorder the checks to keep it passing.
+Two in-tree casualties, which the implementer will otherwise hit as red tests, and they take
+opposite fixes:
+
+- `tests/phase7_slice3e.rs:183` declares `trait: Show 'T tag ( -- i64 ) ;` purely to provoke
+  the P7.S3p zero-input-receiver error, and `tag` is a rejected name (`BUILTIN_WORDS`, the
+  slice-10c discriminant primitive). **Rename** that fixture's member to a non-builtin name so
+  it still asserts the receiver diagnostic it is about; do not reorder the checks to keep it
+  passing.
+- `src/check/poly.rs`'s `bound_dispatch_and_a_builtin_named_member_coexist` declares
+  `trait: Sum 'T add ( &'T &'T -- i64 ) ;`, and its *subject* is the operator-spelled member
+  itself, so there is no rename that keeps its intent. **Delete** it: its own successor
+  (`bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin`, member `eq`) records
+  that `add` never exercised R10's claimed partition in the first place (no dispatch-cascade arm
+  matches `add`), carries the same coexistence half in its `main`, and stays legal under the
+  corrected predicate. Note on that successor that the six surface comparisons are now the whole
+  of the barrier it guards.
 
 Why the predicate is not the `BUILTIN_WORDS` const: the const **does** contain `eq`, `lt`,
 `gt`, `lte`, `gte`, `ne` (`src/check/declarations.rs:94-99`), but the comment there records
