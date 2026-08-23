@@ -154,7 +154,7 @@ stated as a ruling, not a menu.
    word branch to `Ok(None)` (`:288`), left raw for the checker -- which is exactly what
    a bound-directed obligation lookup needs. The one real gap: if the qualifier's target
    module happens to export an unrelated concrete word sharing the member's name,
-   `rewrite` mangles the call before the checker ever sees it (`:289-292`), silently
+   `rewrite` mangles the call before the checker ever sees it (`:287-292`), silently
    discarding trait-member intent. **Correction (fresh review, v2.4):** R18's own
    round-3 reversal rules this a rejection, not a resolution the checker somehow
    "pre-empts" -- see R18 for why the pre-empt framing is unimplementable and what
@@ -302,7 +302,7 @@ stated as a ruling, not a menu.
    behavior a bound-directed obligation lookup wants. The one real gap `rewrite`
    introduces: if the qualifier's target module happens to export (or re-export) an
    unrelated concrete word sharing the member's name, `rewrite` mangles the call before
-   the checker ever sees it (`:289-292`/`:310-313`), silently discarding the
+   the checker ever sees it (`:287-292`/`:310-313`), silently discarding the
    trait-member intent. **Correction (fresh review, v2.4):** the "obligation-recording
    branch must run, or be checked for, before this mangling can apply" framing above is
    itself unimplementable -- `rewrite` runs before `check::check` unconditionally, so
@@ -369,10 +369,19 @@ stated as a ruling, not a menu.
   parameter), parameterize its diagnostic instead of hardcoding `` static `{}` ...``, and
   add a new `check_trait_decls` call site (mirroring `check_static_decls`, called
   alongside it pre-mangle) that walks `module.traits` and calls the generalized function
-  against words/externs/structs/enums/statics -- this single trait-side call catches
-  the collision regardless of declaration order, since the scan is whole-module. Note
-  the struct/enum arm compares `s.name_static`, not `s.name` (`:363-370`); this only
-  works because the check runs pre-mangle, and the new trait call site must inherit that
+  against words/externs/structs/enums/statics **and other traits** (round-2-of-fresh-loop
+  finding: the enumerated scan set must include `module.traits` itself, or R2's own
+  requirement that a user `trait: Copy`/`trait: Point` collide is unenforced by this
+  mechanism -- the generalized function's existing `owns`-filtered scan pattern extends
+  to a trait-vs-trait arm the same way it extends to any other kind). The generalized
+  static-side arm must also exclude the static's own span when scanning
+  `module.statics` against itself (round-2-of-fresh-loop nit: today's function is never
+  called with the target's own kind in the scanned set, so this self-match case has no
+  existing precedent to copy -- state it explicitly rather than leave it inferred) --
+  this single trait-side call catches the collision regardless of declaration order,
+  since the scan is whole-module. Note the struct/enum arm compares `s.name_static`,
+  not `s.name` (`:363-370`); this only works because the check runs pre-mangle, and the
+  new trait call site must inherit that
   placement constraint explicitly.
 
 - **R2.** The parser must replace the two hardcoded string compares for `Copy`/`Ord` in
@@ -927,7 +936,7 @@ signals at phase exit, not before.
 | `src/check/declarations.rs:562-586` | `local_decl_names` | Needs a `traits` loop alongside structs/enums/words/externs, or a local trait colliding with a selectively imported one goes uncaught (R1) |
 | `src/check/declarations.rs:346-374` | `colliding_name_kind` | The real existing cross-kind precedent (round-3 correction -- round-2 wrongly cited `duplicate_static_error` (`:376`) alone and concluded no cross-kind check existed), but it is `StaticDecl`-only with one caller today (`check_static_decls`, `:312`) -- generalize its parameter and add a new `check_trait_decls` call site rather than adding a bare `traits` arm inside it, which would only catch trait-vs-static (R1, fresh review correction) |
 | `src/parser.rs:3455-3460` (`type_is_exported`/`not_exported_error` def `:3080`), inside `resolve_type_or_apply` | Parse-time qualified-type export gate | The actual mechanism a trait name in a bound must reuse (R18, round-2 correction) -- NOT `NameTables::build`/`Resolver::rewrite`, which run post-parse and never see a bound's trait name (already baked into `Bound::User(TraitId)` by parse time) |
-| `src/resolve.rs:721-724`, `:288-292`, `:310-313` | `Resolver::rewrite`'s in-place name mutation, its word-branch fallthrough/mangling, its hub re-export fallthrough | R12's non-colliding qualified member call needs no new branch (falls to `Ok(None)`); a *colliding* qualified call (target module exports **or re-exports** an unrelated same-named word) is a ruled **rejection** (round-3 reversal), since `rewrite` mutates the name here *before* `check::check` runs -- "trait wins" (round-1/round-2's wording) is unimplementable without a new branch here, which this slice does not add. The rejection surfaces as the pre-existing `poly_var_to_concrete_error`/`poly_op_on_variable_error`, not an invented trait-specific message (fresh review addition) |
+| `src/resolve.rs:721-724`, `:287-292`, `:310-313` | `Resolver::rewrite`'s in-place name mutation, its word-branch fallthrough/mangling, its hub re-export fallthrough | R12's non-colliding qualified member call needs no new branch (falls to `Ok(None)`); a *colliding* qualified call (target module exports **or re-exports** an unrelated same-named word) is a ruled **rejection** (round-3 reversal), since `rewrite` mutates the name here *before* `check::check` runs -- "trait wins" (round-1/round-2's wording) is unimplementable without a new branch here, which this slice does not add. The rejection surfaces as the pre-existing `poly_var_to_concrete_error`/`poly_op_on_variable_error`, not an invented trait-specific message (fresh review addition) |
 | `tests/phase7_slice3e.rs` (new, one file) | Golden + unit tests | Matches `tests/phase7_slice3{a,b,c,d,f,g,i}.rs`'s existing single-file convention |
 
 **Load-bearing constraints:**
@@ -1000,7 +1009,11 @@ parse into the new AST, land in a flat whole-program registry mirroring
     1/R4), whole-program registries mirroring the *actual current* `structs`/`enums`
     field layout (read it first, don't assume a shape).
   - `src/parser.rs`: `parse_trait_decl`, `parse_impl_decl` (bare-pair grammar, no `| |`,
-    no body), `parse_capabilities`'s trait-table rewrite (R2).
+    no body), `parse_capabilities`'s trait-table rewrite (R2) -- **`Copy`/`Ord`
+    pre-seeded entries only this phase** (round-2-of-fresh-loop clarification: `TraitId`
+    and `Bound::User` don't exist until Phase 2, so this phase's rewrite can only ever
+    produce `Bound::Copy`/`Bound::Ord` from the lookup table; the same call site's
+    `Bound::User` arm is Phase 2's, once a real `TraitId` exists to construct one from).
   - `src/resolve.rs`: `exportable_names` (`:496`) gains a `traits` loop; this is the
     actual export gate, not `:270`'s `not_exported_error` alone (decision 4 correction).
   - `src/check/declarations.rs`: `local_decl_names` (`:562-586`) gains a `traits` loop
@@ -1008,10 +1021,11 @@ parse into the new AST, land in a flat whole-program registry mirroring
     current `StaticDecl`-only parameter to a kind-tagged `(name, module, span)` shape
     with a parameterized diagnostic, plus a new `check_trait_decls` call site
     (mirroring `check_static_decls`) that is the actual place a new trait is compared
-    against words/externs/structs/enums/statics (R1, mechanism corrected in the fresh
-    review round after round-3's own "just add a `traits` arm" plan turned out to be a
-    second same-kind-only trap -- that function has exactly one caller today and is
-    hardcoded to statics).
+    against words/externs/structs/enums/statics/**other traits** (R1, mechanism
+    corrected in the fresh review round after round-3's own "just add a `traits` arm"
+    plan turned out to be a second same-kind-only trap -- that function has exactly one
+    caller today and is hardcoded to statics; the trait arm must be in the scan set,
+    not just the callee, or R2's `trait: Copy` requirement is unenforced).
 - Files to create: `tests/phase7_slice3e.rs` (tests land in this single file, extended
   by later phases; created here, not before).
 - Out of scope: any bound syntax consumption (`'T: Show`, including its parse-time
@@ -1072,7 +1086,12 @@ disambiguation working across module boundaries.
     parse time via the same `self.imports`/`type_is_exported` gate
     `resolve_type_or_apply` uses (`:3455-3460`, `:3080`) -- R18's corrected mechanism
     (round-2 finding: NOT a `NameTables`/`rewrite` branch, which cannot see a bound's
-    trait name post-parse).
+    trait name post-parse). **This owns the `Bound::User(TraitId)`-producing half of
+    R2's trait-table rewrite** (round-2-of-fresh-loop finding: Phase 1's R2 bullet only
+    covers `parse_capabilities` producing `Bound::Copy`/`Bound::Ord` from pre-seeded
+    table entries, since `TraitId`/`Bound::User` don't exist until this phase -- Phase 1
+    is `Copy`/`Ord`-only for R2's rewrite, and the same call site gains its `Bound::User`
+    arm here, once a real `TraitId` exists to construct one from).
   - `src/driver.rs`: a new whole-closure trait pre-pass, run before the per-module
     `parse_bodies` loop (`:451-467`), mirroring `prepass_generic_typedefs`
     (`:435-449`) exactly -- without it, a cross-module bound (R18) cannot resolve
@@ -1100,11 +1119,18 @@ queryable.
   resolves correctly regardless of source order (R18's whole-closure pre-pass, round-3
   finding), and an unbound qualifier in a bound gets its own located diagnostic.
 - A qualified member call whose target module also exports or re-exports an unrelated
-  same-named concrete word is a located rejection asserted against the actual existing
-  diagnostic it produces (`poly_var_to_concrete_error`/`poly_op_on_variable_error`, not
-  an invented trait-specific message), not a resolved call -- do not accept a golden
-  asserting the trait-member call succeeds here (R18, round-3 reversal, fresh-review
-  diagnostic pin).
+  same-named concrete word, **called with the bound type variable itself as an
+  operand**, is a located rejection asserted against the actual existing diagnostic it
+  produces (`poly_var_to_concrete_error`/`poly_op_on_variable_error`, not an invented
+  trait-specific message), not a resolved call -- do not accept a golden asserting the
+  trait-member call succeeds here (R18, round-3 reversal, fresh-review diagnostic pin).
+  **Correction (round-2-of-fresh-loop review):** both pinned diagnostics fire only from
+  the operand-window loop that inspects a `PolyType::Var`/`Ref`/`QuotLit` slot
+  (`src/check/poly.rs:1221-1293`) -- if every operand at the collision call site is
+  `PolyType::Concrete`, the mangled name simply type-checks and silently calls the
+  unrelated concrete word, with no rejection at all. The exit criterion holds only for a
+  call shape where the bound variable itself is an operand; the golden must use that
+  shape, not an arbitrary qualified call.
 - A poly *combinator* declaring `'T: Trait` on its own type variable is a located,
   explicit rejection, not an attempted dispatch (R9/R17 scope cut, tracked separately as
   P7.S3o).
