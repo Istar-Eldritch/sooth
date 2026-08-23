@@ -183,6 +183,14 @@ pub(super) struct FuncBuilder<'a> {
     /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
     /// checker records nothing there), so their lowering is byte-for-byte.
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
+    /// P7.S3e (R8/R9): this instantiation's own trait-member-call resolutions
+    /// (`CallInst::trait_calls`), span -> the implementing word's lowering
+    /// symbol. Consulted before `builtin_overloads` in `lower_call`, since a
+    /// bound call resolves through the trait/impl registries rather than a
+    /// name-directed overload set. Empty on every non-instantiation lowering
+    /// path (a monomorphic word has no bounds to resolve, so it never gets
+    /// one either).
+    pub(super) trait_calls: &'a HashMap<Span, String>,
     /// P7 slice 1 (R2): the receiver-directed field projections the checker
     /// resolved, span -> `(StructId, field index)`. `lower_reference_word`
     /// reads a `&hp` site's receiver type back from here: the name alone does
@@ -365,6 +373,7 @@ impl<'a> FuncBuilder<'a> {
             statics,
             instantiations: empty_instantiations(),
             builtin_overloads: empty_builtin_overloads(),
+            trait_calls: empty_trait_calls(),
             resolved_fields: empty_resolved_fields(),
             resolved_variant_fields: empty_resolved_variant_fields(),
             poly_arities: empty_poly_arities(),
@@ -726,6 +735,7 @@ pub(super) fn lower_word_parts(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    trait_calls: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
@@ -746,6 +756,7 @@ pub(super) fn lower_word_parts(
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
     b.instantiations = instantiations;
     b.builtin_overloads = builtin_overloads;
+    b.trait_calls = trait_calls;
     b.resolved_fields = resolved_fields;
     b.resolved_variant_fields = resolved_variant_fields;
     b.poly_arities = poly_arities;
@@ -881,6 +892,7 @@ pub(super) fn lower_word_parts(
         regs,
         instantiations,
         builtin_overloads,
+        trait_calls,
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -902,6 +914,7 @@ pub(super) fn lower_materialized(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
+    trait_calls: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
@@ -934,6 +947,7 @@ pub(super) fn lower_materialized(
             regs,
             instantiations,
             builtin_overloads,
+            trait_calls,
             resolved_fields,
             resolved_variant_fields,
             poly_arities,

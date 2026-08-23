@@ -111,6 +111,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                     .builtin_overloads
                     .values()
                     .any(|s| s == &symbols[*idx])
+                // P7.S3e (R15): an impl member named after a builtin operator
+                // and reachable only through bound dispatch is "called" too --
+                // its only mention is a resolved symbol in some instantiation's
+                // `trait_calls`, never a bare name in `called_names`.
+                && !module
+                    .instantiations
+                    .values()
+                    .any(|i| i.trait_calls.values().any(|s| s == &symbols[*idx]))
         })
         .map(|(idx, _)| idx)
         .collect();
@@ -209,6 +217,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 regs,
                 &module.instantiations,
                 &module.builtin_overloads,
+                // A monomorphic word declares no bounds (only a polymorphic
+                // word's signature can), so it can never call through a
+                // resolved trait obligation -- empty here, unlike the
+                // per-instantiation loop below.
+                empty_trait_calls(),
                 &module.resolved_fields,
                 &module.resolved_variant_fields,
                 &poly_arities,
@@ -281,6 +294,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             regs,
             &module.instantiations,
             &module.builtin_overloads,
+            // P7.S3e (R9): this instantiation's own bound-dispatch
+            // resolutions -- a pure function of `(callee, θ)`, so this map is
+            // identical to every other instantiation of the same `(callee,
+            // θ)` pair (`CallInst::trait_calls`'s own doc comment).
+            &inst.trait_calls,
             &module.resolved_fields,
             &module.resolved_variant_fields,
             &poly_arities,
@@ -616,6 +634,9 @@ pub fn lower_line(
         regs,
         instantiations,
         builtin_overloads,
+        // R15/decision 8: the REPL path is explicitly out of scope for
+        // trait-bound dispatch this slice.
+        empty_trait_calls(),
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -757,6 +778,9 @@ pub(crate) fn lower_word(
         regs,
         instantiations,
         builtin_overloads,
+        // R15/decision 8: the REPL path is explicitly out of scope for
+        // trait-bound dispatch this slice.
+        empty_trait_calls(),
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -814,6 +838,9 @@ pub(crate) fn lower_instantiation(
         regs,
         empty_instantiations(),
         builtin_overloads,
+        // R15/decision 8: the REPL path is explicitly out of scope for
+        // trait-bound dispatch this slice.
+        empty_trait_calls(),
         resolved_fields,
         empty_resolved_variant_fields(),
         empty_poly_arities(),

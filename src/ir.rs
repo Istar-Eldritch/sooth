@@ -71,6 +71,15 @@ fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7.S3e (R9): the trait-call companion of `empty_builtin_overloads`, handed
+/// to every lowering path with no instantiation-specific bound-dispatch
+/// resolutions to thread (every monomorphic word, the REPL, destructor
+/// synthesis, and unit tests).
+fn empty_trait_calls() -> &'static HashMap<Span, String> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// P7 slice 1 (R2): the resolved-field companion of `empty_instantiations`,
 /// handed to every lowering path that resolved no field projection
 /// (destructor synthesis and unit tests).

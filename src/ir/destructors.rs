@@ -382,6 +382,7 @@ fn synthesize_struct_destructor_override(
         regs,
         empty_instantiations(),
         empty_builtin_overloads(),
+        empty_trait_calls(),
         resolved_fields,
         resolved_variant_fields,
         empty_poly_arities(),

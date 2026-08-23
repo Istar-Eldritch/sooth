@@ -223,6 +223,39 @@ impl<'a> FuncBuilder<'a> {
         self.restore_loop_state(saved_loop_state);
     }
 
+    /// Slice 8a phase 4 (R7), extended P7.S3e (R9): call an already-resolved
+    /// ordinary concrete word by its lowering symbol, shared by the
+    /// builtin-overload and trait-bound-dispatch resolution paths above (both
+    /// resolve to a plain user word, never a struct/enum-generated one).
+    fn lower_resolved_word_call(&mut self, sym_name: &str) {
+        let (in_arity, out_arity, ret_ty) = {
+            let a = self
+                .env
+                .get(sym_name)
+                .expect("checked resolved call exists");
+            (a.in_arity, a.out_arity, a.ret_ty)
+        };
+        let split = self.stack.len() - in_arity;
+        let args = self.stack.split_off(split);
+        let bundle = match ret_ty {
+            Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+            _ => None,
+        };
+        let ret = if out_arity == 1 || bundle.is_some() {
+            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+        } else {
+            None
+        };
+        let sym = (self.resolve)(sym_name);
+        self.push_instr(Instr::Call(ret, sym, args));
+        if let Some(v) = ret {
+            self.stack.push(v);
+        }
+        if let Some(id) = bundle {
+            self.unpack_bundle(id);
+        }
+    }
+
     pub(in crate::ir) fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
@@ -236,6 +269,16 @@ impl<'a> FuncBuilder<'a> {
         // miscategorized as a self-tail call on `.`). Same env-lookup +
         // resolve + bundle-unpack shape as the ordinary user-word path in the
         // `_` arm below, since this *is* that path, reached early.
+        // P7.S3e (R8/R9): a trait-member call the checker resolved via bound
+        // dispatch (`CallInst::trait_calls`, threaded onto this instantiation's
+        // `FuncBuilder` the same way `builtin_overloads` is) dispatches straight
+        // to the implementing word's own lowering symbol -- an ordinary concrete
+        // word (decision 1/2), never a struct/enum-generated one, so it skips
+        // the struct/enum special-casing below and calls it directly.
+        if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
+            self.lower_resolved_word_call(&sym_name);
+            return;
+        }
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
             // D7/R5: two generic-type instantiations sharing a bare surface
             // name (`Box`'s constructor/accessor) resolve here too -- the
@@ -256,32 +299,7 @@ impl<'a> FuncBuilder<'a> {
                 self.lower_enum_call(ew, span, tail);
                 return;
             }
-            let (in_arity, out_arity, ret_ty) = {
-                let a = self
-                    .env
-                    .get(&sym_name)
-                    .expect("checked user overload exists");
-                (a.in_arity, a.out_arity, a.ret_ty)
-            };
-            let split = self.stack.len() - in_arity;
-            let args = self.stack.split_off(split);
-            let bundle = match ret_ty {
-                Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
-                _ => None,
-            };
-            let ret = if out_arity == 1 || bundle.is_some() {
-                Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
-            } else {
-                None
-            };
-            let sym = (self.resolve)(&sym_name);
-            self.push_instr(Instr::Call(ret, sym, args));
-            if let Some(v) = ret {
-                self.stack.push(v);
-            }
-            if let Some(id) = bundle {
-                self.unpack_bundle(id);
-            }
+            self.lower_resolved_word_call(&sym_name);
             return;
         }
         // R10: a tail-position self-call inside a self-tail combinator splice
