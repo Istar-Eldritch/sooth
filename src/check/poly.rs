@@ -803,12 +803,11 @@ pub(super) fn poly_term(
 /// language does not have, so `'T: A B` calling a shared member stays the
 /// ambiguity error S3e made it.
 ///
-/// A fit is unique where it exists: the window is anchored at the stack top,
-/// so a candidate's own receiver position pins its variable there, and a
-/// candidate on a different variable declares either its own receiver or a
-/// concrete type at that slot -- both conflicting. `None` therefore means no
-/// candidate fits, reported as the same ambiguity: nothing at the call site
-/// picks.
+/// The fit must be unique: two candidates on one variable fit the same
+/// operands (that is the same-variable ambiguity, reachable here through a
+/// mixed set -- two traits on `'T` plus one on `'U`), and no candidate fits a
+/// call whose operands are wrong for every one of them. Both are `None`, and
+/// both are the ambiguity: nothing at the call site picks.
 fn candidate_fitting_the_operands<'a>(
     stack: &[PolySlot],
     candidates: &[(u32, TraitId, &'a TraitMember)],
@@ -816,19 +815,20 @@ fn candidate_fitting_the_operands<'a>(
     if candidates.windows(2).all(|w| w[0].0 == w[1].0) {
         return None;
     }
-    candidates
-        .iter()
-        .find(|(var, _, member)| {
-            let inputs = &member.sig.inputs;
-            stack.len() >= inputs.len() && {
-                let base = stack.len() - inputs.len();
-                inputs
-                    .iter()
-                    .enumerate()
-                    .all(|(i, t)| stack[base + i].pt == substitute_member_var(t, *var))
-            }
-        })
-        .copied()
+    let mut fitting = candidates.iter().filter(|(var, _, member)| {
+        let inputs = &member.sig.inputs;
+        stack.len() >= inputs.len() && {
+            let base = stack.len() - inputs.len();
+            inputs
+                .iter()
+                .enumerate()
+                .all(|(i, t)| stack[base + i].pt == substitute_member_var(t, *var))
+        }
+    });
+    match (fitting.next(), fitting.next()) {
+        (Some(one), None) => Some(*one),
+        _ => None,
+    }
 }
 
 /// P7.S3e (R7): a trait member's signature is written over the trait's own
@@ -6592,6 +6592,27 @@ mod tests {
         );
         let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
         assert_eq!(vars, vec![1, 0]);
+    }
+
+    /// P7.S3p (ruling 4): a third bound on another variable does not turn the
+    /// same-variable ambiguity into a resolvable call -- `'T`'s two candidates
+    /// fit the operands equally, so the fit is not unique and the call is
+    /// still rejected. Without the uniqueness requirement one of the two is
+    /// picked by bound declaration order.
+    #[test]
+    fn a_same_variable_ambiguity_survives_a_bound_on_another_variable() {
+        let err = check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             trait: C 'T t1 ( &'T -- ) ;\n\
+             : f ( &'U: C &'T: A B -- ) t1 drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by `C` on 'U, `A` on 'T and `B` on 'T"),
+            "{err}"
+        );
     }
 
     /// P7.S3p (ruling 4): when the operands fit *no* candidate, nothing at the
