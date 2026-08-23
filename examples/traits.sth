@@ -5,6 +5,7 @@
 \ caller's own `impl:` at monomorphization -- an ordinary word call resolved
 \ per instantiation, never a runtime vtable.
 
+import: intrinsics * ;
 import: core::prelude | if lt gt | ;
 import: core::bool | Bool | ;
 
