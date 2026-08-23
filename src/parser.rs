@@ -1822,7 +1822,6 @@ fn reject_growing_generic_argument(
                         decl_name, name, arg, span,
                     ));
                 }
-                reject_growing_generic_argument(decl_name, arg, span)?;
             }
             Ok(())
         }
@@ -4912,8 +4911,22 @@ impl<'t> Parser<'t> {
                         return None;
                     }
                 }
-                Token::Word(w) if ty_vars.iter().any(|(n, _)| n == w) => {
-                    return Some((w.clone(), *span));
+                Token::Word(w) => {
+                    // A leading `^` or `&`/`&!` glues onto the variable's own
+                    // token (`^'T`, `&'T`), so the bare name must be peeled
+                    // off before comparing -- otherwise this scan is blind
+                    // to exactly the shapes `fold_field_ref`/`fold_field_
+                    // owned_cell` exist to admit, and the variable falls
+                    // through to the concrete parser's misleading `unknown
+                    // type 'T` instead of this rule's own message.
+                    let bare = w
+                        .strip_prefix('^')
+                        .or_else(|| w.strip_prefix("&!"))
+                        .or_else(|| w.strip_prefix('&'))
+                        .unwrap_or(w);
+                    if ty_vars.iter().any(|(n, _)| n == bare) {
+                        return Some((bare.to_string(), *span));
+                    }
                 }
                 _ => {}
             }
@@ -6718,6 +6731,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_generic_enum_typedef_concrete_self_reference_resolves() {
+        // R2's enum twin: `instantiate_enum` mints `L[i64]` while `L`'s own
+        // header is still pending, so the variant list must come from the
+        // deferred fill, not from the empty list minted at that moment. A
+        // variant-less `L[i64]` here is the silent-wrong-mint failure the
+        // enum-side pending machinery exists to prevent.
+        let module = parse_src("type: L 'T | Node v 'T n ^L[i64] | Nil ;").unwrap();
+        let inst = module
+            .enums
+            .iter()
+            .find(|d| d.name == "L[i64]")
+            .expect("the concrete self-reference minted `L[i64]`");
+        assert_eq!(
+            inst.variants.len(),
+            2,
+            "the deferred fill must have paid off `L[i64]`'s variant list"
+        );
+    }
+
+    #[test]
     fn parse_generic_typedef_duplicate_header_still_rejected_after_self_registration() {
         // R2 hazard: stage (a) pushes a placeholder for the first `Box`, and
         // `generic_header_at_cursor_is_registered`'s snapshot must not let
@@ -6836,6 +6869,29 @@ mod tests {
         assert!(
             !err.contains("unknown type"),
             "the variable sits past a nested bracket, not past the effect: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_glued_sigil_variable_in_quotation_is_error() {
+        // R7: `^'T` and `&'T` glue the cell/ref sigil onto the variable's own
+        // token, so the scan must peel the sigil off before comparing against
+        // `ty_vars` -- otherwise the variable is invisible to this rule and
+        // falls through to the concrete parser's misleading `unknown type`.
+        let err = parse_src("type: QF 'T f [ ^'T -- ] ;").unwrap_err();
+        assert!(err.contains("quotation field"), "unexpected: {err}");
+        assert!(err.contains("'T"), "unexpected: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "the glued cell sigil must not hide the variable: {err}"
+        );
+
+        let err = parse_src("type: QF 'T f [ &'T -- ] ;").unwrap_err();
+        assert!(err.contains("quotation field"), "unexpected: {err}");
+        assert!(err.contains("'T"), "unexpected: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "the glued ref sigil must not hide the variable: {err}"
         );
     }
 
