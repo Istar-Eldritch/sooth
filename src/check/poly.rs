@@ -7630,6 +7630,20 @@ mod tests {
         assert!(err.contains("linear"), "unexpected message: {err}");
     }
     #[test]
+    fn check_poly_dup_of_an_owning_cell_is_rejected() {
+        // P7.S3n (R3): both halves of the cell's `Copy` answer at once.
+        // `poly_is_copy` must say `false` -- a `^T` owns its payload at every
+        // instantiation, so answering `true` would let two names free one
+        // allocation -- and `poly_copy_gate` must then have an arm to render
+        // it, since without one it falls to whichever sibling arm claims the
+        // shape.
+        let err = check_src(": bad ( ^'T -- ^'T ^'T ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `dup` an owning cell in `bad` (line 1)\n  `^'T` is linear: it owns its payload, so duplicating it would free the same allocation twice"
+        );
+    }
+    #[test]
     fn poly_op_on_variable_error_names_a_reference() {
         // Slice 13 (review fix): `poly_op_on_variable_error`'s `Ref` describer
         // (`"a reference"`) is reachable from source -- `len` rejects a

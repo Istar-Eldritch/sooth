@@ -2017,6 +2017,28 @@ mod tests {
         assert_eq!(out, vec![Type::I64]);
     }
 
+    #[test]
+    fn collect_poly_concrete_sees_through_an_owned_cell() {
+        // P7.S3n (R3): the cell twin of the arm above, and for the same
+        // reason -- a private type named as a `^` payload is still named.
+        // Built directly for the same reason too: a fully-concrete payload
+        // folds to `Concrete(Type::OwnedCell)` at parse time, so only a
+        // variable-bearing one reaches this arm, and reaching it with a
+        // *concrete leaf* inside needs a shape (a generic application's mixed
+        // argument list) that no source signature spells in one token.
+        let payload = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0), PolyType::Concrete(Type::I64)],
+            name: "Ent",
+        };
+        let pt = PolyType::OwnedCell(Box::new(payload));
+        let mut out = Vec::new();
+        collect_poly_concrete(&pt, &mut out);
+        assert_eq!(out, vec![Type::I64]);
+    }
+
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();

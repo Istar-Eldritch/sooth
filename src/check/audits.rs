@@ -396,7 +396,7 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
         }
         // P7.S3n (R3): the cell twin of the `&` arm above.
         PolyType::OwnedCell(payload) => {
-            reject_poly_quotation_anywhere(payload, sig, "an owning cell's payload")
+            reject_poly_quotation_anywhere(payload, sig, "an owned-cell payload")
         }
         // P7 slice 3a: a quotation smuggled in as a generic argument
         // (`Box[[ 'T -- ]]`) is still nested inside the parameter.
@@ -430,7 +430,7 @@ fn reject_poly_quotation_anywhere(
             reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
         }
         PolyType::OwnedCell(payload) => {
-            reject_poly_quotation_anywhere(payload, sig, "an owning cell's payload")
+            reject_poly_quotation_anywhere(payload, sig, "an owned-cell payload")
         }
         // P7 slice 3a: recurse into a generic's arguments, so a quotation
         // smuggled in as one (`Box[[ 'T -- ]]`) is still rejected.
@@ -577,6 +577,37 @@ mod tests {
             err,
             "error: a reference cannot be stored: `f` declares the output `Box[&'T]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
+    }
+
+    #[test]
+    fn quotation_behind_an_owned_cell_is_rejected() {
+        // P7.S3n (R3): a quotation effect hidden in a cell payload is still a
+        // nested effect position, on both audit walks. Reachable from source
+        // (a bare `^` sigil whose payload is the following slot), and it
+        // shares its "an owned-cell payload" wording with the concrete twin
+        // at `:205` rather than inventing a second spelling.
+        let err = check_src(": f ( ^ [ 'T -- ] -- ) drop ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a quotation type `[ 'T -- ]` cannot appear as an owned-cell payload: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+        );
+    }
+
+    #[test]
+    fn ref_bearing_owned_cell_input_is_rejected() {
+        // P7.S3n (R3): `contains_poly_reference`'s cell arm recurses into the
+        // payload, so a reference laundered behind a `^` (`^ &'T`, a bare
+        // sigil whose payload is the following slot) still trips the
+        // reference-cannot-be-stored audit. The concrete twin
+        // (`contains_reference`) does not descend into `Type::OwnedCell`, so
+        // this arm's answer is not inherited from anywhere -- deleting the
+        // recursion admits the signature outright.
+        let err = check_src(": f ( ^ &'T -- ) drop ;\n").unwrap_err();
+        assert!(
+            err.contains("a reference cannot be stored"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("^&'T"), "the shape must be named: {err}");
     }
 
     #[test]

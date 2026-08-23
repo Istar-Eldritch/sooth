@@ -7856,6 +7856,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_trait_decl_member_with_an_owned_cell_shape_is_error() {
+        // P7.S3n (R3): the new owned-cell shape is deliberately *left out* of
+        // the supported set -- `ground_member_type` has no cell arm, so a
+        // `^'T` member would ground to nothing. Adding it to the supported
+        // list is the mutation this catches, and it is a located rejection
+        // rather than a wildcard fall-through.
+        let err = parse_src("trait: Sink 'T sink ( ^'T -- ) ;").unwrap_err();
+        assert!(err.contains("unsupported signature shape"), "{err}");
+    }
+
+    #[test]
     fn parse_trait_copy_collides_with_the_reserved_predicate_entry() {
         // R2: `Copy`/`Ord` are pre-seeded trait-table entries, so parsing a
         // user `trait: Copy` succeeds (it is a name, not a reserved-word
