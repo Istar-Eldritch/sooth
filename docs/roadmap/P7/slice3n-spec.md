@@ -885,5 +885,5 @@ restructuring on a shared path, and a compiler stack overflow as the failure mod
   (`docs/roadmap/P7-language-prereqs.md`); its "rejects with `unknown type 'T`" claim and
   its "not yet recon'd" paragraph were both falsified by this slice.
 - **`growing_generic_self_reference_error` renders a doubled `error:` prefix.** The
-  message bakes in `error: ` and `main.rs` re-prefixes. Phase 1's message joining a
+  message bakes in `error:` and `main.rs` re-prefixes. Phase 1's message joining a
   pre-existing, unowned set across the crate; a sweep, not a drive-by fix here.
