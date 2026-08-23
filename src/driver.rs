@@ -2099,6 +2099,45 @@ mod tests {
         );
     }
 
+    /// R18, the other half of the collision condition: "declares **or
+    /// re-exports**". `Resolver::rewrite`'s hub re-export fallthrough
+    /// (`resolve.rs:310-313`) mangles a qualified call to the *declaring*
+    /// module with no export gate of its own, so a module that merely passes
+    /// the name through wins the spelling exactly as a declaring one does.
+    #[test]
+    fn a_qualified_member_call_colliding_with_a_re_exported_word_is_rejected() {
+        let s = Sandbox::new("member-reexport-collision");
+        s.write(
+            "dep.sth",
+            "import: intrinsics * ;\n\
+             type: Blob n i64 ;\n\
+             : t1 ( &Blob -- ) drop ;\n\
+             export: t1 ;\n",
+        );
+        s.write(
+            "a.sth",
+            "import: intrinsics * ;\n\
+             import: \"dep.sth\" d | t1 | ;\n\
+             trait: A 'T t1 ( &'T -- ) ;\n\
+             export: A ;\nexport: t1 ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"a.sth\" a | A | ;\n\
+             : f ( &'T: A -- ) a::t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module)
+            .expect_err("the re-exported word wins the name, so the operand is rejected");
+        assert!(
+            err.contains("`t1` is not permitted on a reference in `f`"),
+            "expected `poly_op_on_variable_error`, got: {err}"
+        );
+    }
+
     /// R10, coexistence half: a bound-directed member call and an unrelated
     /// concrete word of the same name, both live in one program. Written
     /// cross-module because it is name *mangling*, not dispatch, that decides

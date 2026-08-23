@@ -796,13 +796,19 @@ fn poly_trait_member_call(
         },
         None => None,
     };
-    let matched: Vec<(TraitId, &TraitMember)> = sig
-        .bounds
-        .iter()
-        .filter_map(|(v, bound)| match bound {
-            Bound::User(tid) if *v == var => Some(*tid),
-            _ => None,
-        })
+    // `'T: A A` parses, so one trait can appear twice on one variable; without
+    // the dedupe it reads as its own ambiguity ("required by both `A` and
+    // `A`").
+    let mut tids: Vec<TraitId> = Vec::new();
+    for (v, bound) in &sig.bounds {
+        if let Bound::User(tid) = bound {
+            if *v == var && !tids.contains(tid) {
+                tids.push(*tid);
+            }
+        }
+    }
+    let matched: Vec<(TraitId, &TraitMember)> = tids
+        .into_iter()
         .filter(|tid| qualified_target.is_none_or(|t| traits[tid.index()].module == t))
         .filter_map(|tid| {
             traits[tid.index()]
@@ -5160,13 +5166,18 @@ mod tests {
         assert_eq!(recorded["shows"].len(), 1);
     }
 
-    /// R17/decision 10: `check_poly_body` and the call-site check used to run
-    /// interleaved in one source-order loop, so a monomorphic caller declared
-    /// *before* its polymorphic callee reached the bound loop while that
-    /// callee's obligations were still unrecorded. The pre-pass closes it: the
-    /// obligation is present whichever order the two are declared in.
+    /// R17/decision 10: the obligation is recorded in both source orders --
+    /// the bounded body is reached whether its monomorphic caller is declared
+    /// before or after it.
+    ///
+    /// This does *not* pin the hoist. The map is fully populated by the time
+    /// `check_module` returns either way, so relocating the pre-pass to after
+    /// the main word loop leaves this test green; that the obligation is
+    /// recorded *early enough* only becomes observable in Phase 3, once the
+    /// call-site bound loop consumes it. The hoist's own witness is
+    /// `check::tests::a_poly_body_diagnostic_precedes_a_monomorphic_one_declared_before_it`.
     #[test]
-    fn obligations_are_recorded_before_any_call_site_regardless_of_order() {
+    fn the_obligation_is_recorded_in_either_declaration_order() {
         let caller_first = format!(
             "{SHOW}: main ( -- ) 1 2 Point |p| &p shows p drop ;\n\
              : shows ( &'T: Show -- ) show ;\n"
@@ -5195,7 +5206,9 @@ mod tests {
     }
 
     /// The output really is the *member's*, not a pass-through: declaring the
-    /// wrong one is a stack-shape mismatch.
+    /// wrong one is a stack-shape mismatch. Asserted on the residual-stack
+    /// line, not just on the word name: with dispatch disabled the same
+    /// fixture fails as an unknown-word error that names `cloned` too.
     #[test]
     fn trait_member_output_is_the_declared_one() {
         let err = check_src(
@@ -5207,7 +5220,10 @@ mod tests {
              : main ( -- ) ;\n",
         )
         .unwrap_err();
-        assert!(err.contains("cloned"), "{err}");
+        assert!(
+            err.contains("cloned") && err.contains("body leaves `'T`"),
+            "{err}"
+        );
     }
 
     /// R7: an operand that does not match the member's declared signature is a
@@ -5277,6 +5293,20 @@ mod tests {
         );
     }
 
+    /// One trait named twice on one variable is not an ambiguity with itself:
+    /// `parse_capabilities` admits the repeat, and the two `Bound::User`
+    /// entries would otherwise reach the ambiguity arm naming `A` twice.
+    #[test]
+    fn a_repeated_bound_is_not_ambiguous_with_itself() {
+        let recorded = obligations_of(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             : f ( &'T: A A -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        assert_eq!(recorded["f"].len(), 1);
+        assert_eq!(recorded["f"][0].member, "t1");
+    }
+
     /// R9/R17 scope cut (P7.S3o): a polymorphic combinator's instantiation
     /// records are scratch, so there is no `CallInst` a resolved obligation
     /// could ride -- a user bound on its own type variable is rejected rather
@@ -5336,13 +5366,15 @@ mod tests {
     /// name -- `eq` does. Before `poly_trait_member_call` moved to the front
     /// of `poly_call_term`, this member was unreachable: the comparisons
     /// block (`matches!(name, "eq" | ...)`) intercepted it first and
-    /// demanded an `Ord` bound the trait never declared.
+    /// demanded an `Ord` bound the trait never declared. `main` carries R10's
+    /// coexistence half for this barrier: the builtin still wins a concrete
+    /// receiver.
     #[test]
     fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
         let recorded = obligations_of(
             "trait: Eq 'T eq ( 'T 'T -- i64 ) ;\n\
              : eqs ( 'T: Eq 'T -- i64 ) eq ;\n\
-             : main ( -- ) ;\n",
+             : main ( -- ) 1 2 eq drop ;\n",
         );
         assert_eq!(recorded["eqs"].len(), 1);
         assert_eq!(recorded["eqs"][0].member, "eq");

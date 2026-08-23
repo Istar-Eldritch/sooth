@@ -999,7 +999,7 @@ this slice.
 | R18's qualified-call collision is implemented as a resolution ("trait wins") instead of the ruled rejection, because an implementer trusts the round-1/round-2 wording over the round-3 correction; or the golden asserts an invented trait-specific message instead of the actual `poly_var_to_concrete_error`/`poly_op_on_variable_error` this design produces (found in round-3, diagnostic gap found in a fresh review round) | Medium | The dedicated golden R18 requires (a qualified member call where the qualifier's module also exports or re-exports an unrelated same-named concrete word) must assert the **rejection**, against the specific pre-existing diagnostic wording it actually triggers -- `rewrite` mutates the name before the checker ever runs, so "trait wins" is not implementable without a new `rewrite`-internal branch this slice does not add, and nothing downstream can emit a trait-aware message either. |
 | A bound on a poly *combinator*'s own type variable is implemented anyway (partially or via a workaround), rather than shipping as the ruled located rejection, because the R9/R17 scope cut is easy to miss while implementing the non-combinator path (found in a fresh review round; user-approved scope cut, tracked as P7.S3o) | Medium | A pinned golden asserting `'T: Trait` on a poly combinator's own type variable is rejected with a located diagnostic, not silently accepted or miscompiled -- combinator bodies never reach `module.instantiations`, so any "working" dispatch here would in fact be reading stale/wrong data. |
 | The cross-module trait pre-pass (R18) is omitted, or is added as part of the per-module `parse_bodies` loop instead of before it, silently reproducing `prepass_generic_typedefs`'s exact original problem for trait names (found in round-3 review) | Medium | A pinned golden with a bound in one module naming a trait declared and exported in a different module, parsed in the order the source lists them (module declaring the bound first) -- this is the specific shape that fails without a true whole-closure pre-pass. |
-| R17's hoist is implemented as an additional pre-pass call alongside the existing in-loop `check_poly_body` call, rather than replacing it, silently double-recording `builtin_overloads`/`slices` (found in round-3 review) | Medium | A pinned test asserting a poly body's generic-struct-minting side effect (a struct instantiated exactly once) is observed exactly once after this slice lands, not twice. |
+| R17's hoist is implemented as an additional pre-pass call alongside the existing in-loop `check_poly_body` call, rather than replacing it, silently double-recording the obligation list (found in round-3 review; the double-recording target corrected in the Phase 2 review) | Medium | The obligation list is the only non-idempotent record `check_poly_body` writes, and it is pinned: seven tests assert an exact obligation count per word (`trait_member_call_records_an_obligation`, `the_prepass_keys_every_noncombinator_poly_word`, the three `bound_dispatch_*`, `a_repeated_bound_is_not_ambiguous_with_itself`, `the_obligation_is_recorded_in_either_declaration_order`), and a supplementing in-loop call that appends to the same list fails all seven. **The originally-worded mitigation (a generic-struct mint "observed exactly once, not twice") is unsatisfiable and must not be written:** `builtin_overloads` is a `Span`-keyed map, `intern_slice_type` dedupes on `(element, mutable)`, and `GenericTypes::instantiate_struct` dedupes on `(decl idx, module, args)`, so a second `check_poly_body` call over the same body is a no-op on all three. Measured in the Phase 2 review by restoring the in-loop call and diffing the whole checked `Module`: byte-identical, and the full suite green. A struct-count assertion would be a placebo. |
 
 ## Delivery Plan
 
@@ -1175,6 +1175,14 @@ home -- round-1 wrongly rejected it based on a REPL-only fact, see R9/Codebase M
 
 **Entry Conditions:** Phase 2's obligation list exists and is threaded into the call-site
 checking context.
+
+**Carried in from the Phase 2 review:** Phase 2 keys the obligation list by `word.name`,
+which is unique only because `resolve::mangle` is per-module -- and it exempts
+`main`/`drop`/prelude words. Nothing in Phase 2 depends on that uniqueness (the map is
+written and read in one pass), but Phase 3 makes it load-bearing: a lookup that finds
+the wrong word's obligations resolves against the wrong `theta`. Re-key the map on
+something that cannot collide (the word's index in `words`), or assert uniqueness when
+inserting.
 
 **Exit Criteria:**
 
