@@ -2370,7 +2370,36 @@ fn poly_combinator_call(
                 .map(|t| PolySlot::new(PolyType::Concrete(*t))),
         );
         rules.push(match decl.row_out {
-            Some(rid) => ArmRule::Row(rid, decl.outs.clone(), poly_type_str(pin, csig)),
+            Some(rid) => {
+                // P7.S3j: the arms sharing an output row feed one join and one
+                // continuation, so the suffix declared above that row has to
+                // be the *same* suffix on each of them -- and stripping each
+                // parameter's own suffix off its own arm is what would
+                // otherwise hide a difference from the cross-arm rule below,
+                // leaving a slot the call's exit row has no account of.
+                // Rejected here, before any arm walks, for `ArmRule::Fixed`'s
+                // reason: no arm-against-sibling rule holds a lone arm.
+                //
+                // Keyed by row id like `shape_baseline` below, though no
+                // program can tell the keying from a bare scan today: a
+                // parameter's *input* row must already be declared where it is
+                // written, so it can only be the signature's top-level input
+                // row, and a differing output row can then only be the
+                // top-level output one -- every `Row` rule shares that id.
+                // `~[ ..b -- ..a i64 ]` is a parse error, not a second id.
+                let disagrees = rules.iter().any(|r| {
+                    matches!(r, ArmRule::Row(other, outs, _) if *other == rid && *outs != decl.outs)
+                });
+                if disagrees {
+                    return Err(poly_combinator_abstract_signature_error(
+                        ctx,
+                        span,
+                        name,
+                        &poly_type_str(pin, csig),
+                    ));
+                }
+                ArmRule::Row(rid, decl.outs.clone(), poly_type_str(pin, csig))
+            }
             None => {
                 let mut want = region;
                 want.extend(

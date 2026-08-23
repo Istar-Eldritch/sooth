@@ -585,6 +585,54 @@ fn a_suffix_shorter_than_the_declared_row_is_error() {
 }
 
 #[test]
+fn arms_sharing_a_row_with_different_declared_suffix_types_is_error() {
+    // P7.S3j (R2): a declared suffix is stripped off each arm's *own* exit,
+    // so two parameters sharing one output row must declare the same suffix
+    // or the strip hides their difference from the cross-arm rule -- here
+    // `i64` and `Bool` above `..b`, which the monomorphic path rejects
+    // outright ("the quotations passed to `pick` leave different stack
+    // shapes"). Without the pre-walk guard both arms strip cleanly against
+    // their own declaration, agree on `..b`, and the program reaches the
+    // backend: `qbe: invalid type for operand %v7 in phi %v9`, unlocated.
+    let err = build_err(
+        "divergent-suffix-type",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b Bool ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop False ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b Bool ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "sibling arms sharing an output row must declare one common suffix: {err}"
+    );
+}
+
+#[test]
+fn arms_sharing_a_row_with_different_declared_suffix_lengths_is_error() {
+    // P7.S3j (R2), the length twin of the test above, and the worse half:
+    // the two suffixes strip to the *same* region, so the cross-arm rule is
+    // satisfied and, without the pre-walk guard, this builds and runs with a
+    // slot the call's exit row has no account of -- a silent miscompile
+    // rather than the previous test's backend rejection. The monomorphic path
+    // rejects it (`leaves \`i64 i64\` ... this one leaves \`i64 i64 i64\``).
+    let err = build_err(
+        "divergent-suffix-length",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 2 ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b i64 i64 ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "sibling arms sharing an output row must declare one common suffix: {err}"
+    );
+}
+
+#[test]
 fn an_abstract_declared_suffix_is_still_the_cannot_ground_rejection() {
     // R3's stripping only fires once `poly_declared_arm` has already ground
     // every declared parameter type to `Concrete`; a suffix slot that is
