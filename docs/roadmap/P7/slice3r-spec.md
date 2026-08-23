@@ -61,13 +61,15 @@ Because `parse_worddef` (`src/parser.rs:1775`) mandates a `(` effect, the body-m
 path cannot reuse it unchanged: it has its own path that parses `: member` then goes
 straight to `| binders |` / body, with no `(`.
 
-Reuse `ground_member_type` (`src/check/declarations.rs:495`) from the parser by elevating it
-to the lowest common ancestor of `parser` and `check`. **Elevation is the plan, not the
-fallback**: `check` already depends on the parser's AST, so calling from `parser` into
-`check` would invert that dependency, and a duplicated parse-time twin would fork the exact
-grounding logic whose byte-identity R2's vacuous-guard argument depends on. If elevation
-turns out to be impossible, that is a spec-level problem to raise, not an implementer's
-choice. **Do not change its behaviour**; `check_impl_decls`' own call is untouched.
+Move `ground_member_type` (`src/check/declarations.rs:495`) to **`src/ast.rs`**, the lowest
+common ancestor of `parser` and `check`. This is a plain relocation, not a judgement call:
+every type the function touches already lives there (`PolyType`, `Type`, `ArrayDecl`
+`src/ast.rs:964`, `RefDecl` `:1020`), as do both interners it calls
+(`intern_ref_type` `src/ast.rs:1044`, `intern_array_type` `src/ast.rs:1141`). It has no
+remaining dependency on `check`. Calling from `parser` into `check` instead would invert the
+dependency, and a parse-time twin would fork the exact grounding logic whose byte-identity
+R2's vacuous-guard argument rests on. **Do not change its behaviour**; `check_impl_decls`'
+own call site is untouched apart from the import.
 
 ### R3 — Diagnostic rendering of a synthesized member name (brief decision 3, spike finding 5)
 
@@ -104,10 +106,10 @@ body.
 
 Two consequences worth stating. Sibling members are **not** rewritten (R7), so a sibling call
 resolves by ordinary lookup: it never reaches the sibling's synthesized word, and it is not
-necessarily an error either, since it can bind a same-named library word instead (see R7).
-And the
-rewrite is what makes R4's rejection necessary rather than cosmetic: for a name the checker
-dispatches *before* the environment, the rewrite would either be bypassed (recursion silently
+necessarily an error either, since it can bind a same-named library word instead (see R7). And
+this rewrite is why R4 rejects at the trait declaration rather than treating the name as
+cosmetic: for a name the checker dispatches *before* the environment, the rewrite would either
+be bypassed (recursion silently
 lost) or would displace a builtin.
 
 Golden (Phase 1): `impl_body_member_calls_itself_recursively` — a member body that calls its
@@ -115,7 +117,7 @@ own member name compiles, links, and runs to the expected value. Mutation check:
 rewrite disabled the program must fail to compile with an unknown-word error, so the golden
 cannot pass a no-op implementation.
 
-### R4 — Builtin-spelled member names are rejected (brief OQ6)
+### R4 — Builtin-spelled member names are rejected at the trait declaration (brief OQ6)
 
 A member name inside its own impl body resolves to that member before any module-scope
 lookup (brief decision 4, the recursion story). Brief decision 5 admits that shadowing **for
@@ -126,9 +128,10 @@ For a builtin-spelled member (`add`, `max`, `.`, `dup`, `swap`, …) that self-b
 shadow a **builtin** inside the body, not merely a user word. That is wider than decision 5
 signed up for, and general/builtin shadowing is explicitly refused project-wide.
 
-Ruling: **a body-form impl member may not be spelled as a name that resolves ahead of the
-word environment, nor as a name reserved against any word declaration.** Inside an `impl:`
-block, `: NAME ... ;` is a located parse error when `NAME` is any of:
+Ruling: **a trait may not declare a member spelled as a name that resolves ahead of the word
+environment, nor as a name reserved against any word declaration.** The rejection lives at
+the `trait:` declaration site (`parse_trait_decl`, `src/parser.rs:1977`), not at the impl
+body. A member name is a located parse error when it is any of:
 
 - a genuinely name-dispatched builtin: `is_builtin_word_name`
   (`src/check/declarations.rs:118`) **minus the six surface comparisons**. That is exactly
@@ -141,10 +144,27 @@ block, `: NAME ... ;` is a located parse error when `NAME` is any of:
   declaration: the `^`-led owning-cell names and the reserved ref names.
 
 The last two categories are exactly what `parse_worddef` already enforces for every ordinary
-word (`src/parser.rs:1775-1780`); a synthesized member word is a word, so it inherits that
-policy rather than inventing one. `parse_trait_decl` (`src/parser.rs:1977`) does **not** call
-`reject_reserved_name` on member names, so a trait can declare a member in any of these
-categories today; the rejection therefore has to live at the impl-body site.
+word (`src/parser.rs:1775-1780`); a member becomes a word, so it inherits that policy rather
+than inventing one. `parse_trait_decl` does **not** call `reject_reserved_name` on member
+names today, so all of these are currently accepted (probed).
+
+**Why the declaration site, not the impl body.** Under R1 the body form is the only way to
+implement a member, so a member in a rejected category is unimplementable; the error belongs
+where the unimplementable thing is written, not at the later site that discovers it. It also
+subsumes the cross-module case for free (a trait in module A cannot be declared at all, so no
+impl in module B can reach it), and `parse_trait_decl` (`src/parser.rs:2025`) is the single
+funnel: the only other `TraitDecl` constructions are the seeded `Copy`/`Ord` predicate traits
+(`src/ast.rs:1386,1393`), which carry `members: Vec::new()`.
+
+The two sites are **mutually exclusive, not defence in depth.** With the declaration site
+guarded, an impl-body check for the same condition is unreachable, and an unreachable check is
+a placebo this project treats as a defect. Implement exactly one, here.
+
+Known in-tree casualty, which the implementer will otherwise hit as a red test:
+`tests/phase7_slice3e.rs:183` declares `trait: Show 'T tag ( -- i64 ) ;` purely to provoke the
+P7.S3p zero-input-receiver error, and `tag` is a rejected name (`BUILTIN_WORDS`, the slice-10c
+discriminant primitive). Rename that fixture's member to a non-builtin name so it still
+asserts the receiver diagnostic it is about; do not reorder the checks to keep it passing.
 
 Why the predicate is not the `BUILTIN_WORDS` const: the const **does** contain `eq`, `lt`,
 `gt`, `lte`, `gte`, `ne` (`src/check/declarations.rs:94-99`), but the comment there records
@@ -318,13 +338,14 @@ A body naming a non-member (R6):
 error: `bogus` is not a member of trait `Show` at line L, col C
 ```
 
-A builtin-spelled member (R4). **Three messages, not one**, because R4's three categories are
-not the same mistake and two of them already have messages that this site inherits rather
-than replaces. Only the name-dispatched-builtin category gets new text:
+A builtin-spelled member (R4), emitted from `parse_trait_decl`, not from the impl body.
+**Three messages, not one**, because R4's three categories are not the same mistake and two of
+them already have messages that this site inherits rather than replaces. Only the
+name-dispatched-builtin category gets new text:
 
 ```text
-error: impl member `max` is spelled as a builtin word at line L, col C
-  note: a body-form impl member may not share a name with a builtin; inside its own body the name would shadow the builtin
+error: trait `Getter` declares a member named `max`, which is a builtin word (line L, col C)
+  note: a trait member becomes a word when implemented, and inside its own body the name would shadow the builtin
 ```
 
 An access-word member (`@`, `!`, `+!`) reuses the existing `shadowed_access_word_error`
@@ -345,15 +366,18 @@ Exit goldens:
   they linked — matches spike finding 2).
 - `impl_body_restated_signature_is_rejected`: the explicit-signature error above.
 - `impl_body_non_member_is_rejected`: the non-member error above.
-- `impl_body_builtin_member_is_rejected`: covers **each** rejected category from R4, since any
-  one of them alone would miss the others: an operator (`max`), a shuffle builtin (`dup`), a
-  `>`-prefixed conversion (`>u8`, which the `BUILTIN_WORDS` const does not list at all), an
-  access word (`@`), and a reserved caret name. Each category asserts **its own** message per
-  the three-message split above, not one shared string; asserting the builtin text for `@` or
-  a caret name would pass only against a wrong implementation. `parse_trait_decl`
-  (`src/parser.rs:1977`) accepts all five as member names, so each fixture is constructible
-  (probed against the built compiler).
-- `impl_body_comparison_member_is_accepted`: the negative-space companion, and the
+- `trait_member_named_after_a_builtin_is_rejected`: covers **each** rejected category from R4,
+  since any one of them alone would miss the others: an operator (`max`), a shuffle builtin
+  (`dup`), a `>`-prefixed conversion (`>u8`, which the `BUILTIN_WORDS` const does not list at
+  all), an access word (`@`), and a reserved caret name. Each category asserts **its own**
+  message per the three-message split above, not one shared string; asserting the builtin text
+  for `@` or a caret name would pass only against a wrong implementation. The fixture is a
+  bare `trait:` declaration with no `impl:` at all — that is the point of the site change, and
+  it is what distinguishes this from an impl-body check. All five are accepted as member names
+  today (probed against the built compiler), so each fixture is constructible.
+- Rename the member in `tests/phase7_slice3e.rs:183` (`trait: Show 'T tag ( -- i64 ) ;`) so it
+  keeps asserting the P7.S3p receiver diagnostic instead of newly hitting R4.
+- `trait_member_named_after_a_comparison_is_accepted`: the negative-space companion, and the
   regression guard for the P0 this ruling nearly shipped. A trait with an `eq` member and a
   body-form `: eq ... ;` must **compile**, since the six surface comparisons are library
   words rather than name-dispatched builtins. Without this, a later tightening of the
