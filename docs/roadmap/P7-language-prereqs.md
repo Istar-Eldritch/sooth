@@ -242,88 +242,37 @@ parameter (grounding it against that declared effect); `branch`/`tag` keep a loc
 rejection naming no follow-up slice yet
 (`docs/roadmap/P7/slice3d-spec.md`, `tests/phase7_slice3d.rs`).
 
-**P7.S3e — User-declarable trait bounds.** `Bound` (Phase 4 Slice 1) is a closed
-two-variant enum (`Copy`, `Ord`) satisfied by a hardcoded predicate
-(`is_copy`/`is_numeric`); the comment on it says "Kitten-style, with no trait objects,"
-and this slice is the intended next step it left open, not a new idea. Forced here,
-before P9.S1 and P9.S2, because both need it and retrofitting is the exact mistake P9.S1 already
-names for allocators: `Map['K 'V]` needs an equality (or ordering) bound on `'K` that
-today's `Ord` cannot express (`is_ord` is `is_numeric` and nothing else), so a map keyed
-on a string or a struct is unwritable with the bounds that exist, and a sortable `Vec['T]`
-hits the same wall. Adding a bound to a collection's signature after it ships changes
-every signature that mentions it — P9.S1's own words, about allocators, apply verbatim to
-bounds: "retrofitting it onto collections specified without it is the mistake Rust's
-`allocator_api` is still paying for, and this is the only moment it is cheap." S1 made
-the same argument about itself, for the same reason: writing the collections against the
-old mechanism and migrating afterwards is the waste. It is also a hard dependency of P8.S3
-(the API description), for the reason P8.S3 already gives about globals: a trait bound on
-an exported word's signature is part of that exported signature, so building the
-diffable API format before bounds exist means re-baselining every diff it has already
-emitted.
-Stays compile-time-only and out of trait *objects* on purpose: `'T: Show` is satisfied by
-an ordinary word (`show`) resolving for the concrete type at monomorphization, the same
-static overload resolution Phase 4 Slice 8 already performs, so a satisfied bound needs
-no runtime representation, no vtable, no erasure, no allocation. **The lowering/IR
-budget is not zero, however** — probe-verified against the built compiler (brief's
-"Resolved recon"): `builtin_overloads: HashMap<Span, String>` records one symbol per
-call site shared across every monomorphization, which cannot express a trait method
-needing a *different* concrete symbol per instantiation, so this slice needs either a
-per-instantiation-aware overload record or lowering re-resolving against `Subst` (the
-second option touches an explicitly stated "lowering never re-runs resolution"
-invariant and needs that invariant's owner to weigh in). The other real work is on the
-body side: `poly.rs`'s whitelist of what a bare type variable (or a *reference* to a
-bounded type variable — required members take `&'T`, per the dogfood) may be used for
-has to grow one case, calling a word required by a variable's declared bound.
-**Depends on S3a (landed), S3b (landed) — not on S3d or S3f.** `Map['K 'V]` is *not*
-writable: a generic struct whose field is an array of its own type variable (`keys ['K 8]`,
-or `slots [Ent['K 'V] 8]`) fails at the declaration with `` error: unknown type 'K ``, a
-third gap distinct from S3a's (which fixed generic-applied-to-own-var in poly *word*
-signatures, not in generic *struct fields*), now its own slice, **P7.S3n**, so `Map` stays
-deferred on it. The array form of
-`sort` was originally thought to need branching (hence `inline`, hence no monomorph symbol
-for a per-instantiation dispatch record to key on) — probe-verified false: S3b's eliminator
-branching already mints a monomorph symbol for a non-inline poly word. A later brief
-revision then attributed the remaining wall to S3d (calling the comparator as a *quotation*
-from inside the poly body) — **re-probed against current main with S3d and S3f both landed,
-and that attribution is wrong**: the dogfood's actual `sort` calls its comparator as an
-ordinary required trait member (a plain word call resolved per-instantiation), never a
-quotation value, so the real remaining wall is this slice's own new dispatch mechanism
-(a `Bound::User` branch in `poly_call_term`), independent of S3d/S3f. The quotation-parameter
-alternative was probed directly and remains fully blocked (an abstract quotation still
-mentioning its declaring word's own `'T` is out of scope for both S3d and S3f, which only
-ever reached the ground, no-free-variable case) — not needed for this consumer and not worth
-revisiting without one.
-**Design decisions settled in the brief** (`docs/roadmap/P7/slice3e-brief.md`):
-satisfaction is **nominal**, via an `impl: Trait for Type ;` block confined by an
-orphan rule to the trait's or the type's own defining module; `Copy`/`Ord` become
-pre-seeded **predicate-kind** entries in the trait table (satisfaction still runs
-`is_copy`/`is_ord`) so a colliding user `trait:` fails as an ordinary duplicate
-declaration; a member name colliding across one variable's bound set is a located
-rejection. The lowering mechanism is settled as a per-instantiation dispatch record
-(check mints, lowering only looks up, so "lowering never re-runs resolution" stands);
-probing confirmed the check-time and lowering-time monomorph symbols are byte-identical,
-so the key is sound — for a leaf word. Bound-satisfying members are restricted to leaf
-calls, and the restriction is a located rejection rather than a new mechanism: P7.S3k
-grounds a generic-to-generic call in general, but refuses one whose *callee* declares a
-user bound, since the callee's own recorded obligations resolve per ground θ and nothing
-composes them across the call.
-**A third trait kind is likely needed, beyond predicate and member kinds:** a
-*compiler-known, library-declared* trait, so intrinsic compiler logic can be written
-against a library implementation. `bool` is already exactly this shape — a library-declared
-enum the compiler knows by a reserved registry position (`src/ast.rs:779`) with its `.`
-overload injected (`:816`). A `Fallible`-style bound satisfied by `Result`/`Option` would
-let fallible slice indexing (deferred from S3c — S3c landed and deferred it, not locked it,
-so there is no retrofit risk yet), a failing allocator (P9.S2), and P9.S4's fallible push
-share one desugaring. **Test before designing it as a trait:** if there is only ever one
-carrier type and users cannot add their own, this wants to be a lang *type* like `bool`,
-not a lang trait — a trait earns its keep only with two or more carriers. Out of this
-slice's initial scope: no consumer within S3e forces it (the array `sort`/collision goldens
-need only `Copy`/`Ord`/hand-declared traits), so ship predicate- and member-kind traits
-first and revisit against `Fallible` once S3c's deferred accessor needs it.
+**P7.S3e — User-declarable trait bounds.** `[ done ]` `Bound` opens from the closed
+`Copy`/`Ord` pair to `Bound::User(TraitId)`. A trait (`trait: Name  member ( sig ) ... ;`)
+is satisfied **nominally**: an `impl: Trait for Type  member word ... ;` block maps each
+member to an existing, already-declared *concrete* word (impl checking is signature
+comparison, never body checking), confined by an orphan rule to the trait's or the
+type's own defining module. `Copy`/`Ord` are pre-seeded predicate-kind trait-table
+entries (satisfaction still runs `is_copy`/`is_ord`), so a colliding user `trait: Copy`
+fails as an ordinary duplicate declaration. A bare or ref-to-bare bounded variable's
+call to a member its bound set declares is resolved in `poly_call_term` ahead of the
+ordinary `env.get` lookup, mints a per-instantiation dispatch record
+(`CallInst::trait_calls`) keyed on `(callee, θ)`, and lowering only looks the symbol up —
+it never re-resolves, preserving the "lowering never re-runs resolution" invariant. Two
+matching bounds on one call is an ambiguity rejection unless a module-qualified name
+disambiguates (`o::t1`, the existing import-alias `::`, not a trait-name qualifier — same-
+module collisions have no escape hatch). A bound on a poly *combinator*'s own type
+variable is a located rejection, tracked separately as **P7.S3o** (a combinator's body
+calling a bounded poly word does resolve, and is tested). Consumer: the array form of
+`sort` (`'T: Copy Order`), Program 2 of `docs/roadmap/P7/slice3-dogfood.md`, runs at two
+distinct concrete instantiations. `Map['K 'V]` stays out of scope, blocked on a generic
+struct's array field being its own type variable (**P7.S3n**), not on anything this slice
+leaves undone.
+Out of scope, unchanged: trait objects/runtime dispatch, associated types, default
+bodies, blanket/supertraits, generic constants, multi-type-variable traits, a
+compiler-known third trait kind for a `Fallible`-style bound (`bool`'s own `.`-overload
+registry slot is the closest existing precedent, revisit once S3c's deferred fallible
+slice indexing needs it), and a trait-name-based qualifier for same-module collisions.
 **Exit:** a user can declare a bound naming required word signatures, a polymorphic word
 can declare `'T: TraitName` and call a bounded word inside its body, and
 monomorphization rejects an instantiation whose concrete type has no matching word with
-a located error naming the missing word and the trait.
+a located error naming the missing word and the trait
+(`docs/roadmap/P7/slice3e-spec.md`, `tests/phase7_slice3e.rs`).
 
 **P7.S3f — Runtime quotation values crossing the polymorphism boundary.** `[ done ]` Discovered
 while scoping S3d, not planned: a *non-inline* word cannot declare a `~[ ]`
@@ -659,11 +608,16 @@ an unrelated same-named concrete word happens to be reachable, or a confusing "u
 otherwise. S3e ships a declaration-time rejection for this shape (`check_trait_decls` rejects
 any member whose input list doesn't end in `'T`) rather than attempting real dispatch, since
 `receiver_ty_var`'s single-slot model has no mechanism for locating the bound variable
-anywhere else in the operand window. Not yet recon'd: whether the right fix is generalizing
-`receiver_ty_var` to scan the full declared input list against the callee's `PolySig` (cheap,
-but may collide with the three-barrier design's assumption that the receiver is always on
-top) or something that resolves the receiver's position per member at `impl:`-binding time and
-threads it through to the call site.
+anywhere else in the operand window. Probe-validated (`docs/roadmap/P7/slice3p-brief.md`):
+name-first lookup (find which of the body's bound traits declares a member of this name,
+then read that member's own declared input list for the receiver's position) dispatches
+correctly and does not collide with the existing ordering invariant (bound dispatch must
+front every name-based special case) -- the fix is internal to how the candidate variable is
+found, not a change to call order. One caught-and-fixed subtlety: candidate selection must
+match loosely on the underlying variable (ignoring ref-vs-bare shape), or a genuine
+operand-shape mismatch silently degrades to "unknown word" instead of the located mismatch
+diagnostic. The multi-position ambiguity case and the zero-input-member (`tag`) case remain
+unprobed and open for the spec to resolve.
 **Exit:** a trait member may declare its bound type variable at any input position, not only
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.
@@ -687,3 +641,25 @@ re-exports through a hub without issue, confirmed by direct probe, so this is sp
 intrinsic-gate mechanism, not types or ordinary words in general).
 **Exit:** a module that imports a hub re-exporting a gated intrinsic (e.g. `drop` through
 `core::prelude`) may call it bare, with no direct `import: intrinsics` line of its own.
+
+**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
+(`src/ast.rs:1417-1421`) is a reserved, member-less trait-table entry (`seed_predicate_traits`,
+`ast.rs:1528-1546`) satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded
+`ty.is_numeric()` check consulted at four discharge sites -- never the whole-program
+`(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches through. `'T: Ord`
+therefore categorically excludes a struct or enum, by construction, regardless of any `impl:`
+a user writes: `examples/traits.sth` worked around this by inventing a separate `Order`
+trait rather than using the language's own `Ord`. Not yet recon'd: whether the fix collapses
+`Bound::Ord` into `Bound::User(TraitId)` (seeding a real, member-bearing `trait: Ord` and
+replacing the numeric fast path with per-width `impl:` blocks or an implicit numeric
+short-circuit ahead of the registry lookup) or adds a second, separately-named nominal trait
+alongside the existing numeric-only `Ord` -- a real design choice with a real blast radius
+(four call sites, every diagnostic naming `Ord` by variant), not a mechanical migration.
+Depends on neither S3k (closed) nor S3p (a binary `cmp`-shaped member's receiver is already
+trailing); overlaps P8.S2's planned `lib/cmp.sth` migration, which should sequence after this
+slice if the satisfaction mechanism changes, or be written explicitly against whichever `Ord`
+shape this slice produces.
+**Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
+comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type,
+not only the numeric tower -- with no per-width boilerplate `impl:` required for the numeric
+tower itself, and every existing `'T: Copy Ord` numeric program unaffected.
