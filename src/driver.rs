@@ -1992,6 +1992,13 @@ mod tests {
     /// R12/decision 6: a member required by two bounds is callable when a
     /// module qualifier picks one of them. The qualifier is the ordinary
     /// import alias -- no trait-name namespace is added by this slice.
+    ///
+    /// The two traits' impls are deliberately distinguishable (different
+    /// implementing words), and `f` is instantiated from `main`, so this
+    /// witnesses *which* trait the qualifier actually selected -- not just
+    /// that `check::check` returned `Ok` (which an inverted module filter in
+    /// `poly_trait_member_call` would also satisfy, since neither trait's
+    /// `t1` here was otherwise distinguished).
     #[test]
     fn a_qualified_member_call_disambiguates_two_traits_in_different_modules() {
         let s = Sandbox::new("member-qualified");
@@ -2002,12 +2009,28 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"a.sth\" a | A | ;\n\
              import: \"b.sth\" b | B | ;\n\
+             type: Pt n i64 ;\n\
+             : pt-a ( &Pt -- ) drop ;\n\
+             : pt-b ( &Pt -- ) drop ;\n\
+             impl: a::A for Pt  t1 pt-a ;\n\
+             impl: b::B for Pt  t1 pt-b ;\n\
              : f ( &'T: A B -- ) a::t1 ;\n\
-             : main ( -- ) ;\n",
+             : main ( -- ) 1 Pt |p| &p f p drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
         check::check(&mut module).expect("the qualifier picks `A`'s `t1`");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f__m0")
+            .expect("the call site recorded an instantiation");
+        let resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
+        assert_eq!(
+            resolved,
+            vec!["pt-a__m0"],
+            "the qualified call must resolve to `A`'s impl, not `B`'s"
+        );
     }
 
     /// The unqualified call in the same program is the ambiguous-call

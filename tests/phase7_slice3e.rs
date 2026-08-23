@@ -3,11 +3,12 @@
 //!
 //! Driven through the real `sooth` binary, so a cross-module scenario
 //! exercises the whole-closure trait pre-pass in `driver::assemble_module`.
-//! Only *rejections* of bound consumption are golden here: a bound-directed
-//! call that check-passes has no lowering yet (the resolved symbol is Phase
-//! 3's `CallInst` field and Phase 4's plumbing), so its goldens land with
-//! that work. The accepting side is pinned at check level meanwhile, in
-//! `check::poly`'s and `driver`'s own tests.
+//! Phase 4's lowering *is* covered here (a bound-directed call that
+//! check-passes now runs and its output is asserted, e.g. the array-sort
+//! consumer below), alongside the declaration/export/import/collision
+//! rejections. The accepting side's finer-grained detail (obligation
+//! recording, per-instantiation symbol resolution) stays pinned at check
+//! level in `check::poly`'s and `driver`'s own tests.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -150,6 +151,66 @@ fn user_trait_named_copy_collides_with_the_reserved_entry() {
     );
     let err = build_error(&entry);
     assert!(err.contains("already the name of a trait"), "{err}");
+}
+
+/// A trait member whose last declared input is not `'T`/`&'T` (a
+/// sandwiched shape, e.g. an index/lookup member) is rejected at `trait:`
+/// declaration time -- bound dispatch (`receiver_ty_var`) only ever
+/// inspects the top-of-stack operand, so this shape would otherwise
+/// silently fall through to `env.get` at the call site instead of
+/// dispatching (P7.S3p).
+#[test]
+fn trait_member_with_a_sandwiched_receiver_is_rejected() {
+    let (_t, entry) = single_file(
+        "sandwiched-receiver",
+        "trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        "{err}"
+    );
+    assert!(err.contains("P7.S3p"), "{err}");
+}
+
+/// The same rejection applies to a zero-input member (a constructor shape
+/// with no receiver slot at all).
+#[test]
+fn trait_member_with_a_zero_input_receiver_is_rejected() {
+    let (_t, entry) = single_file(
+        "zero-input-receiver",
+        "trait: Show 'T tag ( -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        "{err}"
+    );
+}
+
+/// The counterexample a post-implementation review built to demonstrate
+/// silent mis-dispatch: before the P7.S3p rejection, this program built and
+/// printed `900` (the unrelated concrete `at` word) instead of dispatching
+/// to the trait member at all. It must now fail to compile.
+#[test]
+fn sandwiched_receiver_no_longer_silently_mis_dispatches() {
+    let (_t, entry) = single_file(
+        "sandwiched-mis-dispatch",
+        "type: Point x i64 y i64 ;\n\
+         trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
+         : point-at ( &Point i64 -- i64 ) drop &x @ ;\n\
+         impl: Show for Point  at point-at ;\n\
+         : at ( i64 -- i64 ) 900 add ;\n\
+         : uses ( &'T: Show -- i64 ) 0 at | v | drop v ;\n\
+         : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        "{err}"
+    );
 }
 
 /// A trait not exported cannot be named from another module -- the same

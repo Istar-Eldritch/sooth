@@ -5437,6 +5437,35 @@ mod tests {
         assert_eq!(obligations_of(&callee_first)["shows"].len(), 1);
     }
 
+    /// R17: the pre-pass hoist *replaces* the in-loop `check_poly_body` call
+    /// rather than supplementing it (documented at `src/check.rs`, above the
+    /// pre-pass loop). A bounded body that also mints a concrete generic
+    /// struct instantiation pins the claim directly: if the deleted in-loop
+    /// call were mistakenly restored alongside the pre-pass, the body would
+    /// be checked twice. (In practice `GenericTypes::instantiate_struct`
+    /// dedupes structurally by `(idx, module, args)` across flushes, so a
+    /// duplicate check of the *same* body is currently idempotent even under
+    /// that mutation -- confirmed by hand -- but this pins the doc's literal
+    /// "observed exactly once" claim and would catch a future change to that
+    /// dedup key.)
+    #[test]
+    fn a_generic_struct_referenced_by_a_bounded_body_mints_exactly_once() {
+        let src = format!(
+            "{SHOW}type: Box 'T val 'T ;\n\
+             : shows ( &'T: Show -- ) show 7 Box drop ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
+        );
+        let (module, _) = checked_like_a_build(&src).expect("the fixture checks");
+        // `Point` (SHOW's own preamble) plus exactly one `Box[i64]`
+        // instantiation -- two concrete structs, not three.
+        assert_eq!(
+            module.structs.len(),
+            2,
+            "Box[i64] should mint exactly once: {:#?}",
+            module.structs.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
     /// R7: the member's declared outputs are pushed, with the trait's own type
     /// variable rewritten to the bounded variable being dispatched on.
     #[test]

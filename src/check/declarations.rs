@@ -418,7 +418,43 @@ pub fn check_trait_decls(module: &Module) -> Result<(), String> {
             return Err(trait_name_collision_error(decl, kind));
         }
     }
+    for decl in &module.traits {
+        if decl.module == RESERVED_TRAIT_MODULE {
+            continue;
+        }
+        for member in &decl.members {
+            if !member_ends_in_trait_var(member) {
+                return Err(non_trailing_receiver_error(decl, member));
+            }
+        }
+    }
     Ok(())
+}
+
+/// P7.S3e (R7 follow-up, post-implementation review): bound dispatch
+/// (`receiver_ty_var`, `src/check/poly.rs`) only ever inspects the
+/// top-of-stack operand, so a member whose *last* declared input is not the
+/// trait's own type variable (bare `'T` or `&'T`) can never be reached
+/// through a bound -- it would otherwise silently fall through to ordinary
+/// `env.get` at the call site instead of dispatching, or fail with a
+/// misleading "unknown word" error. Rejected here, at `trait:` declaration
+/// time, rather than left to mis-dispatch at the call. Lifting this
+/// restriction (dispatching on the bound variable at any input position) is
+/// tracked as P7.S3p.
+fn member_ends_in_trait_var(member: &TraitMember) -> bool {
+    match member.sig.inputs.last() {
+        Some(PolyType::Var(0)) => true,
+        Some(PolyType::Ref(referent, _)) => matches!(referent.as_ref(), PolyType::Var(0)),
+        _ => false,
+    }
+}
+
+fn non_trailing_receiver_error(decl: &TraitDecl, member: &TraitMember) -> String {
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) does not take `'T` (or `&'T`) as its \
+         last input, so it cannot be dispatched through a bound this slice (tracked as P7.S3p)",
+        member.name, decl.name, decl.span.line, decl.span.col
+    )
 }
 
 fn duplicate_trait_error(decl: &TraitDecl, first: Span) -> String {
@@ -3745,12 +3781,18 @@ mod tests {
         // effect matches on both sides: `concrete_match`'s `w.poly.is_none()`
         // conjunct is the only thing rejecting it, and the sibling test above
         // (a `( &'T -- )` member) discriminates on slot count instead.
-        let err = impl_check_src(
-            "trait: Show 'T nothing ( -- ) ;\n\
+        //
+        // A zero-slot member is itself rejected by `check_trait_decls` as of
+        // P7.S3p (its input list doesn't end in `'T`), so this drives
+        // `check_impl_decls` directly, skipping `check_trait_decls`, to keep
+        // isolating the impl-site polymorphic-member rejection this test is
+        // actually about.
+        let tokens = lex("trait: Show 'T nothing ( -- ) ;\n\
              : p ( 'U: Copy &'U -- ) drop ;\n\
-             impl: Show for i64  nothing p ;",
-        )
-        .unwrap_err();
+             impl: Show for i64  nothing p ;")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        let err = check_impl_decls(&mut module).unwrap_err();
         assert!(err.contains("polymorphic"), "{err}");
         assert!(err.contains("`p`"), "{err}");
     }

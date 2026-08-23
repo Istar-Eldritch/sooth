@@ -87,10 +87,16 @@ Program 2 of `docs/roadmap/P7/slice3-dogfood.md`. `Map['K 'V]` out of scope (P7.
 ## What shipped
 
 **AST (`src/ast.rs`).** `TraitDecl { name, module, kind, span, members }` with
-`TraitMember { name, sig }`; `TraitKind::{Predicate(Bound), User}`, where `Copy`/`Ord`
-are `Predicate` entries seeded by `seed_predicate_traits()` carrying a sentinel module
-that collides with a user `trait: Copy` in any module. `ImplDecl { trait_id, target_ty,
-module, span, bindings }`. Flat `Module::traits`/`Module::impls`. `Bound::User(TraitId)`.
+`TraitMember { name, sig }`; `TraitKind::{Predicate(Bound), Nominal}` (post-implementation
+review correction: the shipped variant is `Nominal`, not `User` -- `User` is actually the
+`Bound` variant that names a trait, `Bound::User(TraitId)`, not a `TraitKind` of its own),
+where `Copy`/`Ord` are `Predicate` entries seeded by `seed_predicate_traits()` carrying a
+sentinel module that collides with a user `trait: Copy` in any module. `ImplDecl { trait_id,
+target_ty, module, span, bindings, resolved }` (post-implementation review correction: the
+shipped struct also carries `resolved: Vec<(String, usize)>`, each binding's implementing
+word as a `Module::words` index, filled by `check_impl_decls` pre-mangle -- load-bearing,
+since a bound-directed call site mints its symbol from this, not from re-resolving
+`bindings` by name). Flat `Module::traits`/`Module::impls`. `Bound::User(TraitId)`.
 `CallInst::trait_calls: HashMap<Span, String>`.
 
 **Parser (`src/parser.rs`).** `parse_trait_decl`, `parse_impl_decl` (bare pairs),
