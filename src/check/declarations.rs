@@ -557,7 +557,7 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
             let candidates: Vec<&WordDef> = module
                 .words
                 .iter()
-                .filter(|w| &w.name == word_name)
+                .filter(|w| w.module == impl_module && &w.name == word_name)
                 .collect();
             if candidates.is_empty() {
                 return Err(impl_unknown_word_error(
@@ -3651,6 +3651,29 @@ mod tests {
              impl: Show for i64  show int-show ;",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn check_impl_decls_does_not_bind_a_word_from_another_module() {
+        // The candidate lookup used to be an unscoped `w.name == word_name`
+        // scan over the whole-program `module.words`, so an `impl:` in one
+        // module could silently bind a member to an unexported word
+        // declared in a different module. Simulate that by parsing the
+        // matching word in-module, then relabeling it as foreign.
+        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;")
+        .unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module).unwrap();
+        module
+            .words
+            .iter_mut()
+            .find(|w| w.name == "int-show")
+            .unwrap()
+            .module = 1;
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(err.contains("unknown word `int-show`"), "{err}");
     }
 
     #[test]

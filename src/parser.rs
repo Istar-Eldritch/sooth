@@ -291,7 +291,8 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
 fn member_shape_is_supported(t: &PolyType) -> bool {
     match t {
         PolyType::Concrete(_) | PolyType::Var(_) => true,
-        PolyType::Array(elem, _) => member_shape_is_supported(elem),
+        PolyType::Array(elem, Len::Concrete(_)) => member_shape_is_supported(elem),
+        PolyType::Array(_, Len::Var(_)) => false,
         PolyType::Ref(referent, _) => member_shape_is_supported(referent),
         PolyType::Quotation(..) | PolyType::Generic { .. } | PolyType::QuotLit => false,
     }
@@ -676,10 +677,11 @@ pub(crate) fn prepass_trait_decls(
                 exports,
                 selective,
                 generics,
-                // A trait member's own signature never names another trait
-                // (there is no bound position inside a `trait:` body), so
-                // this pass never looks the registry-so-far up while parsing.
-                traits: &[],
+                // A trait member's own signature can still name a bound
+                // (`'T: Copy`) inside its `( ... )` effect, so this needs the
+                // reserved-predicate table even though it never looks up a
+                // user trait declared earlier in the registry-so-far.
+                traits: crate::ast::predicate_traits(),
             };
             let decl = parser.parse_trait_decl()?;
             i = parser.pos;
@@ -6624,6 +6626,41 @@ mod tests {
         let err = crate::check::check_trait_decls(&module).unwrap_err();
         assert!(
             err.contains("already the name of a trait"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_trait_ord_collides_with_the_reserved_predicate_entry() {
+        // Mirrors the `Copy` case above -- `Ord` is the other pre-seeded
+        // predicate entry and was previously untested.
+        let module = parse_src("trait: Ord 'T foo ( &'T -- ) ;").unwrap();
+        let err = crate::check::check_trait_decls(&module).unwrap_err();
+        assert!(
+            err.contains("already the name of a trait"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_trait_decl_member_with_a_length_variable_array_shape_is_error() {
+        // A length-variable array (`&['T 'N]`) is not a supported member
+        // shape: `ground_member_type` only grounds `Len::Concrete`, so this
+        // must be rejected here (it used to slip past `member_shape_is_supported`
+        // and panic in `ground_member_type` at `impl:` check time instead).
+        let err = parse_src("trait: Foo 'T bar ( &['T 'N] -- ) ;").unwrap_err();
+        assert!(err.contains("unsupported signature shape"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_member_bound_reports_bound_on_use_not_unknown_capability() {
+        // `prepass_trait_decls` used to build its inner `Parser` with an
+        // empty `traits` slice, so a bound (`'T: Copy`) inside a member
+        // signature saw no predicate-trait table and reported "unknown
+        // capability `Copy`" instead of the located bound-on-use error.
+        let err = parse_src("trait: Show 'T show ( 'T: Copy -- ) ;").unwrap_err();
+        assert!(
+            err.contains("must be written at its binding"),
             "unexpected message: {err}"
         );
     }
