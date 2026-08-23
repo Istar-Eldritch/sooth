@@ -1579,6 +1579,34 @@ mod tests {
         );
     }
 
+    /// P7.S3n (R3): `subst_polytype`'s owned-cell arm resolves `^'T` to the
+    /// *right* registry entry, not merely to some cell.
+    ///
+    /// Asserted here rather than through a golden program because the result
+    /// is unobservable at runtime: `^>` is rejected in a generic body, so a
+    /// monomorphized poly body never loads through the cell, and forcing this
+    /// lookup to index 0 leaves every program's output unchanged. Two entries,
+    /// and the *second* requested, so returning the first (or ignoring the
+    /// payload) fails.
+    #[test]
+    fn subst_polytype_owned_cell_resolves_the_payloads_own_registry_entry() {
+        use crate::ast::{intern_owned_cell_type, PolyType};
+        let mut cells = Vec::new();
+        intern_owned_cell_type(&mut cells, Type::I64);
+        let want = intern_owned_cell_type(&mut cells, Type::U32);
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::U32));
+        let got = subst_polytype(
+            &PolyType::OwnedCell(Box::new(PolyType::Var(0))),
+            &subst,
+            &[],
+            &cells,
+            &[],
+            &GenericTypes::default(),
+        );
+        assert_eq!(got, want, "`^'T` at `'T = u32` is the `^u32` entry");
+    }
+
     /// P7.S3e phase 4 (R9): `lower_src` is not enough for a bound-dispatch
     /// fixture -- `check` does not run the trait/impl pre-passes (`driver.rs`
     /// does, before it), so without them `ImplDecl::resolved` is empty and

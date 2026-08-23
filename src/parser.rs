@@ -6773,17 +6773,44 @@ mod tests {
     }
 
     #[test]
-    fn parse_generic_field_concrete_nested_generic_argument_is_ok() {
-        // R8's accept side: "fully concrete at *any* depth" is admitted. A
-        // shallow misreading of the rule ("`Concrete` or bare `Var`", read of
-        // the unfolded tree) would reject this. Deliberately asymmetric with
-        // the word-signature path, which rejects the same nesting for D5's
-        // unrelated depth reason.
-        assert!(parse_src(
-            "type: Ent 'K 'V k 'K v 'V ;\ntype: L 'T v 'T next ^L[Ent[i64 u32]] ;\n"
-        )
-        .is_ok());
-        assert!(parse_src("type: L 'T v 'T next ^L[[i64 2]] ;").is_ok());
+    fn parse_generic_field_compound_concrete_argument_beside_a_variable_is_ok() {
+        // R8's accept side: an argument that is compound but *fully concrete*
+        // at any depth is inert -- it carries no variable to grow -- so it is
+        // admitted; only a compound argument mentioning one of the header's
+        // own variables is refused.
+        //
+        // The argument list has to be *mixed* for this to witness anything.
+        // An all-concrete list (`^L[Ent[i64 u32]]`, `^L[[i64 2]]`) folds the
+        // whole application to `PolyType::Concrete` at parse time, leaving no
+        // `Generic` node in the tree for R8's walk to reach -- so such a
+        // fixture passes with the accept clause deleted outright, and is a
+        // placebo. Here the bare `'K` is what keeps the application unfolded,
+        // and the compound concrete argument beside it is what the clause has
+        // to admit.
+        assert!(
+            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K [i64 2]] ;\n").is_ok(),
+            "a concrete array argument beside a variable one is inert"
+        );
+        assert!(
+            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W2 'K e Ent['K Ent[i64 u32]] ;\n")
+                .is_ok(),
+            "a concrete *nested application* argument is inert too -- and is \
+             deliberately asymmetric with the word-signature path, which \
+             rejects the same nesting for D5's unrelated depth reason"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_concrete_referent_folds_to_a_concrete_ref() {
+        // R1: the `&`-arm's fold, mirroring `raw_to_poly_type`'s. A bare `&`
+        // sigil whose referent turns out concrete must intern a real
+        // `Type::Ref` rather than leaving a second representation of one
+        // shape (`Ref(Concrete(..))`) for substitution to trip over.
+        let module = parse_src("type: B 'T v 'T r & [i64 2] ;").unwrap();
+        match module.generic_structs[0].fields[1].1 {
+            PolyType::Concrete(Type::Ref(..)) => {}
+            ref other => panic!("expected a folded concrete reference, got {other:?}"),
+        }
     }
 
     #[test]
