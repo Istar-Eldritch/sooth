@@ -69,9 +69,8 @@ fn build_error(entry: &Path) -> String {
     String::from_utf8(build.stderr).expect("stderr should be utf8")
 }
 
-/// Phase 4: build and run, returning stdout. The binary is left in place
-/// (unlike `build_ok`) since the R15 golden also inspects its symbol table.
-fn build_and_run(entry: &Path) -> (PathBuf, String) {
+/// Phase 4: build, run, and return stdout.
+fn build_and_run(entry: &Path) -> String {
     let build = sooth_build(entry);
     assert!(
         build.status.success(),
@@ -83,7 +82,8 @@ fn build_and_run(entry: &Path) -> (PathBuf, String) {
         .output()
         .expect("the built binary should run");
     assert!(run.status.success(), "the built binary should exit 0");
-    (binary, String::from_utf8_lossy(&run.stdout).into_owned())
+    std::fs::remove_file(&binary).ok();
+    String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
 /// A scratch tree with a `sooth.pkg` naming this repo's own `lib/` as `core`,
@@ -461,20 +461,23 @@ fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
 /// generic word may not call another generic word unless the callee is
 /// concrete/builtin, P7.S3d; a combinator cannot carry a user bound at all,
 /// P7.S3o's scope cut), each comparison dispatching through the bound to its
-/// own concrete `impl:`'s `cmp`. Each instantiation gets its own mangled
-/// `IrFunc`, so `i64` and `Pair` sorting correctly at once proves the
-/// per-instantiation `CallInst::trait_calls` map -- not a single hardcoded
-/// resolution -- reached the lowered call site (R9).
+/// own concrete `impl:`'s `cmp`. `Pair`'s `impl:` orders *descending*, and
+/// deliberately so: `Pair` is a one-`i64` struct, so an ascending
+/// `cmp-pair` would be behaviourally identical to `cmp-i64` on either
+/// receiver's layout and this golden would pass even if both
+/// instantiations lowered the same resolution. Reversed, the two
+/// instantiations are distinguishable in the output, which is what proves
+/// the *per-instantiation* `CallInst::trait_calls` map reached the lowered
+/// call site (R9).
 #[test]
 fn the_array_sort_consumer_runs_at_two_concrete_instantiations() {
     let t = tree_with_core("sort");
     let entry = t.write(
         "main.sth",
-"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Ordering | Less | Equal | Greater ;\ntrait: Order 'T cmp ( &'T &'T -- Ordering ) ;\ntype: Pair n i64 ;\n: cmp-i64 ( &i64 &i64 -- Ordering )\n  | b | | a |\n  a @ b @ lt ~[ Less ] ~[\n    a @ b @ gt ~[ Greater ] ~[ Equal ] if\n  ] if ;\n: cmp-pair ( &Pair &Pair -- Ordering )\n  | b | | a |\n  a &n @ | an | b &n @ | bn |\n  an bn lt ~[ Less ] ~[\n    an bn gt ~[ Greater ] ~[ Equal ] if\n  ] if ;\nimpl: Order for i64  cmp cmp-i64 ;\nimpl: Order for Pair  cmp cmp-pair ;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Less ) drop a0 ]\n  ~[ ( Equal ) drop a0 ]\n  ~[ ( Greater )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Ordering? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Less ) drop a1 ]\n  ~[ ( Equal ) drop a1 ]\n  ~[ ( Greater )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Ordering? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Less ) drop a2 ]\n  ~[ ( Equal ) drop a2 ]\n  ~[ ( Greater )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Ordering? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
+"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Ordering | Less | Equal | Greater ;\ntrait: Order 'T cmp ( &'T &'T -- Ordering ) ;\ntype: Pair n i64 ;\n: cmp-i64 ( &i64 &i64 -- Ordering )\n  | b | | a |\n  a @ b @ lt ~[ Less ] ~[\n    a @ b @ gt ~[ Greater ] ~[ Equal ] if\n  ] if ;\n: cmp-pair ( &Pair &Pair -- Ordering )\n  | b | | a |\n  a &n @ | an | b &n @ | bn |\n  an bn lt ~[ Greater ] ~[\n    an bn gt ~[ Less ] ~[ Equal ] if\n  ] if ;\nimpl: Order for i64  cmp cmp-i64 ;\nimpl: Order for Pair  cmp cmp-pair ;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Less ) drop a0 ]\n  ~[ ( Equal ) drop a0 ]\n  ~[ ( Greater )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Ordering? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Less ) drop a1 ]\n  ~[ ( Equal ) drop a1 ]\n  ~[ ( Greater )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Ordering? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Less ) drop a2 ]\n  ~[ ( Equal ) drop a2 ]\n  ~[ ( Greater )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Ordering? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
     );
-    let (binary, stdout) = build_and_run(&entry);
-    std::fs::remove_file(&binary).ok();
-    assert_eq!(stdout, "1\n2\n3\n1\n2\n3\n");
+    let stdout = build_and_run(&entry);
+    assert_eq!(stdout, "1\n2\n3\n3\n2\n1\n");
 }
 
 /// Phase 4 (R15): an impl member whose *implementing word* is named after a
@@ -491,7 +494,6 @@ fn an_impl_member_named_after_a_builtin_operator_survives_pruning() {
         "r15-operator-name",
 "trait: Getter 'T show ( &'T -- i64 ) ;\ntype: Pt n i64 ;\n: max ( &Pt -- i64 ) &n @ ;\nimpl: Getter for Pt  show max ;\n: getval ( &'T: Getter -- i64 ) show ;\n: main ( -- ) 7 Pt |p| &p getval . p drop ;\n"
     );
-    let (binary, stdout) = build_and_run(&entry);
-    std::fs::remove_file(&binary).ok();
+    let stdout = build_and_run(&entry);
     assert_eq!(stdout, "7\n");
 }
