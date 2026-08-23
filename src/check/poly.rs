@@ -922,6 +922,24 @@ pub(super) fn poly_call_term(
         return Ok(stack);
     }
     let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
+    // Review finding 3 (P7.S3e round-4): bound-directed dispatch (R7/R10)
+    // must front every name-based special case below it, not just the
+    // ordinary `env` lookup decision 7 originally partitioned against --
+    // otherwise a trait member sharing a name with a builtin (`eq`, `len`,
+    // `call`, `dup`, ...) is unreachable through its bound, silently running
+    // the builtin or failing with a diagnostic that never mentions the
+    // trait. `poly_trait_member_call` is a narrow, self-gating probe: it
+    // returns `Ok(None)` unless the top of stack is one of this word's own
+    // bounded type variables *and* a `Bound::User` on it actually declares a
+    // member of this name, so moving it here changes nothing for the
+    // ordinary (non-trait) use of any of these names. It also must run
+    // ahead of the intrinsic-import gate immediately below: bound dispatch
+    // is whole-program and unscoped by import (decision 9), so a bound call
+    // to e.g. `eq` must not be rejected as an unimported comparison
+    // intrinsic before dispatch even gets a chance to try it.
+    if let Some(next) = poly_trait_member_call(name, span, &mut stack, sig, ctx, tctx)? {
+        return Ok(next);
+    }
     // P8 S2 (R2): the poly-body twin of `check_term`'s intrinsic-import gate.
     // A generic body dispatches the same builtins on its own path, so without
     // this an unimported `dup`/`add` would be gated in a monomorphic word and
@@ -1397,18 +1415,10 @@ pub(super) fn poly_call_term(
     )? {
         return Ok(next);
     }
-    // P7.S3e (R7/R10): a call whose receiver is one of this word's own bounded
-    // type variables and whose name a `Bound::User` trait declares as a member
-    // is an *obligation*, not an ordinary call: the signature is known here,
-    // the symbol is not. Ordered ahead of `env` because the three shapes it
-    // intercepts -- a bare or ref-to-bare variable at a concrete operand
-    // position -- were each an unconditional error below before this slice
-    // (`poly_var_to_concrete_error`, `poly_delegate_op`'s suffix truncation,
-    // `poly_op_on_variable_error`), so no concrete overload was ever reachable
-    // from them and the two dispatch paths partition rather than compete.
-    if let Some(next) = poly_trait_member_call(name, span, &mut stack, sig, ctx, tctx)? {
-        return Ok(next);
-    }
+    // P7.S3e (R7/R10): bound-directed dispatch now runs once, up front
+    // (review finding 3) -- it already fell through here `Ok(None)` when it
+    // didn't apply, so nothing changes for the ordinary `env` dispatch below
+    // by having tried it earlier.
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
         _ => candidates.iter().find(|o| {
@@ -5214,6 +5224,22 @@ mod tests {
         );
     }
 
+    /// `substitute_member_var` witness: every other fixture in this file puts
+    /// the bound variable at index 0, identical to the trait member's own
+    /// `'T` (also id 0 in its own `PolySig`), so an identity-stubbed rewrite
+    /// would pass them all. Here the bound variable (`'T`) is declared
+    /// *second*, at id 1, behind an unrelated `'U` at id 0 -- an identity
+    /// rewrite would leave `show`'s declared `&'T` input at var 0, which is
+    /// `'U` in this signature, not the bound `'T`, and the call would be
+    /// rejected as a mismatch it is not.
+    #[test]
+    fn trait_member_dispatch_rewrites_a_non_first_bound_variable() {
+        check_src(&format!(
+            "{SHOW}: shows ( 'U &'T: Show -- 'U ) show ;\n: main ( -- ) ;\n"
+        ))
+        .expect("show's receiver rewrites to 'T (id 1), not 'U (id 0)");
+    }
+
     /// R12/decision 5: composing two traits that happen to require the same
     /// member name is legal to *declare* -- the rejection belongs to the
     /// ambiguous call, not to a body that never makes one.
@@ -5302,6 +5328,24 @@ mod tests {
         );
         assert_eq!(recorded["sums"].len(), 1);
         assert_eq!(recorded["sums"][0].member, "add");
+    }
+
+    /// Review finding 3: `add` (the fixture above) never actually exercised
+    /// R10's claimed partition against the shuffles/comparisons/`call`
+    /// family, since none of the earlier dispatch-cascade arms match that
+    /// name -- `eq` does. Before `poly_trait_member_call` moved to the front
+    /// of `poly_call_term`, this member was unreachable: the comparisons
+    /// block (`matches!(name, "eq" | ...)`) intercepted it first and
+    /// demanded an `Ord` bound the trait never declared.
+    #[test]
+    fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
+        let recorded = obligations_of(
+            "trait: Eq 'T eq ( 'T 'T -- i64 ) ;\n\
+             : eqs ( 'T: Eq 'T -- i64 ) eq ;\n\
+             : main ( -- ) ;\n",
+        );
+        assert_eq!(recorded["eqs"].len(), 1);
+        assert_eq!(recorded["eqs"][0].member, "eq");
     }
 
     // A one-field struct with a `drop` overload: linear for the same reason any

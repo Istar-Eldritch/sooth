@@ -2749,7 +2749,7 @@ impl<'t> Parser<'t> {
                 out.push(bound);
                 continue;
             }
-            match self.bound_trait_id(&c, span)? {
+            match self.bound_trait_id(&c, span, out.is_empty())? {
                 Some(id) => {
                     self.pos += 1;
                     out.push(Bound::User(id));
@@ -2773,13 +2773,32 @@ impl<'t> Parser<'t> {
     /// already uses for a qualified generic type header. A bound is baked
     /// into `Bound::User(TraitId)` here, before `Resolver::rewrite` runs, so
     /// there is never a trait-name token left for `rewrite` to see.
-    fn bound_trait_id(&self, name: &str, span: Span) -> Result<Option<TraitId>, String> {
+    ///
+    /// `is_first` mirrors `parse_capabilities`' own `out.is_empty()` gate: an
+    /// unrecognized *qualifier* (review finding 2) is only a bound-parsing
+    /// error when nothing has been read yet -- past the first bound, this
+    /// word may just be the enclosing signature's next slot (`q::Point` as a
+    /// plain input type), and that slot's own parsing already reports an
+    /// unknown-type error for it. A qualifier that *is* recognized but whose
+    /// target module doesn't export the named trait (`not_exported_error`)
+    /// stays an unconditional error either way: `find_trait_in_module`
+    /// already matched a real trait under that name, so this can never be a
+    /// plain type slot in disguise.
+    fn bound_trait_id(
+        &self,
+        name: &str,
+        span: Span,
+        is_first: bool,
+    ) -> Result<Option<TraitId>, String> {
         let id = find_trait_in_module(self.traits, name, self.module, self.imports, self.selective);
         let Some((qualifier, base)) = name.split_once("::") else {
             return Ok(id);
         };
         if !self.imports.contains_key(qualifier) {
-            return Err(unbound_bound_qualifier_error(qualifier, base, span));
+            if is_first {
+                return Err(unbound_bound_qualifier_error(qualifier, base, span));
+            }
+            return Ok(None);
         }
         if id.is_some() && !self.type_is_exported(qualifier, base) {
             return Err(not_exported_error(base, qualifier, span));
@@ -7081,6 +7100,22 @@ mod tests {
         let err = parse_src(": f ( 'T: q::Show -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown module qualifier `q`"), "{err}");
         assert!(err.contains("`q::Show`"), "{err}");
+    }
+
+    #[test]
+    fn parse_capabilities_unbound_qualifier_after_a_bound_is_the_next_slot() {
+        // Review finding 2: an unresolvable qualifier used to raise the
+        // unbound-qualifier error unconditionally, even past the first bound
+        // -- so a legal signature whose next input happens to be a qualified
+        // type (unrelated to any bound) was misdiagnosed as a bad bound.
+        let err =
+            parse_src("trait: Copy2 'T dummy ( 'T -- ) ;\n: f ( 'T: Copy2 q::Point -- 'T ) drop ;")
+                .unwrap_err();
+        // `q::Point` is not itself resolvable to anything here (no `q`
+        // import exists), so this must fail as an ordinary unknown-type
+        // error on the next slot, never as an unbound-bound-qualifier one.
+        assert!(!err.contains("in bound"), "{err}");
+        assert!(err.contains("q::Point"), "{err}");
     }
 
     #[test]
