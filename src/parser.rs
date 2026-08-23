@@ -295,7 +295,14 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         PolyType::Array(elem, Len::Concrete(_)) => member_shape_is_supported(elem),
         PolyType::Array(_, Len::Var(_)) => false,
         PolyType::Ref(referent, _) => member_shape_is_supported(referent),
-        PolyType::Quotation(..) | PolyType::Generic { .. } | PolyType::QuotLit => false,
+        // P7.S3n (R3): the new owned-cell shape is deliberately *not* added
+        // to the supported set -- `ground_member_type` has no cell arm, so a
+        // `^'T` member would ground to nothing. A located rejection, not a
+        // wildcard fall-through.
+        PolyType::OwnedCell(_)
+        | PolyType::Quotation(..)
+        | PolyType::Generic { .. }
+        | PolyType::QuotLit => false,
     }
 }
 
@@ -1278,6 +1285,13 @@ pub fn parse_enum_typedef_line(
     Ok(variant_fields)
 }
 
+/// P7.S3n (R2): a generic `type:` header on its own -- the declared name, the
+/// bound type variables with their spans (for the phantom and duplicate
+/// diagnostics), and the `type:` keyword's span. Registered as a placeholder
+/// by `parse_generic_typedefs`' stage (a), then handed back to stage (b) to
+/// parse that header's own field/variant list against.
+type GenericHeader = (String, Vec<(String, Span)>, Span);
+
 /// A parsed polymorphic type before folding to `PolyType`: a concrete type, a
 /// type variable (already interned to its id), or an array whose element
 /// and/or count may itself be variable.
@@ -1299,6 +1313,11 @@ enum RawTy {
     /// `Concrete(Type::Ref)` when the referent folds fully concrete -- by
     /// `raw_to_poly_type`.
     Ref(Box<RawTy>, bool),
+    /// P7.S3n (R3): a `^`-led slot whose payload may itself be variable
+    /// (`^'T`, `^['T 4]`), folded to `PolyType::OwnedCell` -- or to
+    /// `Concrete(Type::OwnedCell)` when the payload folds fully concrete --
+    /// by `raw_to_poly_type`, exactly as `Ref` folds.
+    OwnedCell(Box<RawTy>),
     /// P7 slice 3a (R1): a generic type applied to poly slots
     /// (`Result['T 'E]`), folded to `PolyType::Generic` -- or to a plain
     /// `Concrete` by instantiating through `GenericTypes`, exactly as the
@@ -1717,6 +1736,137 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
 /// application (`Box[Box['T]]`), rejected at nesting depth > 1 -- v1
 /// represents this shape but never grounds it, and no consumer forces it
 /// (the brief's OQ4).
+/// P7.S3n (R1): the surface spelling of a generic `type:` field's type, in
+/// the declaration's own variable spellings. `PolyType` carries variable
+/// *indices*, so rendering one needs the header's `ty_vars` table; the
+/// checker's `poly_type_str` does the same job against a `PolySig` instead.
+fn generic_field_type_str(pty: &PolyType, ty_vars: &[(String, Span)]) -> String {
+    match pty {
+        PolyType::Concrete(t) => t.name().to_string(),
+        PolyType::Var(v) => ty_vars[*v as usize].0.clone(),
+        PolyType::Array(elem, len) => {
+            let n = match len {
+                Len::Concrete(n) => n.to_string(),
+                // N3: a struct header binds no length variable, so R1's
+                // array arm only ever builds `Len::Concrete`.
+                Len::Var(_) => unreachable!("a generic `type:` field has no length variable"),
+            };
+            format!("[{} {}]", generic_field_type_str(elem, ty_vars), n)
+        }
+        PolyType::Ref(referent, mutable) => format!(
+            "&{}{}",
+            if *mutable { "!" } else { "" },
+            generic_field_type_str(referent, ty_vars)
+        ),
+        PolyType::OwnedCell(payload) => {
+            format!("^{}", generic_field_type_str(payload, ty_vars))
+        }
+        PolyType::Generic { name, args, .. } => {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| generic_field_type_str(a, ty_vars))
+                .collect();
+            format!("{name}[{}]", args.join(" "))
+        }
+        // R7 rejects a variable-bearing quotation field at the parser, and a
+        // concrete one folds to `Concrete`, so neither reaches here.
+        PolyType::Quotation(..) | PolyType::QuotLit => {
+            unreachable!("a generic `type:` field is never a quotation shape")
+        }
+    }
+}
+
+/// P7.S3n (R7): a quotation-typed field naming the declaration's own type
+/// variable. Out of scope this slice, and a located rejection rather than an
+/// `unknown type` misreport or a panic downstream.
+fn quotation_field_ty_var_error(decl_name: &str, var: &str, span: Span) -> String {
+    format!(
+        "error: a quotation field naming `{decl_name}`'s type variable `{var}` at line {}, col {} is not supported\n  a quotation type in a generic `type:` field may only mention concrete types",
+        span.line, span.col
+    )
+}
+
+/// P7.S3n (R8): reject a **growing** generic application anywhere in a
+/// field's type tree -- an application one of whose arguments is *compound*
+/// and mentions one of the declaration's own type variables (`L[['T 2]]`,
+/// `L[^'T]`, `L[&'T]`). Each such hop would instantiate the header at a
+/// strictly larger argument than the last, forever.
+///
+/// The walk descends through every wrapper, not just a field whose own top
+/// level is an application: `^L[^'T]` is a cell over the application, and
+/// `[Ent['K 'V] 8]` is an array over one. An argument that is fully concrete
+/// at any depth (`L[[i64 2]]`) is inert -- it carries no variable to grow --
+/// and a bare `'T` argument passes through unchanged, so both are admitted.
+///
+/// Accepted over-rejection, stated so a future slice can lift it: a
+/// *non-recursive* wrapping application (`Outer 'T f Ent[['T 2] i64]`, where
+/// `Ent` never names `Outer` back) also terminates, and is rejected here
+/// anyway. Admitting it needs an SCC pass over a header-level dependency
+/// graph, which nothing currently wanted requires -- `Map`'s backing store is
+/// `[Ent['K 'V] N]`, an array *of* an application with bare-variable
+/// arguments.
+fn reject_growing_generic_argument(
+    decl_name: &str,
+    pty: &PolyType,
+    span: Span,
+) -> Result<(), String> {
+    match pty {
+        PolyType::Concrete(_) | PolyType::Var(_) => Ok(()),
+        PolyType::Array(elem, _) => reject_growing_generic_argument(decl_name, elem, span),
+        PolyType::Ref(referent, _) => reject_growing_generic_argument(decl_name, referent, span),
+        PolyType::OwnedCell(payload) => reject_growing_generic_argument(decl_name, payload, span),
+        PolyType::Generic { name, args, .. } => {
+            for arg in args {
+                if !matches!(arg, PolyType::Concrete(_) | PolyType::Var(_)) {
+                    return Err(growing_generic_self_reference_error(
+                        decl_name, name, arg, span,
+                    ));
+                }
+                reject_growing_generic_argument(decl_name, arg, span)?;
+            }
+            Ok(())
+        }
+        PolyType::Quotation(..) | PolyType::QuotLit => Ok(()),
+    }
+}
+
+/// P7.S3n (R8)'s diagnostic. Names the *restriction* explicitly rather than
+/// just saying "recursive": the type may well not be recursive at all (see
+/// `reject_growing_generic_argument`'s accepted over-rejection), and a user
+/// who hits this needs to know which shape is refused, not to be told
+/// something false about their declaration.
+fn growing_generic_self_reference_error(
+    decl_name: &str,
+    applied: &str,
+    arg: &PolyType,
+    span: Span,
+) -> String {
+    // The argument is compound and mentions a variable, so it renders
+    // through the shape names alone -- `ty_vars` spellings are not needed to
+    // say *which shape* is refused.
+    let shape = match arg {
+        PolyType::Array(..) => "an array of",
+        PolyType::Ref(..) => "a reference to",
+        PolyType::OwnedCell(_) => "an owning cell over",
+        PolyType::Generic { .. } => "another generic application over",
+        _ => "a compound type over",
+    };
+    format!(
+        "error: `{decl_name}` applies `{applied}` to {shape} one of its own type variables at line {}, col {}\n  a generic argument must be either fully concrete or a bare type variable: wrapping one grows the type at every instantiation, so it could never be laid out",
+        span.line, span.col
+    )
+}
+
+/// A `^`-led type with nothing following it to own. Shared by the concrete
+/// splitter (`split_owning_cell_word`) and P7.S3n's poly `^`-arm, so both
+/// paths report the same wording for the same defect.
+fn owned_cell_no_payload_error(word: &str, span: Span) -> String {
+    format!(
+        "error: owning-cell type `{word}` has no payload type at line {}, col {} (write `{word}T` for some type T)",
+        span.line, span.col
+    )
+}
+
 fn generic_nesting_depth_error(outer: &str, inner: &str, span: Span) -> String {
     format!(
         "error: `{outer}[...]` at line {}, col {} names `{inner}[...]` as a type argument, but a generic applied to another generic (nesting depth > 1) is not yet supported",
@@ -2536,6 +2686,13 @@ impl<'t> Parser<'t> {
                 {
                     return true;
                 }
+                // P7.S3n (R3): the identical miss for a glued `^'T`/`^^'T`,
+                // one `Word` token starting with `^` rather than `'`.
+                Token::Word(w)
+                    if w.starts_with('^') && w.trim_start_matches('^').starts_with('\'') =>
+                {
+                    return true;
+                }
                 _ => {}
             }
             i += 1;
@@ -2668,6 +2825,50 @@ impl<'t> Parser<'t> {
                     self.pos += 1;
                     let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
                     return Ok(RawTy::Ref(Box::new(inner), mutable));
+                }
+            }
+        }
+        // P7.S3n (R3): a `^`-led slot, intercepted before the
+        // `parse_type_expr` fallthrough for the same reason the `&` arm above
+        // is -- that path resolves a cell's payload concretely, so `^'T`
+        // would die on `'T` as an unknown type. Only the two poly-relevant
+        // shapes are taken here; a glued concrete payload (`^Foo`) still
+        // falls through to `parse_owning_cell_type_expr` and folds to
+        // `Concrete`.
+        if let Some((Token::Word(w), span)) = self.peek() {
+            let (w, span) = (w.clone(), *span);
+            if w.starts_with('^') {
+                let run_len = w.chars().take_while(|&c| c == '^').count();
+                let remainder = &w[run_len..];
+                // Bare run (`^ 'T`, `^['T 4]`): the payload is a genuine
+                // following token, so recurse into it as a poly slot.
+                let inner = if remainder.is_empty() {
+                    self.pos += 1;
+                    if matches!(self.peek(), Some((Token::Word(n), _)) if n == "--")
+                        || self.peek().is_none()
+                    {
+                        return Err(owned_cell_no_payload_error(&w, span));
+                    }
+                    Some(self.parse_poly_slot(builder, word_is_output)?)
+                } else if remainder.starts_with('\'') {
+                    // Glued run+variable (`^'T`, `^^'T: Copy`): the variable
+                    // is a substring, not a token, so it is interned from the
+                    // remainder rather than recursed on.
+                    let remainder = remainder.to_string();
+                    let remainder_span = Span {
+                        col: span.col + run_len as u32,
+                        ..span
+                    };
+                    self.pos += 1;
+                    Some(self.parse_poly_ty_var(builder, &remainder, remainder_span)?)
+                } else {
+                    None
+                };
+                if let Some(mut inner) = inner {
+                    for _ in 0..run_len {
+                        inner = RawTy::OwnedCell(Box::new(inner));
+                    }
+                    return Ok(inner);
                 }
             }
         }
@@ -3086,6 +3287,15 @@ impl<'t> Parser<'t> {
                     PolyType::Ref(Box::new(inner), mutable)
                 }
             }
+            // P7.S3n (R3): the cell twin of the `Ref` fold above.
+            RawTy::OwnedCell(inner) => {
+                let inner = self.raw_to_poly_type(*inner)?;
+                if let PolyType::Concrete(t) = inner {
+                    PolyType::Concrete(crate::ast::intern_owned_cell_type(self.owned_cells, t))
+                } else {
+                    PolyType::OwnedCell(Box::new(inner))
+                }
+            }
             // P7 slice 3a (R1): the fold mirrors the array fold exactly --
             // if every argument is `PolyType::Concrete`, instantiate through
             // `GenericTypes` (byte-for-byte the same as `resolve_type_or_
@@ -3257,10 +3467,7 @@ impl<'t> Parser<'t> {
             // separator, never a type name; without this check it falls
             // through to `resolve_type` and blames `--` as an unknown type.
             if matches!(self.peek(), Some((Token::Word(w), _)) if w == "--") {
-                return Err(format!(
-                    "error: owning-cell type `{word}` has no payload type at line {}, col {} (write `{word}T` for some type T)",
-                    span.line, span.col
-                ));
+                return Err(owned_cell_no_payload_error(word, span));
             }
             self.parse_type_expr()?
         } else {
@@ -3318,7 +3525,7 @@ impl<'t> Parser<'t> {
     fn parse_array_type_expr(&mut self) -> Result<Type, String> {
         self.expect(Token::LBracket)?;
         let element = self.parse_type_expr()?;
-        let count = self.parse_array_count(element)?;
+        let count = self.parse_array_count(element.name())?;
         self.expect(Token::RBracket)?;
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
@@ -3367,7 +3574,7 @@ impl<'t> Parser<'t> {
         let (name, name_span) = self.expect_word_any_spanned()?;
         let element = self.resolve_type_or_apply(&name, name_span)?;
         self.expect(Token::Semicolon)?;
-        let count = self.parse_array_count(element)?;
+        let count = self.parse_array_count(element.name())?;
         self.expect(Token::RBracket)?;
         let ty = crate::ast::intern_array_type(self.arrays, element, count);
         Ok(Term {
@@ -3629,7 +3836,7 @@ impl<'t> Parser<'t> {
     /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
     /// a located error naming the full `[T N]` spelling and the invalid
     /// length (X2).
-    fn parse_array_count(&mut self, element: Type) -> Result<u32, String> {
+    fn parse_array_count(&mut self, element: &str) -> Result<u32, String> {
         match self.peek().cloned() {
             Some((Token::Int(n), _span)) if (1..=i64::from(u32::MAX)).contains(&n) => {
                 self.pos += 1;
@@ -3638,15 +3845,15 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N <= {})",
-                    element.name(), n, n, span.line, span.col, u32::MAX
+                    "error: array type `[{element} {n}]` has invalid length {n} at line {}, col {} (`[T N]` requires N <= {})",
+                    span.line, span.col, u32::MAX
                 ))
             }
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N >= 1)",
-                    element.name(), n, n, span.line, span.col
+                    "error: array type `[{element} {n}]` has invalid length {n} at line {}, col {} (`[T N]` requires N >= 1)",
+                    span.line, span.col
                 ))
             }
             Some((tok, span)) => Err(format!(
@@ -3891,10 +4098,19 @@ impl<'t> Parser<'t> {
     /// dispatch disambiguates two instantiations by their constructor's
     /// *input* types alone, which a phantom variable (varying only the
     /// output) breaks.
-    fn parse_generic_typedef(&mut self) -> Result<crate::ast::GenericStructDecl, String> {
-        let type_span = self.expect_word("type:")?;
-        let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars(&name)?;
+    ///
+    /// P7.S3n (R2): split in half. `parse_generic_header` reads the header
+    /// alone, so `parse_generic_typedefs`' stage (a) can register a
+    /// placeholder for every header in the file before any *field list* is
+    /// parsed; this half parses one already-registered header's field list,
+    /// resuming at the token position stage (a) recorded. Splitting it is
+    /// what lets a field name its own declaration (`next ^L['T]`), or a
+    /// header declared further down.
+    fn parse_generic_typedef_fields(
+        &mut self,
+        name: &str,
+        ty_vars: &[(String, Span)],
+    ) -> Result<Vec<(String, PolyType)>, String> {
         let mut used = vec![false; ty_vars.len()];
         let mut fields = Vec::new();
         loop {
@@ -3905,36 +4121,32 @@ impl<'t> Parser<'t> {
                     reject_ty_var_field_name(&field_name, field_span)?;
                     if let Some((Token::Semicolon, span)) = self.peek() {
                         return Err(generic_odd_field_count_error(
-                            &name,
-                            &ty_vars,
+                            name,
+                            ty_vars,
                             &field_name,
                             ";",
                             *span,
                         ));
                     }
-                    let ty = self.parse_generic_field_type_expr(&name, &ty_vars, &mut used)?;
+                    let ty = self.parse_generic_field_type_expr(name, ty_vars, &mut used)?;
                     fields.push((field_name, ty));
                 }
                 None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
             }
         }
         self.expect(Token::Semicolon)?;
-        check_no_phantom_ty_var(&name, &ty_vars, &used)?;
-        Ok(crate::ast::GenericStructDecl {
-            name,
-            ty_var_names: ty_vars.into_iter().map(|(n, _)| n).collect(),
-            fields,
-            span: type_span,
-            module: self.module,
-        })
+        check_no_phantom_ty_var(name, ty_vars, &used)?;
+        Ok(fields)
     }
 
-    /// The enum twin of `parse_generic_typedef` (D1, M3, R1): `type: Name
-    /// ('var)+ '|'? variant ('|' variant)* ;`.
-    fn parse_generic_enum_typedef(&mut self) -> Result<crate::ast::GenericEnumDecl, String> {
-        let type_span = self.expect_word("type:")?;
-        let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars(&name)?;
+    /// The enum twin of `parse_generic_typedef_fields` (D1, M3, R1): `'|'?
+    /// variant ('|' variant)* ;`, resuming past an already-registered header.
+    fn parse_generic_enum_typedef_variants(
+        &mut self,
+        name: &str,
+        ty_vars: &[(String, Span)],
+        type_span: Span,
+    ) -> Result<Vec<crate::ast::GenericVariantDecl>, String> {
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
@@ -3944,7 +4156,7 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some((Token::Word(_), _)) => {
-                    variants.push(self.parse_generic_variant_fields(&name, &ty_vars, &mut used)?);
+                    variants.push(self.parse_generic_variant_fields(name, ty_vars, &mut used)?);
                     if matches!(self.peek(), Some((Token::Pipe, _))) {
                         self.pos += 1;
                     } else {
@@ -3967,14 +4179,19 @@ impl<'t> Parser<'t> {
                 type_span.line, type_span.col
             ));
         }
-        check_no_phantom_ty_var(&name, &ty_vars, &used)?;
-        Ok(crate::ast::GenericEnumDecl {
-            name,
-            ty_var_names: ty_vars.into_iter().map(|(n, _)| n).collect(),
-            variants,
-            span: type_span,
-            module: self.module,
-        })
+        check_no_phantom_ty_var(name, ty_vars, &used)?;
+        Ok(variants)
+    }
+
+    /// P7.S3n (R2): a generic `type:`'s header alone -- `type: Name ('var)+`
+    /// -- leaving the cursor at the first field/variant token. Everything a
+    /// placeholder registration needs (name, bound variables, span) is known
+    /// here; nothing a field list needs is missing.
+    fn parse_generic_header(&mut self) -> Result<GenericHeader, String> {
+        let type_span = self.expect_word("type:")?;
+        let (name, _) = self.expect_word_any_spanned()?;
+        let ty_vars = self.parse_generic_header_vars(&name)?;
+        Ok((name, ty_vars, type_span))
     }
 
     /// One generic variant's field list, mirroring `parse_variant_fields`
@@ -4055,8 +4272,26 @@ impl<'t> Parser<'t> {
     /// `check_duplicate_type_names` (round-2 review fix). The single-file and
     /// direct-`parse_bodies` paths have no whole-closure pre-pass and register
     /// here alone.
+    ///
+    /// P7.S3n (R2): two-stage. Stage (a) walks the whole token stream and
+    /// registers a *placeholder* for every header -- name and bound variables
+    /// only, empty field list -- recording where that header's field list
+    /// starts. Stage (b) revisits each recorded position and parses only the
+    /// field/variant list, filling the placeholder in place. A single loop
+    /// registering each header immediately before parsing its own fields is
+    /// not enough: a mutual cycle (`A` naming `B`, declared later, and `B`
+    /// naming `A`) needs *both* headers registered before *either* field list
+    /// is read.
+    ///
+    /// Diagnostic-ordering consequence, stated rather than hidden: a
+    /// header-level error (a duplicate `'`-var, a malformed header) now
+    /// surfaces during stage (a), so on a multi-error file it can precede an
+    /// earlier declaration's field-level error. Every error still fires.
     fn parse_generic_typedefs(&mut self) -> Result<(), String> {
         let already = (self.generics.structs.len(), self.generics.enums.len());
+        // (is_enum, registry index, the field/variant list's token position,
+        // the header itself)
+        let mut headers: Vec<(bool, usize, usize, GenericHeader)> = Vec::new();
         let mut i = 0;
         while i < self.tokens.len() {
             if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
@@ -4065,17 +4300,56 @@ impl<'t> Parser<'t> {
                 self.pos = i;
                 if self.generic_header_at_cursor_is_registered(already) {
                     self.skip_typedef();
-                } else if self.current_typedef_is_enum() {
-                    let decl = self.parse_generic_enum_typedef()?;
-                    self.generics.enums.push(decl);
                 } else {
-                    let decl = self.parse_generic_typedef()?;
-                    self.generics.structs.push(decl);
+                    let is_enum = self.current_typedef_is_enum();
+                    let (name, ty_vars, type_span) = self.parse_generic_header()?;
+                    let ty_var_names = ty_vars.iter().map(|(n, _)| n.clone()).collect();
+                    let idx = if is_enum {
+                        self.generics
+                            .push_enum_placeholder(crate::ast::GenericEnumDecl {
+                                name: name.clone(),
+                                ty_var_names,
+                                variants: Vec::new(),
+                                span: type_span,
+                                module: self.module,
+                            })
+                    } else {
+                        self.generics
+                            .push_struct_placeholder(crate::ast::GenericStructDecl {
+                                name: name.clone(),
+                                ty_var_names,
+                                fields: Vec::new(),
+                                span: type_span,
+                                module: self.module,
+                            })
+                    };
+                    headers.push((is_enum, idx, self.pos, (name, ty_vars, type_span)));
+                    self.skip_typedef();
                 }
                 i = self.pos;
                 continue;
             }
             i += 1;
+        }
+        for (is_enum, idx, pos, (name, ty_vars, type_span)) in headers {
+            self.pos = pos;
+            if is_enum {
+                let variants =
+                    self.parse_generic_enum_typedef_variants(&name, &ty_vars, type_span)?;
+                // Disjoint field borrows: `regs` reads the concrete
+                // registries, `generics` is a separate field.
+                let regs = NameRegistries {
+                    structs: self.structs,
+                    enums: self.enums,
+                    arrays: self.arrays,
+                    cells: self.owned_cells,
+                    refs: self.refs,
+                };
+                self.generics.fill_enum_variants(idx, variants, regs);
+            } else {
+                let fields = self.parse_generic_typedef_fields(&name, &ty_vars)?;
+                self.generics.fill_struct_fields(idx, fields);
+            }
         }
         self.pos = 0;
         Ok(())
@@ -4305,33 +4579,347 @@ impl<'t> Parser<'t> {
         Ok(ty_vars)
     }
 
-    /// A generic `type:` field's type (R1): either a bare reference to one of
-    /// the header's bound variables (marking it used, for the phantom check),
-    /// or an ordinary concrete field type resolved exactly as
-    /// `parse_field_type_expr` resolves a non-generic `type:`'s field. A bare
-    /// `'name` not found in `ty_vars` is a located error naming the
-    /// declaration -- distinct from an unbound variable in a word signature,
-    /// which errors through `PolyBuilder` instead.
+    /// A generic `type:` field's type (R1): a recursive descent over the
+    /// shapes that can wrap one of the header's bound variables -- array
+    /// (`['T 2]`, nested to any depth), reference (`&'T`, `&!'T`), owning
+    /// cell (`^'T`), and generic application (`Ent['K 'V]`) -- with every
+    /// leaf `'name` resolved against `ty_vars` and marked used (for the
+    /// phantom check, at whatever depth it sits). A fully-concrete field
+    /// falls through to `parse_field_type_expr`, which resolves it exactly
+    /// as a non-generic `type:`'s field. A `'name` not found in `ty_vars` is
+    /// a located error naming the declaration -- distinct from an unbound
+    /// variable in a word signature, which errors through `PolyBuilder`.
+    ///
+    /// P7.S3n (R8): the finished type tree is walked for a *growing*
+    /// self-reference before it is returned, so a declaration that could
+    /// only instantiate forever is rejected here rather than hanging later.
     fn parse_generic_field_type_expr(
         &mut self,
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
     ) -> Result<PolyType, String> {
+        let span = self.peek().map(|(_, s)| *s).unwrap_or_default();
+        let pty = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
+        reject_growing_generic_argument(decl_name, &pty, span)?;
+        Ok(pty)
+    }
+
+    /// R1's descent proper, split from `parse_generic_field_type_expr` so
+    /// R8's whole-tree growth check runs once per *field* rather than once
+    /// per node the recursion visits.
+    fn parse_generic_field_shape(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+    ) -> Result<PolyType, String> {
+        if let Some((Token::TildeLBracket, span)) = self.peek() {
+            return Err(tilde_quotation_position_error(*span));
+        }
+        // A `[` opens either a quotation effect or an array type, decided by
+        // `quotation_type_ahead`'s top-depth `--` scan exactly as
+        // `parse_field_type_expr` decides it -- without this the array
+        // production would misparse a legal concrete quotation field.
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            if self.quotation_type_ahead() {
+                // R7: a quotation field naming the declaration's own type
+                // variable is out of scope, rejected here rather than left
+                // to misreport `'T` as an unknown concrete type. A quotation
+                // field over concrete types alone still parses.
+                if let Some((var, span)) = self.quotation_effect_ty_var_ahead(ty_vars) {
+                    return Err(quotation_field_ty_var_error(decl_name, &var, span));
+                }
+                return Ok(PolyType::Concrete(self.parse_quotation_type_expr()?));
+            }
+            return self.parse_generic_field_array(decl_name, ty_vars, used);
+        }
         if let Some((Token::Word(w), span)) = self.peek() {
+            let (w, span) = (w.clone(), *span);
             if w.starts_with('\'') {
-                let (w, span) = (w.clone(), *span);
                 self.pos += 1;
-                let idx = ty_vars
-                    .iter()
-                    .position(|(n, _)| *n == w)
-                    .ok_or_else(|| unbound_generic_ty_var_error(&w, decl_name, span))?;
-                used[idx] = true;
-                return Ok(PolyType::Var(idx as u32));
+                return Ok(PolyType::Var(
+                    self.resolve_field_ty_var(decl_name, ty_vars, used, &w, span)?,
+                ));
+            }
+            // A `&`-led field: intercepted before the concrete fall-through,
+            // which resolves the referent concretely and would blame `'T` as
+            // an unknown type. The field does not *build* (a reference can
+            // never be stored, `check_no_stored_reference`), but it must fail
+            // with that rule's message rather than `unknown type`.
+            if w.starts_with('&') {
+                let sigil_len = if w.starts_with("&!") { 2 } else { 1 };
+                let mutable = sigil_len == 2;
+                let remainder = &w[sigil_len..];
+                if remainder.is_empty() {
+                    self.pos += 1;
+                    let inner = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
+                    return Ok(self.fold_field_ref(inner, mutable));
+                }
+                if remainder.starts_with('\'') {
+                    let remainder = remainder.to_string();
+                    let remainder_span = Span {
+                        col: span.col + sigil_len as u32,
+                        ..span
+                    };
+                    self.pos += 1;
+                    let id = self.resolve_field_ty_var(
+                        decl_name,
+                        ty_vars,
+                        used,
+                        &remainder,
+                        remainder_span,
+                    )?;
+                    return Ok(self.fold_field_ref(PolyType::Var(id), mutable));
+                }
+            }
+            // A `^`-led field. `^` is the only indirection a field can
+            // actually store (a reference never can, and an array does not
+            // break a recursion), so this arm carries the shapes the slice
+            // exists for: a bare run whose payload is the following token, a
+            // run glued to a variable, and a run glued to a generic header
+            // that is then applied (`^L['T]`, `^Ent['K 'V]`).
+            if w.starts_with('^') {
+                let run_len = w.chars().take_while(|&c| c == '^').count();
+                let remainder = w[run_len..].to_string();
+                let remainder_span = Span {
+                    col: span.col + run_len as u32,
+                    ..span
+                };
+                let inner = if remainder.is_empty() {
+                    self.pos += 1;
+                    if matches!(self.peek(), Some((Token::Semicolon | Token::Pipe, _)))
+                        || self.peek().is_none()
+                    {
+                        return Err(owned_cell_no_payload_error(&w, span));
+                    }
+                    Some(self.parse_generic_field_shape(decl_name, ty_vars, used)?)
+                } else if remainder.starts_with('\'') {
+                    self.pos += 1;
+                    let id = self.resolve_field_ty_var(
+                        decl_name,
+                        ty_vars,
+                        used,
+                        &remainder,
+                        remainder_span,
+                    )?;
+                    Some(PolyType::Var(id))
+                } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                    match self.poly_generic_header(&remainder, remainder_span)? {
+                        Some((is_enum, idx, module)) => {
+                            self.pos += 1;
+                            Some(self.parse_generic_field_application(
+                                decl_name,
+                                ty_vars,
+                                used,
+                                &remainder,
+                                is_enum,
+                                idx,
+                                module,
+                                remainder_span,
+                            )?)
+                        }
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(mut inner) = inner {
+                    for _ in 0..run_len {
+                        inner = self.fold_field_owned_cell(inner);
+                    }
+                    return Ok(inner);
+                }
+            }
+            // A generic type applied to field types (`Ent['K 'V]`), including
+            // this declaration's own header (`L['T]`, `L[i64]`) -- which
+            // stage (a) has already registered a placeholder for, so it
+            // resolves here rather than reporting an unknown type.
+            if !w.starts_with('^')
+                && !w.starts_with('&')
+                && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+            {
+                if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
+                    self.pos += 1;
+                    return self.parse_generic_field_application(
+                        decl_name, ty_vars, used, &w, is_enum, idx, module, span,
+                    );
+                }
             }
         }
         let ty = self.parse_field_type_expr()?;
         Ok(PolyType::Concrete(ty))
+    }
+
+    /// One `'name` leaf in a generic field type: its index in `ty_vars`,
+    /// marking it used. Shared by every arm of R1's descent, so a variable
+    /// nested three deep counts against the phantom check exactly as a bare
+    /// one does.
+    fn resolve_field_ty_var(
+        &self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+        name: &str,
+        span: Span,
+    ) -> Result<u32, String> {
+        let idx = ty_vars
+            .iter()
+            .position(|(n, _)| n == name)
+            .ok_or_else(|| unbound_generic_ty_var_error(name, decl_name, span))?;
+        used[idx] = true;
+        Ok(idx as u32)
+    }
+
+    /// A generic field's array type `[ elem count ]`, `elem` recursing so a
+    /// nested `[['T 2] 2]` falls out. N3: a struct header binds no *length*
+    /// variable, so the count is always a literal here -- `parse_array_count`
+    /// is reused verbatim and no `Len::Var` path exists.
+    fn parse_generic_field_array(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+    ) -> Result<PolyType, String> {
+        self.expect(Token::LBracket)?;
+        let elem = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
+        // `parse_array_count`'s linear-element rejection needs a concrete
+        // element type; over a variable element there is none to give it, so
+        // the count is read as a bare literal and the element's linearity is
+        // left to the checker, exactly as it is for a concrete array field.
+        let count = match &elem {
+            PolyType::Concrete(t) => self.parse_array_count(t.name())?,
+            elem => self.parse_array_count(&generic_field_type_str(elem, ty_vars))?,
+        };
+        self.expect(Token::RBracket)?;
+        Ok(match elem {
+            PolyType::Concrete(t) => {
+                PolyType::Concrete(crate::ast::intern_array_type(self.arrays, t, count))
+            }
+            elem => PolyType::Array(Box::new(elem), Len::Concrete(count)),
+        })
+    }
+
+    /// A generic field's generic-type application, each argument a field type
+    /// rather than a concrete type expression -- the field-parser twin of
+    /// `parse_type_arguments`, reusing only its arity check. A fully-concrete
+    /// argument list instantiates immediately and folds to `Concrete`,
+    /// byte-for-byte as `resolve_type_or_apply` already does; otherwise the
+    /// application stays `PolyType::Generic` for substitution to ground.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_generic_field_application(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+        name: &str,
+        is_enum: bool,
+        idx: usize,
+        module: u32,
+        span: Span,
+    ) -> Result<PolyType, String> {
+        let arity = if is_enum {
+            self.generics.enums[idx].ty_var_names.len()
+        } else {
+            self.generics.structs[idx].ty_var_names.len()
+        };
+        if !matches!(self.peek(), Some((Token::LBracket, _))) {
+            return Err(generic_arity_error(name, arity, 0, span));
+        }
+        self.pos += 1;
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated generic type application)"));
+                }
+                _ => args.push(self.parse_generic_field_shape(decl_name, ty_vars, used)?),
+            }
+        }
+        if args.len() != arity {
+            return Err(generic_arity_error(name, arity, args.len(), span));
+        }
+        let concrete: Option<Vec<Type>> = args
+            .iter()
+            .map(|a| match a {
+                PolyType::Concrete(t) => Some(*t),
+                _ => None,
+            })
+            .collect();
+        if let Some(concrete) = concrete {
+            let regs = NameRegistries {
+                structs: self.structs,
+                enums: self.enums,
+                arrays: self.arrays,
+                cells: self.owned_cells,
+                refs: self.refs,
+            };
+            return Ok(PolyType::Concrete(if is_enum {
+                self.generics.instantiate_enum(idx, &concrete, module, regs)
+            } else {
+                self.generics
+                    .instantiate_struct(idx, &concrete, module, regs)
+            }));
+        }
+        Ok(PolyType::Generic {
+            is_enum,
+            idx: idx as u32,
+            module,
+            args,
+            name: Box::leak(name.to_string().into_boxed_str()),
+        })
+    }
+
+    /// Fold a `&`-wrapped field type, interning a fully-concrete referent
+    /// into a real `Type::Ref` exactly as `raw_to_poly_type` folds one.
+    fn fold_field_ref(&mut self, inner: PolyType, mutable: bool) -> PolyType {
+        match inner {
+            PolyType::Concrete(t) => {
+                PolyType::Concrete(crate::ast::intern_ref_type(self.refs, t, mutable))
+            }
+            inner => PolyType::Ref(Box::new(inner), mutable),
+        }
+    }
+
+    /// The owning-cell twin of `fold_field_ref`.
+    fn fold_field_owned_cell(&mut self, inner: PolyType) -> PolyType {
+        match inner {
+            PolyType::Concrete(t) => {
+                PolyType::Concrete(crate::ast::intern_owned_cell_type(self.owned_cells, t))
+            }
+            inner => PolyType::OwnedCell(Box::new(inner)),
+        }
+    }
+
+    /// R7: the first of the declaration's own type variables mentioned inside
+    /// the quotation effect the cursor is positioned on, scanning to its
+    /// matching `]`. An *unbound* `'`-name is deliberately not reported here:
+    /// it falls through to the concrete parser's own unknown-type error,
+    /// which is the right message for a typo.
+    fn quotation_effect_ty_var_ahead(&self, ty_vars: &[(String, Span)]) -> Option<(String, Span)> {
+        let mut depth = 0i32;
+        let mut i = self.pos;
+        while let Some((tok, span)) = self.tokens.get(i) {
+            match tok {
+                Token::LBracket => depth += 1,
+                Token::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return None;
+                    }
+                }
+                Token::Word(w) if ty_vars.iter().any(|(n, _)| n == w) => {
+                    return Some((w.clone(), *span));
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
     }
 
     /// Parse a `| names |` binding at the current `|`. At least one name is
@@ -5961,6 +6549,307 @@ mod tests {
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
         assert_eq!(module.generic_structs.len(), 1);
+    }
+
+    // -- P7.S3n phase 1 (R1/R2/R3/R7/R8) -----------------------------------
+
+    /// The sole field type of the sole generic struct `parse_src` registered.
+    fn sole_generic_field(src: &str) -> PolyType {
+        let module = parse_src(src).unwrap_or_else(|e| panic!("{src} should parse: {e}"));
+        let decl = &module.generic_structs[0];
+        assert_eq!(decl.fields.len(), 1, "fixture declares one field");
+        decl.fields[0].1.clone()
+    }
+
+    #[test]
+    fn parse_generic_field_array_of_ty_var_builds_array_polytype() {
+        // R1: the shape the whole slice exists for. Before the recursive
+        // descent this was `error: unknown type 'T` -- the variable sits one
+        // token deeper than the old single-`if` production could look.
+        assert_eq!(
+            sole_generic_field("type: Pair 'T items ['T 2] ;"),
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2))
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_nested_array_of_ty_var_builds_nested_polytype() {
+        // R1: the descent recurses, so depth is unbounded rather than one.
+        assert_eq!(
+            sole_generic_field("type: NestArr 'T grid [['T 2] 3] ;"),
+            PolyType::Array(
+                Box::new(PolyType::Array(
+                    Box::new(PolyType::Var(0)),
+                    Len::Concrete(2)
+                )),
+                Len::Concrete(3)
+            )
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_owned_cell_of_ty_var_builds_cell_polytype() {
+        // R3: `^'T` arrives as one glued token, so the payload is a substring
+        // rather than a following token.
+        assert_eq!(
+            sole_generic_field("type: Cell 'T c ^'T ;"),
+            PolyType::OwnedCell(Box::new(PolyType::Var(0)))
+        );
+        // A `^`-run nests, one wrapper per caret.
+        assert_eq!(
+            sole_generic_field("type: Cell2 'T c ^^'T ;"),
+            PolyType::OwnedCell(Box::new(PolyType::OwnedCell(Box::new(PolyType::Var(0)))))
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_ref_of_ty_var_builds_ref_polytype() {
+        // R1/R10: `&'T` *parses* -- it does not build, but the rejection must
+        // come from the no-stored-reference rule rather than `unknown type`.
+        assert_eq!(
+            sole_generic_field("type: Box 'T r &'T ;"),
+            PolyType::Ref(Box::new(PolyType::Var(0)), false)
+        );
+        assert_eq!(
+            sole_generic_field("type: BoxM 'T r &!'T ;"),
+            PolyType::Ref(Box::new(PolyType::Var(0)), true)
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_generic_application_of_ty_vars_builds_generic_polytype() {
+        // R1: each argument is a field type in its own right, so the header's
+        // variables reach an application's argument list.
+        let module =
+            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: Wrap 'K 'V e Ent['K 'V] ;\n").unwrap();
+        let wrap = module
+            .generic_structs
+            .iter()
+            .find(|d| d.name == "Wrap")
+            .expect("Wrap is registered");
+        match &wrap.fields[0].1 {
+            PolyType::Generic { args, name, .. } => {
+                assert_eq!(*name, "Ent");
+                assert_eq!(args, &[PolyType::Var(0), PolyType::Var(1)]);
+            }
+            other => panic!("expected a Generic application, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_generic_field_generic_application_mixed_args_builds_mixed_polytype() {
+        // R1: a concrete argument beside a variable one. Asymmetric on
+        // purpose -- `Ent['K i64]` and `Ent[i64 'K]` are distinguishable,
+        // which a same-type pair would not be.
+        let module =
+            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K i64] ;\n").unwrap();
+        let w = module
+            .generic_structs
+            .iter()
+            .find(|d| d.name == "W")
+            .expect("W is registered");
+        match &w.fields[0].1 {
+            PolyType::Generic { args, .. } => {
+                assert_eq!(args, &[PolyType::Var(0), PolyType::Concrete(Type::I64)]);
+            }
+            other => panic!("expected a Generic application, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_generic_field_unbound_ty_var_inside_array_is_error() {
+        // R1: the leaf error is the field parser's own, naming the
+        // declaration -- not `PolyBuilder`'s word-signature wording, and not
+        // a bare `unknown type`.
+        let err = parse_src("type: Box 'T items ['E 2] ;").unwrap_err();
+        assert!(err.contains("'E"), "unexpected message: {err}");
+        assert!(err.contains("Box"), "unexpected message: {err}");
+        assert!(err.contains("line 1, col 21"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_field_ty_var_used_only_inside_array_is_not_phantom() {
+        // N4: `check_no_phantom_ty_var` reads the `used` bitmap alone, so the
+        // descent has to set it at the leaf, at whatever depth. Without that
+        // this fixture is rejected as a phantom parameter.
+        assert!(parse_src("type: Pair 'T items ['T 2] ;").is_ok());
+        assert!(parse_src("type: Cell 'T c ^'T ;").is_ok());
+        assert!(parse_src("type: Deep 'T g [[^'T 2] 3] ;").is_ok());
+    }
+
+    #[test]
+    fn parse_generic_enum_variant_named_field_array_of_ty_var_builds_array_polytype() {
+        // R1: the enum twin shares the field parser, but routes through
+        // `parse_generic_variant_fields` rather than the struct field loop.
+        let module = parse_src("type: Buf 'T | Some xs ['T 2] | None ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(
+            decl.variants[0].fields[0].1,
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2))
+        );
+    }
+
+    #[test]
+    fn parse_generic_typedef_concrete_self_reference_resolves() {
+        // R2: a header must be registered *before* its own field list is
+        // parsed. Nothing here needs R1's descent -- the argument is fully
+        // concrete -- which is why this is R2's own witness. Before the
+        // two-stage split this was `error: unknown type 'L'`.
+        let module = parse_src("type: L 'T v 'T next ^L[i64] ;").unwrap();
+        let decl = &module.generic_structs[0];
+        match decl.fields[1].1 {
+            PolyType::Concrete(Type::OwnedCell(..)) => {}
+            ref other => panic!("expected a concrete `^L[i64]`, got {other:?}"),
+        }
+        // R2's second half: the instantiation was minted while `L`'s own
+        // header was still a placeholder, so its fields were owed and paid
+        // off on fill. A fieldless `L[i64]` here is the silent-wrong-mint
+        // failure the pending machinery exists to prevent.
+        let inst = module
+            .structs
+            .iter()
+            .find(|d| d.name == "L[i64]")
+            .expect("the concrete self-reference minted `L[i64]`");
+        assert_eq!(
+            inst.fields.len(),
+            2,
+            "the deferred fill must have paid off `L[i64]`'s field list"
+        );
+    }
+
+    #[test]
+    fn parse_generic_typedef_duplicate_header_still_rejected_after_self_registration() {
+        // R2 hazard: stage (a) pushes a placeholder for the first `Box`, and
+        // `generic_header_at_cursor_is_registered`'s snapshot must not let
+        // that push make the *second* `Box` look pre-registered -- which
+        // would swallow it before `check_duplicate_type_names` ever saw it.
+        let module = parse_src("type: Box 'T v 'T ; type: Box 'T w 'T ;").unwrap();
+        assert_eq!(
+            module.generic_structs.len(),
+            2,
+            "both headers must reach the registry for the duplicate check"
+        );
+    }
+
+    #[test]
+    fn parse_generic_typedef_mutual_self_reference_resolves_both_directions() {
+        // R2's load-bearing case for the *two-stage* split specifically: `A`
+        // names `B`, declared after it. A single loop registering each header
+        // immediately before parsing its own fields still fails here, because
+        // `B` has no placeholder yet when `A`'s field list is read.
+        let module =
+            parse_src("type: A 'T v 'T next ^B['T] ;\ntype: B 'T w 'T back ^A['T] ;\n").unwrap();
+        let a = module
+            .generic_structs
+            .iter()
+            .find(|d| d.name == "A")
+            .expect("A is registered");
+        match &a.fields[1].1 {
+            PolyType::OwnedCell(inner) => match inner.as_ref() {
+                PolyType::Generic { name, .. } => assert_eq!(*name, "B"),
+                other => panic!("expected `^B['T]`, got a cell over {other:?}"),
+            },
+            other => panic!("expected `^B['T]`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_generic_field_growing_generic_argument_is_error() {
+        // R8: each hop wraps `'T` in another cell, so `L` would need
+        // instantiating at a strictly larger argument forever. Rejected
+        // structurally, at the field, with no instantiation involved.
+        let err = parse_src("type: L 'T v 'T next ^L[^'T] ;").unwrap_err();
+        assert!(err.contains("owning cell over"), "unexpected: {err}");
+        assert!(
+            err.contains("fully concrete or a bare type variable"),
+            "the message must name the restriction, not just say `recursive`: {err}"
+        );
+        assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        // The array and reference wrappers are the same rule.
+        let err = parse_src("type: L 'T v 'T next ^L[['T 2]] ;").unwrap_err();
+        assert!(err.contains("array of"), "unexpected: {err}");
+        let err = parse_src("type: L 'T v 'T next ^L[&'T] ;").unwrap_err();
+        assert!(err.contains("reference to"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn parse_generic_field_concrete_nested_generic_argument_is_ok() {
+        // R8's accept side: "fully concrete at *any* depth" is admitted. A
+        // shallow misreading of the rule ("`Concrete` or bare `Var`", read of
+        // the unfolded tree) would reject this. Deliberately asymmetric with
+        // the word-signature path, which rejects the same nesting for D5's
+        // unrelated depth reason.
+        assert!(parse_src(
+            "type: Ent 'K 'V k 'K v 'V ;\ntype: L 'T v 'T next ^L[Ent[i64 u32]] ;\n"
+        )
+        .is_ok());
+        assert!(parse_src("type: L 'T v 'T next ^L[[i64 2]] ;").is_ok());
+    }
+
+    #[test]
+    fn parse_generic_field_variable_quotation_is_error() {
+        // R7: out of scope, and a located rejection rather than `'T` being
+        // misreported as an unknown concrete type.
+        let err = parse_src("type: QF 'T f [ 'T -- 'T ] ;").unwrap_err();
+        assert!(err.contains("quotation field"), "unexpected: {err}");
+        assert!(err.contains("'T"), "unexpected: {err}");
+        assert!(err.contains("QF"), "unexpected: {err}");
+        assert!(err.contains("line 1, col 17"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_field_concrete_quotation_still_parses() {
+        // R7/N4: the `[`-arm has to replicate `quotation_type_ahead`'s
+        // top-depth `--` scan, or the array production misparses a legal
+        // concrete quotation field. `Q` needs a variable-bearing field of its
+        // own too, else the phantom check rejects the fixture for an
+        // unrelated reason.
+        let module = parse_src("type: Q 'T v 'T f [ i64 -- i64 ] ;").unwrap();
+        let decl = &module.generic_structs[0];
+        match decl.fields[1].1 {
+            PolyType::Concrete(Type::Quotation(_)) => {}
+            ref other => panic!("expected a concrete quotation field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_poly_slot_owned_cell_of_ty_var_builds_cell_rawty() {
+        // R3, word-signature side: `parse_poly_slot`'s new `^`-arm. `^` is
+        // not a lexer delimiter, so this also depends on
+        // `effect_has_variable` recognising a glued `^'T` -- without that the
+        // whole effect takes the concrete path and dies on `'T`.
+        let module = parse_src(": idc ( ^'T -- ^'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("`idc` is polymorphic");
+        assert_eq!(
+            sig.inputs[0],
+            PolyType::OwnedCell(Box::new(PolyType::Var(0)))
+        );
+        assert_eq!(
+            sig.outputs[0],
+            PolyType::OwnedCell(Box::new(PolyType::Var(0)))
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_owned_cell_of_concrete_payload_folds_to_concrete() {
+        // R3: the fold mirrors `Ref`'s -- a fully-concrete payload interns a
+        // real `Type::OwnedCell` rather than staying `PolyType::OwnedCell`,
+        // so nothing downstream has two representations of one shape.
+        let module = parse_src(": f ( ^i64 'T -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("`f` is polymorphic");
+        match sig.inputs[0] {
+            PolyType::Concrete(Type::OwnedCell(..)) => {}
+            ref other => panic!("expected a folded concrete cell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_poly_slot_owned_cell_without_payload_is_error() {
+        // R3/N1: a bare `^` run with the stack-effect separator behind it has
+        // no payload to recurse into; located, not a blame on `--` as an
+        // unknown type.
+        let err = parse_src(": f ( ^ -- 'T ) ;").unwrap_err();
+        assert!(err.contains("has no payload type"), "unexpected: {err}");
     }
 
     /// The registered struct named `name`, with its `StructId`.

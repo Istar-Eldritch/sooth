@@ -492,6 +492,7 @@ pub(super) fn inline_combinator(
             span,
             ctx,
             arrays,
+            cells,
             refs,
         )?
     } else {
@@ -617,7 +618,7 @@ fn check_poly_combinator_args(
             continue;
         }
         unify_poly_input(
-            sig, pin, found.ty, name, span, ctx, arrays, refs, &mut subst,
+            sig, pin, found.ty, name, span, ctx, arrays, cells, refs, &mut subst,
         )?;
     }
     for (i, pin) in deferred_literals {
@@ -632,7 +633,9 @@ fn check_poly_combinator_args(
             Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
             _ => stack[base + i].ty,
         };
-        unify_poly_input(sig, pin, ty, name, span, ctx, arrays, refs, &mut subst)?;
+        unify_poly_input(
+            sig, pin, ty, name, span, ctx, arrays, cells, refs, &mut subst,
+        )?;
     }
     // Pass 2: ground each quotation parameter and run the directional + D3
     // check on its caller literal.
@@ -651,7 +654,7 @@ fn check_poly_combinator_args(
             continue;
         }
         let found = stack[base + i];
-        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays, refs)?;
+        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays, cells, refs)?;
         // Slice 10a (R1): `apply_subst` grounds an ordinary quotation parameter
         // to `Type::Quotation` and (phase 2) a `~` parameter to
         // `Type::InlineQuotation`; the accessor accepts both, so this let-else

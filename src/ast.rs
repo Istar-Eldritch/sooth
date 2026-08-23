@@ -559,6 +559,26 @@ pub struct GenericTypes {
     struct_resolved: Vec<Type>,
     /// The enum twin of `struct_resolved`.
     enum_resolved: Vec<Type>,
+    /// P7.S3n (R2): the `structs` indices that are still placeholders --
+    /// registered by `parse_generic_typedefs`' stage (a) with an empty field
+    /// list, so a self-reference inside a header's own field list has a
+    /// header to find, but not yet filled by stage (b). A set of indices
+    /// rather than a `bool` parallel to `structs`: a decl pushed with its
+    /// fields already in place is simply absent, so nothing has to be kept
+    /// in lockstep and a direct `structs.push` cannot desynchronise it.
+    /// An instantiation minted against a pending header cannot compute its
+    /// fields yet, so it lands on `deferred_structs` instead.
+    struct_pending: Vec<usize>,
+    /// The enum twin of `struct_pending`.
+    enum_pending: Vec<usize>,
+    /// P7.S3n (R2): `(inst_structs index, structs index, concrete
+    /// arguments)` for every instantiation minted against a still-pending
+    /// header. The `StructId` is already handed out and never changes; only
+    /// the field list is owed, and `fill_struct_fields` pays it once that
+    /// header's real fields are known.
+    deferred_structs: Vec<(usize, usize, Vec<Type>)>,
+    /// The enum twin of `deferred_structs`.
+    deferred_enums: Vec<(usize, usize, Vec<Type>)>,
     struct_base: usize,
     enum_base: usize,
 }
@@ -677,14 +697,21 @@ pub fn generic_surface_name(name: &str) -> &str {
 }
 
 /// Substitute a generic declaration's field type against a use site's
-/// concrete type arguments. `parse_generic_field_type_expr` admits exactly
-/// two field forms -- a bare bound variable and a fully concrete type (D1
-/// rules out an open application) -- so those are the two shapes here.
+/// concrete type arguments.
+///
+/// P7.S3n phase 1: `parse_generic_field_type_expr` now also admits array /
+/// reference / owned-cell / generic-application fields over the header's own
+/// variables, so the panic below is *reachable from source* -- concretely
+/// instantiating one of those shapes aborts until phase 2 grows the matching
+/// arms (R4). Left as a panic deliberately rather than softened into a wrong
+/// answer.
 fn substitute_generic_field(pty: &PolyType, args: &[Type]) -> Type {
     match pty {
         PolyType::Concrete(t) => *t,
         PolyType::Var(v) => args[*v as usize],
-        other => unreachable!("a generic `type:` field is never {other:?}"),
+        other => unreachable!(
+            "substituting a generic `type:` field of shape {other:?} is P7.S3n phase 2"
+        ),
     }
 }
 
@@ -704,6 +731,10 @@ impl GenericTypes {
             enum_keys: Vec::new(),
             struct_resolved: Vec::new(),
             enum_resolved: Vec::new(),
+            struct_pending: Vec::new(),
+            enum_pending: Vec::new(),
+            deferred_structs: Vec::new(),
+            deferred_enums: Vec::new(),
             struct_base,
             enum_base,
         }
@@ -786,6 +817,115 @@ impl GenericTypes {
         Some((*gi, *m, args))
     }
 
+    /// P7.S3n (R2): register a generic struct header with an empty field
+    /// list and mark it pending, so a self-reference *inside that header's
+    /// own field list* has a header to resolve against. `parse_generic_
+    /// typedefs`' stage (b) fills the fields through `fill_struct_fields`.
+    pub fn push_struct_placeholder(&mut self, decl: GenericStructDecl) -> usize {
+        self.structs.push(decl);
+        let idx = self.structs.len() - 1;
+        self.struct_pending.push(idx);
+        idx
+    }
+
+    /// The enum twin of `push_struct_placeholder`.
+    pub fn push_enum_placeholder(&mut self, decl: GenericEnumDecl) -> usize {
+        self.enums.push(decl);
+        let idx = self.enums.len() - 1;
+        self.enum_pending.push(idx);
+        idx
+    }
+
+    /// P7.S3n (R2): fill placeholder header `idx`'s real field list, clear
+    /// its pending flag, and pay off every instantiation that was minted
+    /// against it while it was still pending -- their `StructId`s were handed
+    /// out already, so only `fields` is recomputed, in place.
+    pub fn fill_struct_fields(&mut self, idx: usize, fields: Vec<(String, PolyType)>) {
+        self.structs[idx].fields = fields;
+        self.struct_pending.retain(|p| *p != idx);
+        let owed: Vec<(usize, Vec<Type>)> = self
+            .deferred_structs
+            .iter()
+            .filter(|(_, header, _)| *header == idx)
+            .map(|(inst, _, args)| (*inst, args.clone()))
+            .collect();
+        self.deferred_structs
+            .retain(|(_, header, _)| *header != idx);
+        for (inst, args) in owed {
+            self.inst_structs[inst].fields = self.substituted_struct_fields(idx, &args);
+        }
+    }
+
+    /// The enum twin of `fill_struct_fields`. Unlike the struct side this
+    /// needs `regs`: a monomorphized variant's *name* carries the argument
+    /// spelling (`Ok[i64]`), and a placeholder header had no variants at
+    /// all, so the whole `VariantDecl` list -- names included -- is built
+    /// here rather than only its field types being replaced.
+    pub fn fill_enum_variants(
+        &mut self,
+        idx: usize,
+        variants: Vec<GenericVariantDecl>,
+        regs: NameRegistries,
+    ) {
+        self.enums[idx].variants = variants;
+        self.enum_pending.retain(|p| *p != idx);
+        let owed: Vec<(usize, Vec<Type>)> = self
+            .deferred_enums
+            .iter()
+            .filter(|(_, header, _)| *header == idx)
+            .map(|(inst, _, args)| (*inst, args.clone()))
+            .collect();
+        self.deferred_enums.retain(|(_, header, _)| *header != idx);
+        for (inst, args) in owed {
+            let name = self.inst_enums[inst].name.clone();
+            self.inst_enums[inst].variants =
+                self.substituted_enum_variants(idx, &args, &name, regs);
+        }
+    }
+
+    /// One instantiation's concrete field list: header `idx`'s declared
+    /// fields with `args` substituted in. Split out of `instantiate_struct`
+    /// so `fill_struct_fields` can recompute exactly the same list for an
+    /// instantiation that was minted before the header had any fields.
+    fn substituted_struct_fields(&self, idx: usize, args: &[Type]) -> Vec<(String, Type)> {
+        self.structs[idx]
+            .fields
+            .iter()
+            .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
+            .collect()
+    }
+
+    /// The enum twin of `substituted_struct_fields`. `name` is the enclosing
+    /// instantiation's own mangled name, which each variant's `display`
+    /// spelling is built from.
+    fn substituted_enum_variants(
+        &self,
+        idx: usize,
+        args: &[Type],
+        name: &str,
+        regs: NameRegistries,
+    ) -> Vec<VariantDecl> {
+        self.enums[idx]
+            .variants
+            .iter()
+            .map(|variant| {
+                let vname = type_instantiation_name(&variant.name, args, regs);
+                let display = format!("{name}.{}", generic_surface_name(&variant.name));
+                VariantDecl {
+                    name_static: Box::leak(vname.clone().into_boxed_str()),
+                    name: vname,
+                    display_static: Box::leak(display.into_boxed_str()),
+                    fields: variant
+                        .fields
+                        .iter()
+                        .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
+                        .collect(),
+                    span: variant.span,
+                }
+            })
+            .collect()
+    }
+
     /// The generic struct declaration `name` names in `module`, if any.
     /// `module` is the *declaring* module: an application spells it out
     /// through an import qualifier, exactly as a concrete cross-module type
@@ -825,18 +965,25 @@ impl GenericTypes {
             return ty;
         }
         let name = type_instantiation_name(&self.structs[idx].name, args, regs);
-        let decl = &self.structs[idx];
-        let fields: Vec<(String, Type)> = decl
-            .fields
-            .iter()
-            .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
-            .collect();
-        let span = decl.span;
+        // P7.S3n (R2): a header still being registered has an empty field
+        // list, so computing fields now would permanently memoize a
+        // fieldless struct with no diagnostic. Mint the id and the memo key
+        // anyway -- a `Type::Struct` is an opaque handle, so handing it out
+        // before its contents exist is sound -- and owe the field list to
+        // `fill_struct_fields`.
+        let pending = self.struct_pending.contains(&idx);
+        let fields = if pending {
+            Vec::new()
+        } else {
+            self.substituted_struct_fields(idx, args)
+        };
+        let span = self.structs[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = StructId::from_index(self.struct_base + self.inst_structs.len());
         let ty = Type::Struct(id, name_static);
         self.struct_keys.push((idx, module, args.to_vec()));
         self.struct_resolved.push(ty);
+        let inst = self.inst_structs.len();
         self.inst_structs.push(StructDecl {
             name,
             name_static,
@@ -846,6 +993,9 @@ impl GenericTypes {
             is_bundle: false,
             module,
         });
+        if pending {
+            self.deferred_structs.push((inst, idx, args.to_vec()));
+        }
         ty
     }
 
@@ -865,32 +1015,20 @@ impl GenericTypes {
             return ty;
         }
         let name = type_instantiation_name(&self.enums[idx].name, args, regs);
-        let decl = &self.enums[idx];
-        let variants: Vec<VariantDecl> = decl
-            .variants
-            .iter()
-            .map(|variant| {
-                let vname = type_instantiation_name(&variant.name, args, regs);
-                let display = format!("{name}.{}", generic_surface_name(&variant.name));
-                VariantDecl {
-                    name_static: Box::leak(vname.clone().into_boxed_str()),
-                    name: vname,
-                    display_static: Box::leak(display.into_boxed_str()),
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
-                        .collect(),
-                    span: variant.span,
-                }
-            })
-            .collect();
-        let span = decl.span;
+        // P7.S3n (R2): the struct twin's reasoning, verbatim.
+        let pending = self.enum_pending.contains(&idx);
+        let variants = if pending {
+            Vec::new()
+        } else {
+            self.substituted_enum_variants(idx, args, &name, regs)
+        };
+        let span = self.enums[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
         let ty = Type::Enum(id, name_static);
         self.enum_keys.push((idx, module, args.to_vec()));
         self.enum_resolved.push(ty);
+        let inst = self.inst_enums.len();
         self.inst_enums.push(EnumDecl {
             name,
             name_static,
@@ -898,6 +1036,9 @@ impl GenericTypes {
             span,
             module,
         });
+        if pending {
+            self.deferred_enums.push((inst, idx, args.to_vec()));
+        }
         ty
     }
 }
@@ -1596,6 +1737,14 @@ pub enum PolyType {
     /// the classification bit (`Copy`-ness, store-vs-fetch, exclusivity),
     /// asked at sites that hold no registry.
     Ref(Box<PolyType>, bool),
+    /// P7.S3n (R3): an owning cell whose payload is still polymorphic
+    /// (`^'T`, `^['T 4]`), deferred for exactly the reason `Ref` documents:
+    /// the payload may be a variable, which no registry entry can name, so
+    /// the `OwnedCellId` is minted only once the payload grounds
+    /// (`apply_subst` / `subst_polytype`, via `intern_owned_cell_type`), and
+    /// a fully-concrete payload folds to `Concrete(Type::OwnedCell(..))` at
+    /// parse time.
+    OwnedCell(Box<PolyType>),
     /// P7 slice 3b (R2): the compile-only marker a quotation *literal* written
     /// inside a non-inline polymorphic body occupies on the poly walk's
     /// virtual stack. Deliberately carries no effect: two literals with one

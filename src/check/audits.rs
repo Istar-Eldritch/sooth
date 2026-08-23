@@ -343,6 +343,10 @@ fn contains_poly_reference(
         PolyType::Ref(..) => true,
         PolyType::Concrete(ty) => contains_reference(*ty, structs, enums, arrays),
         PolyType::Array(elem, _) => contains_poly_reference(elem, structs, enums, arrays),
+        // P7.S3n (R3): a cell payload is followed for the same reason an
+        // array element is -- `^&'T` must not launder a reference past the
+        // audit through the payload position.
+        PolyType::OwnedCell(payload) => contains_poly_reference(payload, structs, enums, arrays),
         PolyType::Var(_) | PolyType::Quotation(..) => false,
         // P7 slice 3b: a body-only marker, never in a declared signature.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
@@ -390,6 +394,10 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
         PolyType::Ref(referent, _) => {
             reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
         }
+        // P7.S3n (R3): the cell twin of the `&` arm above.
+        PolyType::OwnedCell(payload) => {
+            reject_poly_quotation_anywhere(payload, sig, "an owning cell's payload")
+        }
         // P7 slice 3a: a quotation smuggled in as a generic argument
         // (`Box[[ 'T -- ]]`) is still nested inside the parameter.
         PolyType::Generic { args, .. } => {
@@ -420,6 +428,9 @@ fn reject_poly_quotation_anywhere(
         PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
         PolyType::Ref(referent, _) => {
             reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
+        }
+        PolyType::OwnedCell(payload) => {
+            reject_poly_quotation_anywhere(payload, sig, "an owning cell's payload")
         }
         // P7 slice 3a: recurse into a generic's arguments, so a quotation
         // smuggled in as one (`Box[[ 'T -- ]]`) is still rejected.

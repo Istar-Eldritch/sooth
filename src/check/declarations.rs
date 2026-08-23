@@ -577,6 +577,8 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         // Slice 13 (R-A9): a private type named behind a `&` is still named,
         // so export-privacy must see it.
         PolyType::Ref(referent, _) => collect_poly_concrete(referent, out),
+        // P7.S3n (R3): likewise a private type named as a cell payload.
+        PolyType::OwnedCell(payload) => collect_poly_concrete(payload, out),
         // Slice 6a (R5): a declared quotation effect's rows may name concrete
         // types (`[ i64 -- ]`); collect them so export-privacy still sees a
         // private type mentioned inside an effect.

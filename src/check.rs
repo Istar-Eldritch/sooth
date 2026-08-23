@@ -1652,6 +1652,7 @@ type BackEdgeShape = (Vec<Type>, Vec<Type>, Vec<Option<usize>>);
 /// `None` when `i` is beyond the carried-input count or the types differ
 /// (so `times`-shape, with zero fixed outputs, yields an empty map, and
 /// `while`'s 1-in/1-out shape yields `[Some(0)]`).
+#[allow(clippy::too_many_arguments)]
 fn back_edge_declared_shape(
     word: &WordDef,
     subst: Option<&Subst>,
@@ -1659,6 +1660,7 @@ fn back_edge_declared_shape(
     span: Span,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Result<BackEdgeShape, String> {
     let (inputs, outputs): (Vec<Type>, Vec<Type>) = match word.poly.as_ref() {
@@ -1666,11 +1668,15 @@ fn back_edge_declared_shape(
             let subst = subst.expect("a poly combinator's marker carries its resolved θ");
             let mut inputs = Vec::with_capacity(sig.inputs.len());
             for p in &sig.inputs {
-                inputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
+                inputs.push(apply_subst(
+                    sig, p, subst, name, span, ctx, arrays, cells, refs,
+                )?);
             }
             let mut outputs = Vec::with_capacity(sig.outputs.len());
             for p in &sig.outputs {
-                outputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
+                outputs.push(apply_subst(
+                    sig, p, subst, name, span, ctx, arrays, cells, refs,
+                )?);
             }
             (inputs, outputs)
         }
