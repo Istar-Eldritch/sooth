@@ -284,10 +284,11 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
 }
 
 /// P7.S3e (R4/R8, decision 8): a trait member signature is restricted to
-/// concrete/array/reference shapes over `'T` this slice -- `check_impl_decls`'
-/// `ground_member_type` grounds exactly these against a concrete `impl:`
-/// target, and nothing else (a quotation or generic-application shape has no
-/// forcing consumer this phase and no grounding rule).
+/// concrete/array/reference shapes over `'T` this slice -- `ast`'s
+/// `ground_member_type`, which the body-form desugar grounds each member with
+/// against a concrete `impl:` target, handles exactly these and nothing else
+/// (a quotation or generic-application shape has no forcing consumer this
+/// phase and no grounding rule).
 fn member_shape_is_supported(t: &PolyType) -> bool {
     match t {
         PolyType::Concrete(_) | PolyType::Var(_) => true,
@@ -309,9 +310,10 @@ fn unsupported_trait_member_shape_error(trait_name: &str, span: Span) -> String 
 
 /// P7.S3e (R4/R8, R9's combinator descope): a trait member declaring a
 /// top-level row variable. A row is a `PolySig` field, not a slot shape, so
-/// `member_shape_is_supported` cannot see it and `check_impl_decls` compares
-/// only `inputs`/`outputs` -- without this rejection a row-typed member would
-/// silently accept a non-combinator implementing word.
+/// `member_shape_is_supported` cannot see it and the body-form desugar grounds
+/// `inputs`/`outputs` alone -- without this rejection the row would be dropped
+/// from the synthesized word's effect and a stack-polymorphic member would
+/// silently check as an ordinary one.
 fn row_typed_trait_member_error(trait_name: &str, row: &str, span: Span) -> String {
     format!(
         "error: trait `{trait_name}`'s member at line {}, col {} declares the row variable `{row}` (a stack-polymorphic member is not supported this slice)",
@@ -2273,10 +2275,8 @@ impl<'t> Parser<'t> {
     /// P7.S3r (R2/R4a/R5/R6): one `: member [| binders |] body ;` inside an
     /// `impl:` block, desugared to the top-level word the member binds to. The
     /// declared effect is the trait member's signature grounded at the `for`
-    /// type through the same `ground_member_type` `check_impl_decls` grounds
-    /// with, so the comparison it makes against this word is byte-identical by
-    /// construction; there is no `(` to parse, since restating the inherited
-    /// signature is rejected.
+    /// type through `ast`'s `ground_member_type`; there is no `(` to parse,
+    /// since restating the inherited signature is rejected.
     fn parse_impl_member_body(
         &mut self,
         trait_id: TraitId,
@@ -6914,7 +6914,7 @@ mod tests {
 
     #[test]
     fn parse_trait_decl_member_with_a_quotation_shape_is_error() {
-        // R4/R8: `ground_member_type` (check/declarations.rs) only grounds
+        // R4/R8: `ground_member_type` (ast.rs) only grounds
         // concrete/array/reference shapes -- a *variable-bearing* quotation
         // shape has no grounding rule and must be rejected here, not left to
         // panic later. (A fully-concrete quotation, with no `'T` inside it,
@@ -6953,10 +6953,9 @@ mod tests {
     #[test]
     fn parse_trait_decl_member_with_a_row_variable_is_error() {
         // A row is a `PolySig` field, not a slot shape, so
-        // `member_shape_is_supported` never sees it and `check_impl_decls`
-        // compares `inputs`/`outputs` alone -- a row-typed member used to
-        // accept an ordinary non-combinator word, the row silently dropped
-        // from both sides of the comparison.
+        // `member_shape_is_supported` never sees it and the body-form desugar
+        // grounds `inputs`/`outputs` alone -- unrejected, the row would be
+        // dropped from the synthesized word's effect.
         let err = parse_src("trait: F 'T go ( ..a &'T -- ..a ) ;").unwrap_err();
         assert!(err.contains("declares the row variable `..a`"), "{err}");
         // Input-side only, so the `row_in` arm is what rejects it (the case
@@ -6992,9 +6991,9 @@ mod tests {
     #[test]
     fn parse_trait_decl_member_with_a_length_variable_array_shape_is_error() {
         // A length-variable array (`&['T 'N]`) is not a supported member
-        // shape: `ground_member_type` only grounds `Len::Concrete`, so this
-        // must be rejected here (it used to slip past `member_shape_is_supported`
-        // and panic in `ground_member_type` at `impl:` check time instead).
+        // shape: `ground_member_type` only grounds `Len::Concrete`, so it must
+        // be rejected here at the trait decl -- otherwise the body-form desugar
+        // panics grounding it.
         let err = parse_src("trait: Foo 'T bar ( &['T 'N] -- ) ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }

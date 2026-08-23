@@ -111,14 +111,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                     .builtin_overloads
                     .values()
                     .any(|s| s == &symbols[*idx])
-                // P7.S3e (R15): an impl member named after a builtin operator
-                // and reachable only through bound dispatch is "called" too --
-                // its only mention is a resolved symbol in some instantiation's
-                // `trait_calls`, never a bare name in `called_names`.
-                && !module
-                    .instantiations
-                    .values()
-                    .any(|i| i.trait_calls.values().any(|s| s == &symbols[*idx]))
         })
         .map(|(idx, _)| idx)
         .collect();
@@ -1625,10 +1617,8 @@ mod tests {
     /// candidate key, and that overload keeps its own body in the module. The
     /// overload's arity matches the builtin `max`'s, so the two agree.
     ///
-    /// This no longer covers R15's `trait_calls` conjunct in
-    /// `uncalled_operator_overloads`. The forwarding body spells `max` as a
-    /// literal term, so `called_names` alone spares the overload; deleting the
-    /// conjunct leaves the suite green. Removing it is the spec's Phase 4 item.
+    /// Pruning needs no help here: an impl member's body spells `max` as a
+    /// literal term, so `called_names` alone spares the overload.
     #[test]
     fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_trait_prepasses(

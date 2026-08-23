@@ -1470,10 +1470,10 @@ pub struct TraitMember {
 /// (`parse_trait_member_effect` rejects anything else at declaration time),
 /// so every other `PolyType` shape is unreachable here.
 ///
-/// P7.S3r (R2): shared by the parser, which grounds the same member signature
-/// to synthesize an impl body's word, and by `check::check_impl_decls`, whose
-/// signature comparison against that synthesized word is only vacuous because
-/// both sides ground through this one function.
+/// P7.S3r (R2): the single grounding rule. The parser grounds a trait member
+/// here to synthesize the impl body's word, and `check::poly` grounds the same
+/// member here to render it in a diagnostic, so the effect a body is checked
+/// against and the effect an error names cannot drift apart.
 pub fn ground_member_type(
     pty: &PolyType,
     target: Type,

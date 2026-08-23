@@ -510,15 +510,12 @@ fn impl_body_wrong_effect_names_readable_member() {
 }
 
 /// P7.S3r Phase 4 (R6): the relocated intent of the retired
-/// `check_impl_decls_signature_mismatch_is_error` guard. Distinct from the
-/// golden above in what it asserts: that golden pins the *readable name* in
-/// the message; this one pins that the rejection is located inside the
-/// member's own line, not at the impl block header or a separate
-/// binding-time signature-comparison site (there is no such site left to
-/// compare against, since the effect is inherited, not restated). A
-/// two-member impl with only the *second* member broken proves the line
-/// tracks the member, not the block: a header-line match would still pass
-/// with a single-member fixture.
+/// `check_impl_decls_signature_mismatch_is_error` guard. The neighbouring
+/// goldens use a single-member impl, where the only signature in scope is
+/// trivially the right one. Here a two-member impl breaks only its *second*
+/// member, so the `note:` is the discriminating part: it proves `cmp`'s body
+/// was checked against `cmp`'s own inherited signature rather than `lo`'s.
+/// Nothing in the source restates either one for the checker to read.
 #[test]
 fn impl_body_wrong_effect_is_rejected_in_body() {
     let (_t, entry) = program(
@@ -537,8 +534,10 @@ fn impl_body_wrong_effect_is_rejected_in_body() {
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
-    assert!(err.contains("stack effect mismatch"), "{err}");
-    assert!(err.contains("(line 10)"), "{err}");
+    assert_eq!(
+        err,
+        "error: error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 10)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
+    );
 }
 
 /// R3 (Phase 2), the type-mismatch sibling of the arity golden above: a body

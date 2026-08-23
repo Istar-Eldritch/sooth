@@ -399,12 +399,11 @@ fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
     }
 }
 
-/// P7.S3e (R4/R11, decision 1/2): every `impl:` binding's own checks --
-/// duplicate `(TraitId, Type)`, the orphan rule, every required member bound
-/// exactly once (no missing, no unknown, no repeat), each bound word
-/// signature-matching the trait's declared member (grounded at the target
-/// type) and concrete (decision 2: a polymorphic binding is rejected here,
-/// at the `impl:` site, never at a later call site).
+/// P7.S3e (R4/R11, decision 1): every `impl:` declaration's own checks --
+/// duplicate `(TraitId, Type)`, the orphan rule, and every required member
+/// bound exactly once (no missing member, no repeat). Each member's word is
+/// the parser's synthesized body word, so there is no signature to verify
+/// here; this only resolves it to a `Module::words` index (R8).
 pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
     // `Type` derives no `Hash`, so the duplicate-`(TraitId, Type)` check is a
     // linear scan rather than a `HashMap` -- `impl:` counts are small (one
@@ -446,13 +445,11 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         // resolved here (pre-mangle, where `word_name` and `WordDef::name`
         // still agree) and read back at a bound-directed call site.
         //
-        // P7.S3r (phase 4): the parser's body-form desugar is the only source
-        // of `bindings` now, and it already validated the member against the
-        // trait and synthesized a concrete word carrying the trait member's
-        // grounded signature, spliced into this same module. There is no
-        // restated signature to compare and no separate word to resolve by
-        // name-and-shape search, so this loop only guards against a member
-        // bound twice and looks up the synthesized word's index by name.
+        // P7.S3r (R2): `bindings` comes from the parser's body-form desugar,
+        // which validates each member against the trait and splices a concrete
+        // word carrying that member's grounded signature into this same
+        // module. The name lookup is therefore exact and total, and the one
+        // thing left to reject is a member bound twice.
         let mut resolved: Vec<(String, usize)> = Vec::new();
         for (member_name, word_name) in &bindings {
             if !bound_names.insert(member_name.as_str()) {

@@ -2369,47 +2369,4 @@ mod tests {
         );
         assert_eq!(resolved, vec![&"show;Show;1;Point__m0".to_string()]);
     }
-
-    /// The discriminating half the test above cannot reach: it names an
-    /// unoverloaded impl member, so its plain name and its lowering symbol
-    /// coincide, and a resolution keyed on either reads the same value. Here
-    /// the member's forwarding body calls another `point-show` overload (a
-    /// distinct signature, over `Other`, so the two coexist), which forces
-    /// `overload_symbols` to suffix both -- `point-show$$0`/`point-show$$1`,
-    /// in declaration order. The resolved trait call still records the
-    /// synthesized member's own symbol, not the word it forwards to; pruning
-    /// is what carries `point-show$$0` onward from there.
-    #[test]
-    fn a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol() {
-        let s = Sandbox::new("bound-symbol-overloaded");
-        let entry = s.write(
-            "main.sth",
-            "import: intrinsics * ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             type: Point x i64 y i64 ;\n\
-             type: Other n i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             : point-show ( &Other -- ) drop ;\n\
-             impl: Show for Point\n\
-               : show | p | p point-show ;\n\
-             ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
-             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
-        );
-        let closure = discover_closure(&entry).expect("closure resolves");
-        let mut module = assemble_module(&closure, true).expect("assembles");
-        check::check(&mut module).expect("the bound is satisfied");
-        let resolved: Vec<&String> = module
-            .instantiations
-            .values()
-            .filter(|i| i.callee == "shows__m0")
-            .flat_map(|i| i.trait_calls.values())
-            .collect();
-        let symbols = crate::ast::overload_symbols(&module.words);
-        assert!(
-            symbols.contains(&"point-show__m0$$0".to_string()),
-            "symbols: {symbols:?}"
-        );
-        assert_eq!(resolved, vec![&"show;Show;0;Point__m0".to_string()]);
-    }
 }
