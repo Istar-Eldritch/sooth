@@ -305,6 +305,32 @@ fn ref_of_ty_var_field_is_rejected_as_stored_reference() {
     );
 }
 
+/// R10's composite-referent half, spelled out separately from the bare
+/// `&'T` case above: `&Ent['K i64]` is a `Ref` whose referent is itself a
+/// `Generic`, so this is the only fixture that can tell R4's `Ref` arm
+/// actually recurses into its `Generic` arm from a `Ref` arm that only ever
+/// substitutes a bare variable payload (that narrower arm would `unreachable!`
+/// here instead of grounding to `&Ent[i64 i64]`).
+#[test]
+fn ref_of_composite_generic_field_is_rejected_as_stored_reference() {
+    let err = build(
+        "refcomposite",
+        "type: Ent 'K 'V k 'K v 'V ;\n\
+         type: Box 'T r &Ent['T i64] ;\n\
+         : f ( Box[i64] -- Box[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect_err("a reference to a composite generic field cannot be stored");
+    assert!(
+        err.contains("a reference cannot be stored"),
+        "unexpected: {err}"
+    );
+    assert!(
+        err.contains("&Ent[i64 i64]"),
+        "the referent must ground through the Generic arm, not blame the bare variable: {err}"
+    );
+}
+
 /// R9: a by-value self-reference is caught by the *existing* `check_recursion`
 /// rule, now reachable for a generic header for the first time. It only fires
 /// on a post-instantiation concrete decl, so the program has to instantiate
@@ -363,6 +389,22 @@ fn cell_wrapped_generic_self_reference_builds_and_terminates() {
     .expect("a cell breaks the cycle, so the type has a finite size");
 }
 
+/// R6's enum twin: `instantiate_enum` must mint the id, memo key and a
+/// fieldless placeholder decl before substituting variants, exactly like the
+/// struct half above. Every other termination witness in this file is
+/// struct-side; reverting the enum ordering to substitute-then-mint leaves
+/// this build (a legal program) overflowing the compiler's own stack.
+#[test]
+fn cell_wrapped_generic_self_reference_enum_builds_and_terminates() {
+    build(
+        "cellcycleenum",
+        "type: L 'T | Nil | Cons v 'T next ^L['T] ;\n\
+         : f ( L[i64] -- L[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect("a cell breaks the cycle for an enum header too, so the type has a finite size");
+}
+
 /// The two-header cycle the single-header test cannot cover: the memo key
 /// includes the header index, so a mechanism that only recognised a header
 /// re-entering *itself* would recurse forever here.
@@ -392,6 +434,30 @@ fn permuting_generic_self_reference_terminates() {
          : main ( -- ) ;\n",
     )
     .expect("a permuting self-reference alternates between two instantiations");
+}
+
+/// R5, in a polymorphic body: `poly_construct_generic` must thread the
+/// *live* cell/ref registries into the `MutRegistries` it builds for a
+/// fully-concrete constructor call, not a throwaway `&mut vec![]` pair --
+/// `type_instantiation_name` unconditionally indexes into them to render a
+/// cell- or ref-payload argument's name. `Ent` is constructed and
+/// immediately dropped inside `mk`'s body (never named in a declared
+/// signature), so this is the only path that mints `Ent[^i64 i64]` through
+/// `poly_construct_generic` itself rather than through a signature's own
+/// eager instantiation. A throwaway-registry regression here panics with an
+/// out-of-bounds index instead of building.
+#[test]
+fn poly_body_constructs_generic_with_cell_argument() {
+    let (stdout, code) = build_and_run(
+        "polycellctor",
+        "import: intrinsics * ;\n\
+         type: Ent 'K 'V k 'K v 'V ;\n\
+         : mkcell ( i64 -- ^i64 ) ^ ;\n\
+         : mk ( 'T -- 'T ) 1 mkcell 2 Ent drop ;\n\
+         : main ( -- ) 5 mk . ;\n",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
 }
 
 /// The out-of-scope gap, pinned rather than left silent: an *attributeless*
