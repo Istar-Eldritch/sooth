@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::{Import, IntrinsicVisibility, Module, ModuleInfo, Span};
+use crate::ast::{ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, TraitDecl};
 use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
@@ -448,7 +448,34 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut generics,
         )?;
     }
+    // P7.S3e (R1/R3, decision 4): every file's `trait:` declarations,
+    // registered across the whole closure before any body parses -- the
+    // trait twin of the generic-typedef pre-pass above, and for the same
+    // reason: an `impl:` binding (parsed in-line by `parse_bodies`) can name
+    // a trait declared in a file discovered *after* the importing one (the
+    // closure lists module 0, the entry file, first, then its dependencies,
+    // not necessarily in the order `parse_bodies` needs them). Seeded with
+    // `Copy`/`Ord` (R2) before any user declaration is appended.
+    let mut traits: Vec<TraitDecl> = crate::ast::seed_predicate_traits();
+    for (m, node) in closure.nodes.iter().enumerate() {
+        parser::prepass_trait_decls(
+            &node.tokens,
+            &structs,
+            &enums,
+            m as u32,
+            &import_by_module[m],
+            &exports_by_module,
+            &selective_maps[m],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            &mut generics,
+            &mut traits,
+        )?;
+    }
     let mut modules = Vec::with_capacity(closure.nodes.len());
+    let mut impls: Vec<ImplDecl> = Vec::new();
     for (m, node) in closure.nodes.iter().enumerate() {
         let import_map = import_by_module[m].clone();
         let selective_map = &selective_maps[m];
@@ -465,6 +492,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut refs,
             &mut slices,
             &mut generics,
+            &traits,
         )?;
         for (k, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
             structs[struct_base[m] + k].fields = fields;
@@ -477,6 +505,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         words.extend(bodies.words);
         externs.extend(bodies.externs);
         statics.extend(bodies.statics);
+        impls.extend(bodies.impls);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -517,6 +546,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         modules,
         statics,
         generics,
+        traits,
+        impls,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
     // module's `export:` list are both still their raw source spellings here,
@@ -530,6 +561,12 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // word's name and a module's `export:` list all still agree here.
     check::check_static_decls(&module)?;
     check::check_globals(&module)?;
+    // P7.S3e (R1/R4/R11): trait/impl duplicate-name and binding validation,
+    // pre-mangle for the same reason as the checks above -- a trait's name
+    // and its module's `export:` list are both still raw source spellings
+    // here.
+    check::check_trait_decls(&module)?;
+    check::check_impl_decls(&mut module)?;
     resolve::resolve_modules(&mut module, always_mangle)?;
     Ok(module)
 }
@@ -1879,5 +1916,386 @@ mod tests {
             vec![0, 1],
             "each file's `&n` resolved against its own receiver: {sites:?}"
         );
+    }
+
+    /// P7.S3e (R18): a bound naming a trait declared and exported by a
+    /// *different* module. The entry file (which writes the bound) is module 0
+    /// and parses first, so this resolves only through the whole-closure trait
+    /// pre-pass -- `prepass_trait_decls`, run before the per-module
+    /// `parse_bodies` loop, exactly as `prepass_generic_typedefs` is.
+    #[test]
+    fn a_cross_module_bound_resolves_through_the_trait_prepass() {
+        let s = Sandbox::new("bound-cross-module");
+        s.write(
+            "show.sth",
+            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"show.sth\" s | Show | ;\n\
+             type: Point x i64 y i64 ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the imported trait's bound resolves and dispatches");
+    }
+
+    /// The qualified spelling of the same bound (`'T: s::Show`) resolves
+    /// through the parse-time `self.imports` gate, with no selective import of
+    /// the trait's bare name.
+    #[test]
+    fn a_qualified_cross_module_bound_resolves() {
+        let s = Sandbox::new("bound-qualified");
+        s.write(
+            "show.sth",
+            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"show.sth\" s ;\n\
+             : shows ( &'T: s::Show -- ) show ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the qualified bound resolves");
+    }
+
+    /// R18/decision 4: a qualified bound is export-gated exactly as a
+    /// qualified type name is -- naming a trait the target module declares but
+    /// does not export is the same `not_exported_error`, at parse time.
+    #[test]
+    fn a_qualified_bound_on_an_unexported_trait_is_rejected() {
+        let s = Sandbox::new("bound-unexported");
+        s.write("show.sth", "trait: Show 'T show ( &'T -- ) ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"show.sth\" s ;\n\
+             : shows ( &'T: s::Show -- ) show ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let err = assemble_module(&closure, true).expect_err("`Show` is not exported");
+        assert!(
+            err.contains("`Show` is not exported from module `s`"),
+            "{err}"
+        );
+    }
+
+    /// R12/decision 6: a member required by two bounds is callable when a
+    /// module qualifier picks one of them. The qualifier is the ordinary
+    /// import alias -- no trait-name namespace is added by this slice.
+    ///
+    /// The two traits' impls are deliberately distinguishable (different
+    /// implementing words), and `f` is instantiated from `main`, so this
+    /// witnesses *which* trait the qualifier actually selected -- not just
+    /// that `check::check` returned `Ok` (which an inverted module filter in
+    /// `poly_trait_member_call` would also satisfy, since neither trait's
+    /// `t1` here was otherwise distinguished).
+    #[test]
+    fn a_qualified_member_call_disambiguates_two_traits_in_different_modules() {
+        let s = Sandbox::new("member-qualified");
+        s.write("a.sth", "trait: A 'T t1 ( &'T -- ) ;\nexport: A ;\n");
+        s.write("b.sth", "trait: B 'T t1 ( &'T -- ) ;\nexport: B ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"a.sth\" a | A | ;\n\
+             import: \"b.sth\" b | B | ;\n\
+             type: Pt n i64 ;\n\
+             : pt-a ( &Pt -- ) drop ;\n\
+             : pt-b ( &Pt -- ) drop ;\n\
+             impl: a::A for Pt  t1 pt-a ;\n\
+             impl: b::B for Pt  t1 pt-b ;\n\
+             : f ( &'T: A B -- ) a::t1 ;\n\
+             : main ( -- ) 1 Pt |p| &p f p drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the qualifier picks `A`'s `t1`");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f__m0")
+            .expect("the call site recorded an instantiation");
+        let resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
+        assert_eq!(
+            resolved,
+            vec!["pt-a__m0"],
+            "the qualified call must resolve to `A`'s impl, not `B`'s"
+        );
+    }
+
+    /// The unqualified call in the same program is the ambiguous-call
+    /// rejection -- without this, the test above proves only that *some*
+    /// dispatch happened, not that the qualifier is what disambiguated it.
+    #[test]
+    fn the_same_member_call_unqualified_is_ambiguous() {
+        let s = Sandbox::new("member-ambiguous");
+        s.write("a.sth", "trait: A 'T t1 ( &'T -- ) ;\nexport: A ;\n");
+        s.write("b.sth", "trait: B 'T t1 ( &'T -- ) ;\nexport: B ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"a.sth\" a | A | ;\n\
+             import: \"b.sth\" b | B | ;\n\
+             : f ( &'T: A B -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module).expect_err("the unqualified call is ambiguous");
+        assert!(
+            err.contains("`t1` is required by both `A` and `B` on 'T"),
+            "{err}"
+        );
+    }
+
+    /// decision 6: two colliding traits declared in the *same* module share a
+    /// qualifier, so `::` cannot break the tie -- a hard rejection this slice,
+    /// with no escape hatch.
+    #[test]
+    fn a_same_module_bound_collision_has_no_qualified_escape_hatch() {
+        let s = Sandbox::new("member-same-module");
+        s.write(
+            "ab.sth",
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             export: A ;\nexport: B ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"ab.sth\" ab | A B | ;\n\
+             : f ( &'T: A B -- ) ab::t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module)
+            .expect_err("one qualifier cannot pick between two traits it names");
+        assert!(
+            err.contains("`t1` is required by both `A` and `B` on 'T"),
+            "{err}"
+        );
+    }
+
+    /// R18 (round-3 reversal): if the qualified module also exports an
+    /// unrelated concrete word of the member's name, `Resolver::rewrite`
+    /// mangles the call to that word *before* `check::check` runs, and nothing
+    /// downstream knows a trait member was intended. The ruled outcome is a
+    /// rejection through the pre-existing operand diagnostic, not a resolved
+    /// trait call -- "trait wins" would need a new `rewrite`-internal branch
+    /// this slice does not add.
+    #[test]
+    fn a_qualified_member_call_colliding_with_an_exported_word_is_rejected() {
+        let s = Sandbox::new("member-collision");
+        s.write(
+            "a.sth",
+            "import: intrinsics * ;\n\
+             trait: A 'T t1 ( &'T -- ) ;\n\
+             type: Blob n i64 ;\n\
+             : t1 ( &Blob -- ) drop ;\n\
+             export: A ;\nexport: t1 ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"a.sth\" a | A | ;\n\
+             : f ( &'T: A -- ) a::t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module)
+            .expect_err("the mangled word wins the name, so the operand is rejected");
+        assert!(
+            err.contains("`t1` is not permitted on a reference in `f`"),
+            "expected `poly_op_on_variable_error`, got: {err}"
+        );
+    }
+
+    /// R18, the other half of the collision condition: "declares **or
+    /// re-exports**". `Resolver::rewrite`'s hub re-export fallthrough
+    /// (`resolve.rs:310-313`) mangles a qualified call to the *declaring*
+    /// module with no export gate of its own, so a module that merely passes
+    /// the name through wins the spelling exactly as a declaring one does.
+    #[test]
+    fn a_qualified_member_call_colliding_with_a_re_exported_word_is_rejected() {
+        let s = Sandbox::new("member-reexport-collision");
+        s.write(
+            "dep.sth",
+            "import: intrinsics * ;\n\
+             type: Blob n i64 ;\n\
+             : t1 ( &Blob -- ) drop ;\n\
+             export: t1 ;\n",
+        );
+        s.write(
+            "a.sth",
+            "import: intrinsics * ;\n\
+             import: \"dep.sth\" d | t1 | ;\n\
+             trait: A 'T t1 ( &'T -- ) ;\n\
+             export: A ;\nexport: t1 ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"a.sth\" a | A | ;\n\
+             : f ( &'T: A -- ) a::t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module)
+            .expect_err("the re-exported word wins the name, so the operand is rejected");
+        assert!(
+            err.contains("`t1` is not permitted on a reference in `f`"),
+            "expected `poly_op_on_variable_error`, got: {err}"
+        );
+    }
+
+    /// R10, coexistence half: a bound-directed member call and an unrelated
+    /// concrete word of the same name, both live in one program. Written
+    /// cross-module because it is name *mangling*, not dispatch, that decides
+    /// this: `resolve::mangle` is per-module, so `blob-show`'s own `show` and
+    /// the bounded body's `show` never contend for one spelling.
+    #[test]
+    fn a_bound_call_and_an_unrelated_concrete_word_of_the_same_name_coexist() {
+        let s = Sandbox::new("bound-coexist");
+        s.write(
+            "blob.sth",
+            "import: intrinsics * ;\n\
+             type: Blob n i64 ;\n\
+             : show ( &Blob -- ) drop ;\n\
+             : shout ( -- ) 5 Blob |b| &b show b drop ;\n\
+             export: shout ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"blob.sth\" b | shout | ;\n\
+             type: Point x i64 y i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) shout ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("neither name shadows the other");
+    }
+
+    /// The other half of that story, and the unqualified twin of the
+    /// qualified-collision rejection above: when the *same* module declares a
+    /// word of the member's name, `rewrite` mangles the bounded body's call to
+    /// it before the checker runs, and the bound call is rejected. Pinned so
+    /// the boundary is a decision on record rather than an accident.
+    #[test]
+    fn a_same_module_word_of_the_members_name_wins_the_spelling() {
+        let s = Sandbox::new("bound-shadowed");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             type: Point x i64 y i64 ;\n\
+             type: Blob n i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : show ( &Blob -- ) drop ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        let err = check::check(&mut module).expect_err("the declared word wins the name");
+        assert!(
+            err.contains("`show` is not permitted on a reference in `shows`"),
+            "{err}"
+        );
+    }
+
+    /// P7.S3e (R8/R9): the resolved symbol in a *mangled* build. The `impl:`
+    /// binding names its word raw (`point-show`) and is resolved pre-mangle,
+    /// while lowering mints that word's function under the post-mangle
+    /// `overload_symbols` spelling -- so the resolution rides the word's index
+    /// rather than its name, and the recorded symbol is the one lowering will
+    /// emit, byte for byte.
+    #[test]
+    fn a_resolved_trait_call_carries_the_post_mangle_lowering_symbol() {
+        let s = Sandbox::new("bound-symbol");
+        s.write(
+            "show.sth",
+            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"show.sth\" s | Show | ;\n\
+             type: Point x i64 y i64 ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the bound is satisfied");
+        let resolved: Vec<&String> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows__m0")
+            .flat_map(|i| i.trait_calls.values())
+            .collect();
+        let symbols = crate::ast::overload_symbols(&module.words);
+        let expected = symbols
+            .iter()
+            .find(|sym| sym.starts_with("point-show"))
+            .expect("the impl member lowers under its own symbol");
+        assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
+        assert_eq!(expected, "point-show__m0");
+    }
+
+    /// The discriminating half the test above cannot reach: it names an
+    /// unoverloaded impl member, so its plain name and its lowering symbol
+    /// coincide, and a resolution keyed on either reads the same value. Here
+    /// the bound member shares its name with another `point-show` overload
+    /// (a distinct signature, over `Other`, so the two coexist), which forces
+    /// `overload_symbols` to suffix both -- `point-show$$0`/`point-show$$1`,
+    /// in declaration order. A resolution keyed on the raw name would record
+    /// `point-show`, which lowering never mints; only the `$$0`-suffixed
+    /// symbol is real.
+    #[test]
+    fn a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol() {
+        let s = Sandbox::new("bound-symbol-overloaded");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             type: Point x i64 y i64 ;\n\
+             type: Other n i64 ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             : point-show ( &Other -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the bound is satisfied");
+        let resolved: Vec<&String> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows__m0")
+            .flat_map(|i| i.trait_calls.values())
+            .collect();
+        assert_eq!(resolved, vec![&"point-show__m0$$0".to_string()]);
     }
 }
