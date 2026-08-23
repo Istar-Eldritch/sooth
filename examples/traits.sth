@@ -5,7 +5,6 @@
 \ caller's own `impl:` at monomorphization -- an ordinary word call resolved
 \ per instantiation, never a runtime vtable.
 
-import: intrinsics * ;
 import: core::prelude | if lt gt | ;
 import: core::bool | Bool | ;
 
@@ -30,13 +29,22 @@ type: Point x i64 y i64 ;
 \ match the trait's exactly, with the trait's `'T` substituted for the
 \ concrete type.
 : point-cmp ( &Point &Point -- Ordering )
-  | b | | a |
-  a &y @ | ay | b &y @ | by |
-  ay by lt ~[ Less ] ~[
-    ay by gt ~[ Greater ] ~[
-      a &x @ | ax | b &x @ | bx |
-      ax bx lt ~[ Less ] ~[
-        ax bx gt ~[ Greater ] ~[ Equal ] if
+  | a b |
+  a &y @ | ay | 
+  b &y @ | by |
+  ay by lt
+  ~[ Less ]
+  ~[
+    ay by gt 
+    ~[ Greater ]
+    ~[
+      a &x @ | ax |
+      b &x @ | bx |
+      ax bx lt
+      ~[ Less ]
+      ~[
+        ax bx gt 
+        ~[ Greater ] ~[ Equal ] if
       ] if
     ] if
   ] if ;
