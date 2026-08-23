@@ -635,3 +635,24 @@ the replacement should be.
 bounded member inside its body resolves against the caller's concrete instantiation the same
 way a non-combinator poly word's bounded call does (S3e's R7/R8/R9), rather than being a
 located rejection.
+
+**P7.S3p -- A trait member is only dispatchable through a bound if its *last* declared
+input is the bound variable.** Named at P7.S3e's post-implementation review. `receiver_ty_var`
+(`src/check/poly.rs:781-790`) only inspects the top-of-stack operand slot to decide whether a
+call is a bound-dispatch candidate; this is exactly the slot a member's *last* declared input
+occupies. A member whose bound variable sits anywhere else in its input list --
+`at ( &'T i64 -- i64 )` (an index/lookup shape), `tag ( -- i64 )` (a zero-input constructor),
+or any shape with a trailing non-`'T` input -- never reaches the three dispatch barriers at
+all; control falls straight through to ordinary `env.get`, which is a silent wrong-answer if
+an unrelated same-named concrete word happens to be reachable, or a confusing "unknown word"
+otherwise. S3e ships a declaration-time rejection for this shape (`check_trait_decls` rejects
+any member whose input list doesn't end in `'T`) rather than attempting real dispatch, since
+`receiver_ty_var`'s single-slot model has no mechanism for locating the bound variable
+anywhere else in the operand window. Not yet recon'd: whether the right fix is generalizing
+`receiver_ty_var` to scan the full declared input list against the callee's `PolySig` (cheap,
+but may collide with the three-barrier design's assumption that the receiver is always on
+top) or something that resolves the receiver's position per member at `impl:`-binding time and
+threads it through to the call site.
+**Exit:** a trait member may declare its bound type variable at any input position, not only
+last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
+rejection for a non-trailing `'T` is lifted.
