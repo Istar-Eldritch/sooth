@@ -723,7 +723,7 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    read-only view or by restructuring the flush, and that is its own slice.
    Deviation 6's honest rejection is what keeps phase 1 inside N1 until then.
 
-### Delivered, with four deviations from the plan above
+### Delivered, with five deviations from the plan above
 
 1. **Finding 2 is answered by rejecting, not by keying on `(name, PolySig)`.** A
    cross-call into *or out of* a polymorphic overload set is a located
@@ -752,14 +752,41 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    caller built itself, so a cross-call's input shapes mirror the caller's
    operand slots, which the caller's own instantiation already interned.
    Shipped and then deleted after mutation testing found it unkillable. The
-   output grounding stays: it is where `out_arity`/`output_types` come from, and
-   it is the arm a future widening of phase 1's compound-output rejection would
-   need.
+   output grounding stays: it is where `out_arity`/`output_types` come from --
+   but a code-review mutation test then showed the *`generics_cell`
+   rebase/flush bracket* around it is also dead, for a stronger reason than
+   the input side ever was: every declared output that reaches `compose`
+   already passed phase 1's `poly_cross_output`, which rejects every compound
+   shape (`Array`/`Ref`/`Generic`) at record time, so `apply_subst`'s only arm
+   that would mint through the live instantiator can never run here. The
+   bracket, `CrossGround::generics`, and the `Some(self.generics)` threaded
+   into `word_ctx` are removed; `compose` grounds a `Var`/`Concrete` output
+   with `ctx.generics() == None`, same as it always effectively did.
 
 4. **`Module::transitive_instantiations` is sorted by symbol.** Discovery seeds
    from a `HashMap`, so without it the field's *order* would be randomized even
    though its content is not. Lowering sorts anyway; this is so a test reading
    the field does not have to.
+
+5. **An `inline` callee whose own body calls a polymorphic word is a located
+   rejection, found by code review.** The skip in finding 1 above is correct
+   as far as it goes, but `h`'s own body is never walked by `check_poly_body`
+   at all -- `check.rs`'s own-body loop excludes every combinator, checking
+   one standalone instead (`check_poly_combinator_standalone`, every type
+   variable stood in for a concrete dummy) -- so a call `h`'s body makes to
+   another polymorphic word never reaches `poly_cross_calls`, and the
+   fixpoint has nothing to compose even though lowering really does splice
+   `h`'s generic body at the outer call site. Unfixed, this reached the exact
+   panic N1 forbids (`f` non-inline, `g inline` calling `id`, `f` calling `g`)
+   and, worse, a silent wrong-symbol splice when two callers reached the
+   spliced body at different θ. `cross_calls_of` now runs a syntactic,
+   one-level scan of the combinator's body terms (`body_calls_a_poly_word`,
+   recursing only into `Quotation`) and rejects the outer call site if it
+   names any polymorphic word -- conservative (an untaken branch still
+   counts) rather than under-detecting. A call to a *further* `inline`
+   combinator is itself a call to a polymorphic word, so this needs no
+   explicit recursion through a chain of `inline` hops: each hop trips the
+   same check the next time it is reached as a callee.
 
 **One claim no test reaches.** A composed `CallInst` inherits the caller's
 `generation`, and nothing can exercise it: the REPL hands the walk an empty
@@ -772,6 +799,26 @@ so the inheritance stays, unkilled.
 R6's accept case for a fully concrete compound image is still an honest
 rejection, and a polymorphic body's walk still sees registries that are stale
 for the instantiations that body itself mints.
+
+**Pre-existing, confirmed and left alone (found probing deviation 5's fix).**
+An `inline` generic caller spliced at two different θ -- `: g inline ( 'T --
+'T ) id ;` called at `i64` and at `str` from a concrete `main` -- mints one
+`id` monomorph and segfaults at run time. Identical at `ac4eb2a`: the span-
+keyed global instantiation map is last-write-wins across a splice's own call
+sites, the same root family as finding 7, and out of this slice's scope.
+
+**Split-signals re-check (CLAUDE.md, phase exit).** `poly.rs` grew again this
+phase (9204 -> 10590 lines across the slice). Import divergence and
+high/low-level mixing are still absent -- everything added shares
+`word_ctx`/`apply_subst`/`intern_bundle_struct`/`is_combinator` with the rest
+of the file -- but a third signal now fires that did not at phase 1: the
+discovery/worklist code (`discover_transitive_instantiations`,
+`CrossGround`, `cross_calls_of`, `compose`, `fixpoint`) is called only from
+`check.rs`'s driver, never from any other walk function in `poly.rs` --
+"functions in a file that never call each other." Two of the four signals is
+below the split threshold; the prior "split deferred" call
+([[project_poly_rs_split_deferred]]) still holds, revisit alongside it rather
+than splitting phase 2's code out on its own.
 
 ## Phases (JSON)
 

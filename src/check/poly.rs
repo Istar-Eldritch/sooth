@@ -4519,35 +4519,26 @@ pub(super) fn discover_transitive_instantiations(
         refs,
         statics,
         modules,
-        generics,
         poly_cross_calls,
         ..
     } = module;
-    // The same rebase/flush bracket `check_poly_body` gets: grounding a
-    // callee's declared `Box['U]` input mints through the live instantiator,
-    // and the mint has to land in `structs`/`enums` before lowering looks it
-    // up (`ir::driver::subst_polytype` only ever finds, never interns).
-    let generics_cell = RefCell::new(std::mem::take(generics));
-    generics_cell
-        .borrow_mut()
-        .rebase(structs.len(), enums.len());
+    // No `generics_cell` rebase/flush bracket here (review finding 2, phase
+    // 2): the callee's declared *outputs* are the only `PolyType`s this
+    // fixpoint ever grounds, and every one already passed phase 1's
+    // `poly_cross_output` to be recorded at all, which rejects every compound
+    // shape (`Array`/`Ref`/`Generic`) outright. `apply_subst`'s `Generic` arm
+    // -- the only one that would mint through a live instantiator -- is
+    // therefore unreachable from `compose`, confirmed by mutation testing:
+    // `word_ctx`'s generics argument below is `None`.
     let ground = CrossGround {
         words,
         structs,
         enums,
         statics,
         modules: Some(modules),
-        generics: &generics_cell,
         records: poly_cross_calls,
     };
-    let composed = ground.fixpoint(insts, arrays, refs);
-    {
-        let mut g = generics_cell.borrow_mut();
-        g.flush_structs_into(structs);
-        g.flush_enums_into(enums);
-    }
-    *generics = generics_cell.into_inner();
-    let mut transitive = composed?;
+    let mut transitive = ground.fixpoint(insts, arrays, refs)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -4586,7 +4577,6 @@ struct CrossGround<'a> {
     enums: &'a [EnumDecl],
     statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
-    generics: &'a RefCell<GenericTypes>,
     records: &'a HashMap<String, Vec<PolyCrossCall>>,
 }
 
@@ -4648,7 +4638,9 @@ impl CrossGround<'_> {
         // Every diagnostic a grounding failure raises names the *caller's*
         // body, since that is where the call site is; `word_ctx`'s combinator
         // view is only read by the back-edge guards, which nothing here
-        // reaches.
+        // reaches. `None` for generics: `compose` only ever grounds a
+        // callee's declared *output*, and phase 1 already rejects every
+        // output shape that could mint one (review finding 2).
         let ctx = word_ctx(
             caller_word,
             self.structs,
@@ -4656,7 +4648,7 @@ impl CrossGround<'_> {
             self.statics,
             self.modules,
             &CombinatorIndex::new(),
-            Some(self.generics),
+            None,
         );
         let mut routed = HashMap::new();
         for record in records {
@@ -4673,7 +4665,26 @@ impl CrossGround<'_> {
             // route the span to a symbol that never exists. Phase 1 records
             // the call either way -- "this body calls `h` with this mapping"
             // is true regardless of how `h` is lowered.
+            //
+            // But `h`'s own body is never walked by `check_poly_body`: an
+            // `inline` word is checked standalone, with every type variable
+            // stood in for a concrete dummy (`check_poly_combinator_standalone`),
+            // so a call from `h`'s body to another polymorphic word never
+            // reaches the cross-call recorder at all -- `self.records` has no
+            // entry for `h` to consult. Lowering, unlike that standalone
+            // check, really does splice `h`'s *generic* body here, so a
+            // syntactic scan of it is the only view this fixpoint has:
+            // conservative (a call inside an untaken branch still counts),
+            // but sound -- nothing here can under-detect and silently
+            // mis-route.
             if is_combinator(callee_word) {
+                if body_calls_a_poly_word(&callee_word.body, self.words) {
+                    return Err(inline_callee_cross_call_error(
+                        &caller.callee,
+                        &record.callee,
+                        record.span,
+                    ));
+                }
                 continue;
             }
             let sig = callee_word
@@ -4787,6 +4798,21 @@ fn enqueue_new(
     }
 }
 
+/// P7.S3k (R4, review finding 1): whether an `inline` callee's own body -- the
+/// terms lowering will splice in place of a call to it -- names any
+/// polymorphic word at all. A one-level name match against every polymorphic
+/// `WordDef` is enough: if the named callee is itself `inline`, a call to *it*
+/// already trips this same check the next time this callee is reached from a
+/// caller, so nothing needs to recurse into a nested combinator's body here.
+/// Only `Quotation` nests terms; every other `TermKind` is a leaf.
+fn body_calls_a_poly_word(body: &[Term], words: &[WordDef]) -> bool {
+    body.iter().any(|term| match &term.kind {
+        TermKind::Call(name) => words.iter().any(|w| w.poly.is_some() && &w.name == name),
+        TermKind::Quotation(inner, _, _) => body_calls_a_poly_word(inner, words),
+        _ => false,
+    })
+}
+
 /// P7.S3k (R4/N1): a cross-call whose caller or callee name is a polymorphic
 /// overload set. Located rather than mis-composed: the two candidates' records
 /// merge under one name and each indexes its own signature's variables, so
@@ -4799,6 +4825,27 @@ fn overloaded_cross_call_error(caller: &str, callee: &str, overloaded: &str, spa
         span.line,
         span.col,
         crate::resolve::demangle_call(overloaded),
+    )
+}
+
+/// P7.S3k (R4, review finding 1): a cross-call to an `inline` callee whose own
+/// body calls another polymorphic word. Lowering splices `h`'s body at this
+/// call site, but the checker recorded that inner call as an ordinary
+/// cross-call keyed on `h`, not walked in place here -- so nothing composes
+/// a θ for it, and routing it anyway would either mint against a symbol that
+/// never exists or reuse whatever a different caller of `h` last routed at
+/// the same span. Located at the outer call site, since that is the only
+/// place a fix (a non-generic `h`, or calling `h` from a monomorphic word)
+/// can land.
+fn inline_callee_cross_call_error(caller: &str, callee: &str, span: Span) -> String {
+    format!(
+        "error: `{}` cannot call the polymorphic word `{}` (line {}, col {})\n  `{}` is `inline` and its own body calls another polymorphic word, which a call across two generic words cannot yet route\n  give `{}` a non-generic body, or call it only from a monomorphic word",
+        crate::resolve::demangle_word(caller),
+        crate::resolve::demangle_call(callee),
+        span.line,
+        span.col,
+        crate::resolve::demangle_call(callee),
+        crate::resolve::demangle_call(callee),
     )
 }
 
@@ -8658,6 +8705,44 @@ mod tests {
         for inst in module.instantiations.values() {
             assert!(inst.poly_calls.is_empty(), "routed: {:?}", inst.poly_calls);
         }
+    }
+
+    /// P7.S3k (R4, review finding 1): unlike `h` above, `h`'s own body here
+    /// calls a polymorphic word. Nothing composes a θ for that inner call --
+    /// `h` is never walked by `check_poly_body` at all (it is checked
+    /// standalone, at a concrete dummy type), so the fixpoint has no record
+    /// of what `h` calls -- and lowering really does splice `h`'s generic
+    /// body at `g`'s call site. A located rejection, not the panic
+    /// ("checked user word exists") or the silent wrong-symbol routing this
+    /// gap used to reach.
+    #[test]
+    fn transitive_discovery_rejects_an_inline_callee_whose_body_calls_a_poly_word() {
+        let src = ": id ( 'T -- 'T ) ;\n: h inline ( 'U -- 'U ) id ;\n: g ( 'T -- 'T ) h ;\n: main ( -- ) 1 g drop ;\n";
+        let err =
+            checked_like_a_build(src).expect_err("an inline callee's own cross-call is unroutable");
+        assert!(
+            err.contains("cannot call the polymorphic word `h`") && err.contains("inline"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The same gap, one `inline` hop further: `g` calls `h`, `h` is `inline`
+    /// and itself calls `k`, another `inline` word whose own body calls a
+    /// polymorphic word. The rejection fires at `g`'s call to `h` -- a call
+    /// to *any* polymorphic word, inline or not, is what `body_calls_a_poly_word`
+    /// looks for, so it does not need to recurse into `k`'s body itself.
+    #[test]
+    fn transitive_discovery_rejects_an_inline_callee_two_hops_from_the_poly_call() {
+        let src = ": id ( 'T -- 'T ) ;\n\
+             : k inline ( 'V -- 'V ) id ;\n\
+             : h inline ( 'U -- 'U ) k ;\n\
+             : g ( 'T -- 'T ) h ;\n\
+             : main ( -- ) 1 g drop ;\n";
+        let err = checked_like_a_build(src).expect_err("a two-hop inline chain is unroutable too");
+        assert!(
+            err.contains("cannot call the polymorphic word `h`"),
+            "unexpected error: {err}"
+        );
     }
 
     /// P7.S3k (R4/R8): a composed callee returning two or more values carries
