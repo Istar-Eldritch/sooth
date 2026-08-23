@@ -6,6 +6,7 @@
 //! `BlockEnd`). Engine-independent clusters do not touch these types; every
 //! `engine`-dependent cluster imports them via `super::*`.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use crate::ast::GenericTypes;
@@ -1087,12 +1088,12 @@ pub(super) enum BlockEnd {
 /// works identically whether the caller is a compiled word or a REPL line.
 pub(super) enum Ctx<'a> {
     Word {
-        /// Demangled, so every diagnostic that interpolates it is correct by
-        /// default: `resolve` rewrites module 0's decls to `{name}__m{module}`
-        /// as soon as a file has an import, and `check` runs on those names.
-        /// Self-tail recognition compares against mangled *call* names, so it
-        /// reads `mangled` instead.
-        name: &'a str,
+        /// The name as `check` sees it: `resolve` rewrites module 0's decls to
+        /// `{name}__m{module}` as soon as a file has an import, and a P7.S3r
+        /// impl member is synthesized as `member;Trait;module;Type`. Both are
+        /// compiler-internal spellings, so a diagnostic renders this through
+        /// `rendered_word_or` (R3) rather than interpolating it; self-tail
+        /// recognition compares it against mangled *call* names.
         mangled: &'a str,
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
@@ -1154,7 +1155,6 @@ pub(super) fn word_ctx<'a>(
     generics: Option<&'a RefCell<GenericTypes>>,
 ) -> Ctx<'a> {
     Ctx::Word {
-        name: crate::resolve::demangle_word(&word.name),
         mangled: &word.name,
         effect: &word.effect,
         structs,
@@ -1216,12 +1216,16 @@ impl Ctx<'_> {
         }
     }
 
-    /// The enclosing word's name, for recognizing a self-tail-call back-edge
-    /// (R15). A bare REPL line has no word to recurse into.
-    pub(super) fn word_name(&self) -> Option<&str> {
+    /// The enclosing word, rendered for a diagnostic (`resolve::render_word`,
+    /// R3): a synthesized impl member reads back as the member/trait/type it
+    /// came from, never its raw `;`-delimited spelling. The result carries its
+    /// own delimiters, so an interpolating template must not add backticks of
+    /// its own -- which is why `fallback`, the stand-in for a bare REPL line
+    /// with no enclosing word, carries them too.
+    pub(super) fn rendered_word_or<'f>(&'f self, fallback: &'f str) -> Cow<'f, str> {
         match self {
-            Ctx::Word { name, .. } => Some(name),
-            Ctx::Line { .. } => None,
+            Ctx::Word { mangled, .. } => crate::resolve::render_word(mangled),
+            Ctx::Line { .. } => Cow::Borrowed(fallback),
         }
     }
 
@@ -1280,7 +1284,6 @@ impl<'a> Ctx<'a> {
     pub(super) fn with_module(&self, module: u32) -> Ctx<'a> {
         match *self {
             Ctx::Word {
-                name,
                 mangled,
                 effect,
                 structs,
@@ -1291,7 +1294,6 @@ impl<'a> Ctx<'a> {
                 generics,
                 ..
             } => Ctx::Word {
-                name,
                 mangled,
                 effect,
                 structs,
@@ -1471,6 +1473,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -1487,6 +1490,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,

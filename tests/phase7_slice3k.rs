@@ -114,8 +114,7 @@ fn monomorph_symbols(entry: &Path) -> Vec<String> {
 /// `a_poly_word_calling_an_imported_poly_word_names_the_narrowing` pinned as a
 /// located error.
 const MYLT: &str = "import: intrinsics * ;\n\
-     import: core::prelude * ;\n\
-     import: core::bool cb | Bool | ;\n";
+     import: core::prelude * ;\n";
 
 /// R1/R3: the capability. An imported generic callee is reached from a
 /// non-inline generic body, at two distinct instantiations, and the program
@@ -277,7 +276,6 @@ fn a_mutual_non_growing_generic_pair_compiles_runs_and_terminates() {
         "main.sth",
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::bool cb | Bool | ;\n\
          : h ( 'U: Copy i64 -- 'U ) dup 0 gt ~[ 1 sub g 0 drop ] ~[ drop ] if ;\n\
          : g ( 'T: Copy i64 -- 'T ) dup 0 gt ~[ 1 sub h 0 drop ] ~[ drop ] if ;\n\
          : main ( -- ) 7 5 g . ;\n",

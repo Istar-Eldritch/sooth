@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::{ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, TraitDecl};
+use crate::ast::{
+    EnumDecl, ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, StructDecl,
+    TraitDecl,
+};
 use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
@@ -277,6 +280,83 @@ fn widen_intrinsics(current: IntrinsicVisibility, imp: &Import) -> IntrinsicVisi
     }
 }
 
+/// P7.S3q-follow: a tolerant type-only counterpart to what `resolve.rs`'s
+/// whole-program `resolve_export_origins` does for every export category.
+/// For each module's `export:` list, the module that actually *declares* the
+/// name as a struct/enum, walking through any number of hub re-exports. A
+/// name this can't place -- because it names a word rather than a type, or
+/// the walk hits a cycle -- is simply left out of the returned map rather
+/// than erroring: the ordinary one-hop lookup already reports the real
+/// diagnostic for those, and this table exists purely to let a *type*
+/// reference in an effect signature follow the same hub hop a term-position
+/// reference already can.
+fn resolve_type_export_origins(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module_count: usize,
+    exports: &[Vec<(String, Span)>],
+    import_maps: &[HashMap<String, u32>],
+    selectives: &[HashMap<String, u32>],
+) -> Vec<HashMap<String, u32>> {
+    let declared_types: Vec<HashSet<&str>> = (0..module_count)
+        .map(|m| {
+            let m = m as u32;
+            let mut names: HashSet<&str> = HashSet::new();
+            for s in structs.iter().filter(|s| s.module == m) {
+                names.insert(s.name_static);
+            }
+            for e in enums.iter().filter(|e| e.module == m) {
+                names.insert(e.name_static);
+                names.extend(e.variants.iter().map(|v| v.name.as_str()));
+            }
+            names
+        })
+        .collect();
+    let mut origin: Vec<HashMap<String, u32>> = vec![HashMap::new(); module_count];
+    for (m, list) in exports.iter().enumerate() {
+        for (name, _) in list {
+            if declared_types[m].contains(name.as_str()) {
+                continue;
+            }
+            if let Some(found) =
+                walk_type_export_origin(m as u32, name, &declared_types, selectives, import_maps)
+            {
+                origin[m].insert(name.clone(), found);
+            }
+        }
+    }
+    origin
+}
+
+/// One name's hop-by-hop walk for `resolve_type_export_origins`: from `start`,
+/// follow an unqualified selective re-export, or else the first import target
+/// that declares the name as a type, until a module actually declaring it as
+/// a struct/enum is found. `None` for a cycle or a dead end (the name is not a
+/// type anywhere reachable from `start`), quietly -- this walk is advisory.
+fn walk_type_export_origin(
+    start: u32,
+    name: &str,
+    declared_types: &[HashSet<&str>],
+    selectives: &[HashMap<String, u32>],
+    import_maps: &[HashMap<String, u32>],
+) -> Option<u32> {
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut current = start;
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        if declared_types[current as usize].contains(name) {
+            return Some(current);
+        }
+        current = *selectives[current as usize].get(name).or_else(|| {
+            import_maps[current as usize]
+                .values()
+                .find(|&&dep| declared_types[dep as usize].contains(name))
+        })?;
+    }
+}
+
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
@@ -412,6 +492,24 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         intrinsics_by_module.push(intrinsics);
     }
 
+    // P7.S3q-follow: a struct/enum name reached only through a hub's
+    // `export:` list (re-exported, not declared there) resolves fine in a
+    // *term* position (`rewrite`'s hub-aware `Visibility::origin` walk, run
+    // late over the whole program) but not in an effect signature, which
+    // resolves its type names during this early parse via
+    // `resolve_type_name_in_module`'s single-hop `imports`/`selective` maps.
+    // `type_origin` closes that gap the same way, but early: computed here,
+    // right after the maps above and the struct/enum pre-pass are both known,
+    // and threaded into `parse_bodies` alongside them.
+    let type_origin = resolve_type_export_origins(
+        &structs,
+        &enums,
+        closure.nodes.len(),
+        &exports_by_module,
+        &import_by_module,
+        &selective_maps,
+    );
+
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
@@ -487,6 +585,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &import_map,
             &exports_by_module,
             selective_map,
+            &type_origin,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -1938,8 +2037,9 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"show.sth\" s | Show | ;\n\
              type: Point x i64 y i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) ;\n",
         );
@@ -2013,10 +2113,12 @@ mod tests {
              import: \"a.sth\" a | A | ;\n\
              import: \"b.sth\" b | B | ;\n\
              type: Pt n i64 ;\n\
-             : pt-a ( &Pt -- ) drop ;\n\
-             : pt-b ( &Pt -- ) drop ;\n\
-             impl: a::A for Pt  t1 pt-a ;\n\
-             impl: b::B for Pt  t1 pt-b ;\n\
+             impl: a::A for Pt\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
+             impl: b::B for Pt\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A B -- ) a::t1 ;\n\
              : main ( -- ) 1 Pt |p| &p f p drop ;\n",
         );
@@ -2030,9 +2132,13 @@ mod tests {
             .expect("the call site recorded an instantiation");
         let resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
         assert_eq!(
-            resolved,
-            vec!["pt-a__m0"],
-            "the qualified call must resolve to `A`'s impl, not `B`'s"
+            resolved.len(),
+            1,
+            "the qualified call must resolve to exactly one member"
+        );
+        assert!(
+            resolved[0].starts_with("t1;A;"),
+            "the qualified call must resolve to `A`'s impl, not `B`'s: {resolved:?}"
         );
     }
 
@@ -2186,8 +2292,9 @@ mod tests {
              import: \"blob.sth\" b | shout | ;\n\
              type: Point x i64 y i64 ;\n\
              trait: Show 'T show ( &'T -- ) ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) shout ;\n",
         );
@@ -2210,8 +2317,9 @@ mod tests {
              type: Point x i64 y i64 ;\n\
              type: Blob n i64 ;\n\
              trait: Show 'T show ( &'T -- ) ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : show ( &Blob -- ) drop ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) ;\n",
@@ -2226,11 +2334,10 @@ mod tests {
     }
 
     /// P7.S3e (R8/R9): the resolved symbol in a *mangled* build. The `impl:`
-    /// binding names its word raw (`point-show`) and is resolved pre-mangle,
-    /// while lowering mints that word's function under the post-mangle
-    /// `overload_symbols` spelling -- so the resolution rides the word's index
-    /// rather than its name, and the recorded symbol is the one lowering will
-    /// emit, byte for byte.
+    /// member's synthesized word is resolved pre-mangle, while lowering mints
+    /// that word's function under the post-mangle `overload_symbols` spelling
+    /// -- so the resolution rides the word's index rather than its name, and
+    /// the recorded symbol is the one lowering will emit, byte for byte.
     #[test]
     fn a_resolved_trait_call_carries_the_post_mangle_lowering_symbol() {
         let s = Sandbox::new("bound-symbol");
@@ -2243,8 +2350,9 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"show.sth\" s | Show | ;\n\
              type: Point x i64 y i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
         );
@@ -2258,47 +2366,10 @@ mod tests {
             .flat_map(|i| i.trait_calls.values())
             .collect();
         let symbols = crate::ast::overload_symbols(&module.words);
-        let expected = symbols
-            .iter()
-            .find(|sym| sym.starts_with("point-show"))
-            .expect("the impl member lowers under its own symbol");
-        assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
-        assert_eq!(expected, "point-show__m0");
-    }
-
-    /// The discriminating half the test above cannot reach: it names an
-    /// unoverloaded impl member, so its plain name and its lowering symbol
-    /// coincide, and a resolution keyed on either reads the same value. Here
-    /// the bound member shares its name with another `point-show` overload
-    /// (a distinct signature, over `Other`, so the two coexist), which forces
-    /// `overload_symbols` to suffix both -- `point-show$$0`/`point-show$$1`,
-    /// in declaration order. A resolution keyed on the raw name would record
-    /// `point-show`, which lowering never mints; only the `$$0`-suffixed
-    /// symbol is real.
-    #[test]
-    fn a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol() {
-        let s = Sandbox::new("bound-symbol-overloaded");
-        let entry = s.write(
-            "main.sth",
-            "import: intrinsics * ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             type: Point x i64 y i64 ;\n\
-             type: Other n i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             : point-show ( &Other -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
-             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        assert!(
+            symbols.contains(&"show;Show;1;Point__m0".to_string()),
+            "symbols: {symbols:?}"
         );
-        let closure = discover_closure(&entry).expect("closure resolves");
-        let mut module = assemble_module(&closure, true).expect("assembles");
-        check::check(&mut module).expect("the bound is satisfied");
-        let resolved: Vec<&String> = module
-            .instantiations
-            .values()
-            .filter(|i| i.callee == "shows__m0")
-            .flat_map(|i| i.trait_calls.values())
-            .collect();
-        assert_eq!(resolved, vec![&"point-show__m0$$0".to_string()]);
+        assert_eq!(resolved, vec![&"show;Show;1;Point__m0".to_string()]);
     }
 }

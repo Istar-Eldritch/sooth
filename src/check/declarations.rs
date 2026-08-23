@@ -53,91 +53,6 @@ pub(super) fn check_extern_decls(
     Ok(())
 }
 
-/// R1: the builtin words `check_term` dispatches by name, in its probe chain,
-/// *before* the word environment is consulted at all. They are absent from
-/// `builtin_table` (empty today, since every builtin dispatches on the
-/// concrete operand type rather than a fixed signature), so an `extern:`
-/// naming one would be registered, never looked up, and silently do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
-/// words are dispatched in the same chain but are rejected earlier, against
-/// the declaration's name in the parser, so they are not repeated here.
-pub(super) const BUILTIN_WORDS: &[&str] = &[
-    // check_shuffle
-    "dup",
-    "drop",
-    "swap",
-    "over",
-    "rot", // check_operator
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "mod",
-    "and",
-    "or",
-    "xor",
-    "not",
-    "shl",
-    "shr",
-    // Slice 10c (R-P3-3): the comparison primitives, each yielding the 32-bit
-    // flag `branch` consumes.
-    "ueq",
-    "ult",
-    "ugt",
-    "ulte",
-    "ugte",
-    "une",
-    // The six surface comparison names are `lib/` words now, not name-
-    // dispatched builtins, but they stay listed: this set is also what stops
-    // a bare tail call being read as a call to the enclosing word
-    // (`has_self_tail_call`), and a trailing `lt` inside a user's own `Vec2 lt`
-    // is still far more often the library `lt` on two scalars than a self-call.
-    "eq",
-    "lt",
-    "gt",
-    "lte",
-    "gte",
-    "ne",
-    ".",
-    // Slice 10c (R-P3-1/R-P3-2): the two control/discriminant primitives.
-    "branch",
-    "tag",
-    "max",
-    "max-total", // check_str_word
-    "len",
-    "cstr", // check_array_word (`len` is shared with `check_str_word`)
-    "fill",
-];
-
-/// R1: whether `name` is dispatched as a builtin ahead of any environment
-/// lookup. Beyond the fixed names, `check_operator` claims every `>`-prefixed
-/// name with a non-empty remainder as a numeric conversion (`>u8`), erroring
-/// on an unrecognised target type rather than falling through, so no such
-/// name can reach a registered signature either. A bare `>` with no suffix
-/// falls through this filter; the comparison operator, now spelled `gt`, is
-/// in the list separately.
-pub(super) fn is_builtin_word_name(name: &str) -> bool {
-    BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
-}
-
-/// P8 S2 (R2): the names the `intrinsics` import gates, which is
-/// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
-/// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
-/// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
-/// as a self-call. Their home is `core::cmp`, so gating them here would answer
-/// an unimported `lt` with "add `import: intrinsics *`", pointing at the wrong
-/// module.
-///
-/// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
-/// `Print` row per printable type, dispatched by `check_operator`) and does not
-/// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
-/// import error.
-pub(super) fn is_gated_intrinsic_name(name: &str) -> bool {
-    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
-        return false;
-    }
-    is_builtin_word_name(name)
-}
-
 /// R1: a located error for an `extern:` declaration redeclaring a name
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
@@ -484,43 +399,11 @@ fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
     }
 }
 
-/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
-/// trait's sole implicit type variable, id 0) against a concrete `impl:`
-/// target, interning a fresh array/reference shape if the grounded shape is
-/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
-/// double-registers one already interned elsewhere). Trait member
-/// signatures are restricted to concrete/array/reference shapes over `'T`
-/// this slice (`parse_trait_member_effect` rejects anything else at
-/// declaration time), so every other `PolyType` shape is unreachable here.
-pub(super) fn ground_member_type(
-    pty: &PolyType,
-    target: Type,
-    arrays: &mut Vec<ArrayDecl>,
-    refs: &mut Vec<RefDecl>,
-) -> Type {
-    match pty {
-        PolyType::Concrete(t) => *t,
-        PolyType::Var(_) => target,
-        PolyType::Array(elem, Len::Concrete(n)) => {
-            let elem_ty = ground_member_type(elem, target, arrays, refs);
-            intern_array_type(arrays, elem_ty, *n)
-        }
-        PolyType::Ref(referent, mutable) => {
-            let r = ground_member_type(referent, target, arrays, refs);
-            intern_ref_type(refs, r, *mutable)
-        }
-        _ => unreachable!(
-            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
-        ),
-    }
-}
-
-/// P7.S3e (R4/R11, decision 1/2): every `impl:` binding's own checks --
-/// duplicate `(TraitId, Type)`, the orphan rule, every required member bound
-/// exactly once (no missing, no unknown, no repeat), each bound word
-/// signature-matching the trait's declared member (grounded at the target
-/// type) and concrete (decision 2: a polymorphic binding is rejected here,
-/// at the `impl:` site, never at a later call site).
+/// P7.S3e (R4/R11, decision 1): every `impl:` declaration's own checks --
+/// duplicate `(TraitId, Type)`, the orphan rule, and every required member
+/// bound exactly once (no missing member, no repeat). Each member's word is
+/// the parser's synthesized body word, so there is no signature to verify
+/// here; this only resolves it to a `Module::words` index (R8).
 pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
     // `Type` derives no `Hash`, so the duplicate-`(TraitId, Type)` check is a
     // linear scan rather than a `HashMap` -- `impl:` counts are small (one
@@ -561,6 +444,12 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         // R8: the word each member binds, as an index into `module.words`,
         // resolved here (pre-mangle, where `word_name` and `WordDef::name`
         // still agree) and read back at a bound-directed call site.
+        //
+        // P7.S3r (R2): `bindings` comes from the parser's body-form desugar,
+        // which validates each member against the trait and splices a concrete
+        // word carrying that member's grounded signature into this same
+        // module. The name lookup is therefore exact and total, and the one
+        // thing left to reject is a member bound twice.
         let mut resolved: Vec<(String, usize)> = Vec::new();
         for (member_name, word_name) in &bindings {
             if !bound_names.insert(member_name.as_str()) {
@@ -570,76 +459,12 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                     impl_span,
                 ));
             }
-            let member_sig = {
-                let trait_decl = &module.traits[trait_id.index()];
-                let Some(member) = trait_decl.members.iter().find(|m| &m.name == member_name)
-                else {
-                    return Err(impl_unknown_member_error(
-                        &trait_name,
-                        member_name,
-                        impl_span,
-                    ));
-                };
-                member.sig.clone()
-            };
-            let expected_inputs: Vec<Type> = member_sig
-                .inputs
-                .iter()
-                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
-                .collect();
-            let expected_outputs: Vec<Type> = member_sig
-                .outputs
-                .iter()
-                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
-                .collect();
-            // R8: a word named `drop` is a destructor overload and nothing
-            // else (`find_drop_overloads` admits no other shape for the
-            // name). Lowering compiles it into its struct's destructor symbol
-            // rather than a callable word of its own, so a member bound to it
-            // would resolve to a symbol no `IrFunc` ever mints.
-            if word_name == "drop" {
-                return Err(impl_drop_overload_member_error(
-                    &trait_name,
-                    member_name,
-                    impl_span,
-                ));
-            }
-            let candidates: Vec<(usize, &WordDef)> = module
+            let idx = module
                 .words
                 .iter()
-                .enumerate()
-                .filter(|(_, w)| w.module == impl_module && &w.name == word_name)
-                .collect();
-            if candidates.is_empty() {
-                return Err(impl_unknown_word_error(
-                    &trait_name,
-                    member_name,
-                    word_name,
-                    impl_span,
-                ));
-            }
-            let poly_candidate = candidates.iter().find(|(_, w)| w.poly.is_some());
-            let concrete_match = candidates.iter().find(|(_, w)| {
-                w.poly.is_none()
-                    && w.effect.inputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_inputs
-                    && w.effect.outputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_outputs
-            });
-            match concrete_match {
-                Some((idx, _)) => resolved.push((member_name.clone(), *idx)),
-                None => {
-                    if let Some((_, pc)) = poly_candidate {
-                        return Err(impl_polymorphic_member_error(&trait_name, member_name, pc));
-                    }
-                    return Err(impl_signature_mismatch_error(
-                        &trait_name,
-                        member_name,
-                        word_name,
-                        &expected_inputs,
-                        &expected_outputs,
-                        impl_span,
-                    ));
-                }
-            }
+                .position(|w| w.module == impl_module && &w.name == word_name)
+                .expect("the desugar splices the synthesized member word into this module");
+            resolved.push((member_name.clone(), idx));
         }
         let trait_decl = &module.traits[trait_id.index()];
         for member in &trait_decl.members {
@@ -699,62 +524,6 @@ fn impl_orphan_error(
 fn impl_duplicate_member_error(trait_name: &str, member: &str, span: Span) -> String {
     format!(
         "error: `impl: {trait_name}` binds member `{member}` more than once at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-fn impl_unknown_member_error(trait_name: &str, member: &str, span: Span) -> String {
-    format!(
-        "error: `{member}` is not a member of trait `{trait_name}` at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-fn impl_unknown_word_error(trait_name: &str, member: &str, word: &str, span: Span) -> String {
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to unknown word `{word}` at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-/// P7.S3e (R8): an `impl:` member bound to a `drop` overload. Rejected at the
-/// binding site rather than left to resolve, because the symbol a call site
-/// would record for it is one lowering never emits.
-fn impl_drop_overload_member_error(trait_name: &str, member: &str, span: Span) -> String {
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `drop` at line {}, col {}, which is a destructor overload, not a callable word",
-        span.line, span.col
-    )
-}
-
-fn impl_polymorphic_member_error(trait_name: &str, member: &str, word: &WordDef) -> String {
-    let span = word_span(word);
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `{}` (line {}, col {}), which is polymorphic; an impl member must be a concrete word",
-        word.name, span.line, span.col
-    )
-}
-
-fn impl_signature_mismatch_error(
-    trait_name: &str,
-    member: &str,
-    word: &str,
-    expected_inputs: &[Type],
-    expected_outputs: &[Type],
-    span: Span,
-) -> String {
-    let ins = expected_inputs
-        .iter()
-        .map(|t| t.name())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let outs = expected_outputs
-        .iter()
-        .map(|t| t.name())
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `{word}` (line {}, col {}), whose signature does not match `( {ins} -- {outs} )`",
         span.line, span.col
     )
 }
@@ -1365,8 +1134,8 @@ pub(super) fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String
         {
             let first = *first;
             return Err(format!(
-                "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
-                crate::resolve::demangle_word(&word.name),
+                "error: duplicate word {} (line {}, col {}); first defined at line {}, col {}",
+                crate::resolve::render_word(&word.name),
                 span.line,
                 span.col,
                 first.line,
@@ -1423,8 +1192,8 @@ fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) 
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "error: overload of `{}` (line {}, col {}) has the same input types ({}) as a builtin",
-        crate::resolve::demangle_word(name),
+        "error: overload of {} (line {}, col {}) has the same input types ({}) as a builtin",
+        crate::resolve::render_word(name),
         span.line,
         span.col,
         types
@@ -1437,10 +1206,10 @@ fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) 
 /// candidate may be a builtin, which has no declaration site to cite, so the
 /// message names it rather than locating it.
 fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity: usize) -> String {
-    let name = crate::resolve::demangle_word(name);
+    let name = crate::resolve::render_word(name);
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     format!(
-        "error: overload of `{name}` (line {}, col {}) takes {arity} input{} but another `{name}` takes {other_arity}; all overloads of a name must agree on input count",
+        "error: overload of {name} (line {}, col {}) takes {arity} input{} but another {name} takes {other_arity}; all overloads of a name must agree on input count",
         span.line,
         span.col,
         plural(arity),
@@ -2674,7 +2443,11 @@ mod tests {
         // the env lookup, plus the `>`-prefixed conversion family. None is in
         // `builtin_table`, so without the `BUILTIN_WORDS` gate the declaration
         // would be accepted, never consulted, and silently do nothing.
-        for name in BUILTIN_WORDS.iter().copied().chain([">u8", ">f64"]) {
+        for name in crate::ast::BUILTIN_WORDS
+            .iter()
+            .copied()
+            .chain([">u8", ">f64"])
+        {
             let src = format!("extern: {name} ( i64 -- i64 ) \"s\" ;");
             let Err(err) = check_src(&src) else {
                 panic!("`extern: {name}` was accepted");
@@ -2685,36 +2458,6 @@ mod tests {
             );
         }
     }
-    /// P8 S2 (R2): the gate set is `is_builtin_word_name` minus exactly the six
-    /// surface comparisons -- no wider and no narrower. `.` is the case that
-    /// makes the difference load-bearing: both r1 reviews put it in the
-    /// exclusion set, but it is a real `BUILTIN_TABLE` intrinsic that does not
-    /// move to `core`, so gating it is correct and excluding it would let a bare
-    /// `.` through with no import at all.
-    #[test]
-    fn the_gate_set_excludes_exactly_the_six_surface_comparisons() {
-        for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
-            assert!(
-                is_builtin_word_name(name),
-                "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
-            );
-            assert!(!is_gated_intrinsic_name(name), "`{name}` is a `core` word");
-        }
-        for name in BUILTIN_WORDS
-            .iter()
-            .copied()
-            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
-            .chain([">u8", ">usize"])
-        {
-            assert!(is_gated_intrinsic_name(name), "`{name}` is gated");
-        }
-        assert!(is_gated_intrinsic_name("."), "`.` is a real intrinsic");
-        assert!(
-            !is_gated_intrinsic_name("call"),
-            "`call` is not in the table"
-        );
-    }
-
     #[test]
     fn overload_exact_input_match_is_error() {
         // R1: two definitions with identical `(module, name, input_types)`
@@ -3735,70 +3478,14 @@ mod tests {
     }
 
     #[test]
-    fn check_impl_decls_ok_for_a_matching_binding() {
+    fn check_impl_decls_ok_for_a_matching_member_body() {
         impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;",
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;",
         )
         .unwrap();
-    }
-
-    #[test]
-    fn check_impl_decls_does_not_bind_a_word_from_another_module() {
-        // The candidate lookup used to be an unscoped `w.name == word_name`
-        // scan over the whole-program `module.words`, so an `impl:` in one
-        // module could silently bind a member to an unexported word
-        // declared in a different module. Simulate that by parsing the
-        // matching word in-module, then relabeling it as foreign.
-        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;")
-        .unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
-        check_trait_decls(&module).unwrap();
-        module
-            .words
-            .iter_mut()
-            .find(|w| w.name == "int-show")
-            .unwrap()
-            .module = 1;
-        let err = check_impl_decls(&mut module).unwrap_err();
-        assert!(err.contains("unknown word `int-show`"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_polymorphic_member_is_error() {
-        let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             : poly-show ( 'U: Copy &'U -- ) drop ;\n\
-             impl: Show for i64  show poly-show ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("polymorphic"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_polymorphic_member_with_a_zero_slot_member_is_error() {
-        // A poly word's `effect` is empty by construction, so a zero-slot
-        // member grounds to an empty expectation that a poly word's empty
-        // effect matches on both sides: `concrete_match`'s `w.poly.is_none()`
-        // conjunct is the only thing rejecting it, and the sibling test above
-        // (a `( &'T -- )` member) discriminates on slot count instead.
-        //
-        // A zero-slot member is itself rejected by `check_trait_decls` as of
-        // P7.S3p (its input list doesn't end in `'T`), so this drives
-        // `check_impl_decls` directly, skipping `check_trait_decls`, to keep
-        // isolating the impl-site polymorphic-member rejection this test is
-        // actually about.
-        let tokens = lex("trait: Show 'T nothing ( -- ) ;\n\
-             : p ( 'U: Copy &'U -- ) drop ;\n\
-             impl: Show for i64  nothing p ;")
-        .unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
-        let err = check_impl_decls(&mut module).unwrap_err();
-        assert!(err.contains("polymorphic"), "{err}");
-        assert!(err.contains("`p`"), "{err}");
     }
 
     #[test]
@@ -3806,8 +3493,9 @@ mod tests {
         // A scalar declares no module of its own, so "or the module declaring
         // `i64`" would name a home that cannot exist.
         let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;")
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         check_trait_decls(&module).unwrap();
@@ -3838,8 +3526,9 @@ mod tests {
     fn check_impl_decls_missing_member_is_error() {
         let err = impl_check_src(
             "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
-             : int-eq ( &i64 &i64 -- ) drop drop ;\n\
-             impl: Eq for i64  eq int-eq ;",
+             impl: Eq for i64\n\
+               : eq | a b | a drop b drop ;\n\
+             ;",
         )
         .unwrap_err();
         assert!(
@@ -3849,57 +3538,29 @@ mod tests {
     }
 
     #[test]
-    fn check_impl_decls_unknown_member_is_error() {
+    fn check_impl_decls_duplicate_member_is_error() {
         let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show  bogus int-show ;",
+            "trait: Getter 'T get ( &'T -- i64 ) ;\n\
+             type: Point n i64 ;\n\
+             impl: Getter for Point\n\
+               : get | p | p &n @ ;\n\
+               : get | p | p &n @ ;\n\
+             ;",
         )
         .unwrap_err();
-        assert!(err.contains("is not a member of trait `Show`"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_drop_overload_member_is_error() {
-        // R8: a `drop` overload's signature matches a `( 'T -- )` member
-        // grounded at its own struct, so nothing else here rejects the
-        // binding -- and the symbol a call site would then record for it
-        // (`drop`) is one lowering never emits: a destructor overload is
-        // compiled into its struct's destructor, not into a word.
-        let err = impl_check_src(
-            "type: Spy tag i64 ;\n\
-             : drop ( Spy -- ) | s | s Spy> drop ;\n\
-             trait: Eat 'T eat ( 'T -- ) ;\n\
-             impl: Eat for Spy  eat drop ;",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains(
-                "`impl: Eat` binds member `eat` to `drop` at line 4, col 1, which is a destructor overload, not a callable word"
-            ),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn check_impl_decls_signature_mismatch_is_error() {
-        let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- i64 ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("does not match"), "{err}");
+        assert!(err.contains("binds member `get` more than once"), "{err}");
     }
 
     #[test]
     fn check_impl_decls_duplicate_impl_is_error() {
         let err = impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             : int-show2 ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;\n\
-             impl: Show for i64  show int-show2 ;",
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;\n\
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;",
         )
         .unwrap_err();
         assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");

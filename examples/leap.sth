@@ -3,10 +3,10 @@
 
 import: intrinsics * ;
 import: core::prelude * ;
-\ `bool` names a type in an effect below and a bool is printed with `.`, and
-\ neither a type name nor an operator overload follows the prelude hub's
-\ re-export: both come from the declaring module.
-import: core::bool b | Bool . | ;
+\ A bool is printed with `.` below, and an operator overload does not follow
+\ the prelude hub's re-export (one hop only): it comes from the declaring
+\ module. `Bool` itself comes through `core::prelude`'s own re-export.
+import: core::bool b | . | ;
 
 : leap ( i64 -- Bool )
   dup 4 mod 0 eq

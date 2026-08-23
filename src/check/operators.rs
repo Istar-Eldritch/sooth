@@ -375,10 +375,9 @@ pub(super) fn check_operator(
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
-            name, span.line, op, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same numeric type, found `{a}` and `{b}`"
         ),
@@ -389,10 +388,9 @@ fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
 /// float-only, integer division is unsupported.
 fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `div` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
-            name, span.line, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `div` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `div` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
         ),
@@ -403,10 +401,9 @@ fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
 /// stays integer-only.
 fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `mod` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
-            name, span.line, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `mod` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `mod` requires two operands of the same integer type, found `{a}` and `{b}`"
         ),
@@ -417,10 +414,9 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
 /// naming `max-total` is the point of the message, not just the mismatch.
 fn max_over_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `max` does not support float operands (found `{}` and `{}`); use `max-total` for a total-ordered float maximum\n  note: declared {}",
-            name, span.line, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `max` does not support float operands (found `{}` and `{}`); use `max-total` for a total-ordered float maximum\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `max` does not support float operands (found `{a}` and `{b}`); use `max-total` for a total-ordered float maximum"
         ),
@@ -431,10 +427,9 @@ fn max_over_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
 /// `max-total` is float-only; naming `max` is the point of the message.
 fn max_total_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `max-total` requires two operands of the same float type, found `{}` and `{}`; use `max` for integers\n  note: declared {}",
-            name, span.line, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `max-total` requires two operands of the same float type, found `{}` and `{}`; use `max` for integers\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `max-total` requires two operands of the same float type, found `{a}` and `{b}`; use `max` for integers"
         ),
@@ -447,10 +442,9 @@ fn max_total_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> St
 fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or Bool type, found `{}` and `{}`\n  note: declared {}",
-            name, span.line, op, a, b, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires two operands of the same integer or Bool type, found `{}` and `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, a, b, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same integer or Bool type, found `{a}` and `{b}`"
         ),
@@ -460,10 +454,9 @@ fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
 /// `not` applied to a non-integer, non-bool operand.
 fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `not` requires an integer or Bool operand, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `not` requires an integer or Bool operand, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `not` requires an integer or Bool operand, found `{found}`"
         ),
@@ -474,10 +467,9 @@ fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String 
 fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an integer value operand, found `{found}`"
         ),
@@ -487,10 +479,9 @@ fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
 /// `shl`/`shr` applied to a shift count that is not `i64`.
 fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an `i64` shift count, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires an `i64` shift count, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an `i64` shift count, found `{found}`"
         ),
@@ -502,10 +493,9 @@ fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
 fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires a numeric source, found `{found}`")
         }
@@ -518,10 +508,9 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
 /// (P7 slice 3i R3) -- and what a future non-printable scalar would get.
 fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `.` requires a printable scalar, found `{found}`")
         }
@@ -531,9 +520,10 @@ fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String 
 /// An unknown type name in a conversion word (X6), e.g. `>i128`.
 fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
     match ctx {
-        Ctx::Word { name: wname, .. } => format!(
-            "error: unknown type `{name}` in `{wname}` (line {})",
-            span.line
+        Ctx::Word { mangled, .. } => format!(
+            "error: unknown type `{name}` in {wname} (line {})",
+            span.line,
+            wname = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => format!("error: unknown type `{name}`"),
     }

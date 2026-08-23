@@ -112,11 +112,33 @@ fn fixture_imports(src: &str) -> String {
         .filter(|w| matches!(w[0], ":" | "static:" | "type:"))
         .map(|w| w[1])
         .collect();
-    let wanted: Vec<&str> = CORE_WORDS
+    let mut wanted: Vec<&str> = CORE_WORDS
         .iter()
         .copied()
         .filter(|w| !declared.contains(w) && tokens.contains(w))
         .collect();
+    // A fixture that names `import: core::bool` itself already binds
+    // `Bool`/`False`/`True` from there; adding the same names again through
+    // `core::prelude` would double-bind them, so this route defers to that
+    // one rather than colliding with it. `False`/`True` are bundled as a pair
+    // (mirroring `bool_imports`' own pairing below) rather than filtered
+    // independently: a fixture spelling one constructor in an eliminator arm
+    // conventionally spells both. A substring check on `src`, not a token
+    // check on `tokens`: this splitter is whitespace-only, so a bracket-
+    // adjacent generic argument (`Res[i64 Bool]`) tokenizes as `Bool]`, never
+    // a bare `Bool` token.
+    if !src.contains("import: core::bool") {
+        if !declared.contains(&"Bool") && src.contains("Bool") {
+            wanted.push("Bool");
+        }
+        if !declared.contains(&"False")
+            && !declared.contains(&"True")
+            && (src.contains("False") || src.contains("True"))
+        {
+            wanted.push("False");
+            wanted.push("True");
+        }
+    }
     // A fixture copied out of the committed corpus already carries its own
     // imports; adding a second binding of the same name is a hard collision.
     let mut out = String::new();
@@ -133,48 +155,41 @@ fn fixture_imports(src: &str) -> String {
     out
 }
 
-/// P7 slice 3i: the `core::bool` names a fixture's text implies, on the same
-/// derive-it-from-the-source principle as the `core` words above.
+/// P7 slice 3i (P7.S3e-follow narrowed this to just the `.` overload):
+/// the `core::bool` names a fixture's text implies that still cannot cross
+/// `core::prelude`'s hub.
 ///
-/// It is a separate `import:` line from the `core::prelude` one on purpose:
-/// `core::prelude` re-exports the `true`/`false` constructors but cannot
-/// re-export the *type* `bool` (a type name resolves against its declaring
-/// module) nor the `.` overload (an operator overload's candidate lookup is one
-/// hop), so a fixture that names either has to reach the declaring module. Both
-/// routes at once would be a hard collision, so everything bool comes from
-/// `core::bool` here and the prelude line stays words-only.
+/// `core::prelude` now re-exports `Bool`/`False`/`True` too (`fixture_imports`
+/// routes those through its own `core::prelude` line), but the `.` overload
+/// still cannot: an operator overload's candidate lookup considers the
+/// calling module and the module it selectively imported the name from, one
+/// hop, so a hub in between hides the declaring module. A fixture that prints
+/// a bool still has to reach `core::bool` directly for `.`.
 fn bool_imports(src: &str, tokens: &[&str], declared: &[&str]) -> String {
-    // A fixture that declares any of these itself -- the in-process shape, and
-    // the subject of the "no import, no `Bool`" goldens -- gets nothing added.
-    let own = ["Bool", "False", "True"];
-    if src.contains("import: core::bool") || own.iter().any(|n| declared.contains(n)) {
+    // A fixture that already names `import: core::bool` itself, or declares
+    // its own `.`, gets nothing added -- the in-process shape, and the
+    // subject of the "no import, no `.`" goldens.
+    if src.contains("import: core::bool") || declared.contains(&".") {
         return String::new();
     }
-    let mut names: Vec<&str> = Vec::new();
-    if src.contains("Bool") {
-        names.push("Bool");
-    }
-    if tokens.contains(&"True") || tokens.contains(&"False") {
-        names.push("False");
-        names.push("True");
-    }
-    // The `.` overload, for a fixture that prints a bool. A bool can reach `.`
-    // without any bool name appearing in the text -- `2 3 lt .` prints one and
-    // spells neither the type nor a constructor -- so a produced-a-bool word
-    // counts as evidence too. Requesting it unused would be harmless (it
-    // overloads a builtin, so no other type's `.` changes); requesting it where
-    // the fixture declares its own `.` is a hard collision.
+    // A bool can reach `.` without any bool name appearing in the text --
+    // `2 3 lt .` prints one and spells neither the type nor a constructor --
+    // so a produced-a-bool word counts as evidence too, alongside a fixture
+    // that spells `Bool`/`True`/`False` directly (those now resolve via
+    // `fixture_imports`' own `core::prelude` line, but the `.` overload still
+    // needs `core::bool` regardless -- it is the one name that still cannot
+    // cross the hub).
     let produces_bool = [
         "eq", "lt", "gt", "lte", "gte", "ne", "and", "or", "xor", "not",
     ]
     .iter()
-    .any(|w| tokens.contains(w));
-    if tokens.contains(&".") && !declared.contains(&".") && (!names.is_empty() || produces_bool) {
-        names.push(".");
-    }
-    match names.is_empty() {
-        true => String::new(),
-        false => format!("import: core::bool corebool | {} | ;\n", names.join(" ")),
+    .any(|w| tokens.contains(w))
+        || src.contains("Bool")
+        || src.contains("True")
+        || src.contains("False");
+    match tokens.contains(&".") && produces_bool {
+        true => "import: core::bool corebool | . | ;\n".to_string(),
+        false => String::new(),
     }
 }
 
