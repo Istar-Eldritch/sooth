@@ -29,6 +29,20 @@ impl Tree {
         Tree(dir)
     }
 
+    /// `new`, plus `module:` entries so the tree's sibling files are importable
+    /// as `self::<name>` (a file inside a package cannot be reached by path).
+    fn with_modules(tag: &str, modules: &str) -> Tree {
+        let t = Tree::new(tag);
+        let pkg = common::fixture_package(tag)
+            .replace("\nlayer:", &format!("\nmodule: {modules} ;\nlayer:"));
+        std::fs::write(t.0.join("sooth.pkg"), pkg).unwrap();
+        t
+    }
+
+    fn write(&self, name: &str, src: &str) {
+        std::fs::write(self.0.join(name), src).unwrap();
+    }
+
     fn entry(&self, src: &str) -> PathBuf {
         let path = self.0.join("main.sth");
         std::fs::write(&path, src).unwrap();
@@ -172,7 +186,10 @@ fn impl_body_form_builds_and_runs() {
     );
     let (stdout, symbols) = build_run_and_symbols(&entry);
     assert_eq!(stdout, "(3\n,4\n)");
-    for synth in ["cmp.3b.Order.3b.Point__m0", "show.3b.Show.3b.Point__m0"] {
+    for synth in [
+        "cmp.3b.Order.3b.0.3b.Point__m0",
+        "show.3b.Show.3b.0.3b.Point__m0",
+    ] {
         assert!(
             symbols.iter().any(|s| s == synth),
             "the desugared member must reach the binary as `{synth}`; nm found:\n{symbols:#?}"
@@ -384,6 +401,44 @@ fn impl_body_trait_qualifier_disambiguates_shared_member_name() {
            3 4 Point | p |\n\
            &p via_getter .\n\
            &p via_setter .\n\
+           p drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "3\n4\n");
+}
+
+/// Recon O3 across modules: the two traits sharing the member name `get` are
+/// *also* named the same, differing only in declaring module. The trait
+/// component of the synthesized name therefore has to carry the module id --
+/// the bare declared name collides, and the collision surfaces as a `duplicate
+/// word` on a program the binding form accepts.
+#[test]
+fn impl_body_disambiguates_same_named_traits_from_two_modules() {
+    let t = Tree::with_modules("same-named-traits", "a b");
+    t.write(
+        "a.sth",
+        "export: Getter ;\ntrait: Getter 'T get ( &'T -- i64 ) ;\n",
+    );
+    t.write(
+        "b.sth",
+        "export: Getter ;\ntrait: Getter 'T get ( &'T -- i64 ) ;\n",
+    );
+    let entry = t.entry(
+        "import: intrinsics * ;\n\
+         import: self::a ;\n\
+         import: self::b ;\n\
+         type: Point x i64 y i64 ;\n\
+         impl: a::Getter for Point\n\
+           : get | p | p &x @ ;\n\
+         ;\n\
+         impl: b::Getter for Point\n\
+           : get | p | p &y @ ;\n\
+         ;\n\
+         : via_a ( &'T: a::Getter -- i64 ) get ;\n\
+         : via_b ( &'T: b::Getter -- i64 ) get ;\n\
+         : main ( -- )\n\
+           3 4 Point | p |\n\
+           &p via_a .\n\
+           &p via_b .\n\
            p drop ;\n",
     );
     assert_eq!(build_and_run(&entry), "3\n4\n");

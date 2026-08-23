@@ -74,13 +74,13 @@ own call site is untouched apart from the import.
 ### R3 — Diagnostic rendering of a synthesized member name (brief decision 3, spike finding 5)
 
 The synthesized name is trait-qualified and unforgeable by construction, using a lexer
-delimiter: `cmp;Order;Point` (`member;Trait;Type`). The spike verified end-to-end that this
+delimiter: `cmp;Order;0;Point` (`member;Trait;trait-module;Type`). The spike verified end-to-end that this
 survives `resolve::mangle` with no new exemption, that `qbe_name` escapes `;` to `.3b.`
 injectively at both definition and call site, and that the binary links and runs.
 
 The spike's one real cost: the raw synthesized name **leaks verbatim into user diagnostics**
 (`resolve::demangle_word`, `src/resolve.rs:105`, strips only a trailing `__m{n}`), so a
-mis-written impl body reports `cmp;Order;Point`, a name the user never wrote and cannot type.
+mis-written impl body reports `cmp;Order;0;Point`, a name the user never wrote and cannot type.
 
 Ruling: diagnostics that render an impl-member word name must render it back to a form the
 user can read. Chosen rendering: **`` `cmp` (member of trait `Order` for `Point`) ``**. This
@@ -90,7 +90,7 @@ for the retired signature-mismatch class (see R6), so it must land before Phase 
 ### R4a — How a member name resolves inside its own body (brief decision 4)
 
 The recursion story needs a stated mechanism, because the synthesized word is a plain
-top-level `WordDef` named `cmp;Order;Point` and a bare `cmp` token in its body would
+top-level `WordDef` named `cmp;Order;0;Point` and a bare `cmp` token in its body would
 otherwise not find it.
 
 Ruling: while desugaring a member body, the parser **rewrites every call token equal to that
@@ -133,10 +133,11 @@ environment, nor as a name reserved against any word declaration.** The rejectio
 the `trait:` declaration site (`parse_trait_decl`, `src/parser.rs:1977`), not at the impl
 body. A member name is a located parse error when it is any of:
 
-- a genuinely name-dispatched builtin: `is_builtin_word_name`
-  (`src/check/declarations.rs:118`) **minus the six surface comparisons**. That is exactly
-  the set `is_gated_intrinsic_name` (`src/check/declarations.rs:134`) already computes;
-  reuse it, or extract the shared predicate under an accurate name. Note this set is a
+- a genuinely name-dispatched builtin: `is_builtin_word_name` **minus the six surface
+  comparisons**. That is exactly the set `is_name_dispatched_builtin` already computes;
+  reuse it. Both predicates and the `BUILTIN_WORDS` const they read live in `src/ast.rs`
+  (`src/ast.rs:1260`+), elevated there from `src/check/declarations.rs` so `parser` can
+  reach them without depending on `check`. Note this set is a
   *function*, not the `BUILTIN_WORDS` const: it also claims every `>`-prefixed conversion
   (`>u8`, `>u32`), which the const does not list;
 - an access word `@` / `!` / `+!` (`ACCESS_WORDS`, `src/parser.rs:150`);
@@ -184,7 +185,7 @@ that those six are `lib/` words now, *not* name-dispatched: they are listed only
 would therefore make a member named `eq` illegal and take the **`Eq` trait and the planned
 `Map` consumer (`Eq` + `Hash`) with it**, for a shadowing hazard that does not exist: an `eq`
 member's self-binding shadows a *library word*, which is precisely the "shadows a user word"
-case decision 5 already admits. `is_gated_intrinsic_name` excludes those six for the same
+case decision 5 already admits. `is_name_dispatched_builtin` excludes those six for the same
 underlying reason (they live in `core::cmp`, not the intrinsics surface).
 
 Why the predicate is not `resolve::is_operator_dispatch_name` (`src/resolve.rs:72`) either:
@@ -200,8 +201,8 @@ body-form impl can implement it, so such a member is effectively unimplementable
 binding form could have implemented it; the binding form is being deleted. Live members are
 unaffected: `cmp`, `show`, `hash` are absent from every rejected category, and `eq`/`lt`/`gt`
 stay legal under the corrected predicate. This keeps decision 5's shadowing exactly at "shadows a user word", never a
-builtin — the exception does not widen. Enforced at the body-desugar site (parse time), so
-trait-declaration checking is untouched (constraint: nothing in check changes).
+builtin — the exception does not widen. Enforced in `parse_trait_decl` (parse time), so
+`check` is untouched (constraint: nothing in check changes).
 
 This does **not** touch the still-legal migration case where the *member* is ordinarily
 named (`get`) and its *body* calls an operator builtin (`max`): there `max` resolves to the
@@ -249,13 +250,23 @@ anything wired only into `assemble_module` is unenforced at the REPL.)
 
 ## The synthesized name
 
-- Shape: `member;Trait;Type`, e.g. `cmp;Order;Point`. Trait-qualified to preserve recon O3
-  (two traits may share a member name and its grounded signature for one type). Unforgeable
-  because `;` is a hard lexer delimiter: a user source token can never contain it (spike
-  finding 4), so no new name-rejection rule is required.
+- Shape: `member;Trait;trait-module;Type`, e.g. `cmp;Order;0;Point`. Trait-qualified to
+  preserve recon O3 (two traits may share a member name and its grounded signature for one
+  type). Unforgeable because `;` is a hard lexer delimiter: a user source token can never
+  contain it (spike finding 4), so no new name-rejection rule is required.
+- The trait component carries `TraitDecl::module` as well as the declared name. The bare name
+  is not injective: two same-named traits from different modules may both be implemented for
+  one type in one module, and without the module id both members synthesize the same name and
+  the second is rejected as a duplicate word — a program the binding form accepts.
 - The `Type` component is the `for`-type's rendered name (the same spelling a type expression
-  produces). This is a synthesized internal name; it is never parsed back, so its exact
-  spelling only needs to be injective per `(member, trait, type)`.
+  produces), which is *not* injective across modules. Two same-named types from different
+  modules are separated instead by the ordinary overload-suffix path, which needs their two
+  grounded signatures to differ. That holds because a member's last input must be `'T`/`&'T`
+  (`non_trailing_receiver_error`, `src/check/declarations.rs:367`), so every grounded
+  signature mentions the `for` type. If that dispatchability rule is ever relaxed (P7.S3p), the `Type` component has to
+  carry its own module id too.
+- This is a synthesized internal name; it is never parsed back, so its components only need
+  to be injective per implemented member.
 - It is spliced into `out.words` as an ordinary `WordDef` and flows through mangle, check,
   lowering, and emission unchanged (spike findings 1–3).
 
@@ -332,7 +343,8 @@ site is clippy-fatal here). Exit criteria are golden tests.
 Add the body-member branch to `parse_impl_decl` (`src/parser.rs:2096`+): when the first token
 after the `for`-type is `:`, parse `: member [| binders |] body ;` members until the closing
 `;` (R5). For each member: resolve it against the trait's `members` (R6), ground its
-signature to a concrete `StackEffect` (R2), synthesize a `WordDef` named `member;Trait;Type`
+signature to a concrete `StackEffect` (R2), synthesize a `WordDef` named
+`member;Trait;trait-module;Type`
 spliced into `out.words`, and push `(member, synth-name)` into `ImplDecl::bindings` so
 `check_impl_decls` resolves it exactly as today. The bare-binding branch is untouched.
 
@@ -406,8 +418,12 @@ Exit goldens:
   witness, not just the literal-name assertions the mutation tests already cover. Two
   traits each declare a member named `get`, both implemented for one type, each reached
   through a different bound; the program prints both results correctly, proving the
-  trait component of `member;Trait;Type` actually disambiguates rather than merely
-  appearing in the synthesized name.
+  trait component of `member;Trait;trait-module;Type` actually disambiguates rather than
+  merely appearing in the synthesized name.
+- `impl_body_disambiguates_same_named_traits_from_two_modules`: the same witness where the
+  two traits also share their *declared name*, differing only in declaring module. This is
+  the only test that discriminates the trait component's module id; without it the bare name
+  passes every other golden.
 - `impl_body_unterminated_block_at_eof_is_error` / `impl_body_unterminated_block_absorbs_next_decl`:
   the two diagnostics an unterminated block can produce, per the note above.
 - Coexistence: the existing binding-form goldens still pass unchanged.
@@ -477,24 +493,31 @@ Difficulty: **hard** (the desugar, grounding elevation, and the new parse path).
 Growth-structure re-check (CLAUDE.md, at phase exit): this phase adds the body-member
 branch, its rejections, and their helpers to `parser.rs`, growing it past 8000 lines. Kept
 as-is: the new code sits beside the other declaration parsers it extends
-(`parse_trait_decl`, `parse_impl_decl`), pulls no dependency the file doesn't already have,
-and none of the split signals (import divergence, X-and-Y-and-Z responsibilities, dead
-cross-calls, a forced circular dependency) fire together. Re-check again at Phase 4, once
-the binding-form branch it coexists with is deleted.
+(`parse_trait_decl`, `parse_impl_decl`), and none of the split signals (import divergence,
+X-and-Y-and-Z responsibilities, dead cross-calls, a forced circular dependency) fire
+together. Re-check again at Phase 4, once the binding-form branch it coexists with is
+deleted.
+
+The phase's two new cross-module needs were both resolved by elevating to the lowest common
+ancestor rather than by importing sideways: `ground_member_type` (R2) and the
+`BUILTIN_WORDS` / `is_builtin_word_name` / `is_name_dispatched_builtin` family (R4) both
+moved from `check` to `ast`, which `parser` and `check` already depend on. `parser` gains no
+non-test dependency on `check`.
 
 ### Phase 2 — Readable rendering of a synthesized member name (R3)
 
-Give diagnostics a way to render `member;Trait;Type` back to
+Give diagnostics a way to render `member;Trait;trait-module;Type` back to
 `` `cmp` (member of trait `Order` for `Point`) ``. Extend the `demangle_word` /
 `demangle_call` path (`src/resolve.rs:105`+) so a name whose (post-`__m` strip) body
 contains the `;` delimiter is split on it and rendered in that form; a name without `;`
-is unchanged. Lookups keep using the mangled name; only the rendered string changes (the
+is unchanged. The split yields four components, not three: the trait-module id is an
+internal disambiguator and is dropped from the rendering. Lookups keep using the mangled name; only the rendered string changes (the
 existing `demangle_word` contract).
 
 Exit golden `impl_body_wrong_effect_names_readable_member`: a body-form impl whose body
 leaves the wrong effect (e.g. a `cmp` body that drops without pushing an `Ordering`) is
 rejected by ordinary in-body stack-effect checking, and the message names
-`` `cmp` (member of trait `Order` for `Point`) `` — never the raw `cmp;Order;Point`. This is
+`` `cmp` (member of trait `Order` for `Point`) `` — never the raw `cmp;Order;0;Point`. This is
 the concrete replacement for the retired signature-mismatch class (R6/Phase 4). Include a
 `nm`-free negative check in the golden that the raw delimiter spelling does **not** appear in
 the diagnostic.

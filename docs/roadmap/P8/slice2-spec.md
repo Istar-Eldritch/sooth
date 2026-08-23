@@ -50,7 +50,7 @@ built out:
 
 - `SelectiveName::qualifier` became `Option<String>`, and `check_selective_imports`'
   collision/not-exported messages gained wildcard-specific wording
-  (`wildcard import of`p`collides with a local ...`) rather than a fabricated qualifier that
+  (``wildcard import of `p` collides with a local ...``) rather than a fabricated qualifier that
   would misdescribe the import shape.
 - A target's `export:` list may repeat a name across two `export:` blocks, which
   `scan_exports` does not dedup; the desugaring dedups, otherwise a wildcard synthesizes two

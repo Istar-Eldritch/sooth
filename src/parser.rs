@@ -16,14 +16,13 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ground_member_type, intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes,
-    GlobalEntry, GlobalMode, ImplDecl, Import, ImportAnchor, ImportBinding, ImportTarget,
-    IntrinsicVisibility, Len, Line, Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl,
-    PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit,
-    StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot,
-    VariantDecl, VariantTag, VariantTagMode, WordDef,
+    ground_member_type, intern_array_type, is_name_dispatched_builtin, ArrayDecl, Bound, EnumDecl,
+    ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl, Import, ImportAnchor,
+    ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line, Module, ModuleInfo, ModuleName,
+    NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
+    StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
+    TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
-use crate::check::is_name_dispatched_builtin;
 use crate::lexer::Token;
 use std::collections::HashMap;
 
@@ -413,13 +412,31 @@ fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
 }
 
 /// P7.S3r: the internal name of the word an `impl:` body member desugars to,
-/// `member;Trait;Type`. Trait-qualified because two traits may require a
-/// same-named member with the same grounded signature for one type, and
-/// unforgeable because `;` is a hard lexer delimiter: no source token can
-/// contain one. Never parsed back, so the `Type` component only needs to be
-/// injective -- the rendered type name is.
-fn synth_member_word_name(member: &str, trait_name: &str, target: Type) -> String {
-    format!("{member};{trait_name};{}", target.name())
+/// `member;Trait;trait-module;Type`. Trait-qualified because two traits may
+/// require a same-named member with the same grounded signature for one type,
+/// and unforgeable because `;` is a hard lexer delimiter: no source token can
+/// contain one. Never parsed back, so the components only need to be injective
+/// per implemented member.
+///
+/// The trait component carries the declaring module's id, not just the bare
+/// declared name: two same-named traits from different modules can both be
+/// implemented for one type in one module, and the bare name alone makes those
+/// two members collide (the binding form, which names two distinct words,
+/// admits that program).
+///
+/// The `Type` component is only the *rendered* type name, so two same-named
+/// types from different modules do share a synthesized name. That case is
+/// currently carried by the ordinary overload-suffix path, which needs the two
+/// grounded signatures to differ -- guaranteed here, because a member's last
+/// input must be `'T`/`&'T` (`check::declarations::non_trailing_receiver_error`)
+/// and so every grounded signature mentions the `for` type.
+fn synth_member_word_name(
+    member: &str,
+    trait_name: &str,
+    trait_module: u32,
+    target: Type,
+) -> String {
+    format!("{member};{trait_name};{trait_module};{}", target.name())
 }
 
 /// P7.S3r (R4a): rewrite every call of `member` inside its own desugared body
@@ -2282,6 +2299,7 @@ impl<'t> Parser<'t> {
         self.expect_word(":")?;
         let (member_name, member_span) = self.expect_word_any_spanned()?;
         let trait_name = self.traits[trait_id.index()].name.clone();
+        let trait_module = self.traits[trait_id.index()].module;
         let Some(sig) = self.traits[trait_id.index()]
             .members
             .iter()
@@ -2316,7 +2334,7 @@ impl<'t> Parser<'t> {
         };
         let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
-        let name = synth_member_word_name(&member_name, &trait_name, target_ty);
+        let name = synth_member_word_name(&member_name, &trait_name, trait_module, target_ty);
         let body = rewrite_member_self_calls(&body, &member_name, &name)?;
         Ok((
             member_name,
@@ -7046,12 +7064,12 @@ mod tests {
         .unwrap();
         assert_eq!(
             module.impls[0].bindings,
-            vec![("show".to_string(), "show;Show;i64".to_string())]
+            vec![("show".to_string(), "show;Show;0;i64".to_string())]
         );
         let synth = module
             .words
             .iter()
-            .find(|w| w.name == "show;Show;i64")
+            .find(|w| w.name == "show;Show;0;i64")
             .expect("the member body is spliced in as a top-level word");
         assert!(synth.poly.is_none());
         assert!(!synth.declares_inline);
@@ -7091,7 +7109,7 @@ mod tests {
         let synth = module
             .words
             .iter()
-            .find(|w| w.name == "show;Show;i64")
+            .find(|w| w.name == "show;Show;0;i64")
             .unwrap();
         let inner = synth
             .body
@@ -7108,7 +7126,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec!["p", "show;Show;i64"]);
+        assert_eq!(calls, vec!["p", "show;Show;0;i64"]);
     }
 
     /// P7.S3r (R4a): the rewrite is unconditional token equality, so a binder
