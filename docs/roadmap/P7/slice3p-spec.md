@@ -47,24 +47,33 @@ Forcing consumer: `Indexable`/`at` (the probe's `Pair` fixture) and, downstream,
    spans all of the body's `Bound::User` variables, so `matched` is `Vec<(u32, TraitId,
    &TraitMember)>`. `[]` falls through to ordinary `env`/builtin dispatch
    (preserving `eq`/`if`/`bool` and any non-member word), `[one]` dispatches on that
-   candidate's `var`, and any longer slice is the ambiguity error. This subsumes and generalizes the S3e single-position ambiguity arm.
-4. **Ambiguity (open item 1) is decided by candidate count, not by position, because a
-   concatenative call carries no positional argument to disambiguate with.** Two bound traits
-   declaring the same member name are ambiguous whether their receivers sit at the same input
-   position or different ones — the call names only the member, and nothing at the call site
-   can pick. The multi-position case is therefore *not* a new resolution path; it is the same
-   ambiguity, and the fix is to widen the check off `matched.len() >= 2` rather than off "one
-   shared position." Two sub-cases both reject:
-   - **Same variable** (`'T: A B`, both declare `t1`): preserved byte-for-byte — this is the
-     existing `ambiguous_trait_member_call_is_rejected` behaviour.
-   - **Different variables** (`&'T: A &'U: B`, `A` declares `t1` on `'T`, `B` on `'U`): newly
-     reachable under name-first search (S3e's top-of-stack discovery fixed the variable first,
-     so it could never arise), and equally ambiguous. `ambiguous_trait_member_error`
-     (`poly.rs:5478`) is generalized to take the candidate `(trait-name, ty-var-name)` set:
-     when every candidate shares one variable it renders exactly as today (`` `t1` is required
-     by both `A` and `B` on 'T (line …) ``, note line unchanged); when variables differ it
-     names each trait with its variable (`` required by `A` on 'T and `B` on 'U ``). The
-     single-var rendering is load-bearing for the preserved test and must stay identical.
+   candidate's `var`, and a longer slice goes to ruling 4. This subsumes and generalizes the S3e single-position ambiguity arm.
+4. **Ambiguity is decided by candidate count *within one variable*; candidates spanning
+   several variables are separated by the operands the call consumes.** Which trait a call
+   means is unanswerable when two of one variable's bounds declare the member: the operands are
+   the same either way, so picking one would be an overload resolution the language does not
+   have. Which *variable* a call means is answerable, and S3e already answered it positionally
+   — that is what keeps `f ( &'T: A &'U: A -- ) ta ta` (one trait on two variables, two
+   obligations resolved against their own thetas,
+   `one_trait_on_two_variables_resolves_each_span_against_its_own_theta`) callable. Deciding
+   the multi-variable case on count alone would regress that legal program to a rejection and
+   make R8's `o.var == v` conjunct dead. So, for `matched.len() >= 2`:
+   - **All on one variable** (`'T: A B`, both declare `t1`): rejected, preserved
+     byte-for-byte — the existing `ambiguous_trait_member_call_is_rejected` behaviour. Input
+     *position* is not a disambiguator here either: `A`'s `t1 ( &'T -- )` and `B`'s
+     `t1 ( &'T i64 -- )` on one variable stay ambiguous.
+   - **Spanning variables** (`&'T: A &'U: A`, or `&'T: A &'U: B`): narrowed to the one
+     candidate whose full declared input list fits the stack window, and dispatched.
+     Non-decisive narrowing is the ambiguity error: no candidate fits (the operands are wrong
+     for all of them), or several do — reachable through a mixed set (`&'U: C &'T: A B`, all
+     three declaring `t1`), where without a uniqueness requirement `'T`'s two equally-fitting
+     candidates would be resolved by bound declaration order.
+   `ambiguous_trait_member_error` (`poly.rs:5478`) takes the candidate `(trait-name,
+   ty-var-name)` set: when every candidate shares one variable it renders exactly as today
+   (`` `t1` is required by both `A` and `B` on 'T (line …) ``, note line unchanged); when
+   variables differ it names each trait with its variable (`` required by `A` on 'T and `B` on
+   'U ``). The single-var rendering is load-bearing for the preserved test and must stay
+   identical.
 5. **The declaration gate is relaxed, not removed: a member must bind the trait variable in
    *some* input.** `member_ends_in_trait_var` becomes `member_binds_trait_var`, true when *any*
    input is `PolyType::Var(0)` or `PolyType::Ref(_, Var(0))` (the trait's own variable is id 0
@@ -116,7 +125,10 @@ comment at `:349-358` rewritten to describe the relaxed rule and the deferral.
 
 ## Invariants to preserve
 
-- Selection never reads operand *shape*; only the downstream per-input check does (ruling 2).
+- Selection never reads operand *shape* to *decline* a candidate: a single candidate is always
+  dispatched, so a mismatch is the downstream per-input diagnostic and never a fall-through to
+  `unknown word` (ruling 2). Shape narrowing applies only to a multi-variable candidate set
+  (ruling 4), where it decides *which* variable, never whether to dispatch at all.
 - `poly_trait_member_call` still runs first in `poly_call_term`, ahead of every name-based
   special case (S3e review finding 3). The name-first change is *internal* to it — the probe
   confirmed no ordering collision, ordinary `eq`/`if`/`bool` dispatch in the same bodies is
@@ -136,10 +148,16 @@ phase that lifts the gate (they fail the instant it lifts):
 - `trait_member_with_a_sandwiched_receiver_is_rejected` → rewritten to
   `trait_member_with_a_non_trailing_receiver_dispatches`: `at ( &'T i64 -- i64 )` on an
   `impl` now declares *and* dispatches instead of being rejected.
-- `sandwiched_receiver_no_longer_silently_mis_dispatches` → rewritten to a dispatch-correctness
-  golden: with both a trait member `at` and an unrelated concrete `: at`, the bounded call
-  reaches the trait member (name-first, ahead of `env.get`), proving the concrete word is not
-  hijacked — the mirror of the mis-dispatch it used to guard against.
+- `sandwiched_receiver_no_longer_silently_mis_dispatches` → rewritten to
+  `a_concrete_word_of_the_members_name_captures_the_call`. The dispatch-correctness claim it
+  was to become (the bounded call reaches the trait member ahead of `env.get`) does not hold
+  through a *build*: name resolution runs before the checker, so a concrete `: at` in the same
+  module captures the call site's spelling (S3e R18's ruled outcome — the trait loses a
+  collision with a word of the member's name). The golden keeps the program and asserts it is
+  still rejected, now as an operand/effect mismatch rather than a declaration rejection, so the
+  original silent `900` mis-dispatch stays impossible. Dispatch winning over an *unresolved*
+  same-named `env` word is pinned in `check::poly`'s tests instead
+  (`a_member_call_beats_a_concrete_word_of_the_same_name`).
 - `trait_member_with_a_zero_input_receiver_is_rejected`: kept as a rejection, assertion updated
   to the new `zero_receiver_member_error` text (must contain `P7.S3t`).
 
@@ -151,9 +169,11 @@ New coverage:
   (`check_src`/`obligations_of`, mirroring `trait_member_call_records_an_obligation`).
 - A bound-declared member with a mismatched operand is a *located* `trait_member_operand_error`,
   not `unknown word` — pins ruling 2 (the probe's regression witness).
-- `ambiguous_trait_member_call_is_rejected` unchanged (same-variable text preserved) plus a new
-  cross-variable ambiguity test (`&'T: A &'U: B`, both declare the member) asserting the widened
-  message names both variables.
+- `ambiguous_trait_member_call_is_rejected` unchanged (same-variable text preserved), plus
+  cross-variable coverage: `&'T: A &'U: B` both declaring the member *dispatches* per operand
+  (each of `t1 t1` recording its own variable), while a call whose operands fit no candidate
+  asserts the widened message names both variables, and a mixed set (`&'U: C &'T: A B`) stays
+  rejected — pins the uniqueness requirement in ruling 4.
 - A multi-position, same-variable duplicate (`t1` at different input positions on one variable)
   is still the single-variable ambiguity — pins ruling 4.
 - End-to-end (`tests/phase7_slice3p.rs`, compiled): the probe's `Indexable`/`at` on `Pair`
