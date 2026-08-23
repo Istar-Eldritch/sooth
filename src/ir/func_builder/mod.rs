@@ -185,11 +185,12 @@ pub(super) struct FuncBuilder<'a> {
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
     /// P7.S3e (R8/R9): this instantiation's own trait-member-call resolutions
     /// (`CallInst::trait_calls`), span -> the implementing word's lowering
-    /// symbol. Consulted before `builtin_overloads` in `lower_call`, since a
-    /// bound call resolves through the trait/impl registries rather than a
-    /// name-directed overload set. Empty on every non-instantiation lowering
-    /// path (a monomorphic word has no bounds to resolve, so it never gets
-    /// one either).
+    /// symbol. Disjoint from `builtin_overloads` by construction: a bound call
+    /// returns at `check/poly.rs`'s `poly_trait_member_call` probe, ahead of
+    /// every `builtin_overloads.insert`, so no span can be in both and
+    /// `lower_call`'s lookup order between the two is not load-bearing. Empty
+    /// on every non-instantiation lowering path (a monomorphic word has no
+    /// bounds to resolve, so it never gets one either).
     pub(super) trait_calls: &'a HashMap<Span, String>,
     /// P7 slice 1 (R2): the receiver-directed field projections the checker
     /// resolved, span -> `(StructId, field index)`. `lower_reference_word`

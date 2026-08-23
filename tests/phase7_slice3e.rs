@@ -457,11 +457,17 @@ fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
 
 /// Phase 4 (R9/R13/R16): the array `sort` consumer -- the slice's forcing
 /// consumer -- run at two distinct concrete instantiations of `'T: Copy
-/// Order`. `sort3` is a fully unrolled 3-element compare-swap network (a
-/// generic word may not call another generic word unless the callee is
-/// concrete/builtin, P7.S3d; a combinator cannot carry a user bound at all,
-/// P7.S3o's scope cut), each comparison dispatching through the bound to its
-/// own concrete `impl:`'s `cmp`. `Pair`'s `impl:` orders *descending*, and
+/// Order`. `sort3` is a fully unrolled 3-element compare-swap network rather
+/// than the spec's `slice3-dogfood.md` Program 2 insertion sort, because that
+/// program's two nested loops are not expressible in a generic body today:
+/// `while` on a quotation literal is rejected outright there, a combinator
+/// cannot carry a user bound at all (P7.S3o's scope cut), and an inner loop
+/// written as its own generic word cannot be called from the generic outer one
+/// ("a polymorphic word is not yet reachable from another polymorphic word",
+/// P7.S3d). Self-recursion alone does work, so a single fused loop is
+/// reachable; the unrolled network is the direct form of the same subject.
+/// Each comparison dispatches through the bound to its own concrete
+/// `impl:`'s `cmp`. `Pair`'s `impl:` orders *descending*, and
 /// deliberately so: `Pair` is a one-`i64` struct, so an ascending
 /// `cmp-pair` would be behaviourally identical to `cmp-i64` on either
 /// receiver's layout and this golden would pass even if both

@@ -1566,4 +1566,76 @@ mod tests {
             "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
     }
+
+    /// P7.S3e phase 4 (R9): `lower_src` is not enough for a bound-dispatch
+    /// fixture -- `check` does not run the trait/impl pre-passes (`driver.rs`
+    /// does, before it), so without them `ImplDecl::resolved` is empty and
+    /// every member call fails to resolve. Mirrors the real build's order.
+    fn lower_with_trait_prepasses(src: &str) -> IrModule {
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::check::check_trait_decls(&module).unwrap();
+        crate::check::check_impl_decls(&mut module).unwrap();
+        check(&mut module).unwrap();
+        crate::ir::lower(&module).unwrap()
+    }
+
+    /// P7.S3e phase 4 (R9): the IR-level twin of the `sort` golden. Each
+    /// monomorphization of one bounded word calls *its own* instantiation's
+    /// `impl:` member, asserted on the emitted `Instr::Call` symbol rather
+    /// than on program output -- which is what "the per-instantiation
+    /// `CallInst::trait_calls` map reached the lowered call site" means. Two
+    /// instantiations, because a single one cannot distinguish a
+    /// per-instantiation map from one shared across all of them.
+    #[test]
+    fn bound_dispatch_lowers_each_instantiation_to_its_own_impl_member() {
+        let m = lower_with_trait_prepasses(
+            "trait: Getter 'T get ( &'T -- i64 ) ;\n\
+             type: Pt n i64 ;\n\
+             type: Qt n i64 ;\n\
+             : pt-get ( &Pt -- i64 ) &n @ ;\n\
+             : qt-get ( &Qt -- i64 ) &n @ ;\n\
+             impl: Getter for Pt  get pt-get ;\n\
+             impl: Getter for Qt  get qt-get ;\n\
+             : getval ( &'T: Getter -- i64 ) get ;\n\
+             : main ( -- ) 7 Pt |p| &p getval . p drop\n\
+                           9 Qt |q| &q getval . q drop ;\n",
+        );
+        assert_eq!(
+            call_symbols(func(&m, "sooth_mono_getval__t0_Pt")),
+            vec!["pt-get"]
+        );
+        assert_eq!(
+            call_symbols(func(&m, "sooth_mono_getval__t0_Qt")),
+            vec!["qt-get"]
+        );
+    }
+
+    /// P7.S3e phase 4 (R15): the IR-level twin of the pruning golden. An
+    /// implementing word named after a builtin operator, reachable *only*
+    /// through a bound (no term anywhere spells `max`), must survive
+    /// `uncalled_operator_overloads` -- which without R15's `trait_calls`
+    /// clause would count it uncalled and drop its body from the module.
+    /// Its arity matches the builtin `max`'s: the unit harness does not
+    /// mangle, so a disagreeing overload is rejected before lowering.
+    #[test]
+    fn an_operator_named_impl_member_reached_only_by_a_bound_is_not_pruned() {
+        let m = lower_with_trait_prepasses(
+            "trait: Getter 'T get ( &'T &'T -- i64 ) ;\n\
+             type: Pt n i64 ;\n\
+             : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\
+             impl: Getter for Pt  get max ;\n\
+             : getval ( &'T: Getter &'T -- i64 ) get ;\n\
+             : main ( -- ) 7 Pt |p| &p &p getval . p drop ;\n",
+        );
+        assert_eq!(
+            call_symbols(func(&m, "sooth_mono_getval__t0_Pt")),
+            vec!["max"]
+        );
+        assert!(
+            m.funcs.iter().any(|f| f.name == "max"),
+            "the bound-reached operator overload keeps its body: {:?}",
+            m.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+    }
 }
