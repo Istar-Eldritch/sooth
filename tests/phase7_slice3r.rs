@@ -512,10 +512,13 @@ fn impl_body_wrong_effect_names_readable_member() {
 /// P7.S3r Phase 4 (R6): the relocated intent of the retired
 /// `check_impl_decls_signature_mismatch_is_error` guard. Distinct from the
 /// golden above in what it asserts: that golden pins the *readable name* in
-/// the message; this one pins that a wrong body is rejected *at all*, and
-/// located inside the impl body (the member's own line), not at a separate
-/// binding-time signature-comparison site -- there is no such site left to
-/// compare against, since the effect is inherited, not restated.
+/// the message; this one pins that the rejection is located inside the
+/// member's own line, not at the impl block header or a separate
+/// binding-time signature-comparison site (there is no such site left to
+/// compare against, since the effect is inherited, not restated). A
+/// two-member impl with only the *second* member broken proves the line
+/// tracks the member, not the block: a header-line match would still pass
+/// with a single-member fixture.
 #[test]
 fn impl_body_wrong_effect_is_rejected_in_body() {
     let (_t, entry) = program(
@@ -523,15 +526,19 @@ fn impl_body_wrong_effect_is_rejected_in_body() {
         "import: intrinsics * ;\n\
          type: Ordering | Less | Equal | Greater ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Order 'T cmp ( &'T &'T -- Ordering ) ;\n\
+         trait: Order 'T\n\
+           lo ( &'T -- i64 )\n\
+           cmp ( &'T &'T -- Ordering )\n\
+         ;\n\
          impl: Order for Point\n\
+           : lo | p | p &x @ ;\n\
            : cmp | a b | a drop b drop ;\n\
          ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(err.contains("stack effect mismatch"), "{err}");
-    assert!(err.contains("(line 6)"), "{err}");
+    assert!(err.contains("(line 10)"), "{err}");
 }
 
 /// R3 (Phase 2), the type-mismatch sibling of the arity golden above: a body

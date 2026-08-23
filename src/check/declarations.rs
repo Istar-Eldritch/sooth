@@ -3537,6 +3537,20 @@ mod tests {
     }
 
     #[test]
+    fn check_impl_decls_duplicate_member_is_error() {
+        let err = impl_check_src(
+            "trait: Getter 'T get ( &'T -- i64 ) ;\n\
+             type: Point n i64 ;\n\
+             impl: Getter for Point\n\
+               : get | p | p &n @ ;\n\
+               : get | p | p &n @ ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("binds member `get` more than once"), "{err}");
+    }
+
+    #[test]
     fn check_impl_decls_duplicate_impl_is_error() {
         let err = impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
