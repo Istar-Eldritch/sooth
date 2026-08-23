@@ -482,18 +482,25 @@ fn arm_local_bound_and_leaked_is_error_and_one_sided_binding_is_not() {
 
 #[test]
 fn a_slot_declared_above_a_produced_row_is_located() {
-    // R3: the produced row is read straight off an arm's exit, so a parameter
-    // declaring a slot *above* that row (`~[ ..a -- ..b i64 ]`) would need
-    // that slot stripped back off first -- a rule neither quotation consumer
-    // shares. Located, and named against the declaration rather than against
-    // the arm, which is written correctly.
+    // P7.S3j (R3): the declared trailing `i64` above pick's produced row
+    // (`~[ ..a -- ..b i64 ]`) is now stripped off each arm's exit before the
+    // row `..b` is read (P7.S3j's fix, mirroring the monomorphic
+    // `check_literal_against_declared_effect`'s shape-changing branch), so
+    // the *pick call itself* grounds identically whether `bad` declares the
+    // stripped row (`-- 'T`, the sibling golden
+    // `a_slot_declared_above_a_produced_row_is_stripped_and_grounds`) or, as
+    // here, the un-stripped one (`-- 'T i64`): nothing at that call site can
+    // see which one is wrong, since `bad` declares no row of its own for
+    // pick's `..b` to answer to.
     //
-    // `bad` declares `-- 'T i64`, the *un-stripped* row itself, rather than
-    // just `-- 'T`: with the guard deleted, that is what lets this reach
-    // `ir/func_builder/quotation.rs`'s row-length arithmetic instead of being
-    // caught first by an ordinary stack-effect-mismatch check, so the guard
-    // is what stands between this program and a backend panic
-    // (`attempt to subtract with overflow`), not just a worse diagnostic.
+    // `bad`'s own declared effect is still checked, generically, against
+    // what its body actually leaves (`poly_output_mismatch_error`) --
+    // catching the same malformed program, before lowering, but as an
+    // ordinary declared-vs-actual mismatch rather than the combinator's own
+    // "cannot ground" wording (which no longer applies: the call did
+    // ground). The backend row-length panic this regression exists to keep
+    // unreachable is still unreachable: `bad` never typechecks, so nothing
+    // reaches `ir/func_builder/quotation.rs`.
     let err = build_err(
         "above-the-row",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
@@ -502,10 +509,152 @@ fn a_slot_declared_above_a_produced_row_is_located() {
          : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
-        err.contains(
-            "`pick` declares `~[ ..a -- ..b i64 ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
-        ),
+        err.contains("stack effect mismatch in `bad`")
+            && err.contains("body leaves `'T`, but the declared outputs are `'T i64`"),
         "{err}"
+    );
+}
+
+#[test]
+fn a_slot_declared_above_a_produced_row_is_stripped_and_grounds() {
+    // R1/R2: the same combinator and arms as the R3 regression above, but the
+    // enclosing word's own declared effect correctly reflects the *stripped*
+    // row (`-- 'T`, not `-- 'T i64`) -- this is the well-formed case the fix
+    // admits: `pick`'s declared trailing `i64` is stripped off each arm's
+    // exit before the row `..b` is read, so `bad` grounds and returns `'T`
+    // alone.
+    let src = ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n";
+    let scratch = Scratch::write("above-the-row-stripped", src);
+    let (stdout, code) = build_and_run(scratch.path());
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_suffix_slot_disagreeing_with_the_declared_type_is_error() {
+    // P7.S3j (R3), the guard the two goldens above never exercise: they
+    // hold the declared suffix's *presence* (its length) to account, not its
+    // *type*. Deleting the whole `!suffix_matches` check leaves this suite
+    // green otherwise -- this arm leaves `Bool` where `pick`'s declared
+    // `~[ ..a -- ..b i64 ]` requires `i64` at the stripped suffix, and
+    // nothing else in the walk notices: the lengths still agree, so only a
+    // per-slot type comparison of the suffix itself catches it.
+    let err = build_err(
+        "suffix-type-mismatch",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T i64 ) True ~[ drop 1 ] ~[ drop True ] pick ;\n\
+         : main ( -- ) 5 7 bad . . ;\n",
+    );
+    assert!(
+        err.contains(
+            "the quotation passed to `pick` in `bad` (line 3) was declared `~[ ..a -- ..b i64 ]`, but it leaves `Bool` where that requires `i64`"
+        ),
+        "the declared suffix's type, not just its length, must be checked: {err}"
+    );
+}
+
+#[test]
+fn a_suffix_shorter_than_the_declared_row_is_error() {
+    // P7.S3j (R3), the length half of `suffix_matches` that the two goldens
+    // above never exercise: they hold the declared suffix's *type* to
+    // account once its length already agrees. Deleting `tail.len() ==
+    // suffix.len()` (keeping only the per-slot `zip` comparison) leaves this
+    // suite green otherwise, because `zip` silently truncates to the shorter
+    // side -- both arms here leave nothing at all, so the empty `tail`
+    // vacuously agrees with a one-slot declared suffix, `bad` grounds, and
+    // the malformed program reaches lowering: an ICE at
+    // `src/ir/func_builder/calls.rs` (`drop: non-empty stack`), the panic
+    // class R3 exists to keep unreachable.
+    let err = build_err(
+        "suffix-too-short",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- ) True ~[ drop drop ] ~[ drop drop ] pick ;\n\
+         : main ( -- ) 5 7 bad ;\n",
+    );
+    assert!(
+        err.contains(
+            "the quotation passed to `pick` in `bad` (line 3) was declared `~[ ..a -- ..b i64 ]`, but it leaves nothing where that requires `i64`"
+        ),
+        "the declared suffix's length, not just its type, must be checked: {err}"
+    );
+}
+
+#[test]
+fn arms_sharing_a_row_with_different_declared_suffix_types_is_error() {
+    // P7.S3j (R2): a declared suffix is stripped off each arm's *own* exit,
+    // so two parameters sharing one output row must declare the same suffix
+    // or the strip hides their difference from the cross-arm rule -- here
+    // `i64` and `Bool` above `..b`, which the monomorphic path rejects
+    // outright ("the quotations passed to `pick` leave different stack
+    // shapes"). Without the pre-walk guard both arms strip cleanly against
+    // their own declaration, agree on `..b`, and the program reaches the
+    // backend: `qbe: invalid type for operand %v7 in phi %v9`, unlocated.
+    let err = build_err(
+        "divergent-suffix-type",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b Bool ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop False ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b Bool ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "sibling arms sharing an output row must declare one common suffix: {err}"
+    );
+}
+
+#[test]
+fn arms_sharing_a_row_with_different_declared_suffix_lengths_is_error() {
+    // P7.S3j (R2), the length twin of the test above, and the worse half:
+    // the two suffixes strip to the *same* region, so the cross-arm rule is
+    // satisfied and, without the pre-walk guard, this builds and runs with a
+    // slot the call's exit row has no account of -- a silent miscompile
+    // rather than the previous test's backend rejection. The monomorphic path
+    // rejects it (`leaves \`i64 i64\` ... this one leaves \`i64 i64 i64\``).
+    let err = build_err(
+        "divergent-suffix-length",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 2 ] pick ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b i64 i64 ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "sibling arms sharing an output row must declare one common suffix: {err}"
+    );
+}
+
+#[test]
+fn an_abstract_declared_suffix_is_still_the_cannot_ground_rejection() {
+    // R3's stripping only fires once `poly_declared_arm` has already ground
+    // every declared parameter type to `Concrete`; a suffix slot that is
+    // still a type variable (`'X`, unbound anywhere in `pick`'s own
+    // signature) fails that grounding first and keeps the combinator's
+    // pre-existing "cannot ground" rejection, not a new one this slice
+    // invents. Regression for the rewrite this slice made to
+    // `a_slot_declared_above_a_produced_row_is_located`'s message: that test
+    // no longer exercises this closure at all, since its program grounds
+    // cleanly now.
+    let err = build_err(
+        "abstract-suffix",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b 'X ] ~[ ..a -- ..b 'X ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ drop 1 ] pick drop ;\n\
+         : main ( -- ) 5 7 bad . ;\n",
+    );
+    assert!(
+        err.contains(
+            "`pick` declares `~[ ..a -- ..b 'X ]`, which a call in the polymorphic body of `bad` (line 3) cannot ground"
+        ),
+        "a variable-carrying suffix must stay the located, un-groundable rejection: {err}"
     );
 }
 

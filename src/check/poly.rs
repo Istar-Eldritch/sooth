@@ -2160,9 +2160,12 @@ enum ArmRule {
         want: Vec<PolySlot>,
         declared: String,
     },
-    /// The shape-changing case (`if`/`unless`): the declaration fixes no exit,
-    /// so the arms sharing this declared output row id are held to each other.
-    Row(u32),
+    /// The shape-changing case (`if`/`unless`): the declaration fixes no exit
+    /// row, only a suffix above it -- the arm's exit is `region ++ suffix`,
+    /// checked here against the declared suffix types (`outs`, `declared` for
+    /// rendering), and the stripped region is what the arms sharing this
+    /// declared output row id (`u32`) are held to against each other.
+    Row(u32, Vec<Type>, String),
 }
 
 /// Classify one declared parameter of a row-typed combinator. `Ok(None)` is an
@@ -2199,13 +2202,12 @@ fn poly_declared_arm(
             let row_out = match (row_in, row_out) {
                 (Some(a), Some(b)) if a != b => {
                     // Shape-changing (`if`/`unless`): nothing fixes the exit
-                    // but sibling agreement, and the produced row is read
-                    // straight off an arm's exit -- so a slot declared *above*
-                    // that row would have to be stripped back off first, a
-                    // rule neither quotation consumer shares.
-                    if !outs.is_empty() {
-                        return Err(abstract_());
-                    }
+                    // row but sibling agreement, and the produced row is read
+                    // straight off an arm's exit -- so a declared suffix
+                    // above that row (`outs`) is stripped back off it first
+                    // (`ArmRule::Row`), the poly port of
+                    // `check_literal_against_declared_effect`'s
+                    // shape-changing branch (`src/check.rs:2124`).
                     Some(*b)
                 }
                 // One row on both sides (`times`), or none at all (the P7.S3d
@@ -2368,7 +2370,36 @@ fn poly_combinator_call(
                 .map(|t| PolySlot::new(PolyType::Concrete(*t))),
         );
         rules.push(match decl.row_out {
-            Some(rid) => ArmRule::Row(rid),
+            Some(rid) => {
+                // P7.S3j: the arms sharing an output row feed one join and one
+                // continuation, so the suffix declared above that row has to
+                // be the *same* suffix on each of them -- and stripping each
+                // parameter's own suffix off its own arm is what would
+                // otherwise hide a difference from the cross-arm rule below,
+                // leaving a slot the call's exit row has no account of.
+                // Rejected here, before any arm walks, for `ArmRule::Fixed`'s
+                // reason: no arm-against-sibling rule holds a lone arm.
+                //
+                // Keyed by row id like `shape_baseline` below, though no
+                // program can tell the keying from a bare scan today: a
+                // parameter's *input* row must already be declared where it is
+                // written, so it can only be the signature's top-level input
+                // row, and a differing output row can then only be the
+                // top-level output one -- every `Row` rule shares that id.
+                // `~[ ..b -- ..a i64 ]` is a parse error, not a second id.
+                let disagrees = rules.iter().any(|r| {
+                    matches!(r, ArmRule::Row(other, outs, _) if *other == rid && *outs != decl.outs)
+                });
+                if disagrees {
+                    return Err(poly_combinator_abstract_signature_error(
+                        ctx,
+                        span,
+                        name,
+                        &poly_type_str(pin, csig),
+                    ));
+                }
+                ArmRule::Row(rid, decl.outs.clone(), poly_type_str(pin, csig))
+            }
             None => {
                 let mut want = region;
                 want.extend(
@@ -2435,13 +2466,43 @@ fn poly_combinator_call(
                         )),
                     }
                 }
-                ArmRule::Row(rid) => match shape_baseline.get(rid) {
-                    Some(want) => poly_arms_agree(want, &exit, ctx, literal_span, name, sig),
-                    None => {
-                        shape_baseline.insert(*rid, exit);
-                        Ok(())
+                ArmRule::Row(rid, suffix, declared) => {
+                    // R2: the arm's exit is `region ++ suffix` -- strip the
+                    // declared trailing slots back off first (the poly port
+                    // of `check_literal_against_declared_effect`'s
+                    // shape-changing branch, `src/check.rs:2124`), and hold
+                    // only the stripped region to the cross-arm agreement
+                    // below.
+                    let split_at = exit.len().saturating_sub(suffix.len());
+                    let (region, tail) = exit.split_at(split_at);
+                    let suffix_matches = tail.len() == suffix.len()
+                        && tail
+                            .iter()
+                            .zip(suffix)
+                            .all(|(s, t)| matches!(s.pt, PolyType::Concrete(u) if u == *t));
+                    if !suffix_matches {
+                        let want: Vec<PolySlot> = suffix
+                            .iter()
+                            .map(|t| PolySlot::new(PolyType::Concrete(*t)))
+                            .collect();
+                        return Err(poly_arm_declared_suffix_mismatch_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            declared,
+                            &poly_row_str(tail, sig),
+                            &poly_row_str(&want, sig),
+                        ));
                     }
-                },
+                    let region = region.to_vec();
+                    match shape_baseline.get(rid) {
+                        Some(want) => poly_arms_agree(want, &region, ctx, literal_span, name, sig),
+                        None => {
+                            shape_baseline.insert(*rid, region);
+                            Ok(())
+                        }
+                    }
+                }
             }
         },
     )?;
@@ -4340,13 +4401,13 @@ pub(super) fn poly_quotation_combinator_unsupported_error(
 }
 
 /// P7 slice 3b-follow (R3/L1): a row-typed combinator whose declaration this
-/// dispatch cannot ground. Three causes, one message, because the answer is
-/// the same: a type or length variable of the callee's own (`each`'s
-/// `&['T N]`) would have to be *solved for*, the mid-body unification L1
-/// forbids; a slot declared above a row a quotation parameter produces would
-/// have to be stripped back off an arm's exit to recover that row; and a
+/// dispatch cannot ground. Two causes, one message, because the answer is the
+/// same: a type or length variable of the callee's own (`each`'s `&['T N]`)
+/// would have to be *solved for*, the mid-body unification L1 forbids; and a
 /// declared output row no parameter produces leaves the combinator's promised
-/// exit and what its arms actually leave unrelated.
+/// exit and what its arms actually leave unrelated. (P7.S3j closed a third:
+/// a slot declared above a row a quotation parameter produces is now
+/// stripped back off an arm's exit rather than rejected here.)
 fn poly_combinator_abstract_signature_error(
     ctx: &Ctx,
     span: Span,
@@ -4356,7 +4417,7 @@ fn poly_combinator_abstract_signature_error(
     let word = crate::resolve::demangle_call(word);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
-        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, that declares no slot above a row its quotation parameters produce, and whose declared output row one of them produces",
+        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, and whose declared output row one of them produces",
         crate::resolve::demangle_word(where_),
         span.line
     )
@@ -4383,6 +4444,29 @@ fn poly_arm_declared_effect_mismatch_error(
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a non-shape-changing quotation parameter carries one row, the same on both sides: the arm must leave the row it entered with",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3j (R3): the `ArmRule::Row` twin of
+/// `poly_arm_declared_effect_mismatch_error` -- a *shape-changing* quotation
+/// parameter (`~[ ..a -- ..b T1 .. Tn ]`) declares trailing outputs above the
+/// row it produces, stripped back off an arm's exit before the row itself is
+/// read (R2). This fires when that stripped suffix disagrees with the
+/// declared types, or is too short to carry them at all.
+fn poly_arm_declared_suffix_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: &str,
+    found: &str,
+    want: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a shape-changing quotation parameter declares trailing outputs above the row it produces: the arm must leave those types, in order, above whatever row it leaves",
         crate::resolve::demangle_word(where_),
         span.line
     )
