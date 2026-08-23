@@ -723,6 +723,56 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    read-only view or by restructuring the flush, and that is its own slice.
    Deviation 6's honest rejection is what keeps phase 1 inside N1 until then.
 
+### Delivered, with four deviations from the plan above
+
+1. **Finding 2 is answered by rejecting, not by keying on `(name, PolySig)`.** A
+   cross-call into *or out of* a polymorphic overload set is a located
+   rejection, and the second direction is why: `PolySig` would disambiguate the
+   record map, but `CallInst::callee` is a bare name on both sides and nothing
+   on it says which candidate it resolved to. The rejection also does not
+   pretend to fix the overload set itself -- an overloaded non-inline generic
+   word already mis-lowers today with no cross-call anywhere in the program
+   (`poly_arities` and `driver`'s `poly_words` are name-keyed with last-wins, so
+   `lower_poly_call` pops the wrong arity and panics on a subtract overflow).
+   What this slice adds is that a cross-call inside or into one is refused at
+   check time instead of reaching that panic.
+
+2. **Finding 3 stands: a callee's user trait bound stays phase 1's located
+   rejection.** The fixpoint does run where the resolution tables are in scope,
+   but composing a callee's recorded obligations against a composed θ is a
+   second mechanism, not a line -- `resolve_user_bound` writes into
+   `CallInst::trait_calls` keyed by the *callee body's* spans, and a cross-call
+   would have to compose those per caller instantiation the same way the
+   instantiation itself is composed. Left for its own slice.
+
+3. **The callee's declared *inputs* are not ground.** "Where discovery lives"
+   step 2 says to ground inputs and outputs alike, for `apply_subst`'s
+   interning. On the input side there is nothing to intern: `poly_cross_match`
+   decomposes a compound input structurally and R6 rejects a compound the
+   caller built itself, so a cross-call's input shapes mirror the caller's
+   operand slots, which the caller's own instantiation already interned.
+   Shipped and then deleted after mutation testing found it unkillable. The
+   output grounding stays: it is where `out_arity`/`output_types` come from, and
+   it is the arm a future widening of phase 1's compound-output rejection would
+   need.
+
+4. **`Module::transitive_instantiations` is sorted by symbol.** Discovery seeds
+   from a `HashMap`, so without it the field's *order* would be randomized even
+   though its content is not. Lowering sorts anyway; this is so a test reading
+   the field does not have to.
+
+**One claim no test reaches.** A composed `CallInst` inherits the caller's
+`generation`, and nothing can exercise it: the REPL hands the walk an empty
+cross-call registry on purpose (phase 1's own note), so `poly_cross_calls` is
+always empty there and the fixpoint returns before composing anything. Writing
+`None` instead would be wrong the day the REPL grows its own composition step,
+so the inheritance stays, unkilled.
+
+**Findings 5 and 7 are untouched and still open**, as their own entries say:
+R6's accept case for a fully concrete compound image is still an honest
+rejection, and a polymorphic body's walk still sees registries that are stale
+for the instantiations that body itself mints.
+
 ## Phases (JSON)
 
 ```json
