@@ -8658,19 +8658,25 @@ mod tests {
         );
     }
 
-    /// P7.S3k (R4): and one *per* distinct θ. Asymmetric on purpose (`i64`
-    /// then `str`), since a symmetric pair cannot tell "two monomorphs" from
-    /// "one, twice".
+    /// P7.S3k (R4): and one *per* distinct θ. Three types, asymmetric with
+    /// each other, since two cannot tell "sorted" from "the 50% of
+    /// `HashMap` iteration orders that happen to already be sorted" -- the
+    /// dedup source (`insts`) iterates a map, so an unsorted `transitive`
+    /// vec is only randomized, not reliably out of order, at n=2.
     #[test]
     fn transitive_discovery_composes_one_monomorph_per_distinct_theta() {
         let (transitive, _) = transitive_of(
             ": id ( 'T -- 'T ) ;\n\
              : g ( 'T -- 'T ) id ;\n\
-             : main ( -- ) 1 g drop \"x\" g drop ;\n",
+             : main ( -- ) 1 g drop \"x\" g drop 1 2 eq g drop ;\n",
         );
         assert_eq!(
             transitive,
-            vec!["sooth_mono_id__t0_i64", "sooth_mono_id__t0_str"]
+            vec![
+                "sooth_mono_id__t0_Bool",
+                "sooth_mono_id__t0_i64",
+                "sooth_mono_id__t0_str"
+            ]
         );
     }
 

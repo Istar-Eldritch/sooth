@@ -95,8 +95,11 @@ it and re-expressing its one test is in scope.
 - **N2** The transitive-discovery machinery must **not** change the emitted IL for any
   existing concrete-caller-calls-generic-callee case: same symbols, same count, same
   order. A program with no generic-calls-generic records must produce byte-for-byte
-  identical IL. Proven by regression coverage (see the named baseline below), not
-  assertion.
+  identical IL. Symbols and count are proven by regression coverage (see the named
+  baseline below), not assertion; order is not separately exercised by a killable
+  test -- it falls out structurally from `distinct.sort_by` in `ir/driver.rs`, a
+  pre-existing sort phase 2 chains into rather than replaces, so a reordering there
+  would have to break that sort's own correctness to surface.
 - **N3** Compilation terminates on every program the checker admits — no depth cap, no
   time-out; termination is a consequence of R6 restricting the reachable
   `(word, θ)` set to a finite closure (see rationale).
@@ -678,21 +681,31 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    Phase 2 updates it, and states the residual narrowings (deviation 1) rather
    than declaring the whole gap closed.
 
-5. **R6's accept case (a fully concrete compound image) is still only
-   honestly rejected, not implemented (deviation 5 above).** The real fix
-   needs `Image` to carry a ground-but-uninterned shape through to a point
-   that holds a mutable array/ref registry -- which phase 2's fixpoint
-   already does, at `check.rs`, via the same `apply_subst` it composes θ_h
-   with. This is **not** in phase 2's scope as specified above (which reads
-   `Image` as exactly `Concrete(Type) | CallerVar(u32)` and never revisits a
-   rejected mapping), so lifting it means either widening `Image` with a
-   third, ground-but-uninterned variant that phase 2's fixpoint interns
-   lazily, or -- equivalently -- threading a `refs`/`arrays` `RefCell` into
-   `Ctx` the way `generics()` already is, so phase 1 itself can fold the
-   image and never reject it. Recorded here as a candidate for its own
-   follow-up slice, not phase 2 by default: phase 2's own scope list does not
-   mention `Ctx` or `Image`'s shape, and widening either is a design decision
-   a reviewer should make explicitly, not inherit silently.
+5. **R6's accept case is already implemented for a generic aggregate; only a
+   `Ref`/`Array` image is still an honest rejection (deviation 5 above).**
+   A fully concrete `Box[i64]`-shaped image folds straight to
+   `PolyType::Concrete(Type::Enum(..))` without needing a fresh id at all --
+   `structs`/`enums` are the mutable registry, reached via `ctx.generics()`'s
+   `RefCell`, and phase 1 already writes through it. So
+   `: take ( 'U -- 'U ) ;  : g ( 'T -- 'T ) 1 Box take drop ;` checks clean
+   *and* links today, monomorphizing `take` at `Box[i64]` -- no phase 2 work
+   was needed for this shape. The gap deviation 5 names is narrower: only a
+   `Ref`/`Array` image needs a *fresh* `RefId`/`ArrayId` minted at fold time,
+   and the poly-body walk holds no mutable path for those two registries (only
+   `structs`/`enums` do). Lifting that remaining case needs `Image` to carry a
+   ground-but-uninterned shape through to a point that holds a mutable
+   array/ref registry -- which phase 2's fixpoint already does, at `check.rs`,
+   via the same `apply_subst` it composes θ_h with. This is **not** in phase
+   2's scope as specified above (which reads `Image` as exactly
+   `Concrete(Type) | CallerVar(u32)` and never revisits a rejected mapping),
+   so lifting it means either widening `Image` with a third,
+   ground-but-uninterned variant that phase 2's fixpoint interns lazily, or --
+   equivalently -- threading a `refs`/`arrays` `RefCell` into `Ctx` the way
+   `generics()` already is, so phase 1 itself can fold the image and never
+   reject it. Recorded here as a candidate for its own follow-up slice, not
+   phase 2 by default: phase 2's own scope list does not mention `Ctx` or
+   `Image`'s shape, and widening either is a design decision a reviewer
+   should make explicitly, not inherit silently.
 
 6. **Phase 1 turned a clean rejection of the slice's headline program into a
    lowering panic, and nothing pins the interval.**
@@ -796,9 +809,10 @@ always empty there and the fixpoint returns before composing anything. Writing
 so the inheritance stays, unkilled.
 
 **Findings 5 and 7 are untouched and still open**, as their own entries say:
-R6's accept case for a fully concrete compound image is still an honest
-rejection, and a polymorphic body's walk still sees registries that are stale
-for the instantiations that body itself mints.
+R6's accept case for a fully concrete `Ref`/`Array` image is still an honest
+rejection (the generic-aggregate case already worked before phase 2 and needed
+no change -- see the revised finding 5), and a polymorphic body's walk still
+sees registries that are stale for the instantiations that body itself mints.
 
 **Pre-existing, confirmed and left alone (found probing deviation 5's fix).**
 An `inline` generic caller spliced at two different θ -- `: g inline ( 'T --

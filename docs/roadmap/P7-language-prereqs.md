@@ -546,10 +546,14 @@ instantiation (the global `Span`-keyed table structurally cannot, since one span
 the body is instantiated at), and `Module::transitive_instantiations` holds the flat set, so each
 composed `(callee, θ)` mints one `IrFunc`.
 **Termination is a property of the mapping rule, not a depth cap.** A callee variable's image
-must be either fully concrete or a bare caller variable; a compound image that *mentions* a
-caller variable -- the caller wrapping its own `'T` in a `Box['T]` before handing it over -- is a
-located rejection. Under that rule every composed θ draws its types from the finite pool the
-seed instantiations introduced, so the reachable `(word, θ)` set is finite and a mutual
+must be either fully concrete or a bare caller variable -- and "fully concrete" does **not**
+mean any concrete type folds: a concrete scalar or generic aggregate (`Box[i64]`) folds cleanly,
+but a concrete `Ref`/`Array` image (`&i64`, `[i64 4]`) is refused too, since folding one needs a
+fresh `RefId`/`ArrayId` and the poly-body walk holds no mutable path to mint one (only
+`structs`/`enums` do). A compound image that *mentions* a caller variable -- the caller wrapping
+its own `'T` in a `Box['T]` before handing it over -- is refused as growth for the same reason
+R6 refuses it anywhere else. Under that rule every composed θ draws its types from the finite
+pool the seed instantiations introduced, so the reachable `(word, θ)` set is finite and a mutual
 `g <-> h` cycle revisits `(g, θ)` at the *same* θ and stops. The over-rejection is deliberate: a
 single, non-recursive wrap would terminate and is refused too, which buys a check-time
 structural rule with no cycle detection.
@@ -557,11 +561,14 @@ structural rule with no cycle detection.
 (`..s`), a quotation parameter, a length variable, a user trait bound, or a compound *output* is
 refused by name: the first three have no image kind to map to, a user bound's recorded
 obligations resolve per ground θ and nothing composes them across a cross-call, and a compound
-output would need the interning only a ground θ gets. A cross-call into or out of a *polymorphic
-overload set* is refused too -- the records merge under one name while each indexes its own
-candidate's variables. The REPL keeps the old `unknown word`: its lowering resolves an
-instantiation through a per-generation store nothing composes a cross-call into, so grounding
-there would check clean and then mis-lower.
+output would need the interning only a ground θ gets. A concrete `Ref`/`Array` operand image is
+refused too, for the minting reason above. A cross-call into or out of a *polymorphic overload
+set* is refused too -- the records merge under one name while each indexes its own candidate's
+variables. A cross-call whose caller is itself an `inline` combinator is refused at the outer
+call site if the spliced body calls a further polymorphic word -- splicing composes no θ for the
+nested call, so the fixpoint would otherwise reach a callee it cannot ground. The REPL keeps the
+old `unknown word`: its lowering resolves an instantiation through a per-generation store nothing
+composes a cross-call into, so grounding there would check clean and then mis-lower.
 **Exit:** a non-inline generic word may call another generic word -- same-module or imported,
 user-defined or a library word like `gt`/`lt` -- passing its own rigid type variables through;
 the callee is monomorphized once per concrete instantiation the caller reaches, the same way a
