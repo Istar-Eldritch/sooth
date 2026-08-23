@@ -151,13 +151,18 @@ deliberately binding a member to an **operator-named** word:
 
 Under the body form there is no way to make the member *be* `max`; you would write a
 forwarding body `: get | a b | a b max ;`, which emits a call to `max` from inside the
-synthesised `get;Getter;Pt`. The pruning *concern* (does a bound-reached operator overload
-survive?) can still be probed, but the test's current assertion (`call_symbols == ["max"]`)
-no longer holds and the scenario "an operator overload IS a trait member" becomes
-inexpressible. **This is the sharpest migration hazard and the strongest concrete argument
-against a clean delete.** It is a capability, not just the namespace leak the brief frames it
-as: binding a member to a pre-existing, independently-useful word (an operator overload, a
-shared helper) is only expressible via a forwarding body under the new form.
+synthesised `get;Getter;Pt`. The test's current assertion (`call_symbols == ["max"]`) no
+longer holds and the scenario "an operator overload IS a trait member" becomes
+inexpressible. (Corrected after Phase 3 landed: the pruning *concern* could **not** be
+carried over either. A forwarding body spells `max` as a literal term, so `called_names`
+covers it without R15's `trait_calls` conjunct; the two fixtures above became
+`an_impl_body_members_operator_named_call_resolves_to_the_local_overload` and
+`an_impl_body_member_returning_a_field_builds_and_runs`, neither of which probes pruning.
+See the spec's Phase 4.) **This is the sharpest migration hazard and the strongest
+concrete argument against a clean delete.** It is a capability, not just the namespace
+leak the brief frames it as: binding a member to a pre-existing, independently-useful word
+(an operator overload, a shared helper) is only expressible via a forwarding body under
+the new form.
 
 ### Fixtures whose diagnostic class DISAPPEARS under the body form (delete/replace, not migrate)
 

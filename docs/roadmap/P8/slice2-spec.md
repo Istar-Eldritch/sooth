@@ -50,7 +50,7 @@ built out:
 
 - `SelectiveName::qualifier` became `Option<String>`, and `check_selective_imports`'
   collision/not-exported messages gained wildcard-specific wording
-  (`wildcard import of `p`  collides with a local ...`) rather than a fabricated qualifier that
+  (``wildcard import of `p` collides with a local ...``) rather than a fabricated qualifier that
   would misdescribe the import shape.
 - A target's `export:` list may repeat a name across two `export:` blocks, which
   `scan_exports` does not dedup; the desugaring dedups, otherwise a wildcard synthesizes two
@@ -80,7 +80,7 @@ on `ModuleInfo`, populated in `assemble_module`'s import loop:
   (`ImportAnchor::Dependency`, `segments == ["intrinsics"]`, no closure edge);
   `self::intrinsics` stays an ordinary module name.
 
-**Gate set:** `is_gated_intrinsic_name` = `is_builtin_word_name` **minus
+**Gate set:** `is_name_dispatched_builtin` = `is_builtin_word_name` **minus
 `{eq, lt, gt, lte, gte, ne}`**. Those six are `lib/` words (they left `BUILTIN_TABLE` in slice
 10c and sit in `BUILTIN_WORDS` only so `has_self_tail_call` does not misread a trailing `lt`),
 so gating them would answer an unimported `lt` with "add `import: intrinsics *`", pointing at

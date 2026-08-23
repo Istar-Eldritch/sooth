@@ -1,6 +1,7 @@
 \ User-declarable trait bounds (P7.S3e). A trait lists required member
-\ signatures, one type variable per trait; `impl:` binds a type's concrete
-\ words to those members. A poly word can then require a bound (`'T: Order`)
+\ signatures, one type variable per trait; `impl:` gives a type its own
+\ member bodies, each inheriting its signature from the trait. A poly word
+\ can then require a bound (`'T: Order`)
 \ instead of hardcoding one type, and each required member dispatches to the
 \ caller's own `impl:` at monomorphization -- an ordinary word call resolved
 \ per instantiation, never a runtime vtable.
@@ -24,36 +25,37 @@ trait: Show 'T
 
 type: Point x i64 y i64 ;
 
-\ Satisfaction is nominal, not structural: an explicit `impl:` block binds a
-\ type's own concrete words to a trait's members. A member's signature must
-\ match the trait's exactly, with the trait's `'T` substituted for the
+\ Satisfaction is nominal, not structural: an `impl:` block declares a
+\ type's own concrete words as trait members, inheriting each member's
+\ signature from the trait with the trait's `'T` substituted for the
 \ concrete type.
-: point-cmp ( &Point &Point -- Ordering )
-  | a b |
-  a &y @ | ay | 
-  b &y @ | by |
-  ay by lt
-  ~[ Less ]
-  ~[
-    ay by gt 
-    ~[ Greater ]
+impl: Order for Point
+  : cmp
+    | a b |
+    a &y @ | ay |
+    b &y @ | by |
+    ay by lt
+    ~[ Less ]
     ~[
-      a &x @ | ax |
-      b &x @ | bx |
-      ax bx lt
-      ~[ Less ]
+      ay by gt
+      ~[ Greater ]
       ~[
-        ax bx gt 
-        ~[ Greater ] ~[ Equal ] if
+        a &x @ | ax |
+        b &x @ | bx |
+        ax bx lt
+        ~[ Less ]
+        ~[
+          ax bx gt
+          ~[ Greater ] ~[ Equal ] if
+        ] if
       ] if
-    ] if
-  ] if ;
+    ] if ;
+;
 
-: point-show ( &Point -- )
-  | p | "(" . p &x @ . "," . p &y @ . ")" . ;
-
-impl: Order for Point  cmp point-cmp ;
-impl: Show for Point  show point-show ;
+impl: Show for Point
+  : show
+    | p | "(" . p &x @ . "," . p &y @ . ")" . ;
+;
 
 \ Bounds compose: `'T: Order Show` is the existing `'T: Copy Ord`-style
 \ capability list, greedy over N names. `cmp`/`show` dispatch as ordinary

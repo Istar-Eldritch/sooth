@@ -12,11 +12,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
-    intern_owned_cell_type, intern_ref_type, intern_slice_type, resolve_bool_type, variant_type,
-    ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl,
-    ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect,
-    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind,
+    generic_surface_name, ground_member_type, instantiation_symbol, intern_array_type,
+    intern_bundle_struct, intern_owned_cell_type, intern_ref_type, intern_slice_type,
+    is_builtin_word_name, is_name_dispatched_builtin, resolve_bool_type, variant_type, ArrayDecl,
+    Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, ImplDecl,
+    Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl,
+    SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind,
     TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
     WordDef, RESERVED_TRAIT_MODULE,
 };
@@ -1248,10 +1249,9 @@ fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String>
         return Ok(());
     }
     Err(match ctx {
-        Ctx::Word {
-            name: word_name, ..
-        } => format!(
-            "error: {kind} `{name}` in `{word_name}` collides with the variant name `{name}`"
+        Ctx::Word { mangled, .. } => format!(
+            "error: {kind} `{name}` in {word_name} collides with the variant name `{name}`",
+            word_name = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => {
             format!("error: {kind} `{name}` collides with the variant name `{name}`")
@@ -1272,12 +1272,10 @@ fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String>
 /// module-scoping gap).
 fn callable_local_error(ctx: &Ctx, name: &str, span: Span) -> String {
     match ctx {
-        Ctx::Word {
-            name: word_name, ..
-        } => format!(
-            "error: local `{name}` in `{word_name}` collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
+        Ctx::Word { mangled, .. } => format!(
+            "error: local `{name}` in {word_name} collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
             span.line
-        ),
+        , word_name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: local `{name}` collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
             span.line
@@ -1299,12 +1297,10 @@ fn reject_duplicate_local<'a>(
         return Ok(());
     }
     Err(match ctx {
-        Ctx::Word {
-            name: word_name, ..
-        } => format!(
-            "error: duplicate local `{name}` in `{word_name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
+        Ctx::Word { mangled, .. } => format!(
+            "error: duplicate local `{name}` in {word_name} (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
             span.line
-        ),
+        , word_name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: duplicate local `{name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
             span.line
@@ -1329,10 +1325,11 @@ fn check_outputs(
     // of both the arity and type-mismatch routes. On a *matching* count the
     // ordinary mismatch would otherwise fire and leak the `Cstr` placeholder
     // spelling; a quotation cannot be a declared output regardless of count.
+    let name = crate::resolve::render_word(&word.name);
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(format!(
-            "error: `{}` (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
-            word.name, line
+            "error: {name} (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
+            line
         ));
     }
     if final_stack.len() != declared.len() {
@@ -1348,8 +1345,8 @@ fn check_outputs(
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
         return Err(format!(
-            "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
-            crate::resolve::demangle_word(&word.name), line, final_stack.len(), declared.len(), effect_str(&word.effect),
+            "error: stack effect mismatch in {name} (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
+            line, final_stack.len(), declared.len(), effect_str(&word.effect),
         ));
     }
     for (found, want) in final_stack.iter().zip(declared) {
@@ -1357,20 +1354,20 @@ fn check_outputs(
             SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
             SlotMatch::NeedsSizeConversion => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-                    word.name, line, want, want, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
+                    line, want, want, effect_str(&word.effect),
                 ));
             }
             SlotMatch::NeedsStrToCstrConversion => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves `str` where the declaration requires `cstr`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
-                    word.name, line, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves `str` where the declaration requires `cstr`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
+                    line, effect_str(&word.effect),
                 ));
             }
             SlotMatch::Mismatch => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
-                    word.name, line, found.ty, want, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
+                    line, found.ty, want, effect_str(&word.effect),
                 ));
             }
         }
@@ -1385,9 +1382,11 @@ pub(crate) fn word_span(word: &WordDef) -> Span {
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
     match ctx {
-        Ctx::Word { name: wname, .. } => format!(
-            "error: unknown word `{}` in `{}` (line {})",
-            name, wname, span.line
+        Ctx::Word { mangled, .. } => format!(
+            "error: unknown word `{}` in {} (line {})",
+            name,
+            crate::resolve::render_word(mangled),
+            span.line
         ),
         Ctx::Line { .. } => format!("error: unknown word `{name}`"),
     }
@@ -1414,9 +1413,10 @@ fn no_overload_matches_error(ctx: &Ctx, span: Span, name: &str, candidates: &[Ov
         .map(|s| format!("\n  candidate: {s}"))
         .collect::<String>();
     match ctx {
-        Ctx::Word { name: wname, .. } => format!(
-            "error: no overload of `{name}` in `{wname}` (line {}) accepts these operands{listed}",
-            span.line
+        Ctx::Word { mangled, .. } => format!(
+            "error: no overload of `{name}` in {wname} (line {}) accepts these operands{listed}",
+            span.line,
+            wname = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => {
             format!("error: no overload of `{name}` accepts these operands{listed}")
@@ -1427,10 +1427,9 @@ fn no_overload_matches_error(ctx: &Ctx, span: Span, name: &str, candidates: &[Ov
 fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: stack effect mismatch in `{}` (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
-            name, span.line, op, needs, holds, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: stack effect mismatch in {} (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, needs, holds, effect_str(effect)),
         Ctx::Line { .. } => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
     }
 }
@@ -1441,10 +1440,9 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
 fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
-            name, span.line, op, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` wants `cstr`, found `str`: convert it explicitly with `cstr` first"
         ),
@@ -1454,10 +1452,9 @@ fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
 fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
-            name, span.line, op, expected, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, expected, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
         }
@@ -1493,11 +1490,12 @@ fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
         )
     };
     match ctx {
-        Ctx::Word { name, effect, .. } => {
+        Ctx::Word {
+            mangled, effect, ..
+        } => {
             format!(
-            "error: cannot `{}` a value of type `{}` in `{}` (line {})\n  {}\n  note: declared {}",
-            op, found, name, span.line, why, effect_str(effect),
-        )
+            "error: cannot `{}` a value of type `{}` in {} (line {})\n  {}\n  note: declared {}",
+            op, found, crate::resolve::render_word(mangled), span.line, why, effect_str(effect))
         }
         Ctx::Line { .. } => format!("error: cannot `{op}` a value of type `{found}`: {why}"),
     }
@@ -1507,10 +1505,9 @@ fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
 /// diagnostic naming the earlier move site.
 fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: use after move in `{}` (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
-            name, span.line, local, ty, site.line, site.col, ty, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: use after move in {} (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, local, ty, site.line, site.col, ty, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: use after move: local `{local}` of type `{ty}` was moved at line {}, col {}",
             site.line, site.col
@@ -1523,10 +1520,9 @@ fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span
 /// auto-dropped, so this is an error rather than a compiler-inserted disposal.
 fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: linear value `{}` is never consumed in `{}` (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
-            local, name, line, local, ty, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: linear value `{}` is never consumed in {} (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
+            local, crate::resolve::render_word(mangled), line, local, ty, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: linear value `{local}` is never consumed (line {line})\n  `{local}` has type `{ty}`, which is linear: drop it or leave it on the stack (nothing is dropped for you)"
         ),
@@ -1539,10 +1535,9 @@ fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) ->
 /// message points at the divergence rather than implying nothing happened.
 fn linear_local_maybe_moved_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
-            local, name, line, local, ty, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: linear value `{}` is not consumed on every path in {} (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
+            local, crate::resolve::render_word(mangled), line, local, ty, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: linear value `{local}` is not consumed on every path (line {line})\n  `{local}` has type `{ty}`, which is linear: it is consumed on one `if` arm but not the other, so drop it on every path"
         ),
@@ -1566,10 +1561,9 @@ fn linear_local_out_of_scope_error(
         false => "is never consumed",
     };
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: linear value `{}` {} in `{}` (line {})\n  `{}` has type `{}`, which is linear, and its scope ends at the `{}` on line {}, col {}: consume it before then (nothing is dropped for you)\n  note: declared {}",
-            local, cause, name, span.line, local, ty, token, span.line, span.col, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: linear value `{}` {} in {} (line {})\n  `{}` has type `{}`, which is linear, and its scope ends at the `{}` on line {}, col {}: consume it before then (nothing is dropped for you)\n  note: declared {}",
+            local, cause, crate::resolve::render_word(mangled), span.line, local, ty, token, span.line, span.col, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: linear value `{local}` {cause} (line {})\n  `{local}` has type `{ty}`, which is linear, and its scope ends at the `{token}` on line {}, col {}: consume it before then (nothing is dropped for you)",
             span.line, span.line, span.col,
@@ -1582,8 +1576,8 @@ fn linear_local_out_of_scope_error(
 /// surplus gets its own wording: the fix is disposal, not an extra output slot.
 fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
     format!(
-        "error: linear value left on the stack in `{}` (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
-        crate::resolve::demangle_word(&word.name),
+        "error: linear value left on the stack in {} (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
+        crate::resolve::render_word(&word.name),
         line,
         ty,
         word.effect.outputs.len(),
@@ -1605,10 +1599,9 @@ fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: 
     let callee = crate::resolve::demangle_call(callee);
     let place = crate::resolve::demangle_word(place);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
-            name, span.line, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: a reference to a local cannot cross a loop in {} (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: a reference to a local cannot cross a loop: a reference derived from `{place}` crosses the back-edge to `{callee}`"
         ),
@@ -2767,9 +2760,9 @@ fn quotation_argument_required_error(
     want: Type,
     found: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: `{word}` expects a quotation `{want}` here, found `{found}`{} (line {})",
+        "error: {word} expects a quotation `{want}` here, found `{found}`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2785,9 +2778,9 @@ fn literal_effect_mismatch_error(
     declared: Type,
     actual: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        "error: the quotation passed to {word} was declared `{declared}` but its body has effect `{actual}`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2806,9 +2799,9 @@ fn ordinary_literal_at_inline_param_error(
     // Phase 6 slice 3 review fix (finding 1): same mid-string mangling as
     // `annotation_parameter_mismatch_error` above -- an eliminator arm's
     // literal-flavour check reaches this with the mangled call name.
-    let word = crate::resolve::demangle_call(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: this argument is an ordinary `[ ... ]` quotation but `{word}` declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
+        "error: this argument is an ordinary `[ ... ]` quotation but {word} declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2825,9 +2818,9 @@ fn inline_literal_at_ordinary_param_error(
     word: &str,
     param: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: this quotation is inline `~[ ... ]` but `{word}` expects `{param}`, an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
+        "error: this quotation is inline `~[ ... ]` but {word} expects `{param}`, an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2880,9 +2873,9 @@ fn combinator_branch_output_mismatch_rendered(
     // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
     // same way it already does for a destructure's `>`; an ordinary word name
     // (never carrying either suffix) demangles identically either way.
-    let word = crate::resolve::demangle_call(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {expected}, this one leaves {found}{} (line {})",
+        "error: the quotations passed to {word} leave different stack shapes: an earlier one leaves {expected}, this one leaves {found}{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2891,9 +2884,9 @@ fn combinator_branch_output_mismatch_rendered(
 /// R12: a quotation literal that consumes a linear enclosing local (D3 forbids
 /// a linear capture). Names the local and the enclosing word.
 fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
+        "error: the quotation passed to {word} consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2902,9 +2895,9 @@ fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str
 /// R12: a quotation literal that borrows an enclosing place and leaves the
 /// reference on its row (D3 forbids capturing an enclosing borrow).
 fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
+        "error: the quotation passed to {word} borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2913,9 +2906,11 @@ fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str)
 fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
     match ctx {
-        Ctx::Word { name: word, .. } => format!(
-            "error: `{name}` is already bound in `{word}` (line {}, col {})\n  {scope_end}",
-            span.line, span.col
+        Ctx::Word { mangled, .. } => format!(
+            "error: `{name}` is already bound in {word} (line {}, col {})\n  {scope_end}",
+            span.line,
+            span.col,
+            word = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => format!(
             "error: `{name}` is already bound (line {}, col {})\n  {scope_end}",
@@ -2951,10 +2946,9 @@ fn leave_block(ctx: &Ctx, scope: &mut Scope, depth: usize, at: BlockEnd) -> Resu
 fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-            name, span.line, op, target, target, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, target, target, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` mixes `{target}` with a computed `i64`: convert it explicitly with `>{target}` first"
         ),
@@ -2969,10 +2963,9 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
 /// literal either way -- see `check_branch_join`.)
 fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: stack effect mismatch in `{}` (line {})\n  the two branch arms leave different stack depths (then: {}, else: {})\n  note: declared {}",
-            name, span.line, d_then, d_else, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: stack effect mismatch in {} (line {})\n  the two branch arms leave different stack depths (then: {}, else: {})\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, d_then, d_else, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: the two branch arms leave different stack depths (then: {d_then}, else: {d_else})"
         ),
@@ -2981,10 +2974,9 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
 
 fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  the two branch arms leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
-            name, span.line, t_then, t_else, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  the two branch arms leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, t_then, t_else, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: the two branch arms leave different types (then: `{t_then}`, else: `{t_else}`)"
         ),
@@ -2996,10 +2988,9 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
         }
@@ -3017,10 +3008,9 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
 /// passing `"fill"` keeps this byte-identical.
 fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type, site: &str) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: linear array elements are not supported yet in `{}` (line {})\n  `{}` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
-            name, span.line, site, elem, elem, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: linear array elements are not supported yet in {} (line {})\n  `{}` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, site, elem, elem, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: linear array elements are not supported yet: `{site}` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
         ),
@@ -3046,10 +3036,9 @@ fn array_constructor_zero_unsafe_element_error(
         format!("via {}", path.join(" -> "))
     };
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot zero-initialize a `{}` in `{}` (line {})\n  `{}` transitively contains `{}` ({}), which is pointer-shaped and would zero to a null pointer\n  note: declared {}",
-            outer, name, span.line, outer, bad, where_, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: cannot zero-initialize a `{}` in {} (line {})\n  `{}` transitively contains `{}` ({}), which is pointer-shaped and would zero to a null pointer\n  note: declared {}",
+            outer, crate::resolve::render_word(mangled), span.line, outer, bad, where_, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: cannot zero-initialize a `{outer}`: it transitively contains `{bad}` ({where_}), which is pointer-shaped and would zero to a null pointer"
         ),
@@ -3081,7 +3070,7 @@ fn borrow_mutability(ty: Type, refs: &[RefDecl]) -> Option<bool> {
 /// located error here does.
 fn in_word(ctx: &Ctx) -> String {
     match ctx {
-        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Word { mangled, .. } => format!(" in {}", crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => String::new(),
     }
 }
@@ -3108,9 +3097,9 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 /// quotation value is slice 7" parenthetical outright, since 7a/7b gave it a
 /// real runtime representation.
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: a quotation cannot be passed to `{word}`; only `call` accepts one{} (line {})",
+        "error: a quotation cannot be passed to {word}; only `call` accepts one{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -3204,10 +3193,10 @@ fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -
     let source = crate::resolve::demangle_word(&decl.name);
     let note = "\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out";
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: cannot destructure `{source}` in `{name}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
+        Ctx::Word { mangled, .. } => format!(
+            "error: cannot destructure `{source}` in {name} (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
             span.line
-        ),
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: cannot destructure `{source}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
             span.line

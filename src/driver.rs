@@ -2034,8 +2034,9 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"show.sth\" s | Show | ;\n\
              type: Point x i64 y i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) ;\n",
         );
@@ -2109,10 +2110,12 @@ mod tests {
              import: \"a.sth\" a | A | ;\n\
              import: \"b.sth\" b | B | ;\n\
              type: Pt n i64 ;\n\
-             : pt-a ( &Pt -- ) drop ;\n\
-             : pt-b ( &Pt -- ) drop ;\n\
-             impl: a::A for Pt  t1 pt-a ;\n\
-             impl: b::B for Pt  t1 pt-b ;\n\
+             impl: a::A for Pt\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
+             impl: b::B for Pt\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A B -- ) a::t1 ;\n\
              : main ( -- ) 1 Pt |p| &p f p drop ;\n",
         );
@@ -2126,9 +2129,13 @@ mod tests {
             .expect("the call site recorded an instantiation");
         let resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
         assert_eq!(
-            resolved,
-            vec!["pt-a__m0"],
-            "the qualified call must resolve to `A`'s impl, not `B`'s"
+            resolved.len(),
+            1,
+            "the qualified call must resolve to exactly one member"
+        );
+        assert!(
+            resolved[0].starts_with("t1;A;"),
+            "the qualified call must resolve to `A`'s impl, not `B`'s: {resolved:?}"
         );
     }
 
@@ -2282,8 +2289,9 @@ mod tests {
              import: \"blob.sth\" b | shout | ;\n\
              type: Point x i64 y i64 ;\n\
              trait: Show 'T show ( &'T -- ) ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) shout ;\n",
         );
@@ -2306,8 +2314,9 @@ mod tests {
              type: Point x i64 y i64 ;\n\
              type: Blob n i64 ;\n\
              trait: Show 'T show ( &'T -- ) ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : show ( &Blob -- ) drop ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) ;\n",
@@ -2322,11 +2331,10 @@ mod tests {
     }
 
     /// P7.S3e (R8/R9): the resolved symbol in a *mangled* build. The `impl:`
-    /// binding names its word raw (`point-show`) and is resolved pre-mangle,
-    /// while lowering mints that word's function under the post-mangle
-    /// `overload_symbols` spelling -- so the resolution rides the word's index
-    /// rather than its name, and the recorded symbol is the one lowering will
-    /// emit, byte for byte.
+    /// member's synthesized word is resolved pre-mangle, while lowering mints
+    /// that word's function under the post-mangle `overload_symbols` spelling
+    /// -- so the resolution rides the word's index rather than its name, and
+    /// the recorded symbol is the one lowering will emit, byte for byte.
     #[test]
     fn a_resolved_trait_call_carries_the_post_mangle_lowering_symbol() {
         let s = Sandbox::new("bound-symbol");
@@ -2339,8 +2347,9 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"show.sth\" s | Show | ;\n\
              type: Point x i64 y i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
+             impl: Show for Point\n\
+               : show | p | p drop ;\n\
+             ;\n\
              : shows ( &'T: Show -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
         );
@@ -2354,47 +2363,10 @@ mod tests {
             .flat_map(|i| i.trait_calls.values())
             .collect();
         let symbols = crate::ast::overload_symbols(&module.words);
-        let expected = symbols
-            .iter()
-            .find(|sym| sym.starts_with("point-show"))
-            .expect("the impl member lowers under its own symbol");
-        assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
-        assert_eq!(expected, "point-show__m0");
-    }
-
-    /// The discriminating half the test above cannot reach: it names an
-    /// unoverloaded impl member, so its plain name and its lowering symbol
-    /// coincide, and a resolution keyed on either reads the same value. Here
-    /// the bound member shares its name with another `point-show` overload
-    /// (a distinct signature, over `Other`, so the two coexist), which forces
-    /// `overload_symbols` to suffix both -- `point-show$$0`/`point-show$$1`,
-    /// in declaration order. A resolution keyed on the raw name would record
-    /// `point-show`, which lowering never mints; only the `$$0`-suffixed
-    /// symbol is real.
-    #[test]
-    fn a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol() {
-        let s = Sandbox::new("bound-symbol-overloaded");
-        let entry = s.write(
-            "main.sth",
-            "import: intrinsics * ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             type: Point x i64 y i64 ;\n\
-             type: Other n i64 ;\n\
-             : point-show ( &Point -- ) drop ;\n\
-             : point-show ( &Other -- ) drop ;\n\
-             impl: Show for Point  show point-show ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
-             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        assert!(
+            symbols.contains(&"show;Show;1;Point__m0".to_string()),
+            "symbols: {symbols:?}"
         );
-        let closure = discover_closure(&entry).expect("closure resolves");
-        let mut module = assemble_module(&closure, true).expect("assembles");
-        check::check(&mut module).expect("the bound is satisfied");
-        let resolved: Vec<&String> = module
-            .instantiations
-            .values()
-            .filter(|i| i.callee == "shows__m0")
-            .flat_map(|i| i.trait_calls.values())
-            .collect();
-        assert_eq!(resolved, vec![&"point-show__m0$$0".to_string()]);
+        assert_eq!(resolved, vec![&"show;Show;1;Point__m0".to_string()]);
     }
 }

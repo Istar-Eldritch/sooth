@@ -767,8 +767,8 @@ pub(super) fn poly_term(
         // interning route, which is a separate gap of its own.
         TermKind::ArrayCtor(_) => {
             return Err(format!(
-                "error: an array constructor in the polymorphic body of `{}` (line {}) is not yet supported",
-                ctx.word_name().unwrap_or("<line>"),
+                "error: an array constructor in the polymorphic body of {} (line {}) is not yet supported",
+                ctx.rendered_word_or("`<line>`"),
                 span.line
             ));
         }
@@ -1013,7 +1013,7 @@ pub(super) fn poly_call_term(
     //
     // The bare spelling reaching here is always the builtin's own: a word the
     // module declared under that name arrives mangled (`dup__m0`), which
-    // `is_gated_intrinsic_name` does not match, and the two un-mangled
+    // `is_name_dispatched_builtin` does not match, and the two un-mangled
     // categories are not in `env` under the bare name either (an operator
     // decl is keyed mangled, and a user `drop` is type-directed, never an
     // `env` entry). So there is no candidate to defer to and nothing to check
@@ -1929,9 +1929,9 @@ fn poly_call_ground_quotation_param(
 /// imported callee and a same-module one emit the same message: both are the
 /// one underlying gap.
 fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
-    let caller = ctx.word_name().unwrap_or("this line");
+    let caller = ctx.rendered_word_or("`this line`");
     format!(
-        "error: `{caller}` cannot call the polymorphic word `{}` (line {}, col {})\n  a polymorphic word is not yet reachable from another polymorphic word across a module boundary\n  inline the caller, make the callee concrete, or call the callee from a monomorphic word",
+        "error: {caller} cannot call the polymorphic word `{}` (line {}, col {})\n  a polymorphic word is not yet reachable from another polymorphic word across a module boundary\n  inline the caller, make the callee concrete, or call the callee from a monomorphic word",
         crate::resolve::demangle_call(callee),
         span.line,
         span.col
@@ -3117,9 +3117,9 @@ fn poly_generic_constructor_undetermined_error(
     var: &str,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{op}` in `{where_}` (line {}) leaves the type variable `{var}` undetermined\n  neither the operands nor the declared output fix `{var}`; a generic constructor needs every argument determined",
+        "error: `{op}` in {where_} (line {}) leaves the type variable `{var}` undetermined\n  neither the operands nor the declared output fix `{var}`; a generic constructor needs every argument determined",
         span.line
     )
 }
@@ -3617,10 +3617,10 @@ pub(super) fn no_poly_overload_matches_error(
         .map(|s| format!("\n  candidate: {s}"))
         .collect::<String>();
     match ctx {
-        Ctx::Word { name: wname, .. } => format!(
-            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+        Ctx::Word { mangled, .. } => format!(
+            "error: no overload of `{demangled}` in {wname} (line {}) accepts these operands{listed}",
             span.line
-        ),
+        , wname = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => {
             format!("error: no overload of `{demangled}` accepts these operands{listed}")
         }
@@ -3807,10 +3807,10 @@ pub(super) fn no_combinator_overload_matches_error(
         .map(|s| format!("\n  candidate: {s}"))
         .collect::<String>();
     match ctx {
-        Ctx::Word { name: wname, .. } => format!(
-            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+        Ctx::Word { mangled, .. } => format!(
+            "error: no overload of `{demangled}` in {wname} (line {}) accepts these operands{listed}",
             span.line
-        ),
+        , wname = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => {
             format!("error: no overload of `{demangled}` accepts these operands{listed}")
         }
@@ -4088,10 +4088,10 @@ fn unsatisfied_user_bound_error(
         sigs.join("`, `")
     );
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {}, col {})\n  {missing}",
+        Ctx::Word { mangled, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in {name} (line {}, col {})\n  {missing}",
             span.line, span.col
-        ),
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}`\n  {missing}"
         ),
@@ -4114,7 +4114,9 @@ fn unresolved_trait_obligation_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     let site = match ctx {
-        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Word { mangled, .. } => {
+            format!(" in {name}", name = crate::resolve::render_word(mangled))
+        }
         Ctx::Line { .. } => String::new(),
     };
     format!(
@@ -4348,9 +4350,9 @@ pub(super) fn poly_generic_not_yet_groundable_error(
     ty: &str,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{op}` in `{where_}` (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
+        "error: `{op}` in {where_} (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
         span.line
     )
 }
@@ -4371,10 +4373,9 @@ pub(super) fn poly_rendered_type_mismatch_error(
 ) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
-            name, span.line, op, expected, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, expected, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
         }
@@ -4510,18 +4511,18 @@ pub(super) fn poly_local_unconsumed_error(
 /// non-`Copy` local read again after its first read (which consumed it),
 /// citing the earlier read site.
 pub(super) fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
+        "error: use after move in {where_} (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
         span.line, site.line, site.col,
     )
 }
 
 pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot `{op}` the type variable `{var}` in `{where_}` (line {})\n  `{var}` has no `Copy` bound, and a linear value cannot be duplicated; declare `{var}: Copy` if every instantiation is `Copy`",
+        "error: cannot `{op}` the type variable `{var}` in {where_} (line {})\n  `{var}` has no `Copy` bound, and a linear value cannot be duplicated; declare `{var}: Copy` if every instantiation is `Copy`",
         span.line
     )
 }
@@ -4532,9 +4533,9 @@ pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -
 /// that instead.
 pub(super) fn poly_copy_mutable_ref_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot `{op}` a mutable reference in `{where_}` (line {})\n  `{ty}` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
+        "error: cannot `{op}` a mutable reference in {where_} (line {})\n  `{ty}` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
         span.line
     )
 }
@@ -4545,18 +4546,18 @@ pub(super) fn poly_copy_mutable_ref_error(ctx: &Ctx, span: Span, op: &str, ty: &
 /// name since a generic application has no single bound to point at.
 pub(super) fn poly_copy_generic_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot `{op}` a generic type applied to a variable in `{where_}` (line {})\n  `{ty}` is conservatively linear: it may carry a linear argument at some instantiation, so it cannot be duplicated",
+        "error: cannot `{op}` a generic type applied to a variable in {where_} (line {})\n  `{ty}` is conservatively linear: it may carry a linear argument at some instantiation, so it cannot be duplicated",
         span.line
     )
 }
 
 pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{op}` on the type variable `{var}` in `{where_}` (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
+        "error: `{op}` on the type variable `{var}` in {where_} (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
         span.line
     )
 }
@@ -4571,9 +4572,9 @@ fn poly_slice_generic_element_error(
     elem: &PolyType,
     sig: &PolySig,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `slice` over an array of `{}` in `{where_}` (line {}) is not supported\n  a view's element type must be concrete; only its length may be generic",
+        "error: `slice` over an array of `{}` in {where_} (line {}) is not supported\n  a view's element type must be concrete; only its length may be generic",
         poly_type_str(elem, sig),
         span.line
     )
@@ -4587,7 +4588,7 @@ pub(super) fn poly_op_on_variable_error(
     sig: &PolySig,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     let what = match pt {
         PolyType::Var(v) => format!("the type variable `{}`", sig.ty_var_names[*v as usize]),
         PolyType::Array(..) => "an array with a variable".to_string(),
@@ -4601,7 +4602,7 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::Generic { .. } => format!("a generic type `{}`", poly_type_str(pt, sig)),
     };
     format!(
-        "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
+        "error: `{op}` is not permitted on {what} in {where_} (line {})",
         span.line
     )
 }
@@ -4615,9 +4616,9 @@ pub(super) fn poly_op_operand_mismatch_error(
     sig: &PolySig,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{op}` in `{where_}` (line {}) needs two operands of one type, found `{}` and `{}`",
+        "error: `{op}` in {where_} (line {}) needs two operands of one type, found `{}` and `{}`",
         span.line,
         poly_type_str(a, sig),
         poly_type_str(b, sig),
@@ -4653,9 +4654,9 @@ fn trait_member_operand_error(
     found: &PolyType,
     sig: &PolySig,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{member}` of `{trait_name}` in `{where_}` (line {}, col {}) expects `{}`, found `{}`",
+        "error: `{member}` of `{trait_name}` in {where_} (line {}, col {}) expects `{}`, found `{}`",
         span.line,
         span.col,
         poly_type_str(expected, sig),
@@ -4704,9 +4705,9 @@ pub(super) fn poly_var_to_concrete_error(
     expected: Type,
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{callee}` in `{where_}` (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
+        "error: `{callee}` in {where_} (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
         span.line
     )
 }
@@ -4719,9 +4720,9 @@ pub(super) fn poly_var_to_concrete_error(
 /// unknown-word error.
 pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{op}` is not yet supported in a generic body, in `{where_}` (line {})\n  monomorphize this word (or write a concrete wrapper) to use `{op}` today",
+        "error: `{op}` is not yet supported in a generic body, in {where_} (line {})\n  monomorphize this word (or write a concrete wrapper) to use `{op}` today",
         span.line
     )
 }
@@ -4751,9 +4752,9 @@ fn receiver_is_aggregate_projection(stack: &[PolySlot]) -> bool {
 /// place to borrow. Mirrors the monomorphic `borrow_of_non_place_error`'s
 /// "a bare sigil cannot borrow whatever happens to be on the stack" case.
 fn poly_borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{spelled}` does not borrow a place in `{where_}` (line {})\n  it names nothing (a bare sigil cannot borrow whatever happens to be on the stack)",
+        "error: `{spelled}` does not borrow a place in {where_} (line {})\n  it names nothing (a bare sigil cannot borrow whatever happens to be on the stack)",
         span.line
     )
 }
@@ -4762,9 +4763,9 @@ fn poly_borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str) -> Strin
 fn poly_borrow_of_non_local_error(ctx: &Ctx, span: Span, spelled: &str, local: &str) -> String {
     let spelled = crate::resolve::demangle_word(spelled);
     let local = crate::resolve::demangle_word(local);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{spelled}` does not borrow a place in `{where_}` (line {})\n  `{local}` is not a local in scope",
+        "error: `{spelled}` does not borrow a place in {where_} (line {})\n  `{local}` is not a local in scope",
         span.line
     )
 }
@@ -4780,9 +4781,9 @@ pub(super) fn poly_borrow_of_variable_local_error(
     local: &str,
     var: &str,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot borrow the local `{local}` of type `{var}` in `{where_}` (line {}, col {})\n  `{var}` might instantiate to a scalar, which has no address; borrow an aggregate (a struct, enum, array, or owning cell) instead",
+        "error: cannot borrow the local `{local}` of type `{var}` in {where_} (line {}, col {})\n  `{var}` might instantiate to a scalar, which has no address; borrow an aggregate (a struct, enum, array, or owning cell) instead",
         span.line, span.col
     )
 }
@@ -4798,9 +4799,9 @@ fn poly_borrow_of_non_aggregate_local_error(
     local: &str,
     ty: &str,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `{ty}` is not",
+        "error: cannot borrow the local `{local}` of type `{ty}` in {where_} (line {}, col {})\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `{ty}` is not",
         span.line, span.col
     )
 }
@@ -4814,9 +4815,9 @@ fn poly_borrow_of_non_aggregate_local_error(
 /// shapeless -- avoids a claim the ABI contradicts; borrowing a quotation is
 /// 7b territory (a first-class capturing closure), not this slice's.
 fn poly_borrow_of_quotation_local_error(ctx: &Ctx, span: Span, local: &str, ty: &str) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  a quotation is not borrowable in a generic body",
+        "error: cannot borrow the local `{local}` of type `{ty}` in {where_} (line {}, col {})\n  a quotation is not borrowable in a generic body",
         span.line, span.col
     )
 }
@@ -4842,9 +4843,9 @@ fn poly_reference_across_back_edge_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     let place = crate::resolve::demangle_word(place);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: a reference to a local cannot cross a loop in `{where_}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration{POLY_BORROW_LIVENESS_NOTE}",
+        "error: a reference to a local cannot cross a loop in {where_} (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration{POLY_BORROW_LIVENESS_NOTE}",
         span.line,
     )
 }
@@ -4862,11 +4863,11 @@ fn poly_conflicting_borrow_error(
     live: &PolyBorrow,
 ) -> String {
     let place = crate::resolve::demangle_word(place);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     let sigil = if new_mutable { "&!" } else { "&" };
     let held = if live.mutable { "mutable" } else { "shared" };
     format!(
-        "error: `{sigil}{place}` conflicts with a live borrow of `{place}` in `{where_}` (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first{POLY_BORROW_LIVENESS_NOTE}",
+        "error: `{sigil}{place}` conflicts with a live borrow of `{place}` in {where_} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first{POLY_BORROW_LIVENESS_NOTE}",
         span.line, span.col, live.span.line, live.span.col,
     )
 }
@@ -4882,10 +4883,10 @@ fn poly_consume_of_borrowed_place_error(
     ty: &str,
     live: &PolyBorrow,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     let held = if live.mutable { "mutable" } else { "shared" };
     format!(
-        "error: cannot consume the borrowed local `{place}` of type `{ty}` in `{where_}` (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed{POLY_BORROW_LIVENESS_NOTE}",
+        "error: cannot consume the borrowed local `{place}` of type `{ty}` in {where_} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed{POLY_BORROW_LIVENESS_NOTE}",
         span.line, span.col, live.span.line, live.span.col,
     )
 }
@@ -4900,9 +4901,9 @@ fn poly_naming_aliases_borrowed_place_error(
     name: &str,
     live: &PolyBorrow,
 ) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot name `{name}` in `{where_}` (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy{POLY_BORROW_LIVENESS_NOTE}",
+        "error: cannot name `{name}` in {where_} (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy{POLY_BORROW_LIVENESS_NOTE}",
         span.line, span.col, live.span.line, live.span.col,
     )
 }
@@ -4913,10 +4914,10 @@ fn poly_naming_aliases_borrowed_place_error(
 /// generic body has no runtime representation to return, store, or capture,
 /// and the one thing that consumes one here is an eliminator in the same body.
 pub(super) fn poly_quotation_not_consumed_error(ctx: &Ctx, span: Span) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: a quotation in the polymorphic body of `{}` (line {}) is not consumed there\n  only an eliminator call in the same body consumes a quotation in a generic word: it cannot be returned, stored, or captured",
-        crate::resolve::demangle_word(where_),
+        "error: a quotation in the polymorphic body of {} (line {}) is not consumed there\n  only an eliminator call in the same body consumes a quotation in a generic word: it cannot be returned, stored, or captured",
+        where_,
         span.line
     )
 }
@@ -4940,10 +4941,10 @@ pub(super) fn poly_quotation_combinator_unsupported_error(
     word: &str,
 ) -> String {
     let demangled = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{demangled}` on a quotation in the polymorphic body of `{}` (line {}) is not yet supported\n  a generic body consumes a quotation through an enum eliminator, through an always-spliced combinator that declares it as a `~[ ]` parameter, or through `call` on a literal (P7.S3d); the `branch`/`tag` primitives declare nothing to ground and name no follow-up slice yet",
-        crate::resolve::demangle_word(where_),
+        "error: `{demangled}` on a quotation in the polymorphic body of {} (line {}) is not yet supported\n  a generic body consumes a quotation through an enum eliminator, through an always-spliced combinator that declares it as a `~[ ]` parameter, or through `call` on a literal (P7.S3d); the `branch`/`tag` primitives declare nothing to ground and name no follow-up slice yet",
+        where_,
         span.line
     )
 }
@@ -4963,10 +4964,10 @@ fn poly_combinator_abstract_signature_error(
     declared: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of `{}` (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, and whose declared output row one of them produces",
-        crate::resolve::demangle_word(where_),
+        "error: `{word}` declares `{declared}`, which a call in the polymorphic body of {} (line {}) cannot ground\n  a generic body consumes a row-typed combinator whose own types are concrete, and whose declared output row one of them produces",
+        where_,
         span.line
     )
 }
@@ -4989,10 +4990,10 @@ fn poly_arm_declared_effect_mismatch_error(
     want: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a non-shape-changing quotation parameter carries one row, the same on both sides: the arm must leave the row it entered with",
-        crate::resolve::demangle_word(where_),
+        "error: the quotation passed to `{word}` in {} (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a non-shape-changing quotation parameter carries one row, the same on both sides: the arm must leave the row it entered with",
+        where_,
         span.line
     )
 }
@@ -5012,10 +5013,10 @@ fn poly_arm_declared_suffix_mismatch_error(
     want: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a shape-changing quotation parameter declares trailing outputs above the row it produces: the arm must leave those types, in order, above whatever row it leaves",
-        crate::resolve::demangle_word(where_),
+        "error: the quotation passed to `{word}` in {} (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a shape-changing quotation parameter declares trailing outputs above the row it produces: the arm must leave those types, in order, above whatever row it leaves",
+        where_,
         span.line
     )
 }
@@ -5034,10 +5035,10 @@ fn poly_combinator_arm_not_a_literal_error(
     found: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{word}` in the polymorphic body of `{}` (line {}) needs a quotation literal written at the call site, found {found}\n  a quotation in a generic body is spliced where it is written: it cannot be bound to a local, forwarded, or returned",
-        crate::resolve::demangle_word(where_),
+        "error: `{word}` in the polymorphic body of {} (line {}) needs a quotation literal written at the call site, found {found}\n  a quotation in a generic body is spliced where it is written: it cannot be bound to a local, forwarded, or returned",
+        where_,
         span.line
     )
 }
@@ -5052,10 +5053,10 @@ pub(super) fn poly_abstract_enum_scrutinee_error(
     found: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{word}` in `{}` (line {}) eliminates `{found}`, which is not a concrete enum\n  an abstract scrutinee needs an enum-kind bound on the type variable, which this slice does not have",
-        crate::resolve::demangle_word(where_),
+        "error: `{word}` in {} (line {}) eliminates `{found}`, which is not a concrete enum\n  an abstract scrutinee needs an enum-kind bound on the type variable, which this slice does not have",
+        where_,
         span.line
     )
 }
@@ -5071,10 +5072,10 @@ pub(super) fn poly_reference_scrutinee_error(
     enum_name: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{word}` in `{}` (line {}) eliminates a reference, which is not yet supported in a generic body\n  pass the owned `{enum_name}` instead",
-        crate::resolve::demangle_word(where_),
+        "error: `{word}` in {} (line {}) eliminates a reference, which is not yet supported in a generic body\n  pass the owned `{enum_name}` instead",
+        where_,
         span.line
     )
 }
@@ -5091,10 +5092,10 @@ pub(super) fn poly_arm_output_disagreement_error(
     found: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: the arms of `{word}` in `{}` (line {}) disagree: an earlier one leaves `{expected}`, this one leaves `{found}`\n  a type variable is rigid across arms: it is never bound to the other arm's type",
-        crate::resolve::demangle_word(where_),
+        "error: the arms of `{word}` in {} (line {}) disagree: an earlier one leaves `{expected}`, this one leaves `{found}`\n  a type variable is rigid across arms: it is never bound to the other arm's type",
+        where_,
         span.line
     )
 }
@@ -5111,11 +5112,11 @@ pub(super) fn poly_arm_borrow_disagreement_error(
     b: &PolyBorrow,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     let sigil = |b: &PolyBorrow| if b.mutable { "&!" } else { "&" };
     format!(
-        "error: the arms of `{word}` in `{}` (line {}) borrow `{}` differently: `{}{}` (line {}) against `{}{}` (line {})\n  one place is borrowed at one mutability across every arm, or the merged table could not answer a later use of it",
-        crate::resolve::demangle_word(where_),
+        "error: the arms of `{word}` in {} (line {}) borrow `{}` differently: `{}{}` (line {}) against `{}{}` (line {})\n  one place is borrowed at one mutability across every arm, or the merged table could not answer a later use of it",
+        where_,
         span.line,
         a.place,
         sigil(a),
@@ -5139,10 +5140,10 @@ pub(super) fn poly_arm_local_not_consumed_error(
     ty: &str,
 ) -> String {
     let word = crate::resolve::demangle_call(word);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: the local `{local}` of type `{ty}`, bound in an arm of `{word}` in `{}` (line {}), is never consumed\n  nothing is dropped for you: consume it in the arm that binds it",
-        crate::resolve::demangle_word(where_),
+        "error: the local `{local}` of type `{ty}`, bound in an arm of `{word}` in {} (line {}), is never consumed\n  nothing is dropped for you: consume it in the arm that binds it",
+        where_,
         span.line
     )
 }
@@ -5150,9 +5151,9 @@ pub(super) fn poly_arm_local_not_consumed_error(
 /// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
 /// element cannot be statically bounds-checked without a known count.
 pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot index a generic-length array in `{where_}` (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature",
+        "error: cannot index a generic-length array in {where_} (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature",
         span.line, span.col
     )
 }
@@ -5185,10 +5186,10 @@ pub(super) fn poly_copy_bound_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is linear and has no `Copy` instance, so a linear value cannot be duplicated; `{var}: Copy` is unsatisfied",
+        Ctx::Word { mangled, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in {name} (line {})\n  `{ty}` is linear and has no `Copy` instance, so a linear value cannot be duplicated; `{var}: Copy` is unsatisfied",
             span.line
-        ),
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with linear type `{ty}`: `{var}: Copy` is unsatisfied"
         ),
@@ -5204,10 +5205,10 @@ pub(super) fn poly_ord_bound_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
+        Ctx::Word { mangled, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in {name} (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
             span.line
-        ),
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}`: `{var}: Ord` is unsatisfied"
         ),
@@ -5225,8 +5226,9 @@ pub(super) fn poly_var_conflict_error(
     let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: `{callee}` in `{name}` (line {line}) resolved `{var}` to both `{a}` and `{b}`"
+        Ctx::Word { mangled, .. } => format!(
+            "error: `{callee}` in {name} (line {line}) resolved `{var}` to both `{a}` and `{b}`",
+            name = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => {
             format!("error: `{callee}` resolved `{var}` to both `{a}` and `{b}`")
@@ -5245,9 +5247,9 @@ pub(super) fn poly_len_conflict_error(
     let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: `{callee}` in `{name}` (line {line}) resolved length `{var}` to both `{a}` and `{b}`"
-        ),
+        Ctx::Word { mangled, .. } => format!(
+            "error: `{callee}` in {name} (line {line}) resolved length `{var}` to both `{a}` and `{b}`"
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => {
             format!("error: `{callee}` resolved length `{var}` to both `{a}` and `{b}`")
         }
@@ -5262,10 +5264,10 @@ pub(super) fn poly_array_expected_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: type mismatch in `{name}` (line {})\n  `{callee}` expected an array operand, found `{found}`",
+        Ctx::Word { mangled, .. } => format!(
+            "error: type mismatch in {name} (line {})\n  `{callee}` expected an array operand, found `{found}`",
             span.line
-        ),
+        , name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{callee}` expected an array operand, found `{found}`")
         }
@@ -5274,9 +5276,9 @@ pub(super) fn poly_array_expected_error(
 
 pub(super) fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var: &str) -> String {
     let callee = crate::resolve::demangle_call(callee);
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: `{callee}` in `{where_}` (line {}) has output variable `{var}` that no input binds",
+        "error: `{callee}` in {where_} (line {}) has output variable `{var}` that no input binds",
         span.line
     )
 }
@@ -5373,8 +5375,9 @@ mod tests {
     /// than `i64` because a scalar local has no address to borrow.
     const SHOW: &str = "type: Point x i64 y i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n";
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n";
 
     /// P7.S3e (R7): a bounded body's member call records an obligation --
     /// which trait, which member, which of the word's own type variables --
@@ -5390,7 +5393,7 @@ mod tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].var, 0);
         assert_eq!(obs[0].member, "show");
-        assert_eq!(obs[0].span.line, 5);
+        assert_eq!(obs[0].span.line, 6);
         // Index 2: the two pre-seeded `Copy`/`Ord` predicate entries occupy 0
         // and 1, so a whole-program `TraitId` is what was recorded, not a
         // per-module or per-word one.
@@ -5473,8 +5476,9 @@ mod tests {
         check_src(
             "type: Point x i64 y i64 ;\n\
              trait: Clone 'T clone ( &'T -- 'T ) ;\n\
-             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
-             impl: Clone for Point  clone point-clone ;\n\
+             impl: Clone for Point\n\
+               : clone | p | p drop 1 2 Point ;\n\
+             ;\n\
              : cloned ( &'T: Clone -- 'T ) clone ;\n\
              : main ( -- ) ;\n",
         )
@@ -5490,8 +5494,9 @@ mod tests {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
              trait: Clone 'T clone ( &'T -- 'T ) ;\n\
-             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
-             impl: Clone for Point  clone point-clone ;\n\
+             impl: Clone for Point\n\
+               : clone | p | p drop 1 2 Point ;\n\
+             ;\n\
              : cloned ( &'T: Clone -- ) clone ;\n\
              : main ( -- ) ;\n",
         )
@@ -5511,7 +5516,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("`show` of `Show` in `shows` (line 5, col 25) expects `&'T`, found `'T`"),
+            err.contains("`show` of `Show` in `shows` (line 6, col 25) expects `&'T`, found `'T`"),
             "{err}"
         );
     }
@@ -5594,7 +5599,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("`'T: Show` on the combinator `shows` at line 5, col 3 is not supported"),
+            err.contains("`'T: Show` on the combinator `shows` at line 6, col 3 is not supported"),
             "{err}"
         );
         assert!(err.contains("records no instantiation"), "{err}");
@@ -5618,33 +5623,20 @@ mod tests {
         assert_eq!(recorded["eats"][0].member, "eat");
     }
 
-    /// R10 barrier 2: an operator-spelled member name. `exact` is never true
-    /// for a variable operand, so such a call never reached the concrete-arm
-    /// at all before this slice -- it fell to `poly_delegate_op`, whose
-    /// concrete-suffix extraction stops before the variable. Shipped here
-    /// rather than deferred to the `sort` consumer, whose `cmp` is not
-    /// operator-spelled and would not exercise this barrier.
-    #[test]
-    fn bound_dispatch_and_a_builtin_named_member_coexist() {
-        let recorded = obligations_of(
-            "type: Point x i64 y i64 ;\n\
-             trait: Sum 'T add ( &'T &'T -- i64 ) ;\n\
-             : sums ( &'T: Sum &'T -- i64 ) add ;\n\
-             : main ( -- ) 1 2 add drop ;\n",
-        );
-        assert_eq!(recorded["sums"].len(), 1);
-        assert_eq!(recorded["sums"][0].member, "add");
-    }
-
-    /// Review finding 3: `add` (the fixture above) never actually exercised
-    /// R10's claimed partition against the shuffles/comparisons/`call`
-    /// family, since none of the earlier dispatch-cascade arms match that
-    /// name -- `eq` does. Before `poly_trait_member_call` moved to the front
-    /// of `poly_call_term`, this member was unreachable: the comparisons
-    /// block (`matches!(name, "eq" | ...)`) intercepted it first and
-    /// demanded an `Ord` bound the trait never declared. `main` carries R10's
-    /// coexistence half for this barrier: the builtin still wins a concrete
-    /// receiver.
+    /// R10 barrier 2: a member spelled as a name the dispatch cascade
+    /// intercepts ahead of bound-directed dispatch. Before
+    /// `poly_trait_member_call` moved to the front of `poly_call_term`, this
+    /// member was unreachable: the comparisons block (`matches!(name, "eq" |
+    /// ...)`) intercepted it first and demanded an `Ord` bound the trait never
+    /// declared. `main` carries R10's coexistence half for this barrier: the
+    /// builtin still wins a concrete receiver.
+    ///
+    /// The six surface comparisons are the whole of that barrier now. P7.S3r
+    /// (R4) rejects a member spelled as a *name-dispatched* builtin at the
+    /// `trait:` declaration, so the operator-spelled sibling of this fixture (a
+    /// `Sum` trait with an `add` member) is no longer declarable -- and it never
+    /// exercised the partition anyway, since no dispatch-cascade arm matches
+    /// `add`.
     #[test]
     fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
         let recorded = obligations_of(
@@ -5658,14 +5650,17 @@ mod tests {
 
     /// Two types, both satisfying one trait through their own `impl:` -- the
     /// preamble the call-site resolution tests need (R8). A `shows` declared
-    /// after it lands on line 8, and its `show` call is the obligation's span.
+    /// after it lands on line 10, and its `show` call is the obligation's
+    /// span.
     const TWO_SHOWS: &str = "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         : blip-show ( &Blip -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
-         impl: Show for Blip  show blip-show ;\n";
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
+         impl: Show for Blip\n\
+           : show | b | b drop ;\n\
+         ;\n";
 
     /// P7.S3e (R8/R9): the load-bearing new mechanism, read directly rather
     /// than through a golden (a bound-directed call does not lower until
@@ -5690,7 +5685,7 @@ mod tests {
             .iter()
             .map(|(span, symbol)| (span.line, symbol.as_str()))
             .collect();
-        assert_eq!(resolved, vec![(5, "point-show")]);
+        assert_eq!(resolved, vec![(6, "show;Show;0;Point")]);
     }
 
     /// R8: two instantiations of one bounded word resolve to two distinct
@@ -5718,24 +5713,25 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                ("Blip".to_string(), 8, "blip-show".to_string()),
-                ("Point".to_string(), 8, "point-show".to_string()),
+                ("Blip".to_string(), 10, "show;Show;0;Blip".to_string()),
+                ("Point".to_string(), 10, "show;Show;0;Point".to_string()),
             ]
         );
     }
 
     /// R8: which member the obligation names selects the binding. A trait with
-    /// two members, a body calling only the second, and two distinct
-    /// implementing words: resolving by position rather than by member name
-    /// would dispatch `hash` to `point-eq`.
+    /// two members, a body calling only the second, and two distinct member
+    /// bodies: resolving by position rather than by member name would
+    /// dispatch `hash` to `eq`'s synthesized word.
     #[test]
     fn the_obligations_member_name_selects_the_binding() {
         let (module, _) = checked_like_a_build(
             "type: Point x i64 y i64 ;\n\
              trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
-             : point-eq ( &Point &Point -- i64 ) drop drop 1 ;\n\
-             : point-hash ( &Point -- i64 ) drop 7 ;\n\
-             impl: Eq for Point  eq point-eq  hash point-hash ;\n\
+             impl: Eq for Point\n\
+               : eq | a b | a drop b drop 1 ;\n\
+               : hash | p | p drop 7 ;\n\
+             ;\n\
              : hashes ( &'T: Eq -- i64 ) hash ;\n\
              : main ( -- ) 1 2 Point |p| &p hashes drop p drop ;\n",
         )
@@ -5746,7 +5742,7 @@ mod tests {
             .filter(|i| i.callee == "hashes")
             .flat_map(|i| i.trait_calls.values())
             .collect();
-        assert_eq!(resolved, vec!["point-hash"]);
+        assert_eq!(resolved, vec!["hash;Eq;0;Point"]);
     }
 
     /// R8: a polymorphic *overload set* -- two bounded words sharing one name,
@@ -5775,10 +5771,10 @@ mod tests {
             .collect();
         sites.sort();
         // The one-input `shows` is called first, so it holds the lower column;
-        // its `show` is on line 5, the two-input one's on line 6.
+        // its `show` is on line 6, the two-input one's on line 7.
         assert_eq!(sites.len(), 2, "{sites:?}");
-        assert_eq!(sites[0].1, vec![5], "{sites:?}");
-        assert_eq!(sites[1].1, vec![6], "{sites:?}");
+        assert_eq!(sites[0].1, vec![6], "{sites:?}");
+        assert_eq!(sites[1].1, vec![7], "{sites:?}");
     }
 
     /// R8: two distinct bound variables on one word, each obligated to a
@@ -5796,10 +5792,12 @@ mod tests {
              type: PB n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
              trait: B 'T tb ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PB -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: B for PB  tb p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: B for PB\n\
+               : tb | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A &'U: B -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
@@ -5811,7 +5809,7 @@ mod tests {
             .expect("the call site recorded an instantiation");
         let mut resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
         resolved.sort();
-        assert_eq!(resolved, vec!["p-a", "p-b"]);
+        assert_eq!(resolved, vec!["ta;A;0;PA", "tb;B;0;PB"]);
     }
 
     /// R8: one trait, two bound variables, instantiated at two types that
@@ -5825,10 +5823,12 @@ mod tests {
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PB -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: A for PB  ta p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: A for PB\n\
+               : ta | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A &'U: A -- ) ta ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
@@ -5846,7 +5846,7 @@ mod tests {
         resolved.sort();
         // The body's first `ta` (col 26) consumes the top input, `'U` = `PB`;
         // the second (col 29) consumes `'T` = `PA`.
-        assert_eq!(resolved, vec![(26, "p-b"), (29, "p-a")]);
+        assert_eq!(resolved, vec![(26, "ta;A;0;PB"), (29, "ta;A;0;PA")]);
     }
 
     /// R8: two traits bounding *one* variable, both implemented for the type
@@ -5862,10 +5862,12 @@ mod tests {
             "type: PA n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
              trait: B 'T tb ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PA -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: B for PA  tb p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: B for PA\n\
+               : tb | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A B &'T -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| &a &a f a drop ;\n",
         )
@@ -5881,7 +5883,7 @@ mod tests {
             .map(|(span, symbol)| (span.col, symbol.as_str()))
             .collect();
         resolved.sort();
-        assert_eq!(resolved, vec![(25, "p-b"), (28, "p-a")]);
+        assert_eq!(resolved, vec![(25, "tb;B;0;PA"), (28, "ta;A;0;PA")]);
     }
 
     /// R8: a polymorphic combinator's body calling a bounded poly word. The
@@ -5919,7 +5921,10 @@ mod tests {
             .collect();
         assert_eq!(maps.len(), 2, "two call sites");
         assert_eq!(maps[0], maps[1]);
-        assert_eq!(maps[0].values().collect::<Vec<_>>(), vec!["point-show"]);
+        assert_eq!(
+            maps[0].values().collect::<Vec<_>>(),
+            vec!["show;Show;0;Point"]
+        );
     }
 
     /// R8: the concrete type a bounded variable was instantiated with has no
@@ -5934,7 +5939,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains(
-                "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 7, col 29)"
+                "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 8, col 29)"
             ),
             "{err}"
         );
@@ -5982,7 +5987,7 @@ mod tests {
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
-            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 5, col 26 in the body of `shows` (instantiated at line 6, col 32 in `main`)"
+            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 6, col 26 in the body of `shows` (instantiated at line 7, col 32 in `main`)"
         );
     }
 

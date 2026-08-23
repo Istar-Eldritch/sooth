@@ -111,14 +111,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                     .builtin_overloads
                     .values()
                     .any(|s| s == &symbols[*idx])
-                // P7.S3e (R15): an impl member named after a builtin operator
-                // and reachable only through bound dispatch is "called" too --
-                // its only mention is a resolved symbol in some instantiation's
-                // `trait_calls`, never a bare name in `called_names`.
-                && !module
-                    .instantiations
-                    .values()
-                    .any(|i| i.trait_calls.values().any(|s| s == &symbols[*idx]))
         })
         .map(|(idx, _)| idx)
         .collect();
@@ -1570,12 +1562,18 @@ mod tests {
     /// P7.S3e phase 4 (R9): `lower_src` is not enough for a bound-dispatch
     /// fixture -- `check` does not run the trait/impl pre-passes (`driver.rs`
     /// does, before it), so without them `ImplDecl::resolved` is empty and
-    /// every member call fails to resolve. Mirrors the real build's order.
+    /// every member call fails to resolve. Mangles too (P7.S3r): a synthesized
+    /// impl-body member's own call to a builtin-operator-named word (`max`)
+    /// only resolves through `scoped_operator_overloads`, which reads the
+    /// mangled candidate key -- unmangled, the candidate set is always empty
+    /// and every such call falls through to the builtin's own numeric-operand
+    /// rejection. Mirrors the real build's order.
     fn lower_with_trait_prepasses(src: &str) -> IrModule {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::check::check_trait_decls(&module).unwrap();
         crate::check::check_impl_decls(&mut module).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module).unwrap();
         crate::ir::lower(&module).unwrap()
     }
@@ -1593,47 +1591,56 @@ mod tests {
             "trait: Getter 'T get ( &'T -- i64 ) ;\n\
              type: Pt n i64 ;\n\
              type: Qt n i64 ;\n\
-             : pt-get ( &Pt -- i64 ) &n @ ;\n\
-             : qt-get ( &Qt -- i64 ) &n @ ;\n\
-             impl: Getter for Pt  get pt-get ;\n\
-             impl: Getter for Qt  get qt-get ;\n\
+             impl: Getter for Pt\n\
+               : get | p | p &n @ ;\n\
+             ;\n\
+             impl: Getter for Qt\n\
+               : get | q | q &n @ ;\n\
+             ;\n\
              : getval ( &'T: Getter -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p getval . p drop\n\
                            9 Qt |q| &q getval . q drop ;\n",
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__t0_Pt")),
-            vec!["pt-get"]
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),
+            vec!["get;Getter;0;Pt__m0"]
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__t0_Qt")),
-            vec!["qt-get"]
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Qt")),
+            vec!["get;Getter;0;Qt__m0"]
         );
     }
 
-    /// P7.S3e phase 4 (R15): the IR-level twin of the pruning golden. An
-    /// implementing word named after a builtin operator, reachable *only*
-    /// through a bound (no term anywhere spells `max`), must survive
-    /// `uncalled_operator_overloads` -- which without R15's `trait_calls`
-    /// clause would count it uncalled and drop its body from the module.
-    /// Its arity matches the builtin `max`'s: the unit harness does not
-    /// mangle, so a disagreeing overload is rejected before lowering.
+    /// A synthesized impl-body member whose body calls a word named after a
+    /// builtin operator (`max`): the call resolves to the local overload
+    /// rather than the builtin, through `scoped_operator_overloads`' mangled
+    /// candidate key, and that overload keeps its own body in the module. The
+    /// overload's arity matches the builtin `max`'s, so the two agree.
+    ///
+    /// Pruning needs no help here: an impl member's body spells `max` as a
+    /// literal term, so `called_names` alone spares the overload.
     #[test]
-    fn an_operator_named_impl_member_reached_only_by_a_bound_is_not_pruned() {
+    fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_trait_prepasses(
             "trait: Getter 'T get ( &'T &'T -- i64 ) ;\n\
              type: Pt n i64 ;\n\
              : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\
-             impl: Getter for Pt  get max ;\n\
+             impl: Getter for Pt\n\
+               : get | a b | a b max ;\n\
+             ;\n\
              : getval ( &'T: Getter &'T -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p &p getval . p drop ;\n",
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__t0_Pt")),
-            vec!["max"]
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),
+            vec!["get;Getter;0;Pt__m0"]
+        );
+        assert_eq!(
+            call_symbols(func(&m, "get;Getter;0;Pt__m0")),
+            vec!["max__m0"]
         );
         assert!(
-            m.funcs.iter().any(|f| f.name == "max"),
+            m.funcs.iter().any(|f| f.name == "max__m0"),
             "the bound-reached operator overload keeps its body: {:?}",
             m.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );

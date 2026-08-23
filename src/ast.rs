@@ -1191,6 +1191,102 @@ pub fn intern_bundle_struct(structs: &mut Vec<StructDecl>, outputs: &[Type]) -> 
     id
 }
 
+/// R1: the builtin words `check_term` dispatches by name, in its probe chain,
+/// *before* the word environment is consulted at all. They are absent from
+/// `builtin_table` (empty today, since every builtin dispatches on the
+/// concrete operand type rather than a fixed signature), so an `extern:`
+/// naming one would be registered, never looked up, and silently do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
+/// words are dispatched in the same chain but are rejected earlier, against
+/// the declaration's name in the parser, so they are not repeated here.
+///
+/// This table and the two predicates below live in `ast` rather than `check`
+/// because `parser` needs them too (P7.S3r R4 rejects a `trait:` member spelled
+/// as a name-dispatched builtin), and `ast` is the lowest module both already
+/// depend on.
+pub(crate) const BUILTIN_WORDS: &[&str] = &[
+    // check_shuffle
+    "dup",
+    "drop",
+    "swap",
+    "over",
+    "rot", // check_operator
+    "add",
+    "sub",
+    "mul",
+    "div",
+    "mod",
+    "and",
+    "or",
+    "xor",
+    "not",
+    "shl",
+    "shr",
+    // Slice 10c (R-P3-3): the comparison primitives, each yielding the 32-bit
+    // flag `branch` consumes.
+    "ueq",
+    "ult",
+    "ugt",
+    "ulte",
+    "ugte",
+    "une",
+    // The six surface comparison names are `lib/` words now, not name-
+    // dispatched builtins, but they stay listed: this set is also what stops
+    // a bare tail call being read as a call to the enclosing word
+    // (`has_self_tail_call`), and a trailing `lt` inside a user's own `Vec2 lt`
+    // is still far more often the library `lt` on two scalars than a self-call.
+    "eq",
+    "lt",
+    "gt",
+    "lte",
+    "gte",
+    "ne",
+    ".",
+    // Slice 10c (R-P3-1/R-P3-2): the two control/discriminant primitives.
+    "branch",
+    "tag",
+    "max",
+    "max-total", // check_str_word
+    "len",
+    "cstr", // check_array_word (`len` is shared with `check_str_word`)
+    "fill",
+];
+
+/// R1: whether `name` is dispatched as a builtin ahead of any environment
+/// lookup. Beyond the fixed names, `check_operator` claims every `>`-prefixed
+/// name with a non-empty remainder as a numeric conversion (`>u8`), erroring
+/// on an unrecognised target type rather than falling through, so no such
+/// name can reach a registered signature either. A bare `>` with no suffix
+/// falls through this filter; the comparison operator, now spelled `gt`, is
+/// in the list separately.
+pub(crate) fn is_builtin_word_name(name: &str) -> bool {
+    BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
+}
+
+/// The names `check_term` really does dispatch ahead of the word environment:
+/// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
+/// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
+/// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
+/// as a self-call.
+///
+/// Two consumers. P8 S2 (R2): the set the `intrinsics` import gates -- the six
+/// live in `core::cmp`, so gating them would answer an unimported `lt` with
+/// "add `import: intrinsics *`", pointing at the wrong module. P7.S3r (R4): the
+/// set a `trait:` member name may not be spelled as, since an impl body binds
+/// its own member name ahead of module scope and would shadow the builtin
+/// there; excluding the six keeps an `eq`/`lt` member legal, shadowing only a
+/// library word.
+///
+/// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
+/// `Print` row per printable type, dispatched by `check_operator`) and does not
+/// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
+/// import error.
+pub(crate) fn is_name_dispatched_builtin(name: &str) -> bool {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
+        return false;
+    }
+    is_builtin_word_name(name)
+}
+
 /// One REPL input unit: either a word definition or a bare term sequence
 /// evaluated against the carried stack.
 #[derive(Debug)]
@@ -1365,6 +1461,42 @@ pub struct TraitMember {
     pub sig: PolySig,
 }
 
+/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
+/// trait's sole implicit type variable, id 0) against a concrete `impl:`
+/// target, interning a fresh array/reference shape if the grounded shape is
+/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
+/// double-registers one already interned elsewhere). Trait member
+/// signatures are restricted to concrete/array/reference shapes over `'T`
+/// (`parse_trait_member_effect` rejects anything else at declaration time),
+/// so every other `PolyType` shape is unreachable here.
+///
+/// P7.S3r (R2): the single grounding rule. The parser grounds a trait member
+/// here to synthesize the impl body's word, and `check::poly` grounds the same
+/// member here to render it in a diagnostic, so the effect a body is checked
+/// against and the effect an error names cannot drift apart.
+pub fn ground_member_type(
+    pty: &PolyType,
+    target: Type,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Type {
+    match pty {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(_) => target,
+        PolyType::Array(elem, Len::Concrete(n)) => {
+            let elem_ty = ground_member_type(elem, target, arrays, refs);
+            intern_array_type(arrays, elem_ty, *n)
+        }
+        PolyType::Ref(referent, mutable) => {
+            let r = ground_member_type(referent, target, arrays, refs);
+            intern_ref_type(refs, r, *mutable)
+        }
+        _ => unreachable!(
+            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
+        ),
+    }
+}
+
 /// The shared, lazily-built `Copy`/`Ord` entries (`seed_predicate_traits`),
 /// for a caller that only ever needs the reserved predicate table and no
 /// user `trait:` declarations -- the REPL's per-line word-definition path,
@@ -1400,9 +1532,11 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
     ]
 }
 
-/// P7.S3e (R4/R11, decision 1): one `impl: Trait for Type ... ;` binding -- a
-/// pure name map (member name -> implementing word name), never a body: an
-/// impl member is always a concrete, already-declared word (decision 2).
+/// One `impl: Trait for Type ... ;` declaration. `bindings` is a name map
+/// (member name -> implementing word name), populated by the parser's
+/// body-form desugar: each `: member ... ;` inside the block synthesizes a
+/// concrete top-level word carrying the trait member's signature grounded at
+/// `target_ty`, and records the (member, synth-name) pair here.
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
     pub trait_id: TraitId,
@@ -2231,6 +2365,42 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P8 S2 (R2): the gate set is `is_builtin_word_name` minus exactly the six
+    /// surface comparisons -- no wider and no narrower. `.` is the case that
+    /// makes the difference load-bearing: both r1 reviews put it in the
+    /// exclusion set, but it is a real `BUILTIN_TABLE` intrinsic that does not
+    /// move to `core`, so gating it is correct and excluding it would let a bare
+    /// `.` through with no import at all.
+    #[test]
+    fn the_gate_set_excludes_exactly_the_six_surface_comparisons() {
+        for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
+            assert!(
+                is_builtin_word_name(name),
+                "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
+            );
+            assert!(
+                !is_name_dispatched_builtin(name),
+                "`{name}` is a `core` word"
+            );
+        }
+        for name in BUILTIN_WORDS
+            .iter()
+            .copied()
+            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
+            .chain([">u8", ">usize"])
+        {
+            assert!(
+                is_name_dispatched_builtin(name),
+                "`{name}` is name-dispatched"
+            );
+        }
+        assert!(is_name_dispatched_builtin("."), "`.` is a real intrinsic");
+        assert!(
+            !is_name_dispatched_builtin("call"),
+            "`call` is not in the table"
+        );
+    }
 
     const EMPTY_REGS: NameRegistries<'static> = NameRegistries {
         structs: &[],

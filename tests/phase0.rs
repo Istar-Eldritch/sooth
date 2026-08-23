@@ -3955,6 +3955,18 @@ fn overload_from_poly_body_dispatches_to_user_word() {
 }
 
 #[test]
+fn traits_dogfood_compiles_and_runs() {
+    // P7.S3r phase 3: `examples/traits.sth` is the only `.sth` dogfood of the
+    // `impl:` body form. `show_larger` takes a `'T: Order Show` bound, so both
+    // members dispatch to `Point`'s own `impl:` block at monomorphization.
+    // (0,0) `cmp` (3,4) is `Less`, so the larger of the two shows: (3,4).
+    // `show` prints `(`/`,`/`)` with no trailing newline of its own.
+    let (stdout, code) = run_and_capture_stdout("examples/traits.sth");
+    assert_eq!(stdout, "(3\n,4\n)");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn overload_exact_type_beats_numeric_coercion_at_the_call_site() {
     // R2: the resolver runs an exact-input-type pass across every candidate
     // (builtin rows and user overloads) before numeric coercion ever runs.
