@@ -84,9 +84,11 @@ impl TraitResolveCtx<'_> {
         }
     }
 
-    /// The obligations recorded for the callee this call site resolved to, or
-    /// an empty slice: a bounded word whose body calls no trait member records
-    /// none, which is ordinary rather than a miss.
+    /// The obligations recorded for the callee this call site resolved to.
+    /// Empty rather than absent when the callee's body calls no trait member:
+    /// the pre-pass records an entry for every non-combinator polymorphic
+    /// word, obligations or not, so the two cases are indistinguishable here
+    /// and neither is a miss.
     fn obligations_of(&self, name: &str, sig: &PolySig) -> &[TraitObligation] {
         self.recorded
             .iter()
@@ -3992,7 +3994,9 @@ fn resolve_user_bound(
     refs: &mut Vec<RefDecl>,
     trait_calls: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
-    let trait_decl = &tr.traits[trait_id.index()];
+    let trait_decl = tr.traits.get(trait_id.index()).expect(
+        "a bound's `TraitId` indexes the whole-program trait table, so a call site resolving one must be given that table and not a scratch one",
+    );
     // `Type` derives no `Hash`, so the registry is scanned linearly, as
     // `check_impl_decls`'s own duplicate check is.
     let Some(imp) = tr
@@ -4099,7 +4103,6 @@ fn unsatisfied_user_bound_error(
 /// requires. `check_impl_decls` rejects that impl at its declaration site, so
 /// reaching here means the two disagree; say so, located, rather than drop the
 /// call and leave lowering to emit nothing.
-#[allow(clippy::too_many_arguments)]
 fn unresolved_trait_obligation_error(
     ctx: &Ctx,
     span: Span,
@@ -5750,11 +5753,13 @@ mod tests {
     }
 
     /// R8: two distinct bound variables on one word, each obligated to a
-    /// different trait, both resolved in one call. `resolve_user_bound`'s
-    /// `.filter(|o| o.trait_id == trait_id && o.var == v)` is what keeps them
-    /// apart -- without it, `A`'s bound loop would also see `B`'s obligation
-    /// (and vice versa) and either resolve it against the wrong `impl:` or
-    /// double-resolve one span.
+    /// different trait, both resolved in one call -- the trait axis of
+    /// `resolve_user_bound`'s `.filter(|o| o.trait_id == trait_id && o.var ==
+    /// v)`. The two obligations differ in *both* conjuncts here, so this
+    /// fixture alone does not discriminate: the variable axis is pinned by
+    /// `one_trait_on_two_variables_resolves_each_span_against_its_own_theta`
+    /// and the trait axis by
+    /// `two_traits_on_one_variable_resolve_against_their_own_impl`.
     #[test]
     fn two_bounds_on_distinct_variables_each_resolve_their_own_obligation() {
         let (module, _) = checked_like_a_build(
@@ -5778,6 +5783,114 @@ mod tests {
         let mut resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
         resolved.sort();
         assert_eq!(resolved, vec!["p-a", "p-b"]);
+    }
+
+    /// R8: one trait, two bound variables, instantiated at two types that
+    /// each implement it. Both obligations name the same trait, so
+    /// `o.var == v` is the only conjunct separating them: without it each
+    /// bound's loop resolves *both* body spans against its own theta, and the
+    /// `'T` dispatch silently gets `'U`'s implementing word.
+    #[test]
+    fn one_trait_on_two_variables_resolves_each_span_against_its_own_theta() {
+        let (module, _) = checked_like_a_build(
+            "type: PA n i64 ;\n\
+             type: PB n i64 ;\n\
+             trait: A 'T ta ( &'T -- ) ;\n\
+             : p-a ( &PA -- ) drop ;\n\
+             : p-b ( &PB -- ) drop ;\n\
+             impl: A for PA  ta p-a ;\n\
+             impl: A for PB  ta p-b ;\n\
+             : f ( &'T: A &'U: A -- ) ta ta ;\n\
+             : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
+        )
+        .expect("the fixture checks");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f")
+            .expect("the call site recorded an instantiation");
+        let mut resolved: Vec<(u32, &str)> = inst
+            .trait_calls
+            .iter()
+            .map(|(span, symbol)| (span.col, symbol.as_str()))
+            .collect();
+        resolved.sort();
+        // The body's first `ta` (col 26) consumes the top input, `'U` = `PB`;
+        // the second (col 29) consumes `'T` = `PA`.
+        assert_eq!(resolved, vec![(26, "p-b"), (29, "p-a")]);
+    }
+
+    /// R8: two traits bounding *one* variable, both implemented for the type
+    /// it is instantiated at. Each bound's loop must see only its own trait's
+    /// obligation and only its own trait's `impl:`: dropping either
+    /// `trait_id` comparison (the obligation filter's or the registry
+    /// lookup's) makes one loop hunt for a member the other trait's impl
+    /// binds, and this legal program is rejected by R17's
+    /// internal-consistency error.
+    #[test]
+    fn two_traits_on_one_variable_resolve_against_their_own_impl() {
+        let (module, _) = checked_like_a_build(
+            "type: PA n i64 ;\n\
+             trait: A 'T ta ( &'T -- ) ;\n\
+             trait: B 'T tb ( &'T -- ) ;\n\
+             : p-a ( &PA -- ) drop ;\n\
+             : p-b ( &PA -- ) drop ;\n\
+             impl: A for PA  ta p-a ;\n\
+             impl: B for PA  tb p-b ;\n\
+             : f ( &'T: A B &'T -- ) tb ta ;\n\
+             : main ( -- ) 1 PA |a| &a &a f a drop ;\n",
+        )
+        .expect("the fixture checks");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f")
+            .expect("the call site recorded an instantiation");
+        let mut resolved: Vec<(u32, &str)> = inst
+            .trait_calls
+            .iter()
+            .map(|(span, symbol)| (span.col, symbol.as_str()))
+            .collect();
+        resolved.sort();
+        assert_eq!(resolved, vec![(25, "p-b"), (28, "p-a")]);
+    }
+
+    /// R8: a polymorphic combinator's body calling a bounded poly word. The
+    /// combinator itself is checked standalone and records nothing that
+    /// survives, but the bound it dispatches through is real -- so that path
+    /// must be handed the whole-program trait/impl tables, not the scratch
+    /// ones (whose trait table a user `TraitId` indexes past the end).
+    #[test]
+    fn a_bounded_call_inside_a_combinator_body_resolves() {
+        checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : appq inline ( &Point ~[ -- ] -- ) | f | f call shows ;\n\
+             : main ( -- ) 1 2 Point |p| &p ~[ ] appq p drop ;\n"
+        ))
+        .expect("a satisfied bound dispatched from a combinator body checks");
+    }
+
+    /// R8/R9: `CallInst::trait_calls` is a pure function of `(callee, theta)`
+    /// -- its keys are the callee's own body spans, never the caller's -- so
+    /// two call sites at one instantiation record identical maps. Phase 4's
+    /// symbol-dedup step reads whichever it reaches first, which is only
+    /// sound if that holds.
+    #[test]
+    fn two_call_sites_at_one_instantiation_record_identical_maps() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows &p shows p drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let maps: Vec<&HashMap<Span, String>> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows")
+            .map(|i| &i.trait_calls)
+            .collect();
+        assert_eq!(maps.len(), 2, "two call sites");
+        assert_eq!(maps[0], maps[1]);
+        assert_eq!(maps[0].values().collect::<Vec<_>>(), vec!["point-show"]);
     }
 
     /// R8: the concrete type a bounded variable was instantiated with has no

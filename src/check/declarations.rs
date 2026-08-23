@@ -556,6 +556,18 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                 .iter()
                 .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
                 .collect();
+            // R8: a word named `drop` is a destructor overload and nothing
+            // else (`find_drop_overloads` admits no other shape for the
+            // name). Lowering compiles it into its struct's destructor symbol
+            // rather than a callable word of its own, so a member bound to it
+            // would resolve to a symbol no `IrFunc` ever mints.
+            if word_name == "drop" {
+                return Err(impl_drop_overload_member_error(
+                    &trait_name,
+                    member_name,
+                    impl_span,
+                ));
+            }
             let candidates: Vec<(usize, &WordDef)> = module
                 .words
                 .iter()
@@ -665,6 +677,16 @@ fn impl_unknown_member_error(trait_name: &str, member: &str, span: Span) -> Stri
 fn impl_unknown_word_error(trait_name: &str, member: &str, word: &str, span: Span) -> String {
     format!(
         "error: `impl: {trait_name}` binds member `{member}` to unknown word `{word}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R8): an `impl:` member bound to a `drop` overload. Rejected at the
+/// binding site rather than left to resolve, because the symbol a call site
+/// would record for it is one lowering never emits.
+fn impl_drop_overload_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name}` binds member `{member}` to `drop` at line {}, col {}, which is a destructor overload, not a callable word",
         span.line, span.col
     )
 }
@@ -3789,6 +3811,28 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("is not a member of trait `Show`"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_drop_overload_member_is_error() {
+        // R8: a `drop` overload's signature matches a `( 'T -- )` member
+        // grounded at its own struct, so nothing else here rejects the
+        // binding -- and the symbol a call site would then record for it
+        // (`drop`) is one lowering never emits: a destructor overload is
+        // compiled into its struct's destructor, not into a word.
+        let err = impl_check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             trait: Eat 'T eat ( 'T -- ) ;\n\
+             impl: Eat for Spy  eat drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "`impl: Eat` binds member `eat` to `drop` at line 4, col 1, which is a destructor overload, not a callable word"
+            ),
+            "{err}"
+        );
     }
 
     #[test]

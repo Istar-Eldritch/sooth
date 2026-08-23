@@ -830,8 +830,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // against, complete only now that the pre-pass has recorded every
     // non-combinator poly body's obligations. The combinator-standalone path
     // gets the same tables, not scratch ones: its instantiation records are
-    // scratch, but its bounds are real, and empty tables would reject a
-    // satisfied bound in a combinator body that calls a bounded poly word.
+    // scratch, but its bounds are real, and a combinator body calling a
+    // bounded poly word resolves that call through here -- against scratch
+    // tables, whose trait table holds only the two predicate entries, a user
+    // `TraitId` indexes past the end (pinned by
+    // `a_bounded_call_inside_a_combinator_body_resolves`).
     let trait_resolve = TraitResolveCtx {
         traits,
         impls,
