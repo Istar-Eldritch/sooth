@@ -610,3 +610,24 @@ brief).
 **Exit:** a generic struct may declare an array field whose element type is one of the
 struct's own type variables, resolved correctly per concrete instantiation, unblocking
 `Map['K 'V]`'s backing storage.
+
+**P7.S3o -- A bound on a poly combinator's own type variable has no dispatch mechanism.**
+Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there. S3e's design
+records a bounded call's trait-member obligation as a new field riding on the `CallInst` that
+`check_poly_call` inserts into `module.instantiations`, later read at the compiled lowering
+site; this works for an ordinary (non-combinator) poly word, whose body is checked once via
+`check_poly_body` and whose `CallInst` survives into `module.instantiations` untouched. It
+does not reach a poly *combinator*: `is_combinator` sends a combinator's body through
+`check_poly_combinator_standalone` instead (`src/check.rs:761-784`), a term-splicing path that
+mints no `IrFunc` and discards its own instantiation records into a scratch map, never
+`module.instantiations` (`src/check.rs:770-777`). There is therefore no `CallInst` anywhere
+for a bound on a combinator's own type variable to hang an obligation on, and S3e rules this
+case an explicit, located rejection rather than attempting it. Not yet recon'd: whether the
+right mechanism is a splice-site resolution (checking the obligation against the concrete
+caller at the term-splice point, before it is ever spliced) or something else -- S3e's review
+only established that the `CallInst`-field mechanism cannot be stretched to cover it, not what
+the replacement should be.
+**Exit:** a poly combinator's own type variable may carry a trait bound, and a call to a
+bounded member inside its body resolves against the caller's concrete instantiation the same
+way a non-combinator poly word's bounded call does (S3e's R7/R8/R9), rather than being a
+located rejection.
