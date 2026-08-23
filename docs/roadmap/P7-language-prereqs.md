@@ -642,6 +642,16 @@ intrinsic-gate mechanism, not types or ordinary words in general).
 **Exit:** a module that imports a hub re-exporting a gated intrinsic (e.g. `drop` through
 `core::prelude`) may call it bare, with no direct `import: intrinsics` line of its own.
 
+**P7.S3t -- A zero-receiver trait member has no call-site signal to dispatch on.** Named at
+P7.S3p's spec, out of scope there. `fresh ( -- i64 )` (a nullary constructor) binds its
+trait's type variable in no declared input, so nothing at the call site grounds *which*
+concrete type's member is meant -- the language has no type-argument syntax and no context
+binding to supply one. P7.S3p's declaration gate (`member_binds_trait_var`) keeps rejecting
+any such member rather than shipping a dispatch path with no grounding signal.
+**Exit:** a trait member binding its variable in no input may be declared and dispatched,
+with some new call-site or context mechanism supplying the concrete type -- mechanism not
+yet designed.
+
 **P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
 (`src/ast.rs:1417-1421`) is a reserved, member-less trait-table entry (`seed_predicate_traits`,
 `ast.rs:1528-1546`) satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded
