@@ -508,23 +508,27 @@ calling module and the one it selectively imported the name from, one hop. So a 
 spells `bool` in an effect, or prints one, names `core::bool` directly. Widening either to
 follow a re-export is its own slice, unclaimed.
 
-**P7.S3j — A shape-changing combinator parameter declaring a slot above its row.**
-Discovered and located, not fixed, at P7.S3b-follow's phase 3 exit: a row-typed inline
-combinator whose quotation parameter declares a slot *above* its output row
-(`~[ ..a -- ..b i64 ]`, as a hand-written `pick` combinator might) is rejected from a
-generic body (`` `pick` declares `~[ ..a -- ..b i64 ]`, which a call ... cannot ground ``)
-but compiles from a monomorphic one, because `poly_combinator_call` reads the produced row
-straight off an arm's exit and has no rule for stripping a declared trailing slot back off
-first. Neither existing quotation consumer (the eliminator, or this slice's own `if`/`times`
-family) needs that rule, so nothing here builds it as a side effect. Memory-safe as it
-stands: the located rejection is what stands between this program and a backend panic
-(`ir/func_builder/quotation.rs`'s row-length arithmetic, `attempt to subtract with overflow`)
-rather than just being a worse diagnostic, and `if`/`times`/`unless` themselves declare no
-such parameter, so no shipped library word is narrower for it. **Exit:** a row-typed
-combinator parameter may declare a slot above its output row, and a generic body calling it
-grounds and strips that slot the same way the monomorphic path already does
-(`tests/phase7_slice3b_follow.rs`'s `a_slot_declared_above_a_produced_row_is_located` is the
-regression the fix must keep passing under the new, permissive path).
+**P7.S3j — A shape-changing combinator parameter declaring a slot above its row.** `[ done ]`
+A row-typed inline combinator's quotation parameter may declare fixed slots *above* its
+output row (`~[ ..a -- ..b i64 ]`, as a hand-written `pick` combinator does), and a
+non-inline generic body calling it grounds. `poly_combinator_call` strips the declared
+suffix off each arm's exit before reading the produced row -- the fixed point
+`check_literal_against_declared_effect`'s shape-changing branch applies on the monomorphic
+path -- and holds only the *stripped* region to the cross-arm agreement that fixes the exit
+row, so the call hands back the combinator's declared row and the backend's row-length
+arithmetic (`ir/func_builder/quotation.rs`) never sees the extra slot.
+**Two rules the strip carries, both located.** A suffix disagreeing with the declaration in
+type *or* in length is rejected at the arm; the length half is not redundant, since a short
+exit would otherwise pass a per-slot comparison that truncates to it and reach lowering.
+And two parameters sharing one declared output row must declare the *same* suffix, rejected
+before any arm walks: they feed one join and one continuation, so differing suffixes
+describe an exit no body can satisfy, while stripping each parameter's own suffix off its
+own arm would hide the difference from the cross-arm rule and leave a slot the exit row has
+no account of. A variable-carrying suffix stays the
+`poly_combinator_abstract_signature_error` rejection: the strip needs the declared types
+ground.
+**Exit:** a row-typed combinator parameter may declare a slot above its output row, and a
+generic body calling it grounds and strips that slot the same way the monomorphic path does.
 
 **P7.S3k — A non-inline generic word calling another generic word.** `poly_call_term`
 dispatches a callee against `env` only (the concrete/monomorphic table); it never consults
