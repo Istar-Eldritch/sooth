@@ -9534,20 +9534,27 @@ mod tests {
     }
 
     #[test]
-    fn poly_quotlit_against_legal_inline_quotation_param_never_reaches_dispatch() {
-        // P8 S2 (R6b, pre-existing/unrelated to this slice): any `~[ ]`-
+    fn poly_quotlit_against_legal_inline_quotation_param_rejects_at_the_cross_call() {
+        // Pre-existing/unrelated to the slice that added this: any `~[ ]`-
         // bearing signature routes to the poly parser regardless of whether
         // it declares a type variable, so `run1` here lands in `poly_env`
-        // (and `poly_words`) despite carrying no `'T`. `poly_call_term`
-        // reads only the concrete `env`, never `poly_env`, so this shape was
-        // never a callable candidate here either way -- R6b just gave that
-        // fall-through a named diagnostic instead of a raw `unknown word`.
+        // despite carrying no `'T`.
+        //
+        // P7.S3k: `poly_call_term` *does* read `poly_env` now, so this shape
+        // reaches the generic-callee arm rather than falling through it. It
+        // is still a rejection, for a narrower and now accurate reason: a
+        // quotation parameter has no runtime representation to pass across a
+        // real call, so it is one of the declared shapes a symbolic mapping
+        // cannot carry. Asserted on that reason and not just on the shared
+        // first line, which both the old whole-feature narrowing and this
+        // gate would satisfy.
         let err = check_src(
             ": run1 inline ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
-        .expect_err("a spliced inline word is never a callable `env` candidate here");
+        .expect_err("a quotation cannot be passed across a polymorphic call");
         assert!(
-            err.contains("cannot call the polymorphic word `run1`"),
+            err.contains("cannot call the polymorphic word `run1`")
+                && err.contains("passing a quotation to a polymorphic word"),
             "{err}"
         );
     }
