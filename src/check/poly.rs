@@ -6594,6 +6594,24 @@ mod tests {
         assert_eq!(vars, vec![1, 0]);
     }
 
+    /// P7.S3p (ruling 4): a candidate declaring more inputs than the stack
+    /// holds cannot fit, so it does not compete -- `B`'s three-input `t1` is
+    /// out, leaving `A`'s the unique fit. The length check is not a narrowing
+    /// nicety: the window base is `stack.len() - inputs.len()`, so without it a
+    /// candidate wider than the stack underflows and the compiler panics on a
+    /// program that otherwise checks fine.
+    #[test]
+    fn a_candidate_wider_than_the_stack_does_not_fit() {
+        let recorded = obligations_of(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T i64 i64 -- ) ;\n\
+             : f ( &'U: B &'T: A -- ) t1 drop ;\n\
+             : main ( -- ) ;\n",
+        );
+        let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
+        assert_eq!(vars, vec![1]);
+    }
+
     /// P7.S3p (ruling 4): a third bound on another variable does not turn the
     /// same-variable ambiguity into a resolvable call -- `'T`'s two candidates
     /// fit the operands equally, so the fit is not unique and the call is
