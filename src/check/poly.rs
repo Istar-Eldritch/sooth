@@ -4705,10 +4705,17 @@ impl CrossGround<'_> {
 
     /// θ_h = θ_w ∘ mapping: each callee variable takes either the concrete
     /// type the caller supplied outright or `θ_w`'s image of the caller
-    /// variable it was matched against. The callee's declared inputs are then
-    /// ground too -- discarded, because a `CallInst` carries no input types;
-    /// the *interning* is the point, since lowering's `subst_polytype` only
-    /// finds an already-interned array/ref/generic shape.
+    /// variable it was matched against. Entry order follows the mapping's,
+    /// which is the order the callee's declared inputs first mention each
+    /// variable -- the same order `unify_poly_input` pushes for a concrete
+    /// caller, so a `(callee, θ)` reached both ways mints one symbol and one
+    /// `IrFunc`.
+    ///
+    /// The callee's declared *inputs* are deliberately not ground here. The
+    /// only reason to would be `apply_subst`'s interning, and a cross-call's
+    /// input shapes mirror the caller's operand slots (`poly_cross_match`
+    /// decomposes structurally, and R6 rejects a compound the caller built
+    /// itself), which the caller's own instantiation already interned.
     fn compose(
         &self,
         record: &PolyCrossCall,
@@ -4730,18 +4737,6 @@ impl CrossGround<'_> {
                 ),
             };
             subst.ty.push((*v, ty));
-        }
-        for pty in &sig.inputs {
-            apply_subst(
-                sig,
-                pty,
-                &subst,
-                &record.callee,
-                record.span,
-                ctx,
-                arrays,
-                refs,
-            )?;
         }
         let mut outputs = Vec::with_capacity(sig.outputs.len());
         for pty in &sig.outputs {
@@ -8663,6 +8658,73 @@ mod tests {
         for inst in module.instantiations.values() {
             assert!(inst.poly_calls.is_empty(), "routed: {:?}", inst.poly_calls);
         }
+    }
+
+    /// P7.S3k (R4/R8): a composed callee returning two or more values carries
+    /// its interned return bundle on *both* records -- the flat emit entry and
+    /// the routing copy -- and they agree, since `intern_bundle_struct` dedups
+    /// by output tuple. Only the routing copy is read today (`lower_poly_call`
+    /// asks the call site what shape came back); pinned on both so a reader of
+    /// `transitive_instantiations` cannot find the invariant broken on one.
+    #[test]
+    fn transitive_discovery_interns_a_composed_bundle_on_both_records() {
+        let (module, _) = checked_like_a_build(
+            ": two ( 'T -- 'T i64 ) 9 ;\n\
+             : g ( 'T -- 'T i64 ) two ;\n\
+             : main ( -- ) 1 g drop drop ;\n",
+        )
+        .expect("the fixture checks");
+        let [composed] = &module.transitive_instantiations[..] else {
+            panic!(
+                "one composed callee: {:?}",
+                module.transitive_instantiations
+            );
+        };
+        assert_eq!(composed.out_arity, 2);
+        let bundle = composed.bundle.expect("the flat entry carries its bundle");
+        let routed: Vec<Option<StructId>> = module
+            .instantiations
+            .values()
+            .flat_map(|inst| inst.poly_calls.values().map(|c| c.bundle))
+            .collect();
+        assert_eq!(routed, vec![Some(bundle)]);
+    }
+
+    /// P7.S3k (R4/R2): a two-variable callee reached *both* from a concrete
+    /// caller and through a cross-call is monomorphized once. That holds only
+    /// if a composed θ orders its entries the way `unify_poly_input` does for
+    /// the concrete path, since `instantiation_symbol` reads them positionally.
+    /// Asymmetric (`i64`, `str`) on purpose: a symmetric pair cannot tell the
+    /// two orders apart.
+    #[test]
+    fn transitive_discovery_shares_a_callee_monomorph_with_the_concrete_path() {
+        let (module, _) = checked_like_a_build(
+            ": swap2 ( 'A 'B -- 'B 'A ) swap ;\n\
+             : g ( 'X 'Y -- 'Y 'X ) swap2 ;\n\
+             : main ( -- ) 1 \"s\" swap2 drop drop 2 \"t\" g drop drop ;\n",
+        )
+        .expect("the fixture checks");
+        let concrete: Vec<&str> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "swap2")
+            .map(|i| i.symbol.as_str())
+            .collect();
+        assert_eq!(concrete, vec!["sooth_mono_swap2__t0_i64_t1_str"]);
+        let routed: Vec<&str> = module
+            .instantiations
+            .values()
+            .flat_map(|inst| inst.poly_calls.values().map(|c| c.symbol.as_str()))
+            .collect();
+        assert_eq!(routed, concrete, "the cross-call reaches that same symbol");
+        // And so needs no monomorph of its own: the fixpoint's seed dedup
+        // already claimed it. A composed θ ordered the other way would mint
+        // `..._t0_str_t1_i64`, miss the dedup, and land a second `IrFunc` here.
+        assert!(
+            module.transitive_instantiations.is_empty(),
+            "composed: {:?}",
+            module.transitive_instantiations
+        );
     }
 
     /// P7.S3k (N2): a program with no cross-call records composes nothing and

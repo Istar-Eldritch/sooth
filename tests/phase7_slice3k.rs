@@ -331,3 +331,27 @@ fn a_cross_call_through_an_overloaded_generic_word_is_a_located_rejection() {
         "unexpected diagnostic: {err}"
     );
 }
+
+/// R4, at the linked artefact: a two-variable callee reached both from a
+/// concrete caller and through a cross-call links **one** monomorph, not two.
+/// Asymmetric (`i64`, `str`) on purpose -- a composed θ ordered the other way
+/// would mint `…__t0_str_t1_i64` and land a second, redundant `IrFunc`, which a
+/// symmetric pair could not distinguish.
+#[test]
+fn a_callee_reached_concretely_and_across_a_cross_call_links_one_monomorph() {
+    let t = Tree::new("shared-callee");
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         : swap2 ( 'A 'B -- 'B 'A ) swap ;\n\
+         : g ( 'X 'Y -- 'Y 'X ) swap2 ;\n\
+         : main ( -- ) 1 \"s\" swap2 drop drop 2 \"t\" g drop drop ;\n",
+    );
+    assert_eq!(
+        monomorph_symbols(&entry),
+        [
+            "sooth_mono_g__m0__t0_i64_t1_str",
+            "sooth_mono_swap2__m0__t0_i64_t1_str",
+        ]
+    );
+}
