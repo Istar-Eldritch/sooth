@@ -515,6 +515,12 @@ fn exportable_names(module: &Module, m: u32) -> HashSet<&str> {
         names.insert(e.name.as_str());
         names.extend(e.variants.iter().map(|v| v.name.as_str()));
     }
+    // P7.S3e (R1/decision 4): a `trait:` declaration is exportable exactly
+    // like `type:`/`extern:` -- without this, `export: TraitName ;` fails
+    // with a no-origin error before reaching `not_exported_error` downstream.
+    for t in module.traits.iter().filter(|t| t.module == m) {
+        names.insert(t.name.as_str());
+    }
     names
 }
 
@@ -1529,6 +1535,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         let lib_bodies = parse_bodies(
@@ -1544,6 +1551,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         let mut words = entry_bodies.words;
@@ -1579,6 +1587,8 @@ mod tests {
                 },
             ],
             statics,
+            traits: Vec::new(),
+            impls: Vec::new(),
         }
     }
 }

@@ -100,6 +100,14 @@ pub struct Module {
     /// this vector; the entry carries that module's qualifier->module import
     /// map and its parsed `export:` list.
     pub modules: Vec<ModuleInfo>,
+    /// P7.S3e (R3): the whole-program trait registry, mirroring
+    /// `structs`/`enums`'s flat-`Vec` shape. Pre-seeded with `Copy`/`Ord`
+    /// (R2) at `RESERVED_TRAIT_MODULE`, followed by every user `trait:`
+    /// declaration across the whole import closure, indexed by `TraitId`.
+    pub traits: Vec<TraitDecl>,
+    /// P7.S3e (R4/R11): the whole-program `impl:` registry, one entry per
+    /// `impl: Trait for Type ... ;` block, in source order.
+    pub impls: Vec<ImplDecl>,
     /// Phase 7 slice 2 (D4): one entry per `static:` declaration, in source
     /// order. A static is never exported or imported (R2): its data symbol is
     /// module-scoped mangled exactly like a word's, and only the per-word
@@ -1285,6 +1293,109 @@ pub enum Bound {
     Ord,
 }
 
+/// P7.S3e (R3): a whole-program index into `Module::traits`, mirroring
+/// `StructId`/`EnumId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraitId(pub(crate) usize);
+
+impl TraitId {
+    /// Mint a `TraitId` for a registry position; crate-internal so an id is
+    /// always tied to a real `Module::traits` entry.
+    pub(crate) fn from_index(idx: usize) -> TraitId {
+        TraitId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// P7.S3e (R2, decision 1): the two shapes a `Module::traits` entry can take.
+/// `Predicate` is a pre-seeded `Copy`/`Ord` entry (R2): satisfaction still
+/// runs `poly_is_copy`/`is_ord` unchanged, never an `impl:` lookup. `Nominal`
+/// is a user `trait:` declaration, satisfied by a whole-program `impl:`
+/// registry lookup keyed by `(TraitId, Type)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraitKind {
+    Predicate(Bound),
+    Nominal,
+}
+
+/// P7.S3e (R2, decision 2/fresh review): the reserved sentinel `module` value
+/// carried by a pre-seeded `Copy`/`Ord` entry. It collides with every real
+/// module for duplicate-name purposes (a user `trait: Copy` in any module is
+/// rejected) but participates in no orphan-rule or export-gating check, which
+/// both compare against a real declaring module.
+pub const RESERVED_TRAIT_MODULE: u32 = u32::MAX;
+
+/// P7.S3e (R3): a whole-program trait declaration, mirroring `StructDecl`'s
+/// flat-registry shape (`module: u32` per entry, indexed by `TraitId`).
+#[derive(Debug, Clone)]
+pub struct TraitDecl {
+    pub name: String,
+    pub kind: TraitKind,
+    /// R1 (single-type-variable traits only): every member's signature
+    /// shares one implicit type variable, id 0 in its own `PolySig`.
+    pub members: Vec<TraitMember>,
+    pub module: u32,
+    pub span: Span,
+}
+
+/// P7.S3e (R3): one required member of a trait -- a name and a signature over
+/// the trait's own (single, implicit) type variable.
+#[derive(Debug, Clone)]
+pub struct TraitMember {
+    pub name: String,
+    pub sig: PolySig,
+}
+
+/// Pre-seed the whole-program trait registry with `Copy`/`Ord` as
+/// `Predicate`-kind entries (R2), so `parse_capabilities` looks them up
+/// through the same trait-table mechanism a user trait uses, rather than a
+/// bespoke reserved-word check. Called once, before any user `trait:`
+/// declaration is registered.
+/// The shared, lazily-built `Copy`/`Ord` entries (`seed_predicate_traits`),
+/// for a caller that only ever needs the reserved predicate table and no
+/// user `trait:` declarations -- the REPL's per-line word-definition path,
+/// which supports `'T: Copy Ord` but not yet a user trait declaration at
+/// REPL scope (the same bypass pattern `structs`/`enums` already follow
+/// there).
+pub fn predicate_traits() -> &'static [TraitDecl] {
+    static TRAITS: std::sync::OnceLock<Vec<TraitDecl>> = std::sync::OnceLock::new();
+    TRAITS.get_or_init(seed_predicate_traits)
+}
+
+pub fn seed_predicate_traits() -> Vec<TraitDecl> {
+    vec![
+        TraitDecl {
+            name: "Copy".to_string(),
+            kind: TraitKind::Predicate(Bound::Copy),
+            members: Vec::new(),
+            module: RESERVED_TRAIT_MODULE,
+            span: Span::default(),
+        },
+        TraitDecl {
+            name: "Ord".to_string(),
+            kind: TraitKind::Predicate(Bound::Ord),
+            members: Vec::new(),
+            module: RESERVED_TRAIT_MODULE,
+            span: Span::default(),
+        },
+    ]
+}
+
+/// P7.S3e (R4/R11, decision 1): one `impl: Trait for Type ... ;` binding -- a
+/// pure name map (member name -> implementing word name), never a body: an
+/// impl member is always a concrete, already-declared word (decision 2).
+#[derive(Debug, Clone)]
+pub struct ImplDecl {
+    pub trait_id: TraitId,
+    pub target_ty: Type,
+    pub module: u32,
+    pub span: Span,
+    pub bindings: Vec<(String, String)>,
+}
+
 /// R4: an array count in a polymorphic type: a concrete length or a length
 /// variable `'N` (index into `PolySig::len_var_names`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2379,6 +2490,8 @@ mod tests {
             resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
         }
     }
 
@@ -2503,6 +2616,8 @@ mod tests {
             resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
         }
     }
 
@@ -2575,6 +2690,8 @@ mod tests {
             resolved_variant_fields: std::collections::HashMap::new(),
             modules: Vec::new(),
             statics: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),

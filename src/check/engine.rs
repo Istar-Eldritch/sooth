@@ -1476,6 +1476,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         parse_bodies(
@@ -1491,6 +1492,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         assert_eq!(

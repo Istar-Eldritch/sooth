@@ -309,7 +309,7 @@ pub fn check_static_decls(module: &Module) -> Result<(), String> {
         }
     }
     for decl in &module.statics {
-        if let Some(kind) = colliding_name_kind(decl, module) {
+        if let Some(kind) = colliding_name_kind(&decl.name, decl.module, decl.span, module) {
             return Err(static_name_collision_error(decl, kind));
         }
     }
@@ -342,35 +342,341 @@ fn static_non_scalar_enum_error(decl: &StaticDecl, name: &str) -> String {
     )
 }
 
-/// What else in the static's own module already holds its name, if anything.
-fn colliding_name_kind(decl: &StaticDecl, module: &Module) -> Option<&'static str> {
-    let owns = |m: u32| m == decl.module;
+/// What else already holds `name`, if anything -- the shared cross-kind
+/// collision precedent (originally `StaticDecl`-only, generalized by P7.S3e
+/// R1 so a new `trait:` declaration can be checked against every other kind,
+/// including another trait). `span` is the *target's own* declaration span:
+/// a kind whose scan set includes the target's own kind (statics against
+/// statics, traits against traits) must exclude a self-match, which callers
+/// checking against a foreign kind alone (a static's original callers,
+/// pre-generalization) never needed to.
+///
+/// A pre-seeded `Copy`/`Ord` trait entry (`RESERVED_TRAIT_MODULE`) collides
+/// with every module (R2, decision 2): a user `trait: Copy` in any module is
+/// rejected, since the reserved entry participates in no real module's
+/// ownership.
+fn colliding_name_kind(
+    name: &str,
+    decl_module: u32,
+    span: Span,
+    module: &Module,
+) -> Option<&'static str> {
+    let owns = |m: u32| m == decl_module;
     if module
         .words
         .iter()
-        .any(|w| owns(w.module) && w.name == decl.name)
+        .any(|w| owns(w.module) && w.name == name)
     {
         return Some("word");
     }
     if module
         .externs
         .iter()
-        .any(|x| owns(x.module) && x.name == decl.name)
+        .any(|x| owns(x.module) && x.name == name)
     {
         return Some("extern");
     }
     if module
         .structs
         .iter()
-        .any(|s| owns(s.module) && s.name_static == decl.name)
+        .any(|s| owns(s.module) && s.name_static == name)
         || module
             .enums
             .iter()
-            .any(|e| owns(e.module) && e.name_static == decl.name)
+            .any(|e| owns(e.module) && e.name_static == name)
     {
         return Some("type");
     }
+    if module
+        .statics
+        .iter()
+        .any(|s| owns(s.module) && s.name == name && s.span != span)
+    {
+        return Some("static");
+    }
+    if module.traits.iter().any(|t| {
+        (owns(t.module) || t.module == RESERVED_TRAIT_MODULE) && t.name == name && t.span != span
+    }) {
+        return Some("trait");
+    }
     None
+}
+
+/// P7.S3e (R1): every `trait:` declaration's own name rules, mirroring
+/// `check_static_decls` -- a same-module duplicate trait name (including a
+/// user `trait: Copy`/`trait: Ord` colliding with the reserved predicate
+/// entries) and a cross-kind collision (`trait: Point` alongside `type:
+/// Point`) are both rejected here, pre-mangle.
+pub fn check_trait_decls(module: &Module) -> Result<(), String> {
+    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    for decl in &module.traits {
+        if decl.module == RESERVED_TRAIT_MODULE {
+            continue;
+        }
+        if let Some(first) = seen.insert((decl.module, decl.name.as_str()), decl.span) {
+            return Err(duplicate_trait_error(decl, first));
+        }
+    }
+    for decl in &module.traits {
+        if decl.module == RESERVED_TRAIT_MODULE {
+            continue;
+        }
+        if let Some(kind) = colliding_name_kind(&decl.name, decl.module, decl.span, module) {
+            return Err(trait_name_collision_error(decl, kind));
+        }
+    }
+    Ok(())
+}
+
+fn duplicate_trait_error(decl: &TraitDecl, first: Span) -> String {
+    format!(
+        "error: duplicate trait `{}` (line {}, col {}); first declared at line {}, col {}",
+        decl.name, decl.span.line, decl.span.col, first.line, first.col
+    )
+}
+
+fn trait_name_collision_error(decl: &TraitDecl, kind: &str) -> String {
+    format!(
+        "error: trait `{}` (line {}, col {}) is already the name of a {kind} in this module",
+        decl.name, decl.span.line, decl.span.col
+    )
+}
+
+/// P7.S3e (R4/R11, decision 1/2): the declaring module of a struct/enum
+/// target type, for the orphan rule -- `None` for a scalar or any other
+/// builtin-shaped type, which declares no module of its own (an `impl:`
+/// naming one satisfies the orphan rule only by living in the trait's own
+/// module).
+fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
+    match ty {
+        Type::Struct(id, _) => Some(module.structs[id.index()].module),
+        Type::Enum(id, _) => Some(module.enums[id.0].module),
+        _ => None,
+    }
+}
+
+/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
+/// trait's sole implicit type variable, id 0) against a concrete `impl:`
+/// target, interning a fresh array/reference shape if the grounded shape is
+/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
+/// double-registers one already interned elsewhere). Trait member
+/// signatures are restricted to concrete/array/reference shapes over `'T`
+/// this slice (`parse_trait_member_effect` rejects anything else at
+/// declaration time), so every other `PolyType` shape is unreachable here.
+fn ground_member_type(
+    pty: &PolyType,
+    target: Type,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Type {
+    match pty {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(_) => target,
+        PolyType::Array(elem, Len::Concrete(n)) => {
+            let elem_ty = ground_member_type(elem, target, arrays, refs);
+            intern_array_type(arrays, elem_ty, *n)
+        }
+        PolyType::Ref(referent, mutable) => {
+            let r = ground_member_type(referent, target, arrays, refs);
+            intern_ref_type(refs, r, *mutable)
+        }
+        _ => unreachable!(
+            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
+        ),
+    }
+}
+
+/// P7.S3e (R4/R11, decision 1/2): every `impl:` binding's own checks --
+/// duplicate `(TraitId, Type)`, the orphan rule, every required member bound
+/// exactly once (no missing, no unknown, no repeat), each bound word
+/// signature-matching the trait's declared member (grounded at the target
+/// type) and concrete (decision 2: a polymorphic binding is rejected here,
+/// at the `impl:` site, never at a later call site).
+pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
+    // `Type` derives no `Hash`, so the duplicate-`(TraitId, Type)` check is a
+    // linear scan rather than a `HashMap` -- `impl:` counts are small (one
+    // per trait per concrete type), so this stays cheap.
+    let mut seen: Vec<(TraitId, Type, Span)> = Vec::new();
+    for imp in &module.impls {
+        if let Some((_, _, first)) = seen
+            .iter()
+            .find(|(t, ty, _)| *t == imp.trait_id && *ty == imp.target_ty)
+        {
+            return Err(duplicate_impl_error(imp, *first));
+        }
+        seen.push((imp.trait_id, imp.target_ty, imp.span));
+    }
+    for i in 0..module.impls.len() {
+        let (trait_id, target_ty, impl_module, impl_span, bindings) = {
+            let imp = &module.impls[i];
+            (
+                imp.trait_id,
+                imp.target_ty,
+                imp.module,
+                imp.span,
+                imp.bindings.clone(),
+            )
+        };
+        let trait_decl_module = module.traits[trait_id.index()].module;
+        let trait_name = module.traits[trait_id.index()].name.clone();
+        let target_module = impl_target_module(target_ty, module);
+        if impl_module != trait_decl_module && Some(impl_module) != target_module {
+            return Err(impl_orphan_error(&trait_name, target_ty, impl_span));
+        }
+        let mut bound_names: HashSet<&str> = HashSet::new();
+        for (member_name, word_name) in &bindings {
+            if !bound_names.insert(member_name.as_str()) {
+                return Err(impl_duplicate_member_error(
+                    &trait_name,
+                    member_name,
+                    impl_span,
+                ));
+            }
+            let member_sig = {
+                let trait_decl = &module.traits[trait_id.index()];
+                let Some(member) = trait_decl.members.iter().find(|m| &m.name == member_name)
+                else {
+                    return Err(impl_unknown_member_error(
+                        &trait_name,
+                        member_name,
+                        impl_span,
+                    ));
+                };
+                member.sig.clone()
+            };
+            let expected_inputs: Vec<Type> = member_sig
+                .inputs
+                .iter()
+                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
+                .collect();
+            let expected_outputs: Vec<Type> = member_sig
+                .outputs
+                .iter()
+                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
+                .collect();
+            let candidates: Vec<&WordDef> = module
+                .words
+                .iter()
+                .filter(|w| &w.name == word_name)
+                .collect();
+            if candidates.is_empty() {
+                return Err(impl_unknown_word_error(
+                    &trait_name,
+                    member_name,
+                    word_name,
+                    impl_span,
+                ));
+            }
+            let poly_candidate = candidates.iter().find(|w| w.poly.is_some());
+            let concrete_match = candidates.iter().find(|w| {
+                w.poly.is_none()
+                    && w.effect.inputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_inputs
+                    && w.effect.outputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_outputs
+            });
+            if concrete_match.is_none() {
+                if let Some(pc) = poly_candidate {
+                    return Err(impl_polymorphic_member_error(&trait_name, member_name, pc));
+                }
+                return Err(impl_signature_mismatch_error(
+                    &trait_name,
+                    member_name,
+                    word_name,
+                    &expected_inputs,
+                    &expected_outputs,
+                    impl_span,
+                ));
+            }
+        }
+        let trait_decl = &module.traits[trait_id.index()];
+        for member in &trait_decl.members {
+            if !bound_names.contains(member.name.as_str()) {
+                return Err(impl_missing_member_error(
+                    &trait_name,
+                    &member.name,
+                    impl_span,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn duplicate_impl_error(imp: &ImplDecl, first: Span) -> String {
+    format!(
+        "error: duplicate `impl:` for `{}` (line {}, col {}); first declared at line {}, col {}",
+        imp.target_ty.name(),
+        imp.span.line,
+        imp.span.col,
+        first.line,
+        first.col
+    )
+}
+
+fn impl_orphan_error(trait_name: &str, target_ty: Type, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name} for {}` at line {}, col {} must live in the module declaring `{trait_name}` or the module declaring `{}`",
+        target_ty.name(), span.line, span.col, target_ty.name()
+    )
+}
+
+fn impl_duplicate_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name}` binds member `{member}` more than once at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+fn impl_unknown_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: `{member}` is not a member of trait `{trait_name}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+fn impl_unknown_word_error(trait_name: &str, member: &str, word: &str, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name}` binds member `{member}` to unknown word `{word}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+fn impl_polymorphic_member_error(trait_name: &str, member: &str, word: &WordDef) -> String {
+    let span = word_span(word);
+    format!(
+        "error: `impl: {trait_name}` binds member `{member}` to `{}` (line {}, col {}), which is polymorphic; an impl member must be a concrete word",
+        word.name, span.line, span.col
+    )
+}
+
+fn impl_signature_mismatch_error(
+    trait_name: &str,
+    member: &str,
+    word: &str,
+    expected_inputs: &[Type],
+    expected_outputs: &[Type],
+    span: Span,
+) -> String {
+    let ins = expected_inputs
+        .iter()
+        .map(|t| t.name())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let outs = expected_outputs
+        .iter()
+        .map(|t| t.name())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "error: `impl: {trait_name}` binds member `{member}` to `{word}` (line {}, col {}), whose signature does not match `( {ins} -- {outs} )`",
+        span.line, span.col
+    )
+}
+
+fn impl_missing_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name}` at line {}, col {} does not bind required member `{member}`",
+        span.line, span.col
+    )
 }
 
 fn duplicate_static_error(decl: &StaticDecl, first: Span) -> String {
@@ -579,6 +885,17 @@ fn local_decl_names(module: &Module, m: u32) -> HashSet<&str> {
     for x in &module.externs {
         if x.module == m {
             names.insert(x.name.as_str());
+        }
+    }
+    // P7.S3e (R1, round-2 finding): a locally declared trait colliding with a
+    // selectively imported one of the same name must be caught here too, or
+    // `check_selective_imports` leaves two live, uncaught bindings of one
+    // name. The reserved `Copy`/`Ord` entries are excluded: they carry no
+    // real module, and a real module can never selectively import them
+    // (they are not declared by any module's `trait:`).
+    for t in &module.traits {
+        if t.module == m {
+            names.insert(t.name.as_str());
         }
     }
     names
@@ -1945,6 +2262,8 @@ mod tests {
                 ..ModuleInfo::default()
             }],
             statics: Vec::new(),
+            traits: Vec::new(),
+            impls: Vec::new(),
         };
 
         let err = check_exported_signatures(&module).unwrap_err();
@@ -2007,6 +2326,8 @@ mod tests {
                 resolved_variant_fields: HashMap::new(),
                 modules,
                 statics: Vec::new(),
+                traits: Vec::new(),
+                impls: Vec::new(),
             }
         }
         fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
@@ -3277,5 +3598,118 @@ mod tests {
         let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7.5 Spy drop ;")).unwrap_err();
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    /// P7.S3e: `check_trait_decls`/`check_impl_decls` run from `driver.rs`,
+    /// not from `check::check` -- this drives them directly against a
+    /// parsed (never-driver-assembled) `Module`, the way `driver.rs`'s own
+    /// pre-mangle checks do.
+    fn trait_check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module)
+    }
+
+    fn impl_check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module)?;
+        check_impl_decls(&mut module)
+    }
+
+    #[test]
+    fn check_trait_decls_duplicate_same_module_is_error() {
+        let err =
+            trait_check_src("trait: Show 'T show ( &'T -- ) ;\ntrait: Show 'T show ( &'T -- ) ;")
+                .unwrap_err();
+        assert!(err.contains("duplicate trait `Show`"), "{err}");
+    }
+
+    #[test]
+    fn check_trait_decls_collides_with_a_type_of_the_same_name() {
+        // R1: the cross-kind collision `colliding_name_kind` was generalized
+        // to catch (`trait: Point` alongside `type: Point`), via the new
+        // `check_trait_decls` call site, not a bare `traits` arm.
+        let err =
+            trait_check_src("type: Point x i64 ;\ntrait: Point 'T foo ( &'T -- ) ;").unwrap_err();
+        assert!(
+            err.contains("already the name of a type"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_trait_decls_ok_for_a_clean_declaration() {
+        trait_check_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
+    }
+
+    #[test]
+    fn check_impl_decls_ok_for_a_matching_binding() {
+        impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_impl_decls_polymorphic_member_is_error() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             : poly-show ( 'U: Copy &'U -- ) drop ;\n\
+             impl: Show for i64  show poly-show ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("polymorphic"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_missing_member_is_error() {
+        let err = impl_check_src(
+            "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
+             : int-eq ( &i64 &i64 -- ) drop drop ;\n\
+             impl: Eq for i64  eq int-eq ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("does not bind required member `hash`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn check_impl_decls_unknown_member_is_error() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show  bogus int-show ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("is not a member of trait `Show`"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_signature_mismatch_is_error() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_duplicate_impl_is_error() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             : int-show2 ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;\n\
+             impl: Show for i64  show int-show2 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");
     }
 }

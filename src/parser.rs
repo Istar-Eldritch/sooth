@@ -17,10 +17,11 @@
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
-    GlobalMode, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line,
-    Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
-    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
-    Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
+    GlobalMode, ImplDecl, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility,
+    Len, Line, Module, ModuleInfo, ModuleName, NameRegistries, OwnedCellDecl, PolySig, PolyType,
+    QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term,
+    TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
+    VariantTagMode, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -282,6 +283,115 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
     )
 }
 
+/// P7.S3e (R4/R8, decision 8): a trait member signature is restricted to
+/// concrete/array/reference shapes over `'T` this slice -- `check_impl_decls`'
+/// `ground_member_type` grounds exactly these against a concrete `impl:`
+/// target, and nothing else (a quotation or generic-application shape has no
+/// forcing consumer this phase and no grounding rule).
+fn member_shape_is_supported(t: &PolyType) -> bool {
+    match t {
+        PolyType::Concrete(_) | PolyType::Var(_) => true,
+        PolyType::Array(elem, _) => member_shape_is_supported(elem),
+        PolyType::Ref(referent, _) => member_shape_is_supported(referent),
+        PolyType::Quotation(..) | PolyType::Generic { .. } | PolyType::QuotLit => false,
+    }
+}
+
+/// P7.S3e (R4/R8): a trait member signature mentions an unsupported shape
+/// (a quotation or generic-application type) -- see `member_shape_is_supported`.
+fn unsupported_trait_member_shape_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}`'s member at line {}, col {} has an unsupported signature shape (only concrete, array, and reference types over the trait's type variable are supported this slice)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R16): a `trait:` header naming a second type variable, or a
+/// member signature mentioning a variable other than the header's --
+/// single-type-variable traits only this slice.
+fn multi_variable_trait_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}` names more than one type variable at line {}, col {} (only single-type-variable traits are supported)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R1): a `trait:` declaration with zero required members.
+fn trait_zero_members_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}` declares no members at line {}, col {} (a trait must require at least one member)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R4): an `impl:` naming a trait that resolves to nothing in scope
+/// (unknown, or not imported).
+fn unknown_trait_error(name: &str, span: Span) -> String {
+    format!(
+        "error: unknown trait `{name}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R4): an `impl:` block with zero member bindings.
+fn impl_zero_bindings_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: `impl: {trait_name}` binds no members at line {}, col {} (an impl must bind at least one)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3e (R4, decision 4): resolve a trait name to a `TraitId`, module-aware
+/// exactly like `resolve_type_name_in_module` -- own module first, then a
+/// pre-seeded reserved-module entry (`Copy`/`Ord`, visible everywhere), then
+/// a `qualifier::Base` mapped through `imports`, then a bare name reached via
+/// a selective import.
+pub(crate) fn find_trait_in_module(
+    traits: &[TraitDecl],
+    name: &str,
+    module: u32,
+    imports: &HashMap<String, u32>,
+    selective: &HashMap<String, u32>,
+) -> Option<TraitId> {
+    if let Some((qualifier, base)) = name.split_once("::") {
+        let target = *imports.get(qualifier)?;
+        return traits
+            .iter()
+            .position(|t| t.name == base && t.module == target)
+            .map(TraitId::from_index);
+    }
+    if let Some(idx) = traits
+        .iter()
+        .position(|t| t.name == name && t.module == module)
+    {
+        return Some(TraitId::from_index(idx));
+    }
+    if let Some(idx) = traits
+        .iter()
+        .position(|t| t.name == name && t.module == crate::ast::RESERVED_TRAIT_MODULE)
+    {
+        return Some(TraitId::from_index(idx));
+    }
+    if let Some(&target) = selective.get(name) {
+        return traits
+            .iter()
+            .position(|t| t.name == name && t.module == target)
+            .map(TraitId::from_index);
+    }
+    None
+}
+
+/// P7.S3e (R2): whether `name` matches a pre-seeded `Predicate`-kind trait
+/// table entry (`Copy`/`Ord`), and if so, the `Bound` it produces.
+/// `parse_capabilities`'s one lookup point, replacing the two hardcoded
+/// string compares.
+fn predicate_bound(traits: &[TraitDecl], name: &str) -> Option<Bound> {
+    traits.iter().find_map(|t| match t.kind {
+        TraitKind::Predicate(b) if t.name == name => Some(b),
+        _ => None,
+    })
+}
+
 /// The one gate every `extern:` symbol string passes through.
 fn reject_invalid_c_symbol(symbol: &str, span: Span) -> Result<(), String> {
     if is_valid_c_symbol(symbol) {
@@ -372,6 +482,13 @@ pub struct ParsedBodies {
     /// Phase 7 slice 2 (D1/D4): one entry per `static:` declaration, in
     /// source order.
     pub statics: Vec<StaticDecl>,
+    /// P7.S3e (R4): one entry per `impl:` declaration, in source order.
+    /// `trait:` declarations are not collected here -- they are fully parsed
+    /// by the whole-closure `prepass_trait_decls` pass before any body
+    /// parses (mirroring `prepass_generic_typedefs`), so this loop only ever
+    /// skips past one (`skip_typedef`, reused verbatim: it just advances to
+    /// the next `;`).
+    pub impls: Vec<ImplDecl>,
 }
 
 /// Parse one module's bodies (R3): the word/extern definitions and `type:`
@@ -395,6 +512,7 @@ pub fn parse_bodies(
     refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     generics: &mut GenericTypes,
+    traits: &[TraitDecl],
 ) -> Result<ParsedBodies, String> {
     let mut out = ParsedBodies {
         words: Vec::new(),
@@ -403,6 +521,7 @@ pub fn parse_bodies(
         enum_fields_by_decl: Vec::new(),
         exports: Vec::new(),
         statics: Vec::new(),
+        impls: Vec::new(),
     };
     let mut parser = Parser {
         tokens,
@@ -418,6 +537,7 @@ pub fn parse_bodies(
         exports,
         selective,
         generics,
+        traits,
     };
     parser.parse_generic_typedefs()?;
     while parser.pos < parser.tokens.len() {
@@ -431,6 +551,14 @@ pub fn parse_bodies(
             }
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "extern:") {
             out.externs.push(parser.parse_extern_decl()?);
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "trait:") {
+            // P7.S3e (R1): already fully parsed by the whole-closure
+            // `prepass_trait_decls` pass (mirroring how a generic `type:`
+            // header is already fully parsed by `parse_generic_typedefs`
+            // above); this loop only skips past it.
+            parser.skip_typedef();
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "impl:") {
+            out.impls.push(parser.parse_impl_decl()?);
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "import:") {
             parser.parse_import()?;
         } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "export:") {
@@ -482,6 +610,9 @@ pub(crate) fn prepass_generic_typedefs(
         exports,
         selective,
         generics,
+        // A generic `type:` field cannot reference a trait (no such syntax
+        // exists), so this pass never looks one up.
+        traits: &[],
     };
     parser.parse_generic_typedefs()
 }
@@ -501,6 +632,65 @@ pub fn prepass_and_register(
     Ok(())
 }
 
+/// P7.S3e (R1/R3, decision 4): register one file's `trait:` declarations
+/// (full member signatures, not names only -- there is nothing further to
+/// fill in later, unlike a concrete `type:`'s fields) into the shared
+/// whole-program `traits` registry under module id `module`. The driver runs
+/// this over every file in the closure -- after `prepass_and_register` and
+/// the import/export/selective maps are known, alongside
+/// `prepass_generic_typedefs` -- and before any file's body parses, so an
+/// `impl:` binding (parsed in-line by `parse_bodies`) can resolve a
+/// cross-module trait name regardless of which order the closure discovered
+/// its files in (module 0, the entry file, is parsed *first*, and may import
+/// a trait declared in a file discovered after it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepass_trait_decls(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module: u32,
+    imports: &HashMap<String, u32>,
+    exports: &[Vec<(String, Span)>],
+    selective: &HashMap<String, u32>,
+    arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
+    generics: &mut GenericTypes,
+    traits: &mut Vec<TraitDecl>,
+) -> Result<(), String> {
+    let mut i = 0;
+    while i < tokens.len() {
+        if matches!(&tokens[i], (Token::Word(w), _) if w == "trait:") {
+            let mut parser = Parser {
+                tokens,
+                pos: i,
+                structs,
+                enums,
+                arrays,
+                owned_cells,
+                refs,
+                slices,
+                module,
+                imports,
+                exports,
+                selective,
+                generics,
+                // A trait member's own signature never names another trait
+                // (there is no bound position inside a `trait:` body), so
+                // this pass never looks the registry-so-far up while parsing.
+                traits: &[],
+            };
+            let decl = parser.parse_trait_decl()?;
+            i = parser.pos;
+            traits.push(decl);
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// Parse one file's tokens into a whole `Module`: the single-file path, with
 /// no import closure around it. The driver's multi-file path builds its own
 /// `Module` around `parse_bodies` instead.
@@ -514,6 +704,22 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut slices = Vec::new();
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+    let mut traits = crate::ast::seed_predicate_traits();
+    prepass_trait_decls(
+        tokens,
+        &structs,
+        &enums,
+        0,
+        &no_imports,
+        &[],
+        &no_imports,
+        &mut arrays,
+        &mut owned_cells,
+        &mut refs,
+        &mut slices,
+        &mut generics,
+        &mut traits,
+    )?;
     let bodies = parse_bodies(
         tokens,
         &structs,
@@ -527,6 +733,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &mut refs,
         &mut slices,
         &mut generics,
+        &traits,
     )?;
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
@@ -576,6 +783,8 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
             intrinsics: IntrinsicVisibility::All,
         }],
         statics: bodies.statics,
+        traits,
+        impls: bodies.impls,
     })
 }
 
@@ -641,6 +850,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                traits: &[],
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -684,6 +894,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                traits: &[],
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -775,6 +986,10 @@ pub fn parse_line_with_structs(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        // P7.S3e (R2): a REPL word def still needs `'T: Copy Ord` to work;
+        // a user `trait:` declaration is not yet supported at REPL scope, so
+        // the reserved predicate-only table is all this context ever sees.
+        traits: crate::ast::predicate_traits(),
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -828,6 +1043,7 @@ pub fn parse_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        traits: &[],
     };
     reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
@@ -907,6 +1123,7 @@ pub fn parse_enum_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        traits: &[],
     };
     reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
@@ -1434,6 +1651,13 @@ struct Parser<'t> {
     /// never written) for a REPL line and for the import/export scans, which
     /// have no generic declaration to apply.
     generics: &'t mut GenericTypes,
+    /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`/`Ord`
+    /// plus every user `trait:` declaration in the closure), populated by
+    /// `prepass_trait_decls` before any body parses -- mirrors `structs`/
+    /// `enums`. Empty for a REPL line (`trait:` is not yet supported at REPL
+    /// scope, the same bypass pattern `structs`/`enums` already follow
+    /// there).
+    traits: &'t [TraitDecl],
 }
 
 impl<'t> Parser<'t> {
@@ -1686,6 +1910,175 @@ impl<'t> Parser<'t> {
             effect,
             span,
             module: self.module,
+        })
+    }
+
+    /// P7.S3e (R1/R3, decision 1): `trait: TraitName 'T member ( &'T ... --
+    /// ... ) member2 ( ... ) ... ;` -- a trait name, its single (implicit)
+    /// type variable header, then one or more member signatures over that
+    /// variable. Single-type-variable traits only (R16): a second header
+    /// variable is a located error here; a member signature introducing a
+    /// variable other than the header's is rejected once its own effect is
+    /// fully parsed (`parse_trait_member_effect`).
+    fn parse_trait_decl(&mut self) -> Result<TraitDecl, String> {
+        let span = self.expect_word("trait:")?;
+        let (name, name_span) = self.expect_word_any_spanned()?;
+        reject_reserved_name("trait", &name, name_span)?;
+        let (ty_var, ty_var_span) = match self.peek() {
+            Some((Token::Word(w), s)) if w.starts_with('\'') => {
+                let (w, s) = (w.clone(), *s);
+                self.pos += 1;
+                (w, s)
+            }
+            Some((tok, s)) => {
+                return Err(format!(
+                    "parse error: expected a type variable (`'T`) after `trait: {name}`, found {tok:?} at line {}, col {}",
+                    s.line, s.col
+                ));
+            }
+            None => return Err(self.eof_error("a type variable (`'T`)")),
+        };
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
+            return Err(multi_variable_trait_error(&name, ty_var_span));
+        }
+        let mut members = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some((Token::Word(_), _)) => {
+                    let (member_name, member_span) = self.expect_word_any_spanned()?;
+                    self.expect(Token::LParen)?;
+                    let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    self.expect(Token::RParen)?;
+                    members.push(TraitMember {
+                        name: member_name,
+                        sig,
+                    });
+                }
+                Some((tok, s)) => {
+                    return Err(format!(
+                        "parse error: expected a member name or `;`, found {tok:?} at line {}, col {}",
+                        s.line, s.col
+                    ));
+                }
+                None => return Err(self.eof_error("`;` (unterminated `trait:` declaration)")),
+            }
+        }
+        self.expect(Token::Semicolon)?;
+        if members.is_empty() {
+            return Err(trait_zero_members_error(&name, span));
+        }
+        Ok(TraitDecl {
+            name,
+            kind: TraitKind::Nominal,
+            members,
+            module: self.module,
+            span: name_span,
+        })
+    }
+
+    /// One trait member's signature, positioned just past its opening `(`:
+    /// an ordinary poly effect, except the trait's own type variable is
+    /// pre-interned at id 0 (its binding occurrence is the trait header, not
+    /// here), so every `'`-mention inside the member is a *use*. A member
+    /// mentioning a second, genuinely new variable name is rejected here
+    /// (R16, single-type-variable traits only), once the whole effect --
+    /// including a use *before* the point a hypothetical second binding
+    /// would occur -- has been parsed.
+    fn parse_trait_member_effect(
+        &mut self,
+        ty_var: &str,
+        trait_name: &str,
+        member_span: Span,
+    ) -> Result<PolySig, String> {
+        let mut builder = PolyBuilder::default();
+        builder.intern_ty_var(ty_var, member_span)?;
+        let raw_in = self.parse_poly_slots(&mut builder, false, |tok| {
+            matches!(tok, Token::RParen) || is_word(tok, "--")
+        })?;
+        self.expect_word("--")?;
+        let raw_out =
+            self.parse_poly_slots(&mut builder, true, |tok| matches!(tok, Token::RParen))?;
+        builder.validate_pending_quotation_rows()?;
+        let inputs = raw_in
+            .into_iter()
+            .map(|r| self.raw_to_poly_type(r))
+            .collect::<Result<_, _>>()?;
+        let outputs = raw_out
+            .into_iter()
+            .map(|r| self.raw_to_poly_type(r))
+            .collect::<Result<_, _>>()?;
+        let sig = builder.finish(inputs, outputs);
+        if sig.ty_var_names.len() > 1 {
+            return Err(multi_variable_trait_error(trait_name, member_span));
+        }
+        for t in sig.inputs.iter().chain(&sig.outputs) {
+            if !member_shape_is_supported(t) {
+                return Err(unsupported_trait_member_shape_error(
+                    trait_name,
+                    member_span,
+                ));
+            }
+        }
+        Ok(sig)
+    }
+
+    /// P7.S3e (R4/R11, decision 1): `impl: Trait for Type  member1 word1
+    /// [member2 word2 ...] ;` -- a pure binding, bare `member word` pairs, no
+    /// `| ... |`, no body (decision 1). `Trait` resolves against the
+    /// whole-program trait registry (module-aware, mirroring a qualified
+    /// type name); `Type` resolves exactly as any other type expression
+    /// does. Member-signature/orphan-rule/polymorphic-member validation (R4)
+    /// is a check-time concern (`check::check_impl_decls`), not here: by the
+    /// time that check runs the whole program's `traits`/`impls`/`structs`
+    /// are fully assembled, regardless of this file's own declaration order.
+    fn parse_impl_decl(&mut self) -> Result<ImplDecl, String> {
+        let span = self.expect_word("impl:")?;
+        let (trait_name, trait_span) = self.expect_word_any_spanned()?;
+        self.expect_word("for")?;
+        let target_ty = self.parse_type_expr()?;
+        let trait_id = find_trait_in_module(
+            self.traits,
+            &trait_name,
+            self.module,
+            self.imports,
+            self.selective,
+        )
+        .ok_or_else(|| unknown_trait_error(&trait_name, trait_span))?;
+        if let Some((qualifier, base)) = trait_name.split_once("::") {
+            if !self.type_is_exported(qualifier, base) {
+                return Err(not_exported_error(base, qualifier, trait_span));
+            }
+        }
+        let mut bindings = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some(_) => {
+                    let (member_name, member_span) = self.expect_word_any_spanned()?;
+                    if let Some((Token::Semicolon, s)) = self.peek() {
+                        return Err(format!(
+                            "parse error: member `{member_name}` has no implementing word before `;` at line {}, col {} (odd binding-token count in `impl:` body)",
+                            s.line, s.col
+                        ));
+                    }
+                    let (word, _) = self.expect_word_any_spanned()?;
+                    let _ = member_span;
+                    bindings.push((member_name, word));
+                }
+                None => return Err(self.eof_error("`;` (unterminated `impl:` declaration)")),
+            }
+        }
+        self.expect(Token::Semicolon)?;
+        if bindings.is_empty() {
+            return Err(impl_zero_bindings_error(&trait_name, span));
+        }
+        Ok(ImplDecl {
+            trait_id,
+            target_ty,
+            module: self.module,
+            span,
+            bindings,
         })
     }
 
@@ -2296,17 +2689,23 @@ impl<'t> Parser<'t> {
     /// capability, then greedily every following capability word. The first
     /// non-capability word after the colon is X3 (unknown capability), since
     /// the colon has already committed to a bound.
+    ///
+    /// P7.S3e (R2): a single trait-table lookup replaces the two hardcoded
+    /// string compares -- `Copy`/`Ord` are pre-seeded `Predicate`-kind
+    /// entries (`seed_predicate_traits`), so a user `trait: Copy` collides
+    /// with them as an ordinary duplicate declaration (`check_trait_decls`),
+    /// not a bespoke reserved-word check. A `Nominal` (user-declared) trait
+    /// name is not yet consumed here -- `'T: Show`'s parse-time resolution is
+    /// Phase 2's R18, out of scope this phase -- so it still falls through to
+    /// the unknown-capability error unchanged.
     fn parse_capabilities(&mut self, colon_span: Span) -> Result<Vec<Bound>, String> {
         let mut out = Vec::new();
         loop {
             match self.peek() {
-                Some((Token::Word(c), _)) if c == "Copy" => {
+                Some((Token::Word(c), _)) if predicate_bound(self.traits, c).is_some() => {
+                    let bound = predicate_bound(self.traits, c).expect("checked above");
                     self.pos += 1;
-                    out.push(Bound::Copy);
-                }
-                Some((Token::Word(c), _)) if c == "Ord" => {
-                    self.pos += 1;
-                    out.push(Bound::Ord);
+                    out.push(bound);
                 }
                 Some((Token::Word(c), span)) if out.is_empty() => {
                     return Err(unknown_capability_error(c, *span));
@@ -3888,6 +4287,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         let exports: Vec<&str> = bodies.exports.iter().map(|(n, _)| n.as_str()).collect();
@@ -3924,6 +4324,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         assert_eq!(generics.structs[0].module, 7);
@@ -4429,6 +4830,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )?;
         match &terms_body(&bodies.words[0])[0].kind {
             TermKind::Quotation(_, _, Some(annot)) => Ok(annot.clone()),
@@ -4522,6 +4924,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         );
         let err = match result {
             Ok(_) => panic!("expected an unknown-type error"),
@@ -4567,6 +4970,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         );
         let err = match result {
             Ok(_) => panic!("expected an unknown-type error"),
@@ -5486,6 +5890,7 @@ mod tests {
                 &mut refs,
                 &mut slices,
                 &mut generics,
+                &[],
             )
             .map(|_| ())
         };
@@ -5530,6 +5935,7 @@ mod tests {
                         &mut refs,
                         &mut slices,
                         &mut generics,
+                        &[],
                     )
                     .map(|_| ())
                 };
@@ -5577,6 +5983,7 @@ mod tests {
                 &mut refs,
                 &mut slices,
                 &mut generics,
+                &[],
             )
             .map(|_| ())
         };
@@ -5626,6 +6033,7 @@ mod tests {
             &mut refs,
             &mut slices,
             &mut generics,
+            &[],
         )
         .unwrap();
         assert_eq!(generics.inst_structs[0].module, 7);
@@ -6160,6 +6568,127 @@ mod tests {
     }
 
     #[test]
+    fn parse_trait_decl_records_its_members() {
+        // P7.S3e (R1/R3): a trait declaration parses into `Module::traits`,
+        // its members sharing one implicit type variable (id 0).
+        let module = parse_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
+        assert_eq!(module.traits.len(), 3, "Copy/Ord pre-seeded, plus Show");
+        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
+        assert_eq!(show.members.len(), 1);
+        assert_eq!(show.members[0].name, "show");
+        assert!(matches!(
+            &show.members[0].sig.inputs[0],
+            PolyType::Ref(r, false) if **r == PolyType::Var(0)
+        ));
+        assert!(show.members[0].sig.outputs.is_empty());
+    }
+
+    #[test]
+    fn parse_trait_decl_zero_members_is_error() {
+        let err = parse_src("trait: Show 'T ;").unwrap_err();
+        assert!(err.contains("declares no members"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_second_header_variable_is_error() {
+        // R16: single-type-variable traits only.
+        let err = parse_src("trait: Rel 'T 'U cmp ( &'T &'U -- ) ;").unwrap_err();
+        assert!(err.contains("more than one type variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_member_introducing_a_second_variable_is_error() {
+        let err = parse_src("trait: Rel 'T cmp ( &'T &'U -- ) ;").unwrap_err();
+        assert!(err.contains("more than one type variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_member_with_a_quotation_shape_is_error() {
+        // R4/R8: `ground_member_type` (check/declarations.rs) only grounds
+        // concrete/array/reference shapes -- a *variable-bearing* quotation
+        // shape has no grounding rule and must be rejected here, not left to
+        // panic later. (A fully-concrete quotation, with no `'T` inside it,
+        // folds to `PolyType::Concrete` at parse time and needs no grounding
+        // at all -- not this case.)
+        let err = parse_src("trait: Apply 'T run ( &'T [ 'T -- 'T ] -- ) ;").unwrap_err();
+        assert!(err.contains("unsupported signature shape"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_copy_collides_with_the_reserved_predicate_entry() {
+        // R2: `Copy`/`Ord` are pre-seeded trait-table entries, so parsing a
+        // user `trait: Copy` succeeds (it is a name, not a reserved-word
+        // check) -- the collision is caught by `check_trait_decls`, an
+        // ordinary duplicate/collision, at check time.
+        let module = parse_src("trait: Copy 'T foo ( &'T -- ) ;").unwrap();
+        let err = crate::check::check_trait_decls(&module).unwrap_err();
+        assert!(
+            err.contains("already the name of a trait"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_impl_decl_records_its_bindings() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             : int-show ( &i64 -- ) drop ;\n\
+             impl: Show for i64  show int-show ;",
+        )
+        .unwrap();
+        assert_eq!(module.impls.len(), 1);
+        let imp = &module.impls[0];
+        assert_eq!(imp.target_ty, Type::I64);
+        assert_eq!(
+            imp.bindings,
+            vec![("show".to_string(), "int-show".to_string())]
+        );
+        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
+        assert_eq!(
+            imp.trait_id,
+            TraitId::from_index(module.traits.iter().position(|t| t.name == "Show").unwrap())
+        );
+        let _ = show;
+    }
+
+    #[test]
+    fn parse_impl_decl_unknown_trait_is_error() {
+        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Show for i64  show int-show ;")
+            .unwrap_err();
+        assert!(err.contains("unknown trait `Show`"), "{err}");
+    }
+
+    #[test]
+    fn parse_impl_decl_zero_bindings_is_error() {
+        let err = parse_src("trait: Show 'T show ( &'T -- ) ;\nimpl: Show for i64 ;").unwrap_err();
+        assert!(err.contains("binds no members"), "{err}");
+    }
+
+    #[test]
+    fn find_trait_in_module_resolves_own_module_then_qualified() {
+        let show = crate::ast::TraitDecl {
+            name: "Show".to_string(),
+            kind: TraitKind::Nominal,
+            members: Vec::new(),
+            module: 1,
+            span: Span::default(),
+        };
+        let traits = vec![show];
+        let mut imports = HashMap::new();
+        imports.insert("lib".to_string(), 1u32);
+        let no_selective = HashMap::new();
+        assert!(find_trait_in_module(&traits, "Show", 0, &imports, &no_selective).is_none());
+        assert_eq!(
+            find_trait_in_module(&traits, "lib::Show", 0, &imports, &no_selective),
+            Some(TraitId::from_index(0))
+        );
+        assert_eq!(
+            find_trait_in_module(&traits, "Show", 1, &imports, &no_selective),
+            Some(TraitId::from_index(0))
+        );
+    }
+
+    #[test]
     fn parse_extern_symbol_with_illegal_characters_is_error() {
         // R12: a symbol containing a newline or quote would corrupt the
         // generated `call $<symbol>` instruction if emitted verbatim.
@@ -6340,6 +6869,27 @@ mod tests {
         assert_eq!(sig.outputs.len(), 2);
         assert!(sig.has_bound(0, Bound::Copy));
         assert!(module.words[0].effect.inputs.is_empty());
+    }
+
+    #[test]
+    fn parse_capabilities_still_folds_copy_ord_byte_for_byte() {
+        // P7.S3e (R2): `parse_capabilities`'s rewrite (a trait-table lookup
+        // replacing the two hardcoded string compares) must not change
+        // `'T: Copy Ord`'s existing parse result -- the highest-blast-radius
+        // regression this phase's Codebase Map calls out.
+        let module = parse_src(": f ( 'T: Copy Ord -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.bounds, vec![(0, Bound::Copy), (0, Bound::Ord)]);
+    }
+
+    #[test]
+    fn parse_capabilities_unknown_name_is_still_an_error() {
+        // A name that resolves to neither a pre-seeded predicate entry nor
+        // (this phase) a consumed nominal trait still falls through
+        // unchanged -- `'T: Show` is out of scope this phase (R18/Phase 2).
+        let err =
+            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap_err();
+        assert!(err.contains("unknown capability"), "{err}");
     }
 
     #[test]
@@ -6529,6 +7079,7 @@ mod tests {
                 &mut refs,
                 &mut slices,
                 &mut generics,
+                &[],
             )
             .map(|_| ())
         };

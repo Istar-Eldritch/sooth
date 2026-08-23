@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::{Import, IntrinsicVisibility, Module, ModuleInfo, Span};
+use crate::ast::{ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, TraitDecl};
 use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
@@ -448,7 +448,34 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut generics,
         )?;
     }
+    // P7.S3e (R1/R3, decision 4): every file's `trait:` declarations,
+    // registered across the whole closure before any body parses -- the
+    // trait twin of the generic-typedef pre-pass above, and for the same
+    // reason: an `impl:` binding (parsed in-line by `parse_bodies`) can name
+    // a trait declared in a file discovered *after* the importing one (the
+    // closure lists module 0, the entry file, first, then its dependencies,
+    // not necessarily in the order `parse_bodies` needs them). Seeded with
+    // `Copy`/`Ord` (R2) before any user declaration is appended.
+    let mut traits: Vec<TraitDecl> = crate::ast::seed_predicate_traits();
+    for (m, node) in closure.nodes.iter().enumerate() {
+        parser::prepass_trait_decls(
+            &node.tokens,
+            &structs,
+            &enums,
+            m as u32,
+            &import_by_module[m],
+            &exports_by_module,
+            &selective_maps[m],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            &mut generics,
+            &mut traits,
+        )?;
+    }
     let mut modules = Vec::with_capacity(closure.nodes.len());
+    let mut impls: Vec<ImplDecl> = Vec::new();
     for (m, node) in closure.nodes.iter().enumerate() {
         let import_map = import_by_module[m].clone();
         let selective_map = &selective_maps[m];
@@ -465,6 +492,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut refs,
             &mut slices,
             &mut generics,
+            &traits,
         )?;
         for (k, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
             structs[struct_base[m] + k].fields = fields;
@@ -477,6 +505,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         words.extend(bodies.words);
         externs.extend(bodies.externs);
         statics.extend(bodies.statics);
+        impls.extend(bodies.impls);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -517,6 +546,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         modules,
         statics,
         generics,
+        traits,
+        impls,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
     // module's `export:` list are both still their raw source spellings here,
@@ -530,6 +561,12 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // word's name and a module's `export:` list all still agree here.
     check::check_static_decls(&module)?;
     check::check_globals(&module)?;
+    // P7.S3e (R1/R4/R11): trait/impl duplicate-name and binding validation,
+    // pre-mangle for the same reason as the checks above -- a trait's name
+    // and its module's `export:` list are both still raw source spellings
+    // here.
+    check::check_trait_decls(&module)?;
+    check::check_impl_decls(&mut module)?;
     resolve::resolve_modules(&mut module, always_mangle)?;
     Ok(module)
 }
