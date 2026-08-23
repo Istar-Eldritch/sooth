@@ -6992,16 +6992,14 @@ mod tests {
         // R2: the reserved `Copy`/`Ord` entries participate in no orphan-rule
         // or export check, so an `impl: Copy for i64` used to fall through to
         // the orphan rule and demand a module that cannot exist.
-        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Copy for i64  show int-show ;")
-            .unwrap_err();
+        let err = parse_src("impl: Copy for i64\n  : show | p | p drop ;\n;").unwrap_err();
         assert!(err.contains("trait `Copy` cannot be implemented"), "{err}");
         assert!(err.contains("built-in predicate"), "{err}");
     }
 
     #[test]
     fn parse_impl_decl_for_reserved_ord_is_error() {
-        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Ord for i64  show int-show ;")
-            .unwrap_err();
+        let err = parse_src("impl: Ord for i64\n  : show | p | p drop ;\n;").unwrap_err();
         assert!(err.contains("trait `Ord` cannot be implemented"), "{err}");
     }
 
@@ -7149,8 +7147,7 @@ mod tests {
 
     #[test]
     fn parse_impl_decl_unknown_trait_is_error() {
-        let err = parse_src(": int-show ( &i64 -- ) drop ;\nimpl: Show for i64  show int-show ;")
-            .unwrap_err();
+        let err = parse_src("impl: Show for i64\n  : show | p | p drop ;\n;").unwrap_err();
         assert!(err.contains("unknown trait `Show`"), "{err}");
     }
 

@@ -3592,8 +3592,9 @@ mod tests {
     fn check_impl_decls_ok_for_a_matching_binding() {
         impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;",
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;",
         )
         .unwrap();
     }
@@ -3660,8 +3661,9 @@ mod tests {
         // A scalar declares no module of its own, so "or the module declaring
         // `i64`" would name a home that cannot exist.
         let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;")
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         check_trait_decls(&module).unwrap();
@@ -3692,8 +3694,9 @@ mod tests {
     fn check_impl_decls_missing_member_is_error() {
         let err = impl_check_src(
             "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
-             : int-eq ( &i64 &i64 -- ) drop drop ;\n\
-             impl: Eq for i64  eq int-eq ;",
+             impl: Eq for i64\n\
+               : eq | a b | a drop b drop ;\n\
+             ;",
         )
         .unwrap_err();
         assert!(
@@ -3750,10 +3753,12 @@ mod tests {
     fn check_impl_decls_duplicate_impl_is_error() {
         let err = impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             : int-show2 ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;\n\
-             impl: Show for i64  show int-show2 ;",
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;\n\
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;",
         )
         .unwrap_err();
         assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");

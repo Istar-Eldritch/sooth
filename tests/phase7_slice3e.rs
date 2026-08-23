@@ -203,8 +203,10 @@ fn sandwiched_receiver_no_longer_silently_mis_dispatches() {
         "sandwiched-mis-dispatch",
         "type: Point x i64 y i64 ;\n\
          trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
-         : point-at ( &Point i64 -- i64 ) drop &x @ ;\n\
-         impl: Show for Point  at point-at ;\n\
+         impl: Show for Point\n\
+           : at | p n | n drop p &x @ ;
+\
+         ;\n\
          : at ( i64 -- i64 ) 900 add ;\n\
          : uses ( &'T: Show -- i64 ) 0 at | v | drop v ;\n\
          : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
@@ -226,8 +228,9 @@ fn trait_requires_export_to_cross_a_module_boundary() {
         "main.sth",
         "import: intrinsics * ;\n\
          import: \"lib.sth\" l ;\n\
-         : int-show ( &i64 -- ) drop ;\n\
-         impl: l::Show for i64  show int-show ;\n\
+         impl: l::Show for i64\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -250,8 +253,9 @@ fn trait_export_and_selective_import_resolve_across_modules() {
         "import: intrinsics * ;\n\
          import: \"lib.sth\" l | Show | ;\n\
          type: Point x i64 y i64 ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     build_ok(&entry);
@@ -316,8 +320,9 @@ fn impl_binding_missing_a_required_member_is_rejected() {
     let (_t, entry) = single_file(
         "impl-missing-member",
         "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
-         : int-eq ( &i64 &i64 -- ) drop drop ;\n\
-         impl: Eq for i64  eq int-eq ;\n\
+         impl: Eq for i64\n\
+           : eq | a b | a drop b drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -362,10 +367,12 @@ fn duplicate_impl_for_the_same_trait_and_type_is_rejected() {
     let (_t, entry) = single_file(
         "impl-duplicate",
         "trait: Show 'T show ( &'T -- ) ;\n\
-         : int-show ( &i64 -- ) drop ;\n\
-         : int-show2 ( &i64 -- ) drop ;\n\
-         impl: Show for i64  show int-show ;\n\
-         impl: Show for i64  show int-show2 ;\n\
+         impl: Show for i64\n\
+           : show | p | p drop ;\n\
+         ;\n\
+         impl: Show for i64\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -387,8 +394,9 @@ fn impl_outside_trait_and_type_module_is_an_orphan_rejection() {
         "import: intrinsics * ;\n\
          import: \"trait.sth\" t | Show | ;\n\
          import: \"point.sth\" p | Point | ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -413,8 +421,9 @@ fn impl_inside_the_target_types_own_module_satisfies_the_orphan_rule() {
          import: \"trait.sth\" t | Show | ;\n\
          type: Point x i64 y i64 ;\n\
          export: Point ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n",
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n",
     );
     let entry = t.write(
         "main.sth",
@@ -458,15 +467,16 @@ fn a_user_bound_on_a_poly_combinator_is_rejected() {
         "combinator-bound",
         "type: Point x i64 y i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : shows inline ( &'T: Show -- ) show ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "error: `'T: Show` on the combinator `shows` at line 6, col 3 is not supported"
+            "error: `'T: Show` on the combinator `shows` at line 7, col 3 is not supported"
         ),
         "{err}"
     );
@@ -501,15 +511,16 @@ fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
         "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : shows ( &'T: Show -- ) show ;\n\
          : main ( -- ) 1 Blip |b| &b shows b drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 8, col 29)"
+            "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 9, col 29)"
         ),
         "{err}"
     );
@@ -544,25 +555,23 @@ fn the_array_sort_consumer_runs_at_two_concrete_instantiations() {
     let t = tree_with_core("sort");
     let entry = t.write(
         "main.sth",
-"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Ordering | Less | Equal | Greater ;\ntrait: Order 'T cmp ( &'T &'T -- Ordering ) ;\ntype: Pair n i64 ;\n: cmp-i64 ( &i64 &i64 -- Ordering )\n  | b | | a |\n  a @ b @ lt ~[ Less ] ~[\n    a @ b @ gt ~[ Greater ] ~[ Equal ] if\n  ] if ;\n: cmp-pair ( &Pair &Pair -- Ordering )\n  | b | | a |\n  a &n @ | an | b &n @ | bn |\n  an bn lt ~[ Greater ] ~[\n    an bn gt ~[ Less ] ~[ Equal ] if\n  ] if ;\nimpl: Order for i64  cmp cmp-i64 ;\nimpl: Order for Pair  cmp cmp-pair ;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Less ) drop a0 ]\n  ~[ ( Equal ) drop a0 ]\n  ~[ ( Greater )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Ordering? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Less ) drop a1 ]\n  ~[ ( Equal ) drop a1 ]\n  ~[ ( Greater )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Ordering? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Less ) drop a2 ]\n  ~[ ( Equal ) drop a2 ]\n  ~[ ( Greater )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Ordering? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
+"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Ordering | Less | Equal | Greater ;\ntrait: Order 'T cmp ( &'T &'T -- Ordering ) ;\ntype: Pair n i64 ;\nimpl: Order for i64\n  : cmp\n    | b | | a |\n    a @ b @ lt ~[ Less ] ~[\n      a @ b @ gt ~[ Greater ] ~[ Equal ] if\n    ] if ;\n;\nimpl: Order for Pair\n  : cmp\n    | b | | a |\n    a &n @ | an | b &n @ | bn |\n    an bn lt ~[ Greater ] ~[\n      an bn gt ~[ Less ] ~[ Equal ] if\n    ] if ;\n;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Less ) drop a0 ]\n  ~[ ( Equal ) drop a0 ]\n  ~[ ( Greater )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Ordering? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Less ) drop a1 ]\n  ~[ ( Equal ) drop a1 ]\n  ~[ ( Greater )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Ordering? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Less ) drop a2 ]\n  ~[ ( Equal ) drop a2 ]\n  ~[ ( Greater )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Ordering? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
     );
     let stdout = build_and_run(&entry);
     assert_eq!(stdout, "1\n2\n3\n3\n2\n1\n");
 }
 
-/// Phase 4 (R15): an impl member whose *implementing word* is named after a
-/// builtin operator (`max`), reachable only through a bound (the trait member
-/// itself is spelled `show`, never `max`, so no `Call` term anywhere in the
-/// source spells `max` -- `uncalled_operator_overloads` (`src/ir/driver.rs`)
-/// would prune it as dead without R15's `trait_calls` consultation). Runs in
-/// a compiled build only: the REPL's `lower_word` path does not run this
-/// filter at all (R15's own text), so this golden gives no REPL coverage and
-/// is not meant to.
+/// The binding form's counterpart to this golden bound a member's implementing
+/// word to an operator-spelled name (`max`), reachable only through a bound.
+/// The body form has no separate implementing word to name: the member itself
+/// is simply inlined, so there is nothing left for `uncalled_operator_overloads`
+/// to prune in the first place. R4's `trait_member_named_after_a_builtin_operator`
+/// golden (P7.S3r phase 1) is what now covers the operator-spelled-name ground.
 #[test]
-fn an_impl_member_named_after_a_builtin_operator_survives_pruning() {
+fn an_impl_body_member_returning_a_field_builds_and_runs() {
     let (_t, entry) = single_file(
-        "r15-operator-name",
-"trait: Getter 'T show ( &'T -- i64 ) ;\ntype: Pt n i64 ;\n: max ( &Pt -- i64 ) &n @ ;\nimpl: Getter for Pt  show max ;\n: getval ( &'T: Getter -- i64 ) show ;\n: main ( -- ) 7 Pt |p| &p getval . p drop ;\n"
+        "impl-body-field-getter",
+"trait: Getter 'T show ( &'T -- i64 ) ;\ntype: Pt n i64 ;\nimpl: Getter for Pt\n  : show | p | p &n @ ;\n;\n: getval ( &'T: Getter -- i64 ) show ;\n: main ( -- ) 7 Pt |p| &p getval . p drop ;\n"
     );
     let stdout = build_and_run(&entry);
     assert_eq!(stdout, "7\n");

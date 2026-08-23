@@ -5375,8 +5375,9 @@ mod tests {
     /// than `i64` because a scalar local has no address to borrow.
     const SHOW: &str = "type: Point x i64 y i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n";
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n";
 
     /// P7.S3e (R7): a bounded body's member call records an obligation --
     /// which trait, which member, which of the word's own type variables --
@@ -5392,7 +5393,7 @@ mod tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].var, 0);
         assert_eq!(obs[0].member, "show");
-        assert_eq!(obs[0].span.line, 5);
+        assert_eq!(obs[0].span.line, 6);
         // Index 2: the two pre-seeded `Copy`/`Ord` predicate entries occupy 0
         // and 1, so a whole-program `TraitId` is what was recorded, not a
         // per-module or per-word one.
@@ -5475,8 +5476,9 @@ mod tests {
         check_src(
             "type: Point x i64 y i64 ;\n\
              trait: Clone 'T clone ( &'T -- 'T ) ;\n\
-             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
-             impl: Clone for Point  clone point-clone ;\n\
+             impl: Clone for Point\n\
+               : clone | p | p drop 1 2 Point ;\n\
+             ;\n\
              : cloned ( &'T: Clone -- 'T ) clone ;\n\
              : main ( -- ) ;\n",
         )
@@ -5492,8 +5494,9 @@ mod tests {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
              trait: Clone 'T clone ( &'T -- 'T ) ;\n\
-             : point-clone ( &Point -- Point ) drop 1 2 Point ;\n\
-             impl: Clone for Point  clone point-clone ;\n\
+             impl: Clone for Point\n\
+               : clone | p | p drop 1 2 Point ;\n\
+             ;\n\
              : cloned ( &'T: Clone -- ) clone ;\n\
              : main ( -- ) ;\n",
         )
@@ -5513,7 +5516,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("`show` of `Show` in `shows` (line 5, col 25) expects `&'T`, found `'T`"),
+            err.contains("`show` of `Show` in `shows` (line 6, col 25) expects `&'T`, found `'T`"),
             "{err}"
         );
     }
@@ -5596,7 +5599,7 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("`'T: Show` on the combinator `shows` at line 5, col 3 is not supported"),
+            err.contains("`'T: Show` on the combinator `shows` at line 6, col 3 is not supported"),
             "{err}"
         );
         assert!(err.contains("records no instantiation"), "{err}");
@@ -5647,14 +5650,17 @@ mod tests {
 
     /// Two types, both satisfying one trait through their own `impl:` -- the
     /// preamble the call-site resolution tests need (R8). A `shows` declared
-    /// after it lands on line 8, and its `show` call is the obligation's span.
+    /// after it lands on line 10, and its `show` call is the obligation's
+    /// span.
     const TWO_SHOWS: &str = "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
          trait: Show 'T show ( &'T -- ) ;\n\
-         : point-show ( &Point -- ) drop ;\n\
-         : blip-show ( &Blip -- ) drop ;\n\
-         impl: Show for Point  show point-show ;\n\
-         impl: Show for Blip  show blip-show ;\n";
+         impl: Show for Point\n\
+           : show | p | p drop ;\n\
+         ;\n\
+         impl: Show for Blip\n\
+           : show | b | b drop ;\n\
+         ;\n";
 
     /// P7.S3e (R8/R9): the load-bearing new mechanism, read directly rather
     /// than through a golden (a bound-directed call does not lower until
@@ -5679,7 +5685,7 @@ mod tests {
             .iter()
             .map(|(span, symbol)| (span.line, symbol.as_str()))
             .collect();
-        assert_eq!(resolved, vec![(5, "point-show")]);
+        assert_eq!(resolved, vec![(6, "show;Show;0;Point")]);
     }
 
     /// R8: two instantiations of one bounded word resolve to two distinct
@@ -5707,24 +5713,25 @@ mod tests {
         assert_eq!(
             resolved,
             vec![
-                ("Blip".to_string(), 8, "blip-show".to_string()),
-                ("Point".to_string(), 8, "point-show".to_string()),
+                ("Blip".to_string(), 10, "show;Show;0;Blip".to_string()),
+                ("Point".to_string(), 10, "show;Show;0;Point".to_string()),
             ]
         );
     }
 
     /// R8: which member the obligation names selects the binding. A trait with
-    /// two members, a body calling only the second, and two distinct
-    /// implementing words: resolving by position rather than by member name
-    /// would dispatch `hash` to `point-eq`.
+    /// two members, a body calling only the second, and two distinct member
+    /// bodies: resolving by position rather than by member name would
+    /// dispatch `hash` to `eq`'s synthesized word.
     #[test]
     fn the_obligations_member_name_selects_the_binding() {
         let (module, _) = checked_like_a_build(
             "type: Point x i64 y i64 ;\n\
              trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
-             : point-eq ( &Point &Point -- i64 ) drop drop 1 ;\n\
-             : point-hash ( &Point -- i64 ) drop 7 ;\n\
-             impl: Eq for Point  eq point-eq  hash point-hash ;\n\
+             impl: Eq for Point\n\
+               : eq | a b | a drop b drop 1 ;\n\
+               : hash | p | p drop 7 ;\n\
+             ;\n\
              : hashes ( &'T: Eq -- i64 ) hash ;\n\
              : main ( -- ) 1 2 Point |p| &p hashes drop p drop ;\n",
         )
@@ -5735,7 +5742,7 @@ mod tests {
             .filter(|i| i.callee == "hashes")
             .flat_map(|i| i.trait_calls.values())
             .collect();
-        assert_eq!(resolved, vec!["point-hash"]);
+        assert_eq!(resolved, vec!["hash;Eq;0;Point"]);
     }
 
     /// R8: a polymorphic *overload set* -- two bounded words sharing one name,
@@ -5764,10 +5771,10 @@ mod tests {
             .collect();
         sites.sort();
         // The one-input `shows` is called first, so it holds the lower column;
-        // its `show` is on line 5, the two-input one's on line 6.
+        // its `show` is on line 6, the two-input one's on line 7.
         assert_eq!(sites.len(), 2, "{sites:?}");
-        assert_eq!(sites[0].1, vec![5], "{sites:?}");
-        assert_eq!(sites[1].1, vec![6], "{sites:?}");
+        assert_eq!(sites[0].1, vec![6], "{sites:?}");
+        assert_eq!(sites[1].1, vec![7], "{sites:?}");
     }
 
     /// R8: two distinct bound variables on one word, each obligated to a
@@ -5785,10 +5792,12 @@ mod tests {
              type: PB n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
              trait: B 'T tb ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PB -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: B for PB  tb p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: B for PB\n\
+               : tb | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A &'U: B -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
@@ -5800,7 +5809,7 @@ mod tests {
             .expect("the call site recorded an instantiation");
         let mut resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
         resolved.sort();
-        assert_eq!(resolved, vec!["p-a", "p-b"]);
+        assert_eq!(resolved, vec!["ta;A;0;PA", "tb;B;0;PB"]);
     }
 
     /// R8: one trait, two bound variables, instantiated at two types that
@@ -5814,10 +5823,12 @@ mod tests {
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PB -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: A for PB  ta p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: A for PB\n\
+               : ta | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A &'U: A -- ) ta ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
@@ -5835,7 +5846,7 @@ mod tests {
         resolved.sort();
         // The body's first `ta` (col 26) consumes the top input, `'U` = `PB`;
         // the second (col 29) consumes `'T` = `PA`.
-        assert_eq!(resolved, vec![(26, "p-b"), (29, "p-a")]);
+        assert_eq!(resolved, vec![(26, "ta;A;0;PB"), (29, "ta;A;0;PA")]);
     }
 
     /// R8: two traits bounding *one* variable, both implemented for the type
@@ -5851,10 +5862,12 @@ mod tests {
             "type: PA n i64 ;\n\
              trait: A 'T ta ( &'T -- ) ;\n\
              trait: B 'T tb ( &'T -- ) ;\n\
-             : p-a ( &PA -- ) drop ;\n\
-             : p-b ( &PA -- ) drop ;\n\
-             impl: A for PA  ta p-a ;\n\
-             impl: B for PA  tb p-b ;\n\
+             impl: A for PA\n\
+               : ta | p | p drop ;\n\
+             ;\n\
+             impl: B for PA\n\
+               : tb | p | p drop ;\n\
+             ;\n\
              : f ( &'T: A B &'T -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| &a &a f a drop ;\n",
         )
@@ -5870,7 +5883,7 @@ mod tests {
             .map(|(span, symbol)| (span.col, symbol.as_str()))
             .collect();
         resolved.sort();
-        assert_eq!(resolved, vec![(25, "p-b"), (28, "p-a")]);
+        assert_eq!(resolved, vec![(25, "tb;B;0;PA"), (28, "ta;A;0;PA")]);
     }
 
     /// R8: a polymorphic combinator's body calling a bounded poly word. The
@@ -5908,7 +5921,10 @@ mod tests {
             .collect();
         assert_eq!(maps.len(), 2, "two call sites");
         assert_eq!(maps[0], maps[1]);
-        assert_eq!(maps[0].values().collect::<Vec<_>>(), vec!["point-show"]);
+        assert_eq!(
+            maps[0].values().collect::<Vec<_>>(),
+            vec!["show;Show;0;Point"]
+        );
     }
 
     /// R8: the concrete type a bounded variable was instantiated with has no
@@ -5923,7 +5939,7 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains(
-                "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 7, col 29)"
+                "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 8, col 29)"
             ),
             "{err}"
         );
@@ -5971,7 +5987,7 @@ mod tests {
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
-            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 5, col 26 in the body of `shows` (instantiated at line 6, col 32 in `main`)"
+            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 6, col 26 in the body of `shows` (instantiated at line 7, col 32 in `main`)"
         );
     }
 
