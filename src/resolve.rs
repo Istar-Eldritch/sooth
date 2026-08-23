@@ -106,23 +106,12 @@ enum Demangled<'a> {
     },
 }
 
-/// Strip the single trailing `__m{digits}` group `mangle` appended (`w__m0`
-/// -> `w`), then split a P7.S3r synthesized impl-member name
+/// `demangle_word`, then split a P7.S3r synthesized impl-member name
 /// (`member;Trait;module;Type`) into its renderable parts. `;` is a hard
 /// lexer delimiter, so a name with that shape is never anything a user wrote
 /// by hand.
 fn split_demangled(name: &str) -> Demangled<'_> {
-    let stripped = match name.rfind("__m") {
-        Some(idx) => {
-            let digits = &name[idx + "__m".len()..];
-            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-                name
-            } else {
-                &name[..idx]
-            }
-        }
-        None => name,
-    };
+    let stripped = demangle_word(name);
     // P7.S3r `synth_member_word_name`: `member;Trait;module;Type`. The trait's
     // declaring module id is load-bearing for uniqueness (two same-named
     // traits from different modules), but it is compiler bookkeeping, not
@@ -138,25 +127,25 @@ fn split_demangled(name: &str) -> Demangled<'_> {
     }
 }
 
-/// Recover a word's source spelling for a *comparison* or *lookup*: the bare
-/// demangled name, undecorated, so equality against a surface spelling
-/// (an eliminator name, an operator name) still holds. A user-facing
-/// diagnostic must use `render_word` instead -- this form drops the
-/// backtick delimiters a synthesized impl-member render needs, so wrapping
-/// its result in a template's own backticks would double them up. `main`/
-/// `drop` are never mangled and pass through unchanged, as does any name
-/// `mangle` never touched. Kept beside `mangle` so the two stay in step.
-pub(crate) fn demangle_word(name: &str) -> std::borrow::Cow<'_, str> {
-    match split_demangled(name) {
-        Demangled::Plain(s) => std::borrow::Cow::Borrowed(s),
-        Demangled::ImplMember {
-            member,
-            trait_name,
-            type_name,
-        } => std::borrow::Cow::Owned(format!(
-            "{member} (member of trait {trait_name} for {type_name})"
-        )),
+/// Recover a word's source spelling for a *comparison* or *lookup*: strip the
+/// single trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`), and
+/// nothing else, so equality against a surface spelling (an eliminator name,
+/// an operator name) still holds. `main`/`drop` are never mangled and pass
+/// through unchanged, as does any name `mangle` never touched. Kept beside
+/// `mangle` so the two stay in step.
+///
+/// A user-facing diagnostic must use `render_word` instead: this form leaves a
+/// P7.S3r synthesized impl-member name as the raw `cmp;Order;0;Point`, a
+/// spelling the user never wrote and cannot type (R3).
+pub(crate) fn demangle_word(name: &str) -> &str {
+    let Some(idx) = name.rfind("__m") else {
+        return name;
+    };
+    let digits = &name[idx + "__m".len()..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return name;
     }
+    &name[..idx]
 }
 
 /// Recover a word's source spelling for a *diagnostic*: the fully delimited
@@ -187,7 +176,7 @@ pub(crate) fn render_word(name: &str) -> std::borrow::Cow<'_, str> {
 /// call (`P__m0`) has no suffix and falls straight through to `demangle_word`.
 pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
     let Some(head) = name.strip_suffix('>').or_else(|| name.strip_suffix('?')) else {
-        return demangle_word(name);
+        return std::borrow::Cow::Borrowed(demangle_word(name));
     };
     let suffix = &name[head.len()..];
     let demangled = demangle_word(head);
@@ -205,9 +194,6 @@ pub(crate) fn render_call(name: &str) -> std::borrow::Cow<'_, str> {
     };
     let suffix = &name[head.len()..];
     match split_demangled(head) {
-        Demangled::Plain(s) if s.len() == head.len() => {
-            std::borrow::Cow::Owned(format!("`{name}`"))
-        }
         Demangled::Plain(s) => std::borrow::Cow::Owned(format!("`{s}{suffix}`")),
         Demangled::ImplMember {
             member,
@@ -867,20 +853,14 @@ mod tests {
         assert_eq!(split_destructure_suffix("Shape?"), ("Shape", "?"));
     }
 
-    /// P7.S3r phase 2 (R3): a synthesized impl-member name demangles to the
-    /// bare, undecorated form for comparison/lookup, module-id component
-    /// dropped; an ordinary name (with or without `;`-free mangling) is
-    /// unaffected.
+    /// P7.S3r phase 2 (R3): `demangle_word` is the comparison/lookup form and
+    /// stays undecorated -- it strips the trailing `__mN` and nothing else, so
+    /// a synthesized impl-member name survives verbatim as the key it is.
+    /// Rendering it for a human is `render_word`'s job, not this one's.
     #[test]
-    fn demangle_word_strips_a_synthesized_impl_member_name_bare() {
-        assert_eq!(
-            demangle_word("cmp;Order;0;Point__m0"),
-            "cmp (member of trait Order for Point)"
-        );
-        assert_eq!(
-            demangle_word("cmp;Order;0;Point"),
-            "cmp (member of trait Order for Point)"
-        );
+    fn demangle_word_leaves_a_synthesized_impl_member_name_intact() {
+        assert_eq!(demangle_word("cmp;Order;0;Point__m0"), "cmp;Order;0;Point");
+        assert_eq!(demangle_word("cmp;Order;0;Point"), "cmp;Order;0;Point");
         assert_eq!(demangle_word("push__m1"), "push");
         assert_eq!(demangle_word("push"), "push");
     }
@@ -888,7 +868,7 @@ mod tests {
     /// The display counterpart: a synthesized impl-member name renders with
     /// its own backtick delimiters already in place, so a caller must print
     /// it bare rather than wrapping it in another pair; an ordinary name is
-    /// wrapped in a single pair.
+    /// wrapped in a single pair. The module-id component is dropped.
     #[test]
     fn render_word_delimits_a_synthesized_impl_member_name() {
         assert_eq!(
@@ -897,6 +877,17 @@ mod tests {
         );
         assert_eq!(render_word("push__m1"), "`push`");
         assert_eq!(render_word("push"), "`push`");
+    }
+
+    /// `render_call`'s generated-word suffixes (`>` destructure, `?`
+    /// eliminator) sit inside the delimiters, and a suffix-free name is
+    /// `render_word`.
+    #[test]
+    fn render_call_keeps_a_generated_suffix_inside_the_delimiters() {
+        assert_eq!(render_call("Point__m0>"), "`Point>`");
+        assert_eq!(render_call("Shape__m1?"), "`Shape?`");
+        assert_eq!(render_call("Point>"), "`Point>`");
+        assert_eq!(render_call("push__m1"), "`push`");
     }
 
     #[test]

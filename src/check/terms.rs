@@ -1029,10 +1029,9 @@ pub(super) fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str
 fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
     let callee = crate::resolve::demangle_call(callee);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
-            name, span.line, ty, callee, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: linear values across a loop are not supported yet in {} (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, ty, callee, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: linear values across a loop are not supported yet: a `{ty}` is live across the back-edge to `{callee}`"
         ),
@@ -1104,9 +1103,9 @@ fn check_linear_across_back_edge(
 /// the value there is not traceable to a single literal.
 fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
-            name, span.line
+        Ctx::Word { mangled, .. } => format!(
+            "error: `call` in {} (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+            crate::resolve::render_word(mangled), span.line
         ),
         Ctx::Line { .. } => format!(
             "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
@@ -1323,7 +1322,10 @@ fn check_branch_join(
                 };
                 match expected {
                     Some(Type::Quotation(eff)) => {
-                        let word = ctx.word_name().unwrap_or("the branch");
+                        // `literal_effect_mismatch_error` renders what it is
+                        // handed (`render_word`), so this hands it the mangled
+                        // name rather than a pre-demangled one.
+                        let word = ctx.mangled_name().unwrap_or("the branch");
                         let a_span = prov.quotations[a.0].span;
                         let b_span = prov.quotations[b.0].span;
                         // Slice 10a (R9): the `if`-join's expected
@@ -1556,10 +1558,9 @@ fn check_branch(
 /// `branch` handed something that is not a quotation in either branch slot.
 fn branch_needs_quotation_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `branch` requires two quotation operands, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `branch` requires two quotation operands, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `branch` requires two quotation operands, found `{found}`")
         }
@@ -1618,10 +1619,9 @@ pub(super) fn borrow_join_disagreement_error(
         Some((None, None)) => "a borrow with no local root".to_string(),
     };
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: borrow state disagrees at the branch join in `{}` (line {})\n  the first arm leaves {}, the second arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
-            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: borrow state disagrees at the branch join in {} (line {})\n  the first arm leaves {}, the second arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, describe(t_then), describe(t_else), effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: borrow state disagrees at the branch join (line {})\n  the first arm leaves {}, the second arm leaves {}",
             span.line, describe(t_then), describe(t_else),

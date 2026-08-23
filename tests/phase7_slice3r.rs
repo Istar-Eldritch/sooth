@@ -533,6 +533,59 @@ fn impl_body_wrong_effect_type_names_readable_member() {
     );
 }
 
+/// R3 (Phase 2), the *in-body operand* family: the two goldens above both come
+/// from checking the body's overall effect against the declaration, which is one
+/// diagnostic constructor. A wrong body far more often trips an operand check
+/// mid-body instead, a different constructor reading the enclosing word out of
+/// the same `Ctx` -- so the member has to render readably there too, or R3 holds
+/// only for the message a user is least likely to see first.
+#[test]
+fn impl_body_underflow_names_readable_member() {
+    let (_t, entry) = program(
+        "body-underflow",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p drop add ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: error: stack effect mismatch in `get` (member of trait `Getter` for `Point`) (line 5)\n  `add` needs 2 values, but the stack holds 0\n  note: declared ( &Point -- i64 )\n"
+    );
+    // Survives a re-blessing of the wording above: the raw synthesized
+    // spelling is unforgeable (`;` is a lexer delimiter), so its appearance in
+    // any diagnostic is always the leak R3 forbids, whatever the message says.
+    assert!(!err.contains("get;Getter"), "{err}");
+}
+
+/// R3 (Phase 2), the unknown-word family: a third constructor, and the one a
+/// typo in a member body reaches. Distinct from the operand golden above in that
+/// the offending word does not resolve at all, so the message names two words
+/// (the unknown one, and the member enclosing it) and only the second renders.
+#[test]
+fn impl_body_unknown_word_names_readable_member() {
+    let (_t, entry) = program(
+        "body-unknown-word",
+        "import: intrinsics * ;\n\
+         type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p bogus ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: error: unknown word `bogus` in `get` (member of trait `Getter` for `Point`) (line 5)\n"
+    );
+    assert!(!err.contains("get;Getter"), "{err}");
+}
+
 /// R7: a member body sees its own name, never its siblings'. `hash`'s body calls
 /// `eq`, which is *not* rewritten, so it resolves by ordinary lookup to
 /// `core::cmp`'s `eq` on two `i64`s -- not to the sibling member, whose grounded

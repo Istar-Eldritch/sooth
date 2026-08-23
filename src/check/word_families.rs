@@ -681,10 +681,9 @@ pub(super) fn check_tag_word(
 /// `tag` applied to something that is not an enum at all.
 fn tag_operand_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `tag` requires an enum operand, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `tag` requires an enum operand, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `tag` requires an enum operand, found `{found}`")
         }
@@ -696,10 +695,9 @@ fn tag_operand_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// storage rather than the value itself.
 fn tag_payload_enum_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `tag` requires an enum whose variants all carry no payload, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `tag` requires an enum whose variants all carry no payload, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: type mismatch: `tag` requires an enum whose variants all carry no payload, found `{found}`"
         ),
@@ -1089,9 +1087,9 @@ pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool 
 /// unknown-word error because the word does exist -- it is simply not imported
 /// here -- so the remedy is an import, not a definition.
 pub(super) fn ungated_intrinsic_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    let caller = ctx.word_name().unwrap_or("this line");
+    let caller = ctx.rendered_word_or("`this line`");
     format!(
-        "error: `{name}` is an intrinsic and is not imported in `{caller}` (line {}, col {})\n  add `import: intrinsics * ;` (or `import: intrinsics | {name} ... | ;`) to this file",
+        "error: `{name}` is an intrinsic and is not imported in {caller} (line {}, col {})\n  add `import: intrinsics * ;` (or `import: intrinsics | {name} ... | ;`) to this file",
         span.line, span.col
     )
 }
@@ -1154,10 +1152,10 @@ pub(super) fn check_drop_import_visibility(
     decl: &StructDecl,
 ) -> Result<(), String> {
     let source = crate::resolve::demangle_word(&decl.name);
-    if is_name_visible_to_module(m, span.module, decl.module, &source) {
+    if is_name_visible_to_module(m, span.module, decl.module, source) {
         Ok(())
     } else {
-        Err(drop_import_visibility_error(ctx, span, m, decl, &source))
+        Err(drop_import_visibility_error(ctx, span, m, decl, source))
     }
 }
 
@@ -1219,9 +1217,10 @@ fn drop_import_visibility_error(
         ),
     };
     match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: cannot `drop` a value of type `{ty_name}` in `{name}` (line {})\n  {note}",
-            span.line
+        Ctx::Word { mangled, .. } => format!(
+            "error: cannot `drop` a value of type `{ty_name}` in {name} (line {})\n  {note}",
+            span.line,
+            name = crate::resolve::render_word(mangled)
         ),
         Ctx::Line { .. } => format!(
             "error: cannot `drop` a value of type `{ty_name}` (line {})\n  {note}",
@@ -1239,10 +1238,9 @@ pub(super) fn array_index_out_of_range_error(
     index: i64,
 ) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
-            name, span.line, index, count, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: array index out of range in {} (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, index, count, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: array index out of range: index {index} is out of bounds for length {count}"
         ),
@@ -1253,10 +1251,9 @@ pub(super) fn array_index_out_of_range_error(
 /// compile-time literal, since there is no comptime interpreter to fold it.
 fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
         ),
@@ -1267,10 +1264,9 @@ fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// be `>= 1` (X2, M1), named against the offending count.
 fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
-            name, span.line, count, u32::MAX, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: invalid array length in {} (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, count, u32::MAX, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
             u32::MAX
@@ -1330,10 +1326,9 @@ fn check_slice_offset(operand: Slot, ctx: &Ctx, span: Span, op: &str) -> Result<
 /// rather than as a generic type mismatch.
 fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
         }
@@ -1344,10 +1339,9 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
 fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {} (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
         }
@@ -1363,10 +1357,9 @@ fn peek_of_linear_owned_payload_error(
     payload: Type,
 ) -> String {
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `^|>` a linear payload in `{}` (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
-            name, span.line, cell_ty, payload, effect_str(effect),
-        ),
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: cannot `^|>` a linear payload in {} (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, cell_ty, payload, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
         ),
@@ -1430,11 +1423,10 @@ pub(super) fn reference_word_operand_error(
 ) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: type mismatch in {name} (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
             span.line,
-            effect_str(effect),
-        ),
+            effect_str(effect), name = crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected {expected}, found `{found}`")
         }
@@ -1680,7 +1672,6 @@ mod tests {
         }];
         fn ctx<'a>(effect: &'a StackEffect, modules: Option<&'a [ModuleInfo]>) -> Ctx<'a> {
             Ctx::Word {
-                name: "w".into(),
                 mangled: "w",
                 effect,
                 structs: &[],

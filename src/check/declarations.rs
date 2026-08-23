@@ -1927,12 +1927,12 @@ pub fn check_no_word_shadows_eliminator(
         );
         if let Some(word) = words.iter().find(|w| {
             w.module == enum_decl.module
-                && crate::resolve::demangle_word(&w.name).as_ref() == eliminator_name
+                && crate::resolve::demangle_word(&w.name) == eliminator_name
         }) {
             return Err(word_shadows_eliminator_error(
                 &eliminator_name,
                 word_span(word),
-                &crate::resolve::demangle_word(generic_surface_name(&enum_decl.name)),
+                crate::resolve::demangle_word(generic_surface_name(&enum_decl.name)),
             ));
         }
     }

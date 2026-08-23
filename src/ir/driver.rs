@@ -105,7 +105,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .iter()
         .enumerate()
         .filter(|(idx, w)| {
-            crate::check::is_builtin_operator_name(&crate::resolve::demangle_word(&w.name))
+            crate::check::is_builtin_operator_name(crate::resolve::demangle_word(&w.name))
                 && !called.contains(w.name.as_str())
                 && !module
                     .builtin_overloads

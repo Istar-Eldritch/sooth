@@ -97,9 +97,9 @@ pub(super) fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> S
 /// is *deferred* (unimplemented, might land later); a `~` capture is *banned*
 /// (materialization is exactly what `~` forbids, permanently).
 fn captured_inline_quotation_error(ctx: &Ctx, span: Span) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
+    let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: a `~` quotation cannot be captured in `{where_}` (line {})",
+        "error: a `~` quotation cannot be captured in {where_} (line {})",
         span.line,
     )
 }
