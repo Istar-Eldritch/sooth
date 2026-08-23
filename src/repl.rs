@@ -1602,8 +1602,7 @@ impl Session {
             }
             // R8 (slice 3r): `impl:`/`trait:` are wired only through
             // `assemble_module`, so without this guard they fall through to
-            // the term loop and report an unrelated "unexpected token
-            // Semicolon" error instead of a located rejection.
+            // the term loop and report an unrelated parse error.
             if w == "impl:" {
                 return Err(format!(
                     "error: `impl:` has no meaning at the REPL (line {}, col {})\n  note: a live session has no module to attach a trait implementation to",
@@ -4913,7 +4912,11 @@ mod tests {
             .eval_line("impl: Order for Point : cmp | a b | a b ; ;", &mut out)
             .unwrap_err();
         assert!(
-            err.contains("`impl:` has no meaning at the REPL") && err.contains("col 1"),
+            err.contains("`impl:` has no meaning at the REPL")
+                && err.contains("col 1")
+                && err.contains(
+                    "note: a live session has no module to attach a trait implementation to"
+                ),
             "unexpected message: {err}"
         );
     }
@@ -4926,7 +4929,9 @@ mod tests {
             .eval_line("trait: Order 'T cmp ( &'T &'T -- Ordering ) ;", &mut out)
             .unwrap_err();
         assert!(
-            err.contains("`trait:` has no meaning at the REPL") && err.contains("col 1"),
+            err.contains("`trait:` has no meaning at the REPL")
+                && err.contains("col 1")
+                && err.contains("note: a live session declares no trait to satisfy"),
             "unexpected message: {err}"
         );
     }
