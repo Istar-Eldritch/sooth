@@ -571,6 +571,26 @@ the *rejection happens and is located inside the impl body*, whereas Phase 2 ass
 Exit: the whole suite green with the binding form gone; `grep` finds no `member word`
 binding syntax in any `.sth` or fixture; the deleted guards' names no longer exist.
 
+Two findings from the Phase 3 review land here rather than in Phase 3 itself:
+
+- **R15's `trait_calls` conjunct in `uncalled_operator_overloads`
+  (`src/ir/driver.rs:114-121`) is now dead.** It existed only for the binding form,
+  where a bound operator-named word (e.g. `show int-show`) never appeared as a literal
+  `Call` anywhere, so pruning had to consult `trait_calls` to see it was reachable.
+  Every body-form member is a real `Call` in source, so `called` already covers it; the
+  conjunct's own tests (`an_operator_named_impl_member_reached_only_by_a_bound_is_not_pruned`,
+  `an_impl_member_named_after_a_builtin_operator_survives_pruning`) still pass today only
+  because the binding form they depend on has not been deleted yet. Once this phase
+  removes the binding branch, mutation-test the conjunct (delete it, confirm the suite
+  stays green) before removing it: if a body-form scenario is later found that still
+  needs it, keep it and add that fixture instead.
+- **`a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol`
+  (`src/driver.rs:2383`) has no body-form equivalent and is deleted, not migrated.**
+  It exists to discriminate a `$$N`-suffixed overload symbol from a plain one; under the
+  body form every member's synthesized name is the unforgeable `member;Trait;mid;Type`,
+  which is never `$$`-suffixed, so the scenario cannot recur. Delete it alongside the
+  other Phase-4-classified fixtures; no replacement golden is needed.
+
 ### Phase 5 — REPL located rejection for `impl:` / `trait:` (R8)
 
 In `eval_line` (`src/repl.rs`, the first-token guard block beside the `export:` rejection),

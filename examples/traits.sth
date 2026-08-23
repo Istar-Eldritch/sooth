@@ -1,6 +1,7 @@
 \ User-declarable trait bounds (P7.S3e). A trait lists required member
-\ signatures, one type variable per trait; `impl:` binds a type's concrete
-\ words to those members. A poly word can then require a bound (`'T: Order`)
+\ signatures, one type variable per trait; `impl:` gives a type its own
+\ member bodies, each inheriting its signature from the trait. A poly word
+\ can then require a bound (`'T: Order`)
 \ instead of hardcoding one type, and each required member dispatches to the
 \ caller's own `impl:` at monomorphization -- an ordinary word call resolved
 \ per instantiation, never a runtime vtable.

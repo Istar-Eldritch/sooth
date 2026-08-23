@@ -204,8 +204,7 @@ fn sandwiched_receiver_no_longer_silently_mis_dispatches() {
         "type: Point x i64 y i64 ;\n\
          trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
          impl: Show for Point\n\
-           : at | p n | n drop p &x @ ;
-\
+           : at | p n | n drop p &x @ ;\n\
          ;\n\
          : at ( i64 -- i64 ) 900 add ;\n\
          : uses ( &'T: Show -- i64 ) 0 at | v | drop v ;\n\
@@ -283,16 +282,16 @@ fn local_trait_collides_with_a_selectively_imported_one() {
     );
 }
 
-/// `impl: Show for i64  show int-show ;` validates and registers when
-/// `int-show` is concrete and its signature matches the trait's declared
-/// member.
+/// `impl: Show for i64  : show int-show ;` validates and builds when the
+/// member body's own effect matches the trait's declared signature.
 #[test]
-fn impl_binding_validates_and_builds() {
+fn impl_body_validates_and_builds() {
     let (_t, entry) = single_file(
         "impl-ok",
         "trait: Show 'T show ( &'T -- ) ;\n\
-         : int-show ( &i64 -- ) drop ;\n\
-         impl: Show for i64  show int-show ;\n\
+         impl: Show for i64\n\
+           : show | p | p drop ;\n\
+         ;\n\
          : main ( -- ) ;\n",
     );
     build_ok(&entry);

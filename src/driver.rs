@@ -2363,11 +2363,11 @@ mod tests {
             .flat_map(|i| i.trait_calls.values())
             .collect();
         let symbols = crate::ast::overload_symbols(&module.words);
-        let expected = symbols
-            .iter()
-            .find(|sym| sym.starts_with("show;Show;"))
-            .expect("the impl member lowers under its own symbol");
-        assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
+        assert!(
+            symbols.contains(&"show;Show;1;Point__m0".to_string()),
+            "symbols: {symbols:?}"
+        );
+        assert_eq!(resolved, vec![&"show;Show;1;Point__m0".to_string()]);
     }
 
     /// The discriminating half the test above cannot reach: it names an
