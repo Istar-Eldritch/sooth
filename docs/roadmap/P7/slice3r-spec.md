@@ -317,8 +317,10 @@ Recon (dogfood §B): 2 real `.sth` declarations (`examples/traits.sth:55,56`), 0
     migrates to a forwarding body `: get | a b | a b max ;`. Probed at `5338c06`: this
     builds, runs, and keeps `max__m0` in the symbol table, called from the synthesized
     member. Its assertion changes from "the member's own call symbol is `max`" to "`max`
-    survives pruning as a symbol called from the synthesized `get;Getter;Pt`"; the pruning
-    concern is still probed and its subject is unchanged.
+    resolves to the local overload and keeps its body, called from the synthesized
+    `get;Getter;Pt`". The **pruning** concern does not survive the migration: a forwarding
+    body spells `max` as a literal term, so `called_names` covers it and R15's `trait_calls`
+    conjunct stops being load-bearing (see Phase 4).
   - `tests/phase7_slice3e.rs:559` (member `show ( &'T -- i64 )`, word `: max ( &Pt -- i64 )`)
     **cannot use a forwarding body at all.** A one-input word named `max` is unreachable by
     name anywhere: the call resolves to the two-input builtin, probed at `5338c06` as
@@ -574,16 +576,19 @@ binding syntax in any `.sth` or fixture; the deleted guards' names no longer exi
 Two findings from the Phase 3 review land here rather than in Phase 3 itself:
 
 - **R15's `trait_calls` conjunct in `uncalled_operator_overloads`
-  (`src/ir/driver.rs:114-121`) is now dead.** It existed only for the binding form,
-  where a bound operator-named word (e.g. `show int-show`) never appeared as a literal
-  `Call` anywhere, so pruning had to consult `trait_calls` to see it was reachable.
-  Every body-form member is a real `Call` in source, so `called` already covers it; the
-  conjunct's own tests (`an_operator_named_impl_member_reached_only_by_a_bound_is_not_pruned`,
-  `an_impl_member_named_after_a_builtin_operator_survives_pruning`) still pass today only
-  because the binding form they depend on has not been deleted yet. Once this phase
-  removes the binding branch, mutation-test the conjunct (delete it, confirm the suite
-  stays green) before removing it: if a body-form scenario is later found that still
-  needs it, keep it and add that fixture instead.
+  (`src/ir/driver.rs:114-121`) is already dead as of Phase 3.** It existed only for the
+  binding form, where a bound operator-named word (e.g. `show int-show`) never appeared as a
+  literal `Call` anywhere, so pruning had to consult `trait_calls` to see it was reachable.
+  Every body-form member is a real `Call` in source, so `called` already covers it. Both of
+  the conjunct's former tests were migrated to the body form in Phase 3 and neither covers it
+  any more: `an_impl_body_members_operator_named_call_resolves_to_the_local_overload`
+  (`src/ir/driver.rs`, renamed from `..._reached_only_by_a_bound_is_not_pruned`) now pins
+  overload *resolution*, and `an_impl_body_member_returning_a_field_builds_and_runs`
+  (`tests/phase7_slice3e.rs`, renamed from
+  `an_impl_member_named_after_a_builtin_operator_survives_pruning`) inlined its member and
+  dropped the operator-spelled word entirely. Mutation-tested at Phase 3's HEAD: deleting the
+  conjunct leaves the suite green. Delete it in this phase; if a body-form scenario is later
+  found that still needs it, keep it and add that fixture instead.
 - **`a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol`
   (`src/driver.rs:2383`) has no body-form equivalent and is deleted, not migrated.**
   It exists to discriminate a `$$N`-suffixed overload symbol from a plain one; under the

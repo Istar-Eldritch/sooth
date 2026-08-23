@@ -3589,7 +3589,7 @@ mod tests {
     }
 
     #[test]
-    fn check_impl_decls_ok_for_a_matching_binding() {
+    fn check_impl_decls_ok_for_a_matching_member_body() {
         impl_check_src(
             "trait: Show 'T show ( &'T -- ) ;\n\
              impl: Show for i64\n\

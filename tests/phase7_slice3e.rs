@@ -282,8 +282,8 @@ fn local_trait_collides_with_a_selectively_imported_one() {
     );
 }
 
-/// `impl: Show for i64  : show int-show ;` validates and builds when the
-/// member body's own effect matches the trait's declared signature.
+/// An `impl:` block validates and builds when its member body's own effect
+/// matches the trait's declared signature.
 #[test]
 fn impl_body_validates_and_builds() {
     let (_t, entry) = single_file(
@@ -315,7 +315,7 @@ fn impl_binding_a_polymorphic_word_is_rejected_at_the_impl_site() {
 
 /// A missing required member is a located rejection naming it.
 #[test]
-fn impl_binding_missing_a_required_member_is_rejected() {
+fn impl_missing_a_required_member_is_rejected() {
     let (_t, entry) = single_file(
         "impl-missing-member",
         "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\

@@ -1619,15 +1619,18 @@ mod tests {
         );
     }
 
-    /// P7.S3e phase 4 (R15): the IR-level twin of the pruning golden. An
-    /// implementing word named after a builtin operator, reachable *only*
-    /// through a bound (no term anywhere spells `max`), must survive
-    /// `uncalled_operator_overloads` -- which without R15's `trait_calls`
-    /// clause would count it uncalled and drop its body from the module.
-    /// Its arity matches the builtin `max`'s: the unit harness does not
-    /// mangle, so a disagreeing overload is rejected before lowering.
+    /// A synthesized impl-body member whose body calls a word named after a
+    /// builtin operator (`max`): the call resolves to the local overload
+    /// rather than the builtin, through `scoped_operator_overloads`' mangled
+    /// candidate key, and that overload keeps its own body in the module. The
+    /// overload's arity matches the builtin `max`'s, so the two agree.
+    ///
+    /// This no longer covers R15's `trait_calls` conjunct in
+    /// `uncalled_operator_overloads`. The forwarding body spells `max` as a
+    /// literal term, so `called_names` alone spares the overload; deleting the
+    /// conjunct leaves the suite green. Removing it is the spec's Phase 4 item.
     #[test]
-    fn an_operator_named_impl_member_reached_only_by_a_bound_is_not_pruned() {
+    fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_trait_prepasses(
             "trait: Getter 'T get ( &'T &'T -- i64 ) ;\n\
              type: Pt n i64 ;\n\
