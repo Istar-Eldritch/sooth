@@ -4950,6 +4950,30 @@ mod tests {
         }
     }
 
+    /// P7.S3k (review fix): `eval_poly_def` passes an empty callee registry
+    /// on purpose (see its own comment above `check::CrossCtx` in
+    /// `eval_poly_def`) -- session lowering has no composition step for a
+    /// cross-call's substitution, so grounding it here would check clean and
+    /// then mis-lower rather than reject cleanly. Pins the deliberate
+    /// `unknown word` outcome so a future implementer who "finishes the
+    /// thread-through" by swapping in `self.poly_env()` gets a failing test
+    /// instead of a green suite and a panic
+    /// (`self.env.get(name).expect("checked user word exists")`,
+    /// `calls.rs:725`) the first time a session line actually runs one.
+    #[test]
+    fn repl_poly_word_calling_another_poly_word_is_unknown_word_not_grounded() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line(": id ( 'T -- 'T ) ;", &mut out).unwrap();
+        let err = session
+            .eval_line(": g ( 'T -- 'T ) id ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("unknown word `id`"),
+            "unexpected message: {err}"
+        );
+    }
+
     #[test]
     fn repl_self_recursive_drop_overload_is_a_located_error_not_a_crash() {
         // Blocker 1: `check_def` alone only validates this override's body in

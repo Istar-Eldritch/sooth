@@ -464,7 +464,7 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
 
 **Difficulty:** hard (new cross-signature mechanism + diagnostic surface).
 
-### Delivered, with four deviations from the plan above
+### Delivered, with five deviations from the plan above
 
 1. **A fifth diagnostic, `poly_cross_call_unsupported_error`.** The plan named
    three new diagnostics; a fourth is needed for the callee-signature shapes a
@@ -474,7 +474,11 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
    space `Image` does not model), a **user trait bound** (see phase 2 finding 3),
    and a compound *output* (`( 'U -- Box['U] )`). It is not the deleted
    whole-feature narrowing under a new name -- it fires for five named declared
-   shapes, and each names itself. All five are reachable from source and pinned.
+   shapes, and each names itself. All five are reachable from source; **review
+   fix:** the row shape was reachable but pinned by nothing (this section's
+   original "all five ... pinned" was false for it) -- fixed by
+   `check_cross_call_unsupported_callee_shapes_name_themselves`'s fourth
+   table entry, mutation-tested by deleting the row gate.
 
 2. **Compound outputs are rejected, symmetrically with R6.** A declared
    compound always mentions a variable (a fully concrete one folds to
@@ -501,12 +505,34 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
    exit-criterion program of P7.S3b-follow, whose per-iteration `gt` cannot be
    hoisted to a monomorphic caller -- is un-`#[ignore]`d with its two goldens.
 
+5. **Review fix: R6's wildcard over-rejected a fully concrete compound
+   image as growth.** `poly_cross_match`'s `Var` arm sent every `Ref`/`Array`/
+   `Generic` supplied type to `poly_growing_cross_call_error`, including one
+   that mentions no caller variable at all (`&n` on a scalar `static n`,
+   which is `&i64`, fully concrete) -- contradicting R6's own rule ("reject
+   only a compound image that *mentions* a caller variable"). Root cause:
+   folding such an image into `Image::Concrete(Type)` would have to mint a
+   fresh `RefId`/`ArrayId`, and the poly-body walk holds no mutable
+   array/ref registry to do that with (only `structs`/`enums` get a mutable
+   path, via `ctx.generics()`'s `RefCell`). Fixed narrowly: a new predicate
+   (`poly_type_mentions_caller_var`) distinguishes the two cases, so a fully
+   concrete image now gets the honest `poly_cross_call_unsupported_error`
+   ("passing the concrete compound value `&i64`") instead of the false
+   growth claim; the growing case is unchanged. This does **not** make the
+   call succeed -- R6's accept case ("a fully-concrete image at any depth
+   ... is allowed") is still not actually implemented, only honestly
+   rejected. See phase 2 finding 5 for the real fix.
+
 The REPL deliberately keeps today's behaviour: it passes an empty registry, so
 a session line calling another polymorphic word still gets `unknown word`.
 REPL lowering resolves an instantiation through its own per-generation store
 and nothing composes a cross-call's substitution into it, so grounding the call
 there would check clean and then mis-lower -- worse than a clean rejection.
 Lifting it needs the REPL's own composition step, not just the thread-through.
+**Review fix:** this was undocumented as deliberate-but-untested; pinned by
+`repl_poly_word_calling_another_poly_word_is_unknown_word_not_grounded`
+(mutation-tested by swapping in `self.poly_env()`, which the test now catches
+before it becomes the `calls.rs:725` panic a real session would otherwise hit).
 
 ## Phase 2 — Check-time transitive fixpoint + thin routing consequence + regression
 
@@ -621,6 +647,22 @@ by all existing instantiation lowering; N2 is the load-bearing risk).
    slice is not delivered until a non-inline generic callee is monomorphized.
    Phase 2 updates it, and states the residual narrowings (deviation 1) rather
    than declaring the whole gap closed.
+
+5. **R6's accept case (a fully concrete compound image) is still only
+   honestly rejected, not implemented (deviation 5 above).** The real fix
+   needs `Image` to carry a ground-but-uninterned shape through to a point
+   that holds a mutable array/ref registry -- which phase 2's fixpoint
+   already does, at `check.rs`, via the same `apply_subst` it composes θ_h
+   with. This is **not** in phase 2's scope as specified above (which reads
+   `Image` as exactly `Concrete(Type) | CallerVar(u32)` and never revisits a
+   rejected mapping), so lifting it means either widening `Image` with a
+   third, ground-but-uninterned variant that phase 2's fixpoint interns
+   lazily, or -- equivalently -- threading a `refs`/`arrays` `RefCell` into
+   `Ctx` the way `generics()` already is, so phase 1 itself can fold the
+   image and never reject it. Recorded here as a candidate for its own
+   follow-up slice, not phase 2 by default: phase 2's own scope list does not
+   mention `Ctx` or `Image`'s shape, and widening either is a design decision
+   a reviewer should make explicitly, not inherit silently.
 
 ## Phases (JSON)
 

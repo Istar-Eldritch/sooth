@@ -1841,6 +1841,29 @@ fn poly_cross_match(
                         "passing a quotation to a polymorphic word",
                     ))
                 }
+                // R6 fires only when the compound image actually mentions a
+                // caller variable (the caller wrapped its own variable
+                // before handing it in). A fully concrete compound (`&i64`,
+                // built by `&n` on a scalar static, say) mentions none, so
+                // it is not growth -- but folding it into `Image::Concrete`
+                // would have to mint a fresh `RefId`/`ArrayId`, and nothing
+                // in the poly-body walk holds a mutable array/ref registry
+                // to do that with (only `structs`/`enums` get that, via
+                // `ctx.generics()`). Rejected honestly as unsupported rather
+                // than mischaracterized as growth; lifting it needs a
+                // `refs`/`arrays` registry cell threaded into `Ctx` the way
+                // `generics()` already is -- its own slice.
+                _ if !poly_type_mentions_caller_var(supplied) => {
+                    return Err(poly_cross_call_unsupported_error(
+                        ctx,
+                        span,
+                        callee,
+                        &format!(
+                            "passing the concrete compound value `{}`",
+                            poly_type_str(supplied, caller_sig)
+                        ),
+                    ))
+                }
                 // R6: the caller built a larger type over one of its own
                 // variables and handed that in.
                 _ => {
@@ -2002,6 +2025,26 @@ fn poly_cross_signature_supported(
         return unsupported(&format!("discharging the `{trait_name}` bound"));
     }
     Ok(())
+}
+
+/// R6: whether `pt` mentions a caller type variable at any depth --
+/// exactly the predicate that discriminates growth (a compound wrapping a
+/// caller variable) from a fully concrete compound (an `&i64`, say) that
+/// merely cannot yet be folded to `Image::Concrete` for want of a mutable
+/// array/ref registry in the poly-body walk. `QuotLit`/`Quotation` never
+/// reach this: the `Var` arm's match handles them ahead of the wildcard
+/// that calls this.
+fn poly_type_mentions_caller_var(pt: &PolyType) -> bool {
+    match pt {
+        PolyType::Var(_) => true,
+        PolyType::Concrete(_) | PolyType::QuotLit => false,
+        PolyType::Array(elem, _) => poly_type_mentions_caller_var(elem),
+        PolyType::Ref(referent, _) => poly_type_mentions_caller_var(referent),
+        PolyType::Generic { args, .. } => args.iter().any(poly_type_mentions_caller_var),
+        PolyType::Quotation(ins, outs, ..) => {
+            ins.iter().chain(outs).any(poly_type_mentions_caller_var)
+        }
+    }
 }
 
 /// Whether a declared slot mentions a length variable at any depth.
@@ -7951,6 +7994,52 @@ mod tests {
         );
     }
 
+    /// P7.S3k (R6, review fix): a *fully concrete* compound image (`&i64`,
+    /// built by `&n` on a scalar `static`) mentions no caller variable, so it
+    /// is not the growing case -- but folding it into `Image::Concrete` would
+    /// mint a fresh `RefId`, and the poly-body walk holds no mutable ref
+    /// registry to do that with. Pins the honest rejection
+    /// (`poly_cross_call_unsupported_error`) against a regression back to the
+    /// growth diagnostic, which would misdescribe this call as building a
+    /// larger type at every hop when nothing wraps `'T` at all.
+    #[test]
+    fn check_growing_cross_call_concrete_reference_is_unsupported_not_growth() {
+        let err = check_src(
+            "static: n i64 = 0 ;\n\
+             : h ( 'U -- ) drop ;\n\
+             : g ( 'T -- 'T ) &n h ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot call the polymorphic word `h`")
+                && err.contains("passing the concrete compound value `&i64`")
+                && !err.contains("builds a larger type at every hop"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3k (R2, review fix): two generic enums of the same arity (`Box`,
+    /// `Wrap`) are still distinguished by `(is_enum, idx, module)`, not just
+    /// arity -- the guard mutation a reviewer probed (weakening the compare
+    /// to arity-only) makes this silently compose `Wrap`'s variable against
+    /// `Box`'s argument instead of raising the ordinary mismatch below.
+    #[test]
+    fn check_generic_cross_call_same_arity_different_header_is_type_mismatch() {
+        let err = check_src(
+            "type: Box 'T | Box 'T ;\n\
+             type: Wrap 'U | Wrap 'U ;\n\
+             : unwrap ( Wrap['A] -- Wrap['A] ) ;\n\
+             : g ( 'T -- ) Box unwrap drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected `Wrap['A]`") && err.contains("found `Box['T]`"),
+            "unexpected message: {err}"
+        );
+    }
+
     /// P7.S3k (R2, the consistency requirement): one callee variable matched
     /// against two different caller variables cannot be one type at any
     /// instantiation. The symbolic twin of `poly_var_conflict_error`, which the
@@ -7971,7 +8060,13 @@ mod tests {
 
     /// P7.S3k: the callee signature shapes a symbolic mapping cannot carry are
     /// each a located rejection naming that shape, not the whole-feature
-    /// narrowing they replaced. All four are reachable from source.
+    /// narrowing they replaced. Four of the five are pinned here (review
+    /// fix: the row case was missing, contradicting the deviations doc's
+    /// claim that it was already pinned); the fifth, a declared quotation
+    /// parameter, is pinned separately by
+    /// `poly_quotlit_against_legal_inline_quotation_param_rejects_at_the_cross_call`,
+    /// which needs a `~[ ]` fixture this table's plain `check_src` shape
+    /// cannot build.
     #[test]
     fn check_cross_call_unsupported_callee_shapes_name_themselves() {
         for (fixture, what) in [
@@ -7990,6 +8085,11 @@ mod tests {
                 ": shows ( &'U: Show -- ) show ;\n\
                  : g ( &'T: Show -- ) shows ;\n: main ( -- ) ;\n",
                 "discharging the `Show` bound",
+            ),
+            (
+                ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+                 : g ( 'T: Copy -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
+                "calling a row-polymorphic word",
             ),
         ] {
             let src = format!("{SHOW}{fixture}");
