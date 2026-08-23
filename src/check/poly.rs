@@ -5749,6 +5749,37 @@ mod tests {
         assert_eq!(sites[1].1, vec![6], "{sites:?}");
     }
 
+    /// R8: two distinct bound variables on one word, each obligated to a
+    /// different trait, both resolved in one call. `resolve_user_bound`'s
+    /// `.filter(|o| o.trait_id == trait_id && o.var == v)` is what keeps them
+    /// apart -- without it, `A`'s bound loop would also see `B`'s obligation
+    /// (and vice versa) and either resolve it against the wrong `impl:` or
+    /// double-resolve one span.
+    #[test]
+    fn two_bounds_on_distinct_variables_each_resolve_their_own_obligation() {
+        let (module, _) = checked_like_a_build(
+            "type: PA n i64 ;\n\
+             type: PB n i64 ;\n\
+             trait: A 'T ta ( &'T -- ) ;\n\
+             trait: B 'T tb ( &'T -- ) ;\n\
+             : p-a ( &PA -- ) drop ;\n\
+             : p-b ( &PB -- ) drop ;\n\
+             impl: A for PA  ta p-a ;\n\
+             impl: B for PB  tb p-b ;\n\
+             : f ( &'T: A &'U: B -- ) tb ta ;\n\
+             : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
+        )
+        .expect("the fixture checks");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f")
+            .expect("the call site recorded an instantiation");
+        let mut resolved: Vec<&str> = inst.trait_calls.values().map(String::as_str).collect();
+        resolved.sort();
+        assert_eq!(resolved, vec!["p-a", "p-b"]);
+    }
+
     /// R8: the concrete type a bounded variable was instantiated with has no
     /// `impl:` for the trait the bound names.
     #[test]

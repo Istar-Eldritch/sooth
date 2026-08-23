@@ -2239,4 +2239,40 @@ mod tests {
         assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
         assert_eq!(expected, "point-show__m0");
     }
+
+    /// The discriminating half the test above cannot reach: it names an
+    /// unoverloaded impl member, so its plain name and its lowering symbol
+    /// coincide, and a resolution keyed on either reads the same value. Here
+    /// the bound member shares its name with another `point-show` overload
+    /// (a distinct signature, over `Other`, so the two coexist), which forces
+    /// `overload_symbols` to suffix both -- `point-show$$0`/`point-show$$1`,
+    /// in declaration order. A resolution keyed on the raw name would record
+    /// `point-show`, which lowering never mints; only the `$$0`-suffixed
+    /// symbol is real.
+    #[test]
+    fn a_resolved_trait_call_carries_the_overloaded_members_suffixed_symbol() {
+        let s = Sandbox::new("bound-symbol-overloaded");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             type: Point x i64 y i64 ;\n\
+             type: Other n i64 ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             : point-show ( &Other -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the bound is satisfied");
+        let resolved: Vec<&String> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows__m0")
+            .flat_map(|i| i.trait_calls.values())
+            .collect();
+        assert_eq!(resolved, vec![&"point-show__m0$$0".to_string()]);
+    }
 }
