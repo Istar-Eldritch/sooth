@@ -503,13 +503,33 @@ fn impl_body_wrong_effect_names_readable_member() {
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
-    assert!(
-        err.contains("`cmp` (member of trait `Order` for `Point`)"),
-        "{err}"
+    assert_eq!(
+        err,
+        "error: error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
     );
-    assert!(
-        !err.contains("cmp;Order"),
-        "the raw synthesized delimiter spelling must never leak into a diagnostic; {err}"
+}
+
+/// R3 (Phase 2), the type-mismatch sibling of the arity golden above: a body
+/// that leaves the declared *count* of outputs but the wrong *type* is the
+/// closest analogue of the retired signature-mismatch class, and its message
+/// must render the member readably too, not just the arity variant.
+#[test]
+fn impl_body_wrong_effect_type_names_readable_member() {
+    let (_t, entry) = program(
+        "wrong-effect-type",
+        "import: intrinsics * ;\n\
+         type: Ordering | Less | Equal | Greater ;\n\
+         type: Point x i64 y i64 ;\n\
+         trait: Order 'T cmp ( &'T &'T -- Ordering ) ;\n\
+         impl: Order for Point\n\
+           : cmp | a b | a drop b drop 0 ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: error: type mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves `i64` where the declaration requires `Ordering`\n  note: declared ( &Point &Point -- Ordering )\n"
     );
 }
 

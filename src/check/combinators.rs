@@ -291,14 +291,10 @@ fn find_combinator_cycle(
 fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
     let mut chain: Vec<std::borrow::Cow<str>> = cycle
         .iter()
-        .map(|&i| crate::resolve::demangle_word(members[i].word.name.as_str()))
+        .map(|&i| crate::resolve::render_word(members[i].word.name.as_str()))
         .collect();
     chain.push(chain[0].clone());
-    let rendered = chain
-        .iter()
-        .map(|n| format!("`{n}`"))
-        .collect::<Vec<_>>()
-        .join(" -> ");
+    let rendered = chain.join(" -> ");
     let span = word_span(members[cycle[0]].word);
     format!(
         "error: an always-spliced word cannot be recursive (the inliner would splice it forever): {} (line {}, col {})",

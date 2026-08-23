@@ -512,14 +512,10 @@ fn find_tail_cycle(
 fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     let mut chain: Vec<std::borrow::Cow<str>> = cycle
         .iter()
-        .map(|&i| crate::resolve::demangle_word(words[i].name.as_str()))
+        .map(|&i| crate::resolve::render_word(words[i].name.as_str()))
         .collect();
     chain.push(chain[0].clone());
-    let rendered = chain
-        .iter()
-        .map(|n| format!("`{n}`"))
-        .collect::<Vec<_>>()
-        .join(" -> ");
+    let rendered = chain.join(" -> ");
     let span = word_span(&words[cycle[0]]);
     format!(
         "error: mutual tail recursion {} (line {}, col {})",

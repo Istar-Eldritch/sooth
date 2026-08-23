@@ -95,18 +95,23 @@ fn is_operator_dispatch_name(name: &str) -> bool {
     )
 }
 
-/// Recover a word's source spelling for a *diagnostic*: strip the single
-/// trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`), then, if
-/// what remains is a P7.S3r synthesized impl-member name (`member;Trait;Type`,
-/// R3), render it back to a form the user can read: `` `cmp` (member of trait
-/// `Order` for `Point`) ``. `;` is a hard lexer delimiter, so a name with that
-/// shape is never anything a user wrote by hand. A user diagnostic must never
-/// show the compiler-internal mangled or synthesized spelling; it shows what
-/// the author wrote, or what they would recognize. Lookups keep using the
-/// mangled/synthesized name, only the rendered string changes. `main`/`drop`
-/// are never mangled and pass through unchanged, as does any name `mangle`
-/// never touched. Kept beside `mangle` so the two stay in step.
-pub(crate) fn demangle_word(name: &str) -> std::borrow::Cow<'_, str> {
+/// The three components a `;`-delimited synthesized impl-member name splits
+/// into for rendering (module id dropped, R3), or a plain name untouched.
+enum Demangled<'a> {
+    Plain(&'a str),
+    ImplMember {
+        member: &'a str,
+        trait_name: &'a str,
+        type_name: &'a str,
+    },
+}
+
+/// Strip the single trailing `__m{digits}` group `mangle` appended (`w__m0`
+/// -> `w`), then split a P7.S3r synthesized impl-member name
+/// (`member;Trait;module;Type`) into its renderable parts. `;` is a hard
+/// lexer delimiter, so a name with that shape is never anything a user wrote
+/// by hand.
+fn split_demangled(name: &str) -> Demangled<'_> {
     let stripped = match name.rfind("__m") {
         Some(idx) => {
             let digits = &name[idx + "__m".len()..];
@@ -123,12 +128,55 @@ pub(crate) fn demangle_word(name: &str) -> std::borrow::Cow<'_, str> {
     // traits from different modules), but it is compiler bookkeeping, not
     // something the user wrote or needs to read back.
     let parts: Vec<&str> = stripped.split(';').collect();
-    if let [member, trait_name, _trait_module, type_name] = parts[..] {
-        return std::borrow::Cow::Owned(format!(
-            "`{member}` (member of trait `{trait_name}` for `{type_name}`)"
-        ));
+    match parts[..] {
+        [member, trait_name, _trait_module, type_name] => Demangled::ImplMember {
+            member,
+            trait_name,
+            type_name,
+        },
+        _ => Demangled::Plain(stripped),
     }
-    std::borrow::Cow::Borrowed(stripped)
+}
+
+/// Recover a word's source spelling for a *comparison* or *lookup*: the bare
+/// demangled name, undecorated, so equality against a surface spelling
+/// (an eliminator name, an operator name) still holds. A user-facing
+/// diagnostic must use `render_word` instead -- this form drops the
+/// backtick delimiters a synthesized impl-member render needs, so wrapping
+/// its result in a template's own backticks would double them up. `main`/
+/// `drop` are never mangled and pass through unchanged, as does any name
+/// `mangle` never touched. Kept beside `mangle` so the two stay in step.
+pub(crate) fn demangle_word(name: &str) -> std::borrow::Cow<'_, str> {
+    match split_demangled(name) {
+        Demangled::Plain(s) => std::borrow::Cow::Borrowed(s),
+        Demangled::ImplMember {
+            member,
+            trait_name,
+            type_name,
+        } => std::borrow::Cow::Owned(format!(
+            "{member} (member of trait {trait_name} for {type_name})"
+        )),
+    }
+}
+
+/// Recover a word's source spelling for a *diagnostic*: the fully delimited
+/// display form. A plain name is wrapped in backticks (`` `push` ``); a
+/// P7.S3r synthesized impl-member name renders to a form the user can read,
+/// with its own delimiters already in place: `` `cmp` (member of trait
+/// `Order` for `Point`) ``. A caller must print this bare -- it must never
+/// wrap the result in another pair of backticks. Lookups keep using the
+/// mangled/synthesized name; only the rendered string changes.
+pub(crate) fn render_word(name: &str) -> std::borrow::Cow<'_, str> {
+    match split_demangled(name) {
+        Demangled::Plain(s) => std::borrow::Cow::Owned(format!("`{s}`")),
+        Demangled::ImplMember {
+            member,
+            trait_name,
+            type_name,
+        } => std::borrow::Cow::Owned(format!(
+            "`{member}` (member of trait `{trait_name}` for `{type_name}`)"
+        )),
+    }
 }
 
 /// `demangle_word` for a *call* name, which may carry one remaining
@@ -147,6 +195,28 @@ pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(name);
     }
     std::borrow::Cow::Owned(format!("{demangled}{suffix}"))
+}
+
+/// `render_word` for a *call* name; the display counterpart of
+/// `demangle_call`, for the same trailing `>`/`?` suffix.
+pub(crate) fn render_call(name: &str) -> std::borrow::Cow<'_, str> {
+    let Some(head) = name.strip_suffix('>').or_else(|| name.strip_suffix('?')) else {
+        return render_word(name);
+    };
+    let suffix = &name[head.len()..];
+    match split_demangled(head) {
+        Demangled::Plain(s) if s.len() == head.len() => {
+            std::borrow::Cow::Owned(format!("`{name}`"))
+        }
+        Demangled::Plain(s) => std::borrow::Cow::Owned(format!("`{s}{suffix}`")),
+        Demangled::ImplMember {
+            member,
+            trait_name,
+            type_name,
+        } => std::borrow::Cow::Owned(format!(
+            "`{member}{suffix}` (member of trait `{trait_name}` for `{type_name}`)"
+        )),
+    }
 }
 
 /// Split a leading reference sigil (`&!`/`&`) off a call name, so `rewrite`
@@ -797,21 +867,36 @@ mod tests {
         assert_eq!(split_destructure_suffix("Shape?"), ("Shape", "?"));
     }
 
-    /// P7.S3r phase 2 (R3): a synthesized impl-member name renders back to a
-    /// form the user can read, module-id component dropped; an ordinary name
-    /// (with or without `;`-free mangling) is unaffected.
+    /// P7.S3r phase 2 (R3): a synthesized impl-member name demangles to the
+    /// bare, undecorated form for comparison/lookup, module-id component
+    /// dropped; an ordinary name (with or without `;`-free mangling) is
+    /// unaffected.
     #[test]
-    fn demangle_word_renders_a_synthesized_impl_member_name() {
+    fn demangle_word_strips_a_synthesized_impl_member_name_bare() {
         assert_eq!(
             demangle_word("cmp;Order;0;Point__m0"),
-            "`cmp` (member of trait `Order` for `Point`)"
+            "cmp (member of trait Order for Point)"
         );
         assert_eq!(
             demangle_word("cmp;Order;0;Point"),
-            "`cmp` (member of trait `Order` for `Point`)"
+            "cmp (member of trait Order for Point)"
         );
         assert_eq!(demangle_word("push__m1"), "push");
         assert_eq!(demangle_word("push"), "push");
+    }
+
+    /// The display counterpart: a synthesized impl-member name renders with
+    /// its own backtick delimiters already in place, so a caller must print
+    /// it bare rather than wrapping it in another pair; an ordinary name is
+    /// wrapped in a single pair.
+    #[test]
+    fn render_word_delimits_a_synthesized_impl_member_name() {
+        assert_eq!(
+            render_word("cmp;Order;0;Point__m0"),
+            "`cmp` (member of trait `Order` for `Point`)"
+        );
+        assert_eq!(render_word("push__m1"), "`push`");
+        assert_eq!(render_word("push"), "`push`");
     }
 
     #[test]

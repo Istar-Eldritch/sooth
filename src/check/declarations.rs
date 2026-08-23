@@ -1249,8 +1249,8 @@ pub(super) fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String
         {
             let first = *first;
             return Err(format!(
-                "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
-                crate::resolve::demangle_word(&word.name),
+                "error: duplicate word {} (line {}, col {}); first defined at line {}, col {}",
+                crate::resolve::render_word(&word.name),
                 span.line,
                 span.col,
                 first.line,
@@ -1307,8 +1307,8 @@ fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) 
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "error: overload of `{}` (line {}, col {}) has the same input types ({}) as a builtin",
-        crate::resolve::demangle_word(name),
+        "error: overload of {} (line {}, col {}) has the same input types ({}) as a builtin",
+        crate::resolve::render_word(name),
         span.line,
         span.col,
         types
@@ -1321,10 +1321,10 @@ fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) 
 /// candidate may be a builtin, which has no declaration site to cite, so the
 /// message names it rather than locating it.
 fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity: usize) -> String {
-    let name = crate::resolve::demangle_word(name);
+    let name = crate::resolve::render_word(name);
     let plural = |n: usize| if n == 1 { "" } else { "s" };
     format!(
-        "error: overload of `{name}` (line {}, col {}) takes {arity} input{} but another `{name}` takes {other_arity}; all overloads of a name must agree on input count",
+        "error: overload of {name} (line {}, col {}) takes {arity} input{} but another {name} takes {other_arity}; all overloads of a name must agree on input count",
         span.line,
         span.col,
         plural(arity),

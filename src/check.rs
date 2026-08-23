@@ -1330,10 +1330,11 @@ fn check_outputs(
     // of both the arity and type-mismatch routes. On a *matching* count the
     // ordinary mismatch would otherwise fire and leak the `Cstr` placeholder
     // spelling; a quotation cannot be a declared output regardless of count.
+    let name = crate::resolve::render_word(&word.name);
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(format!(
-            "error: `{}` (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
-            word.name, line
+            "error: {name} (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
+            line
         ));
     }
     if final_stack.len() != declared.len() {
@@ -1349,8 +1350,8 @@ fn check_outputs(
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
         return Err(format!(
-            "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
-            crate::resolve::demangle_word(&word.name), line, final_stack.len(), declared.len(), effect_str(&word.effect),
+            "error: stack effect mismatch in {name} (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
+            line, final_stack.len(), declared.len(), effect_str(&word.effect),
         ));
     }
     for (found, want) in final_stack.iter().zip(declared) {
@@ -1358,20 +1359,20 @@ fn check_outputs(
             SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
             SlotMatch::NeedsSizeConversion => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-                    word.name, line, want, want, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
+                    line, want, want, effect_str(&word.effect),
                 ));
             }
             SlotMatch::NeedsStrToCstrConversion => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves `str` where the declaration requires `cstr`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
-                    word.name, line, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves `str` where the declaration requires `cstr`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
+                    line, effect_str(&word.effect),
                 ));
             }
             SlotMatch::Mismatch => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
-                    word.name, line, found.ty, want, effect_str(&word.effect),
+                    "error: type mismatch in {name} (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
+                    line, found.ty, want, effect_str(&word.effect),
                 ));
             }
         }
@@ -1583,8 +1584,8 @@ fn linear_local_out_of_scope_error(
 /// surplus gets its own wording: the fix is disposal, not an extra output slot.
 fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
     format!(
-        "error: linear value left on the stack in `{}` (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
-        crate::resolve::demangle_word(&word.name),
+        "error: linear value left on the stack in {} (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
+        crate::resolve::render_word(&word.name),
         line,
         ty,
         word.effect.outputs.len(),
@@ -2768,9 +2769,9 @@ fn quotation_argument_required_error(
     want: Type,
     found: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: `{word}` expects a quotation `{want}` here, found `{found}`{} (line {})",
+        "error: {word} expects a quotation `{want}` here, found `{found}`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2786,9 +2787,9 @@ fn literal_effect_mismatch_error(
     declared: Type,
     actual: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        "error: the quotation passed to {word} was declared `{declared}` but its body has effect `{actual}`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2807,9 +2808,9 @@ fn ordinary_literal_at_inline_param_error(
     // Phase 6 slice 3 review fix (finding 1): same mid-string mangling as
     // `annotation_parameter_mismatch_error` above -- an eliminator arm's
     // literal-flavour check reaches this with the mangled call name.
-    let word = crate::resolve::demangle_call(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: this argument is an ordinary `[ ... ]` quotation but `{word}` declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
+        "error: this argument is an ordinary `[ ... ]` quotation but {word} declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2826,9 +2827,9 @@ fn inline_literal_at_ordinary_param_error(
     word: &str,
     param: Type,
 ) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: this quotation is inline `~[ ... ]` but `{word}` expects `{param}`, an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
+        "error: this quotation is inline `~[ ... ]` but {word} expects `{param}`, an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2881,9 +2882,9 @@ fn combinator_branch_output_mismatch_rendered(
     // once mangled (`Shape__m0?`) -- `demangle_call` sees through that the
     // same way it already does for a destructure's `>`; an ordinary word name
     // (never carrying either suffix) demangles identically either way.
-    let word = crate::resolve::demangle_call(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {expected}, this one leaves {found}{} (line {})",
+        "error: the quotations passed to {word} leave different stack shapes: an earlier one leaves {expected}, this one leaves {found}{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2892,9 +2893,9 @@ fn combinator_branch_output_mismatch_rendered(
 /// R12: a quotation literal that consumes a linear enclosing local (D3 forbids
 /// a linear capture). Names the local and the enclosing word.
 fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
+        "error: the quotation passed to {word} consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2903,9 +2904,9 @@ fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str
 /// R12: a quotation literal that borrows an enclosing place and leaves the
 /// reference on its row (D3 forbids capturing an enclosing borrow).
 fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_word(word);
     format!(
-        "error: the quotation passed to `{word}` borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
+        "error: the quotation passed to {word} borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -3082,7 +3083,7 @@ fn borrow_mutability(ty: Type, refs: &[RefDecl]) -> Option<bool> {
 /// located error here does.
 fn in_word(ctx: &Ctx) -> String {
     match ctx {
-        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Word { mangled, .. } => format!(" in {}", crate::resolve::render_word(mangled)),
         Ctx::Line { .. } => String::new(),
     }
 }
@@ -3109,9 +3110,9 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 /// quotation value is slice 7" parenthetical outright, since 7a/7b gave it a
 /// real runtime representation.
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
-    let word = crate::resolve::demangle_word(word);
+    let word = crate::resolve::render_call(word);
     format!(
-        "error: a quotation cannot be passed to `{word}`; only `call` accepts one{} (line {})",
+        "error: a quotation cannot be passed to {word}; only `call` accepts one{} (line {})",
         in_word(ctx),
         span.line,
     )

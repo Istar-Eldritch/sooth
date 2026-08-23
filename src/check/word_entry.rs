@@ -137,10 +137,10 @@ pub(crate) fn check_inline_quotation_requires_inline(word: &WordDef) -> Result<(
     let Some(param) = param else {
         return Ok(());
     };
-    let name = crate::resolve::demangle_word(&word.name);
+    let name = crate::resolve::render_word(&word.name);
     let span = word.span;
     Err(format!(
-        "error: word `{name}` declares an inline-quotation parameter `{param}` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line {}, col {})",
+        "error: word {name} declares an inline-quotation parameter `{param}` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line {}, col {})",
         span.line, span.col
     ))
 }
@@ -204,8 +204,8 @@ fn check_terms_word(
     if let Some(TermKind::Bind(names)) = terms.first().map(|t| &t.kind) {
         if names.len() > inputs {
             return Err(format!(
-                "error: stack effect mismatch in `{}`\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
-                crate::resolve::demangle_word(&word.name),
+                "error: stack effect mismatch in {}\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
+                crate::resolve::render_word(&word.name),
                 names.len(),
                 inputs,
                 effect_str(&word.effect),
