@@ -807,29 +807,20 @@ admits reaches `substitute_generic_field`'s `unreachable!` (N1).
   the hang.
 
 **Mutation-test R6's ordering and the `Map` test's distinct-`StructId` assertion.**
-Reverting the ordering must hang or fail the cell-cycle tests; collapsing the two
-instantiations onto one `StructId` must fail the `Map` test. "Must hang" is not directly
-executable as a mutation-test instruction: a hang is a timeout, and this repo's
-mutation-testing classifier reads for the literal string `test result: FAILED` in `cargo
-test` output -- a hung process produces neither `FAILED` nor any other terminal `test
-result:` line before the runner itself is killed, so a hang-producing mutation would
-otherwise register as neither caught nor clean, an ambiguous non-result rather than a
-classified one. There is no existing timeout-wrapped test in this repo's suite to mirror
-(grepped for `recv_timeout`/`timeout` across `src/`, none found), so this is new
-machinery, not a borrowed pattern: wrap `cell_wrapped_generic_self_reference_builds_and_
-terminates` and `mutual_cell_wrapped_generic_self_reference_terminates` in a spawned
-thread joined with `recv_timeout` (a channel send from the thread on completion, a
-few-second bound comfortably above the test's real running time), and have the *test*
-fail explicitly with a message naming a timeout (e.g. `panic!("instantiation did not
-terminate within Ns -- ordering regression suspected")`) if the receive times out, rather
-than letting the process hang. The expected failure signature for the mutation-test round
-is then this explicit timeout panic and its `test result: FAILED` line -- not a bare hang
--- so the existing classifier catches it like any other mutation. Note the
-mutation-testing hygiene the repo has been bitten by: commit first, copy `examples/` into
-the scratch tree, never `cp -r` the worktree, and classify on `test result: FAILED`.
+Reverting the ordering must fail the cell-cycle tests; collapsing the two instantiations
+onto one `StructId` must fail the `Map` test. **The failure mode is an abort, not a
+hang** -- measured, not assumed (see "Exit findings"): the recursion is a call chain, so
+reverting the ordering overflows the stack and the process dies with `fatal runtime
+error: stack overflow, aborting`. No timeout machinery is needed, and none would work: a
+watchdog thread joined with `recv_timeout` goes down with the process it is watching.
+What this *does* cost is classification -- an aborted binary prints no terminal `test
+result:` line at all, so the repo's usual `test result: FAILED` classifier scores the
+mutation SURVIVED. Classify these two on the abort string or the runner's exit code
+instead. Note the mutation-testing hygiene the repo has been bitten by: commit first,
+copy `examples/` into the scratch tree, and never `cp -r` the worktree.
 
 **Difficulty:** hard (mutual recursion between substitution and instantiation, a borrow
-restructuring on a shared path, and a hang as the failure mode).
+restructuring on a shared path, and a compiler stack overflow as the failure mode).
 
 ## Phases (JSON)
 
@@ -837,7 +828,62 @@ restructuring on a shared path, and a hang as the failure mode).
 {
   "phases": [
     { "phase": 1, "focus": "Parser: recursive generic struct/enum field-type descent (array, ref, owned-cell, generic-application arms over the header's own type variables), header placeholder self-registration before field parsing, the new PolyType/RawTy owned-cell variant with its whole-crate exhaustive-match audit and parse_poly_slot ^-arm, the located variable-quotation-field rejection, and the declaration-time growing-generic-argument rejection; parser-level tests only, no substitution change", "effort": "L", "difficulty": "hard" },
-    { "phase": 2, "focus": "substitute_generic_field's Array/Ref/Generic/owned-cell arms as a GenericTypes method (with the instantiate_enum borrow fix mirroring instantiate_struct's), the MutRegistries container threaded through instantiate_struct/instantiate_enum and their eight call sites including the resolve_type_or_apply borrow restructuring, the mint-and-memo-before-substitute ordering fix (both struct and enum) enabling cell-wrapped self-reference, plus the Map-shaped two-instantiation regression test, the R9 infinite-size and R10 stored-reference diagnostic criteria, the pinned attributeless-variant gap, and timeout-wrapped termination-witness tests for the cell-cycle goldens -- bumped from the brief's \"M\" to \"L\": mutual recursion between substitution and instantiation, an 8+ call-site borrow restructuring, the memo/vector reorder across three parallel vectors for both structs and enums, and new timeout-test machinery this repo has no precedent for", "effort": "L", "difficulty": "hard" }
+    { "phase": 2, "focus": "substitute_generic_field's Array/Ref/Generic/owned-cell arms as a GenericTypes method (with the instantiate_enum borrow fix mirroring instantiate_struct's), the MutRegistries container threaded through instantiate_struct/instantiate_enum and their eight call sites including the resolve_type_or_apply borrow restructuring, the mint-and-memo-before-substitute ordering fix (both struct and enum) enabling cell-wrapped self-reference, plus the Map-shaped two-instantiation regression test, the R9 infinite-size and R10 stored-reference diagnostic criteria, the pinned attributeless-variant gap, and plain (un-wrapped) termination-witness tests for the cell-cycle goldens -- bumped from the brief's \"M\" to \"L\": mutual recursion between substitution and instantiation, an 8+ call-site borrow restructuring, and the memo/vector reorder across three parallel vectors for both structs and enums", "effort": "L", "difficulty": "hard" }
   ]
 }
 ```
+
+## Exit findings (confirmed at implementation)
+
+- **The termination failure mode is an abort, not a hang.** The spec planned timeout
+  machinery around the cell-cycle goldens on the assumption that an ordering regression
+  hangs. Measured by reverting R6's ordering: it does not hang, it overflows the
+  compiler's own stack and aborts (`fatal runtime error: stack overflow`). The machinery
+  was therefore not built, and could not have worked if it had been -- a watchdog thread
+  joined with `recv_timeout` dies with the process it watches. The residual cost is
+  classification only: an aborted test binary emits no terminal `test result:` line, so a
+  `test result: FAILED` classifier scores such a mutation SURVIVED. Both R6 mutations
+  (struct and enum halves) were classified on the abort string instead, and both are
+  caught.
+- **N1 holds, probed rather than assumed.** No field shape phase 1 admits reaches
+  `substitute_generic_field`'s `unreachable!`. The one shape that could -- a quotation
+  naming a type variable -- is rejected by R7 under every wrapper tried: array, owned
+  cell, ref, nested array, generic argument and enum variant.
+- **R8's growth rejection is uniform across headers and kinds.** Beyond the self-naming
+  case the goldens cover, cross-header growth (`A['T]` whose field names `^B[^'T]`) and
+  the enum-side equivalent are both rejected; struct-to-enum and enum-to-struct mutual
+  cell cycles terminate in *either* declaration order. No test covers cross-kind cycles;
+  they were probed directly.
+- **`MutRegistries::names` over the live registries is load-bearing, not defensive.**
+  `type_arg_key` (`src/ast.rs:682`) renders a `Struct`/`Enum` argument from the carried
+  `name` but *indexes* `refs`/`cells`/`arrays` by id, so the throwaway `cells: &[]` /
+  `refs: &[]` view an earlier caller built renders a cell- or ref-payload argument wrong,
+  or panics outright, as soon as one exists to look up.
+- **`src/ast.rs` split signals, re-run (CLAUDE.md's phase-exit check).** The file is ~3,990
+  lines and this phase grew it by ~420. **3 of 5 signals fire.** *Not* firing: import
+  divergence -- the file has **zero** top-level `use` statements, every `std` path is
+  written fully qualified, so there are no imports to diverge; and there is no would-be
+  circular dependency forcing a split (the generics section never names `Module`, while
+  `Module` holds `GenericTypes`, so the dependency runs one way only). Firing: three
+  responsibilities in one module (AST/type definitions, the concrete interning registries,
+  generic substitution/instantiation); high- and low-level code mixed (plain data
+  declarations beside a mutually recursive substituter/instantiator carrying memo-ordering
+  invariants); and functions that never call each other (`alpha_rename_locals`/
+  `rename_terms` and `seed_predicate_traits` never touch the generics machinery).
+  **Decision: defer, but for a weaker reason than `poly.rs`'s.** Unlike `poly.rs`, where
+  both candidate splits were judged actively wrong, the `ast/generics.rs` split here is
+  available and clean: `GenericStructDecl`/`GenericEnumDecl`/`GenericVariantDecl`/
+  `GenericTypes`/`PolyType`/`NameRegistries`/`MutRegistries`/`type_arg_key`/
+  `type_instantiation_name`/`generic_surface_name` move as one unit and depend only
+  downward. It is deferred because it is pure code motion well outside this phase's
+  declared scope, not because it is the wrong cut. **Recommended as its own change**,
+  ahead of P7.S3e, which will grow `GenericTypes` again.
+
+### Recommendations for later work (not this slice)
+
+- **The roadmap's S3n entry is closed out here**
+  (`docs/roadmap/P7-language-prereqs.md`); its "rejects with `unknown type 'T`" claim and
+  its "not yet recon'd" paragraph were both falsified by this slice.
+- **`growing_generic_self_reference_error` renders a doubled `error:` prefix.** The
+  message bakes in `error: ` and `main.rs` re-prefixes. Phase 1's message joining a
+  pre-existing, unowned set across the crate; a sweep, not a drive-by fix here.
