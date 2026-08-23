@@ -784,7 +784,11 @@ admits reaches `substitute_generic_field`'s `unreachable!` (N1).
 - `nested_array_of_ty_var_field_instantiates_to_nested_array`
 - `owned_cell_of_ty_var_field_instantiates_to_concrete_cell`
 - `ref_of_ty_var_field_is_rejected_as_stored_reference` (R10) — asserts the message is
-  `a reference cannot be stored` **and** that it is no longer `unknown type`.
+  `a reference cannot be stored` **and** that it is no longer `unknown type`. Cover the
+  *composite* referent too (`&Ent['K i64]`, a `Ref` over a `Generic`, which phase 1 admits
+  in both its glued and spaced spellings): today it panics at `substitute_generic_field`
+  like the bare `&'T`, so R4's `Ref` arm must recurse into its `Generic` arm rather than
+  each arm only handling a variable payload. A `&'T`-only fixture cannot witness that.
 - `by_value_generic_self_reference_is_infinite_size_error` and
   `array_wrapped_generic_self_reference_is_infinite_size_error` (R9).
 - `cell_wrapped_generic_self_reference_builds_and_terminates` — the R6 memo-ordering

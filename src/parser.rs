@@ -4376,10 +4376,15 @@ impl<'t> Parser<'t> {
                 .is_some_and(|idx| idx < already.1)
     }
 
-    /// Advance past a whole `type:` declaration without parsing it. An
-    /// unterminated one needs no error here: `parse_generic_typedefs` already
-    /// parsed (and would already have rejected) every declaration this is
-    /// called for.
+    /// Advance past a whole `type:` declaration without parsing it.
+    ///
+    /// An unterminated one needs no error here, but for two different reasons
+    /// depending on the caller. `parse_bodies` and the `trait:`/duplicate-header
+    /// arms skip declarations a prior pass has *already* parsed and would
+    /// already have rejected. R2's stage (a), by contrast, skips ahead of any
+    /// field list having been parsed at all -- there the rejection is still
+    /// pending, and comes from stage (b) revisiting the recorded position and
+    /// parsing that list for real.
     fn skip_typedef(&mut self) {
         while let Some((tok, _)) = self.tokens.get(self.pos) {
             let terminator = matches!(tok, Token::Semicolon);
