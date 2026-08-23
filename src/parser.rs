@@ -531,6 +531,7 @@ pub fn parse_bodies(
     imports: &HashMap<String, u32>,
     exports: &[Vec<(String, Span)>],
     selective: &HashMap<String, u32>,
+    type_origin: &[HashMap<String, u32>],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -560,6 +561,7 @@ pub fn parse_bodies(
         imports,
         exports,
         selective,
+        type_origin,
         generics,
         traits,
     };
@@ -634,6 +636,7 @@ pub(crate) fn prepass_generic_typedefs(
         exports,
         selective,
         generics,
+        type_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     parser.parse_generic_typedefs()
@@ -698,6 +701,7 @@ pub(crate) fn prepass_trait_decls(
                 exports,
                 selective,
                 generics,
+                type_origin: &[],
                 // A trait member's own signature can still name a bound
                 // (`'T: Copy`) inside its `( ... )` effect, so this needs the
                 // reserved-predicate table even though it never looks up a
@@ -751,6 +755,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &no_imports,
         &[],
         &no_imports,
+        &[],
         &mut arrays,
         &mut owned_cells,
         &mut refs,
@@ -873,6 +878,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                type_origin: &[],
                 traits: crate::ast::predicate_traits(),
             };
             imports.push(parser.parse_import()?);
@@ -917,6 +923,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                type_origin: &[],
                 traits: crate::ast::predicate_traits(),
             };
             exports.extend(parser.parse_export()?);
@@ -1009,6 +1016,7 @@ pub fn parse_line_with_structs(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        type_origin: &[],
         // P7.S3e (R2): a REPL word def still needs `'T: Copy Ord` to work;
         // a user `trait:` declaration is not yet supported at REPL scope, so
         // the reserved predicate-only table is all this context ever sees.
@@ -1066,6 +1074,7 @@ pub fn parse_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        type_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
@@ -1146,6 +1155,7 @@ pub fn parse_enum_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
         generics: &mut generics,
+        type_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
@@ -1678,6 +1688,16 @@ struct Parser<'t> {
     /// here after the own-module lookup fails (own-module-first, R11). Empty
     /// for a single-file program and every REPL line.
     selective: &'t std::collections::HashMap<String, u32>,
+    /// P7.S3q-follow: for a module reached through `imports`/`selective`,
+    /// the true declaring module of a name on *its* `export:` list, when that
+    /// name is a re-export rather than something it declares itself --
+    /// closing the gap where a type name reached only through a hub resolved
+    /// fine in term position (the late, whole-program `resolve.rs` pass
+    /// already walks a hub chain there) but not in an effect signature,
+    /// which resolves during this early parse via a single hop. Indexed by
+    /// module id, empty for a REPL line and any parse path with no real
+    /// cross-module data.
+    type_origin: &'t [std::collections::HashMap<String, u32>],
     /// Phase 5 slice 1 (R2/D5): the generic `type:` declarations in scope and
     /// the concrete struct/enum registry each application of one mints. A
     /// mutable borrow for the same reason `arrays` is one: an instantiation
@@ -3344,6 +3364,7 @@ impl<'t> Parser<'t> {
             self.module,
             self.imports,
             self.selective,
+            self.type_origin,
         )
         .is_some()
         {
@@ -3540,6 +3561,7 @@ impl<'t> Parser<'t> {
             self.module,
             self.imports,
             self.selective,
+            self.type_origin,
         )
         .ok_or_else(|| {
             format!(
@@ -4370,6 +4392,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -4407,6 +4430,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -4913,6 +4937,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -5007,6 +5032,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -5053,6 +5079,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -5973,6 +6000,7 @@ mod tests {
                 &no_imports,
                 &[],
                 &no_imports,
+                &[],
                 &mut arrays,
                 &mut cells,
                 &mut refs,
@@ -6018,6 +6046,7 @@ mod tests {
                         imports,
                         &exports,
                         &no_imports,
+                        &[],
                         &mut arrays,
                         &mut cells,
                         &mut refs,
@@ -6066,6 +6095,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &mut arrays,
                 &mut cells,
                 &mut refs,
@@ -6116,6 +6146,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -7301,6 +7332,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &mut arrays,
                 &mut cells,
                 &mut refs,

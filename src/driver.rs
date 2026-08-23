@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ast::{ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, TraitDecl};
+use crate::ast::{
+    EnumDecl, ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, StructDecl,
+    TraitDecl,
+};
 use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
@@ -277,6 +280,83 @@ fn widen_intrinsics(current: IntrinsicVisibility, imp: &Import) -> IntrinsicVisi
     }
 }
 
+/// P7.S3q-follow: a tolerant type-only counterpart to what `resolve.rs`'s
+/// whole-program `resolve_export_origins` does for every export category.
+/// For each module's `export:` list, the module that actually *declares* the
+/// name as a struct/enum, walking through any number of hub re-exports. A
+/// name this can't place -- because it names a word rather than a type, or
+/// the walk hits a cycle -- is simply left out of the returned map rather
+/// than erroring: the ordinary one-hop lookup already reports the real
+/// diagnostic for those, and this table exists purely to let a *type*
+/// reference in an effect signature follow the same hub hop a term-position
+/// reference already can.
+fn resolve_type_export_origins(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module_count: usize,
+    exports: &[Vec<(String, Span)>],
+    import_maps: &[HashMap<String, u32>],
+    selectives: &[HashMap<String, u32>],
+) -> Vec<HashMap<String, u32>> {
+    let declared_types: Vec<HashSet<&str>> = (0..module_count)
+        .map(|m| {
+            let m = m as u32;
+            let mut names: HashSet<&str> = HashSet::new();
+            for s in structs.iter().filter(|s| s.module == m) {
+                names.insert(s.name_static);
+            }
+            for e in enums.iter().filter(|e| e.module == m) {
+                names.insert(e.name_static);
+                names.extend(e.variants.iter().map(|v| v.name.as_str()));
+            }
+            names
+        })
+        .collect();
+    let mut origin: Vec<HashMap<String, u32>> = vec![HashMap::new(); module_count];
+    for (m, list) in exports.iter().enumerate() {
+        for (name, _) in list {
+            if declared_types[m].contains(name.as_str()) {
+                continue;
+            }
+            if let Some(found) =
+                walk_type_export_origin(m as u32, name, &declared_types, selectives, import_maps)
+            {
+                origin[m].insert(name.clone(), found);
+            }
+        }
+    }
+    origin
+}
+
+/// One name's hop-by-hop walk for `resolve_type_export_origins`: from `start`,
+/// follow an unqualified selective re-export, or else the first import target
+/// that declares the name as a type, until a module actually declaring it as
+/// a struct/enum is found. `None` for a cycle or a dead end (the name is not a
+/// type anywhere reachable from `start`), quietly -- this walk is advisory.
+fn walk_type_export_origin(
+    start: u32,
+    name: &str,
+    declared_types: &[HashSet<&str>],
+    selectives: &[HashMap<String, u32>],
+    import_maps: &[HashMap<String, u32>],
+) -> Option<u32> {
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut current = start;
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        if declared_types[current as usize].contains(name) {
+            return Some(current);
+        }
+        current = *selectives[current as usize].get(name).or_else(|| {
+            import_maps[current as usize]
+                .values()
+                .find(|&&dep| declared_types[dep as usize].contains(name))
+        })?;
+    }
+}
+
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
@@ -412,6 +492,24 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         intrinsics_by_module.push(intrinsics);
     }
 
+    // P7.S3q-follow: a struct/enum name reached only through a hub's
+    // `export:` list (re-exported, not declared there) resolves fine in a
+    // *term* position (`rewrite`'s hub-aware `Visibility::origin` walk, run
+    // late over the whole program) but not in an effect signature, which
+    // resolves its type names during this early parse via
+    // `resolve_type_name_in_module`'s single-hop `imports`/`selective` maps.
+    // `type_origin` closes that gap the same way, but early: computed here,
+    // right after the maps above and the struct/enum pre-pass are both known,
+    // and threaded into `parse_bodies` alongside them.
+    let type_origin = resolve_type_export_origins(
+        &structs,
+        &enums,
+        closure.nodes.len(),
+        &exports_by_module,
+        &import_by_module,
+        &selective_maps,
+    );
+
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
@@ -487,6 +585,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &import_map,
             &exports_by_module,
             selective_map,
+            &type_origin,
             &mut arrays,
             &mut owned_cells,
             &mut refs,

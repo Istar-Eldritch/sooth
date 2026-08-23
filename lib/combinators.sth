@@ -19,11 +19,7 @@
 \ share the loop shape, not a call.
 
 import: intrinsics * ;
-import: self::prelude * ;
-\ `bool` names a type in `filter`/`while`'s effects, and a type name resolves
-\ against its declaring module rather than following the hub's re-export, so it
-\ comes from `core::bool` directly.
-import: self::bool b | Bool | ;
+import: self::prelude * ;    \ Bool (used in filter/while's effects) comes through here.
 
 export: each map fold filter while times times-helper ;
 

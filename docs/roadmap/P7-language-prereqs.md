@@ -656,3 +656,23 @@ threads it through to the call site.
 **Exit:** a trait member may declare its bound type variable at any input position, not only
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.
+
+**P7.S3q -- An intrinsic gated into a module cannot be re-exported through a hub.** Named
+while writing `examples/traits.sth` against `lib/prelude.sth`. `import: intrinsics | drop | ;`
+flips a permission bit (`IntrinsicVisibility`) on the importing module; it is not a real
+`Module` import (`driver.rs::names_the_intrinsics` resolves the `intrinsics` name to no module
+at all), so it never touches the `declared`/`selectives`/`import_maps` tables
+`resolve.rs::resolve_export_origins` uses to decide what `export:` may name. Naming `drop` on
+a hub's own `export:` list fails with an unknown-name error, probe-verified against current
+`main`. This is a two-part gap, not one: even after `export:` learns to accept a gated
+intrinsic name, the caller-side check (`check/word_families.rs::intrinsic_is_gated_out`) only
+ever consults the *calling* module's own `intrinsics` gate -- it does not walk an import
+chain -- so a module that reaches `drop` only through a hub (never writing
+`import: intrinsics` itself) would still be rejected calling it bare. Not yet recon'd:
+whether the gate check should walk the same one-hop selective-import resolution
+`rewrite`/`Visibility::origin` already does for words, or something else; unrelated to S3e,
+this is a pre-existing hub/`export:` gap S3e's own example surfaced (`Bool`, a type,
+re-exports through a hub without issue, confirmed by direct probe, so this is specific to the
+intrinsic-gate mechanism, not types or ordinary words in general).
+**Exit:** a module that imports a hub re-exporting a gated intrinsic (e.g. `drop` through
+`core::prelude`) may call it bare, with no direct `import: intrinsics` line of its own.

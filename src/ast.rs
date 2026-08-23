@@ -331,20 +331,30 @@ pub fn resolve_type_name_in_module(
     module: u32,
     imports: &std::collections::HashMap<String, u32>,
     selective: &std::collections::HashMap<String, u32>,
+    type_origin: &[std::collections::HashMap<String, u32>],
 ) -> Option<Type> {
     if let Some(t) = Type::from_name(name) {
         return Some(t);
     }
     if let Some((qualifier, base)) = name.split_once("::") {
         let target = *imports.get(qualifier)?;
-        return find_type_in_module(structs, enums, base, target);
+        return find_type_in_module(structs, enums, base, target).or_else(|| {
+            // P7.S3q-follow: `target` names the name on its own `export:`
+            // list without declaring it itself -- a re-export, resolved to
+            // its true declaring module ahead of time in `type_origin`.
+            let origin = *type_origin.get(target as usize)?.get(base)?;
+            find_type_in_module(structs, enums, base, origin)
+        });
     }
     find_type_in_module(structs, enums, name, module).or_else(|| {
         // R15c (phase 4): a selectively imported type's bare name resolves
         // unqualified against its target module, the same one unit its
         // generated words resolve through in `resolve.rs`'s `NameTables`.
         let target = *selective.get(name)?;
-        find_type_in_module(structs, enums, name, target)
+        find_type_in_module(structs, enums, name, target).or_else(|| {
+            let origin = *type_origin.get(target as usize)?.get(name)?;
+            find_type_in_module(structs, enums, name, origin)
+        })
     })
 }
 
@@ -2557,12 +2567,28 @@ mod tests {
         imports.insert("lib".to_string(), 1u32);
         let no_selective = std::collections::HashMap::new();
 
-        let bare =
-            resolve_type_name_in_module(&structs, &[], "Foo", 0, &imports, &no_selective).unwrap();
+        let no_origin: Vec<std::collections::HashMap<String, u32>> = Vec::new();
+        let bare = resolve_type_name_in_module(
+            &structs,
+            &[],
+            "Foo",
+            0,
+            &imports,
+            &no_selective,
+            &no_origin,
+        )
+        .unwrap();
         assert_eq!(bare, Type::Struct(StructId(0), "Foo"), "own module first");
-        let qualified =
-            resolve_type_name_in_module(&structs, &[], "lib::Foo", 0, &imports, &no_selective)
-                .unwrap();
+        let qualified = resolve_type_name_in_module(
+            &structs,
+            &[],
+            "lib::Foo",
+            0,
+            &imports,
+            &no_selective,
+            &no_origin,
+        )
+        .unwrap();
         assert_eq!(
             qualified,
             Type::Struct(StructId(1), "Foo"),
@@ -2575,16 +2601,24 @@ mod tests {
             "nope::Foo",
             0,
             &imports,
-            &no_selective
+            &no_selective,
+            &no_origin,
         )
         .is_none());
         // R15c: a bare name absent from the own module resolves against a
         // module it is selectively imported from.
         let mut selective = std::collections::HashMap::new();
         selective.insert("Foo".to_string(), 1u32);
-        let via_selective =
-            resolve_type_name_in_module(&[mk("Foo", 1)], &[], "Foo", 0, &imports, &selective)
-                .unwrap();
+        let via_selective = resolve_type_name_in_module(
+            &[mk("Foo", 1)],
+            &[],
+            "Foo",
+            0,
+            &imports,
+            &selective,
+            &no_origin,
+        )
+        .unwrap();
         assert_eq!(
             via_selective,
             Type::Struct(StructId(0), "Foo"),

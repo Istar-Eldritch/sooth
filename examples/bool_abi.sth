@@ -1,8 +1,5 @@
 import: intrinsics * ;
-import: core::prelude * ;
-\ `bool` names a type in an effect below, and a type name resolves against
-\ its declaring module rather than following the prelude hub's re-export.
-import: core::bool b | Bool | ;
+import: core::prelude * ;    \ Bool comes through here, the prelude's own re-export.
 
 : pos ( i64 -- Bool )
   0 gt ;

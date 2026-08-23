@@ -131,7 +131,7 @@ export function $sooth_main() {
 	%v34 =w cultl %v32, %v33
 	jnz %v34, @blk15, @blk16
 @blk16
-	%v35 =l copy 49
+	%v35 =l copy 45
 	%v36 =l copy 3
 	call $sooth_oob_trap(l %v35, l %v32, l %v36)
 	jmp @blk15

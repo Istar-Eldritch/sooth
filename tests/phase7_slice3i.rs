@@ -111,14 +111,18 @@ fn bool_in_an_effect_without_importing_core_bool_is_an_unknown_type() {
     );
 }
 
-/// The prelude hub carries the `true`/`false` constructors but *cannot* carry
-/// the type: a type name resolves against its declaring module rather than
-/// following a re-export. This is why every corpus file that spells `bool` in an
-/// effect imports `core::bool` alongside the prelude, and it is a rule worth
-/// pinning: if type re-export through a hub ever lands, this golden is the one
-/// that says so.
+/// P7.S3q-follow: the prelude hub carries the `true`/`false` constructors
+/// *and* the type name `Bool` now -- a struct/enum name reached only through
+/// a hub's `export:` list resolves in an effect signature the same way it
+/// already did in term position, closing the gap this golden used to pin the
+/// other side of (`git log` on this test's prior body has the pre-fix
+/// diagnostic). The `.` overload stays the one thing that still cannot cross
+/// a hub: an operator overload's candidate lookup considers the calling
+/// module and the module it selectively imported the name from, one hop, so
+/// a hub in between still hides the declaring module -- an orthogonal
+/// mechanism, not narrowed by this fix.
 #[test]
-fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
+fn the_prelude_hub_carries_the_constructors_and_the_type_name_but_not_the_print_overload() {
     let t = Tree::new("g1-hub");
     let ok = t.write_raw(
         "ctors.sth",
@@ -131,19 +135,20 @@ fn the_prelude_hub_carries_the_constructors_but_not_the_type_name() {
         String::from_utf8_lossy(&build.stderr)
     );
 
-    let entry = t.write_raw(
+    let named = t.write_raw(
         "named.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n: w ( Bool -- ) drop ;\n: main ( -- ) ;\n",
+        "import: intrinsics * ;\nimport: core::prelude * ;\n: w ( Bool -- ) drop ;\n: main ( -- ) True w ;\n",
     );
-    let err = build_error(&entry);
+    let named_build = sooth_build(&named);
     assert!(
-        err.contains("unknown type `Bool` at line 3"),
-        "unexpected diagnostic: {err}"
+        named_build.status.success(),
+        "the type name re-exports into an effect signature too: {}",
+        String::from_utf8_lossy(&named_build.stderr)
     );
 
-    // The `.` overload is the type name's twin: it too resolves against its
-    // declaring module, not a re-exporting hub, so the constructors working
-    // above does not mean printing does.
+    // The `.` overload is the one thing that still does not cross the hub:
+    // it resolves against its declaring module, not a re-exporting hub, so
+    // the type name working above does not mean printing does.
     let print_entry = t.write_raw(
         "print.sth",
         "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) True . ;\n",
