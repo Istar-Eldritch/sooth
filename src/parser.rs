@@ -428,9 +428,10 @@ fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
 /// The `Type` component is only the *rendered* type name, so two same-named
 /// types from different modules do share a synthesized name. That case is
 /// currently carried by the ordinary overload-suffix path, which needs the two
-/// grounded signatures to differ -- guaranteed here, because a member's last
-/// input must be `'T`/`&'T` (`check::declarations::non_trailing_receiver_error`)
-/// and so every grounded signature mentions the `for` type.
+/// grounded signatures to differ -- guaranteed here, because a member must
+/// take `'T`/`&'T` as some input
+/// (`check::declarations::member_binds_trait_var`) and so every grounded
+/// signature mentions the `for` type.
 fn synth_member_word_name(
     member: &str,
     trait_name: &str,

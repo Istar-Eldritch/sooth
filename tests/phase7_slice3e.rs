@@ -153,32 +153,31 @@ fn user_trait_named_copy_collides_with_the_reserved_entry() {
     assert!(err.contains("already the name of a trait"), "{err}");
 }
 
-/// A trait member whose last declared input is not `'T`/`&'T` (a
-/// sandwiched shape, e.g. an index/lookup member) is rejected at `trait:`
-/// declaration time -- bound dispatch (`receiver_ty_var`) only ever
-/// inspects the top-of-stack operand, so this shape would otherwise
-/// silently fall through to `env.get` at the call site instead of
-/// dispatching (P7.S3p).
+/// P7.S3p: a member whose receiver is not its last declared input (an
+/// index/lookup shape) declares *and* dispatches -- the variable comes off the
+/// body's bounds by member name, not off the top of the stack, so the receiver
+/// sits wherever the signature puts it.
 #[test]
-fn trait_member_with_a_sandwiched_receiver_is_rejected() {
+fn trait_member_with_a_non_trailing_receiver_dispatches() {
     let (_t, entry) = single_file(
-        "sandwiched-receiver",
-        "trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
-         : main ( -- ) ;\n",
+        "non-trailing-receiver",
+        "type: Point x i64 y i64 ;\n\
+         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         impl: Indexable for Point\n\
+           : at | p n | n drop p &x @ ;\n\
+         ;\n\
+         : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
+         : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
     );
-    let err = build_error(&entry);
-    assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
-        "{err}"
-    );
-    assert!(err.contains("P7.S3p"), "{err}");
+    assert_eq!(build_and_run(&entry), "7\n");
 }
 
-/// The same rejection applies to a zero-input member (a constructor shape
-/// with no receiver slot at all). The member is spelled `fresh`, not `tag`:
-/// P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at the
-/// `trait:` declaration, which would preempt the receiver diagnostic this test
-/// is about.
+/// A member binding the trait's variable in *no* input is still rejected at
+/// `trait:` declaration time: a call has no operand to ground the variable
+/// from, and there is no type-argument syntax to supply one. Deferred, not
+/// ruled out -- the message names P7.S3t. The member is spelled `fresh`, not
+/// `tag`: P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at
+/// the declaration, which would preempt the diagnostic this test is about.
 #[test]
 fn trait_member_with_a_zero_input_receiver_is_rejected() {
     let (_t, entry) = single_file(
@@ -187,32 +186,36 @@ fn trait_member_with_a_zero_input_receiver_is_rejected() {
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
-    assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
-        "{err}"
-    );
+    assert!(err.contains("takes `'T` (or `&'T`) in no input"), "{err}");
+    assert!(err.contains("P7.S3t"), "{err}");
 }
 
-/// The counterexample a post-implementation review built to demonstrate
-/// silent mis-dispatch: before the P7.S3p rejection, this program built and
-/// printed `900` (the unrelated concrete `at` word) instead of dispatching
-/// to the trait member at all. It must now fail to compile.
+/// The counterexample a post-implementation review built to demonstrate silent
+/// mis-dispatch: this program used to build and print `900` (the unrelated
+/// concrete `at` word) instead of dispatching to the trait member. Lifting the
+/// declaration gate does not bring that back. A real build resolves names
+/// before checking, so the concrete `at` this module declares captures the
+/// call site's spelling (S3e R18: the trait loses a collision with a word of
+/// the member's name, deliberately) -- and the concrete word cannot consume
+/// the receiver, so the mis-dispatch is a located rejection rather than a
+/// wrong answer. Dispatch winning over an *unresolved* same-named word is
+/// pinned in `check::poly`'s own tests.
 #[test]
-fn sandwiched_receiver_no_longer_silently_mis_dispatches() {
+fn a_concrete_word_of_the_members_name_captures_the_call() {
     let (_t, entry) = single_file(
-        "sandwiched-mis-dispatch",
+        "member-name-collision",
         "type: Point x i64 y i64 ;\n\
-         trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
-         impl: Show for Point\n\
+         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         impl: Indexable for Point\n\
            : at | p n | n drop p &x @ ;\n\
          ;\n\
          : at ( i64 -- i64 ) 900 add ;\n\
-         : uses ( &'T: Show -- i64 ) 0 at | v | drop v ;\n\
+         : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
          : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        err.contains("body leaves `&'T i64`") && err.contains("`uses`"),
         "{err}"
     );
 }
