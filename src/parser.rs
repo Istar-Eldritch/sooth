@@ -420,9 +420,8 @@ fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
 ///
 /// The trait component carries the declaring module's id, not just the bare
 /// declared name: two same-named traits from different modules can both be
-/// implemented for one type in one module, and the bare name alone makes those
-/// two members collide (the binding form, which names two distinct words,
-/// admits that program).
+/// implemented for one type in one module, and the bare name alone would make
+/// those two members' synthesized names collide.
 ///
 /// The `Type` component is only the *rendered* type name, so two same-named
 /// types from different modules do share a synthesized name. That case is
@@ -2216,11 +2215,10 @@ impl<'t> Parser<'t> {
     /// that check runs the whole program's `traits`/`impls`/`structs` are fully
     /// assembled, regardless of this file's own declaration order.
     ///
-    /// Two body shapes, discriminated by the single token after the `for` type:
-    /// a `:` opens P7.S3r's body form (`: member ... ;` per member, each
+    /// The body is a sequence of `: member ... ;` members (R1/R5), each
     /// desugared to a synthesized top-level `WordDef` returned alongside the
-    /// decl), anything else is the bare `member word` binding form P7.S3r
-    /// deletes. Either way the decl carries only `(member, word-name)` pairs.
+    /// decl; the decl itself carries only the `(member, synth-name)` pairs
+    /// `check_impl_decls` resolves.
     fn parse_impl_decl(&mut self) -> Result<(ImplDecl, Vec<WordDef>), String> {
         let span = self.expect_word("impl:")?;
         let (trait_name, trait_span) = self.expect_word_any_spanned()?;
@@ -2244,25 +2242,13 @@ impl<'t> Parser<'t> {
         }
         let mut bindings = Vec::new();
         let mut words = Vec::new();
-        let body_form = matches!(self.peek(), Some((Token::Word(w), _)) if w == ":");
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
-                Some(_) if body_form => {
+                Some(_) => {
                     let (member_name, word) = self.parse_impl_member_body(trait_id, target_ty)?;
                     bindings.push((member_name, word.name.clone()));
                     words.push(word);
-                }
-                Some(_) => {
-                    let (member_name, _) = self.expect_word_any_spanned()?;
-                    if let Some((Token::Semicolon, s)) = self.peek() {
-                        return Err(format!(
-                            "parse error: member `{member_name}` has no implementing word before `;` at line {}, col {} (odd binding-token count in `impl:` body)",
-                            s.line, s.col
-                        ));
-                    }
-                    let (word, _) = self.expect_word_any_spanned()?;
-                    bindings.push((member_name, word));
                 }
                 None => return Err(self.eof_error("`;` (unterminated `impl:` declaration)")),
             }
@@ -7023,27 +7009,6 @@ mod tests {
         assert!(
             err.contains("must be written at its binding"),
             "unexpected message: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_impl_decl_records_its_bindings() {
-        let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;",
-        )
-        .unwrap();
-        assert_eq!(module.impls.len(), 1);
-        let imp = &module.impls[0];
-        assert_eq!(imp.target_ty, Type::I64);
-        assert_eq!(
-            imp.bindings,
-            vec![("show".to_string(), "int-show".to_string())]
-        );
-        assert_eq!(
-            imp.trait_id,
-            TraitId::from_index(module.traits.iter().position(|t| t.name == "Show").unwrap())
         );
     }
 

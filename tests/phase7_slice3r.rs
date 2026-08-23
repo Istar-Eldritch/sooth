@@ -409,8 +409,8 @@ fn impl_body_trait_qualifier_disambiguates_shared_member_name() {
 /// Recon O3 across modules: the two traits sharing the member name `get` are
 /// *also* named the same, differing only in declaring module. The trait
 /// component of the synthesized name therefore has to carry the module id --
-/// the bare declared name collides, and the collision surfaces as a `duplicate
-/// word` on a program the binding form accepts.
+/// the bare declared name alone would collide, surfacing as a `duplicate
+/// word` between the two members' synthesized names.
 #[test]
 fn impl_body_disambiguates_same_named_traits_from_two_modules() {
     let t = Tree::with_modules("same-named-traits", "a b");
@@ -444,8 +444,8 @@ fn impl_body_disambiguates_same_named_traits_from_two_modules() {
     assert_eq!(build_and_run(&entry), "3\n4\n");
 }
 
-/// The unterminated-block EOF path: the block runs to end of file with no closing `;`
-/// at all, so the existing EOF diagnostic fires exactly as it did for the binding form.
+/// The unterminated-block EOF path: the block runs to end of file with no
+/// closing `;` at all, so the existing EOF diagnostic fires.
 #[test]
 fn impl_body_unterminated_block_at_eof_is_error() {
     let (_t, entry) = program(
@@ -507,6 +507,31 @@ fn impl_body_wrong_effect_names_readable_member() {
         err,
         "error: error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
     );
+}
+
+/// P7.S3r Phase 4 (R6): the relocated intent of the retired
+/// `check_impl_decls_signature_mismatch_is_error` guard. Distinct from the
+/// golden above in what it asserts: that golden pins the *readable name* in
+/// the message; this one pins that a wrong body is rejected *at all*, and
+/// located inside the impl body (the member's own line), not at a separate
+/// binding-time signature-comparison site -- there is no such site left to
+/// compare against, since the effect is inherited, not restated.
+#[test]
+fn impl_body_wrong_effect_is_rejected_in_body() {
+    let (_t, entry) = program(
+        "wrong-effect-rejected-in-body",
+        "import: intrinsics * ;\n\
+         type: Ordering | Less | Equal | Greater ;\n\
+         type: Point x i64 y i64 ;\n\
+         trait: Order 'T cmp ( &'T &'T -- Ordering ) ;\n\
+         impl: Order for Point\n\
+           : cmp | a b | a drop b drop ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(err.contains("stack effect mismatch"), "{err}");
+    assert!(err.contains("(line 6)"), "{err}");
 }
 
 /// R3 (Phase 2), the type-mismatch sibling of the arity golden above: a body

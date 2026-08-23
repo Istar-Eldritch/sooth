@@ -297,22 +297,6 @@ fn impl_body_validates_and_builds() {
     build_ok(&entry);
 }
 
-/// An `impl:` binding a member to a polymorphic word is a located rejection
-/// at the `impl:` site (decision 2), not a later call-site error.
-#[test]
-fn impl_binding_a_polymorphic_word_is_rejected_at_the_impl_site() {
-    let (_t, entry) = single_file(
-        "impl-poly-member",
-        "trait: Show 'T show ( &'T -- ) ;\n\
-         : poly-show ( 'U: Copy &'U -- ) drop ;\n\
-         impl: Show for i64  show poly-show ;\n\
-         : main ( -- ) ;\n",
-    );
-    let err = build_error(&entry);
-    assert!(err.contains("polymorphic"), "{err}");
-    assert!(err.contains("poly-show"), "{err}");
-}
-
 /// A missing required member is a located rejection naming it.
 #[test]
 fn impl_missing_a_required_member_is_rejected() {
@@ -329,35 +313,6 @@ fn impl_missing_a_required_member_is_rejected() {
         err.contains("does not bind required member `hash`"),
         "{err}"
     );
-}
-
-/// A binding to an unknown member name is rejected.
-#[test]
-fn impl_binding_an_unknown_member_is_rejected() {
-    let (_t, entry) = single_file(
-        "impl-unknown-member",
-        "trait: Show 'T show ( &'T -- ) ;\n\
-         : int-show ( &i64 -- ) drop ;\n\
-         impl: Show for i64  show int-show  bogus int-show ;\n\
-         : main ( -- ) ;\n",
-    );
-    let err = build_error(&entry);
-    assert!(err.contains("is not a member of trait `Show`"), "{err}");
-}
-
-/// A binding whose signature does not match the trait's declared member
-/// (grounded at the target type) is rejected.
-#[test]
-fn impl_binding_with_a_mismatched_signature_is_rejected() {
-    let (_t, entry) = single_file(
-        "impl-signature-mismatch",
-        "trait: Show 'T show ( &'T -- i64 ) ;\n\
-         : int-show ( &i64 -- ) drop ;\n\
-         impl: Show for i64  show int-show ;\n\
-         : main ( -- ) ;\n",
-    );
-    let err = build_error(&entry);
-    assert!(err.contains("does not match"), "{err}");
 }
 
 /// Two `impl:` blocks for the same `(Trait, Type)` pair are a duplicate.

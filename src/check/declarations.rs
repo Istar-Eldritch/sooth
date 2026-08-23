@@ -445,6 +445,14 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         // R8: the word each member binds, as an index into `module.words`,
         // resolved here (pre-mangle, where `word_name` and `WordDef::name`
         // still agree) and read back at a bound-directed call site.
+        //
+        // P7.S3r (phase 4): the parser's body-form desugar is the only source
+        // of `bindings` now, and it already validated the member against the
+        // trait and synthesized a concrete word carrying the trait member's
+        // grounded signature, spliced into this same module. There is no
+        // restated signature to compare and no separate word to resolve by
+        // name-and-shape search, so this loop only guards against a member
+        // bound twice and looks up the synthesized word's index by name.
         let mut resolved: Vec<(String, usize)> = Vec::new();
         for (member_name, word_name) in &bindings {
             if !bound_names.insert(member_name.as_str()) {
@@ -454,76 +462,12 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                     impl_span,
                 ));
             }
-            let member_sig = {
-                let trait_decl = &module.traits[trait_id.index()];
-                let Some(member) = trait_decl.members.iter().find(|m| &m.name == member_name)
-                else {
-                    return Err(impl_unknown_member_error(
-                        &trait_name,
-                        member_name,
-                        impl_span,
-                    ));
-                };
-                member.sig.clone()
-            };
-            let expected_inputs: Vec<Type> = member_sig
-                .inputs
-                .iter()
-                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
-                .collect();
-            let expected_outputs: Vec<Type> = member_sig
-                .outputs
-                .iter()
-                .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
-                .collect();
-            // R8: a word named `drop` is a destructor overload and nothing
-            // else (`find_drop_overloads` admits no other shape for the
-            // name). Lowering compiles it into its struct's destructor symbol
-            // rather than a callable word of its own, so a member bound to it
-            // would resolve to a symbol no `IrFunc` ever mints.
-            if word_name == "drop" {
-                return Err(impl_drop_overload_member_error(
-                    &trait_name,
-                    member_name,
-                    impl_span,
-                ));
-            }
-            let candidates: Vec<(usize, &WordDef)> = module
+            let idx = module
                 .words
                 .iter()
-                .enumerate()
-                .filter(|(_, w)| w.module == impl_module && &w.name == word_name)
-                .collect();
-            if candidates.is_empty() {
-                return Err(impl_unknown_word_error(
-                    &trait_name,
-                    member_name,
-                    word_name,
-                    impl_span,
-                ));
-            }
-            let poly_candidate = candidates.iter().find(|(_, w)| w.poly.is_some());
-            let concrete_match = candidates.iter().find(|(_, w)| {
-                w.poly.is_none()
-                    && w.effect.inputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_inputs
-                    && w.effect.outputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_outputs
-            });
-            match concrete_match {
-                Some((idx, _)) => resolved.push((member_name.clone(), *idx)),
-                None => {
-                    if let Some((_, pc)) = poly_candidate {
-                        return Err(impl_polymorphic_member_error(&trait_name, member_name, pc));
-                    }
-                    return Err(impl_signature_mismatch_error(
-                        &trait_name,
-                        member_name,
-                        word_name,
-                        &expected_inputs,
-                        &expected_outputs,
-                        impl_span,
-                    ));
-                }
-            }
+                .position(|w| w.module == impl_module && &w.name == word_name)
+                .expect("the desugar splices the synthesized member word into this module");
+            resolved.push((member_name.clone(), idx));
         }
         let trait_decl = &module.traits[trait_id.index()];
         for member in &trait_decl.members {
@@ -583,62 +527,6 @@ fn impl_orphan_error(
 fn impl_duplicate_member_error(trait_name: &str, member: &str, span: Span) -> String {
     format!(
         "error: `impl: {trait_name}` binds member `{member}` more than once at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-fn impl_unknown_member_error(trait_name: &str, member: &str, span: Span) -> String {
-    format!(
-        "error: `{member}` is not a member of trait `{trait_name}` at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-fn impl_unknown_word_error(trait_name: &str, member: &str, word: &str, span: Span) -> String {
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to unknown word `{word}` at line {}, col {}",
-        span.line, span.col
-    )
-}
-
-/// P7.S3e (R8): an `impl:` member bound to a `drop` overload. Rejected at the
-/// binding site rather than left to resolve, because the symbol a call site
-/// would record for it is one lowering never emits.
-fn impl_drop_overload_member_error(trait_name: &str, member: &str, span: Span) -> String {
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `drop` at line {}, col {}, which is a destructor overload, not a callable word",
-        span.line, span.col
-    )
-}
-
-fn impl_polymorphic_member_error(trait_name: &str, member: &str, word: &WordDef) -> String {
-    let span = word_span(word);
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `{}` (line {}, col {}), which is polymorphic; an impl member must be a concrete word",
-        word.name, span.line, span.col
-    )
-}
-
-fn impl_signature_mismatch_error(
-    trait_name: &str,
-    member: &str,
-    word: &str,
-    expected_inputs: &[Type],
-    expected_outputs: &[Type],
-    span: Span,
-) -> String {
-    let ins = expected_inputs
-        .iter()
-        .map(|t| t.name())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let outs = expected_outputs
-        .iter()
-        .map(|t| t.name())
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!(
-        "error: `impl: {trait_name}` binds member `{member}` to `{word}` (line {}, col {}), whose signature does not match `( {ins} -- {outs} )`",
         span.line, span.col
     )
 }
@@ -3600,63 +3488,6 @@ mod tests {
     }
 
     #[test]
-    fn check_impl_decls_does_not_bind_a_word_from_another_module() {
-        // The candidate lookup used to be an unscoped `w.name == word_name`
-        // scan over the whole-program `module.words`, so an `impl:` in one
-        // module could silently bind a member to an unexported word
-        // declared in a different module. Simulate that by parsing the
-        // matching word in-module, then relabeling it as foreign.
-        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;")
-        .unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
-        check_trait_decls(&module).unwrap();
-        module
-            .words
-            .iter_mut()
-            .find(|w| w.name == "int-show")
-            .unwrap()
-            .module = 1;
-        let err = check_impl_decls(&mut module).unwrap_err();
-        assert!(err.contains("unknown word `int-show`"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_polymorphic_member_is_error() {
-        let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             : poly-show ( 'U: Copy &'U -- ) drop ;\n\
-             impl: Show for i64  show poly-show ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("polymorphic"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_polymorphic_member_with_a_zero_slot_member_is_error() {
-        // A poly word's `effect` is empty by construction, so a zero-slot
-        // member grounds to an empty expectation that a poly word's empty
-        // effect matches on both sides: `concrete_match`'s `w.poly.is_none()`
-        // conjunct is the only thing rejecting it, and the sibling test above
-        // (a `( &'T -- )` member) discriminates on slot count instead.
-        //
-        // A zero-slot member is itself rejected by `check_trait_decls` as of
-        // P7.S3p (its input list doesn't end in `'T`), so this drives
-        // `check_impl_decls` directly, skipping `check_trait_decls`, to keep
-        // isolating the impl-site polymorphic-member rejection this test is
-        // actually about.
-        let tokens = lex("trait: Show 'T nothing ( -- ) ;\n\
-             : p ( 'U: Copy &'U -- ) drop ;\n\
-             impl: Show for i64  nothing p ;")
-        .unwrap();
-        let mut module = crate::parser::parse(&tokens).unwrap();
-        let err = check_impl_decls(&mut module).unwrap_err();
-        assert!(err.contains("polymorphic"), "{err}");
-        assert!(err.contains("`p`"), "{err}");
-    }
-
-    #[test]
     fn check_impl_decls_orphan_scalar_target_names_only_the_trait_module() {
         // A scalar declares no module of its own, so "or the module declaring
         // `i64`" would name a home that cannot exist.
@@ -3703,50 +3534,6 @@ mod tests {
             err.contains("does not bind required member `hash`"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn check_impl_decls_unknown_member_is_error() {
-        let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show  bogus int-show ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("is not a member of trait `Show`"), "{err}");
-    }
-
-    #[test]
-    fn check_impl_decls_drop_overload_member_is_error() {
-        // R8: a `drop` overload's signature matches a `( 'T -- )` member
-        // grounded at its own struct, so nothing else here rejects the
-        // binding -- and the symbol a call site would then record for it
-        // (`drop`) is one lowering never emits: a destructor overload is
-        // compiled into its struct's destructor, not into a word.
-        let err = impl_check_src(
-            "type: Spy tag i64 ;\n\
-             : drop ( Spy -- ) | s | s Spy> drop ;\n\
-             trait: Eat 'T eat ( 'T -- ) ;\n\
-             impl: Eat for Spy  eat drop ;",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains(
-                "`impl: Eat` binds member `eat` to `drop` at line 4, col 1, which is a destructor overload, not a callable word"
-            ),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn check_impl_decls_signature_mismatch_is_error() {
-        let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- i64 ) ;\n\
-             : int-show ( &i64 -- ) drop ;\n\
-             impl: Show for i64  show int-show ;",
-        )
-        .unwrap_err();
-        assert!(err.contains("does not match"), "{err}");
     }
 
     #[test]

@@ -1532,9 +1532,11 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
     ]
 }
 
-/// P7.S3e (R4/R11, decision 1): one `impl: Trait for Type ... ;` binding -- a
-/// pure name map (member name -> implementing word name), never a body: an
-/// impl member is always a concrete, already-declared word (decision 2).
+/// One `impl: Trait for Type ... ;` declaration. `bindings` is a name map
+/// (member name -> implementing word name), populated by the parser's
+/// body-form desugar: each `: member ... ;` inside the block synthesizes a
+/// concrete top-level word carrying the trait member's signature grounded at
+/// `target_ty`, and records the (member, synth-name) pair here.
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
     pub trait_id: TraitId,
