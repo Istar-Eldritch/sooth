@@ -19,7 +19,7 @@ use crate::ast::{
     ground_member_type, intern_array_type, is_name_dispatched_builtin, ArrayDecl, Bound, EnumDecl,
     ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl, Import, ImportAnchor,
     ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line, Module, ModuleInfo, ModuleName,
-    NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
+    MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
     StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
     TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
 };
@@ -3329,7 +3329,7 @@ impl<'t> Parser<'t> {
                     })
                     .collect();
                 if let Some(concrete) = concrete {
-                    let regs = NameRegistries {
+                    let regs = MutRegistries {
                         structs: self.structs,
                         enums: self.enums,
                         arrays: self.arrays,
@@ -4335,9 +4335,9 @@ impl<'t> Parser<'t> {
             if is_enum {
                 let variants =
                     self.parse_generic_enum_typedef_variants(&name, &ty_vars, type_span)?;
-                // Disjoint field borrows: `regs` reads the concrete
+                // Disjoint field borrows: `regs` borrows the concrete
                 // registries, `generics` is a separate field.
-                let regs = NameRegistries {
+                let regs = MutRegistries {
                     structs: self.structs,
                     enums: self.enums,
                     arrays: self.arrays,
@@ -4347,7 +4347,14 @@ impl<'t> Parser<'t> {
                 self.generics.fill_enum_variants(idx, variants, regs);
             } else {
                 let fields = self.parse_generic_typedef_fields(&name, &ty_vars)?;
-                self.generics.fill_struct_fields(idx, fields);
+                let regs = MutRegistries {
+                    structs: self.structs,
+                    enums: self.enums,
+                    arrays: self.arrays,
+                    cells: self.owned_cells,
+                    refs: self.refs,
+                };
+                self.generics.fill_struct_fields(idx, fields, regs);
             }
         }
         self.pos = 0;
@@ -4440,7 +4447,7 @@ impl<'t> Parser<'t> {
         if let Some(idx) = self.generics.find_struct(base, owner) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            let regs = NameRegistries {
+            let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
                 arrays: self.arrays,
@@ -4454,7 +4461,7 @@ impl<'t> Parser<'t> {
         if let Some(idx) = self.generics.find_enum(base, owner) {
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            let regs = NameRegistries {
+            let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
                 arrays: self.arrays,
@@ -4879,7 +4886,7 @@ impl<'t> Parser<'t> {
             })
             .collect();
         if let Some(concrete) = concrete {
-            let regs = NameRegistries {
+            let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
                 arrays: self.arrays,

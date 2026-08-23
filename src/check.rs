@@ -805,6 +805,8 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             structs,
             enums,
             arrays,
+            owned_cells,
+            refs,
             slices,
             statics,
             Some(modules),

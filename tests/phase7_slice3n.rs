@@ -1,14 +1,13 @@
-//! P7.S3n phase 1 goldens: a generic `type:` field wrapping the
-//! declaration's own type variable, and the owned-cell `PolyType`/`RawTy`
-//! variant that makes a self-referential generic type expressible at all.
+//! P7.S3n goldens: a generic `type:` field wrapping the declaration's own
+//! type variable, and the owned-cell `PolyType`/`RawTy` variant that makes a
+//! self-referential generic type expressible at all.
 //!
-//! Phase 1 is a *parser* phase: `substitute_generic_field` still has no arms
-//! for the new field shapes, so a **concrete instantiation** of one aborts
-//! until phase 2. Everything asserted here therefore either stops at
-//! declaration (an uninstantiated generic header reaches no substitution) or
-//! is a word signature, where the substitution path is `apply_subst`, which
-//! phase 1 does complete. The unit tests beside `parse_generic_field_type_expr`
-//! carry the `PolyType`-tree assertions.
+//! Phase 1 was a *parser* phase: everything it asserts stops at declaration
+//! or lives in a word signature. Phase 2 added `substitute_generic_field`'s
+//! arms, so from here a **concrete instantiation** of each shape is a real
+//! claim -- the tests below the phase-1 block instantiate. The `PolyType`-tree
+//! assertions live beside `parse_generic_field_type_expr`, and the
+//! substituted-`Type` assertions beside `substitute_generic_field`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -221,4 +220,222 @@ fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
         "type: Q 'T v 'T f [ i64 -- i64 ] ;\n: main ( -- ) ;\n",
     )
     .expect("a concrete quotation field is unchanged by this slice");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: substitution, instantiation ordering, and the diagnostics the two
+// together make reachable.
+// ---------------------------------------------------------------------------
+
+/// Run `body` on a spawned thread and fail the test if it has not finished in
+/// `secs`. R6's failure mode is a *non-terminating* instantiation, and a hung
+/// test process emits no `test result:` line at all -- neither a pass nor a
+/// failure -- so the termination witnesses below have to fail explicitly
+/// instead of hanging.
+fn within(secs: u64, what: &str, body: impl FnOnce() + Send + 'static) {
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+    let (tx, rx) = channel();
+    let handle = std::thread::spawn(move || {
+        body();
+        let _ = tx.send(());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        // `Disconnected` means the thread ended without sending: it panicked,
+        // so re-raise that panic rather than blaming a timeout for it.
+        Ok(()) | Err(RecvTimeoutError::Disconnected) => match handle.join() {
+            Ok(()) => {}
+            Err(payload) => std::panic::resume_unwind(payload),
+        },
+        Err(RecvTimeoutError::Timeout) => panic!(
+            "{what} did not terminate within {secs}s -- \
+             instantiation ordering regression suspected"
+        ),
+    }
+}
+
+/// R4, whole pipeline: an array-of-type-variable field instantiated at two
+/// differently-sized payloads, constructed from a real array and read back.
+/// Two payloads rather than one, because a substitution that ignored the
+/// argument and grounded every `['T 2]` to the same shape would pass with one.
+#[test]
+fn array_of_ty_var_field_instantiates_and_runs_at_two_payloads() {
+    let (stdout, code) = build_and_run(
+        "arrfield",
+        "import: intrinsics * ;\n\
+         type: Pair 'T items ['T 2] ;\n\
+         : first ( Pair[i64] -- i64 )\n\
+           Pair> | items | &items 0 >usize &> @ items drop ;\n\
+         : firstb ( Pair[u8] -- u8 )\n\
+           Pair> | items | &items 0 >usize &> @ items drop ;\n\
+         : main ( -- )\n\
+           7 2 fill Pair first .\n\
+           3 >u8 2 fill Pair firstb . ;\n",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "7\n3\n");
+}
+
+/// R4: the nesting claim at instantiation. A one-level array arm that did not
+/// recurse would reach `substitute_generic_field`'s `unreachable!` on the
+/// inner `['T 2]` (N1).
+#[test]
+fn nested_array_of_ty_var_field_instantiates() {
+    build(
+        "nestfield",
+        "type: NestArr 'T grid [['T 2] 3] ;\n\
+         : f ( NestArr[i64] -- NestArr[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect("a nested array field instantiates to a nested concrete array");
+}
+
+/// R4/R3, whole pipeline: an owned-cell field over the header's own variable,
+/// instantiated, constructed and unwrapped. `^` is the only indirection a
+/// field may hold (a reference cannot be stored, an array does not break a
+/// cycle), so this arm is what every self-referential generic type rests on.
+#[test]
+fn owned_cell_of_ty_var_field_instantiates_and_runs() {
+    let (stdout, code) = build_and_run(
+        "cellfield",
+        "import: intrinsics * ;\n\
+         type: Cell 'T c ^'T ;\n\
+         : get ( Cell[i64] -- i64 ) Cell> ^> ;\n\
+         : main ( -- ) 9 ^ Cell get . ;\n",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "9\n");
+}
+
+/// R10, a diagnostic-quality requirement: `&'T` still does not build, but it
+/// now fails for the right reason. Before this slice the parser never resolved
+/// the field at all and blamed `'T` as an unknown type; now it grounds to a
+/// real `Type::Ref` and meets the pre-existing, unconditional
+/// no-stored-reference rule. Asserting only "this fails" would have passed
+/// before the fix, so both halves are asserted.
+#[test]
+fn ref_of_ty_var_field_is_rejected_as_stored_reference() {
+    let err = build(
+        "reffield",
+        "type: Box 'T r &'T ;\n\
+         : f ( Box[i64] -- Box[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect_err("a reference cannot be stored in a field");
+    assert!(
+        err.contains("a reference cannot be stored"),
+        "unexpected: {err}"
+    );
+    assert!(
+        !err.contains("unknown type"),
+        "the field must resolve before it is rejected: {err}"
+    );
+}
+
+/// R9: a by-value self-reference is caught by the *existing* `check_recursion`
+/// rule, now reachable for a generic header for the first time. It only fires
+/// on a post-instantiation concrete decl, so the program has to instantiate
+/// `L` at something -- asserting against the bare generic declaration would
+/// assert nothing.
+#[test]
+fn by_value_generic_self_reference_is_infinite_size_error() {
+    let err = build(
+        "byvalue",
+        "type: L 'T v 'T next L['T] ;\n\
+         : f ( L[i64] -- L[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect_err("a by-value self-reference has infinite size");
+    assert!(
+        err.contains("recursive struct definition (infinite size)"),
+        "unexpected: {err}"
+    );
+}
+
+/// R9's other edge kind: an array element does not break the cycle either, so
+/// the same diagnostic fires one indirection down. Distinct from the by-value
+/// case -- `type_node` reaches it through its `Type::Array` arm.
+#[test]
+fn array_wrapped_generic_self_reference_is_infinite_size_error() {
+    let err = build(
+        "arrwrapped",
+        "type: L 'T v 'T kids [L['T] 4] ;\n\
+         : f ( L[i64] -- L[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect_err("an array-wrapped self-reference has infinite size");
+    assert!(
+        err.contains("recursive struct definition (infinite size)"),
+        "unexpected: {err}"
+    );
+}
+
+/// R6's termination witness. `^L['T]` at `'T = i64` re-enters
+/// `instantiate_struct` for the same `(idx, module, args)` while substituting
+/// its own field; the memo pushed before that substitution is what closes the
+/// loop. With the old substitute-then-mint order this never returns, which is
+/// why the build runs under an explicit timeout.
+#[test]
+fn cell_wrapped_generic_self_reference_builds_and_terminates() {
+    within(60, "a cell-wrapped generic self-reference", || {
+        build(
+            "cellcycle",
+            "type: L 'T v 'T next ^L['T] ;\n\
+             : f ( L[i64] -- L[i64] ) ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a cell breaks the cycle, so the type has a finite size");
+    });
+}
+
+/// The two-header cycle the single-header test cannot cover: the memo key
+/// includes the header index, so a mechanism that only recognised a header
+/// re-entering *itself* would recurse forever here.
+#[test]
+fn mutual_cell_wrapped_generic_self_reference_terminates() {
+    within(60, "a mutual cell-wrapped generic cycle", || {
+        build(
+            "mutualcycle",
+            "type: A 'T v 'T next ^B['T] ;\n\
+             type: B 'T w 'T back ^A['T] ;\n\
+             : f ( A[i64] -- A[i64] ) ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a mutual cycle through two cells is finite");
+    });
+}
+
+/// R8's accept side at instantiation, and the case that distinguishes its rule
+/// from a blanket ban on self-reference: `^A['V 'K]` swaps its arguments each
+/// hop, so the reachable closure is two instantiations rather than an
+/// unbounded chain. The memo key includes `args`, which is what makes the
+/// second hop find the first.
+#[test]
+fn permuting_generic_self_reference_terminates() {
+    within(60, "a permuting generic self-reference", || {
+        build(
+            "permutecycle",
+            "type: A 'K 'V k 'K v 'V next ^A['V 'K] ;\n\
+             : f ( A[i64 u8] -- A[i64 u8] ) ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a permuting self-reference alternates between two instantiations");
+    });
+}
+
+/// The out-of-scope gap, pinned rather than left silent: an *attributeless*
+/// (positional) variant field cannot be an array. Pre-existing and unrelated
+/// to type variables -- this fixture has no generic header at all -- and
+/// deliberately untouched by this slice. A *named* generic variant field
+/// (`Some xs ['T 2]`) is in scope and covered elsewhere.
+#[test]
+fn attributeless_variant_array_field_is_still_a_parse_error() {
+    let err = build(
+        "posvariant",
+        "type: Foo | Some [i64 2] | None ;\n: main ( -- ) ;\n",
+    )
+    .expect_err("a positional array variant field does not parse");
+    assert!(
+        err.contains("expected a word, found LBracket"),
+        "unexpected: {err}"
+    );
 }
