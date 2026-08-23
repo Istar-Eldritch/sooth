@@ -464,6 +464,50 @@ it strengthens coverage — it would silently test the pre-existing guard, not R
 
 **Difficulty:** hard (new cross-signature mechanism + diagnostic surface).
 
+### Delivered, with four deviations from the plan above
+
+1. **A fifth diagnostic, `poly_cross_call_unsupported_error`.** The plan named
+   three new diagnostics; a fourth is needed for the callee-signature shapes a
+   `Vec<(u32, Image)>` mapping structurally cannot carry, each of which N1
+   requires be a located rejection rather than an admitted shape mis-lowered
+   later: a row (`..s`), a quotation parameter, a length variable (a second id
+   space `Image` does not model), a **user trait bound** (see phase 2 finding 3),
+   and a compound *output* (`( 'U -- Box['U] )`). It is not the deleted
+   whole-feature narrowing under a new name -- it fires for five named declared
+   shapes, and each names itself. All five are reachable from source and pinned.
+
+2. **Compound outputs are rejected, symmetrically with R6.** A declared
+   compound always mentions a variable (a fully concrete one folds to
+   `Concrete` at parse), so substituting the mapping into a compound output
+   either grows a type over a caller variable -- R6 in the return direction --
+   or needs the registry interning `apply_subst` performs for a *ground* θ and
+   nothing symbolic can do. So the rule across a cross-call is symmetric: a
+   type mentioning a caller variable must be a bare variable, in both
+   directions.
+
+3. **`check_generic_word_calls_imported_generic_grounds` is split.** A
+   genuine two-module fixture needs the driver's closure assembly, and a
+   `tests/` build golden cannot be written for a *non-inline* callee until
+   phase 2 routes it. The unit half is
+   `check_generic_word_calls_mangled_generic_grounds`, which runs the real
+   `resolve_modules` mangling -- the only thing that distinguishes an imported
+   callee at this level, since the arm dispatches on `poly_env`'s post-mangle
+   keys and never on a spelling. The end-to-end half is phase 2's.
+
+4. **An `inline` generic callee lands end-to-end already**, so phase 1 ships
+   more than "checks clean": lowering *splices* such a callee, so it needs no
+   monomorph and no routing. `lib/cmp.sth`'s comparisons on a body's own `'T`
+   therefore build and run (`tests/phase7_slice3k.rs`), and `clampsum` -- the
+   exit-criterion program of P7.S3b-follow, whose per-iteration `gt` cannot be
+   hoisted to a monomorphic caller -- is un-`#[ignore]`d with its two goldens.
+
+The REPL deliberately keeps today's behaviour: it passes an empty registry, so
+a session line calling another polymorphic word still gets `unknown word`.
+REPL lowering resolves an instantiation through its own per-generation store
+and nothing composes a cross-call's substitution into it, so grounding the call
+there would check clean and then mis-lower -- worse than a clean rejection.
+Lifting it needs the REPL's own composition step, not just the thread-through.
+
 ## Phase 2 — Check-time transitive fixpoint + thin routing consequence + regression
 
 **Scope (modify):**
@@ -538,6 +582,45 @@ a crash.
 
 **Difficulty:** hard (net-new discovery machinery + a routing change on the path shared
 by all existing instantiation lowering; N2 is the load-bearing risk).
+
+### Findings from phase 1 that phase 2 must act on
+
+1. **The fixpoint must skip an `inline` callee.** Lowering splices one and an
+   `inline` word mints no `IrFunc`, so composing a `(callee, θ_h)` for it and
+   routing the body span through `poly_calls` would emit a call to a symbol
+   that never exists -- turning a case that *already works* (deviation 4 above)
+   into a link failure. Phase 1 records the cross-call regardless, because
+   "this body calls `h` with this mapping" is true either way and how `h` is
+   lowered is not the record's business; the fixpoint runs where `module.words`
+   is in hand, so it can filter on `is_combinator` precisely, by candidate,
+   rather than by name.
+
+2. **`Module::poly_cross_calls` is name-keyed, and a polymorphic overload set
+   merges into one entry.** Two poly words may share a name with different
+   signatures (only *identical* signatures are rejected,
+   `check_duplicate_poly_signatures`), and each record's `mapping` indexes its
+   own signature's variables. The fixpoint looks the map up by
+   `CallInst::callee`, a bare name, so it would compose one candidate's mapping
+   against the other's θ -- silently, producing a wrong monomorph. `PolySig` is
+   what disambiguates (`WordObligations` carries it beside the name for exactly
+   this reason). Phase 2 should key on `(name, PolySig)` or reject a cross-call
+   inside an overloaded generic word; it must not iterate the merged list.
+
+3. **A user trait bound is a located rejection in phase 1, not R3's
+   `has_bound` discharge.** Satisfaction itself would transfer soundly (the
+   caller declares the same bound), but the *callee's* recorded obligations are
+   resolved against a ground θ (`resolve_user_bound`, into
+   `CallInst::trait_calls`), and nothing composes them for a cross-call -- an
+   admitted one would lower a body whose member call resolves to nothing,
+   exactly the monomorphization-time failure N1 forbids. Phase 2's fixpoint
+   runs where `TraitResolveCtx`'s tables are already in scope, so lifting this
+   is a candidate there; it is a scope decision, not an oversight.
+
+4. **`docs/roadmap/P7-language-prereqs.md` still states the gap as open**
+   (`:128`, `:381`, `:420`, `:533`). Left untouched in phase 1 on purpose: the
+   slice is not delivered until a non-inline generic callee is monomorphized.
+   Phase 2 updates it, and states the residual narrowings (deviation 1) rather
+   than declaring the whole gap closed.
 
 ## Phases (JSON)
 
