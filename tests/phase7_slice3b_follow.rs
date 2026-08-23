@@ -558,6 +558,33 @@ fn a_suffix_slot_disagreeing_with_the_declared_type_is_error() {
 }
 
 #[test]
+fn a_suffix_shorter_than_the_declared_row_is_error() {
+    // P7.S3j (R3), the length half of `suffix_matches` that the two goldens
+    // above never exercise: they hold the declared suffix's *type* to
+    // account once its length already agrees. Deleting `tail.len() ==
+    // suffix.len()` (keeping only the per-slot `zip` comparison) leaves this
+    // suite green otherwise, because `zip` silently truncates to the shorter
+    // side -- both arms here leave nothing at all, so the empty `tail`
+    // vacuously agrees with a one-slot declared suffix, `bad` grounds, and
+    // the malformed program reaches lowering: an ICE at
+    // `src/ir/func_builder/calls.rs` (`drop: non-empty stack`), the panic
+    // class R3 exists to keep unreachable.
+    let err = build_err(
+        "suffix-too-short",
+        ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
+           | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
+         : bad ( 'T: Copy Ord 'T -- ) True ~[ drop drop ] ~[ drop drop ] pick ;\n\
+         : main ( -- ) 5 7 bad ;\n",
+    );
+    assert!(
+        err.contains(
+            "the quotation passed to `pick` in `bad` (line 3) was declared `~[ ..a -- ..b i64 ]`, but it leaves nothing where that requires `i64`"
+        ),
+        "the declared suffix's length, not just its type, must be checked: {err}"
+    );
+}
+
+#[test]
 fn an_abstract_declared_suffix_is_still_the_cannot_ground_rejection() {
     // R3's stripping only fires once `poly_declared_arm` has already ground
     // every declared parameter type to `Concrete`; a suffix slot that is

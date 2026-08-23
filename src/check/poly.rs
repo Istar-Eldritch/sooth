@@ -2456,7 +2456,7 @@ fn poly_combinator_call(
                             .iter()
                             .map(|t| PolySlot::new(PolyType::Concrete(*t)))
                             .collect();
-                        return Err(poly_arm_declared_effect_mismatch_error(
+                        return Err(poly_arm_declared_suffix_mismatch_error(
                             ctx,
                             literal_span,
                             name,
@@ -4415,6 +4415,29 @@ fn poly_arm_declared_effect_mismatch_error(
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a non-shape-changing quotation parameter carries one row, the same on both sides: the arm must leave the row it entered with",
+        crate::resolve::demangle_word(where_),
+        span.line
+    )
+}
+
+/// P7 slice 3j (R3): the `ArmRule::Row` twin of
+/// `poly_arm_declared_effect_mismatch_error` -- a *shape-changing* quotation
+/// parameter (`~[ ..a -- ..b T1 .. Tn ]`) declares trailing outputs above the
+/// row it produces, stripped back off an arm's exit before the row itself is
+/// read (R2). This fires when that stripped suffix disagrees with the
+/// declared types, or is too short to carry them at all.
+fn poly_arm_declared_suffix_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: &str,
+    found: &str,
+    want: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: the quotation passed to `{word}` in `{}` (line {}) was declared `{declared}`, but it leaves {found} where that requires {want}\n  a shape-changing quotation parameter declares trailing outputs above the row it produces: the arm must leave those types, in order, above whatever row it leaves",
         crate::resolve::demangle_word(where_),
         span.line
     )
