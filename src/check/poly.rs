@@ -41,6 +41,61 @@ impl TraitCtx<'_> {
     }
 }
 
+/// P7.S3e (R7/R17): one polymorphic word's recorded obligations, tagged with
+/// the identity a call site rediscovers them by. The name alone is not an
+/// identity: a single-file build mangles nothing and a polymorphic overload
+/// set shares one name across two signatures, so the signature is carried
+/// with it -- and since each obligation's `var` indexes *its own* signature's
+/// `ty_var_names`, handing a call site another word's obligations would
+/// resolve them against the wrong θ silently rather than fail.
+#[derive(Debug)]
+pub(crate) struct WordObligations {
+    pub name: String,
+    pub sig: PolySig,
+    pub obligations: Vec<TraitObligation>,
+}
+
+/// P7.S3e (R8): the tables `check_poly_call` resolves a recorded obligation
+/// against once θ is concrete -- the trait registry (which the diagnostic for
+/// a missing `impl:` reads), the whole-program `impl:` registry, every word's
+/// lowering symbol (`ast::overload_symbols`, so a resolved symbol is
+/// byte-identical to the one lowering mints), and the obligations themselves.
+#[derive(Clone, Copy)]
+pub(crate) struct TraitResolveCtx<'a> {
+    pub traits: &'a [TraitDecl],
+    pub impls: &'a [ImplDecl],
+    pub word_symbols: &'a [String],
+    pub recorded: &'a [WordObligations],
+}
+
+impl TraitResolveCtx<'_> {
+    /// The scratch tables for a path no `Bound::User` can reach: the REPL
+    /// (a session declares no `trait:`, so its bounds are `Copy`/`Ord` only)
+    /// and the REPL's poly-combinator check. An empty `impls` would reject a
+    /// satisfied bound, so a path that *can* see one -- including native's
+    /// poly-combinator-standalone check, whose instantiation records are
+    /// scratch but whose bounds are real -- must pass the real tables.
+    pub(crate) fn scratch() -> TraitResolveCtx<'static> {
+        TraitResolveCtx {
+            traits: crate::ast::predicate_traits(),
+            impls: &[],
+            word_symbols: &[],
+            recorded: &[],
+        }
+    }
+
+    /// The obligations recorded for the callee this call site resolved to, or
+    /// an empty slice: a bounded word whose body calls no trait member records
+    /// none, which is ordinary rather than a miss.
+    fn obligations_of(&self, name: &str, sig: &PolySig) -> &[TraitObligation] {
+        self.recorded
+            .iter()
+            .find(|w| w.name == name && &w.sig == sig)
+            .map(|w| w.obligations.as_slice())
+            .unwrap_or(&[])
+    }
+}
+
 /// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
 /// (every integer width, `usize`/`isize`, and both floats) is totally ordered
 /// for the comparison operators; nothing else is (`bool`, a struct, an array).
@@ -395,6 +450,9 @@ pub(crate) fn check_poly_combinator_repl(
         resolved_variant_fields: &mut scratch_variant_fields,
         combinators,
         eliminators: &eliminators,
+        // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
+        // can reach a REPL-checked combinator body.
+        trait_resolve: TraitResolveCtx::scratch(),
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -3831,9 +3889,17 @@ pub(super) fn check_poly_call(
             &mut subst,
         )?;
     }
+    // P7.S3e (R8/R9): the trait-member calls in the callee's own body that
+    // this instantiation's θ resolves, filled by the bound loop below and
+    // recorded on the `CallInst` for lowering.
+    let mut trait_calls: HashMap<Span, String> = HashMap::new();
     // R6: each declared bound must hold of the concrete type `θ` bound the
     // variable to.
     for (v, bound) in &sig.bounds {
+        // An ungrounded variable (one no input mentions) skips bound checking
+        // entirely, as it always has -- and with it R8's resolution, which is
+        // correct rather than a gap: no obligation can name a variable the
+        // body could not have dispatched on.
         let Some(ty) = subst.ty_of(*v) else { continue };
         let var = &sig.ty_var_names[*v as usize];
         let unsatisfied = match bound {
@@ -3841,10 +3907,26 @@ pub(super) fn check_poly_call(
                 .then(|| poly_copy_bound_error(ctx, span, name, var, ty)),
             Bound::Ord => (!is_ord(ty)).then(|| poly_ord_bound_error(ctx, span, name, var, ty)),
             // P7.S3e (R8): satisfaction of a user trait is an `impl:` registry
-            // lookup keyed by `(TraitId, θ(v))`, and each recorded obligation
-            // then resolves to a concrete symbol against the same θ. Both are
-            // the call-site resolution phase's, which owns that registry read.
-            Bound::User(_) => None,
+            // lookup keyed by `(TraitId, θ(v))`, and each obligation the
+            // callee's body recorded on this variable then resolves to a
+            // concrete symbol against the same θ -- here, at check time, with
+            // the `Subst` in hand, so lowering re-runs no resolution.
+            Bound::User(trait_id) => {
+                resolve_user_bound(
+                    *trait_id,
+                    *v,
+                    ty,
+                    &sig,
+                    name,
+                    span,
+                    ctx,
+                    &poly.trait_resolve,
+                    arrays,
+                    refs,
+                    &mut trait_calls,
+                )?;
+                None
+            }
         };
         if let Some(err) = unsatisfied {
             return Err(err);
@@ -3881,6 +3963,7 @@ pub(super) fn check_poly_call(
             bundle: None,
             generation,
             quot_inputs,
+            trait_calls,
         },
     );
     stack.truncate(base);
@@ -3888,6 +3971,153 @@ pub(super) fn check_poly_call(
         stack.push(Slot::computed(ty));
     }
     Ok(std::mem::take(stack))
+}
+
+/// P7.S3e (R8): one `Bound::User` at a call site whose θ is known -- the
+/// `impl:` registry lookup that decides satisfaction, then the resolution of
+/// every obligation the callee's body recorded on this variable to the
+/// implementing word's lowering symbol, keyed by the body span that dispatched
+/// it.
+#[allow(clippy::too_many_arguments)]
+fn resolve_user_bound(
+    trait_id: TraitId,
+    v: u32,
+    ty: Type,
+    sig: &PolySig,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    tr: &TraitResolveCtx,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+    trait_calls: &mut HashMap<Span, String>,
+) -> Result<(), String> {
+    let trait_decl = &tr.traits[trait_id.index()];
+    // `Type` derives no `Hash`, so the registry is scanned linearly, as
+    // `check_impl_decls`'s own duplicate check is.
+    let Some(imp) = tr
+        .impls
+        .iter()
+        .find(|i| i.trait_id == trait_id && i.target_ty == ty)
+    else {
+        return Err(unsatisfied_user_bound_error(
+            ctx,
+            span,
+            name,
+            &sig.ty_var_names[v as usize],
+            trait_decl,
+            ty,
+            arrays,
+            refs,
+        ));
+    };
+    for ob in tr
+        .obligations_of(name, sig)
+        .iter()
+        .filter(|o| o.trait_id == trait_id && o.var == v)
+    {
+        let symbol = imp
+            .resolved
+            .iter()
+            .find(|(member, _)| *member == ob.member)
+            .and_then(|(_, idx)| tr.word_symbols.get(*idx));
+        let Some(symbol) = symbol else {
+            return Err(unresolved_trait_obligation_error(
+                ctx,
+                span,
+                name,
+                &trait_decl.name,
+                &ob.member,
+                ty,
+                ob.span,
+            ));
+        };
+        trait_calls.insert(ob.span, symbol.clone());
+    }
+    Ok(())
+}
+
+/// R8: the concrete type a bounded variable was instantiated with has no
+/// `impl:` for the trait. Names the trait, the type, and every member
+/// signature the missing impl would have to provide, grounded at that type --
+/// grounding interns, but only on this failure path, where the compile is
+/// already over.
+#[allow(clippy::too_many_arguments)]
+fn unsatisfied_user_bound_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    trait_decl: &TraitDecl,
+    ty: Type,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let sigs: Vec<String> = trait_decl
+        .members
+        .iter()
+        .map(|m| {
+            let ins: Vec<String> = m
+                .sig
+                .inputs
+                .iter()
+                .map(|t| ground_member_type(t, ty, arrays, refs).name().to_string())
+                .collect();
+            let outs: Vec<String> = m
+                .sig
+                .outputs
+                .iter()
+                .map(|t| ground_member_type(t, ty, arrays, refs).name().to_string())
+                .collect();
+            match (ins.is_empty(), outs.is_empty()) {
+                (true, true) => "( -- )".to_string(),
+                (true, false) => format!("( -- {} )", outs.join(" ")),
+                (false, true) => format!("( {} -- )", ins.join(" ")),
+                (false, false) => format!("( {} -- {} )", ins.join(" "), outs.join(" ")),
+            }
+        })
+        .collect();
+    let missing = format!(
+        "`{ty}` does not satisfy `{}`: no `{}` found",
+        trait_decl.name,
+        sigs.join("`, `")
+    );
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {}, col {})\n  {missing}",
+            span.line, span.col
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}`\n  {missing}"
+        ),
+    }
+}
+
+/// R17: the backstop for a satisfied bound whose recorded obligation resolves
+/// to nothing -- an `impl:` that binds no word for a member its trait
+/// requires. `check_impl_decls` rejects that impl at its declaration site, so
+/// reaching here means the two disagree; say so, located, rather than drop the
+/// call and leave lowering to emit nothing.
+#[allow(clippy::too_many_arguments)]
+fn unresolved_trait_obligation_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    trait_name: &str,
+    member: &str,
+    ty: Type,
+    member_span: Span,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let site = match ctx {
+        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Line { .. } => String::new(),
+    };
+    format!(
+        "error: `impl: {trait_name} for {ty}` binds no word for member `{member}`, dispatched at line {}, col {} in the body of `{callee}` (instantiated at line {}, col {}{site})",
+        member_span.line, member_span.col, span.line, span.col
+    )
 }
 
 /// R5: unify one declared input `PolyType` against a concrete slot type,
@@ -5108,17 +5338,31 @@ mod tests {
     use crate::lexer::lex;
 
     fn check_src(src: &str) -> Result<(), String> {
+        checked_like_a_build(src).map(|_| ())
+    }
+
+    /// A source checked the way `driver::assemble_module` checks one: the
+    /// declaration checks first (P7.S3e -- `check_impl_decls` is what resolves
+    /// each `impl:` binding to the word it names, and no call site can resolve
+    /// an obligation without it), then the body/call-site pass, returning the
+    /// checked module alongside what R17's pre-pass recorded.
+    fn checked_like_a_build(src: &str) -> Result<(Module, Vec<WordObligations>), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        check(&mut module)
+        check_trait_decls(&module)?;
+        check_impl_decls(&mut module)?;
+        let recorded = super::super::check_module(&mut module)?;
+        Ok((module, recorded))
     }
 
     /// P7.S3e (R7/R17): the obligations the pre-pass recorded, keyed by the
     /// polymorphic word whose body recorded them.
     fn obligations_of(src: &str) -> HashMap<String, Vec<TraitObligation>> {
-        let tokens = lex(src).unwrap();
-        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        super::super::check_module(&mut module).expect("the fixture checks")
+        let (_, recorded) = checked_like_a_build(src).expect("the fixture checks");
+        recorded
+            .into_iter()
+            .map(|w| (w.name, w.obligations))
+            .collect()
     }
 
     /// A trait, a concrete implementing word, and the `impl:` binding them --
@@ -5378,6 +5622,195 @@ mod tests {
         );
         assert_eq!(recorded["eqs"].len(), 1);
         assert_eq!(recorded["eqs"][0].member, "eq");
+    }
+
+    /// Two types, both satisfying one trait through their own `impl:` -- the
+    /// preamble the call-site resolution tests need (R8). A `shows` declared
+    /// after it lands on line 8, and its `show` call is the obligation's span.
+    const TWO_SHOWS: &str = "type: Point x i64 y i64 ;\n\
+         type: Blip n i64 ;\n\
+         trait: Show 'T show ( &'T -- ) ;\n\
+         : point-show ( &Point -- ) drop ;\n\
+         : blip-show ( &Blip -- ) drop ;\n\
+         impl: Show for Point  show point-show ;\n\
+         impl: Show for Blip  show blip-show ;\n";
+
+    /// P7.S3e (R8/R9): the load-bearing new mechanism, read directly rather
+    /// than through a golden (a bound-directed call does not lower until
+    /// Phase 4). The call site resolves the obligation its callee's body
+    /// recorded against its own theta and records the implementing word's
+    /// lowering symbol, keyed by the *body* span that dispatched it -- never
+    /// the caller's.
+    #[test]
+    fn a_satisfied_bound_resolves_to_the_implementing_words_symbol() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "shows")
+            .expect("the call site recorded an instantiation");
+        let resolved: Vec<(u32, &str)> = inst
+            .trait_calls
+            .iter()
+            .map(|(span, symbol)| (span.line, symbol.as_str()))
+            .collect();
+        assert_eq!(resolved, vec![(5, "point-show")]);
+    }
+
+    /// R8: two instantiations of one bounded word resolve to two distinct
+    /// symbols -- the same body span, under each instantiation's own
+    /// `CallInst`, which is what "per-instantiation" means.
+    #[test]
+    fn two_instantiations_resolve_to_two_distinct_symbols() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{TWO_SHOWS}: shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop 7 Blip |b| &b shows b drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let mut resolved: Vec<(String, u32, String)> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows")
+            .flat_map(|i| {
+                let ty = i.subst.ty_of(0).expect("'T is grounded");
+                i.trait_calls
+                    .iter()
+                    .map(move |(span, symbol)| (ty.name().to_string(), span.line, symbol.clone()))
+            })
+            .collect();
+        resolved.sort();
+        assert_eq!(
+            resolved,
+            vec![
+                ("Blip".to_string(), 8, "blip-show".to_string()),
+                ("Point".to_string(), 8, "point-show".to_string()),
+            ]
+        );
+    }
+
+    /// R8: which member the obligation names selects the binding. A trait with
+    /// two members, a body calling only the second, and two distinct
+    /// implementing words: resolving by position rather than by member name
+    /// would dispatch `hash` to `point-eq`.
+    #[test]
+    fn the_obligations_member_name_selects_the_binding() {
+        let (module, _) = checked_like_a_build(
+            "type: Point x i64 y i64 ;\n\
+             trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
+             : point-eq ( &Point &Point -- i64 ) drop drop 1 ;\n\
+             : point-hash ( &Point -- i64 ) drop 7 ;\n\
+             impl: Eq for Point  eq point-eq  hash point-hash ;\n\
+             : hashes ( &'T: Eq -- i64 ) hash ;\n\
+             : main ( -- ) 1 2 Point |p| &p hashes drop p drop ;\n",
+        )
+        .expect("the fixture checks");
+        let resolved: Vec<&String> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "hashes")
+            .flat_map(|i| i.trait_calls.values())
+            .collect();
+        assert_eq!(resolved, vec!["point-hash"]);
+    }
+
+    /// R8: a polymorphic *overload set* -- two bounded words sharing one name,
+    /// which is legal since their declared inputs differ. Each call site must
+    /// read back its own callee's obligations: they are recorded per
+    /// `(name, signature)`, and a name-keyed lookup would hand both call sites
+    /// the first candidate's obligation, resolving a body span belonging to a
+    /// word that was never called.
+    #[test]
+    fn each_overload_of_one_name_resolves_its_own_bodys_obligation() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : shows ( &'T: Show i64 -- ) drop show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows &p 3 shows p drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let mut sites: Vec<(u32, Vec<u32>)> = module
+            .instantiations
+            .iter()
+            .filter(|(_, i)| i.callee == "shows")
+            .map(|(span, i)| {
+                let mut lines: Vec<u32> = i.trait_calls.keys().map(|s| s.line).collect();
+                lines.sort();
+                (span.col, lines)
+            })
+            .collect();
+        sites.sort();
+        // The one-input `shows` is called first, so it holds the lower column;
+        // its `show` is on line 5, the two-input one's on line 6.
+        assert_eq!(sites.len(), 2, "{sites:?}");
+        assert_eq!(sites[0].1, vec![5], "{sites:?}");
+        assert_eq!(sites[1].1, vec![6], "{sites:?}");
+    }
+
+    /// R8: the concrete type a bounded variable was instantiated with has no
+    /// `impl:` for the trait the bound names.
+    #[test]
+    fn an_unsatisfied_user_bound_names_the_missing_member_signature() {
+        let err = check_src(&format!(
+            "{SHOW}type: Blip n i64 ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 Blip |b| &b shows b drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 7, col 29)"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains("`Blip` does not satisfy `Show`: no `( &Blip -- )` found"),
+            "{err}"
+        );
+    }
+
+    /// R8: every member's grounded signature is listed, not only the first --
+    /// an unsatisfied bound says what an `impl:` would have to provide in
+    /// full.
+    #[test]
+    fn an_unsatisfied_multi_member_bound_lists_every_member_signature() {
+        let err = check_src(
+            "type: Point x i64 y i64 ;\n\
+             trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
+             : eqs ( &'T: Eq &'T -- i64 ) eq ;\n\
+             : main ( -- ) 1 2 Point |p| &p &p eqs drop p drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "`Point` does not satisfy `Eq`: no `( &Point &Point -- i64 )`, `( &Point -- i64 )` found"
+            ),
+            "{err}"
+        );
+    }
+
+    /// R17: the backstop for a satisfied bound whose recorded obligation
+    /// resolves to nothing. `check_impl_decls` rejects an `impl:` binding no
+    /// word for a required member at its own declaration site, so the only way
+    /// into this state is to skip that check -- which is what this asserts:
+    /// the fixture that resolves cleanly in
+    /// `a_satisfied_bound_resolves_to_the_implementing_words_symbol` becomes a
+    /// located error, not a silently dropped call, when the two disagree.
+    #[test]
+    fn an_unresolvable_obligation_on_a_satisfied_bound_is_a_located_error() {
+        let src = format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
+        );
+        let tokens = lex(&src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert_eq!(
+            err,
+            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 5, col 26 in the body of `shows` (instantiated at line 6, col 32 in `main`)"
+        );
     }
 
     // A one-field struct with a `drop` overload: linear for the same reason any

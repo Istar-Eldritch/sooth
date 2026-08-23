@@ -1241,6 +1241,29 @@ instantiations.
 populated correctly at check time (verified independently in Phase 3, not assumed
 here).
 
+**Carried in from the Phase 3 implementation:** the field landed as
+`CallInst::trait_calls` (body span -> the implementing word's
+`ast::overload_symbols` spelling), resolved through a new `ImplDecl::resolved`
+(member name -> word index, filled by `check_impl_decls` pre-mangle, since a
+binding's raw word name and a mangled `WordDef::name` no longer agree by check
+time). Two boundaries for this phase, both measured rather than inferred:
+
+- R9's "pure function of `(callee, θ, generation)`" invariant is satisfied by
+  `trait_calls` itself, but it does not make the *lowering* dedup safe for a
+  polymorphic **overload set**: two same-named poly words at one θ mint the
+  identical `instantiation_symbol`, so `driver.rs`'s `emitted.insert(symbol)`
+  keeps one body and every call to the other dispatches to it. This is
+  pre-existing and unrelated to traits (probed on a trait-free program: `: f (
+  'T i64 -- ) drop drop 2 . ;` before `: f ( 'T -- ) drop 1 . ;`, called at both
+  arities, prints `1` twice instead of `2` then `1`), so it is not this slice's
+  to fix -- but this phase must not read `symbol` as identifying a callee body,
+  and its goldens must not use an overloaded poly word.
+- The REPL path passes `TraitResolveCtx::scratch()` (empty `impls`), so no
+  session line resolves a bound-directed call. Native's
+  poly-combinator-standalone check gets the *real* tables even though its
+  instantiation records are scratch: empty tables there would reject a
+  satisfied bound in a combinator body that calls a bounded poly word.
+
 **Exit Criteria:**
 
 - The `sort` golden builds, lowers to QBE, and runs correctly, sorting arrays of two

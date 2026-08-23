@@ -167,6 +167,10 @@ struct PolyCtx<'a> {
     /// eliminator has no body, so it is not a `Combinator` and must never be
     /// spliced.
     eliminators: &'a HashMap<String, EnumId>,
+    /// P7.S3e (R8): the tables a `Bound::User` at a resolved call site is
+    /// decided and resolved against. `TraitResolveCtx::scratch()` on the REPL
+    /// paths, which can carry no user bound at all.
+    trait_resolve: TraitResolveCtx<'a>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -534,7 +538,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 /// artifact of a check run that is otherwise invisible from outside, since
 /// nothing stores it on `Module` (a resolved obligation rides `CallInst`
 /// instead).
-fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligation>>, String> {
+fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // R1: recognized ahead of `check_types` so the ordering hazard against
     // `check_recursion` (run inside `check_types`) never arises.
     let drop_overloads = find_drop_overloads(&module.words, &module.structs)?;
@@ -710,7 +714,7 @@ fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligati
         statics,
         generics,
         traits,
-        impls: _,
+        impls,
     } = module;
     // P7 slice 3a phase 2 (R2): the live instantiator, wrapped so a poly
     // body's own construction (`poly_call_term`'s new arm) and the grounding
@@ -781,7 +785,7 @@ fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligati
     // ahead of monomorphic-word order. A combinator stays on the in-loop
     // `check_poly_combinator_standalone` path, which records nothing that
     // survives it (R9's scope cut).
-    let mut trait_obligations: HashMap<String, Vec<TraitObligation>> = HashMap::new();
+    let mut trait_obligations: Vec<WordObligations> = Vec::new();
     for word in words.iter() {
         let Some(sig) = &word.poly else { continue };
         if is_combinator(word) {
@@ -816,8 +820,24 @@ fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligati
             g.flush_structs_into(structs);
             g.flush_enums_into(enums);
         }
-        trait_obligations.insert(word.name.clone(), obligations);
+        trait_obligations.push(WordObligations {
+            name: word.name.clone(),
+            sig: (**sig).clone(),
+            obligations,
+        });
     }
+    // P7.S3e (R8): the tables every bound-directed call site below resolves
+    // against, complete only now that the pre-pass has recorded every
+    // non-combinator poly body's obligations. The combinator-standalone path
+    // gets the same tables, not scratch ones: its instantiation records are
+    // scratch, but its bounds are real, and empty tables would reject a
+    // satisfied bound in a combinator body that calls a bounded poly word.
+    let trait_resolve = TraitResolveCtx {
+        traits,
+        impls,
+        word_symbols: &symbols,
+        recorded: &trait_obligations,
+    };
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -848,6 +868,7 @@ fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligati
                     resolved_variant_fields: &mut scratch_variant_fields,
                     combinators: &combinators,
                     eliminators: &eliminators,
+                    trait_resolve,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -876,6 +897,7 @@ fn check_module(module: &mut Module) -> Result<HashMap<String, Vec<TraitObligati
                 resolved_variant_fields: &mut resolved_variant_fields,
                 combinators: &combinators,
                 eliminators: &eliminators,
+                trait_resolve,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -1071,6 +1093,10 @@ pub(crate) fn check_def_collecting_drop_sites(
         resolved_variant_fields: &mut variant_fields,
         combinators,
         eliminators: &eliminators,
+        // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
+        // reaches a REPL-checked body or line -- the same bypass
+        // `structs`/`enums` already follow here.
+        trait_resolve: TraitResolveCtx::scratch(),
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -1149,6 +1175,10 @@ pub(crate) fn infer_line(
         resolved_variant_fields: &mut variant_fields,
         combinators,
         eliminators: &eliminators,
+        // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
+        // reaches a REPL-checked body or line -- the same bypass
+        // `structs`/`enums` already follow here.
+        trait_resolve: TraitResolveCtx::scratch(),
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,

@@ -394,3 +394,31 @@ fn an_unbound_qualifier_in_a_bound_is_rejected() {
         "{err}"
     );
 }
+
+/// R8: a bound instantiated at a concrete type with no satisfying `impl:` is
+/// a located rejection naming the trait, the type, and the member signature
+/// the missing impl would have to provide.
+#[test]
+fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
+    let (_t, entry) = single_file(
+        "bound-unsatisfied",
+        "type: Point x i64 y i64 ;\n\
+         type: Blip n i64 ;\n\
+         trait: Show 'T show ( &'T -- ) ;\n\
+         : point-show ( &Point -- ) drop ;\n\
+         impl: Show for Point  show point-show ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- ) 1 Blip |b| &b shows b drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: cannot instantiate `'T` of `shows` with `Blip` in `main` (line 8, col 29)"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("`Blip` does not satisfy `Show`: no `( &Blip -- )` found"),
+        "{err}"
+    );
+}

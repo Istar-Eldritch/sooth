@@ -1400,6 +1400,14 @@ pub struct ImplDecl {
     pub module: u32,
     pub span: Span,
     pub bindings: Vec<(String, String)>,
+    /// P7.S3e (R8): each binding's implementing word as an index into
+    /// `Module::words`, member name -> index. Filled by `check_impl_decls`,
+    /// which resolves it pre-mangle, where a binding's raw word name and a
+    /// `WordDef::name` still agree; a bound-directed call site then mints the
+    /// symbol from `overload_symbols` so it is byte-identical to the one
+    /// lowering emits. Empty on any path that skips that check (a REPL
+    /// session, which declares no `impl:`), so nothing resolves there.
+    pub resolved: Vec<(String, usize)>,
 }
 
 /// R4: an array count in a polymorphic type: a concrete length or a length
@@ -1481,7 +1489,12 @@ pub enum PolyType {
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature
 /// (a `Var(0)` in one word is unrelated to a `Var(0)` in another); the
 /// `*_var_names` tables carry each id's surface spelling for diagnostics.
-#[derive(Debug, Clone)]
+///
+/// P7.S3e (R8): `Eq` because a call site identifies its callee by name *and*
+/// signature together when reading back the obligations the pre-pass recorded
+/// for that body -- a polymorphic overload set shares one name across two
+/// signatures, and each obligation's variable id indexes its own signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolySig {
     /// The input row variable (`..s` at the deepest input slot), if any.
     pub row_in: Option<u32>,
@@ -1553,6 +1566,13 @@ pub struct CallInst {
     /// the concrete boundary's own `Arity::quot_inputs` -- an abstract
     /// `PolyType::Quotation` position never reaches here (out of scope, L1).
     pub quot_inputs: Vec<(usize, &'static QuotEffect)>,
+    /// P7.S3e (R8/R9): the trait-member calls inside the callee's own body
+    /// that this instantiation's `θ` resolves, span -> the implementing word's
+    /// lowering symbol. A pure function of `(callee, θ, generation)`: the
+    /// spans are the callee body's, never the caller's, so two call sites
+    /// sharing a `(callee, θ)` record identical maps and the symbol-dedup step
+    /// in lowering may read either one.
+    pub trait_calls: std::collections::HashMap<Span, String>,
 }
 
 /// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,

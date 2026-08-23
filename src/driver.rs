@@ -2198,4 +2198,45 @@ mod tests {
             "{err}"
         );
     }
+
+    /// P7.S3e (R8/R9): the resolved symbol in a *mangled* build. The `impl:`
+    /// binding names its word raw (`point-show`) and is resolved pre-mangle,
+    /// while lowering mints that word's function under the post-mangle
+    /// `overload_symbols` spelling -- so the resolution rides the word's index
+    /// rather than its name, and the recorded symbol is the one lowering will
+    /// emit, byte for byte.
+    #[test]
+    fn a_resolved_trait_call_carries_the_post_mangle_lowering_symbol() {
+        let s = Sandbox::new("bound-symbol");
+        s.write(
+            "show.sth",
+            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n\
+             import: \"show.sth\" s | Show | ;\n\
+             type: Point x i64 y i64 ;\n\
+             : point-show ( &Point -- ) drop ;\n\
+             impl: Show for Point  show point-show ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- ) 1 2 Point |p| &p shows p drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the bound is satisfied");
+        let resolved: Vec<&String> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "shows__m0")
+            .flat_map(|i| i.trait_calls.values())
+            .collect();
+        let symbols = crate::ast::overload_symbols(&module.words);
+        let expected = symbols
+            .iter()
+            .find(|sym| sym.starts_with("point-show"))
+            .expect("the impl member lowers under its own symbol");
+        assert_eq!(resolved, vec![expected], "symbols: {symbols:?}");
+        assert_eq!(expected, "point-show__m0");
+    }
 }

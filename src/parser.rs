@@ -2122,6 +2122,7 @@ impl<'t> Parser<'t> {
             module: self.module,
             span,
             bindings,
+            resolved: Vec::new(),
         })
     }
 

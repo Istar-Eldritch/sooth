@@ -456,7 +456,7 @@ fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
 /// signatures are restricted to concrete/array/reference shapes over `'T`
 /// this slice (`parse_trait_member_effect` rejects anything else at
 /// declaration time), so every other `PolyType` shape is unreachable here.
-fn ground_member_type(
+pub(super) fn ground_member_type(
     pty: &PolyType,
     target: Type,
     arrays: &mut Vec<ArrayDecl>,
@@ -522,6 +522,10 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
             ));
         }
         let mut bound_names: HashSet<&str> = HashSet::new();
+        // R8: the word each member binds, as an index into `module.words`,
+        // resolved here (pre-mangle, where `word_name` and `WordDef::name`
+        // still agree) and read back at a bound-directed call site.
+        let mut resolved: Vec<(String, usize)> = Vec::new();
         for (member_name, word_name) in &bindings {
             if !bound_names.insert(member_name.as_str()) {
                 return Err(impl_duplicate_member_error(
@@ -552,10 +556,11 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                 .iter()
                 .map(|t| ground_member_type(t, target_ty, &mut module.arrays, &mut module.refs))
                 .collect();
-            let candidates: Vec<&WordDef> = module
+            let candidates: Vec<(usize, &WordDef)> = module
                 .words
                 .iter()
-                .filter(|w| w.module == impl_module && &w.name == word_name)
+                .enumerate()
+                .filter(|(_, w)| w.module == impl_module && &w.name == word_name)
                 .collect();
             if candidates.is_empty() {
                 return Err(impl_unknown_word_error(
@@ -565,24 +570,27 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                     impl_span,
                 ));
             }
-            let poly_candidate = candidates.iter().find(|w| w.poly.is_some());
-            let concrete_match = candidates.iter().find(|w| {
+            let poly_candidate = candidates.iter().find(|(_, w)| w.poly.is_some());
+            let concrete_match = candidates.iter().find(|(_, w)| {
                 w.poly.is_none()
                     && w.effect.inputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_inputs
                     && w.effect.outputs.iter().map(|s| s.ty).collect::<Vec<_>>() == expected_outputs
             });
-            if concrete_match.is_none() {
-                if let Some(pc) = poly_candidate {
-                    return Err(impl_polymorphic_member_error(&trait_name, member_name, pc));
+            match concrete_match {
+                Some((idx, _)) => resolved.push((member_name.clone(), *idx)),
+                None => {
+                    if let Some((_, pc)) = poly_candidate {
+                        return Err(impl_polymorphic_member_error(&trait_name, member_name, pc));
+                    }
+                    return Err(impl_signature_mismatch_error(
+                        &trait_name,
+                        member_name,
+                        word_name,
+                        &expected_inputs,
+                        &expected_outputs,
+                        impl_span,
+                    ));
                 }
-                return Err(impl_signature_mismatch_error(
-                    &trait_name,
-                    member_name,
-                    word_name,
-                    &expected_inputs,
-                    &expected_outputs,
-                    impl_span,
-                ));
             }
         }
         let trait_decl = &module.traits[trait_id.index()];
@@ -595,6 +603,7 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
                 ));
             }
         }
+        module.impls[i].resolved = resolved;
     }
     Ok(())
 }
