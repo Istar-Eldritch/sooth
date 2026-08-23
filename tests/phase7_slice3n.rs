@@ -227,32 +227,6 @@ fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
 // together make reachable.
 // ---------------------------------------------------------------------------
 
-/// Run `body` on a spawned thread and fail the test if it has not finished in
-/// `secs`. R6's failure mode is a *non-terminating* instantiation, and a hung
-/// test process emits no `test result:` line at all -- neither a pass nor a
-/// failure -- so the termination witnesses below have to fail explicitly
-/// instead of hanging.
-fn within(secs: u64, what: &str, body: impl FnOnce() + Send + 'static) {
-    use std::sync::mpsc::{channel, RecvTimeoutError};
-    let (tx, rx) = channel();
-    let handle = std::thread::spawn(move || {
-        body();
-        let _ = tx.send(());
-    });
-    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
-        // `Disconnected` means the thread ended without sending: it panicked,
-        // so re-raise that panic rather than blaming a timeout for it.
-        Ok(()) | Err(RecvTimeoutError::Disconnected) => match handle.join() {
-            Ok(()) => {}
-            Err(payload) => std::panic::resume_unwind(payload),
-        },
-        Err(RecvTimeoutError::Timeout) => panic!(
-            "{what} did not terminate within {secs}s -- \
-             instantiation ordering regression suspected"
-        ),
-    }
-}
-
 /// R4, whole pipeline: an array-of-type-variable field instantiated at two
 /// differently-sized payloads, constructed from a real array and read back.
 /// Two payloads rather than one, because a substitution that ignored the
@@ -372,19 +346,21 @@ fn array_wrapped_generic_self_reference_is_infinite_size_error() {
 /// R6's termination witness. `^L['T]` at `'T = i64` re-enters
 /// `instantiate_struct` for the same `(idx, module, args)` while substituting
 /// its own field; the memo pushed before that substitution is what closes the
-/// loop. With the old substitute-then-mint order this never returns, which is
-/// why the build runs under an explicit timeout.
+/// loop.
+///
+/// Termination is the whole claim, and it needs no timeout wrapper: the
+/// recursion is a call chain, so a regression here overflows the stack and
+/// aborts (measured, by reverting the ordering) rather than hanging. The
+/// runner reports that as a failure like any other.
 #[test]
 fn cell_wrapped_generic_self_reference_builds_and_terminates() {
-    within(60, "a cell-wrapped generic self-reference", || {
-        build(
-            "cellcycle",
-            "type: L 'T v 'T next ^L['T] ;\n\
-             : f ( L[i64] -- L[i64] ) ;\n\
-             : main ( -- ) ;\n",
-        )
-        .expect("a cell breaks the cycle, so the type has a finite size");
-    });
+    build(
+        "cellcycle",
+        "type: L 'T v 'T next ^L['T] ;\n\
+         : f ( L[i64] -- L[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect("a cell breaks the cycle, so the type has a finite size");
 }
 
 /// The two-header cycle the single-header test cannot cover: the memo key
@@ -392,16 +368,14 @@ fn cell_wrapped_generic_self_reference_builds_and_terminates() {
 /// re-entering *itself* would recurse forever here.
 #[test]
 fn mutual_cell_wrapped_generic_self_reference_terminates() {
-    within(60, "a mutual cell-wrapped generic cycle", || {
-        build(
-            "mutualcycle",
-            "type: A 'T v 'T next ^B['T] ;\n\
-             type: B 'T w 'T back ^A['T] ;\n\
-             : f ( A[i64] -- A[i64] ) ;\n\
-             : main ( -- ) ;\n",
-        )
-        .expect("a mutual cycle through two cells is finite");
-    });
+    build(
+        "mutualcycle",
+        "type: A 'T v 'T next ^B['T] ;\n\
+         type: B 'T w 'T back ^A['T] ;\n\
+         : f ( A[i64] -- A[i64] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect("a mutual cycle through two cells is finite");
 }
 
 /// R8's accept side at instantiation, and the case that distinguishes its rule
@@ -411,15 +385,13 @@ fn mutual_cell_wrapped_generic_self_reference_terminates() {
 /// second hop find the first.
 #[test]
 fn permuting_generic_self_reference_terminates() {
-    within(60, "a permuting generic self-reference", || {
-        build(
-            "permutecycle",
-            "type: A 'K 'V k 'K v 'V next ^A['V 'K] ;\n\
-             : f ( A[i64 u8] -- A[i64 u8] ) ;\n\
-             : main ( -- ) ;\n",
-        )
-        .expect("a permuting self-reference alternates between two instantiations");
-    });
+    build(
+        "permutecycle",
+        "type: A 'K 'V k 'K v 'V next ^A['V 'K] ;\n\
+         : f ( A[i64 u8] -- A[i64 u8] ) ;\n\
+         : main ( -- ) ;\n",
+    )
+    .expect("a permuting self-reference alternates between two instantiations");
 }
 
 /// The out-of-scope gap, pinned rather than left silent: an *attributeless*

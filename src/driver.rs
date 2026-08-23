@@ -1208,8 +1208,13 @@ mod tests {
         );
 
         // `Map`'s only field is `[Ent['K 'V] 8]`: an interned array whose
-        // element is the substituted `Ent` instantiation.
-        let entry_fields = |map: usize| {
+        // element is the substituted `Ent` instantiation. Both the element's
+        // rendered name *and* its field types are asserted, and the two are
+        // not the same claim: a substitution that swapped `'K`/`'V` would be
+        // applied twice on the way to `Ent`'s own fields (once binding
+        // `Ent`'s arguments, once binding its fields against them) and cancel
+        // out at arity two, leaving only the name wrong.
+        let entry_of = |map: usize| {
             let (_, slots) = &module.structs[map].fields[0];
             let crate::ast::Type::Array(arr, _) = slots else {
                 panic!("slots is an array: {slots:?}")
@@ -1219,21 +1224,34 @@ mod tests {
             let crate::ast::Type::Struct(ent, _) = decl.element else {
                 panic!("the element is an Ent instantiation: {:?}", decl.element)
             };
-            module.structs[ent.index()]
-                .fields
-                .iter()
-                .map(|(n, t)| (n.clone(), *t))
-                .collect::<Vec<_>>()
+            let ent = &module.structs[ent.index()];
+            (
+                ent.name.clone(),
+                ent.fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), *t))
+                    .collect::<Vec<_>>(),
+            )
         };
+        let (a_name, a_fields) = entry_of(a);
+        let (b_name, b_fields) = entry_of(b);
+        assert!(
+            a_name.starts_with("Ent[i64 str]"),
+            "Map[i64 str]'s element instantiates Ent at ('K, 'V) in that order: {a_name}"
+        );
+        assert!(
+            b_name.starts_with("Ent[str i64]"),
+            "and Map[str i64]'s at the reverse: {b_name}"
+        );
         assert_eq!(
-            entry_fields(a),
+            a_fields,
             vec![
                 ("k".to_string(), crate::ast::Type::I64),
                 ("v".to_string(), crate::ast::Type::Str)
             ]
         );
         assert_eq!(
-            entry_fields(b),
+            b_fields,
             vec![
                 ("k".to_string(), crate::ast::Type::Str),
                 ("v".to_string(), crate::ast::Type::I64)
