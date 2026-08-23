@@ -806,14 +806,17 @@ pub(super) fn poly_term(
 /// The fit must be unique: two candidates on one variable fit the same
 /// operands (that is the same-variable ambiguity, reachable here through a
 /// mixed set -- two traits on `'T` plus one on `'U`), and no candidate fits a
-/// call whose operands are wrong for every one of them. Both are `None`, and
-/// both are the ambiguity: nothing at the call site picks.
+/// call whose operands are wrong for every one of them. Those two failure
+/// modes are not the same diagnostic: the first is resolved by a module
+/// qualifier (it narrows *which* trait), the second is not (no candidate's
+/// declared operands match, so naming a trait changes nothing) -- `CandidateFit`
+/// keeps them apart for the caller.
 fn candidate_fitting_the_operands<'a>(
     stack: &[PolySlot],
     candidates: &[(u32, TraitId, &'a TraitMember)],
-) -> Option<(u32, TraitId, &'a TraitMember)> {
+) -> CandidateFit<'a> {
     if candidates.windows(2).all(|w| w[0].0 == w[1].0) {
-        return None;
+        return CandidateFit::Ambiguous;
     }
     let mut fitting = candidates.iter().filter(|(var, _, member)| {
         let inputs = &member.sig.inputs;
@@ -826,9 +829,16 @@ fn candidate_fitting_the_operands<'a>(
         }
     });
     match (fitting.next(), fitting.next()) {
-        (Some(one), None) => Some(*one),
-        _ => None,
+        (Some(one), None) => CandidateFit::Unique(*one),
+        (Some(_), Some(_)) => CandidateFit::Ambiguous,
+        (None, _) => CandidateFit::NoFit,
     }
+}
+
+enum CandidateFit<'a> {
+    Unique((u32, TraitId, &'a TraitMember)),
+    Ambiguous,
+    NoFit,
 }
 
 /// P7.S3e (R7): a trait member's signature is written over the trait's own
@@ -856,8 +866,15 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
 ///
 /// P7.S3p (ruling 1/2): the candidate variable comes from the *bounds*, found
 /// by member name, never from the stack -- so a member dispatches whatever
-/// input position its receiver sits at. Selection never reads operand shape;
-/// the per-input check below is the sole place a mismatch is reported.
+/// input position its receiver sits at.
+///
+/// P7.S3p (ruling 4, amended): selection reads operand shape only when the
+/// name-based search above finds candidates spanning more than one variable
+/// (`candidate_fitting_the_operands`); a single-variable match never touches
+/// operand shape at all. The per-input check below stays the sole place an
+/// operand *mismatch on the resolved candidate* is reported -- shape only
+/// ever disambiguates *which* candidate, never validates the one it settles
+/// on.
 ///
 /// The obligation records *which trait, which member, which variable* and no
 /// symbol: `'T` is still abstract here, so the implementing word is unknowable
@@ -925,8 +942,8 @@ fn poly_trait_member_call(
         // R12/decision 5: composing two traits that happen to share a member
         // name is legal to declare; only the ambiguous *call* is the error.
         many => match candidate_fitting_the_operands(stack, many) {
-            Some(one) => one,
-            None => {
+            CandidateFit::Unique(one) => one,
+            CandidateFit::Ambiguous => {
                 let named: Vec<(&str, &str)> = matched
                     .iter()
                     .map(|(v, tid, _)| {
@@ -937,6 +954,18 @@ fn poly_trait_member_call(
                     })
                     .collect();
                 return Err(ambiguous_trait_member_error(span, member, &named));
+            }
+            CandidateFit::NoFit => {
+                let named: Vec<(&str, &str)> = matched
+                    .iter()
+                    .map(|(v, tid, _)| {
+                        (
+                            traits[tid.index()].name.as_str(),
+                            sig.ty_var_names[*v as usize].as_str(),
+                        )
+                    })
+                    .collect();
+                return Err(no_candidate_fits_operands_error(span, member, &named));
             }
         },
     };
@@ -1039,10 +1068,14 @@ pub(super) fn poly_call_term(
     // `call`, `dup`, ...) is unreachable through its bound, silently running
     // the builtin or failing with a diagnostic that never mentions the
     // trait. `poly_trait_member_call` is a narrow, self-gating probe: it
-    // returns `Ok(None)` unless the top of stack is one of this word's own
-    // bounded type variables *and* a `Bound::User` on it actually declares a
-    // member of this name, so moving it here changes nothing for the
-    // ordinary (non-trait) use of any of these names. It also must run
+    // returns `Ok(None)` unless a `Bound::User` on one of this word's own
+    // type variables declares a member of this name (P7.S3p: found by name
+    // over the bounds, not by matching the stack top), so moving it here
+    // changes nothing for the ordinary (non-trait) use of any of these
+    // names -- a member named `eq`/`len`/`call`/`dup` is rejected at
+    // `trait:` declaration time (it collides with the builtin), so no bound
+    // ever actually declares one, and every user word besides arrives here
+    // mangled, never under the bare builtin spelling. It also must run
     // ahead of the intrinsic-import gate immediately below: bound dispatch
     // is whole-program and unscoped by import (decision 9), so a bound call
     // to e.g. `eq` must not be rejected as an unimported comparison
@@ -5530,6 +5563,30 @@ fn ambiguous_trait_member_error(span: Span, member: &str, candidates: &[(&str, &
     )
 }
 
+/// P7.S3p (ruling 4, amended): the operands at the call fit none of the
+/// candidates spanning more than one variable. This is not the same problem
+/// as `ambiguous_trait_member_error`'s: there, a module qualifier resolves
+/// the call by naming which trait is meant; here every candidate's declared
+/// operands already disagree with the stack, so no qualifier changes that --
+/// the call is a plain operand-shape mismatch, just one with more than one
+/// declared shape to be wrong against.
+fn no_candidate_fits_operands_error(
+    span: Span,
+    member: &str,
+    candidates: &[(&str, &str)],
+) -> String {
+    let each: Vec<String> = candidates
+        .iter()
+        .map(|(t, v)| format!("`{t}` on {v}"))
+        .collect();
+    format!(
+        "error: `{member}` is required by {} (line {}, col {})\n  note: the operands at this call match none of their declared shapes",
+        joined_with_and(&each),
+        span.line,
+        span.col
+    )
+}
+
 fn joined_with_and(items: &[String]) -> String {
     match items.split_last() {
         Some((last, [])) => last.clone(),
@@ -6633,11 +6690,14 @@ mod tests {
         );
     }
 
-    /// P7.S3p (ruling 4): when the operands fit *no* candidate, nothing at the
-    /// call site picks, so it is the ambiguity error -- widened to name each
-    /// trait with its own variable, since the candidates no longer share one.
+    /// P7.S3p (ruling 4, amended): when the operands fit *no* candidate,
+    /// nothing at the call site picks -- but this is not the same failure as
+    /// an ambiguous call: no module qualifier would fix it, since every
+    /// candidate's declared operands already disagree with the stack. The
+    /// diagnostic says so instead of the "cannot be called unqualified" note,
+    /// which is only true when qualifying would actually help.
     #[test]
-    fn a_cross_variable_member_call_fitting_no_candidate_is_ambiguous() {
+    fn a_cross_variable_member_call_fitting_no_candidate_names_the_operand_mismatch() {
         let err = check_src(
             "trait: A 'T t1 ( &'T -- ) ;\n\
              trait: B 'T t1 ( &'T -- ) ;\n\
@@ -6649,6 +6709,11 @@ mod tests {
             err.contains("`t1` is required by `A` on 'T and `B` on 'U (line 3, col 30)"),
             "{err}"
         );
+        assert!(
+            err.contains("the operands at this call match none of their declared shapes"),
+            "{err}"
+        );
+        assert!(!err.contains("cannot be called unqualified"), "{err}");
     }
 
     /// P7.S3p (ruling 4): position is not a disambiguator either. `A`'s `t1`

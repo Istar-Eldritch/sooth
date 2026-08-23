@@ -597,27 +597,33 @@ way a non-combinator poly word's bounded call does (S3e's R7/R8/R9), rather than
 located rejection.
 
 **P7.S3p -- A trait member is only dispatchable through a bound if its *last* declared
-input is the bound variable.** Named at P7.S3e's post-implementation review. `receiver_ty_var`
-(`src/check/poly.rs:781-790`) only inspects the top-of-stack operand slot to decide whether a
-call is a bound-dispatch candidate; this is exactly the slot a member's *last* declared input
-occupies. A member whose bound variable sits anywhere else in its input list --
-`at ( &'T i64 -- i64 )` (an index/lookup shape), `tag ( -- i64 )` (a zero-input constructor),
-or any shape with a trailing non-`'T` input -- never reaches the three dispatch barriers at
-all; control falls straight through to ordinary `env.get`, which is a silent wrong-answer if
-an unrelated same-named concrete word happens to be reachable, or a confusing "unknown word"
-otherwise. S3e ships a declaration-time rejection for this shape (`check_trait_decls` rejects
-any member whose input list doesn't end in `'T`) rather than attempting real dispatch, since
-`receiver_ty_var`'s single-slot model has no mechanism for locating the bound variable
-anywhere else in the operand window. Probe-validated (`docs/roadmap/P7/slice3p-brief.md`):
-name-first lookup (find which of the body's bound traits declares a member of this name,
-then read that member's own declared input list for the receiver's position) dispatches
-correctly and does not collide with the existing ordering invariant (bound dispatch must
-front every name-based special case) -- the fix is internal to how the candidate variable is
-found, not a change to call order. One caught-and-fixed subtlety: candidate selection must
-match loosely on the underlying variable (ignoring ref-vs-bare shape), or a genuine
-operand-shape mismatch silently degrades to "unknown word" instead of the located mismatch
-diagnostic. The multi-position ambiguity case and the zero-input-member (`tag`) case remain
-unprobed and open for the spec to resolve.
+input is the bound variable.** `[ done ]` Named at P7.S3e's post-implementation review. The old
+`receiver_ty_var` only inspected the top-of-stack operand slot to decide whether a call is a
+bound-dispatch candidate; this is exactly the slot a member's *last* declared input occupies. A
+member whose bound variable sits anywhere else in its input list -- `at ( &'T i64 -- i64 )` (an
+index/lookup shape), `tag ( -- i64 )` (a zero-input constructor), or any shape with a trailing
+non-`'T` input -- never reached the three dispatch barriers at all; control fell straight
+through to ordinary `env.get`, which was a silent wrong-answer if an unrelated same-named
+concrete word happened to be reachable, or a confusing "unknown word" otherwise. S3e shipped a
+declaration-time rejection for this shape (`check_trait_decls` rejects any member whose input
+list doesn't end in `'T`) rather than attempting real dispatch, since the single-slot model had
+no mechanism for locating the bound variable anywhere else in the operand window. The shipped
+fix (`src/check/poly.rs::poly_trait_member_call`) is name-first: it finds which of the body's
+bound traits declares a member of this name, then reads that member's own declared input list
+for the receiver's position, and does not collide with the existing ordering invariant (bound
+dispatch must front every name-based special case) -- the fix is internal to how the candidate
+variable is found, not a change to call order.
+
+One case the probe surfaced and the spec had to rule on beyond the brief: two candidates on
+*different* bound variables both declaring a member of the same name. Ruling 4 as first written
+(count of matching bound declarations alone) would have made this always ambiguous, which
+regresses a program S3e already made legal (`one trait, two variables, two obligations resolved
+against their own thetas`); ruling 4 was amended in-implementation
+(`docs/roadmap/P7/slice3p-spec.md`) to separate cross-variable candidates by which operands the
+call consumes, matching same-variable duplicates unaffected -- those stay the ambiguity error
+S3e made them, since no operand shape could pick between them without an overload-resolution
+mechanism the language doesn't have. The zero-input-member (`tag`) case stayed out of scope,
+as planned, and moved to **P7.S3t** below.
 **Exit:** a trait member may declare its bound type variable at any input position, not only
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.
