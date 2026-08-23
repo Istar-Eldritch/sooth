@@ -429,50 +429,13 @@ fn the_typed_core_arrives_only_by_import() {
     assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n");
 }
 
-// -- R6b: the narrowing prelude deletion introduces, named ------------------
-
-/// R6b: a non-inline polymorphic word calling an imported polymorphic word is
-/// the one capability prelude deletion removes (the prelude's comparisons were
-/// reachable by bare, unmangled name from any body). It is a located error
-/// naming caller, callee and remedy -- not the raw `unknown word `lt__mN``
-/// that leaks a mangled spelling.
-#[test]
-fn a_poly_word_calling_an_imported_poly_word_names_the_narrowing() {
-    let t = Tree::new("poly-calls-poly");
-    let entry = write_raw(
-        &t,
-        "main.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n\
-         import: core::bool cb | Bool | ;\n\
-         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
-         : main ( -- ) 1 2 mylt drop ;\n",
-    );
-    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("build")
-        .arg(&entry)
-        .arg("--manifest")
-        .arg(common::fixture_manifest())
-        .output()
-        .expect("sooth build should spawn");
-    let err = String::from_utf8_lossy(&build.stderr).into_owned();
-    assert!(!build.status.success(), "build should have failed: {err}");
-    assert!(
-        err.contains(
-            "cannot call the polymorphic word `lt`"
-        ) && err.contains("`mylt`")
-            && err.contains(
-                "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
-            )
-            && err.contains(
-                "inline the caller, make the callee concrete, or call the callee from a monomorphic word"
-            ),
-        "unexpected diagnostic: {err}"
-    );
-    assert!(
-        !err.contains("__m"),
-        "the diagnostic must not leak a mangled spelling: {err}"
-    );
-}
+// -- R6b: the narrowing prelude deletion introduced, since lifted -----------
+//
+// R6b's own golden (`a_poly_word_calling_an_imported_poly_word_names_the_narrowing`)
+// pinned the located error a non-inline polymorphic word got for calling an
+// imported polymorphic one. P7.S3k grounds that call instead, so the
+// diagnostic and its test are gone; the capability it named is pinned by
+// `tests/phase7_slice3k.rs`.
 
 /// R2, the poly-body twin: a generic body dispatches the same builtins on its
 /// own path (`poly_call_term`), so without a gate there an unimported `dup`

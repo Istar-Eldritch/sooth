@@ -1571,6 +1571,7 @@ mod tests {
             generics: crate::ast::GenericTypes::default(),
             externs: Vec::new(),
             instantiations: HashMap::new(),
+            poly_cross_calls: HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),

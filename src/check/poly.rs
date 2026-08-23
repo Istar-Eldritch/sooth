@@ -28,6 +28,21 @@ pub(crate) struct TraitCtx<'a> {
     pub obligations: &'a mut Vec<TraitObligation>,
 }
 
+/// P7.S3k (R1/R2): the generic-callee side of a polymorphic body's walk --
+/// the registry a call to *another* generic word looks its signature up in,
+/// and the symbolic cross-call records the walk writes back. Bundled for the
+/// same reason `TraitCtx` is: it rides the same eight functions, which
+/// already carry `builtin_overloads` and `tctx` along that path.
+///
+/// This replaces the bare `poly_words: &HashSet<String>` the walk used to
+/// carry. That set held callee *names* only, which was enough to name a
+/// diagnostic and nothing else; the signature is what a call site needs to
+/// dispatch against.
+pub(crate) struct CrossCtx<'a> {
+    pub env: &'a PolyEnv,
+    pub calls: &'a mut Vec<PolyCrossCall>,
+}
+
 impl TraitCtx<'_> {
     /// The scratch context for a path that records no obligation: the REPL's
     /// per-line word check and the poly-combinator-standalone path, neither of
@@ -500,7 +515,7 @@ pub fn check_poly_body(
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     // R12 (slice 8b, 8a): the caller module's operator visibility rides on
@@ -550,7 +565,7 @@ pub fn check_poly_body(
         slices,
         builtin_overloads,
         tctx,
-        poly_words,
+        cross,
         true,
     )?;
     // P7 slice 3b (R4/L2): splice-consumed quotations only. A literal still
@@ -599,7 +614,7 @@ pub(super) fn poly_walk(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     let last = terms.len().wrapping_sub(1);
@@ -634,7 +649,7 @@ pub(super) fn poly_walk(
             slices,
             builtin_overloads,
             tctx,
-            poly_words,
+            cross,
             tail && at == last,
         )?;
     }
@@ -656,7 +671,7 @@ pub(super) fn poly_term(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     let span = term.span;
@@ -733,7 +748,7 @@ pub(super) fn poly_term(
                 slices,
                 builtin_overloads,
                 tctx,
-                poly_words,
+                cross,
                 tail,
             );
         }
@@ -954,7 +969,7 @@ pub(super) fn poly_call_term(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
@@ -1197,41 +1212,13 @@ pub(super) fn poly_call_term(
         }
         _ => {}
     }
-    // Comparisons: on a bare variable they need `Ord` (X8); on two concrete
-    // operands they delegate to the ordinary operator check below.
-    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
-        let n = stack.len();
-        if n >= 2 {
-            let a = stack[n - 2].pt.clone();
-            let b = stack[n - 1].pt.clone();
-            let (av, bv) = (poly_var_id(&a), poly_var_id(&b));
-            if av.is_some() || bv.is_some() {
-                match (av, bv) {
-                    (Some(v), Some(w)) if v == w => {
-                        if !sig.has_bound(v, Bound::Ord) {
-                            return Err(poly_ord_body_error(
-                                ctx,
-                                span,
-                                name,
-                                &sig.ty_var_names[v as usize],
-                            ));
-                        }
-                    }
-                    _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
-                }
-                // P7 slice 3i (R4): the comparison's result type is
-                // `core::bool`'s enum as this build resolved it. Absent, the
-                // six comparison names are `lib/cmp.sth` words that resolved
-                // to nothing, which is what the caller is told.
-                let Some(bool_ty) = resolve_bool_type(ctx.enums()) else {
-                    return Err(unknown_word_error(ctx, span, name));
-                };
-                stack.truncate(n - 2);
-                stack.push(PolySlot::new(PolyType::Concrete(bool_ty)));
-                return Ok(stack);
-            }
-        }
-    }
+    // P7.S3k (R7): the six-name "comparisons need `Ord`" carve-out that used
+    // to sit here is gone. `eq`/`lt`/`gt`/`lte`/`gte`/`ne` are `lib/cmp.sth`
+    // words, so a real call arrives module-mangled and the bare-name match
+    // never fired outside the unmangled `parse_with_core` test harness. Their
+    // one real capability -- a comparison on the body's own `'T`, gated on its
+    // bounds -- is now a special case of the generic-callee arm below, driven
+    // by `gt`'s declared `( 'T: Copy Ord 'T -- Bool )` rather than by name.
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
     // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
@@ -1308,7 +1295,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             tctx,
-            poly_words,
+            cross,
             tail,
         )?;
         let leaked = scope
@@ -1361,7 +1348,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             tctx,
-            poly_words,
+            cross,
             tail,
         );
     }
@@ -1404,7 +1391,7 @@ pub(super) fn poly_call_term(
             slices,
             builtin_overloads,
             tctx,
-            poly_words,
+            cross,
             tail,
         );
     }
@@ -1576,7 +1563,7 @@ pub(super) fn poly_call_term(
                             slices,
                             builtin_overloads,
                             tctx,
-                            poly_words,
+                            cross,
                         )?;
                     }
                     other => {
@@ -1648,15 +1635,478 @@ pub(super) fn poly_call_term(
         }
         return Ok(stack);
     }
-    // P8 S2 (R6b): a polymorphic callee is registered in `poly_env`, which this
-    // path cannot see, so a poly word calling one lands here rather than
-    // dispatching. That is the generic-calls-generic gap, not an unknown name:
-    // say so, and name the caller, the callee and the three ways out, instead
-    // of leaking the mangled spelling through `unknown word`.
-    if poly_words.contains(name) {
-        return Err(poly_calls_poly_word_error(ctx, span, name));
+    // P7.S3k (R1): a call to a *different* polymorphic word. `cross.env` is
+    // the same `poly_env` a monomorphic body dispatches through, so this arm
+    // reaches every generic callee -- same-module or imported, user-declared
+    // or a library word -- and relates its rigid variables to this body's
+    // symbolically (R2), the caller having no θ of its own here.
+    //
+    // Copied out of `cross` first (it is one shared reference) so the record
+    // below can borrow `cross.calls` mutably.
+    let poly_env = cross.env;
+    if let Some(candidates) = poly_env.get(name) {
+        return poly_cross_call(
+            name,
+            span,
+            stack,
+            sig,
+            ctx,
+            structs,
+            enums,
+            arrays,
+            tctx.traits,
+            candidates,
+            cross,
+        );
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// P7.S3k (R1-R3/R6): a call from one polymorphic body to a *different*
+/// polymorphic word. Neither side has a θ here, so nothing is unified against
+/// a concrete type: the callee's declared inputs are matched **structurally**
+/// against the caller's operand slots, and what comes out is a
+/// variable-to-variable mapping (R2) recorded for later composition, never a
+/// `Subst`. The self-call arm above is not an instance of this -- it reuses
+/// the walk's own `sig` and needs no mapping at all.
+#[allow(clippy::too_many_arguments)]
+fn poly_cross_call(
+    name: &str,
+    span: Span,
+    mut stack: Vec<PolySlot>,
+    sig: &PolySig,
+    ctx: &Ctx,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    traits: &[TraitDecl],
+    candidates: &[(PolySig, Option<u64>)],
+    cross: &mut CrossCtx,
+) -> Result<Vec<PolySlot>, String> {
+    // R2: which candidate this operand run selects. A lone candidate is the
+    // ordinary case and is used as-is, so its own rejection is what the caller
+    // is told; an overload set is resolved by trying each in declaration
+    // order, the first-match-wins rule `resolve_combinator_overload` already
+    // applies -- with no ground type in hand there is nothing to rank
+    // candidates by.
+    let callee_sig = match candidates {
+        [(only, _)] => only,
+        _ => {
+            let matched = candidates
+                .iter()
+                .map(|(csig, _)| csig)
+                .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig, traits).is_ok());
+            match matched {
+                Some(csig) => csig,
+                None => return Err(no_poly_overload_matches_error(ctx, span, name, candidates)),
+            }
+        }
+    };
+    let mapping = poly_cross_relate(callee_sig, name, &stack, span, ctx, sig, traits)?;
+    // R3: every bound the callee declares on a mapped variable, discharged
+    // here, at the call site. For a variable image this is a *symbolic*
+    // discharge against the caller's own declared bounds -- the caller's own
+    // concrete instantiation is what checks those against a real type
+    // (`check_poly_call`'s bound loop), so satisfaction transfers -- and for a
+    // concrete image it is the ordinary predicate, run on the spot.
+    for (v, bound) in &callee_sig.bounds {
+        // A variable no declared input mentions skips bound checking, exactly
+        // as the concrete path's own bound loop skips an ungrounded one.
+        let Some((_, image)) = mapping.iter().find(|(id, _)| id == v) else {
+            continue;
+        };
+        let var = &callee_sig.ty_var_names[*v as usize];
+        let unsatisfied = match (image, bound) {
+            (Image::CallerVar(t), _) => (!sig.has_bound(*t, *bound)).then(|| {
+                poly_cross_bound_error(ctx, span, name, var, &sig.ty_var_names[*t as usize], *bound)
+            }),
+            (Image::Concrete(ty), Bound::Copy) => (!is_copy(*ty, structs, enums, arrays))
+                .then(|| poly_copy_bound_error(ctx, span, name, var, *ty)),
+            (Image::Concrete(ty), Bound::Ord) => {
+                (!is_ord(*ty)).then(|| poly_ord_bound_error(ctx, span, name, var, *ty))
+            }
+            // A user bound is gated out of a cross-call entirely by
+            // `poly_cross_signature_supported`, so this is unreachable.
+            (Image::Concrete(_), Bound::User(_)) => None,
+        };
+        if let Some(err) = unsatisfied {
+            return Err(err);
+        }
+    }
+    let n_in = callee_sig.inputs.len();
+    let base = stack.len() - n_in;
+    // The callee's declared outputs, read back into the *caller's* variable
+    // space through the mapping -- the symbolic twin of `apply_subst`.
+    let mut outputs = Vec::with_capacity(callee_sig.outputs.len());
+    for declared in &callee_sig.outputs {
+        outputs.push(poly_cross_output(
+            declared, &mapping, callee_sig, name, span, ctx,
+        )?);
+    }
+    cross.calls.push(PolyCrossCall {
+        callee: name.to_string(),
+        span,
+        mapping,
+    });
+    stack.truncate(base);
+    for out in outputs {
+        stack.push(PolySlot::new(out));
+    }
+    Ok(stack)
+}
+
+/// P7.S3k (R2): relate `callee`'s declared inputs to the caller's operand
+/// slots, yielding each callee type variable's image in the caller's world.
+/// Total: every shape it cannot represent is a located rejection at the call
+/// site, never a deferred one (N1).
+fn poly_cross_relate(
+    callee_sig: &PolySig,
+    callee: &str,
+    stack: &[PolySlot],
+    span: Span,
+    ctx: &Ctx,
+    caller_sig: &PolySig,
+    traits: &[TraitDecl],
+) -> Result<Vec<(u32, Image)>, String> {
+    poly_cross_signature_supported(callee_sig, callee, span, ctx, traits)?;
+    let n_in = callee_sig.inputs.len();
+    if stack.len() < n_in {
+        return Err(underflow_error(ctx, span, callee, n_in, stack.len()));
+    }
+    let base = stack.len() - n_in;
+    let mut mapping = Vec::new();
+    for (i, declared) in callee_sig.inputs.iter().enumerate() {
+        poly_cross_match(
+            declared,
+            &stack[base + i].pt,
+            &mut mapping,
+            callee_sig,
+            caller_sig,
+            callee,
+            span,
+            ctx,
+        )?;
+    }
+    Ok(mapping)
+}
+
+/// P7.S3k (R2/R6): match one declared callee input against the caller's slot,
+/// binding each callee variable it reaches. The recursion is what separates
+/// R6's two look-alike cases: a *declared* compound (`&'U`) is decomposed, so
+/// a caller passing `&'T` binds `'U` to the bare `'T` and nothing grew; a
+/// declared bare `'U` facing a compound operand is the caller having wrapped
+/// its own variable, which is growth.
+#[allow(clippy::too_many_arguments)]
+fn poly_cross_match(
+    declared: &PolyType,
+    supplied: &PolyType,
+    mapping: &mut Vec<(u32, Image)>,
+    callee_sig: &PolySig,
+    caller_sig: &PolySig,
+    callee: &str,
+    span: Span,
+    ctx: &Ctx,
+) -> Result<(), String> {
+    let mismatch = || {
+        poly_rendered_type_mismatch_error(
+            ctx,
+            span,
+            callee,
+            &poly_type_str(declared, callee_sig),
+            &poly_type_str(supplied, caller_sig),
+        )
+    };
+    match (declared, supplied) {
+        (PolyType::Var(v), _) => {
+            let image = match supplied {
+                PolyType::Concrete(t) => Image::Concrete(*t),
+                PolyType::Var(w) => Image::CallerVar(*w),
+                // Not a value at all, so it can fill no declared position:
+                // the same rejection the operand-window guard renders for a
+                // literal it cannot ground.
+                PolyType::QuotLit => {
+                    return Err(poly_op_on_variable_error(
+                        ctx,
+                        span,
+                        callee,
+                        &PolyType::QuotLit,
+                        caller_sig,
+                    ))
+                }
+                PolyType::Quotation(..) => {
+                    return Err(poly_cross_call_unsupported_error(
+                        ctx,
+                        span,
+                        callee,
+                        "passing a quotation to a polymorphic word",
+                    ))
+                }
+                // R6: the caller built a larger type over one of its own
+                // variables and handed that in.
+                _ => {
+                    return Err(poly_growing_cross_call_error(
+                        ctx,
+                        span,
+                        callee,
+                        &callee_sig.ty_var_names[*v as usize],
+                        &poly_type_str(supplied, caller_sig),
+                    ))
+                }
+            };
+            match mapping.iter().find(|(id, _)| id == v) {
+                // R2's consistency requirement, the symbolic twin of
+                // `unify_poly_input`'s `poly_var_conflict_error`: one callee
+                // variable pinned to two different caller images cannot be
+                // one type at any instantiation.
+                Some((_, prev)) if *prev != image => Err(poly_cross_var_conflict_error(
+                    ctx,
+                    span,
+                    callee,
+                    &callee_sig.ty_var_names[*v as usize],
+                    &poly_image_str(prev, caller_sig),
+                    &poly_image_str(&image, caller_sig),
+                )),
+                Some(_) => Ok(()),
+                None => {
+                    mapping.push((*v, image));
+                    Ok(())
+                }
+            }
+        }
+        (PolyType::Concrete(a), PolyType::Concrete(b)) => match a == b {
+            true => Ok(()),
+            false => Err(mismatch()),
+        },
+        (PolyType::Array(de, dl), PolyType::Array(se, sl)) if dl == sl => {
+            poly_cross_match(de, se, mapping, callee_sig, caller_sig, callee, span, ctx)
+        }
+        (PolyType::Ref(de, dm), PolyType::Ref(se, sm)) if dm == sm => {
+            poly_cross_match(de, se, mapping, callee_sig, caller_sig, callee, span, ctx)
+        }
+        // Same header, argument by argument. `name` carries no identity (see
+        // `PolyType::Generic`'s own doc), so it takes no part in the compare.
+        (
+            PolyType::Generic {
+                is_enum: de,
+                idx: di,
+                module: dm,
+                args: da,
+                ..
+            },
+            PolyType::Generic {
+                is_enum: se,
+                idx: si,
+                module: sm,
+                args: sa,
+                ..
+            },
+        ) if (de, di, dm, da.len()) == (se, si, sm, sa.len()) => {
+            for (d, sup) in da.iter().zip(sa) {
+                poly_cross_match(d, sup, mapping, callee_sig, caller_sig, callee, span, ctx)?;
+            }
+            Ok(())
+        }
+        _ => Err(mismatch()),
+    }
+}
+
+/// P7.S3k: one declared callee *output*, read back into the caller's variable
+/// space. A compound output is rejected for the mirror of R6's reason plus one
+/// of its own: a declared compound always mentions a variable (a fully
+/// concrete one folds to `Concrete` at parse), so substituting the mapping
+/// into it either grows a type over a caller variable or needs the registry
+/// interning `apply_subst` does for a *ground* θ and nothing here can do
+/// symbolically.
+fn poly_cross_output(
+    declared: &PolyType,
+    mapping: &[(u32, Image)],
+    callee_sig: &PolySig,
+    callee: &str,
+    span: Span,
+    ctx: &Ctx,
+) -> Result<PolyType, String> {
+    match declared {
+        PolyType::Concrete(t) => Ok(PolyType::Concrete(*t)),
+        PolyType::Var(v) => match mapping.iter().find(|(id, _)| id == v) {
+            Some((_, Image::Concrete(t))) => Ok(PolyType::Concrete(*t)),
+            Some((_, Image::CallerVar(w))) => Ok(PolyType::Var(*w)),
+            // An output variable no declared input pins. The callee's own body
+            // check rejects a signature it cannot produce, so this is a
+            // backstop rather than a shape source can reach.
+            None => Err(poly_cross_call_unsupported_error(
+                ctx,
+                span,
+                callee,
+                &format!(
+                    "an output type variable (`{}`) that the callee's inputs do not determine",
+                    callee_sig.ty_var_names[*v as usize]
+                ),
+            )),
+        },
+        _ => Err(poly_cross_call_unsupported_error(
+            ctx,
+            span,
+            callee,
+            &format!(
+                "returning the compound type `{}` from a polymorphic word",
+                poly_type_str(declared, callee_sig)
+            ),
+        )),
+    }
+}
+
+/// P7.S3k: the callee signature shapes a symbolic mapping cannot carry, each
+/// a located rejection at the call site rather than a shape admitted and
+/// mis-lowered later.
+///
+/// This is the residual of the gap this slice closes, not a restatement of it:
+/// it fires for four specific declared shapes, where the deleted
+/// `poly_calls_poly_word_error` fired for *every* cross-call.
+///
+/// - A row (`..s`) has no image kind to map to, and a row-typed `inline`
+///   combinator is spliced by `poly_combinator_call` above rather than called.
+/// - A quotation parameter has no runtime representation to pass across a
+///   real call.
+/// - A length variable is a second, separate id space `Image` does not model.
+/// - A user trait bound would be *satisfied* soundly by the symbolic
+///   discharge above (the caller declares the same bound), but the callee's
+///   own recorded obligations are resolved per ground θ, and nothing composes
+///   them for a cross-call yet -- admitting one here would ship exactly the
+///   monomorphization-time failure N1 forbids.
+fn poly_cross_signature_supported(
+    callee_sig: &PolySig,
+    callee: &str,
+    span: Span,
+    ctx: &Ctx,
+    traits: &[TraitDecl],
+) -> Result<(), String> {
+    let unsupported = |what: &str| Err(poly_cross_call_unsupported_error(ctx, span, callee, what));
+    if callee_sig.row_in.is_some() || callee_sig.row_out.is_some() {
+        return unsupported("calling a row-polymorphic word");
+    }
+    let slots = || callee_sig.inputs.iter().chain(&callee_sig.outputs);
+    if slots().any(poly_input_is_quotation) {
+        return unsupported("passing a quotation to a polymorphic word");
+    }
+    if slots().any(poly_mentions_len_var) {
+        return unsupported("a length variable in the callee's signature");
+    }
+    if let Some((_, Bound::User(id))) = callee_sig
+        .bounds
+        .iter()
+        .find(|(_, b)| matches!(b, Bound::User(_)))
+    {
+        let trait_name = traits
+            .get(id.index())
+            .map_or("a user trait", |t| t.name.as_str());
+        return unsupported(&format!("discharging the `{trait_name}` bound"));
+    }
+    Ok(())
+}
+
+/// Whether a declared slot mentions a length variable at any depth.
+fn poly_mentions_len_var(pt: &PolyType) -> bool {
+    match pt {
+        PolyType::Array(elem, len) => matches!(len, Len::Var(_)) || poly_mentions_len_var(elem),
+        PolyType::Ref(referent, _) => poly_mentions_len_var(referent),
+        PolyType::Generic { args, .. } => args.iter().any(poly_mentions_len_var),
+        PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(poly_mentions_len_var),
+        PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
+    }
+}
+
+/// P7.S3k: one callee variable's image, in the *caller's* spellings -- what
+/// the conflict diagnostic names the two sides with.
+fn poly_image_str(image: &Image, caller_sig: &PolySig) -> String {
+    match image {
+        Image::Concrete(t) => t.name().to_string(),
+        Image::CallerVar(v) => caller_sig.ty_var_names[*v as usize].clone(),
+    }
+}
+
+/// P7.S3k (R6): the caller wrapped one of its own type variables in a larger
+/// type before handing it to a callee that declared a bare variable. Rejected
+/// because a recursive cross-call of this shape composes a structurally larger
+/// type at every hop, so its set of instantiations need not be finite and no
+/// dedup ever fires.
+///
+/// Deliberately shape-directed, not cycle-directed: a single, non-recursive
+/// wrap would terminate, and is rejected too. That over-rejection buys a
+/// check-time structural rule with no cycle detection, and the remedy named
+/// below (declare the parameter at the shape the caller actually has) is the
+/// accepted form of the same call.
+fn poly_growing_cross_call_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    callee_var: &str,
+    supplied: &str,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let caller = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{caller}` cannot pass `{supplied}` to `{callee_var}` of the polymorphic word `{callee}` (line {}, col {})\n  a polymorphic call site may pass a type variable only bare: wrapping it in `{supplied}` builds a larger type at every hop of a recursive call, which has no finite set of instantiations\n  declare `{callee}`'s parameter as `{supplied}` so the shape is matched structurally, or call it from a monomorphic word",
+        span.line, span.col
+    )
+}
+
+/// P7.S3k (R3): the callee needs a bound on a variable the caller passes one
+/// of its own for, and the caller's signature does not declare it. Located at
+/// the call site: the caller's own instantiations are what would otherwise
+/// discover this, far away and per instantiation.
+fn poly_cross_bound_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    callee_var: &str,
+    caller_var: &str,
+    bound: Bound,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let caller = ctx.word_name().unwrap_or("<line>");
+    let bound = match bound {
+        Bound::Copy => "Copy",
+        Bound::Ord => "Ord",
+        // Gated out ahead of the discharge (`poly_cross_signature_supported`).
+        Bound::User(_) => "a user trait",
+    };
+    format!(
+        "error: `{callee_var}` of `{callee}` requires `{bound}`, which `{caller_var}` in `{caller}` does not declare (line {}, col {})\n  declare `{caller_var}: {bound}` so every instantiation of `{caller}` satisfies `{callee}`",
+        span.line, span.col
+    )
+}
+
+/// P7.S3k (R2): one callee variable matched against two different caller
+/// images at one call site. The symbolic twin of `poly_var_conflict_error`:
+/// the callee declared one variable in both positions, so no instantiation can
+/// make the two operands agree.
+fn poly_cross_var_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    callee_var: &str,
+    a: &str,
+    b: &str,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let caller = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{callee}` in `{caller}` (line {}, col {}) matched `{callee_var}` to both `{a}` and `{b}`",
+        span.line, span.col
+    )
+}
+
+/// P7.S3k: a cross-call whose callee signature is outside the symbolic
+/// mapping's reach (`poly_cross_signature_supported`, and the operand/output
+/// shapes that need the same interning). Names the specific shape, so it is
+/// never mistaken for the whole-feature narrowing it replaced.
+fn poly_cross_call_unsupported_error(ctx: &Ctx, span: Span, callee: &str, what: &str) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let caller = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{caller}` cannot call the polymorphic word `{callee}` (line {}, col {})\n  {what} is not yet supported from a polymorphic body\n  call `{callee}` from a monomorphic word instead",
+        span.line, span.col
+    )
 }
 
 /// P7.S3g-follow (1c): the poly twin of `check_reference_across_back_edge` --
@@ -1750,7 +2200,7 @@ fn poly_ground_quotation_literal(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
 ) -> Result<(), String> {
     let lit = scope.quotation(quot).clone();
     // Review fix (Bug 2): the mono twin's flavour funnel
@@ -1800,7 +2250,7 @@ fn poly_ground_quotation_literal(
         slices,
         builtin_overloads,
         tctx,
-        poly_words,
+        cross,
         false,
     )?;
     // R12, the poly twin of the concrete argument site's
@@ -1921,23 +2371,6 @@ fn poly_call_ground_quotation_param(
     Ok(stack)
 }
 
-/// P8 S2 (R6b): the located diagnostic for a non-inline polymorphic word
-/// calling another polymorphic word. Deleting the prelude removed the one shape
-/// this used to work for -- its injected comparisons were reachable by bare,
-/// unmangled name from any body -- so this is the narrowing that replaced it,
-/// named rather than left as a raw unknown-word error. An
-/// imported callee and a same-module one emit the same message: both are the
-/// one underlying gap.
-fn poly_calls_poly_word_error(ctx: &Ctx, span: Span, callee: &str) -> String {
-    let caller = ctx.word_name().unwrap_or("this line");
-    format!(
-        "error: `{caller}` cannot call the polymorphic word `{}` (line {}, col {})\n  a polymorphic word is not yet reachable from another polymorphic word across a module boundary\n  inline the caller, make the callee concrete, or call the callee from a monomorphic word",
-        crate::resolve::demangle_call(callee),
-        span.line,
-        span.col
-    )
-}
-
 /// P7 slice 3b (R2/R3): the abstract twin of `check_eliminator_call`
 /// (`src/check.rs`) -- a *concrete* enum eliminated inside a **polymorphic**
 /// body, whose arms are quotation literals written in that body.
@@ -1972,7 +2405,7 @@ fn poly_eliminator_call(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     let enum_decl = &enums[id.index()];
@@ -2147,7 +2580,7 @@ fn poly_eliminator_call(
         slices,
         builtin_overloads,
         tctx,
-        poly_words,
+        cross,
         &mut |literal_span, exit| match &baseline {
             None => {
                 baseline = Some(exit);
@@ -2212,7 +2645,7 @@ fn poly_walk_arms(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     cross_arm: &mut dyn FnMut(Span, Vec<PolySlot>) -> Result<(), String>,
 ) -> Result<(), String> {
     let enclosing_locals: HashSet<String> = scope.locals.keys().cloned().collect();
@@ -2251,7 +2684,7 @@ fn poly_walk_arms(
             slices,
             builtin_overloads,
             tctx,
-            poly_words,
+            cross,
             arm.tail,
         )?;
         // A `Type::Variant` may not leave the call. Every type-directed
@@ -2568,7 +3001,7 @@ fn poly_combinator_call(
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
-    poly_words: &HashSet<String>,
+    cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
     // P7.S3g-follow (1a): which of the callee's parameters hold a quotation it
@@ -2742,7 +3175,7 @@ fn poly_combinator_call(
         slices,
         builtin_overloads,
         tctx,
-        poly_words,
+        cross,
         &mut |literal_span, exit| {
             let rule = &rules[at];
             at += 1;
@@ -3392,15 +3825,6 @@ fn check_poly_slice_offset(
             Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
         }
         other => Err(poly_op_on_variable_error(ctx, span, op, other, sig)),
-    }
-}
-
-/// The variable id of a bare `PolyType::Var`, else `None` (a concrete or
-/// array slot is not a bare variable).
-pub(super) fn poly_var_id(pt: &PolyType) -> Option<u32> {
-    match pt {
-        PolyType::Var(v) => Some(*v),
-        _ => None,
     }
 }
 
@@ -4552,15 +4976,6 @@ pub(super) fn poly_copy_generic_error(ctx: &Ctx, span: Span, op: &str, ty: &str)
     )
 }
 
-pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
-    let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
-    format!(
-        "error: `{op}` on the type variable `{var}` in `{where_}` (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
-        span.line
-    )
-}
-
 /// P7 slice 3c (R1.2, phase 4): `slice` over a buffer whose *element* is still
 /// generic. The view's length may be a variable -- that is what a view erases
 /// -- but its element may not: a generic element is a locked non-goal, so the
@@ -4603,24 +5018,6 @@ pub(super) fn poly_op_on_variable_error(
     format!(
         "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
         span.line
-    )
-}
-
-pub(super) fn poly_op_operand_mismatch_error(
-    ctx: &Ctx,
-    span: Span,
-    op: &str,
-    a: &PolyType,
-    b: &PolyType,
-    sig: &PolySig,
-) -> String {
-    let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.word_name().unwrap_or("<line>");
-    format!(
-        "error: `{op}` in `{where_}` (line {}) needs two operands of one type, found `{}` and `{}`",
-        span.line,
-        poly_type_str(a, sig),
-        poly_type_str(b, sig),
     )
 }
 
@@ -5340,6 +5737,21 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
 
+    /// P7.S3k: the callee-side walk context for a fixture that drives
+    /// `poly_term`/`poly_walk_arms` directly. The registry is empty, so no
+    /// cross-call arm can fire and no record survives -- both of which every
+    /// one of those fixtures wants. A macro rather than a function because
+    /// `CrossCtx` borrows two temporaries, which only live as long as the
+    /// statement they are written in.
+    macro_rules! scratch_cross {
+        () => {
+            &mut CrossCtx {
+                env: &PolyEnv::new(),
+                calls: &mut Vec::new(),
+            }
+        };
+    }
+
     fn check_src(src: &str) -> Result<(), String> {
         checked_like_a_build(src).map(|_| ())
     }
@@ -5356,6 +5768,29 @@ mod tests {
         check_impl_decls(&mut module)?;
         let recorded = super::super::check_module(&mut module)?;
         Ok((module, recorded))
+    }
+
+    /// A source checked the way a real build checks one, *including* the
+    /// per-module name mangling every build applies even to a single file
+    /// (`assemble_module`'s `always_mangle`). `check_src` skips
+    /// `resolve_modules`, so a call to a `lib/` word arrives under its bare
+    /// spelling there -- the test-harness artefact that kept the deleted
+    /// six-name comparison carve-out (P7.S3k R7) looking alive. Through here,
+    /// `gt` arrives as `gt__mN`, which is what a real call site holds.
+    fn check_src_mangled(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
+        check_trait_decls(&module)?;
+        check_impl_decls(&mut module)?;
+        super::super::check_module(&mut module).map(|_| ())
+    }
+
+    /// The cross-call records a checked source produced, keyed by the
+    /// polymorphic word whose body made them (P7.S3k R2).
+    fn cross_calls_of(src: &str) -> HashMap<String, Vec<PolyCrossCall>> {
+        let (module, _) = checked_like_a_build(src).expect("the fixture checks");
+        module.poly_cross_calls
     }
 
     /// P7.S3e (R7/R17): the obligations the pre-pass recorded, keyed by the
@@ -6349,7 +6784,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             false,
         )
         .expect("a quotation literal is admitted in a polymorphic body");
@@ -6400,7 +6835,7 @@ mod tests {
                 &mut Vec::new(),
                 &mut overloads,
                 &mut TraitCtx::scratch(&mut Vec::new()),
-                &HashSet::new(),
+                scratch_cross!(),
                 false,
             )
             .expect("two literals then a swap");
@@ -6579,7 +7014,7 @@ mod tests {
             &mut Vec::new(),
             &mut HashMap::new(),
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             &mut |_, exit| {
                 exits.push(exit.into_iter().map(|slot| slot.pt).collect());
                 Ok(())
@@ -6625,7 +7060,7 @@ mod tests {
             &mut Vec::new(),
             &mut HashMap::new(),
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             &mut |_, _| Ok(()),
         )
         .expect_err("a linear local bound in an arm and never read leaks");
@@ -6852,7 +7287,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             false,
         )
         .expect("an int literal should push a slot");
@@ -6878,7 +7313,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             false,
         )
         .expect("binding the literal should consume the slot");
@@ -6912,10 +7347,30 @@ mod tests {
         assert_eq!(symbols.len(), 2);
     }
     #[test]
-    fn check_poly_ord_word_accepts_comparison_body() {
-        // R7: a `'T: Ord` variable may be compared; the body and a numeric
-        // instantiation both check.
-        check_src(": less ( 'T: Ord 'T -- Bool ) gt ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+    fn check_generic_comparison_body_with_ord_checks_clean() {
+        // P7.S3k (R1/R3/R7): re-expresses the retired
+        // `check_poly_ord_word_accepts_comparison_body`. A generic body may
+        // compare its own `'T` -- but through `lib/cmp.sth`'s real
+        // `: gt ( 'T: Copy Ord 'T -- Bool )`, reached as a generic callee like
+        // any other, not through a name-matched carve-out. Checked *mangled*,
+        // so the callee arrives as `gt__mN` exactly as it does in a real
+        // build; that is the shape the deleted carve-out could never see, and
+        // the reason it was dead code.
+        check_src_mangled(": less ( 'T: Copy Ord 'T -- Bool ) gt ;\n: main ( -- ) 3 4 less drop ;")
+            .unwrap();
+    }
+    #[test]
+    fn check_generic_comparison_body_without_ord_is_error() {
+        // P7.S3k (R3): the same body without the bound is a located call-site
+        // error naming the missing `Ord`, not a deferred failure at whatever
+        // type `less` is later instantiated at.
+        let err =
+            check_src_mangled(": less ( 'T: Copy 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
+        assert!(
+            err.contains("requires `Ord`") && err.contains("`less`"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "a mangled spelling leaked: {err}");
     }
     #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
@@ -6965,9 +7420,16 @@ mod tests {
     fn check_x6_ord_bound_on_non_ord_type_is_error() {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
-        let err =
-            check_src(": less ( 'T: Ord 'T -- Bool ) gt ;\n: main ( -- ) True False less drop ;")
-                .unwrap_err();
+        // P7.S3k (R7): `Copy` joins the declaration. `gt` is `lib/cmp.sth`'s
+        // `( 'T: Copy Ord 'T -- Bool )`, and the body's comparison now
+        // discharges that whole bound set across the call (R3) instead of
+        // being special-cased by name against `Ord` alone. The subject is
+        // unchanged: `Bool` is `Copy` but not `Ord`, so it is `less`'s own
+        // instantiation that fails, at `main`'s call site.
+        let err = check_src(
+            ": less ( 'T: Copy Ord 'T -- Bool ) gt ;\n: main ( -- ) True False less drop ;",
+        )
+        .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -6982,7 +7444,12 @@ mod tests {
     #[test]
     fn check_x8_compare_of_unbounded_variable_requires_ord() {
         // X8: `gt` on an unbounded `'T` inside a body requires an `Ord` bound.
-        let err = check_src(": bad ( 'T 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
+        //
+        // P7.S3k (R7): declared `'T: Copy` so `Ord` is the *only* bound
+        // missing. The rule is now `gt`'s own declared bound set discharged
+        // against this word's (R3), so an entirely unbounded `'T` names
+        // whichever of the two comes first and would not pin `Ord`.
+        let err = check_src(": bad ( 'T: Copy 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -7363,24 +7830,196 @@ mod tests {
             "the stranded `Spy` shows up as the arms disagreeing: {err}"
         );
     }
+    // -- P7.S3k: a generic word calling another generic word ---------------
+
+    /// P7.S3k (R1): the slice's headline shape. Replaces the retired
+    /// `poly_different_word_call_still_rejects` (and its `tests/` twins), which
+    /// pinned the `poly_calls_poly_word_error` narrowing this closes.
     #[test]
-    fn poly_different_word_call_still_rejects() {
-        // R3: a call to a *different* polymorphic word (not the walking
-        // word's own name) is unchanged -- still `poly_calls_poly_word_error`,
-        // the P8 S2 generic-calls-generic gap this slice does not close.
-        let err =
-            check_src(": other ( 'T -- 'T ) ;\n: caller ( 'T -- 'T ) other ;\n: main ( -- ) ;\n")
-                .unwrap_err();
+    fn check_generic_word_calls_same_module_generic_grounds() {
+        check_src(": id ( 'T -- 'T ) ;\n: g ( 'T -- 'T ) id ;\n: main ( -- ) ;\n").unwrap();
+    }
+
+    /// P7.S3k (R1): the same call under the per-module mangling every real
+    /// build applies, which is the only thing that distinguishes an *imported*
+    /// callee from a same-module one at this level -- the arm dispatches on
+    /// `poly_env`, whose keys are post-mangle names, never on a spelling. The
+    /// end-to-end cross-module build golden is `tests/phase7_slice3k.rs`'s.
+    #[test]
+    fn check_generic_word_calls_mangled_generic_grounds() {
+        check_src_mangled(": id ( 'T -- 'T ) ;\n: g ( 'T -- 'T ) id ;\n: main ( -- ) ;\n").unwrap();
+    }
+
+    /// P7.S3k (R2): what the walk actually produces -- one symbolic record per
+    /// grounded cross-call, keyed by the *containing* word, mapping the
+    /// callee's own variable to the caller's. Phase 2 composes exactly this
+    /// against a concrete θ, so its shape is the contract, not an incidental.
+    #[test]
+    fn check_generic_cross_call_records_the_caller_var_mapping() {
+        let recorded =
+            cross_calls_of(": id ( 'T -- 'T ) ;\n: g ( 'T -- 'T ) id ;\n: main ( -- ) ;\n");
+        let calls = recorded.get("g").expect("`g`'s body made the call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].callee, "id");
+        assert_eq!(calls[0].mapping, vec![(0, Image::CallerVar(0))]);
+        // Keyed by the caller, not the callee: `id`'s own body calls nothing.
+        assert!(!recorded.contains_key("id"), "recorded: {recorded:?}");
+    }
+
+    /// P7.S3k (R2/R6, the accept side of the growth rule): a *concrete* image.
+    /// The caller hands over an `i64` it built itself, so `'U` maps to a
+    /// ground type rather than to one of the caller's variables -- legal, and
+    /// the case a growth rule written as "reject anything but a bare variable"
+    /// would wrongly refuse.
+    #[test]
+    fn check_generic_cross_call_with_a_concrete_operand_grounds() {
+        let recorded =
+            cross_calls_of(": h ( 'U -- 'U ) ;\n: g ( 'T -- 'T ) 1 h drop ;\n: main ( -- ) ;\n");
+        let calls = recorded.get("g").expect("`g`'s body made the call");
+        assert_eq!(calls[0].mapping, vec![(0, Image::Concrete(Type::I64))]);
+    }
+
+    /// P7.S3k (R6, the distinction an implementer must not confuse): a callee
+    /// declaring its *own* compound parameter is structurally decomposed, so
+    /// the image of `'U` is the bare `'T` and nothing grew. The mirror of
+    /// `check_growing_cross_call_is_error` below, whose only difference is
+    /// which side wrote the wrapper.
+    #[test]
+    fn check_generic_cross_call_forwarding_a_reference_grounds() {
+        let recorded =
+            cross_calls_of(": peek ( &'U -- ) drop ;\n: g ( &'T -- ) peek ;\n: main ( -- ) ;\n");
+        let calls = recorded.get("g").expect("`g`'s body made the call");
+        assert_eq!(calls[0].mapping, vec![(0, Image::CallerVar(0))]);
+    }
+
+    /// P7.S3k (R3): a bound the callee needs and the caller does not declare
+    /// is a located error at the call site -- the user-declared-callee twin of
+    /// `check_generic_comparison_body_without_ord_is_error`'s library one.
+    #[test]
+    fn check_generic_cross_call_bound_mismatch_is_error() {
+        let err = check_src(
+            ": biggest ( 'U: Ord -- 'U ) ;\n: g ( 'T -- 'T ) biggest ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
         assert!(
-            err.contains("cannot call the polymorphic word"),
+            err.contains("`'U` of `biggest` requires `Ord`, which `'T` in `g` does not declare"),
             "unexpected message: {err}"
         );
+    }
+
+    /// P7.S3k (R3): the same discharge against a *concrete* image runs the
+    /// ordinary predicate on the spot, so the caller's own bounds are not the
+    /// only route to a rejection. `Bool` is `Copy` but not `Ord`.
+    #[test]
+    fn check_generic_cross_call_concrete_operand_failing_a_bound_is_error() {
+        let err = check_src(
+            ": biggest ( 'U: Ord -- 'U ) ;\n\
+             : g ( 'T -- 'T ) True biggest drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
         assert!(
-            err.contains(
-                "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
+            err.contains("cannot instantiate `'U` of `biggest` with `Bool`")
+                && err.contains("is not `Ord`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3k (R6): the caller wraps its own `'T` before handing it over, so
+    /// the image of the callee's bare `'U` is a compound over a caller
+    /// variable -- the growing case, rejected at the call site.
+    ///
+    /// The wrapper is a generic **enum**, deliberately. An array wrapper would
+    /// be a placebo: array *construction* inside any polymorphic body is
+    /// rejected outright by a pre-existing guard (`poly_term`'s `ArrayCtor`
+    /// arm), so the growth rule would never be consulted. Sooth has no generic
+    /// structs, so a single-variant generic enum is the only constructible
+    /// wrapper. Do not add an array-based "second witness".
+    #[test]
+    fn check_growing_cross_call_is_error() {
+        let err = check_src(
+            "type: Box 'T | Box 'T ;\n\
+             : h ( 'U -- 'U ) ;\n\
+             : g ( 'T -- ) Box h drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot pass `Box['T]` to `'U` of the polymorphic word `h`")
+                && err.contains("builds a larger type at every hop"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3k (R2, the consistency requirement): one callee variable matched
+    /// against two different caller variables cannot be one type at any
+    /// instantiation. The symbolic twin of `poly_var_conflict_error`, which the
+    /// concrete path raises for the same shape against two ground types.
+    #[test]
+    fn check_inconsistent_cross_call_mapping_is_error() {
+        let err = check_src(
+            ": pair ( 'U 'U -- 'U 'U ) ;\n\
+             : g ( 'A 'B -- 'A 'B ) pair ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("matched `'U` to both `'A` and `'B`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3k: the callee signature shapes a symbolic mapping cannot carry are
+    /// each a located rejection naming that shape, not the whole-feature
+    /// narrowing they replaced. All four are reachable from source.
+    #[test]
+    fn check_cross_call_unsupported_callee_shapes_name_themselves() {
+        for (fixture, what) in [
+            (
+                ": alen ( ['E 'N] -- ['E 'N] usize ) len ;\n\
+                 : g ( ['T 4] -- ['T 4] ) alen drop ;\n: main ( -- ) ;\n",
+                "a length variable in the callee's signature",
             ),
-            "unexpected message: {err}"
-        );
+            (
+                "type: Box 'T | Box 'T ;\n\
+                 : box ( 'U -- Box['U] ) Box ;\n\
+                 : g ( 'T -- ) box drop ;\n: main ( -- ) ;\n",
+                "returning the compound type `Box['U]` from a polymorphic word",
+            ),
+            (
+                ": shows ( &'U: Show -- ) show ;\n\
+                 : g ( &'T: Show -- ) shows ;\n: main ( -- ) ;\n",
+                "discharging the `Show` bound",
+            ),
+        ] {
+            let src = format!("{SHOW}{fixture}");
+            let err = check_src(&src).unwrap_err();
+            assert!(
+                err.contains(what) && err.contains("is not yet supported from a polymorphic body"),
+                "expected `{what}`, got: {err}"
+            );
+        }
+    }
+
+    /// P7.S3k (R2/N1): a grounded cross-call records *only* the symbolic
+    /// mapping. It mints no instantiation of its own, so nothing in the
+    /// existing `Span`-keyed table moves -- phase 2's composition is what adds
+    /// one, from this record.
+    #[test]
+    fn check_generic_cross_call_records_no_instantiation() {
+        let (module, _) = checked_like_a_build(
+            ": id ( 'T -- 'T ) ;\n: g ( 'T -- 'T ) id ;\n: main ( -- ) 1 g drop ;\n",
+        )
+        .expect("the fixture checks");
+        // `main`'s call to `g` is the one instantiation; `g`'s call to `id`
+        // is not one yet.
+        let callees: Vec<&str> = module
+            .instantiations
+            .values()
+            .map(|c| c.callee.as_str())
+            .collect();
+        assert_eq!(callees, vec!["g"]);
+        assert_eq!(module.poly_cross_calls["g"].len(), 1);
     }
     #[test]
     fn check_poly_body_with_if_accepts_choose() {
@@ -7881,7 +8520,7 @@ mod tests {
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
-            &HashSet::new(),
+            scratch_cross!(),
             false,
         )
         .expect("`len` answers a slice");
@@ -8117,14 +8756,6 @@ mod tests {
             &[],
         )
         .expect("`dup` of a shared reference is permitted");
-    }
-
-    #[test]
-    fn poly_var_id_on_a_reference_is_none() {
-        // Slice 13 (R-A9): a reference is not a bare variable, so the
-        // existing `_ => None` already answers correctly and the function
-        // needs no new arm. Pinned rather than edited.
-        assert_eq!(poly_var_id(&poly_ref(PolyType::Var(0), false)), None);
     }
 
     #[test]

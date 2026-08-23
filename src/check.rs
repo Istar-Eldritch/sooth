@@ -15,10 +15,10 @@ use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
     intern_owned_cell_type, intern_ref_type, intern_slice_type, resolve_bool_type, variant_type,
     ArrayDecl, Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl,
-    ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect,
-    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst, Term, TermKind,
-    TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode,
-    WordDef, RESERVED_TRAIT_MODULE,
+    Image, ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolyCrossCall, PolySig, PolyType,
+    QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId,
+    Subst, Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl,
+    VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
 mod audits;
@@ -68,7 +68,9 @@ use self::engine::*;
 pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
-pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str, TraitCtx};
+pub(crate) use self::poly::{
+    check_poly_body, check_poly_combinator_repl, poly_type_str, CrossCtx, TraitCtx,
+};
 use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
@@ -679,13 +681,6 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         }
     }
 
-    // P8 S2 (R6b): every polymorphic word's name, post-mangle, so a poly body
-    // that calls one can say so. `poly_call_term` reads `env` (the concrete
-    // one) and never `poly_env`, so such a call reaches its fall-through and
-    // used to leak a raw `unknown word `lt__m2``; this set is what lets the
-    // fall-through name the real narrowing instead.
-    let poly_words: HashSet<String> = poly_env.keys().cloned().collect();
-
     check_main_effect(
         &module.words,
         &module.structs,
@@ -707,6 +702,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         generic_enums: _,
         externs: _,
         instantiations: _,
+        poly_cross_calls: _,
         builtin_overloads: _,
         resolved_fields: _,
         resolved_variant_fields: _,
@@ -786,12 +782,18 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // `check_poly_combinator_standalone` path, which records nothing that
     // survives it (R9's scope cut).
     let mut trait_obligations: Vec<WordObligations> = Vec::new();
+    // P7.S3k (R2): the generic-to-generic calls each of those bodies makes,
+    // recorded symbolically as it is walked (its own `'T` is still rigid here,
+    // so there is no θ to ground them against) and relayed to the module for
+    // the composition step.
+    let mut poly_cross_calls: HashMap<String, Vec<PolyCrossCall>> = HashMap::new();
     for word in words.iter() {
         let Some(sig) = &word.poly else { continue };
         if is_combinator(word) {
             continue;
         }
         let mut obligations = Vec::new();
+        let mut cross_calls = Vec::new();
         // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself at entry
         // (to the live registries' current length); flushed right after it
         // returns, so a mint this body triggers lands at an id the very next
@@ -812,13 +814,22 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 traits,
                 obligations: &mut obligations,
             },
-            &poly_words,
+            &mut CrossCtx {
+                env: &poly_env,
+                calls: &mut cross_calls,
+            },
             Some(&generics_cell),
         )?;
         {
             let mut g = generics_cell.borrow_mut();
             g.flush_structs_into(structs);
             g.flush_enums_into(enums);
+        }
+        if !cross_calls.is_empty() {
+            poly_cross_calls
+                .entry(word.name.clone())
+                .or_default()
+                .extend(cross_calls);
         }
         trait_obligations.push(WordObligations {
             name: word.name.clone(),
@@ -969,6 +980,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         }
     }
     module.instantiations = insts;
+    module.poly_cross_calls = poly_cross_calls;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;

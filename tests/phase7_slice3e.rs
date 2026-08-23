@@ -521,11 +521,12 @@ fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
 /// Order`. `sort3` is a fully unrolled 3-element compare-swap network rather
 /// than the spec's `slice3-dogfood.md` Program 2 insertion sort, because that
 /// program's two nested loops are not expressible in a generic body today:
-/// `while` on a quotation literal is rejected outright there, a combinator
-/// cannot carry a user bound at all (P7.S3o's scope cut), and an inner loop
-/// written as its own generic word cannot be called from the generic outer one
-/// ("a polymorphic word is not yet reachable from another polymorphic word",
-/// P7.S3d). Self-recursion alone does work, so a single fused loop is
+/// `while` on a quotation literal is rejected outright there, and a combinator
+/// cannot carry a user bound at all (P7.S3o's scope cut). (An inner loop
+/// written as its own generic word was blocked too, by the
+/// generic-calls-generic gap; P7.S3k has since closed that one, but it carries
+/// a user bound here, which a cross-call does not yet discharge.)
+/// Self-recursion alone does work, so a single fused loop is
 /// reachable; the unrolled network is the direct form of the same subject.
 /// Each comparison dispatches through the bound to its own concrete
 /// `impl:`'s `cmp`. `Pair`'s `impl:` orders *descending*, and

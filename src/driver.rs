@@ -540,6 +540,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         generic_enums: generics.enums.clone(),
         externs,
         instantiations: HashMap::new(),
+        poly_cross_calls: HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         resolved_variant_fields: HashMap::new(),

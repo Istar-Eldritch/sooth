@@ -2857,10 +2857,16 @@ impl Session {
             // `Bound::User` can reach here; the obligations it records are
             // scratch, the same bypass `structs`/`enums` already follow.
             &mut check::TraitCtx::scratch(&mut Vec::new()),
-            // P8 S2 (R6b): a session's poly words are not in a module closure,
-            // so no cross-module narrowing can arise here and there is nothing
-            // to name.
-            &HashSet::new(),
+            // P7.S3k: an empty callee registry, so a session line calling
+            // another polymorphic word still gets `unknown word` rather than
+            // grounding. Deliberate: REPL lowering resolves an instantiation
+            // through its own per-generation store (`Session::poly_words`),
+            // which nothing composes a cross-call's substitution into, so
+            // admitting the call here would check clean and then mis-lower.
+            &mut check::CrossCtx {
+                env: &HashMap::new(),
+                calls: &mut Vec::new(),
+            },
             None,
         )?;
 

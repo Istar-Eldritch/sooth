@@ -221,10 +221,8 @@ fn narrowed_guard_keeps_branch_and_tag_located() {
     // `branch`'s condition is a `True` literal rather than a computed
     // comparison (as it is below, at `bad`'s other call sites): this program
     // is never built successfully (the assertion is on the rejection), so the
-    // condition's actual value never matters, and a comparison would only
-    // hit the P7.S3k gap (a non-inline generic body cannot call another
-    // generic word, comparisons included) before ever reaching the rejection
-    // this test is pinning.
+    // condition's actual value never matters, and the literal keeps the
+    // fixture on the one term under test.
     for (name, body) in [
         ("branch", "True ~[ drop ] ~[ swap drop ] branch"),
         ("tag", "~[ dup ] tag drop"),
@@ -262,14 +260,14 @@ fn shape_changing_if_in_a_non_inline_generic_body_compiles_and_runs() {
     // the minimum instead and these assertions fail while still compiling.
     //
     // `gt` is computed by `main`, a monomorphic caller, and handed in as a
-    // third input rather than called from inside `mymax`'s own (non-inline,
-    // generic) body: P8.S2 (`tests/phase8_slice2.rs`'s
-    // `a_poly_word_calling_an_imported_poly_word_names_the_narrowing`)
-    // deliberately narrowed a non-inline generic body to never reach another
-    // generic word, comparisons included -- restoring that reach is P7.S3k,
-    // named and scoped but not yet delivered. The comparison is still real
-    // per-instantiation data computed at each call, not a hardcoded literal,
-    // so arm routing stays genuinely non-vacuous.
+    // third input rather than called from inside `mymax`'s own body. That was
+    // forced when this golden was written -- a non-inline generic body could
+    // not reach another generic word at all, comparisons included -- and is
+    // merely retained now that P7.S3k lifted the restriction
+    // (`tests/phase7_slice3k.rs`), since the shape under test is `if`'s
+    // exit-row join and not where the `Bool` came from. The comparison is
+    // still real per-instantiation data computed at each call, not a
+    // hardcoded literal, so arm routing stays genuinely non-vacuous.
     let src = ": mymax ( 'T 'T Bool -- 'T ) ~[ drop ] ~[ swap drop ] if ;\n\
                : main ( -- )\n\
                  2 9 over over gt mymax .\n\
@@ -295,7 +293,7 @@ fn unless_reaches_the_dispatch_rather_than_the_operand_window() {
     // maximum here and fail while still compiling.
     //
     // `gt` is computed by `main` for the same reason `mymax` above computes
-    // it there: P7.S3k (not yet delivered).
+    // it there.
     let src = ": mymin ( 'T 'T Bool -- 'T ) ~[ drop ] ~[ swap drop ] unless ;\n\
                : main ( -- )\n\
                  2 9 over over gt mymin .\n\
@@ -693,21 +691,18 @@ fn inline_generic_body_still_splices_a_row_combinator() {
 /// started with. The clamp is idempotent after the first iteration, so
 /// `n == 0` is what discriminates a real loop from one that never executes.
 ///
-/// **Blocked on P7.S3k, not a fixture bug.** `gt`'s comparison is recomputed
-/// fresh every iteration against the loop-carried `val`, so unlike `mymax`/
-/// `mymin` above it cannot be hoisted out to a monomorphic caller and passed
-/// in -- the whole point is a *fresh* comparison each pass. Every other route
-/// to a runtime `Bool` inside a non-inline generic body is blocked too: the
-/// raw comparison intrinsics (`ugt` et al.) only set a condition `branch`
-/// consumes, and `branch` itself is one of the three primitives this slice's
-/// own R4 keeps as a located rejection in a non-inline body (`call`/`branch`/
-/// `tag`); pre-warming a concrete instantiation of `gt` elsewhere in the same
-/// file doesn't help either, since the poly-body dispatch never looks in
-/// `env` for a callee that has no concrete registration yet. `clampsum` is
-/// the exit-criterion program this spec's own text names, and it stays here,
-/// unrun (see the two `#[ignore]`d tests below), as the standing witness for
-/// why P7.S3k exists rather than being quietly reworked into an algorithm
-/// that dodges the gap.
+/// `gt`'s comparison is recomputed fresh every iteration against the
+/// loop-carried `val`, so unlike `mymax`/`mymin` above it cannot be hoisted
+/// out to a monomorphic caller and passed in -- the whole point is a *fresh*
+/// comparison each pass. That is what kept the two goldens below `#[ignore]`d
+/// from this slice until P7.S3k: a non-inline generic body could reach no
+/// other generic word, and every other route to a runtime `Bool` in one is
+/// blocked as well (the raw comparison intrinsics only set a condition
+/// `branch` consumes, and `branch` is one of the three primitives R4 keeps as
+/// a located rejection in a non-inline body). P7.S3k grounds the per-iteration
+/// `gt`, so `clampsum` -- the exit-criterion program this spec's own text
+/// names -- now runs as written, never reworked into an algorithm that dodged
+/// the gap.
 const CLAMPSUM: &str = ": clampsum ( 'T: Copy Ord 'T 'T i64 -- 'T )
   ~[ | i |
      over over gt ~[ drop dup ] ~[ ] if
@@ -719,11 +714,6 @@ const CLAMPSUM: &str = ": clampsum ( 'T: Copy Ord 'T 'T i64 -- 'T )
 ";
 
 #[test]
-#[ignore = "blocked on P7.S3k (docs/roadmap/P7-language-prereqs.md): `clampsum`'s \
-           per-iteration `gt` is a non-inline generic body calling another \
-           generic word, which P8.S2 deliberately closed off \
-           (tests/phase8_slice2.rs::a_poly_word_calling_an_imported_poly_word_names_the_narrowing); \
-           re-enable once P7.S3k lands"]
 fn clampsum_golden_behavioural_matrix() {
     // Mutation-tested guard: deleting the R2/R3 combinator dispatch makes
     // this fail to *compile* with the located rejection
@@ -753,7 +743,6 @@ fn clampsum_golden_behavioural_matrix() {
 }
 
 #[test]
-#[ignore = "blocked on P7.S3k, same reason as clampsum_golden_behavioural_matrix above"]
 fn clampsum_structural_characterization_one_definition_per_instantiation() {
     // CHARACTERIZATION ONLY, no mutation-guard claim (per the spec: a wrong
     // R3 that spliced the arms into the caller is a **lowering** property,

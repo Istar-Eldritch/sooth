@@ -790,6 +790,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         generic_enums: generics.enums.clone(),
         externs: bodies.externs,
         instantiations: HashMap::new(),
+        poly_cross_calls: HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,

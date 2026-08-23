@@ -62,6 +62,13 @@ pub struct Module {
     /// keyed by the call site's `Span`, emitted by the checker and consumed by
     /// lowering. Empty for a program with no polymorphic calls.
     pub instantiations: std::collections::HashMap<Span, CallInst>,
+    /// P7.S3k (R2): the generic-to-generic calls each polymorphic body makes,
+    /// keyed by the *caller's* name -- the word whose body contains them, not
+    /// any instantiation of it, since a polymorphic body is walked once with
+    /// its variables still rigid. Grounded per caller instantiation by
+    /// composing each record's mapping with that instantiation's θ. Empty for
+    /// a program whose generic words call no generic word.
+    pub poly_cross_calls: std::collections::HashMap<String, Vec<PolyCrossCall>>,
     /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
     /// overload of a builtin-named word (e.g. `add` on two `Vec2`), keyed by the
     /// call site's `Span`, valued by the resolved callee's Sooth name. A
@@ -1575,6 +1582,38 @@ pub struct CallInst {
     pub trait_calls: std::collections::HashMap<Span, String>,
 }
 
+/// P7.S3k (R2): what one *callee* type variable was matched to at a
+/// generic-to-generic call site. The caller's own variables are still
+/// abstract when the mapping is built, so an image is never a ground `Subst`
+/// entry: it is either a concrete type the caller supplied outright, or one
+/// of the caller's own rigid variables, to be grounded later against the
+/// caller's own θ. R6's growth rule is what keeps the set this small -- a
+/// compound image mentioning a caller variable (`Box['T]`, `['T 4]`) is a
+/// located rejection at the call site, so no type constructor ever needs
+/// representing here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Image {
+    Concrete(Type),
+    /// An index into the **caller's** `PolySig::ty_var_names`.
+    CallerVar(u32),
+}
+
+/// P7.S3k (R2): one generic-to-generic call, recorded symbolically as the
+/// caller's own body is walked. Deliberately not a `CallInst`: at walk time
+/// the caller has no θ of its own, so there is no ground substitution to
+/// record and no symbol to mint. Composing `mapping` with a concrete θ of the
+/// caller is what grounds it into a real instantiation of `callee`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolyCrossCall {
+    pub callee: String,
+    pub span: Span,
+    /// Callee type-variable id -> its image in the caller's world, in the
+    /// order the callee's declared inputs first mention each variable (the
+    /// push order `unify_poly_input` uses for a ground `Subst`, so a composed
+    /// θ orders its entries the way the concrete path would have).
+    pub mapping: Vec<(u32, Image)>,
+}
+
 /// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,
 /// deterministic function of its inputs with no lowering-order dependence, so
 /// the checker's call-site table and the lowered `IrFunc.name` are minted from
@@ -2511,6 +2550,7 @@ mod tests {
             generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            poly_cross_calls: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -2637,6 +2677,7 @@ mod tests {
             generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            poly_cross_calls: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -2711,6 +2752,7 @@ mod tests {
             generics: GenericTypes::default(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            poly_cross_calls: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),

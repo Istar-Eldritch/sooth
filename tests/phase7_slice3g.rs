@@ -3,8 +3,11 @@
 //! that word's own signature (R1) and lowers to an ordinary recursive call
 //! into whichever instantiation is being emitted (R2). A structural operand
 //! mismatch at the self-call site is a located type error, not a check-time
-//! loop or a panic (D1); a call to a *different* polymorphic word still
-//! rejects with `poly_calls_poly_word_error` unchanged (R3).
+//! loop or a panic (D1).
+//!
+//! R3's control -- a call to a *different* polymorphic word rejects with
+//! `poly_calls_poly_word_error` -- retired with that diagnostic in P7.S3k,
+//! which grounds such a call instead (`tests/phase7_slice3k.rs`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -177,31 +180,6 @@ fn self_call_concrete_operand_mismatch_is_located_type_error() {
         err,
         "error: type mismatch in `rec` (line 3)\n  `rec` expected `i64`, found `Bool`\n  note: declared ( -- )",
         "{err}"
-    );
-}
-
-/// Regression: a non-inline generic word calling a *second, different*
-/// generic word still produces `poly_calls_poly_word_error` with its current
-/// wording -- P7.S3k's gap, which this slice must not perturb (R3). Asserted
-/// as a stable substring, not the full located string, since the diagnostic
-/// interpolates a `(line, col)` that would otherwise bake a brittle position
-/// into the golden.
-#[test]
-fn different_poly_word_call_still_names_the_narrowing() {
-    let err = check_err(
-        ": other ( 'T -- 'T ) ;\n\
-         : caller ( 'T -- 'T ) other ;\n\
-         : main ( -- ) ;\n",
-    );
-    assert!(
-        err.contains("cannot call the polymorphic word"),
-        "unexpected message: {err}"
-    );
-    assert!(
-        err.contains(
-            "a polymorphic word is not yet reachable from another polymorphic word across a module boundary"
-        ),
-        "unexpected message: {err}"
     );
 }
 
