@@ -1600,6 +1600,22 @@ impl Session {
                     span.line, span.col
                 ));
             }
+            // R8 (slice 3r): `impl:`/`trait:` are wired only through
+            // `assemble_module`, so without this guard they fall through to
+            // the term loop and report an unrelated "unexpected token
+            // Semicolon" error instead of a located rejection.
+            if w == "impl:" {
+                return Err(format!(
+                    "error: `impl:` has no meaning at the REPL (line {}, col {})\n  note: a live session has no module to attach a trait implementation to",
+                    span.line, span.col
+                ));
+            }
+            if w == "trait:" {
+                return Err(format!(
+                    "error: `trait:` has no meaning at the REPL (line {}, col {})\n  note: a live session declares no trait to satisfy",
+                    span.line, span.col
+                ));
+            }
         }
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
@@ -4884,6 +4900,35 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(!session.env.contains_key("tick"));
+    }
+
+    #[test]
+    fn repl_rejects_impl() {
+        // R8: `impl:` is wired only through `assemble_module`, so without
+        // this gate the line falls into the term loop and reports an
+        // unrelated "unexpected token Semicolon" error.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("impl: Order for Point : cmp | a b | a b ; ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("`impl:` has no meaning at the REPL") && err.contains("col 1"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn repl_rejects_trait() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("trait: Order 'T cmp ( &'T &'T -- Ordering ) ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("`trait:` has no meaning at the REPL") && err.contains("col 1"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
