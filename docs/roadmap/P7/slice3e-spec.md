@@ -787,6 +787,16 @@ stated as a ruling, not a menu.
 - Associated types, default method bodies, blanket impls, supertraits, generic
   constants.
 - Multi-type-variable traits.
+- Stack-polymorphic (row-typed) trait members. A row is a `PolySig` field, not a slot
+  shape, so `member_shape_is_supported` cannot see one and `check_impl_decls` compares
+  `inputs`/`outputs` alone -- Phase 1 makes a member declaring `..a` on either side a
+  located rejection in `parse_trait_member_effect`. Lifting it belongs with the
+  combinator-bound work (**P7.S3o**), which needs the row on both sides of the
+  member/word comparison.
+- Requiring a trait member to mention the trait's type variable. A member whose
+  signature is entirely target-independent (`nothing ( -- )`) is accepted; its grounded
+  expectation is then the same for every `impl:`, which is useless but harmless. Ruling
+  it out is a future slice's call, not Phase 1's.
 - The compiler-known third trait kind (`Fallible`/`bool`-shaped).
 - `Map['K 'V]` and any consumer needing generic-struct-array-of-own-type-variable
   fields (blocked separately on P7.S3n) or generic-instantiation-over-own-variable
