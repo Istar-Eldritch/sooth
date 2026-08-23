@@ -4655,12 +4655,12 @@ impl<'t> Parser<'t> {
                     let inner = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
                     return Ok(self.fold_field_ref(inner, mutable));
                 }
+                let remainder = remainder.to_string();
+                let remainder_span = Span {
+                    col: span.col + sigil_len as u32,
+                    ..span
+                };
                 if remainder.starts_with('\'') {
-                    let remainder = remainder.to_string();
-                    let remainder_span = Span {
-                        col: span.col + sigil_len as u32,
-                        ..span
-                    };
                     self.pos += 1;
                     let id = self.resolve_field_ty_var(
                         decl_name,
@@ -4670,6 +4670,30 @@ impl<'t> Parser<'t> {
                         remainder_span,
                     )?;
                     return Ok(self.fold_field_ref(PolyType::Var(id), mutable));
+                }
+                // A run glued to a generic header that is then applied
+                // (`&Ent['K i64]`), mirroring the `^` arm below. Without it
+                // only the *spaced* `& Ent['K i64]` reaches the application
+                // production, and the glued spelling falls through to the
+                // concrete parser -- which blames `'K` as an unknown type,
+                // the exact misreport this whole arm exists to prevent.
+                if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                    if let Some((is_enum, idx, module)) =
+                        self.poly_generic_header(&remainder, remainder_span)?
+                    {
+                        self.pos += 1;
+                        let inner = self.parse_generic_field_application(
+                            decl_name,
+                            ty_vars,
+                            used,
+                            &remainder,
+                            is_enum,
+                            idx,
+                            module,
+                            remainder_span,
+                        )?;
+                        return Ok(self.fold_field_ref(inner, mutable));
+                    }
                 }
             }
             // A `^`-led field. `^` is the only indirection a field can
@@ -4919,11 +4943,19 @@ impl<'t> Parser<'t> {
                     // owned_cell` exist to admit, and the variable falls
                     // through to the concrete parser's misleading `unknown
                     // type 'T` instead of this rule's own message.
-                    let bare = w
+                    //
+                    // The peel loops: sigils stack (`^^'T`, a shape R1 admits
+                    // and builds nested cells for), so stripping once leaves
+                    // `^'T`, which matches no `ty_vars` entry and reopens the
+                    // very misreport above.
+                    let mut bare = w.as_str();
+                    while let Some(rest) = bare
                         .strip_prefix('^')
-                        .or_else(|| w.strip_prefix("&!"))
-                        .or_else(|| w.strip_prefix('&'))
-                        .unwrap_or(w);
+                        .or_else(|| bare.strip_prefix("&!"))
+                        .or_else(|| bare.strip_prefix('&'))
+                    {
+                        bare = rest;
+                    }
                     if ty_vars.iter().any(|(n, _)| n == bare) {
                         return Some((bare.to_string(), *span));
                     }
@@ -6806,6 +6838,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_generic_field_growing_argument_under_each_field_wrapper_is_error() {
+        // R8's *descent*, distinct from the sibling test above: that one
+        // varies the offending argument's wrapper while pinning the field's
+        // own top level as `^`, so it only ever exercises the `OwnedCell`
+        // arm of the walk. Both other wrapper arms can be stubbed to `Ok(())`
+        // with the whole suite still green, and `[L[^'T] 2]` -- an array of
+        // an application, the shape `Map`'s backing store actually takes --
+        // is then silently admitted.
+        let err = parse_src("type: L 'T v 'T kids [L[^'T] 2] ;").unwrap_err();
+        assert!(
+            err.contains("owning cell over"),
+            "the walk must descend through an array field: {err}"
+        );
+        let err = parse_src("type: L 'T v 'T kids & L[^'T] ;").unwrap_err();
+        assert!(
+            err.contains("owning cell over"),
+            "the walk must descend through a reference field: {err}"
+        );
+    }
+
+    #[test]
     fn parse_generic_field_compound_concrete_argument_beside_a_variable_is_ok() {
         // R8's accept side: an argument that is compound but *fully concrete*
         // at any depth is inert -- it carries no variable to grow -- so it is
@@ -6893,6 +6946,53 @@ mod tests {
             !err.contains("unknown type"),
             "the glued ref sigil must not hide the variable: {err}"
         );
+
+        // Sigils stack, so peeling exactly one is not enough. `^^'T` is a
+        // shape R1 admits outside a quotation (it builds nested cells), so a
+        // single-strip peel leaves R7 blind to something R1 accepts.
+        for src in [
+            "type: QF 'T f [ ^^'T -- ] ;",
+            "type: QF 'T f [ ^^^'T -- ] ;",
+            "type: QF 'T f [ &!^'T -- ] ;",
+        ] {
+            let err = parse_src(src).unwrap_err();
+            assert!(err.contains("quotation field"), "{src}: unexpected: {err}");
+            assert!(
+                !err.contains("unknown type"),
+                "{src}: stacked sigils must not hide the variable: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_generic_field_glued_reference_to_generic_application_resolves() {
+        // R1: `&` glues onto an applied header's token just as `^` does. The
+        // `^` arm has an application branch; without its `&` twin only the
+        // spaced `& Ent['K i64]` parses, and the glued spelling falls through
+        // to the concrete parser's `unknown type 'K` -- the misreport the
+        // `&` intercept exists to prevent. The field itself still never
+        // builds (R10, phase 2); this is about which diagnostic it reaches.
+        let module =
+            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K k 'K w &Ent['K i64] ;").unwrap();
+        let w = module
+            .generics
+            .structs
+            .iter()
+            .find(|d| d.name == "W")
+            .expect("`W`'s header is registered");
+        match &w.fields[1].1 {
+            PolyType::Ref(inner, false) => match inner.as_ref() {
+                PolyType::Generic { name, args, .. } => {
+                    assert_eq!(*name, "Ent");
+                    assert!(
+                        matches!(args.as_slice(), [PolyType::Var(0), PolyType::Concrete(_)]),
+                        "the mixed argument list must survive the fold: {args:?}"
+                    );
+                }
+                other => panic!("expected `&Ent['K i64]`, got a reference to {other:?}"),
+            },
+            other => panic!("expected `&Ent['K i64]`, got {other:?}"),
+        }
     }
 
     #[test]
