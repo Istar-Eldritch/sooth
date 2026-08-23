@@ -507,12 +507,21 @@ non-test dependency on `check`.
 ### Phase 2 — Readable rendering of a synthesized member name (R3)
 
 Give diagnostics a way to render `member;Trait;trait-module;Type` back to
-`` `cmp` (member of trait `Order` for `Point`) ``. Extend the `demangle_word` /
-`demangle_call` path (`src/resolve.rs:105`+) so a name whose (post-`__m` strip) body
+`` `cmp` (member of trait `Order` for `Point`) ``. A name whose (post-`__m` strip) body
 contains the `;` delimiter is split on it and rendered in that form; a name without `;`
 is unchanged. The split yields four components, not three: the trait-module id is an
-internal disambiguator and is dropped from the rendering. Lookups keep using the mangled name; only the rendered string changes (the
-existing `demangle_word` contract).
+internal disambiguator and is dropped from the rendering. Lookups keep using the mangled
+name; only the rendered string changes (the existing `demangle_word` contract).
+
+The rendering lives in display-only siblings of `demangle_word` / `demangle_call`
+(`render_word` / `render_call`, `src/resolve.rs:105`+), **not** in `demangle_word` itself:
+that one is the comparison/lookup form and must stay bare, since an eliminator-name or
+operator-name equality test still runs through it. Because the rendering carries its own
+backtick delimiters (they have to sit around `cmp` and `Order` separately, not around the
+whole phrase), a diagnostic template interpolates the result **bare** and adds no backticks
+of its own — including the ~100 in-body diagnostics that read the enclosing word out of
+`Ctx`, which therefore render through `Ctx::rendered_word_or` rather than carrying a
+pre-rendered name in the `Ctx` itself.
 
 Exit golden `impl_body_wrong_effect_names_readable_member`: a body-form impl whose body
 leaves the wrong effect (e.g. a `cmp` body that drops without pushing an `Ordering`) is
@@ -521,6 +530,14 @@ rejected by ordinary in-body stack-effect checking, and the message names
 the concrete replacement for the retired signature-mismatch class (R6/Phase 4). Include a
 `nm`-free negative check in the golden that the raw delimiter spelling does **not** appear in
 the diagnostic.
+
+R3 is not one message: a wrong body reaches an operand check (underflow, operator type
+mismatch), an unknown word, or an ungated intrinsic long before it reaches the declared-effect
+comparison, and each of those is a separate diagnostic constructor. So the exit set also
+covers one golden per rendering route — `impl_body_underflow_names_readable_member` and
+`impl_body_unknown_word_names_readable_member` for the constructors that read `Ctx` directly,
+and `impl_body_ungated_intrinsic_names_readable_member` for the `rendered_word_or` accessor
+path, which the first three leave untested.
 
 ### Phase 3 — Migrate `.sth` sources and mechanical fixtures to the body form
 

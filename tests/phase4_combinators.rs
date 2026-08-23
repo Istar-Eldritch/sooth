@@ -2301,6 +2301,23 @@ fn everyday_diagnostics_show_the_unmangled_enclosing_word() {
 }
 
 #[test]
+fn quotation_at_a_destructure_slot_shows_the_unmangled_generated_name() {
+    // The third shape of the same family: `reject_quotation_argument` renders a
+    // *call* name, so the generated slot's trailing `>` has to survive while
+    // the `__m0` in front of it does not. Every other call site of this
+    // diagnostic passes a plain word name, which renders the same either way,
+    // so this fixture is the only one that can tell the two apart.
+    let err = build_error_with_import(
+        "m0-quot-destructure",
+        "type: P x i64 ;\n: main ( -- ) [ ] P> drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: a quotation cannot be passed to `P>`; only `call` accepts one in `main` (line 3)"
+    );
+}
+
+#[test]
 fn cycle_and_accessor_diagnostics_show_unmangled_names() {
     // Two shapes the first sweep missed. The cycle renders a chain of `WordDef`
     // names, which never passed through the rendering boundary; the destructure
