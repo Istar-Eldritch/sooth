@@ -6825,6 +6825,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_generic_field_variable_after_a_nested_bracket_in_a_quotation_is_error() {
+        // R7: the scan for the declaration's own variables has to track
+        // bracket depth. Stopping at the first `]` -- an *inner* one here --
+        // ends the scan before `'T`, and the field then falls through to the
+        // concrete parser, which misreports `'T` as an unknown type instead of
+        // naming the unsupported shape.
+        let err = parse_src("type: QF 'T f [ [i64 2] -- 'T ] ;").unwrap_err();
+        assert!(err.contains("quotation field"), "unexpected: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "the variable sits past a nested bracket, not past the effect: {err}"
+        );
+    }
+
+    #[test]
     fn parse_generic_field_concrete_quotation_still_parses() {
         // R7/N4: the `[`-arm has to replicate `quotation_type_ahead`'s
         // top-depth `--` scan, or the array production misparses a legal
