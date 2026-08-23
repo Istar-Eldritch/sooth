@@ -586,6 +586,30 @@ fn impl_body_unknown_word_names_readable_member() {
     assert!(!err.contains("get;Getter"), "{err}");
 }
 
+/// R3 (Phase 2), the other half of the mechanism: the three goldens above all
+/// reach diagnostics that read `Ctx::Word`'s `mangled` directly, while a second
+/// family goes through the `rendered_word_or` accessor. Reverting that accessor
+/// alone leaves those three passing, so this fixture -- an intrinsic called in a
+/// member body of a file with no `import: intrinsics` line -- is what pins it.
+#[test]
+fn impl_body_ungated_intrinsic_names_readable_member() {
+    let (_t, entry) = program(
+        "body-ungated-intrinsic",
+        "type: Point n i64 ;\n\
+         trait: Getter 'T get ( &'T -- i64 ) ;\n\
+         impl: Getter for Point\n\
+           : get | p | p &n @ 1 add ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: error: `add` is an intrinsic and is not imported in `get` (member of trait `Getter` for `Point`) (line 4, col 22)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file\n"
+    );
+    assert!(!err.contains("get;Getter"), "{err}");
+}
+
 /// R7: a member body sees its own name, never its siblings'. `hash`'s body calls
 /// `eq`, which is *not* rewritten, so it resolves by ordinary lookup to
 /// `core::cmp`'s `eq` on two `i64`s -- not to the sibling member, whose grounded
