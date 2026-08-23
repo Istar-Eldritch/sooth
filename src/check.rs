@@ -703,6 +703,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         externs: _,
         instantiations: _,
         poly_cross_calls: _,
+        transitive_instantiations: _,
         builtin_overloads: _,
         resolved_fields: _,
         resolved_variant_fields: _,
@@ -979,8 +980,15 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             ));
         }
     }
-    module.instantiations = insts;
     module.poly_cross_calls = poly_cross_calls;
+    // P7.S3k (R4): a generic body's call to another generic word was recorded
+    // symbolically, since the caller had no θ of its own when its body was
+    // walked. Grounding it needs the concrete instantiations above *and* the
+    // registry interning `apply_subst` performs, both of which live here and
+    // neither of which lowering can redo -- so the transitive closure of
+    // "which monomorphs does this program need" is computed at check time.
+    module.transitive_instantiations = discover_transitive_instantiations(module, &mut insts)?;
+    module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;

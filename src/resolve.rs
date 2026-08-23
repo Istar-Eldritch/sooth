@@ -1572,6 +1572,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: HashMap::new(),
             poly_cross_calls: HashMap::new(),
+            transitive_instantiations: Vec::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),

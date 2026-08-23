@@ -123,11 +123,10 @@ parameter to dispatch off, and `call` on a literal was **P7.S3d**'s own exit cri
 them. A quotation may not
 be materialised — stored, returned, or left unconsumed at word or arm exit — and every escape
 route is its own located error.
-Two standing limits bound what can be written against this today: field projection (`&w`) is
-rejected in every generic body, so an arm destructures (`Rect>`) rather than projects; and a
-generic word cannot call another generic word (`unknown word g__m0`), so a combinator written
-here composes concrete and builtin callees only. A third, narrower one: the arm join compares
-each slot's *type* and not the compile-time literal beside it, so arms disagreeing on an index
+One standing limit bounds what can be written against this today: field projection (`&w`) is
+rejected in every generic body, so an arm destructures (`Rect>`) rather than projects. A second,
+narrower one: the arm join compares each slot's *type* and not the compile-time literal beside
+it, so arms disagreeing on an index
 literal leave the join carrying the first arm's — `~[ a 0 ] ~[ a 9 ]` joined over a `['T 4]`
 satisfies the static bounds check and traps at runtime instead. Memory-safe, and no laxer than
 the concrete path, which ICEs on the same program rather than rejecting it.
@@ -303,12 +302,11 @@ declaration; a member name colliding across one variable's bound set is a locate
 rejection. The lowering mechanism is settled as a per-instantiation dispatch record
 (check mints, lowering only looks up, so "lowering never re-runs resolution" stands);
 probing confirmed the check-time and lowering-time monomorph symbols are byte-identical,
-so the key is sound — for a leaf word. **Resolved:** a bounded poly word calling another
-poly word already gets a located rejection for free — `poly_calls_poly_word_error`
-(P8.S2's R6b, landed independently of this slice) rejects a poly-word callee from a poly
-body whether the caller is bounded or not, same module or cross-module, with no new
-mechanism needed. The spec restricts bound-satisfying members to leaf calls and cites this
-existing diagnostic rather than building a new one.
+so the key is sound — for a leaf word. Bound-satisfying members are restricted to leaf
+calls, and the restriction is a located rejection rather than a new mechanism: P7.S3k
+grounds a generic-to-generic call in general, but refuses one whose *callee* declares a
+user bound, since the callee's own recorded obligations resolve per ground θ and nothing
+composes them across the call.
 **A third trait kind is likely needed, beyond predicate and member kinds:** a
 *compiler-known, library-declared* trait, so intrinsic compiler logic can be written
 against a library implementation. `bool` is already exactly this shape — a library-declared
@@ -378,15 +376,15 @@ it -- see **P7.S3l** below.
 polymorphic word may call itself, so a generic word that loops over an inductively-shaped
 value no longer has to be `inline` and spliced at each call site to do it.
 **A self-call needs no registry lookup, which is what separates it from the general
-generic-calls-generic case (P7.S3k).** The general case is blocked because `poly_call_term`
-cannot see `poly_env`, so no polymorphic callee is registered on that path; a *self*-call
-resolves against the walk's own `sig`. `poly_call_term` recognizes the self-name by
-`ctx.mangled_name()` — the *mangled* spelling, since `resolve::mangle` rewrites a self-call
+generic-calls-generic case (P7.S3k).** The general case fetches the callee's own signature out
+of `poly_env` and relates its variables to the caller's; a *self*-call resolves against the
+walk's own `sig`. `poly_call_term` recognizes the self-name by `ctx.mangled_name()` — the
+*mangled* spelling, since `resolve::mangle` rewrites a self-call
 body reference alongside the declaration it names — and matches the operand window against
 `sig.inputs` **pointwise and structurally**, producing `sig.outputs`: the same comparison
 the walk already runs against `sig.outputs` at body exit, run mid-body. No unification, no
 `Subst`, no fresh `GenericTypes` mint; the rigid type-variable ids carry through unchanged.
-A call to a *different* poly word is untouched and still hits the fall-through.
+A call to a *different* poly word takes P7.S3k's own arm, below.
 **Polymorphic recursion is unreachable through bare self-call syntax, and so needs no
 termination guard.** A self-call at *different* type arguments (`'T` recursing at
 `['T 2]`) would demand a fresh instantiation per level, and monomorphization would never
@@ -415,11 +413,9 @@ whichever instantiation is currently being emitted, so `lower_word_parts` carrie
 word's own name (`cur_poly_callee`) and dispatches such a call to `cur_word_name`, this
 instantiation's symbol, at that instantiation's own concrete arity. Both real entry points
 thread it: the native monomorphization loop and the REPL's `lower_instantiation`.
-**Exit:** a non-inline generic word can call itself at its own type arguments, compile at
-two instantiations and run; a self-call at different type arguments is a located type
-mismatch at the call site, not a hang; and the generic-calls-generic diagnostic no longer
-claims a self-call is a call to another generic word
-(`docs/roadmap/P7/slice3g-spec.md`, `tests/phase7_slice3g.rs`).
+**Exit:** a non-inline generic word can call itself at its own type arguments, compile at two
+instantiations and run; and a self-call at different type arguments is a located type mismatch
+at the call site, not a hang (`docs/roadmap/P7/slice3g-spec.md`, `tests/phase7_slice3g.rs`).
 
 **P7.S3g-follow — The self-tail loop transform for a polymorphic body.** `[ done ]` A
 self-call in tail position inside a non-inline generic body lowers to a loop back-edge, so a
@@ -530,41 +526,49 @@ ground.
 **Exit:** a row-typed combinator parameter may declare a slot above its output row, and a
 generic body calling it grounds and strips that slot the same way the monomorphic path does.
 
-**P7.S3k — A non-inline generic word calling another generic word.** `poly_call_term`
-dispatches a callee against `env` only (the concrete/monomorphic table); it never consults
-`poly_env` (`src/check.rs:625`), so **no** generic callee -- user-defined or library, same-
-module or imported -- is reachable from a non-inline generic body. `poly_calls_poly_word_error`
-(`src/check/poly.rs:1140`) is the located diagnostic this gap produces today, named and tested
-by P8.S2 (`tests/phase8_slice2.rs::a_poly_word_calling_an_imported_poly_word_names_the_narrowing`).
-The six comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) look exempt, but are not an instance of
-the general mechanism: `poly_call_term` carries a hand-written name-matched special case for
-exactly those six (the "comparisons need `Ord`" block) that never touches `poly_env` at all.
-Before P8.S2 that block's bare-name match happened to work because the prelude's comparisons
-were `mangle`-exempt (injected unmangled); P8.S2 correctly declined to special-case them back
-in ("a silent third option -- leaving the exemption in place for comparisons only -- is
-declined, since it keeps the hole this slice exists to close", `docs/roadmap/P8/slice2-brief.md`),
-so the six-name carve-out is dead code today, not a working narrow case. P7.S3g shipped the
-self-call case (`loopg` calling itself) precisely because a self-call needs no registry lookup
-at all -- it resolves against the walk's own `sig`. Calling a *different* generic word is the
-remaining, harder case S3g explicitly scoped out ("the general case is blocked because
-`poly_call_term` cannot see `poly_env`") and P8.S2 explicitly declined to pull forward
-("declare the generic-calls-generic fix a hard prerequisite of this slice ... moves work into
-P7 and grows the slice" -- rejected in favour of the located narrowing).
-**Harder than S3g in one specific way: the callee's own type variables are not the caller's.**
-A self-call reuses the walk's `sig` unchanged; calling a *different* generic word means
-grounding the callee's bound type variables against the caller's rigid ones (which may still
-be abstract at check time) and triggering the callee's monomorphization at whatever concrete
-types the caller ends up instantiated at -- one callee instantiation per caller instantiation,
-recursively, the same worklist shape `lower_instantiation` already walks for concrete callers.
-A bound mismatch (the callee needs `Ord` and the caller's `'T` carries none) must be a located
-rejection at the call site, not a deferred failure at some later monomorphization.
+**P7.S3k — A non-inline generic word calling another generic word.** `[ done ]` A non-inline
+generic body may call another generic word -- same-module or imported, user-defined or a library
+word like `gt`/`lt` -- passing its own rigid type variables through. `poly_call_term` fetches the
+callee's signature out of `poly_env` (the registry a monomorphic caller already dispatches
+through) and relates its declared inputs to the caller's operand slots **symbolically**, since
+neither side has a θ while a generic body is walked: what comes out is a variable-to-variable
+mapping (callee variable -> a caller rigid variable, or -> a concrete type), recorded per call
+site as a `PolyCrossCall` on `Module::poly_cross_calls`. A bound the callee declares is
+discharged there, against the caller's own declared bound set, so an unsatisfied one is a
+located call-site error and never a monomorphization-time failure.
+**Monomorphization is a check-time fixpoint, not a lowering-time worklist.** A record grounds by
+composing its mapping with a concrete θ of the caller, and those θs are exactly the `CallInst`s
+the checker already holds -- so composition, `apply_subst`'s registry interning, and
+return-bundle interning all run inside `check`, seeded from the recorded instantiations and
+iterated to a symbol-deduped fixpoint. Lowering walks the finished graph only:
+`CallInst::poly_calls` routes one body span to the composed callee for *this* caller
+instantiation (the global `Span`-keyed table structurally cannot, since one span serves every θ
+the body is instantiated at), and `Module::transitive_instantiations` holds the flat set, so each
+composed `(callee, θ)` mints one `IrFunc`.
+**Termination is a property of the mapping rule, not a depth cap.** A callee variable's image
+must be either fully concrete or a bare caller variable; a compound image that *mentions* a
+caller variable -- the caller wrapping its own `'T` in a `Box['T]` before handing it over -- is a
+located rejection. Under that rule every composed θ draws its types from the finite pool the
+seed instantiations introduced, so the reachable `(word, θ)` set is finite and a mutual
+`g <-> h` cycle revisits `(g, θ)` at the *same* θ and stops. The over-rejection is deliberate: a
+single, non-recursive wrap would terminate and is refused too, which buys a check-time
+structural rule with no cycle detection.
+**Residual narrowings, each its own located rejection.** A callee signature carrying a row
+(`..s`), a quotation parameter, a length variable, a user trait bound, or a compound *output* is
+refused by name: the first three have no image kind to map to, a user bound's recorded
+obligations resolve per ground θ and nothing composes them across a cross-call, and a compound
+output would need the interning only a ground θ gets. A cross-call into or out of a *polymorphic
+overload set* is refused too -- the records merge under one name while each indexes its own
+candidate's variables. The REPL keeps the old `unknown word`: its lowering resolves an
+instantiation through a per-generation store nothing composes a cross-call into, so grounding
+there would check clean and then mis-lower.
 **Exit:** a non-inline generic word may call another generic word -- same-module or imported,
 user-defined or a library word like `gt`/`lt` -- passing its own rigid type variables through;
 the callee is monomorphized once per concrete instantiation the caller reaches, the same way a
 concrete caller's generic callees already are; a callee whose bound the caller's type variable
-does not satisfy is a located error, not a hang or a monomorphization-time panic; and
-`poly_calls_poly_word_error`'s message is deleted along with the gap it named, not left behind
-as an unreachable diagnostic (`tests/phase8_slice2.rs`'s narrowing test is retired with it).
+does not satisfy is a located error, not a hang or a monomorphization-time panic; a mutual
+non-growing pair compiles, runs, and terminates compilation; and a growing cross-call is a
+located call-site rejection (`docs/roadmap/P7/slice3k-spec.md`, `tests/phase7_slice3k.rs`).
 
 **P7.S3l -- A poly body calling a bound instantiation of an abstract quotation parameter.**
 Named at P7.S3f's exit, out of scope there. `unify_poly_input`'s `PolyType::Quotation` arm

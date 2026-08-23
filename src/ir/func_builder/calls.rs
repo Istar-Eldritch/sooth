@@ -329,6 +329,18 @@ impl<'a> FuncBuilder<'a> {
         // another). This is checked before the builtin/user dispatch below
         // because a polymorphic callee is always a user word whose name is
         // none of the builtins.
+        // P7.S3k (R4/N1): a call from *this* generic body to another generic
+        // word, routed through the per-instantiation map rather than the
+        // global one -- the global map is `Span`-keyed and this one span
+        // serves every θ this body is instantiated at. Checked before that
+        // map (which holds no entry for a generic body's spans) and, more to
+        // the point, before the ordinary-user-call arm below, whose
+        // `env.get(name).expect(...)` would panic: a polymorphic callee has
+        // no name-keyed `env` entry.
+        if let Some(inst) = self.poly_calls.get(&span).cloned() {
+            self.lower_poly_call(&inst);
+            return;
+        }
         if let Some(inst) = self.instantiations.get(&span).cloned() {
             self.lower_poly_call(&inst);
             return;

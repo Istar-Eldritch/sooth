@@ -541,6 +541,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         externs,
         instantiations: HashMap::new(),
         poly_cross_calls: HashMap::new(),
+        transitive_instantiations: Vec::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         resolved_variant_fields: HashMap::new(),
@@ -839,7 +840,8 @@ mod tests {
     /// the self-call body reference to match -- so the checker's guard must
     /// compare against `ctx.mangled_name()`. A demangled comparison
     /// (`ctx.word_name()`, still `"rec"` here) would never match the mangled
-    /// call term and would wrongly fall through to `poly_calls_poly_word_error`.
+    /// call term and would wrongly fall through to the cross-call arm, which
+    /// would then look `rec` up as a *different* generic word.
     #[test]
     fn poly_self_call_uses_mangled_name_not_demangled() {
         let s = Sandbox::new("poly-self-call-mangled");

@@ -222,6 +222,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 // resolved trait obligation -- empty here, unlike the
                 // per-instantiation loop below.
                 empty_trait_calls(),
+                // A monomorphic word is walked once, so its own polymorphic
+                // call sites are all in the global `instantiations` table;
+                // only a *generic* body's cross-call needs per-instantiation
+                // routing.
+                empty_poly_calls(),
                 &module.resolved_fields,
                 &module.resolved_variant_fields,
                 &poly_arities,
@@ -254,7 +259,17 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // and the IL should too.
     let mut distinct: Vec<(String, &CallInst)> = Vec::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for inst in module.instantiations.values() {
+    // P7.S3k (R4): the monomorphs reached only through a generic body's call
+    // to another generic word join the same dedup, so a `(callee, θ)` a
+    // concrete caller *also* instantiates is emitted once. Chained rather
+    // than merged: `transitive_instantiations` is empty for a program with no
+    // generic-calls-generic call, so `distinct` is the identical list it was
+    // and the IL is byte-for-byte (N2).
+    for inst in module
+        .instantiations
+        .values()
+        .chain(&module.transitive_instantiations)
+    {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
@@ -299,6 +314,10 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // identical to every other instantiation of the same `(callee,
             // θ)` pair (`CallInst::trait_calls`'s own doc comment).
             &inst.trait_calls,
+            // P7.S3k (R4): and this instantiation's own cross-calls, composed
+            // against the same θ -- likewise identical across two call sites
+            // sharing a `(callee, θ)`.
+            &inst.poly_calls,
             &module.resolved_fields,
             &module.resolved_variant_fields,
             &poly_arities,
@@ -637,6 +656,7 @@ pub fn lower_line(
         // R15/decision 8: the REPL path is explicitly out of scope for
         // trait-bound dispatch this slice.
         empty_trait_calls(),
+        empty_poly_calls(),
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -781,6 +801,7 @@ pub(crate) fn lower_word(
         // R15/decision 8: the REPL path is explicitly out of scope for
         // trait-bound dispatch this slice.
         empty_trait_calls(),
+        empty_poly_calls(),
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -841,6 +862,7 @@ pub(crate) fn lower_instantiation(
         // R15/decision 8: the REPL path is explicitly out of scope for
         // trait-bound dispatch this slice.
         empty_trait_calls(),
+        empty_poly_calls(),
         resolved_fields,
         empty_resolved_variant_fields(),
         empty_poly_arities(),

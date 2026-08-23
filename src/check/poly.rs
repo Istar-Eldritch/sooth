@@ -4468,6 +4468,10 @@ pub(super) fn check_poly_call(
             generation,
             quot_inputs,
             trait_calls,
+            // P7.S3k (R4): the concrete path records none. A cross-call is
+            // discovered by the transitive fixpoint, which fills this in
+            // afterwards for the instantiations whose body has one.
+            poly_calls: HashMap::new(),
         },
     );
     stack.truncate(base);
@@ -4475,6 +4479,332 @@ pub(super) fn check_poly_call(
         stack.push(Slot::computed(ty));
     }
     Ok(std::mem::take(stack))
+}
+
+/// P7.S3k (R4/N3): the monomorphs reachable only *through* a generic body's
+/// call to another generic word, discovered once every concrete call site has
+/// been recorded.
+///
+/// A concrete caller's `CallInst` says that `(w, θ_w)` exists; `w`'s own body
+/// may call another generic word, and that call was recorded only symbolically
+/// (`Module::poly_cross_calls`) because `w`'s variables were still rigid when
+/// its body was walked. Composing a record's mapping with a caller θ is what
+/// grounds it, so discovery belongs here, where the concrete θs live and where
+/// `apply_subst`'s registry interning is still reachable -- not at lowering,
+/// which only ever looks an already-interned shape up.
+///
+/// Terminates with no depth cap (N3): R6 rejects a compound image over a
+/// caller variable at the call site, so a composed θ assigns each callee
+/// variable either a fixed concrete type or the caller θ's image of one caller
+/// variable -- never a constructor applied to one. Every reachable θ therefore
+/// draws its types from the finite pool the seed instantiations introduced, the
+/// reachable `(word, θ)` set is finite, and the symbol dedup below reaches a
+/// fixpoint. A mutual `g <-> h` cycle revisits `(g, θ)` at the *same* θ and
+/// stops.
+pub(super) fn discover_transitive_instantiations(
+    module: &mut Module,
+    insts: &mut HashMap<Span, CallInst>,
+) -> Result<Vec<CallInst>, String> {
+    // N2: no records means nothing to compose, so every program without a
+    // generic-calls-generic call emits identical IL by construction rather
+    // than by inspection.
+    if module.poly_cross_calls.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Module {
+        words,
+        structs,
+        enums,
+        arrays,
+        refs,
+        statics,
+        modules,
+        generics,
+        poly_cross_calls,
+        ..
+    } = module;
+    // The same rebase/flush bracket `check_poly_body` gets: grounding a
+    // callee's declared `Box['U]` input mints through the live instantiator,
+    // and the mint has to land in `structs`/`enums` before lowering looks it
+    // up (`ir::driver::subst_polytype` only ever finds, never interns).
+    let generics_cell = RefCell::new(std::mem::take(generics));
+    generics_cell
+        .borrow_mut()
+        .rebase(structs.len(), enums.len());
+    let ground = CrossGround {
+        words,
+        structs,
+        enums,
+        statics,
+        modules: Some(modules),
+        generics: &generics_cell,
+        records: poly_cross_calls,
+    };
+    let composed = ground.fixpoint(insts, arrays, refs);
+    {
+        let mut g = generics_cell.borrow_mut();
+        g.flush_structs_into(structs);
+        g.flush_enums_into(enums);
+    }
+    *generics = generics_cell.into_inner();
+    let mut transitive = composed?;
+    // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
+    // composed callee returning a bundle is laid out like any other. Run as a
+    // post-pass because interning needs `&mut structs`, which the grounding
+    // above holds immutably through `Ctx`. `intern_bundle_struct` dedups by
+    // output tuple, so the flat entry and the routing copy of one `(h, θ_h)`
+    // land on the same `StructId`.
+    for inst in transitive.iter_mut() {
+        intern_composed_bundles(structs, inst);
+    }
+    for inst in insts.values_mut() {
+        intern_composed_bundles(structs, inst);
+    }
+    Ok(transitive)
+}
+
+/// The bundle of a composed `CallInst` and of every cross-call its body
+/// routes. The nested copies get one too: `lower_poly_call` reads `bundle`
+/// off the *call site's* record to know what shape came back.
+fn intern_composed_bundles(structs: &mut Vec<StructDecl>, inst: &mut CallInst) {
+    if inst.out_arity >= 2 {
+        inst.bundle = Some(intern_bundle_struct(structs, &inst.output_types));
+    }
+    for callee in inst.poly_calls.values_mut() {
+        if callee.out_arity >= 2 {
+            callee.bundle = Some(intern_bundle_struct(structs, &callee.output_types));
+        }
+    }
+}
+
+/// P7.S3k (R4): everything the composition step reads. Bundled because it is
+/// threaded through a worklist loop that also carries the two registries
+/// grounding *writes* to (`arrays`/`refs`), which cannot ride here.
+struct CrossGround<'a> {
+    words: &'a [WordDef],
+    structs: &'a [StructDecl],
+    enums: &'a [EnumDecl],
+    statics: &'a [StaticDecl],
+    modules: Option<&'a [ModuleInfo]>,
+    generics: &'a RefCell<GenericTypes>,
+    records: &'a HashMap<String, Vec<PolyCrossCall>>,
+}
+
+impl CrossGround<'_> {
+    /// Seed from the concrete instantiations, then compose until no new
+    /// `(word, θ)` appears. Each taken instantiation's routing map is written
+    /// back onto it, so a seed learns what its own body calls and a composed
+    /// entry carries the map its body will be lowered against.
+    fn fixpoint(
+        &self,
+        insts: &mut HashMap<Span, CallInst>,
+        arrays: &mut Vec<ArrayDecl>,
+        refs: &mut Vec<RefDecl>,
+    ) -> Result<Vec<CallInst>, String> {
+        let mut seen: HashSet<String> = insts.values().map(|i| i.symbol.clone()).collect();
+        let mut frontier: Vec<CallInst> = Vec::new();
+        for inst in insts.values_mut() {
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs)?;
+            enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
+        }
+        let mut transitive: Vec<CallInst> = Vec::new();
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for mut inst in frontier {
+                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs)?;
+                enqueue_new(&inst.poly_calls, &mut seen, &mut next);
+                transitive.push(inst);
+            }
+            frontier = next;
+        }
+        // `insts` iterates a `HashMap`, so the discovery order is randomized;
+        // sort so the recorded set is a deterministic sequence and not merely
+        // a deterministic set. Lowering sorts by symbol too, but a test
+        // reading this field should not have to.
+        transitive.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        Ok(transitive)
+    }
+
+    /// Ground every cross-call recorded in `caller`'s body against `caller`'s
+    /// own θ, keyed by the body span each one sits at -- the routing map
+    /// lowering consults while lowering that one instantiation.
+    fn cross_calls_of(
+        &self,
+        caller: &CallInst,
+        arrays: &mut Vec<ArrayDecl>,
+        refs: &mut Vec<RefDecl>,
+    ) -> Result<HashMap<Span, CallInst>, String> {
+        let Some(records) = self.records.get(&caller.callee) else {
+            return Ok(HashMap::new());
+        };
+        let caller_word = self.sole_poly_word(&caller.callee).ok_or_else(|| {
+            overloaded_cross_call_error(
+                &caller.callee,
+                &records[0].callee,
+                &caller.callee,
+                records[0].span,
+            )
+        })?;
+        // Every diagnostic a grounding failure raises names the *caller's*
+        // body, since that is where the call site is; `word_ctx`'s combinator
+        // view is only read by the back-edge guards, which nothing here
+        // reaches.
+        let ctx = word_ctx(
+            caller_word,
+            self.structs,
+            self.enums,
+            self.statics,
+            self.modules,
+            &CombinatorIndex::new(),
+            Some(self.generics),
+        );
+        let mut routed = HashMap::new();
+        for record in records {
+            let Some(callee_word) = self.sole_poly_word(&record.callee) else {
+                return Err(overloaded_cross_call_error(
+                    &caller.callee,
+                    &record.callee,
+                    &record.callee,
+                    record.span,
+                ));
+            };
+            // An `inline` callee is *spliced* at this site and mints no
+            // `IrFunc` of its own, so composing a monomorph for it would
+            // route the span to a symbol that never exists. Phase 1 records
+            // the call either way -- "this body calls `h` with this mapping"
+            // is true regardless of how `h` is lowered.
+            if is_combinator(callee_word) {
+                continue;
+            }
+            let sig = callee_word
+                .poly
+                .as_ref()
+                .expect("sole_poly_word yields a polymorphic word");
+            routed.insert(
+                record.span,
+                self.compose(record, caller, sig, &ctx, arrays, refs)?,
+            );
+        }
+        Ok(routed)
+    }
+
+    /// The single polymorphic word declared under `name`, or `None` when the
+    /// name is a polymorphic overload set. An overload set cannot be routed:
+    /// `Module::poly_cross_calls` merges both candidates' records under the
+    /// one name while each record's mapping indexes its *own* candidate's
+    /// variables, and nothing on a `CallInst` says which candidate it came
+    /// from -- so composing would silently pick the wrong signature.
+    fn sole_poly_word(&self, name: &str) -> Option<&WordDef> {
+        let mut candidates = self
+            .words
+            .iter()
+            .filter(|w| w.name == name && w.poly.is_some());
+        let first = candidates.next()?;
+        candidates.next().is_none().then_some(first)
+    }
+
+    /// θ_h = θ_w ∘ mapping: each callee variable takes either the concrete
+    /// type the caller supplied outright or `θ_w`'s image of the caller
+    /// variable it was matched against. The callee's declared inputs are then
+    /// ground too -- discarded, because a `CallInst` carries no input types;
+    /// the *interning* is the point, since lowering's `subst_polytype` only
+    /// finds an already-interned array/ref/generic shape.
+    fn compose(
+        &self,
+        record: &PolyCrossCall,
+        caller: &CallInst,
+        sig: &PolySig,
+        ctx: &Ctx,
+        arrays: &mut Vec<ArrayDecl>,
+        refs: &mut Vec<RefDecl>,
+    ) -> Result<CallInst, String> {
+        let mut subst = Subst::default();
+        for (v, image) in &record.mapping {
+            let ty = match image {
+                Image::Concrete(t) => *t,
+                // A caller variable no input mentions is rejected at the
+                // caller's own declaration (its body could not produce one),
+                // so θ_w binds every variable an image can name.
+                Image::CallerVar(u) => caller.subst.ty_of(*u).expect(
+                    "a caller type variable an operand carried is mentioned by the caller's inputs, so its own instantiation bound it",
+                ),
+            };
+            subst.ty.push((*v, ty));
+        }
+        for pty in &sig.inputs {
+            apply_subst(
+                sig,
+                pty,
+                &subst,
+                &record.callee,
+                record.span,
+                ctx,
+                arrays,
+                refs,
+            )?;
+        }
+        let mut outputs = Vec::with_capacity(sig.outputs.len());
+        for pty in &sig.outputs {
+            outputs.push(apply_subst(
+                sig,
+                pty,
+                &subst,
+                &record.callee,
+                record.span,
+                ctx,
+                arrays,
+                refs,
+            )?);
+        }
+        // The caller's `generation` rides along so `instantiation_symbol`
+        // stays collision-free across REPL redefinitions.
+        let symbol = instantiation_symbol(&record.callee, &subst, caller.generation);
+        Ok(CallInst {
+            callee: record.callee.clone(),
+            subst,
+            symbol,
+            out_arity: outputs.len(),
+            output_types: outputs,
+            bundle: None,
+            generation: caller.generation,
+            // A quotation parameter and a user trait bound are both located
+            // rejections on the cross-call path (`poly_cross_signature_supported`),
+            // so a composed callee has neither to record.
+            quot_inputs: Vec::new(),
+            trait_calls: HashMap::new(),
+            poly_calls: HashMap::new(),
+        })
+    }
+}
+
+/// Push each not-yet-seen composed callee onto the worklist. Deduping by
+/// symbol *before* recursing is what makes a mutual `g <-> h` cycle stop: the
+/// second visit to `(g, θ)` mints the same symbol as the first.
+fn enqueue_new(
+    routed: &HashMap<Span, CallInst>,
+    seen: &mut HashSet<String>,
+    frontier: &mut Vec<CallInst>,
+) {
+    for callee in routed.values() {
+        if seen.insert(callee.symbol.clone()) {
+            frontier.push(callee.clone());
+        }
+    }
+}
+
+/// P7.S3k (R4/N1): a cross-call whose caller or callee name is a polymorphic
+/// overload set. Located rather than mis-composed: the two candidates' records
+/// merge under one name and each indexes its own signature's variables, so
+/// picking either would ground the wrong monomorph without saying so.
+fn overloaded_cross_call_error(caller: &str, callee: &str, overloaded: &str, span: Span) -> String {
+    format!(
+        "error: `{}` cannot call the polymorphic word `{}` (line {}, col {})\n  `{}` names more than one polymorphic word, and a call across two generic words carries no record of which candidate it resolved to\n  give the overloaded word distinct names",
+        crate::resolve::demangle_word(caller),
+        crate::resolve::demangle_call(callee),
+        span.line,
+        span.col,
+        crate::resolve::demangle_call(overloaded),
+    )
 }
 
 /// P7.S3e (R8): one `Bound::User` at a call site whose θ is known -- the
@@ -8227,6 +8557,156 @@ mod tests {
         assert_eq!(callees, vec!["g"]);
         assert_eq!(module.poly_cross_calls["g"].len(), 1);
     }
+
+    /// The composed monomorphs of a checked source, symbol-keyed, and the
+    /// routing map each concrete instantiation carries -- the two records
+    /// phase 2's fixpoint writes.
+    fn transitive_of(src: &str) -> (Vec<String>, Vec<Vec<String>>) {
+        let (module, _) = checked_like_a_build(src).expect("the fixture checks");
+        let mut routed: Vec<Vec<String>> = module
+            .instantiations
+            .values()
+            .map(|inst| {
+                let mut syms: Vec<String> =
+                    inst.poly_calls.values().map(|c| c.symbol.clone()).collect();
+                syms.sort();
+                syms
+            })
+            .collect();
+        routed.sort();
+        (
+            module
+                .transitive_instantiations
+                .iter()
+                .map(|c| c.symbol.clone())
+                .collect(),
+            routed,
+        )
+    }
+
+    /// P7.S3k (R4): the composition step. `main` instantiates `g` at `i64`,
+    /// `g`'s body calls `id`, and the fixpoint grounds that record into a real
+    /// `(id, i64)` monomorph -- routed at `g`'s own body span, and recorded
+    /// flat so lowering emits one `IrFunc` for it.
+    #[test]
+    fn transitive_discovery_composes_the_callee_instantiation() {
+        let (transitive, routed) =
+            transitive_of(": id ( 'T -- 'T ) ;\n: g ( 'T -- 'T ) id ;\n: main ( -- ) 1 g drop ;\n");
+        assert_eq!(transitive, vec!["sooth_mono_id__t0_i64"]);
+        assert_eq!(routed, vec![vec!["sooth_mono_id__t0_i64"]]);
+    }
+
+    /// P7.S3k (R4): once per *distinct* instantiation the caller reaches. Two
+    /// call sites at the same θ compose the same symbol, so the fixpoint's
+    /// dedup collapses them -- without it lowering would emit the callee's
+    /// `IrFunc` twice under one name and the assembler would refuse the module.
+    #[test]
+    fn transitive_discovery_dedups_repeated_instantiation_symbol() {
+        let (transitive, routed) = transitive_of(
+            ": id ( 'T -- 'T ) ;\n\
+             : g ( 'T -- 'T ) id ;\n\
+             : main ( -- ) 1 g drop 2 g drop ;\n",
+        );
+        assert_eq!(transitive, vec!["sooth_mono_id__t0_i64"]);
+        // Both call sites still route -- deduping the *emit* set must not drop
+        // either site's routing entry.
+        assert_eq!(
+            routed,
+            vec![vec!["sooth_mono_id__t0_i64"], vec!["sooth_mono_id__t0_i64"]]
+        );
+    }
+
+    /// P7.S3k (R4): and one *per* distinct θ. Asymmetric on purpose (`i64`
+    /// then `str`), since a symmetric pair cannot tell "two monomorphs" from
+    /// "one, twice".
+    #[test]
+    fn transitive_discovery_composes_one_monomorph_per_distinct_theta() {
+        let (transitive, _) = transitive_of(
+            ": id ( 'T -- 'T ) ;\n\
+             : g ( 'T -- 'T ) id ;\n\
+             : main ( -- ) 1 g drop \"x\" g drop ;\n",
+        );
+        assert_eq!(
+            transitive,
+            vec!["sooth_mono_id__t0_i64", "sooth_mono_id__t0_str"]
+        );
+    }
+
+    /// P7.S3k (R5/N3): a mutual cycle terminates because the second visit to
+    /// `(g, θ)` mints the symbol the first already claimed. One monomorph per
+    /// word, and `g`'s own seed entry is not duplicated into the flat set.
+    #[test]
+    fn transitive_discovery_terminates_on_a_mutual_cycle() {
+        let (transitive, _) = transitive_of(
+            ": h ( 'U -- 'U ) g 0 drop ;\n\
+             : g ( 'T -- 'T ) h 0 drop ;\n\
+             : main ( -- ) 1 g drop ;\n",
+        );
+        assert_eq!(transitive, vec!["sooth_mono_h__t0_i64"]);
+    }
+
+    /// P7.S3k (R4, phase 1 finding 1): an `inline` callee is *spliced* at the
+    /// call site and mints no `IrFunc`, so the fixpoint must compose nothing
+    /// for it. Routing the span would emit a call to a symbol that never
+    /// exists -- a link failure for a case that already worked. The record
+    /// itself is still made: how `h` is lowered is not the record's business.
+    #[test]
+    fn transitive_discovery_skips_an_inline_callee() {
+        let src = ": h inline ( 'U -- 'U ) ;\n: g ( 'T -- 'T ) h ;\n: main ( -- ) 1 g drop ;\n";
+        let (module, _) = checked_like_a_build(src).expect("the fixture checks");
+        assert_eq!(module.poly_cross_calls["g"].len(), 1);
+        assert!(
+            module.transitive_instantiations.is_empty(),
+            "composed: {:?}",
+            module.transitive_instantiations
+        );
+        for inst in module.instantiations.values() {
+            assert!(inst.poly_calls.is_empty(), "routed: {:?}", inst.poly_calls);
+        }
+    }
+
+    /// P7.S3k (N2): a program with no cross-call records composes nothing and
+    /// routes nothing, which is what makes the emitted IL of the existing
+    /// corpus identical by construction rather than by inspection.
+    #[test]
+    fn transitive_discovery_is_empty_without_a_cross_call() {
+        let (transitive, routed) =
+            transitive_of(": id ( 'T -- 'T ) ;\n: main ( -- ) 1 id drop ;\n");
+        assert!(transitive.is_empty(), "composed: {transitive:?}");
+        assert_eq!(routed, vec![Vec::<String>::new()]);
+    }
+
+    /// P7.S3k (R4/N1, phase 1 finding 2): a polymorphic overload set merges
+    /// into one `poly_cross_calls` entry, and each record's mapping indexes its
+    /// *own* candidate's variables -- so composing one candidate's mapping
+    /// against the other's θ would mint a wrong monomorph silently. Rejected,
+    /// located, from either side of the call.
+    #[test]
+    fn check_cross_call_through_an_overloaded_generic_word_is_error() {
+        for (fixture, overloaded) in [
+            (
+                ": id ( 'T -- 'T ) ;\n\
+                 : f ( 'T -- 'T ) id ;\n\
+                 : f ( 'A 'B -- 'A 'B ) swap swap ;\n\
+                 : main ( -- ) 1 f drop ;\n",
+                "`f` names more than one polymorphic word",
+            ),
+            (
+                ": id ( 'T -- 'T ) ;\n\
+                 : id ( 'A 'B -- 'A 'B ) swap swap ;\n\
+                 : g ( 'T -- 'T ) id ;\n\
+                 : main ( -- ) 1 g drop ;\n",
+                "`id` names more than one polymorphic word",
+            ),
+        ] {
+            let err = check_src(fixture).unwrap_err();
+            assert!(
+                err.contains(overloaded),
+                "expected `{overloaded}`, got: {err}"
+            );
+        }
+    }
+
     #[test]
     fn check_poly_body_with_if_accepts_choose() {
         // T1: a polymorphic body may branch. Slice 10c: `inline`, because

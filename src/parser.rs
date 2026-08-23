@@ -791,6 +791,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         externs: bodies.externs,
         instantiations: HashMap::new(),
         poly_cross_calls: HashMap::new(),
+        transitive_instantiations: Vec::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,

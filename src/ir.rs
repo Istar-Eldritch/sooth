@@ -80,6 +80,14 @@ fn empty_trait_calls() -> &'static HashMap<Span, String> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7.S3k (R4): the cross-call companion of `empty_trait_calls`, handed to
+/// every lowering path with no generic-to-generic call to route (every
+/// monomorphic word, the REPL, destructor synthesis, and unit tests).
+fn empty_poly_calls() -> &'static HashMap<Span, CallInst> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// P7 slice 1 (R2): the resolved-field companion of `empty_instantiations`,
 /// handed to every lowering path that resolved no field projection
 /// (destructor synthesis and unit tests).

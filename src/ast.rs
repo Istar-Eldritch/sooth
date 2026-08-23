@@ -69,6 +69,14 @@ pub struct Module {
     /// composing each record's mapping with that instantiation's θ. Empty for
     /// a program whose generic words call no generic word.
     pub poly_cross_calls: std::collections::HashMap<String, Vec<PolyCrossCall>>,
+    /// P7.S3k (R4): the monomorphs reached only *through* a generic body's
+    /// call to another generic word, composed by the checker's transitive
+    /// fixpoint. Flat rather than `Span`-keyed because `instantiations`
+    /// structurally cannot hold them: one cross-call site in a generic body
+    /// serves every instantiation of that body, so N callee monomorphs share
+    /// one span. Symbol-deduped, so lowering emits one `IrFunc` per entry.
+    /// Empty for a program whose generic words call no generic word.
+    pub transitive_instantiations: Vec<CallInst>,
     /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
     /// overload of a builtin-named word (e.g. `add` on two `Vec2`), keyed by the
     /// call site's `Span`, valued by the resolved callee's Sooth name. A
@@ -1580,6 +1588,17 @@ pub struct CallInst {
     /// sharing a `(callee, θ)` record identical maps and the symbol-dedup step
     /// in lowering may read either one.
     pub trait_calls: std::collections::HashMap<Span, String>,
+    /// P7.S3k (R4): the calls to *other* generic words inside this callee's
+    /// own body, span -> the fully composed `CallInst` of the callee that
+    /// call reaches at this θ. A `CallInst` rather than a bare symbol (unlike
+    /// `trait_calls`) because lowering the cross-call needs the composed
+    /// θ's output shape and bundle, not just a name. Nested copies are
+    /// deliberately left empty: they route one `Instr::Call`, they do not
+    /// lower their own callee's body -- `Module::transitive_instantiations`
+    /// holds the authoritative, `poly_calls`-populated copy for that.
+    /// Empty on every monomorphic word and on every instantiation whose body
+    /// calls no generic word, so the existing corpus lowers unchanged.
+    pub poly_calls: std::collections::HashMap<Span, CallInst>,
 }
 
 /// P7.S3k (R2): what one *callee* type variable was matched to at a
@@ -2551,6 +2570,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
+            transitive_instantiations: Vec::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -2678,6 +2698,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
+            transitive_instantiations: Vec::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -2753,6 +2774,7 @@ mod tests {
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
+            transitive_instantiations: Vec::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),

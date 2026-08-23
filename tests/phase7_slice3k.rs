@@ -7,11 +7,10 @@
 //! dispatches through, and its rigid type variables are related to the
 //! caller's symbolically, since at check time the caller has no `θ` either.
 //!
-//! Phase 1 covers the callees lowering **splices** (an `inline` library word
-//! like `lt`/`gt`), which need no monomorph of their own and so work
-//! end-to-end already. A non-inline generic callee needs one composed
-//! instantiation per concrete type the caller reaches; that is phase 2, and
-//! its goldens land here beside these.
+//! A callee lowering **splices** (an `inline` library word like `lt`/`gt`)
+//! needs no monomorph of its own. A non-inline one needs one composed
+//! instantiation per concrete type the caller reaches, discovered by the
+//! checker's transitive fixpoint and routed per caller instantiation.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,13 +45,15 @@ impl Drop for Tree {
 }
 
 fn sooth_build(entry: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("build")
-        .arg(entry)
-        .arg("--manifest")
-        .arg(common::fixture_manifest())
-        .output()
-        .expect("sooth build should spawn")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_sooth"));
+    cmd.arg("build").arg(entry);
+    // A single-file fixture in a temp directory needs the shared manifest to
+    // name `core` at all; a multi-file tree wrote its own `sooth.pkg`, and
+    // `--manifest` would override it out of `self::` reach.
+    if let Some(manifest) = common::manifest_for(entry) {
+        cmd.arg("--manifest").arg(manifest);
+    }
+    cmd.output().expect("sooth build should spawn")
 }
 
 fn build_and_run(entry: &Path) -> String {
@@ -77,6 +78,34 @@ fn build_error(entry: &Path) -> String {
         String::from_utf8_lossy(&build.stdout)
     );
     String::from_utf8_lossy(&build.stderr).into_owned()
+}
+
+/// Build, then read the monomorph symbols out of the linked binary with `nm`
+/// (the pattern `tests/phase7_slice3a.rs` and `tests/symbol_hijack.rs` use).
+/// Which instantiation ran is unobservable at runtime -- a generic body cannot
+/// print its own `'T` -- so callee identity has to be asserted in the emitted
+/// artefact.
+fn monomorph_symbols(entry: &Path) -> Vec<String> {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    let nm = Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_file(&binary).ok();
+    let mut symbols: Vec<String> = String::from_utf8_lossy(&nm.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().last())
+        .filter(|s| s.starts_with("sooth_mono_"))
+        .map(str::to_string)
+        .collect();
+    symbols.sort();
+    symbols
 }
 
 /// The generic body under test in both goldens below: `mylt` compares its own
@@ -170,6 +199,135 @@ fn a_cross_call_growing_the_type_is_a_located_rejection() {
     assert!(
         err.contains("cannot pass `Box['T]` to `'U` of the polymorphic word `h`")
             && err.contains("builds a larger type at every hop"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+// -- phase 2: the non-inline callee, monomorphized ---------------------------
+
+/// R4: the slice's headline shape end to end. `g` is generic and non-inline,
+/// so it is monomorphized once per θ it is called at; each of those monomorphs
+/// calls `id`, which is generic and non-inline too and so needs a monomorph of
+/// its own -- one that no *concrete* call site in the program names. Two
+/// asymmetric instantiations, since one alone cannot tell "a monomorph per θ"
+/// from "one monomorph, reached twice".
+#[test]
+fn a_non_inline_generic_callee_is_monomorphized_once_per_reached_instantiation() {
+    let t = Tree::new("id-g");
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         : id ( 'T -- 'T ) ;\n\
+         : g ( 'T -- 'T ) id ;\n\
+         : main ( -- ) 7 g . \"x\" g drop ;\n",
+    );
+    assert_eq!(
+        monomorph_symbols(&entry),
+        [
+            "sooth_mono_g__m0__t0_i64",
+            "sooth_mono_g__m0__t0_str",
+            "sooth_mono_id__m0__t0_i64",
+            "sooth_mono_id__m0__t0_str",
+        ]
+    );
+}
+
+/// R4: the cross-module half of the same thing, which phase 1 could only pin
+/// through the mangler at unit level. The callee's symbol carries its own
+/// declaring module (`__m1`), so the composed instantiation is minted against
+/// the imported word rather than against a same-module lookalike.
+#[test]
+fn an_imported_non_inline_generic_callee_is_monomorphized() {
+    let t = Tree::new("imported-callee");
+    t.write("sooth.pkg", &common::fixture_package("p7s3k"));
+    t.write(
+        "boxed.sth",
+        "import: intrinsics * ;\n\
+         export: myid ;\n\
+         : myid ( 'T -- 'T ) ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         import: self::boxed b | myid | ;\n\
+         : g ( 'T -- 'T ) myid ;\n\
+         : main ( -- ) 7 g . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "7\n");
+    assert_eq!(
+        monomorph_symbols(&entry),
+        ["sooth_mono_g__m0__t0_i64", "sooth_mono_myid__m1__t0_i64"]
+    );
+}
+
+/// R5/N3: a mutual generic pair, each hop a pure variable renaming. The
+/// fixpoint revisits `(g, i64)` on the second hop, mints the symbol it already
+/// claimed, and stops -- so compilation *terminates* with no depth cap, and one
+/// monomorph exists per word rather than one per hop. The `0 drop` after each
+/// call keeps the cycle out of tail position, where `check_tail_call_cycles`
+/// rejects it before this machinery is reached at all.
+///
+/// Run, not merely built: the runtime cycle is bounded by the `i64` counter, so
+/// a wrongly-composed callee would recurse on the un-decremented value and
+/// never return rather than print.
+#[test]
+fn a_mutual_non_growing_generic_pair_compiles_runs_and_terminates() {
+    let t = Tree::new("mutual");
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         import: core::prelude * ;\n\
+         import: core::bool cb | Bool | ;\n\
+         : h ( 'U: Copy i64 -- 'U ) dup 0 gt ~[ 1 sub g 0 drop ] ~[ drop ] if ;\n\
+         : g ( 'T: Copy i64 -- 'T ) dup 0 gt ~[ 1 sub h 0 drop ] ~[ drop ] if ;\n\
+         : main ( -- ) 7 5 g . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "7\n");
+    assert_eq!(
+        monomorph_symbols(&entry),
+        ["sooth_mono_g__m0__t0_i64", "sooth_mono_h__m0__t0_i64"]
+    );
+}
+
+/// R4/R8: a composed callee returning two or more values gets the same interned
+/// return bundle a concrete instantiation's callee gets. The bundle is interned
+/// by the fixpoint, not by the concrete `out_arity >= 2` loop, which never sees
+/// this callee -- without it the call site would lower against `bundle: None`
+/// and read a single scalar back out of a two-field aggregate.
+#[test]
+fn a_composed_callee_returning_a_bundle_is_laid_out_like_any_other() {
+    let t = Tree::new("bundle");
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         : two ( 'T -- 'T i64 ) 9 ;\n\
+         : g ( 'T -- 'T i64 ) two ;\n\
+         : main ( -- ) 7 g . . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "9\n7\n");
+}
+
+/// R4/N1: a cross-call whose caller or callee name is a polymorphic overload
+/// set. Both candidates' records merge under one name and each indexes its own
+/// signature's variables, so composing would ground the wrong monomorph
+/// silently. Rejected at the call site instead -- and note this is a *build*
+/// golden: an unrouted cross-call is a panic in lowering, not a diagnostic, so
+/// the rejection has to happen at check time to be observable at all.
+#[test]
+fn a_cross_call_through_an_overloaded_generic_word_is_a_located_rejection() {
+    let t = Tree::new("overloaded");
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         : id ( 'T -- 'T ) ;\n\
+         : id ( 'A 'B -- 'A 'B ) swap swap ;\n\
+         : g ( 'T -- 'T ) id ;\n\
+         : main ( -- ) 7 g . ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("`g` cannot call the polymorphic word `id` (line 4, col 18)")
+            && err.contains("`id` names more than one polymorphic word"),
         "unexpected diagnostic: {err}"
     );
 }
