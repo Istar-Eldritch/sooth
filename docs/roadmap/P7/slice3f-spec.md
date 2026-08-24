@@ -28,10 +28,15 @@
 
 ## Locked rules
 
-- **L1 Ground only.** Every change is gated on the declared input being
-  `PolyType::Concrete(Type::Quotation(eff))` after `raw_to_poly_type`'s fold. A declared
-  `PolyType::Quotation(ins, outs, ..)` still carrying a free type/row variable is
-  untouched: R1 does not spare it, R3 does not dispatch on it.
+- **L1 Ground only — superseded by P7.S3l.** Every change *in this slice* was gated on the
+  declared input being `PolyType::Concrete(Type::Quotation(eff))` after `raw_to_poly_type`'s
+  fold, leaving a declared `PolyType::Quotation(ins, outs, ..)` still carrying a free
+  type/row variable untouched: R1 did not spare it, R3 did not dispatch on it. P7.S3l lifted
+  both halves — its R1 gave the body `call` a dispatch arm on the abstract operand
+  (`poly_call_abstract_quotation_param`), and its R5 made R9p spare an abstract declared slot
+  at the argument boundary by grounding it through the caller's completed `Subst`. This
+  bullet is kept only as the historical record of what this slice's exit asserted; L2's
+  bare-`PolyType::Var` rejection is the part that still holds.
 - **L2 R9p's real hazard stays enforced.** A bare `PolyType::Var` position (the
   `dupit`/`'T: Copy -- 'T 'T` shape) keeps rejecting.
 - **L3 No splice for a genuine parameter.** R3 pops and pushes against the declared

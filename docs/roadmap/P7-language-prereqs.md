@@ -318,9 +318,9 @@ the stale "slice 7" wording is retired
 (`resolve_poly_overload`'s `saw_quotation` short-circuit, `src/check/poly.rs:3038-3067`)
 without ever reaching this slice's per-position check -- a single-candidate poly name
 only. And a still-**abstract** `PolyType::Quotation(ins, outs, ..)` parameter (one whose
-brackets still mention a type variable, e.g. `[ 'T -- 'T ]`) unifies correctly at the
-call-site boundary already, but a poly body still cannot `call` a *bound instantiation* of
-it -- see **P7.S3l** below.
+brackets still mention a type variable, e.g. `[ 'T -- 'T ]`) was refused at both boundaries
+at this slice's exit: R9p rejected a literal argument at that position, and a poly body could
+not `call` a *bound instantiation* of it. **P7.S3l** below lifted both.
 
 **P7.S3g — Self-recursion in a non-inline generic body.** `[ done ]` A non-inline
 polymorphic word may call itself, so a generic word that loops over an inductively-shaped
@@ -530,19 +530,25 @@ non-growing pair compiles, runs, and terminates compilation; and a growing cross
 located call-site rejection (`docs/roadmap/P7/slice3k-spec.md`, `tests/phase7_slice3k.rs`).
 
 **P7.S3l -- A poly body calling a bound instantiation of an abstract quotation parameter.**
-Named at P7.S3f's exit, out of scope there. `unify_poly_input`'s `PolyType::Quotation` arm
-(`src/check/poly.rs:3495-3535`) already unifies a still-abstract declared quotation parameter
-(one whose brackets mention a type variable, e.g. `[ 'T -- 'T ]`) correctly at the call-site
-argument boundary, row-pointwise, binding any variable the row mentions. The gap left open is
-the body side: `poly_call_term`'s `call` handling still has no arm for a bound instantiation
-of that shape, so `call` on it falls through to `poly_op_on_variable_error`'s generic
-rendering, unchanged since before S3f. S3f's own probe pass found no evidence this needs a new
-representation -- only a new `poly_call_term` dispatch arm parallel to S3f's R3, grounded
-against the concretely bound instantiation (the `Subst` already carries what each variable
-grounds to) rather than a body-local literal.
-**Exit:** a poly body may `call` its own declared, still-abstract quotation parameter once
-bound by the caller's instantiation, popping/pushing against the row grounded through that
-call's `Subst`, the same way S3f's R3 does for the already-ground case.
+`[ done ]` Named at P7.S3f's exit, out of scope there. A still-abstract declared quotation
+parameter (one whose brackets mention a type variable, e.g. `[ 'T -- 'T ]`) is now live at
+both boundaries of a non-inline generic word. In the **body**, `poly_call_term`'s `call`
+handling dispatches on a `PolyType::Quotation` operand through a dedicated arm parallel to
+S3f's R3, consuming the declared inputs and pushing the declared outputs by structural row
+comparison; no new representation was needed. At the **call site**, R9p spares such a slot
+instead of rejecting the literal outright: `check_poly_call` unifies every non-quotation input
+first, then grounds each declared quotation slot through the completed `Subst` and
+materializes the operand exactly as a ground slot's is, so the declared parameter order does
+not matter. `subst_polytype` mirrors check's `apply_subst` for the same shape, so the
+monomorphized body lowers through the ordinary indirect-call path.
+**Exit (met):** a poly body may `call` its own declared, still-abstract quotation parameter,
+consuming its declared inputs deepest-first and pushing its declared outputs, each row slot
+compared structurally (via `PolyType`'s derived `Eq`) against the operand's own `PolyType` --
+no `Subst` is built or consulted mid-body, since every type variable stays rigid there
+(`docs/roadmap/P7/slice3l-spec.md`, `src/check/poly.rs`, `tests/phase7_slice3f.rs`). A
+literal quotation argument reaching a still-abstract declared position at the *call-site*
+boundary (not the body) grounds through the caller's own `Subst` and materializes exactly as
+a ground declared quotation slot does.
 
 **P7.S3m -- A declared quotation effect with two or more outputs cannot be lowered.**
 Named at P7.S3f's exit (its ">=2-output lowering gap" finding), pre-existing on the concrete
