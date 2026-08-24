@@ -202,6 +202,28 @@ fn a_local_destructor_coexists_with_a_wildcard_hub_import() {
     assert_eq!(build_and_run(&entry), "");
 }
 
+/// R5's exemption is keyed on the *entry* (an admitted-intrinsic name), not on
+/// there being only one other claimant: a second module's own `drop` word may
+/// selectively import alongside it, because the exemption also skips `seen`'s
+/// reservation of the bare name, so the two entries never contend for one
+/// slot. This pins the cross-module analogue of the local-destructor case
+/// above; it is not a design ruling that this shape must stay legal, only a
+/// record of what it does today.
+#[test]
+fn a_hub_admitted_intrinsic_and_another_modules_real_word_share_a_name() {
+    let t = Tree::new("cross-module-drop");
+    t.write("hub.sth", "import: intrinsics | drop | ;\nexport: drop ;\n");
+    t.write(
+        "other.sth",
+        "import: intrinsics | drop | ;\ntype: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\nexport: Fd drop ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: \"./hub.sth\" a | drop | ;\nimport: \"./other.sth\" b | Fd drop | ;\n: main ( -- ) 7 Fd drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "");
+}
+
 /// R5: two hubs both admitting `drop` union to the same set, so a collision
 /// error would report an ambiguity with no two answers.
 #[test]

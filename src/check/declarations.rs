@@ -717,10 +717,10 @@ pub fn check_selective_imports(
             }
             // R4 (import mirror): a selective import naming a builtin
             // operator must agree with it on input count. The other two
-            // collision checks above already forbid an import from sharing a
-            // name with a local decl or with another selective import
-            // outright, so a builtin row is the only candidate this site can
-            // still silently disagree with.
+            // collision checks above forbid an import from sharing a name with
+            // a local decl or with another selective import outright -- except
+            // an admitted-intrinsic entry (R5), which skips both, so a local or
+            // sibling `drop` can still reach this arity check alongside it.
             if let Some(rows) = builtins.get(entry.name.as_str()) {
                 let builtin_arity = rows[0].inputs.len();
                 if let Some(imported) = module
