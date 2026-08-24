@@ -4498,14 +4498,40 @@ pub(super) fn check_poly_call(
     // `CallInst` so lowering can materialize the caller's phantom argument
     // into a real runtime aggregate before the call.
     let mut quot_inputs: Vec<(usize, &'static QuotEffect)> = Vec::new();
+    // Pass 1: unify every non-quotation input first, so a variable a
+    // declared quotation slot mentions is already bound by the time pass 2
+    // grounds it -- mirroring `check_poly_combinator_args`'s two-pass split,
+    // whatever the parameter order.
     for i in 0..n_in {
+        if poly_input_is_quotation(&sig.inputs[i]) {
+            continue;
+        }
         // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
         // quotation would silently bind `'T` to the placeholder and
-        // monomorphize a call over a phantom. Reject before unification --
-        // unless the declared input is itself a ground `Type::Quotation`
-        // (P7.S3f R1), in which case the operand is materialized into a
-        // real runtime value first (R2) and falls through to ordinary
-        // unification below.
+        // monomorphize a call over a phantom. Reject before unification.
+        if let Some(QuotRef::Known(_)) = stack[base + i].quot {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        let slot_ty = stack[base + i].ty;
+        unify_poly_input(
+            &sig,
+            &sig.inputs[i],
+            slot_ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+        )?;
+    }
+    // Pass 2: materialize each declared quotation input, now that `subst`
+    // holds every binding pass 1 could produce.
+    for i in 0..n_in {
+        if !poly_input_is_quotation(&sig.inputs[i]) {
+            continue;
+        }
         if let Some(QuotRef::Known(id)) = stack[base + i].quot {
             match &sig.inputs[i] {
                 PolyType::Concrete(Type::Quotation(eff)) => {
@@ -4516,10 +4542,8 @@ pub(super) fn check_poly_call(
                     quot_inputs.push((i, eff));
                 }
                 // P7.S3l phase 2 (R9p closure): a declared quotation slot
-                // still carrying a variable -- ground it through the `subst`
-                // already built from earlier inputs (the same "once every
-                // variable the row mentions is bound" precondition R2 states
-                // for the body-`call` twin), then materialize exactly as the
+                // still carrying a variable -- ground it through `subst`,
+                // now complete from pass 1, then materialize exactly as the
                 // ground arm does. Scope rules out an inline/row-carrying
                 // slot ever reaching a non-combinator word's signature, so
                 // `apply_subst`'s `Quotation` arm always grounds to
@@ -4538,7 +4562,7 @@ pub(super) fn check_poly_call(
                     )?;
                     quot_inputs.push((i, eff));
                 }
-                _ => return Err(reject_quotation_argument(ctx, span, name)),
+                _ => unreachable!("poly_input_is_quotation guarantees a quotation-shaped input"),
             }
         }
         let slot_ty = stack[base + i].ty;
@@ -7323,6 +7347,18 @@ mod tests {
              : main ( -- ) 7 [ ] run_abstract drop ;\n",
         )
         .expect("a literal argument at an abstract quotation position should materialize");
+    }
+    /// P7.S3l phase 2 review: the two-pass split (mirroring
+    /// `check_poly_combinator_args`) makes grounding order-independent -- the
+    /// declared quotation slot comes *before* the plain input that binds
+    /// `'T`, the reverse of the sibling test above.
+    #[test]
+    fn check_poly_call_materializes_an_abstract_quotation_argument_declared_first() {
+        check_src(
+            ": run_abstract_first ( [ 'T: Copy -- 'T ] 'T -- 'T ) swap drop ;\n\
+             : main ( -- ) [ ] 7 run_abstract_first drop ;\n",
+        )
+        .expect("grounding a quotation slot declared before its binding input should succeed");
     }
     /// R2: a capturing literal at the argument boundary runs the existing R15
     /// admission path. An in-frame (non-escaping) capture is admitted; this

@@ -18,7 +18,10 @@ Closing that gap (if it is done at all) is phase 2's concern; see R4 and the pha
 below. The headline shape *does* build and run when the quotation argument reaches `apply`
 by some route other than a literal at that call site (e.g. forwarded out of another word's
 return value) — `tests/phase7_slice3f.rs`'s `body_boundary_calls_an_abstract_quotation_param`
-is the phase 1 golden for that shape. The literal-at-call-site form remains aspirational:
+is the phase 1 golden for that shape. The literal-at-call-site form was closed in phase 2
+(below): `check_poly_call`'s R9p guard now grounds an abstract declared quotation slot
+through a completed `Subst` before materializing the literal, order-independent of the
+declared parameter position (two-pass, mirroring `check_poly_combinator_args`):
 
 ```
 import: intrinsics * ;
@@ -182,16 +185,22 @@ so phase 2 does not understate it as an afterthought.
   would fail on a *different*, unrelated arity error at the `call_it` call site, not build
   clean. Verified live: `call_it` declares two inputs (`'T` and the quotation), `main`
   pushes only one.
-- **Correction (review round 1).** The `apply` shape cannot be built as a real golden
-  through a *literal* call-site argument (`4 [ 1 add ] apply .`): the Goal-section
-  correction above means that source hits the R9p rejection, not a clean build, so it
-  cannot replace the original check-only assertion with a `build_and_run` one as first
-  planned. The actual replacement, `body_boundary_calls_an_abstract_quotation_param`,
+- **Correction (review round 1).** At phase 1 exit, the `apply` shape could not be built as
+  a real golden through a *literal* call-site argument (`4 [ 1 add ] apply .`): the
+  Goal-section correction above meant that source hit the R9p rejection, not a clean build,
+  so phase 1 could not replace the original check-only assertion with a `build_and_run` one
+  as first planned. Its replacement, `body_boundary_calls_an_abstract_quotation_param`,
   forwards the quotation argument out of a helper word's return value instead (`mk_i64`/
   `mk_bool`), which does not touch R9p, and is a full `build_and_run` golden run at two
   instantiations of `'T` — not a `check_ok` placebo. It also depends on, and exercises, the
-  `subst_polytype` lowering fix (R4) alongside the checker accept arm, so it is the one
-  golden that proves the whole phase 1 path end-to-end, headline call-site literal aside.
+  `subst_polytype` lowering fix (R4) alongside the checker accept arm, so it was the one
+  golden that proved the whole phase 1 path end-to-end, headline call-site literal aside.
+- **Phase 2.** `headline_apply_accepts_a_literal_quotation_argument` is the literal
+  call-site golden the round-1 correction above could not yet build, now closed by the R9p
+  fix; it runs two instantiations of `'T` (`i64` and `Bool`), same discipline as the phase 1
+  golden above. `check_poly_call_materializes_an_abstract_quotation_argument_declared_first`
+  (`src/check/poly.rs`) pins the two-pass reorder itself: the declared quotation slot before
+  the plain input that binds `'T`, the reverse of the phase 2 unit test alongside it.
 
 The replaced/renamed tests are cited here so the pipeline does not read their diff as a
 regression.
@@ -219,10 +228,11 @@ one, so it does not split further.
 
 1. `import: intrinsics * ;` then `: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;` with
    `4 [ 1 add ] apply .` builds, runs, and prints `5\n`. **Not met at phase 1 exit** — the
-   R9p call-site gap (Goal section correction) still rejects this exact source at `main`'s
-   call site; phase 1's `body_boundary_calls_an_abstract_quotation_param` golden proves the
-   same body-boundary shape end-to-end via a non-literal argument instead. Phase 2 owns
-   closing R9p and then this literal criterion.
+   R9p call-site gap (Goal section correction) rejected this exact source at `main`'s
+   call site; phase 1's `body_boundary_calls_an_abstract_quotation_param` golden proved the
+   same body-boundary shape end-to-end via a non-literal argument instead. **Met at phase 2
+   exit**: `headline_apply_accepts_a_literal_quotation_argument`
+   (`tests/phase7_slice3f.rs`) builds and runs this exact source.
 2. A body `call` whose stack holds fewer operands than the declared quotation's inputs is a
    located underflow (`` `call` needs N values, but the stack holds M``), not the blanket
    message. Met at phase 1 exit.

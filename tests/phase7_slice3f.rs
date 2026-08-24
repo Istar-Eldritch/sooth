@@ -206,11 +206,18 @@ fn body_boundary_calls_an_abstract_quotation_param() {
 #[test]
 fn headline_apply_accepts_a_literal_quotation_argument() {
     let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
                : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
-               : main ( -- ) 4 [ 1 add ] apply . ;\n";
+               : main ( -- )\n\
+                 4 [ 1 add ] apply .\n\
+                 True [ ] apply .\n\
+               ;\n";
     let prog = Scratch::write("headline-apply-literal-argument", src);
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    assert_eq!(stdout, "5\n");
+    assert_eq!(
+        stdout, "5\nTrue\n",
+        "two instantiations of `'T` rule out a coincidental single-shape match"
+    );
 }
