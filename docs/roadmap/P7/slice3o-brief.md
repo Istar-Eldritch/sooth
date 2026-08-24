@@ -196,7 +196,19 @@ unrelated bug; (3) re-probe every design shape with **two** splices of the enclo
 not one — that discipline is what round 2 found round 1 missing, and there is no reason to
 believe two is the last depth that matters until it's actually checked.
 
-## Ready to spec: no, park it
+## Ready to spec: no, park it (but the motivating program now exists)
+
+**Update:** P7.S3s (`Ord` as a library trait) is the concrete program this slice was parked
+waiting for -- a bounded `inline` comparison. S3s deliberately ships the six comparisons
+*non-inline* rather than attempting this slice under its schedule pressure, which would bias
+the design toward a key that works for `lt` rather than one sound in general (the shape of both
+prior failures). In exchange S3s hands this slice the oracle neither review round had: a
+correct non-inline implementation to differential-test against. Flip `inline` on the same
+source and diff program output and resolved `impl:` symbols (`nm`) at two splices, at three,
+and inside a materialized quotation literal. That is the entry condition for a third attempt,
+on top of the three open items above.
+
+## Original recommendation
 
 Recommend leaving `reject_user_bound_on_combinator` as-is and moving on to other P7 backlog
 items. Revisit only if a concrete program actually needs bound dispatch on a combinator's own

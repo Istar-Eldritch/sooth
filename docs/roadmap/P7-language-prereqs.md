@@ -596,7 +596,11 @@ a bug. Recon'd and spec'd twice; both designs (a splice-uid resolution key, then
 source-derived `SplicePath` key) were found unsound in review -- see
 [slice3o-brief.md](./P7/slice3o-brief.md) for the full recon, the two failure modes, and what
 would need to be true before this is worth trying a third time. No spec currently exists for
-this slice; revisit only if a concrete program needs it.
+this slice. **P7.S3s supplies the motivating program** it was parked waiting for: a bounded
+`inline` comparison over a library `Ord`. S3s ships those comparisons non-inline precisely so
+this slice inherits a differential oracle -- flip `inline` on the same source and diff the
+resolved `impl:` symbols at two and three splices -- which is the entry condition for a third
+attempt, alongside the three open items in its brief.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -672,26 +676,32 @@ with some new call-site or context mechanism supplying the concrete type -- mech
 yet designed.
 
 **P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
-(`src/ast.rs:1417-1421`) is a reserved, member-less trait-table entry (`seed_predicate_traits`,
-`ast.rs:1528-1546`) satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded
-`ty.is_numeric()` check consulted at four discharge sites -- never the whole-program
-`(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches through. `'T: Ord`
-therefore categorically excludes a struct or enum, by construction, regardless of any `impl:`
-a user writes: `examples/traits.sth` worked around this by inventing a separate `Order`
-trait rather than using the language's own `Ord`. Not yet recon'd: whether the fix collapses
-`Bound::Ord` into `Bound::User(TraitId)` (seeding a real, member-bearing `trait: Ord` and
-replacing the numeric fast path with per-width `impl:` blocks or an implicit numeric
-short-circuit ahead of the registry lookup) or adds a second, separately-named nominal trait
-alongside the existing numeric-only `Ord` -- a real design choice with a real blast radius
-(four call sites, every diagnostic naming `Ord` by variant), not a mechanical migration.
-Depends on neither S3k (closed) nor S3p (a binary `cmp`-shaped member's receiver is already
-trailing); overlaps P8.S2's planned `lib/cmp.sth` migration, which should sequence after this
-slice if the satisfaction mechanism changes, or be written explicitly against whichever `Ord`
-shape this slice produces.
+(`src/ast.rs:1679-1683`) is a reserved, member-less trait-table entry (`seed_predicate_traits`)
+satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded `ty.is_numeric()` check --
+never the whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches
+through. `'T: Ord` therefore categorically excludes a struct or enum, and a user cannot opt
+their own type in: `impl: Ord for Point` is rejected as a built-in predicate.
+`examples/traits.sth` worked around this by inventing a separate `Order` trait.
+
+`Ord` becomes an ordinary library trait declaring `cmp ( &'T &'T -- Ordering )` over an
+`Ordering` enum, with one `impl:` per numeric width in `core` built from the raw comparison
+intrinsics, the six surface comparisons derived from `cmp`, and `Bound::Ord` deleted. The
+blocking gap is generic-calls-generic under a user bound: the checker's symbolic forwarding
+arm already handles it, but lowering ICEs (`calls.rs:737`) because a forwarded obligation is
+never resolved to a symbol per instantiation. See
+[slice3s-brief.md](./P7/slice3s-brief.md) for the probes.
+
+The six comparisons ship **non-inline** here and regress to a real call frame each, because a
+bounded `inline` word is **P7.S3o**, parked. That is deliberate: the cross-call lowering gap
+must close either way, and landing a correct non-inline version first gives S3o the
+differential oracle (flip `inline`, diff resolved `impl:` symbols at two and three splices)
+that both of its failed design rounds lacked. S3o is the named follow-on that restores the
+splice. Sequence before P8.S2's `lib/cmp.sth` migration.
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
-comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type,
-not only the numeric tower -- with no per-width boilerplate `impl:` required for the numeric
-tower itself, and every existing `'T: Copy Ord` numeric program unaffected.
+comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
+a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;
+the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
+still behaves identically (codegen regresses, behaviour does not).
 
 **P7.S3u -- Trait objects (an erased owner with a reachable destructor).** Traits dispatch
 statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete

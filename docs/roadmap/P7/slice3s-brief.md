@@ -2,11 +2,11 @@
 
 ## Problem, confirmed live against current `main`
 
-`Bound` (`src/ast.rs:1417-1421`) has three variants: `Copy`, `Ord`, and `User(TraitId)`.
+`Bound` (`src/ast.rs:1679-1683`) has three variants: `Copy`, `Ord`, and `User(TraitId)`.
 The first two are **reserved, member-less trait-table entries**
-(`seed_predicate_traits`, `ast.rs:1528-1546`) that exist only so `parse_capabilities`
-(the `'T: Copy Ord` parser) can look every bound name up through one uniform mechanism
-(`ast.rs:1520-1527` comment). Satisfaction is never nominal for either: `poly_is_copy`
+(`seed_predicate_traits`, `ast.rs:1793-1811`) that exist only so `parse_capabilities`
+(the `'T: Copy Ord` parser) can look every bound name up through one uniform mechanism.
+Satisfaction is never nominal for either: `poly_is_copy`
 checks a closed set of concrete-type predicates (`is_copy`), and `is_ord`
 (`src/check/poly.rs:120-122`) is exactly:
 
@@ -17,25 +17,39 @@ pub(super) fn is_ord(ty: Type) -> bool {
 ```
 
 — a hardcoded numeric-tower check, consulted at every `Bound::Ord` discharge site
-(`declarations.rs:1348`, `poly.rs:1211`, `poly.rs:3708`, `poly.rs:3910`). None of these
+(`declarations.rs:1360`, `poly.rs:1881`, `poly.rs:4428`, `poly.rs:4693` — line numbers
+drift as active files churn; note that only two of these four are actually
+bound-satisfaction sites, see "the overload-admission filter" below). None of these
 sites ever consult the `impl:` registry `Bound::User` dispatch already uses
 (`check_impl_decls`, `declarations.rs:407-482`; whole-program `(TraitId, Type)` lookup,
-`slice3e-spec.md` design ruling 9). **This produces a live, confirmed footgun**: writing
-`trait: Ord ...` is rejected as a name collision with the reserved predicate entry
-(`trait_name_collision_error`, `declarations.rs:333-336`, `colliding_name_kind` — not yet
-traced whether it fires here or elsewhere, needs a probe), but nothing stops `impl: Ord
-for Point` if it *were* somehow reachable, since a `Predicate`-kind `TraitDecl` carries
-`members: Vec::new()` (`ast.rs:1531-1544`) — zero required members means
-`check_impl_decls`'s missing-member loop (`declarations.rs:472-480`) is vacuously
-satisfied, and the impl would type-check while doing nothing: `Bound::Ord`'s discharge
-sites never look at the impl registry, only at `is_ord`'s numeric check. **Not yet
-probed** whether the name collision actually blocks this path today or whether it is
-live and silently inert — first thing the spec phase must confirm.
+`slice3e-spec.md` design ruling 9).
+
+**There is no live footgun here — both reachability paths are cleanly closed today**,
+probed against current `main`. An earlier draft of this brief speculated that
+`impl: Ord for Point` might type-check while doing nothing, on the reasoning that a
+`Predicate`-kind `TraitDecl` carries `members: Vec::new()` and so satisfies
+`check_impl_decls`'s missing-member loop vacuously. It does not get that far:
+
+```
+$ impl: Ord for Point ...
+error: trait `Ord` cannot be implemented at line 5, col 7
+  (it is a built-in predicate, satisfied by a type's own shape)
+
+$ trait: Ord 'T ...
+error: trait `Ord` (line 3, col 8) is already the name of a trait in this module
+```
+
+Both are correct, located rejections. The gap is a missing capability, not a silent
+misbehaviour. **Consequence for this slice:** the built-in-predicate implementation guard
+must be narrowed to `Copy` alone when `Ord` stops being a predicate, and the reserved-name
+collision must stop applying to `Ord` (or `Ord`'s seeded declaration must itself become
+the library one). Both are phase-2 work, and both need a test that the guard still fires
+for `Copy`.
 
 The consequence for a user: `'T: Ord` bounds a struct or enum out categorically. `sort`,
 `bin_search`, or any comparison-bounded generic word can only ever be instantiated over
-the numeric tower, by construction, no matter how many `impl:` blocks a user writes for
-their own type. This is the gap `Program 2` of `docs/roadmap/P7/slice3-dogfood.md`
+the numeric tower, by construction — and a user cannot opt their own type in, since the
+`impl:` that would do it is rejected outright (above). This is the gap `Program 2` of `docs/roadmap/P7/slice3-dogfood.md`
 (cited by `slice3e-spec.md`'s own "Forcing consumer" note) worked around by inventing a
 *separate*, user-declared `Order` trait (`examples/traits.sth`, `cmp ( &'T &'T --
 Ordering )`) rather than using the language's own `Ord` — because the language's own
@@ -68,97 +82,144 @@ Ordering )`) rather than using the language's own `Ord` — because the language
   in halves" — re-verify against `main` before relying on this, per that memory's own
   caveat.)
 
-## The actual redesign: what has to move, and what it breaks
+## The design, decided
 
-`Bound::Ord` is not a narrow constant to swap — it is threaded through the checker as a
-first-class enum variant, distinct from `Bound::User(TraitId)`, at every site listed
-above (four discharge sites plus the `Bound` enum itself, plus every error message
-naming `Ord` by variant match rather than by trait name lookup, e.g.
-`poly_ord_bound_error`). Turning `Ord` into a real trait means one of two shapes, neither
-yet designed:
+`Ord` becomes an ordinary library trait. No predicate variant, no compiler-level
+numeric-tower knowledge:
 
-1. **Collapse `Bound::Ord` into `Bound::User(TraitId)`, with `Ord`'s `TraitId` seeded to
-   a real, member-bearing `trait: Ord 'T ... ;`** (mirroring `Order` in
-   `examples/traits.sth`, but under the reserved name), with `impl: Ord for i64` / `for
-   f64` / ... written once for the numeric tower in a core library module, replacing
-   `is_ord`'s hardcoded predicate with real dispatch through the `(TraitId, Type)`
-   registry. This deletes the `Bound::Ord` variant entirely and every one of its four
-   discharge sites becomes an ordinary `Bound::User` discharge — but this changes the
-   *performance/mechanism* of every existing numeric comparison: today `is_ord` is a
-   zero-cost `ty.is_numeric()` match; after this move, satisfying `'T: Ord` for `i64`
-   means resolving through the whole-program impl registry every time, which changes
-   both how `check_poly_call`'s bound-check reports failure (today's `poly_ord_bound_error`
-   names "Ord" as a fixed capability; after, it would need to look and read exactly like
-   any other unsatisfied user trait) and how many `impl:` blocks the core library needs
-   to seed (one per numeric width `i8..i64`, `u8..usize/isize`, `f32`/`f64` — a dozen-plus
-   boilerplate impls, unless the impl mechanism grows some form of blanket/derived impl,
-   which does not exist and is out of scope to invent here).
+```sooth
+type: Ordering | Less | Equal | Greater ;
 
-2. **Keep `Bound::Ord` as the fast numeric-tower path, and add a second,
-   separately-named library trait (`Order`, matching the dogfood example) that a struct
-   or enum satisfies nominally**, leaving `'T: Ord` exactly as restrictive as it is today.
-   This is strictly additive and touches none of the four existing discharge sites, but
-   it does not answer the user's actual question — `Ord` stays a numeric-only intrinsic,
-   and a struct-bearing generic word has to spell a different bound name than the one
-   the language ships for numeric comparisons, which is the asymmetry motivating this
-   slice in the first place.
+trait: Ord 'T
+  cmp ( &'T &'T -- Ordering )
+;
+```
 
-**Not yet recon'd or decided which of these is right** — this is the central open design
-question for the spec phase, not a mechanical migration. (1) is the literal reading of
-"make `Ord` a library trait" but has a real cost (loses the zero-cost numeric fast path,
-needs a boilerplate-impl story) and a real blast radius (every one of the four
-`is_ord`/`Bound::Ord` sites, plus every diagnostic naming `Ord` by variant). (2) is
-smaller and lower-risk but arguably doesn't deliver what was asked — it just files a
-second trait alongside the existing intrinsic rather than replacing it. A third option
-worth at least naming for the spec to rule out or in: keep `Bound::Ord`'s fast numeric
-path as an *implicit* satisfaction of the same `Ord` trait (i.e., `is_ord(ty)` short-
-circuits the registry lookup for the numeric tower, and only a non-numeric type falls
-through to a real `(TraitId, Type)` lookup) — this would preserve the zero-cost path for
-the common case while still letting a struct `impl: Ord for Point` genuinely work,
-without a dozen boilerplate numeric impls, but blurs "nominal satisfaction" (design
-ruling 1's whole premise) with an implicit fallback, which the spec phase needs to weigh
-against S3e's own stated design philosophy before choosing.
+`impl: Ord for i64` and one per remaining numeric width are written in `core`, each body
+built from the raw comparison intrinsics (`ult`/`ueq`/...) exactly as `lib/cmp.sth`'s
+bodies are today. The six surface comparisons (`lt`/`gt`/`eq`/`lte`/`gte`/`ne`) are then
+derived from `cmp` rather than from the intrinsics directly, and `Bound::Ord` is deleted
+from the `Bound` enum.
+
+**`&'T &'T -- Ordering`, not `'T 'T -- Ordering`.** Two by-value operands consume both,
+so a `sort` cannot compare the same element twice. `Order` in `examples/traits.sth`
+already uses borrows for this reason.
+
+### The blocker, probe-confirmed: generic-calls-generic under a user bound
+
+Once `lt` is a `'T: Ord`-bounded library word, every generic consumer of it (`sort`,
+`bin_search`, any user word) is a polymorphic body calling a polymorphic word whose
+signature carries a `Bound::User` — which is rejected outright today:
+
+```
+error: `pick` cannot call the polymorphic word `is_less`
+  discharging the `Order` bound is not yet supported from a polymorphic body
+```
+
+`Bound::Ord` is exempt today only because it is a *predicate*: a predicate needs no
+instantiation record to resolve against. This is the structural reason `Ord` was
+hardcoded in the first place, and it is why moving it to the library is not a pure
+library change.
+
+**The checker side is already written.** The symbolic forwarding arm
+(`poly.rs:1856`) is bound-agnostic — `(Image::CallerVar(t), _) => !sig.has_bound(t,
+bound)` — so a caller forwarding its own identical bound to a callee is handled
+correctly for `Bound::User` already. It is merely unreachable behind the blanket
+rejection in `poly_cross_signature_supported` (`poly.rs:2188`). Probed by deleting only
+that rejection: the forwarding program **type-checks**. It then ICEs in lowering at
+`calls.rs:737` (`checked user word exists`) — the callee's trait-member obligation is
+never resolved to a concrete symbol per instantiation on the cross-call path. That
+lowering gap is the substance of this slice.
+
+### Scope: the comparisons drop `inline`, and that is deliberate
+
+`is_combinator(word)` is exactly `word.declares_inline` (`combinators.rs:155-157`) —
+a quotation parameter is irrelevant. All six comparisons in `lib/cmp.sth` are `inline`
+today, so a `'T: Ord`-bounded `lt` would hit `reject_user_bound_on_combinator` on its own
+declaration. That rejection is **P7.S3o**, parked with two designs found unsound in
+review, whose failure mode is silent dispatch to the wrong `impl:`.
+
+This slice therefore ships the six comparisons **non-inline**. Each becomes a real
+monomorphized call frame, and QBE performs no cross-function inlining, so a comparison
+that is one `ult` today becomes a leaf call. That is a genuine, pervasive regression
+against today's codegen, accepted for one slice's duration on the following reasoning:
+
+- The cross-call lowering gap must be closed either way. `bin_search_internal`
+  (`examples/experiments/binary_search.sth`) is a non-inline `'T: Ord` word today and
+  user code will write more, so S3o does not subsume this work. This slice is a *prefix*
+  of the total work, not a detour.
+- Attempting S3o under schedule pressure from this slice biases the design toward a
+  resolution key that happens to work for `lt`, rather than one sound in general — which
+  is the precise shape of both prior failures.
+- Landing non-inline first hands S3o the oracle it has never had: a correct
+  implementation to **differential-test** the spliced version against. Flip `inline` on
+  the same source, diff program output and the resolved `impl:` symbols (`nm`), at two
+  splices, at three, and inside a materialized quotation literal. That converts S3o's
+  untestable soundness property into a mechanical diff, answering the methodological gap
+  round 2 identified directly.
+
+### Also in scope: the overload-admission filter
+
+`poly_admits` (`declarations.rs:1360`) and `poly_sig_could_match` (`poly.rs:4428`) are
+*not* bound-satisfaction sites — they are slice 10c's overload-admission filter, using
+"has an `Ord` bound && `!is_numeric` → decline" to keep the library's generic `lt` from
+swallowing a user's own concrete `Vec2 lt`. With `Bound::Ord` deleted, that filter goes
+dead and the generic `lt` admits every operand type again. Both sites must become a real
+`(TraitId, Type)` registry lookup: decline unless the operand type has an `impl: Ord`.
+
+### Diagnostics
+
+`poly_ord_bound_error` and `poly.rs:2285`'s `Bound::Ord => "Ord"` naming disappear with
+the variant. An unsatisfied `Ord` becomes an ordinary user-trait failure, and should name
+the missing `impl:` the way a `Bound::User` failure does.
 
 ## Dependencies / sequencing
 
-- **No dependency on P7.S3p.** `Ord`'s natural member shape (`cmp`, binary, trailing
-  receiver) never needs the non-trailing-receiver fix.
+- **Blocks nothing on P7.S3o, but hands it its entry condition.** S3o's brief parks it
+  with "revisit only if a concrete program actually needs bound dispatch on a
+  combinator's own type variable". This slice is that program. S3o becomes the named
+  follow-on: re-`inline` the six comparisons, with the differential harness above as its
+  entry condition and its own benchmark to justify itself against.
+- **No dependency on P7.S3p.** `cmp`'s receiver is trailing; the non-trailing fix is not
+  needed.
 - **No dependency on P7.S3k**, already closed.
-- **Overlaps P8.S2's planned `lib/cmp.sth` migration.** P8.S2 is moving the *surface*
-  comparison words (`eq`/`lt`/`gt`/...) out of the compiled-in prelude into a
-  gated-import library module, still `'T: Copy Ord`-bounded exactly as today — it does
-  not touch what `Ord` *means*, only where the comparison words live. If this slice
-  changes `Bound::Ord`'s satisfaction mechanism (option 1 above), P8.S2's migration
-  needs to land against the *new* `Ord`, not the old numeric-only one, or the two land in
-  the wrong order and one of them has to be redone. Recommend sequencing this slice
-  **before** P8.S2's `lib/cmp.sth` migration lands, or explicitly coordinating the two
-  specs so P8.S2 is written against whichever `Ord` shape this slice produces.
+- **Sequence before P8.S2's `lib/cmp.sth` migration.** P8.S2 moves the surface
+  comparisons out of the compiled-in prelude into a gated-import module, still
+  `'T: Copy Ord`-bounded as today. This slice changes what `Ord` *is* and what those
+  bodies are built from, so P8.S2 must be written against the post-S3s shape or one of
+  the two gets redone.
 
-## Exit criteria (proposed, not yet roadmap-committed)
+## Exit criteria
 
-- `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, exactly as
-  `Order` does in `examples/traits.sth` today — a comparison-bounded generic word
-  (`sort`, `bin_search`) can be instantiated over a user type, not only the numeric
-  tower.
-- The numeric tower still satisfies `'T: Ord` with no per-width boilerplate `impl:`
-  the user has to write (mechanism TBD per the open design question above).
-- Every existing `'T: Copy Ord` numeric program (the whole of `lib/cmp.sth`,
-  `examples/poly_if.sth`'s `mymax`, `lib/arrays.sth`'s `sort`/`bin_search`) keeps
-  compiling and running unchanged — this slice must not be observable to code that never
-  touches a non-numeric `Ord` bound.
+- `Ord` bounds a struct or enum, satisfied nominally by an `impl: Ord for Point` block —
+  a comparison-bounded generic word (`sort`, `bin_search`) instantiates over a user type,
+  not only the numeric tower.
+- A polymorphic body may call a polymorphic word carrying a `Bound::User` on a forwarded
+  variable, through lowering, without ICE — the `calls.rs:737` gap closed.
+- The numeric tower satisfies `'T: Ord` through ordinary `impl:` blocks in `core`, with
+  no per-width `impl:` written by the user.
+- `Bound::Ord` no longer exists in the `Bound` enum, and `is_ord` no longer exists.
+- The generic `lt` still does not swallow a user's own concrete `Vec2 lt` where `Vec2`
+  has no `impl: Ord` — slice 10c's coexistence preserved through the rewritten
+  admission filter.
+- Every existing `'T: Copy Ord` numeric program still compiles and produces the same
+  results. Codegen is *expected* to regress (a call frame per comparison); behaviour is
+  not.
 
 ## Sizing
 
-Not sizeable yet — the central design question (option 1 vs 2 vs the hybrid) is unresolved
-and changes the shape of every subsequent phase. Recommend the spec phase open with a
-paper-traced design comparing the three options against real call sites (mirroring how
-S3k's brief validated its design before locking phases), rather than sizing phases against
-an undecided mechanism.
+Phase shape, roughly: (1) close the cross-call lowering gap — resolve a forwarded
+`Bound::User` obligation to a concrete symbol per instantiation, removing the blanket
+`poly_cross_signature_supported` rejection, with the probed forwarding program as its
+golden; (2) seed `Ord` as a real member-bearing trait with `Ordering` and the numeric
+`impl:` blocks in `core`, deleting `Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six
+comparisons over `cmp`, non-inline; (4) rewrite the two overload-admission sites as
+registry lookups, with a `Vec2 lt` coexistence golden; (5) diagnostics. Phase 1 is the
+one with real unknowns and should be probed before the rest are sized.
 
-## Ready to spec: no — one design question blocks phase planning
+## Ready to spec: yes
 
-Do not hand this to spec-writer until the collapse-vs-add-a-second-trait-vs-hybrid
-question above is resolved with a paper-traced design against the four `is_ord`/
-`Bound::Ord` call sites and `seed_predicate_traits`. Once that's settled, re-verify every
-citation above against live `main` (`poly.rs`/`declarations.rs`/`ast.rs` are active files
-other in-flight slices also touch) before locking a spec.
+The design is decided and the blocker is probe-confirmed rather than assumed. Re-verify
+every line citation against live `main` before locking phases — `poly.rs`,
+`declarations.rs` and `ast.rs` are actively churned by other in-flight slices, and the
+numbers in this brief have already drifted once.
