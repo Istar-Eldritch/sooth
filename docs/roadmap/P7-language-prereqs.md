@@ -547,7 +547,7 @@ literal quotation argument reaching a still-abstract declared position at the *c
 boundary (not the body) grounds through the caller's own `Subst` and materializes exactly as
 a ground declared quotation slot does.
 
-**P7.S3m -- A declared quotation effect with two or more outputs cannot be lowered.**
+**P7.S3m -- A declared quotation effect with two or more outputs cannot be lowered.** `[ done ]`
 Named at P7.S3f's exit (its ">=2-output lowering gap" finding), pre-existing on the concrete
 path and confirmed reachable (without being caused) on the poly path once S3f's R3 landed.
 `intern_output_bundles` (`src/check.rs:913`) interns an output-tuple bundle only for a
