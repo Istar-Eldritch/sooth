@@ -75,6 +75,25 @@ fn concrete_call_it_pushes_both_quotation_outputs() {
     );
 }
 
+/// R1, site 1's output half: a word *returning* a two-output quotation, called
+/// by its caller. The word's own output tuple is a single slot, so no
+/// word-level bundle covers this -- only descending into the output slot's type
+/// finds the quotation's own tuple.
+#[test]
+fn returned_quotation_pushes_both_outputs() {
+    let src = "import: intrinsics * ;\n\
+               : mk ( -- [ i64 -- i64 i64 ] ) [ dup ] ;\n\
+               : main ( -- ) 3 mk call add . ;\n";
+    let prog = Scratch::write("returned", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "6\n",
+        "a quotation reached through a declared output must still return both values"
+    );
+}
+
 /// R1, site 4: the same parameter on a polymorphic word, whose declared shape
 /// lives in `w.poly` rather than `w.effect`. `'T` is unrelated to the
 /// quotation and carried rigidly through two instantiations (S3f's golden

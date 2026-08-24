@@ -3465,6 +3465,16 @@ mod tests {
         assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
     }
 
+    /// P7.S3m (R2): a quotation's own rows are descended, so a two-output
+    /// quotation reached only as *another* quotation's parameter is interned
+    /// too. Live via a struct field, which (unlike a word input) is not gated by
+    /// the nested-inside-an-effect rejection.
+    #[test]
+    fn quotation_nested_in_a_quotation_effect_interns_a_bundle() {
+        let bundles = interned_bundles("type: H run [ [ i64 -- i64 i64 ] -- ] ;\n");
+        assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
+    }
+
     /// P7.S3m: the `>= 2` filter holds at the widened sites too -- a
     /// single-output quotation keeps `lower_indirect_call`'s bundle-free path.
     #[test]
