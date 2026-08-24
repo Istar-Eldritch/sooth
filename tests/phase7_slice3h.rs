@@ -298,6 +298,25 @@ fn an_owning_closure_as_one_of_several_outputs_builds_and_runs() {
     assert_eq!(build_and_run(prog.path()), "5\ndrop 7\n");
 }
 
+/// Disposing a capture is not the only way to discharge it: handing it back out
+/// as an output moves it to the caller, which satisfies
+/// `check_owning_captures_consumed` just as a `drop` inside the body would. The
+/// env block is still freed by the body's prologue, so a capture outliving the
+/// closure is not a leak. Pinned because the body-frees-at-entry design is what
+/// makes returning a capture safe, and a later move of that free to an exit path
+/// would regress this silently while every disposal-shaped test kept passing.
+#[test]
+fn an_owning_closure_may_return_its_capture_instead_of_disposing_it() {
+    let prog = Scratch::write(
+        "hand-back",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- Spy ] ) | s | [ s ] ;\n\
+             : main ( -- ) 7 Spy mk call drop ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "drop 7\n");
+}
+
 /// `drop` cannot discharge the obligation: disposing the captures means running
 /// the body, which is code only the closure has, and `emit_drop`'s match has no
 /// arm that could run one. Without this rejection the `drop` is silently a
