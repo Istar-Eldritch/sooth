@@ -137,12 +137,48 @@ pub(super) fn ref_root_is_in_frame(
     }
 }
 
+/// P7.S3h: is a captured aggregate-arm type *scalar-represented*, i.e. held in
+/// the one-word env slot as a value rather than as a pointer into frame
+/// storage? A struct and an array are unconditionally pointer-backed
+/// (`is_aggregate`, `ir/func_builder/mod.rs`), and an owned cell is a pointer
+/// to a heap block whose ownership cannot be snapshotted, so this is true for
+/// exactly one shape: an enum none of whose variants carries a payload.
+///
+/// Computed from the *declaration*, not from `ir::layout`, following slice
+/// 10c's `tag` domain check (`word_families.rs`) and for the same reason: the
+/// admission this gates must be decidable before any lowering runs.
+///
+/// No `is_copy` conjunct, deliberately: `is_copy`'s enum arm folds over the
+/// variant fields, so a payload-free enum is `Copy` by construction and the
+/// conjunct could never change an answer.
+fn capture_is_scalar_represented(ty: Type, enums: &[EnumDecl]) -> bool {
+    match ty {
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .all(|v| v.fields.is_empty()),
+        _ => false,
+    }
+}
+
 /// R15: classify a captured name by its binding (case 4 quotation-typed names
 /// are peeled off before this runs). The frame-rooted/outer-rooted split reuses
 /// the exact `owned_root`-vs-current-frame test the R12 exit-row check
 /// (`:6108`) and `check_reference_across_back_edge` (`:5519`) already apply.
-pub(super) fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureClass {
+pub(super) fn classify_capture(
+    b: &Binding,
+    prov: &Provenance,
+    scope: &Scope,
+    enums: &[EnumDecl],
+) -> CaptureClass {
     match b.ty {
+        // P7.S3h: a scalar-represented member of the aggregate arm below is a
+        // *value* in the one-word env slot, not a pointer into frame storage,
+        // so it can no more dangle than an `i64` can and takes case 1. Only a
+        // payload-free enum qualifies -- `bool` since S3i, the motivating case:
+        // the blanket arm below rejected it at every escaping boundary purely
+        // for being spelled as an enum.
+        Type::Enum(..) if capture_is_scalar_represented(b.ty, enums) => CaptureClass::Scalar,
         // Case 2: an aggregate value read directly (no deriv). A scope-bound
         // aggregate is owned by (and dies with) this frame; a global aggregate
         // is not in scope and never reaches here.
@@ -207,6 +243,7 @@ pub(super) fn check_capture_admission(
     prov: &mut Provenance,
     scope: &Scope,
 ) -> Result<Option<SurvivingCaptureSetId>, String> {
+    let enums = ctx.enums();
     // Only names bound in the enclosing scope are real captures; a free global
     // word resolves at the call and needs no env.
     let mut names: Vec<String> = prov
@@ -242,7 +279,7 @@ pub(super) fn check_capture_admission(
     let mut members: Vec<SurvivingCapture> = Vec::new();
     for name in &names {
         let b = scope.local(name).expect("filtered to a bound name");
-        match classify_capture(b, prov, scope) {
+        match classify_capture(b, prov, scope, enums) {
             CaptureClass::Scalar => {}
             CaptureClass::FrameRooted => {
                 if escaping {
@@ -462,7 +499,7 @@ mod tests {
         let empty = Scope::default();
         let scalar = capture_binding("x", Type::I64, None);
         assert!(matches!(
-            classify_capture(&scalar, &prov, &empty),
+            classify_capture(&scalar, &prov, &empty, &[]),
             CaptureClass::Scalar
         ));
 
@@ -470,7 +507,7 @@ mod tests {
         // this frame).
         let agg = capture_binding("arr", arr_ty, None);
         assert!(matches!(
-            classify_capture(&agg, &prov, &empty),
+            classify_capture(&agg, &prov, &empty, &[]),
             CaptureClass::FrameRooted
         ));
 
@@ -482,14 +519,14 @@ mod tests {
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let borrow_local = capture_binding("r", ref_ty, Some(d));
         assert!(matches!(
-            classify_capture(&borrow_local, &prov, &framed),
+            classify_capture(&borrow_local, &prov, &framed, &[]),
             CaptureClass::FrameRooted
         ));
 
         // Case 3b: the same borrow, but its `owned_root` is not in this scope
         // (rooted in an ancestor frame) -> OuterRooted.
         assert!(matches!(
-            classify_capture(&borrow_local, &prov, &empty),
+            classify_capture(&borrow_local, &prov, &empty, &[]),
             CaptureClass::OuterRooted
         ));
 
@@ -507,7 +544,7 @@ mod tests {
         });
         let param_ref = capture_binding("r", ref_ty, Some(d));
         assert!(matches!(
-            classify_capture(&param_ref, &prov, &empty),
+            classify_capture(&param_ref, &prov, &empty, &[]),
             CaptureClass::OuterRooted
         ));
     }
@@ -535,17 +572,102 @@ mod tests {
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let framed_view = capture_binding("s", slice_ty, Some(d));
         assert!(matches!(
-            classify_capture(&framed_view, &prov, &framed),
+            classify_capture(&framed_view, &prov, &framed, &[]),
             CaptureClass::FrameRooted
         ));
 
         // The same view whose root is not this frame's: outer-rooted, so it
         // outlives the closure's calls.
         assert!(matches!(
-            classify_capture(&framed_view, &prov, &Scope::default()),
+            classify_capture(&framed_view, &prov, &Scope::default(), &[]),
             CaptureClass::OuterRooted
         ));
     }
+    /// P7.S3h: the aggregate arm splits on scalar representation, not on the
+    /// four type constructors. A payload-free enum is a value in the one-word
+    /// env slot, so it takes case 1; a payload-carrying one is tagged storage
+    /// reached by pointer and keeps the frame-rooted rejection. Both
+    /// directions are pinned: an arm answering `Scalar` for every enum would
+    /// pass on the first assertion alone.
+    #[test]
+    fn classify_capture_payload_free_enum_is_scalar_not_frame_rooted() {
+        let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            display_static: name,
+            fields,
+            span: Span::default(),
+        };
+        let enums = vec![
+            EnumDecl {
+                name: "Bool".to_string(),
+                name_static: "Bool",
+                variants: vec![variant("False", vec![]), variant("True", vec![])],
+                span: Span::default(),
+                module: 0,
+            },
+            EnumDecl {
+                name: "Item".to_string(),
+                name_static: "Item",
+                variants: vec![
+                    variant("Empty", vec![]),
+                    variant("Full", vec![("v".to_string(), Type::I64)]),
+                ],
+                span: Span::default(),
+                module: 0,
+            },
+        ];
+        let prov = Provenance::default();
+        let scope = Scope::default();
+
+        let payload_free = capture_binding("b", Type::Enum(EnumId::from_index(0), "Bool"), None);
+        assert!(matches!(
+            classify_capture(&payload_free, &prov, &scope, &enums),
+            CaptureClass::Scalar
+        ));
+
+        // `Item` is `Copy` (its one payload field is an `i64`), so `is_copy`
+        // alone would admit it -- the scalar-representation half is the whole
+        // guard here.
+        let payload = capture_binding("e", Type::Enum(EnumId::from_index(1), "Item"), None);
+        assert!(matches!(
+            classify_capture(&payload, &prov, &scope, &enums),
+            CaptureClass::FrameRooted
+        ));
+    }
+
+    /// P7.S3h: the pointer-backed members of the aggregate arm are unmoved by
+    /// the enum narrowing, and a `Copy` one is the case that matters -- the
+    /// env slot holds one word, and a struct's or an array's value is a
+    /// pointer into frame storage, so snapshotting one at an escaping
+    /// boundary would be a use-after-return however `Copy` it is.
+    #[test]
+    fn classify_capture_copy_aggregate_stays_frame_rooted() {
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let structs = vec![StructDecl {
+            name: "P".to_string(),
+            name_static: "P",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let struct_ty = Type::Struct(StructId::from_index(0), "P");
+        assert!(is_copy(arr_ty, &structs, &[], &arrays));
+        assert!(is_copy(struct_ty, &structs, &[], &arrays));
+
+        let prov = Provenance::default();
+        let scope = Scope::default();
+        for ty in [arr_ty, struct_ty] {
+            assert!(matches!(
+                classify_capture(&capture_binding("a", ty, None), &prov, &scope, &[]),
+                CaptureClass::FrameRooted
+            ));
+        }
+    }
+
     #[test]
     fn check_capture_admission_gates_each_capture_kind() {
         // U-admit (R15): the admission gate around `classify_capture`. Each
