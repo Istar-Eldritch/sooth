@@ -43,18 +43,6 @@ impl Drop for Scratch {
     }
 }
 
-fn check_err(src: &str) -> String {
-    let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
-    sooth::check::check(&mut module).expect_err("this program should be rejected")
-}
-
-fn check_ok(src: &str) {
-    let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
-    sooth::check::check(&mut module).expect("this program should be accepted");
-}
-
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
     let binary = driver::build(src).expect("program should build");
     let output = std::process::Command::new(&binary)
@@ -171,14 +159,38 @@ fn body_boundary_pops_declared_inputs_deepest_first() {
 
 /// L1 at the golden level, flipped by P7.S3l (R1/R2): a declared quotation
 /// parameter that still carries a free variable inside its brackets is now
-/// accepted at the body boundary, mirroring the headline `apply` shape
-/// (`: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;`). No call site: passing a
-/// *literal* quotation to this declared position hits an unrelated,
-/// still-pinned rejection at the argument boundary (`check_poly_call`'s
-/// R9p guard) that this slice does not touch -- getting the headline
-/// `4 [ 1 add ] apply .` shape past that guard, if it is done at all, is
-/// phase 2's concern (recorded as a phase 1 recon finding).
+/// accepted at the body boundary and lowers end-to-end, mirroring the
+/// headline `apply` shape (`: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;`), run
+/// at two distinct instantiations of `'T` so it is carried rigidly rather
+/// than coincidentally matching. The quotation argument is forwarded through
+/// a helper word (`mk_i64`/`mk_bool`) rather than passed as a literal at the
+/// `apply` call site: a *literal* quotation at that position hits an
+/// unrelated, still-pinned rejection (`check_poly_call`'s R9p guard, which
+/// only materializes a literal against a **ground** `Concrete(Type::
+/// Quotation)` slot, not this abstract one) -- closing that gap, if it is
+/// done at all, is phase 2's concern (recorded as a phase 1 recon finding).
+/// Phase 1 also confirmed and closed a second, lower-level gap this golden
+/// depends on: `subst_polytype`'s `PolyType::Quotation` lowering arm
+/// (`src/ir/driver.rs`) previously asserted this shape could never reach
+/// monomorphized lowering and panicked when it did; it now grounds the row
+/// through `θ`, mirroring check-side `apply_subst`'s existing arm.
 #[test]
-fn body_boundary_accepts_an_abstract_quotation_param() {
-    check_ok(": call_it ( 'T [ 'T -- 'T ] -- 'T ) call ;\n");
+fn body_boundary_calls_an_abstract_quotation_param() {
+    let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
+               : mk_i64 ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
+               : mk_bool ( -- [ Bool -- Bool ] ) [ ] ;\n\
+               : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+               : main ( -- )\n\
+                 4 mk_i64 apply .\n\
+                 True mk_bool apply .\n\
+               ;\n";
+    let prog = Scratch::write("body-boundary-abstract-quotation", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "5\nTrue\n",
+        "each instantiation of `'T` must call its own forwarded quotation independently"
+    );
 }

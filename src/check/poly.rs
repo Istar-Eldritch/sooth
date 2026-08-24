@@ -7401,7 +7401,8 @@ mod tests {
     /// word's own body. `swap drop` first discards the word's other `'T`
     /// input so the quotation's own `'T` output is the sole thing left on
     /// exit, matching the declared single-`'T` output -- the near miss
-    /// `poly_call_on_non_literal_quotation_operand_is_located_error` does not
+    /// `check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position`
+    /// (a different guard, at the argument boundary, still pinned) does not
     /// cover: only the *output* side carries the variable, so a dispatch
     /// predicate that checked the declared inputs were ground (they are, a
     /// single `i64`) would wrongly claim this one.
@@ -7421,6 +7422,33 @@ mod tests {
             err.contains("`call` needs 1 values, but the stack holds 0"),
             "{err}"
         );
+    }
+    /// R2's ordering, the input side: two heterogeneous declared inputs, so
+    /// consuming them in the wrong order (rather than merely miscounting
+    /// them) is discriminated. Every other R2/R3 test in this file declares
+    /// a single input, which cannot tell deepest-first from its reverse.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_pops_declared_inputs_deepest_first() {
+        check_src(
+            ": call_it ( 'T: Copy [ i64 Bool -- 'T ] -- 'T )\n\
+               swap drop 1 True rot call\n\
+             ;\n",
+        )
+        .expect("the deepest operand must satisfy the first declared input");
+    }
+    /// R2's ordering, the output side: two heterogeneous declared outputs,
+    /// so pushing them in the wrong order is discriminated. The existing
+    /// `poly_call_on_a_ground_quotation_param_pushes_outputs_in_order` pins
+    /// this for the ground twin only; the abstract arm has its own push loop
+    /// (`poly_call_abstract_quotation_param`) and needs its own witness.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_pushes_outputs_in_order() {
+        check_src(
+            ": call_it ( 'T: Copy [ -- 'T Bool ] -- 'T Bool )\n\
+               swap drop call\n\
+             ;\n",
+        )
+        .expect("the first declared output must land deepest");
     }
     /// R3's mismatch arm: an operand whose `PolyType` is not structurally
     /// equal to the declared input.

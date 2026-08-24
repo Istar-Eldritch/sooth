@@ -4,9 +4,21 @@
 
 A plain (non-`inline`, non-combinator) polymorphic word may now `call` a quotation-typed
 parameter it declared, from inside its own body, when that parameter's brackets still
-mention the word's own type variables (`[ 'T -- 'T ]`). The call-site side of this shape
-already works (`unify_poly_input`'s `Quotation` arm binds the row pointwise); only the body
-side was closed. The headline shape builds and runs:
+mention the word's own type variables (`[ 'T -- 'T ]`). This slice closes the body side only.
+
+**Correction (phase 1 recon finding, review round 1).** The claim that "the call-site side of
+this shape already works" is false: `check_poly_call`'s R9p guard materializes a *literal*
+quotation argument only against a **ground** `Concrete(Type::Quotation(eff))` declared
+position; an abstract `PolyType::Quotation` slot falls to `reject_quotation_argument`
+(`src/check/poly.rs:4518`), so `unify_poly_input`'s `Quotation` arm is never reached from a
+literal call-site argument. Probe-verified live: the headline program below is rejected at
+`main`'s call site, not accepted, with
+`` error: a quotation cannot be passed to `apply`; only `call` accepts one in `main` ``.
+Closing that gap (if it is done at all) is phase 2's concern; see R4 and the phase table
+below. The headline shape *does* build and run when the quotation argument reaches `apply`
+by some route other than a literal at that call site (e.g. forwarded out of another word's
+return value) — `tests/phase7_slice3f.rs`'s `body_boundary_calls_an_abstract_quotation_param`
+is the phase 1 golden for that shape. The literal-at-call-site form remains aspirational:
 
 ```
 import: intrinsics * ;
@@ -98,10 +110,36 @@ remaining source is a genuinely non-quotation operand (unchanged, `poly_op_on_va
 concrete instantiation, so the `[ 'T -- 'T ]` parameter has already grounded to a `Type::
 Quotation` via `apply_subst`'s `Quotation` arm, and the existing indirect-call path
 (`src/ir/func_builder/quotation.rs`, `lower_indirect_call`, `~:205`), already exercised
-end-to-end by the ground-parameter case, should carry this shape with no change. **Phase 1
-confirms this against live source before phase 2 assumes it**; if a representation gap exists,
-phase 2 adds the minimal lowering arm and the spec's exit findings record it. No new lowering
-machinery is planned.
+end-to-end by the ground-parameter case, should carry this shape with no change once the
+parameter's own declared row is grounded. **Phase 1 confirms this against live source before
+phase 2 assumes it**; a representation gap did exist, and phase 1 closed it (below), since
+leaving it open would have shipped a checker accept arm whose only realistic reachable
+program crashed the compiler.
+
+**Recon finding, closed in phase 1 (review round 1 blocker).** `subst_polytype`
+(`src/ir/driver.rs`), the lowering-side twin of check's `apply_subst`, had a
+`PolyType::Quotation(..) => unreachable!(...)` arm whose comment asserted "a quotation-taking
+word is never monomorphized to a standalone `IrFunc`". That premise was already false before
+this slice for *any* non-combinator word declaring an abstract quotation parameter, called
+with a concrete instantiation, regardless of whether its body ever `call`s that parameter
+(probe-verified: a body that only `drop`s such a parameter hit the same `unreachable!` at
+`HEAD~1`, unrelated to this slice's `call` arm). R1's new `call` arm added a second,
+checker-visible path to the same pre-existing gap, turning what used to be a clean checker
+rejection (`` `call` is not permitted on a quotation ``) into a lowering-time panic for the
+`call`-using shape specifically. Fixed in phase 1 by mirroring `apply_subst`'s `Quotation`
+arm: substitute both rows through `θ`, then ground to `Type::Quotation`/`Type::
+InlineQuotation` via `crate::ast::quotation_type`/`inline_quotation_type` (no interning
+needed — those constructors mint a fresh leaked effect per call, unlike the `Array`/`Ref`
+arms' lookup-only style). This is a lowering **bug fix**, not new machinery: it makes
+`subst_polytype` agree with what `apply_subst` already computed on the check side for the
+same shape.
+
+**Recon finding, left open for phase 2.** The R9p call-site gap (Goal section correction,
+above) is a separate, pre-existing gap at the *argument* boundary, not the body boundary this
+slice's R1–R3 touch. It is out of phase 1's scope: `check_poly_call`'s materialization guard
+is a different function on a different call path (`poly_call_term` is never involved), and
+closing it is a call-site unification change, not a body-`call` dispatch change. Recorded here
+so phase 2 does not understate it as an afterthought.
 
 ## Tests
 
@@ -120,6 +158,16 @@ machinery is planned.
   through `poly_rendered_type_mismatch_error`, both sides rendered by `poly_type_str`.
 - `poly_call_on_a_variable_local_is_still_error` stays green (a bare `'T` local is not a
   quotation and keeps its own rejection).
+- **Added (review round 1, coverage gap).** Neither of the accept-case tests above declares
+  more than one input or one output, so neither can discriminate a reversed consumption or
+  push order from the correct one — the ground twin
+  (`poly_call_on_a_ground_quotation_param_pushes_outputs_in_order`,
+  `body_boundary_pops_declared_inputs_deepest_first`) pins this for
+  `poly_call_ground_quotation_param` only, not the new abstract arm.
+  `poly_call_on_an_abstract_quotation_param_pops_declared_inputs_deepest_first` and
+  `poly_call_on_an_abstract_quotation_param_pushes_outputs_in_order` each declare two
+  heterogeneous slots and are mutation-tested: reversing either loop in
+  `poly_call_abstract_quotation_param` turns its own test red.
 - No test targets a `~`-declared or row-carrying quotation operand reaching this arm: per the
   Scope section, no non-combinator word can ever construct one, through the parser or
   otherwise relevant to this call site, so there is no witness program and none is owed.
@@ -133,19 +181,19 @@ machinery is planned.
   body-internal rejection fires first, but once that rejection is lifted the same source
   would fail on a *different*, unrelated arity error at the `call_it` call site, not build
   clean. Verified live: `call_it` declares two inputs (`'T` and the quotation), `main`
-  pushes only one. Swapping `check_err` for `build_and_run` on the unmodified source is not
-  sufficient; the replacement source must supply both operands, e.g. a `main` reading
-  `` 5 [ 5 ] call_it . `` (or the headline `apply` shape below in golden form). Renamed to
-  `body_boundary_accepts_an_abstract_quotation_param`.
-- The headline golden: `import: intrinsics * ;` then `: apply ( 'T [ 'T -- 'T ] -- 'T )
-  call ;` with `4 [ 1 add ] apply .` builds, runs, and prints `5\n` (`.` appends a trailing
-  newline, confirmed by the existing `body_boundary_calls_ground_quotation_param` golden's
-  `stdout` assertion), confirming R4's lowering path end-to-end. A multi-instantiation
-  golden (the same `apply` used at two concrete `'T`) is included only if phase 1's recon
-  shows it exercises a distinct lowering path; otherwise it is redundant with S3f's ground
-  goldens and omitted.
+  pushes only one.
+- **Correction (review round 1).** The `apply` shape cannot be built as a real golden
+  through a *literal* call-site argument (`4 [ 1 add ] apply .`): the Goal-section
+  correction above means that source hits the R9p rejection, not a clean build, so it
+  cannot replace the original check-only assertion with a `build_and_run` one as first
+  planned. The actual replacement, `body_boundary_calls_an_abstract_quotation_param`,
+  forwards the quotation argument out of a helper word's return value instead (`mk_i64`/
+  `mk_bool`), which does not touch R9p, and is a full `build_and_run` golden run at two
+  instantiations of `'T` — not a `check_ok` placebo. It also depends on, and exercises, the
+  `subst_polytype` lowering fix (R4) alongside the checker accept arm, so it is the one
+  golden that proves the whole phase 1 path end-to-end, headline call-site literal aside.
 
-Both replaced/flipped tests are cited here so the pipeline does not read their red diff as a
+The replaced/renamed tests are cited here so the pipeline does not read their diff as a
 regression.
 
 ## Phase plan
@@ -155,14 +203,14 @@ one, so it does not split further.
 
 | Phase | Focus | Effort | Difficulty |
 | --- | --- | --- | --- |
-| 1 | Recon the lowering path, add the checker accept arm and its diagnostics, flip both pinned unit assertions | S | standard |
-| 2 | End-to-end goldens (build and run), any minimal lowering arm the recon requires, green gate | S | standard |
+| 1 | Recon the lowering path, add the checker accept arm and its diagnostics, flip both pinned unit assertions, fix the `subst_polytype` lowering gap the recon found | S | standard |
+| 2 | Close the R9p call-site gap so a literal quotation argument reaches an abstract declared position, then the headline `apply` golden (build and run), green gate | S | standard |
 
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "checker accept arm for an abstract quotation parameter, its located under/mismatch diagnostics, and flipping the pinned unit assertions", "effort": "S", "difficulty": "standard" },
-    { "phase": 2, "focus": "end-to-end build-and-run goldens, any minimal lowering arm recon requires, and the green gate", "effort": "S", "difficulty": "standard" }
+    { "phase": 1, "focus": "checker accept arm for an abstract quotation parameter, its located under/mismatch diagnostics, flipping the pinned unit assertions, and the subst_polytype lowering fix the recon found", "effort": "S", "difficulty": "standard" },
+    { "phase": 2, "focus": "close the R9p call-site materialization gap for an abstract quotation position, then the headline build-and-run golden and the green gate", "effort": "S", "difficulty": "standard" }
   ]
 }
 ```
@@ -170,14 +218,20 @@ one, so it does not split further.
 ## Exit criteria
 
 1. `import: intrinsics * ;` then `: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;` with
-   `4 [ 1 add ] apply .` builds, runs, and prints `5\n`.
+   `4 [ 1 add ] apply .` builds, runs, and prints `5\n`. **Not met at phase 1 exit** — the
+   R9p call-site gap (Goal section correction) still rejects this exact source at `main`'s
+   call site; phase 1's `body_boundary_calls_an_abstract_quotation_param` golden proves the
+   same body-boundary shape end-to-end via a non-literal argument instead. Phase 2 owns
+   closing R9p and then this literal criterion.
 2. A body `call` whose stack holds fewer operands than the declared quotation's inputs is a
    located underflow (`` `call` needs N values, but the stack holds M``), not the blanket
-   message.
+   message. Met at phase 1 exit.
 3. A body `call` on an operand whose `PolyType` is not structurally equal to the declared
-   input is a located mismatch rendered through `poly_type_str` on both sides.
-4. Both formerly-pinned rejection tests (`src/check/poly.rs`,
-   `tests/phase7_slice3f.rs`) now assert acceptance.
+   input is a located mismatch rendered through `poly_type_str` on both sides. Met at phase
+   1 exit.
+4. Both formerly-pinned rejection tests (`poly_call_on_an_abstract_quotation_param_is_accepted`
+   in `src/check/poly.rs`, `body_boundary_calls_an_abstract_quotation_param` in
+   `tests/phase7_slice3f.rs`) now assert acceptance. Met at phase 1 exit.
 5. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` green at each phase exit.
 
 **Note on roadmap wording.** `docs/roadmap/P7-language-prereqs.md`'s S3l entry describes the
