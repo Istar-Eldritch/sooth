@@ -88,19 +88,21 @@ rejects a `Type::Quotation` in either position outright (`audit_quotation_type_r
 covered by the top-level walk over `module.structs`; enum variant fields cannot carry a
 quotation (same audit), so neither is recursed into here.
 
-**R3 -- `PolyType` recursion for site 4.** From each `PolyType` in a poly signature, recurse
-through the variable-bearing wrappers (`PolyType::Array`, `PolyType::Ref`,
-`PolyType::OwnedCell`, and `PolyType::Quotation`'s own input/output `Vec<PolyType>`,
-`ast.rs:1847`) to reach any nested `PolyType::Concrete(Type::Quotation(..))`, then hand that
-concrete quotation's output tuple to R2's `Type` path. A `PolyType::Var` or
-`PolyType::QuotLit` leaf carries no callable ground quotation and is skipped.
-`PolyType::Generic` is *not* a leaf (it carries recursive `args`), but the walk skips it too:
-the checker's poly audit already rejects a quotation nested in a generic type argument
-(`audit_poly_input_quotation`'s `Generic` arm, `src/check/audits.rs:403`, and its
-`reject_poly_quotation_anywhere` twin at `:437`), so no ground quotation survives inside a
-generic argument for the discovery walk to find. A variable-bearing `PolyType::Quotation` is
-descended for a *nested* concrete quotation but is not itself interned (it has no ground
-output tuple).
+**R3 -- site 4 needs only the top-level `PolyType::Concrete` arm, not a recursive walk.** A
+ground quotation can only ever reach a poly signature as a top-level
+`PolyType::Concrete(Type::Quotation(..))`: `audit_poly_input_quotation`
+(`src/check/audits.rs:366`) already rejects a quotation nested in every other
+`PolyType` position -- `Array`, `Ref`, `OwnedCell`, a quotation-effect row, and a generic
+type argument -- via its `reject_poly_quotation_anywhere` twin, and that audit
+(`audit_quotation_type_registries`/`audit_poly_input_quotation`, both run from
+`src/check.rs:570`) runs well before the discovery walk (`:972`). So a recursive descent
+through those wrappers, as an earlier draft of this mechanism called for, is dead code: it
+can never fire, because nothing that would make it fire survives to reach it. Site 4 is
+therefore just `for pt in sig.inputs.iter().chain(&sig.outputs) { if let
+PolyType::Concrete(ty) = pt { collect_quotation_bundles(*ty, &mut tuples); } }` -- the same
+`Type` recursion (R2) applied to the one `PolyType` shape that can carry a ground quotation.
+A fully concrete composite (`[ [ i64 -- i64 i64 ] 2 ]`) also folds to `Concrete` at parse
+time, so it arrives here rather than as a `PolyType::Array`.
 
 Ordering is unchanged: the widened `intern_output_bundles` still runs where the current call
 sits (`src/check.rs:972`), after every type-level check and `struct_generated_sigs`, and
@@ -178,9 +180,11 @@ pass/fail; `thing_condition_expected` naming):
   - `quotation_param_two_outputs_interns_a_bundle` -- a concrete word taking
     `[ i64 -- i64 i64 ]`: after `check`, `module.structs` contains an `is_bundle` struct
     with fields `[("f0", i64), ("f1", i64)]`.
-  - `poly_signature_quotation_output_interns_a_bundle` -- a poly word whose `w.poly` carries
+  - `poly_signature_quotation_param_interns_a_bundle` -- a poly word whose `w.poly` carries
     a ground `PolyType::Concrete(Type::Quotation([i64 -- i64 i64]))` param: the same
-    `is_bundle` struct is present, proving site 4 (`w.poly`, not `w.effect`) is walked.
+    `is_bundle` struct is present, proving site 4 (`w.poly`, not `w.effect`) is walked. (Not
+    a quotation *output*: a poly signature's output can never be a quotation --
+    `reject_poly_quotation_anywhere` rejects one outright -- so only the param shape exists.)
   - `struct_field_quotation_two_outputs_interns_a_bundle` -- a struct with a
     `[ i64 -- i64 i64 ]` field carries the same `is_bundle` struct after `check`.
   - `array_element_quotation_two_outputs_interns_a_bundle` -- a word taking
@@ -221,22 +225,27 @@ pass/fail; `thing_condition_expected` naming):
     two-output ground quotation, and `call` requires a fully-ground quotation operand
     (`src/check/poly.rs:1367`), so this golden instead uses a word polymorphic over an
     unrelated `'T` that takes a *fixed* two-output `[ i64 -- i64 i64 ]` parameter, run at two
-    instantiations of `'T` so the variable is carried rigidly (the S3f golden shape). Source:
+    instantiations of `'T` so the variable is carried rigidly (the S3f golden shape). The
+    word's own declared output stays a *single* `'T` -- giving it two outputs
+    (`( ... -- 'T i64 )`) would make the golden a placebo, since the `'T = i64`
+    instantiation's own return bundle happens to be `[i64 i64]`, the exact tuple the
+    quotation needs, so the program would build and print correctly even with discovery
+    unwidened. Source:
 
     ```sooth
     import: intrinsics * ;
     import: core::bool * ;
-    : call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T i64 ) 3 swap call add ;
+    : call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T ) 3 swap call add . ;
     : main ( -- )
-      9 [ dup ] call_it . .
-      True [ dup ] call_it . .
+      9 [ dup ] call_it .
+      True [ dup ] call_it .
     ;
     ```
 
     Entry stack `['T, q]`; `3 swap call` runs `[ dup ]` on `3` beside the untouched `'T`
-    (`['T, 3, 3]`), `add` sums (`['T, 6]`), matching the declared `'T i64` output. `main`
-    prints the `i64` then the `'T` at each instantiation. Expected stdout: `6\n9\n6\nTrue\n`.
-    This exercises the `w.poly` walk (site 4) through a build.
+    (`['T, 3, 3]`), `add` sums (`['T, 6]`), then `.` prints the sum before `call_it` returns
+    the untouched `'T`, which `main` prints. Expected stdout: `6\n9\n6\nTrue\n`. This
+    exercises the `w.poly` walk (site 4) through a build.
 
 ## Sizing
 

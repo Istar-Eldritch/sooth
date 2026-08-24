@@ -1066,6 +1066,10 @@ fn intern_output_bundles(module: &mut Module) {
 /// another quotation); every other composite that can legally hold a quotation
 /// is a registry the caller sweeps directly.
 fn collect_quotation_bundles(ty: Type, found: &mut Vec<Vec<Type>>) {
+    // `Type::InlineQuotation` (a `~[ ... ]` parameter) is deliberately excluded:
+    // a `~` is always spliced at its call site, never reaches
+    // `lower_indirect_call`, and so needs no bundle -- unlike every other site
+    // in this file (`is_quotation_type`), which treats both variants alike.
     let Type::Quotation(eff) = ty else {
         return;
     };
@@ -3480,6 +3484,16 @@ mod tests {
     #[test]
     fn quotation_param_single_output_interns_no_bundle() {
         assert!(interned_bundles(": call_it ( [ i64 -- i64 ] -- ) ;\n").is_empty());
+    }
+
+    /// P7.S3m: a `~[ ... ]` parameter is `Type::InlineQuotation`, not
+    /// `Type::Quotation` -- `collect_quotation_bundles` skips it because a `~`
+    /// is always spliced and never reaches `lower_indirect_call`. Pins the
+    /// exclusion so widening the guard to `is_quotation_type` (as every other
+    /// site in this file does) would be caught here.
+    #[test]
+    fn inline_quotation_param_two_outputs_interns_no_bundle() {
+        assert!(interned_bundles(": call_it inline ( ~[ i64 -- i64 i64 ] -- ) ;\n").is_empty());
     }
 
     /// P7.S3m (R3): a quotation parameter whose own output row still mentions a
