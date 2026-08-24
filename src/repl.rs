@@ -823,7 +823,9 @@ fn rich_value_size(
         // Slice 7a: a code handle is one word; a quotation value spans its
         // fixed two-slot layout (only reached as a struct/enum/array field).
         ir::IrType::Code => ir::WORD_WIDTH as usize,
-        ir::IrType::Quotation(_) => ir::quotation_layout(ir::WORD_WIDTH).size as usize,
+        ir::IrType::Quotation(_) | ir::IrType::OwningQuotation(_) => {
+            ir::quotation_layout(ir::WORD_WIDTH).size as usize
+        }
         // P7 slice 3c (R2.2): a slice spans its whole two-slot layout, not one
         // word -- the `Str` answer above would under-read by the length slot.
         ir::IrType::Slice(_) => ir::slice_layout(ir::WORD_WIDTH).size as usize,
@@ -879,7 +881,7 @@ fn render_rich_value(
         // payload; reached only as a struct/enum/array field (a bare
         // quotation on the residual is rejected before rendering).
         ir::IrType::Code => "<code>".to_string(),
-        ir::IrType::Quotation(_) => "<quotation>".to_string(),
+        ir::IrType::Quotation(_) | ir::IrType::OwningQuotation(_) => "<quotation>".to_string(),
         // P7 slice 3c (R2.2/R7): a placeholder, matching the checker's ruling
         // that a slice is not printable (`.`'s allowlist excludes it): showing
         // the elements would need an element loop and a separator policy this
@@ -3049,6 +3051,15 @@ impl Session {
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.
         check::audit_word_quotation_positions(&word, &self.structs, &self.enums, &self.arrays)?;
+        // P7.S3h (phase 2): before the combinator retention route below, which
+        // is where an `owning` parameter would otherwise land -- it makes the
+        // word a combinator, so the session keeps its body and re-splices it,
+        // and the splice route compares a caller's literal on the
+        // inline-versus-ordinary axis only, not plain-versus-owning. Without
+        // this line the session accepts `: f inline ( owning [ -- ] -- )` and
+        // runs `[ 1 . ] f`, admitting a plain literal into an owning slot. The
+        // ordinary-parameter shape is declined below either way.
+        check::reject_owning_quotation_declarations(&word)?;
         // Slice 11 (R3): the same per-word `inline` rejections native `check`
         // runs as a pre-pass, at the REPL's own per-word gate -- the poly half
         // in particular, which the retention route below would otherwise carry

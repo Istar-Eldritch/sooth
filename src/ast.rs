@@ -2257,6 +2257,25 @@ pub enum Type {
     /// Its `name_static` carries the `~[ ... ]` spelling (see
     /// `inline_quotation_type`), so the two variants also render distinctly.
     InlineQuotation(&'static QuotEffect),
+    /// P7.S3h: the owning quotation type `owning [ ... ]`. Same payload as
+    /// `Type::Quotation`, and it materializes exactly as one does, but it is
+    /// **linear**: it carries a disposal obligation for whatever the closure
+    /// captured, and the only thing that can discharge that obligation is
+    /// running the body, so `call` is its consuming use and `drop` on it is
+    /// rejected. The type names the obligation and nothing else -- never where
+    /// the env lives -- so inline, static and heap storage can all land behind
+    /// one signature. Structural `PartialEq` gives
+    /// `OwningQuotation(e) != Quotation(e)` for free, so every materialization
+    /// boundary and `if`-join separates the two by type inequality. Its
+    /// `name_static` carries the `owning [ ... ]` spelling (see
+    /// `owning_quotation_type`).
+    ///
+    /// Never a field, element, payload or referent: `is_quotation_type` returns
+    /// `Some` for it and the registry audit's legal-position carve-outs match
+    /// `Type::Quotation` structurally, so every aggregate position rejects it.
+    /// That containment is what makes "the body is the sole disposer" true --
+    /// synthesized destructor glue has no way to run a closure body.
+    OwningQuotation(&'static QuotEffect),
 }
 
 /// Slice 6a (R4): a declared quotation effect, the payload behind
@@ -2303,6 +2322,30 @@ pub fn inline_quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
     Type::InlineQuotation(eff)
 }
 
+/// P7.S3h: build a `Type::OwningQuotation` for a declared `owning` effect.
+/// Mirrors `inline_quotation_type`, but the leaked spelling is prefixed with
+/// `owning `, so the effect's `name_static` reads `owning [ ... -- ... ]` and
+/// no two of the three quotation variants ever share a `&'static QuotEffect`.
+pub fn owning_quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
+    let name = format!(
+        "{OWNING_QUOTATION_KEYWORD} {}",
+        render_quotation_effect(&inputs, &outputs)
+    );
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let eff: &'static QuotEffect = Box::leak(Box::new(QuotEffect {
+        inputs,
+        outputs,
+        name_static,
+    }));
+    Type::OwningQuotation(eff)
+}
+
+/// P7.S3h: the one surface spelling of the owning-quotation prefix. Not a
+/// lexer delimiter and not a registered type name: it is intercepted by name
+/// at every type-position entry, ahead of every user type lookup, and reserved
+/// so a `type:` declaration cannot shadow it.
+pub const OWNING_QUOTATION_KEYWORD: &str = "owning";
+
 /// Slice 10a (R1): the effect behind either quotation type variant. Returns
 /// `Some(eff)` for both `Type::Quotation` and `Type::InlineQuotation`, so every
 /// enabling and routing site that must treat a `~` like an ordinary quotation
@@ -2316,7 +2359,7 @@ pub fn inline_quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
 /// open otherwise).
 pub fn is_quotation_type(ty: Type) -> Option<&'static QuotEffect> {
     match ty {
-        Type::Quotation(eff) | Type::InlineQuotation(eff) => Some(eff),
+        Type::Quotation(eff) | Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => Some(eff),
         _ => None,
     }
 }
@@ -2497,9 +2540,10 @@ impl Type {
             Type::Str => "str",
             Type::Cstr => "cstr",
             Type::Quotation(eff) => eff.name_static,
-            // The `~[ ... ]` spelling is baked into `name_static` by
-            // `inline_quotation_type`, so this mirrors the `Quotation` arm.
-            Type::InlineQuotation(eff) => eff.name_static,
+            // The `~[ ... ]` and `owning [ ... ]` spellings are baked into
+            // `name_static` by `inline_quotation_type`/`owning_quotation_type`,
+            // so these mirror the `Quotation` arm.
+            Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => eff.name_static,
         }
     }
 }
@@ -2778,14 +2822,38 @@ mod tests {
 
     /// Slice 10a (R1): the accessor sees through both quotation variants and
     /// nothing else, so every enabling/routing site routes through one place.
+    /// P7.S3h: three variants now. The `owning` row is load-bearing twice
+    /// over: `call` reaches `check_abstract_quotation_call` through this
+    /// accessor, and the registry audit's rejection dispatches on it, which is
+    /// what makes the containment rule (never a field, element, payload or
+    /// referent) automatic rather than a gate of its own.
     #[test]
-    fn is_quotation_type_accepts_both_variants_only() {
+    fn is_quotation_type_accepts_all_three_variants_only() {
         let ord = quotation_type(vec![Type::I64], Vec::new());
         let inl = inline_quotation_type(vec![Type::I64], Vec::new());
+        let own = owning_quotation_type(vec![Type::I64], Vec::new());
         assert!(is_quotation_type(ord).is_some());
         assert!(is_quotation_type(inl).is_some());
+        assert!(is_quotation_type(own).is_some());
         assert!(is_quotation_type(Type::I64).is_none());
         assert!(is_quotation_type(Type::Str).is_none());
+    }
+
+    /// P7.S3h: `owning [ ... ]` renders with its keyword, and is structurally
+    /// unequal to both the plain and the `~` quotation of the same rows -- the
+    /// property every materialization boundary and `if`-join relies on to keep
+    /// the two flavours apart with no code of its own.
+    #[test]
+    fn owning_quotation_type_renders_and_never_equals_its_siblings() {
+        let ord = quotation_type(vec![Type::I64], vec![Type::I64]);
+        let inl = inline_quotation_type(vec![Type::I64], vec![Type::I64]);
+        let own = owning_quotation_type(vec![Type::I64], vec![Type::I64]);
+        assert_eq!(own.name(), "owning [ i64 -- i64 ]");
+        assert_ne!(own, ord);
+        assert_ne!(own, inl);
+        // ...and it equals itself, so the inequality is the variant tag, not a
+        // per-call fresh leak of the payload.
+        assert_eq!(own, owning_quotation_type(vec![Type::I64], vec![Type::I64]));
     }
 
     /// Slice 10a (R3): structural `PartialEq` makes a `~` and an ordinary

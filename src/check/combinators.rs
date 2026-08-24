@@ -413,6 +413,7 @@ pub(super) fn inline_combinator(
                                 is_arm: tail_slots.contains(&i),
                                 caller_tail: tail,
                                 finalize: false,
+                                owning: false,
                             },
                             None,
                         )?;
@@ -708,6 +709,7 @@ fn check_poly_combinator_args(
                     is_arm: tail_slots.contains(&i),
                     caller_tail: tail,
                     finalize: false,
+                    owning: false,
                 },
                 None,
             )?

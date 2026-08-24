@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::OWNING_QUOTATION_KEYWORD;
 
 /// R6 (Q1): does the quotation `body` read any name in `enclosing` that the
 /// body does not itself bind? The cheap boolean the D3 materialization line
@@ -46,10 +47,22 @@ pub(super) fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>
 /// (`:5501`): the same "a local of this frame ... does not survive" shape, one
 /// frame instead of one loop iteration. Fires for `make-a` (R15) and, in
 /// Phase 2, for a frame capture escaping through a returned carrier (R22).
-pub(super) fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str) -> String {
+///
+/// P7.S3h: a *linear* capture gets the remedy named. `owning [ ... ]` is a
+/// boundary that owns its captures and disposes them by running the body, so
+/// it is exactly the fix here -- and it is not the fix for a `Copy` aggregate
+/// or a borrow, whose problem is a pointer into dead frame storage that no
+/// disposal obligation addresses, so those keep the bare message.
+pub(super) fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str, linear: bool) -> String {
     let _ = ctx;
+    let remedy = match linear {
+        true => format!(
+            "\n  declare the boundary `{OWNING_QUOTATION_KEYWORD} [ ... ]` to hand the closure ownership of `{name}`, so calling it disposes `{name}`"
+        ),
+        false => String::new(),
+    };
     format!(
-        "error: an escaping closure captures `{name}`, a local of this frame, whose storage does not survive the return (line {})",
+        "error: an escaping closure captures `{name}`, a local of this frame, whose storage does not survive the return (line {}){remedy}",
         span.line,
     )
 }
@@ -137,12 +150,48 @@ pub(super) fn ref_root_is_in_frame(
     }
 }
 
+/// P7.S3h: is a captured aggregate-arm type *scalar-represented*, i.e. held in
+/// the one-word env slot as a value rather than as a pointer into frame
+/// storage? A struct and an array are unconditionally pointer-backed
+/// (`is_aggregate`, `ir/func_builder/mod.rs`), and an owned cell is a pointer
+/// to a heap block whose ownership cannot be snapshotted, so this is true for
+/// exactly one shape: an enum none of whose variants carries a payload.
+///
+/// Computed from the *declaration*, not from `ir::layout`, following slice
+/// 10c's `tag` domain check (`word_families.rs`) and for the same reason: the
+/// admission this gates must be decidable before any lowering runs.
+///
+/// No `is_copy` conjunct, deliberately: `is_copy`'s enum arm folds over the
+/// variant fields, so a payload-free enum is `Copy` by construction and the
+/// conjunct could never change an answer.
+fn capture_is_scalar_represented(ty: Type, enums: &[EnumDecl]) -> bool {
+    match ty {
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .all(|v| v.fields.is_empty()),
+        _ => false,
+    }
+}
+
 /// R15: classify a captured name by its binding (case 4 quotation-typed names
 /// are peeled off before this runs). The frame-rooted/outer-rooted split reuses
 /// the exact `owned_root`-vs-current-frame test the R12 exit-row check
 /// (`:6108`) and `check_reference_across_back_edge` (`:5519`) already apply.
-pub(super) fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureClass {
+pub(super) fn classify_capture(
+    b: &Binding,
+    prov: &Provenance,
+    scope: &Scope,
+    enums: &[EnumDecl],
+) -> CaptureClass {
     match b.ty {
+        // P7.S3h: a scalar-represented member of the aggregate arm below is a
+        // *value* in the one-word env slot, not a pointer into frame storage,
+        // so it can no more dangle than an `i64` can and takes case 1. Only a
+        // payload-free enum qualifies -- `bool` since S3i, the motivating case:
+        // the blanket arm below rejected it at every escaping boundary purely
+        // for being spelled as an enum.
+        Type::Enum(..) if capture_is_scalar_represented(b.ty, enums) => CaptureClass::Scalar,
         // Case 2: an aggregate value read directly (no deriv). A scope-bound
         // aggregate is owned by (and dies with) this frame; a global aggregate
         // is not in scope and never reaches here.
@@ -199,14 +248,18 @@ pub(super) fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) ->
 /// aggregate/borrow captures whose referents must outlive the closure's calls,
 /// each tagged frame-rooted (for the R22 escape guard). A scalar-only closure
 /// returns `None` -- a snapshot has no referent that can go dead.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_capture_admission(
     id: QuotId,
     escaping: bool,
+    owning: bool,
     span: Span,
     ctx: &Ctx,
+    arrays: &[ArrayDecl],
     prov: &mut Provenance,
     scope: &Scope,
 ) -> Result<Option<SurvivingCaptureSetId>, String> {
+    let enums = ctx.enums();
     // Only names bound in the enclosing scope are real captures; a free global
     // word resolves at the call and needs no env.
     let mut names: Vec<String> = prov
@@ -242,11 +295,26 @@ pub(super) fn check_capture_admission(
     let mut members: Vec<SurvivingCapture> = Vec::new();
     for name in &names {
         let b = scope.local(name).expect("filtered to a bound name");
-        match classify_capture(b, prov, scope) {
+        match classify_capture(b, prov, scope, enums) {
             CaptureClass::Scalar => {}
             CaptureClass::FrameRooted => {
+                // `arrays` is threaded in for exactly this: `is_linear`
+                // resolves an array element through the registry, and `Ctx`
+                // exposes only `structs`/`enums`.
+                let linear = is_linear(b.ty, ctx.structs(), enums, arrays);
+                // P7.S3h: at an `owning` boundary a *linear* capture is moved
+                // into the closure's heap env, which outlives the frame, so
+                // the frame's storage dying at return is no longer the
+                // question -- and the frame no longer owns the value either,
+                // so it is not a surviving-set member. The narrowing to linear
+                // is deliberate: a `Copy` aggregate is not moved, so admitting
+                // one here would leave the frame and the env each holding a
+                // copy with no rule saying which is authoritative.
+                if owning && linear {
+                    continue;
+                }
                 if escaping {
-                    return Err(past_owning_frame_error(ctx, span, name));
+                    return Err(past_owning_frame_error(ctx, span, name, linear));
                 }
                 members.push(SurvivingCapture {
                     name: name.clone(),
@@ -265,7 +333,10 @@ pub(super) fn check_capture_admission(
     // the bundle marker rides onto the interned set regardless, since the
     // in-frame admission is only sound until this closure escapes through a
     // later carrier, which the R22 guard checks at the word-output boundary.
-    let bundle = names.len() >= 2;
+    // P7.S3h: an owning closure's env is a heap block, never the stack bundle
+    // this marker names, so both the 2+-capture deferral and the R22
+    // transitive-escape guard it feeds are inapplicable to it.
+    let bundle = names.len() >= 2 && !owning;
     if escaping && bundle {
         return Err(multi_capture_escaping_error(ctx, span));
     }
@@ -287,6 +358,7 @@ pub(super) fn check_capture_admission(
 pub(super) fn materialize_quotation_at_boundary(
     id: QuotId,
     eff: &'static QuotEffect,
+    owning: bool,
     escaping: bool,
     word: &str,
     span: Span,
@@ -302,8 +374,9 @@ pub(super) fn materialize_quotation_at_boundary(
 ) -> Result<Slot, String> {
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
-    let surviving = if body_captures_enclosing(&body, &enclosing) {
-        check_capture_admission(id, escaping, span, ctx, prov, scope)?
+    let captures = body_captures_enclosing(&body, &enclosing);
+    let surviving = if captures {
+        check_capture_admission(id, escaping, owning, span, ctx, arrays, prov, scope)?
     } else {
         None
     };
@@ -331,9 +404,20 @@ pub(super) fn materialize_quotation_at_boundary(
             is_arm: false,
             caller_tail: false,
             finalize: false,
+            owning,
         },
         None,
     )?;
+    // P7.S3h: an owning literal *must* consume every linear value it captures.
+    // The boundary lifted the R12 blanket ban on consuming an enclosing linear
+    // local (that consumption is the ownership transfer), which leaves the
+    // opposite hazard: a capture the body merely reads leaves the frame still
+    // owning the value while the env holds its bytes, so it would be disposed
+    // twice. Checked after the body walk, since the move state is what answers
+    // it.
+    if owning && captures {
+        check_owning_captures_consumed(id, span, ctx, arrays, prov, scope)?;
+    }
     // R7 (P7 slice 1 phase 6): a declared quotation effect returning a
     // reference used to reach `lower_reference_word`'s `referent_of` and
     // panic ("checked: every reference value records its referent") instead
@@ -348,10 +432,54 @@ pub(super) fn materialize_quotation_at_boundary(
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
     // R22 escape guard read once the identity is gone.
+    let ty = match owning {
+        true => Type::OwningQuotation(eff),
+        false => Type::Quotation(eff),
+    };
     Ok(Slot {
         surviving,
-        ..Slot::computed(Type::Quotation(eff))
+        ..Slot::computed(ty)
     })
+}
+
+/// P7.S3h: every linear local an owning literal captured must have been
+/// consumed by the literal's body, so ownership genuinely moved into the env
+/// rather than being duplicated. `MaybeMoved` (consumed on one arm of an `if`
+/// inside the body) fails for the same reason it fails everywhere else: it is
+/// neither a completed move nor a live value.
+pub(super) fn check_owning_captures_consumed(
+    id: QuotId,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    prov: &Provenance,
+    scope: &Scope,
+) -> Result<(), String> {
+    let mut names: Vec<&String> = prov
+        .quotation_captures(id)
+        .iter()
+        .filter(|n| scope.local(n).is_some())
+        .collect();
+    names.sort_unstable();
+    for name in names {
+        let b = scope.local(name).expect("filtered to a bound name");
+        if !is_linear(b.ty, ctx.structs(), ctx.enums(), arrays) {
+            continue;
+        }
+        if !matches!(scope.moves.states.get(name), Some(MoveState::Moved(_))) {
+            return Err(owning_capture_not_consumed_error(ctx, span, name, b.ty));
+        }
+    }
+    Ok(())
+}
+
+/// P7.S3h: an owning closure captured a linear local without consuming it.
+fn owning_capture_not_consumed_error(ctx: &Ctx, span: Span, name: &str, ty: Type) -> String {
+    format!(
+        "error: an `{OWNING_QUOTATION_KEYWORD}` closure captures `{name}`, a linear `{ty}`, without consuming it{} (line {}): an owning closure takes ownership of what it captures, so its body must dispose or return each linear capture exactly once",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R7: the quotation-effect twin of `check_reference_free_signature`
@@ -462,7 +590,7 @@ mod tests {
         let empty = Scope::default();
         let scalar = capture_binding("x", Type::I64, None);
         assert!(matches!(
-            classify_capture(&scalar, &prov, &empty),
+            classify_capture(&scalar, &prov, &empty, &[]),
             CaptureClass::Scalar
         ));
 
@@ -470,7 +598,7 @@ mod tests {
         // this frame).
         let agg = capture_binding("arr", arr_ty, None);
         assert!(matches!(
-            classify_capture(&agg, &prov, &empty),
+            classify_capture(&agg, &prov, &empty, &[]),
             CaptureClass::FrameRooted
         ));
 
@@ -482,14 +610,14 @@ mod tests {
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let borrow_local = capture_binding("r", ref_ty, Some(d));
         assert!(matches!(
-            classify_capture(&borrow_local, &prov, &framed),
+            classify_capture(&borrow_local, &prov, &framed, &[]),
             CaptureClass::FrameRooted
         ));
 
         // Case 3b: the same borrow, but its `owned_root` is not in this scope
         // (rooted in an ancestor frame) -> OuterRooted.
         assert!(matches!(
-            classify_capture(&borrow_local, &prov, &empty),
+            classify_capture(&borrow_local, &prov, &empty, &[]),
             CaptureClass::OuterRooted
         ));
 
@@ -507,7 +635,7 @@ mod tests {
         });
         let param_ref = capture_binding("r", ref_ty, Some(d));
         assert!(matches!(
-            classify_capture(&param_ref, &prov, &empty),
+            classify_capture(&param_ref, &prov, &empty, &[]),
             CaptureClass::OuterRooted
         ));
     }
@@ -535,17 +663,102 @@ mod tests {
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let framed_view = capture_binding("s", slice_ty, Some(d));
         assert!(matches!(
-            classify_capture(&framed_view, &prov, &framed),
+            classify_capture(&framed_view, &prov, &framed, &[]),
             CaptureClass::FrameRooted
         ));
 
         // The same view whose root is not this frame's: outer-rooted, so it
         // outlives the closure's calls.
         assert!(matches!(
-            classify_capture(&framed_view, &prov, &Scope::default()),
+            classify_capture(&framed_view, &prov, &Scope::default(), &[]),
             CaptureClass::OuterRooted
         ));
     }
+    /// P7.S3h: the aggregate arm splits on scalar representation, not on the
+    /// four type constructors. A payload-free enum is a value in the one-word
+    /// env slot, so it takes case 1; a payload-carrying one is tagged storage
+    /// reached by pointer and keeps the frame-rooted rejection. Both
+    /// directions are pinned: an arm answering `Scalar` for every enum would
+    /// pass on the first assertion alone.
+    #[test]
+    fn classify_capture_payload_free_enum_is_scalar_not_frame_rooted() {
+        let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            display_static: name,
+            fields,
+            span: Span::default(),
+        };
+        let enums = vec![
+            EnumDecl {
+                name: "Bool".to_string(),
+                name_static: "Bool",
+                variants: vec![variant("False", vec![]), variant("True", vec![])],
+                span: Span::default(),
+                module: 0,
+            },
+            EnumDecl {
+                name: "Item".to_string(),
+                name_static: "Item",
+                variants: vec![
+                    variant("Empty", vec![]),
+                    variant("Full", vec![("v".to_string(), Type::I64)]),
+                ],
+                span: Span::default(),
+                module: 0,
+            },
+        ];
+        let prov = Provenance::default();
+        let scope = Scope::default();
+
+        let payload_free = capture_binding("b", Type::Enum(EnumId::from_index(0), "Bool"), None);
+        assert!(matches!(
+            classify_capture(&payload_free, &prov, &scope, &enums),
+            CaptureClass::Scalar
+        ));
+
+        // `Item` is `Copy` (its one payload field is an `i64`), so `is_copy`
+        // alone would admit it -- the scalar-representation half is the whole
+        // guard here.
+        let payload = capture_binding("e", Type::Enum(EnumId::from_index(1), "Item"), None);
+        assert!(matches!(
+            classify_capture(&payload, &prov, &scope, &enums),
+            CaptureClass::FrameRooted
+        ));
+    }
+
+    /// P7.S3h: the pointer-backed members of the aggregate arm are unmoved by
+    /// the enum narrowing, and a `Copy` one is the case that matters -- the
+    /// env slot holds one word, and a struct's or an array's value is a
+    /// pointer into frame storage, so snapshotting one at an escaping
+    /// boundary would be a use-after-return however `Copy` it is.
+    #[test]
+    fn classify_capture_copy_aggregate_stays_frame_rooted() {
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let structs = vec![StructDecl {
+            name: "P".to_string(),
+            name_static: "P",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let struct_ty = Type::Struct(StructId::from_index(0), "P");
+        assert!(is_copy(arr_ty, &structs, &[], &arrays));
+        assert!(is_copy(struct_ty, &structs, &[], &arrays));
+
+        let prov = Provenance::default();
+        let scope = Scope::default();
+        for ty in [arr_ty, struct_ty] {
+            assert!(matches!(
+                classify_capture(&capture_binding("a", ty, None), &prov, &scope, &[]),
+                CaptureClass::FrameRooted
+            ));
+        }
+    }
+
     #[test]
     fn check_capture_admission_gates_each_capture_kind() {
         // U-admit (R15): the admission gate around `classify_capture`. Each
@@ -571,7 +784,7 @@ mod tests {
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
         let admit = |prov: &mut Provenance, escaping, scope: &Scope| {
-            check_capture_admission(QuotId(0), escaping, span, &ctx, prov, scope)
+            check_capture_admission(QuotId(0), escaping, false, span, &ctx, &arrays, prov, scope)
         };
 
         // No real capture: an empty set, and a free global not in scope, both
@@ -648,6 +861,71 @@ mod tests {
             "the all-scalar 2-capture stack bundle marks its set as a bundle"
         );
     }
+    /// P7.S3h: the remedy line is conditioned on linearity rather than bolted
+    /// onto every past-owning-frame rejection. `owning [ ... ]` is the fix for
+    /// a *linear* capture, because an owning closure takes ownership and
+    /// disposes it by running; it fixes nothing for a `Copy` aggregate, whose
+    /// problem is a pointer into dead frame storage that no disposal obligation
+    /// addresses. Both directions, since dropping the condition would put a
+    /// wrong remedy on the `Copy` case.
+    #[test]
+    fn past_owning_frame_names_owning_only_for_a_linear_capture() {
+        let structs = vec![
+            StructDecl {
+                name: "Spy".to_string(),
+                name_static: "Spy",
+                fields: vec![("tag".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: true,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "P".to_string(),
+                name_static: "P",
+                fields: vec![("x".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let cases = [
+            (Type::Struct(StructId::from_index(0), "Spy"), true),
+            (Type::Struct(StructId::from_index(1), "P"), false),
+        ];
+        for (ty, wants_remedy) in cases {
+            assert_eq!(is_linear(ty, &structs, &enums, &[]), wants_remedy);
+            let mut prov = Provenance::default();
+            prov.quotation_captures
+                .push(std::iter::once("v".to_string()).collect());
+            let mut scope = Scope::default();
+            scope.bound.push(capture_binding("v", ty, None));
+            let err =
+                check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
+                    .expect_err("a frame-rooted capture escaping is past-owning-frame");
+            assert!(
+                err.contains("does not survive the return"),
+                "both cases keep the base rejection: {err}"
+            );
+            assert_eq!(
+                err.contains(OWNING_QUOTATION_KEYWORD),
+                wants_remedy,
+                "remedy presence for `{ty}`: {err}"
+            );
+        }
+    }
+
     /// Slice 10a (R2): the fifth materialization boundary, pinned directly.
     /// A poly signature cannot place an ordinary quotation anywhere but a
     /// direct top-level parameter (`reject_poly_quotation_anywhere`), so a
@@ -680,8 +958,9 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let err = check_capture_admission(QuotId(0), true, span, &ctx, &mut prov, &scope)
-            .expect_err("a captured `~` local must be rejected");
+        let err =
+            check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
+                .expect_err("a captured `~` local must be rejected");
         assert!(
             err.contains("`~`") && err.contains("captured"),
             "a captured `~` local should be its own located rejection, not the ordinary \
@@ -702,8 +981,17 @@ mod tests {
             &CombinatorIndex::new(),
             None,
         );
-        let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
-            .expect_err("a captured `~` local must be rejected");
+        let word_err = check_capture_admission(
+            QuotId(0),
+            true,
+            false,
+            span,
+            &word_ctx,
+            &[],
+            &mut prov,
+            &scope,
+        )
+        .expect_err("a captured `~` local must be rejected");
         assert!(
             word_err.contains("`outer`"),
             "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"

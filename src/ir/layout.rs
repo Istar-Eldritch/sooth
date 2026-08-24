@@ -308,7 +308,7 @@ pub(super) fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
         IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
-        IrType::Quotation(_) => {
+        IrType::Quotation(_) | IrType::OwningQuotation(_) => {
             unreachable!("a quotation value resolves via `quotation_layout`, not a scalar")
         }
         // P7 slice 3c (R2.1): a slice is two words, not one, and its align is
@@ -335,7 +335,9 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
         // A quotation value is a two-slot aggregate; it marshals like any
         // aggregate, its size rounded up so the next slot stays 8-aligned.
-        IrType::Quotation(_) => round_up(quotation_layout(WORD_WIDTH).size, 8),
+        IrType::Quotation(_) | IrType::OwningQuotation(_) => {
+            round_up(quotation_layout(WORD_WIDTH).size, 8)
+        }
         // P7 slice 3c (R2.2): a slice marshals as its two-slot `{ptr, len}`
         // aggregate, like `Quotation` and unlike the 8-byte scalar arm below
         // -- `Str`'s one-word answer would truncate the length.
@@ -737,8 +739,12 @@ impl LayoutBuilder<'_> {
             }
             // Slice 7a: a quotation field/element is the fixed two-slot value
             // aggregate, word-width-derived (`quotation_layout`), not a scalar
-            // -- `scalar_size_align_ww` deliberately panics on it.
-            Type::Quotation(_) => {
+            // -- `scalar_size_align_ww` deliberately panics on it. P7.S3h: an
+            // owning quotation shares that same two-slot value shape, so it
+            // sizes here too -- its only distinction is the env storage
+            // decision, not the layout. It reaches this arm as a synthesized
+            // multi-output bundle field, interned after the containment audit.
+            Type::Quotation(_) | Type::OwningQuotation(_) => {
                 let l = quotation_layout(self.word_width);
                 (l.size, l.align)
             }

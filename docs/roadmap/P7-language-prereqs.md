@@ -387,52 +387,45 @@ than `self.env.get(name)`, which panics on a poly name.
 **Exit:** a self-*tail* call in a non-inline generic body lowers to a loop back-edge, and a
 generic countdown over a large counter runs in constant stack.
 
-**P7.S3h — An escaping closure may capture a linear value (closure env disposal).**
-Capture into a *materialized* (escaping) closure is restricted to `Copy` values -- an
-emergent consequence of `classify_capture` (`src/check/captures.rs:144`) treating every
-by-value aggregate as frame-rooted, not a rule stated anywhere in DESIGN.md. The
-restriction is not arbitrary: the captured env is absent from the
-disposal walk entirely -- `src/ir/destructors.rs` synthesizes destructors per concrete
-`IrType::Struct`/`Enum`/`OwnedCell` and never sees a closure env -- so a linear value moved
-into an env would simply never be disposed. This slice gives the env an owner and a
-destructor, which is the mechanism a linear value needs to outlive the frame that built it.
-**Probe-verified boundary at HEAD**, three cases, only the third rejected:
-
-- a `Copy` local captured into an escaping closure compiles and runs;
-- a *linear* local captured into a **spliced** `~[ ]` quotation compiles and runs (splicing
-  keeps it in scope, so no env exists);
-- a linear local captured into an **escaping** `[ ]` closure is rejected:
-  `` error: an escaping closure captures `b`, a local of this frame, whose storage does not
-  survive the return `` (`src/check/captures.rs:52`). The same message covers an aggregate
-  captured by value, so this is one wall, not two.
-
-That rejection is *correct* for a stack local read through the env. What is missing is the
-alternative it leaves unavailable: **moving** the value into the env, transferring ownership,
-so the closure owns it and disposal runs when the closure is dropped. Today a capture can
-only ever be a read of something living elsewhere.
-**Framed as closure capture, deliberately, and not as trait objects.** A materialized
-quotation is already a `(code, env)` pair, which is a trait object's shape with a one-method
-vtable, so owned trait objects and this slice want the *same* missing mechanism: a
-destructor reachable from an erased owner. Doing it as closure capture is narrower, has a
-consumer, and forces the disposal question to be answered concretely; heterogeneous
-collections (`Vec[dyn T]`) are a separate and much weaker motivation, since a closed enum is
-usually the better design and already works in `core`. Trait objects, if ever wanted, are a
-generalization *after* this exists, not the thing that introduces it.
-**The real cost, and it touches a load-bearing invariant:** disposal is type-directed and
-statically resolved today. An env whose contents vary per closure needs its destructor
-reached through the closure value, which puts **dynamic dispatch into the destructor path**
--- where the linear spine bottoms out. That is the decision this slice actually turns on and
-it needs DESIGN.md's owner to weigh in, not a spec author. A per-capture-set synthesized
-destructor (one concrete env struct per closure literal, statically resolved) may avoid the
-dynamic dispatch entirely and is the first design to price.
-**Standing hazards in this neighbourhood, to verify before speccing rather than discover
-during:** a materialized quotation cannot be linked in the REPL at all (a session line
-building a `(code, env)` value dies on a non-PIC `__quot0` relocation), and `drop` never
-touches `env` today, so any claim that an existing rule already disposes a capture is false.
-**Exit:** a linear value can be moved into an escaping closure's env, the closure can be
-returned from the word that built it, calling it observes the captured value, and dropping
-the closure disposes the captured value exactly once -- with a leaked or double-disposed
-capture each a located error rather than a silent miscompile.
+**P7.S3h — An escaping closure may capture a linear value (closure env disposal).** `[ done ]`
+A closure that owns a linear capture says so in its *type*: `owning [ … ]`, a distinct
+quotation flavour spelled in type positions only (a parser prefix at every type-position
+entry, and a reserved name so `type: owning ;` cannot shadow it). The type carries the
+obligation and says nothing about where the env lives. Such a closure is linear, and `call`
+is its consuming use -- no new checker rule, since the pre-existing consumed-on-every-path
+check already forces a conditional to call it on both arms, and forgetting one is the
+ordinary unconsumed-value error.
+**The env is heap storage the body owns.** Captures are *moved* into a `sooth_alloc` block
+laid out per literal (each capture's own storage, word-aligned), so the frame no longer owns
+them and the block outlives the return. The compiled body's prologue copies every capture out
+into its own frame, rebinding a borrow capture with its reference record, and *then* frees the
+block -- at entry, not at the return, so the body is thereafter an ordinary word body that
+consumes its captures exactly as a word consumes a linear parameter, and an `owning [ -- Spy ]`
+body may hand a capture back rather than dispose it. There is no drop pointer, no third layout
+slot and no `emit_drop` arm; a plain quotation keeps its two-word `(code, env)` layout and
+gains no allocation.
+**The body is the sole disposer, which is what the containment rule buys.** An owning
+quotation is rejected in every aggregate position (struct field, variant field, array and
+slice element, owned-cell payload, referent, `extern:` slot), so no synthesized glue can reach
+one and `field_is_linear`/`layout_field_is_linear` stay untouched. `drop` on one is a located
+rejection in both a monomorphic and a generic body, since releasing the capture means running
+code only the closure has. Neither a spliced (`inline`) nor a generic word may declare an
+`owning` parameter: the splice route never materializes, and a polymorphic call site
+materializes from the declared effect alone, which does not carry the flavour -- so in both
+the distinction would be silently unenforced.
+**Capture admission.** `classify_capture`'s aggregate arm admits a capture as scalar only when
+it is both `Copy` and scalar-represented, so a payload-free enum passes and a pointer-backed
+aggregate keeps being rejected however `Copy` it is. At an `owning` boundary the frame-rooted
+rejection and the 2+-capture deferral both lift for a *linear* capture, the heap block having
+replaced the stack bundle they guarded; the in-frame path is unchanged.
+**Two restrictions remain, both waiting on an erased owner:** an owning closure may not be
+discarded unexecuted, nor stored in an aggregate. Both are **P7.S3v**, after **P7.S3u**.
+Standing hazard, unchanged: a materialized quotation still cannot be linked in the REPL (a
+session line building a `(code, env)` value dies on a non-PIC `__quot0` relocation).
+**Exit:** a linear value can be moved into an escaping closure's env, the closure returned
+from the word that built it, and calling it observes the capture and disposes it exactly once
+-- one observation, not zero and not two -- with a forgotten closure, a `drop`ped one and a
+capture the body never consumes each a located error rather than a silent miscompile.
 
 **P7.S3i — `bool` as an ordinary enum, not a compiler-injected one.** `[ done ]` The type was
 a plain two-variant zero-payload enum already; the only thing making it special was that

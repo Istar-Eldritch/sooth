@@ -15,7 +15,13 @@ impl<'a> FuncBuilder<'a> {
     pub(in crate::ir) fn materialize_if_phantom(&mut self, val: Value, ty: IrType) -> Value {
         match ty {
             IrType::Quotation(sig) if self.quot_bodies.contains_key(&val) => {
-                self.materialize_quot_value(val, sig)
+                self.materialize_quot_value(val, sig, false)
+            }
+            // P7.S3h: the same boundary, building an owning closure. The
+            // declared `IrType` is the only thing that says which env shape to
+            // build, which is why the two are distinct variants.
+            IrType::OwningQuotation(sig) if self.quot_bodies.contains_key(&val) => {
+                self.materialize_quot_value(val, sig, true)
             }
             _ => val,
         }
@@ -45,7 +51,7 @@ impl<'a> FuncBuilder<'a> {
     /// enclosing frame -- a scalar's value, or a reference's pointer. The
     /// symbol is `{enclosing}__quot{id}`, unique because word names are unique
     /// and `QuotId` is per-function.
-    fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId) -> Value {
+    fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId, owning: bool) -> Value {
         let id = self.quot_bodies[&phantom];
         let symbol = format!("{}__quot{}", self.cur_word_name, id.0);
         // The captured locals (sorted by name), resolved against the live frame
@@ -54,38 +60,86 @@ impl<'a> FuncBuilder<'a> {
         if !self.materialized.iter().any(|m| m.symbol == symbol) {
             let env_caps = captures
                 .iter()
-                .map(|(name, value)| {
-                    // A scalar capture has no mutability to carry; a reference
-                    // one is required to have recorded it, so ask through the
-                    // accessor that panics rather than defaulting -- a broken
-                    // lockstep must not read out as a shared view here.
-                    let referent = self.ref_inner.get(value).copied();
-                    EnvCapture {
-                        name: name.clone(),
-                        ty: self.value_type(*value),
-                        ref_mutable: referent.is_some() && self.reference_is_mutable(*value),
-                        referent,
-                    }
-                })
+                .map(|(name, value)| self.env_capture_of(name, *value))
                 .collect();
             self.materialized.push(MaterializedQuot {
                 symbol: symbol.clone(),
                 effect: sig.0,
                 body: self.quot_defs[id.0].clone(),
                 captures: env_caps,
+                owning,
             });
         }
         let layout = quotation_layout(WORD_WIDTH);
-        let dst = self.fresh_value(IrType::Quotation(sig));
+        let ty = match owning {
+            true => IrType::OwningQuotation(sig),
+            false => IrType::Quotation(sig),
+        };
+        let dst = self.fresh_value(ty);
         self.push_alloc(Instr::Alloc(dst, layout.size, layout.align));
         let code = self.fresh_value(IrType::Code);
         self.push_instr(Instr::FuncAddr(code, symbol));
         let code_ptr = self.field_ptr(dst, layout.code_offset);
         self.push_instr(Instr::FieldStore(code_ptr, code));
-        let env = self.build_env(&captures);
+        let env = match owning {
+            true => self.build_owning_env(&captures),
+            false => self.build_env(&captures),
+        };
         let env_ptr = self.field_ptr(dst, layout.env_offset);
         self.push_instr(Instr::FieldStore(env_ptr, env));
         dst
+    }
+
+    /// P7.S3h: the `env` word for an *owning* closure -- one heap block
+    /// holding every capture by value, which is what lets the closure outlive
+    /// the frame that built it. An aggregate capture is blitted in (the frame
+    /// storage it came from is dead the moment the boundary returns), a scalar
+    /// or borrow stored as its word. No zero/one/many ladder: the plain env's
+    /// inline-single-word case exists to avoid an allocation for a snapshot,
+    /// and an owning closure needs the block regardless. A capture-free owning
+    /// literal still allocates nothing and keeps the null-env shape.
+    fn build_owning_env(&mut self, captures: &[(String, Value)]) -> Value {
+        let caps: Vec<EnvCapture> = captures
+            .iter()
+            .map(|(name, value)| self.env_capture_of(name, *value))
+            .collect();
+        let (offsets, total) = owning_env_slots(self, &caps);
+        if total == 0 {
+            let z = self.fresh_value(IrType::Ptr);
+            self.push_instr(Instr::Const(z, 0));
+            return z;
+        }
+        let size_v = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(size_v, total as i64));
+        let block = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::Call(
+            Some(block),
+            ALLOC_SYMBOL.to_string(),
+            vec![size_v],
+        ));
+        for ((_, value), offset) in captures.iter().zip(&offsets) {
+            let slot = self.field_ptr(block, *offset);
+            let ty = self.value_type(*value);
+            self.store_owned_payload(slot, *value, ty);
+        }
+        block
+    }
+
+    /// 7b/R16: how the lowered body must read back the capture `value` bound
+    /// to `name`. Shared by both env flavours so the build side and the read
+    /// side cannot disagree about which captures are borrows.
+    fn env_capture_of(&self, name: &str, value: Value) -> EnvCapture {
+        // A scalar capture has no mutability to carry; a reference one is
+        // required to have recorded it, so ask through the accessor that
+        // panics rather than defaulting -- a broken lockstep must not read out
+        // as a shared view here.
+        let referent = self.ref_inner.get(&value).copied();
+        EnvCapture {
+            name: name.to_string(),
+            ty: self.value_type(value),
+            ref_mutable: referent.is_some() && self.reference_is_mutable(value),
+            referent,
+        }
     }
 
     /// 7b/R16: the `env` word for a materialized closure. Q2a's ladder: zero
@@ -157,21 +211,26 @@ impl<'a> FuncBuilder<'a> {
         else_pred: BlockId,
         mut else_stack: Vec<Value>,
     ) -> (Vec<Value>, Vec<Value>) {
-        let mut jobs: Vec<(usize, QuotSigId)> = Vec::new();
+        // P7.S3h: the owning flavour rides alongside the signature, since it
+        // is what each arm's materialization needs to know to build its env.
+        // A join is a declared-type boundary like any other, so it reads the
+        // flavour off the same declared output/referent.
+        let mut jobs: Vec<(usize, QuotSigId, bool)> = Vec::new();
         for (i, (t, e)) in then_stack.iter().zip(&else_stack).enumerate() {
             if t != e && self.quot_bodies.contains_key(t) && self.quot_bodies.contains_key(e) {
-                let target = match self.cur_outputs.get(i) {
-                    Some(&IrType::Quotation(sig)) => Some(sig),
-                    _ => match i
-                        .checked_sub(1)
-                        .and_then(|b| self.ref_inner.get(&then_stack[b]))
-                    {
-                        Some(&IrType::Quotation(sig)) => Some(sig),
-                        _ => None,
-                    },
+                let flavour = |ty: Option<&IrType>| match ty {
+                    Some(&IrType::Quotation(sig)) => Some((sig, false)),
+                    Some(&IrType::OwningQuotation(sig)) => Some((sig, true)),
+                    _ => None,
                 };
+                let target = flavour(self.cur_outputs.get(i)).or_else(|| {
+                    flavour(
+                        i.checked_sub(1)
+                            .and_then(|b| self.ref_inner.get(&then_stack[b])),
+                    )
+                });
                 match target {
-                    Some(sig) => jobs.push((i, sig)),
+                    Some((sig, owning)) => jobs.push((i, sig, owning)),
                     None => unreachable!(
                         "a differing quotation join slot maps to a declared quotation output or an in-frame store target"
                     ),
@@ -182,13 +241,13 @@ impl<'a> FuncBuilder<'a> {
             return (then_stack, else_stack);
         }
         let (then_pos, then_term) = self.reopen_block(then_pred);
-        for &(i, sig) in &jobs {
-            then_stack[i] = self.materialize_quot_value(then_stack[i], sig);
+        for &(i, sig, owning) in &jobs {
+            then_stack[i] = self.materialize_quot_value(then_stack[i], sig, owning);
         }
         self.reseal_block_at(then_pos, then_term);
         let (else_pos, else_term) = self.reopen_block(else_pred);
-        for &(i, sig) in &jobs {
-            else_stack[i] = self.materialize_quot_value(else_stack[i], sig);
+        for &(i, sig, owning) in &jobs {
+            else_stack[i] = self.materialize_quot_value(else_stack[i], sig, owning);
         }
         self.reseal_block_at(else_pos, else_term);
         (then_stack, else_stack)
@@ -201,7 +260,11 @@ impl<'a> FuncBuilder<'a> {
     /// bundle, unpacked, exactly as an ordinary word call). The runtime-
     /// dispatch counterpart to `call`-of-literal fusion (D5); no splice.
     pub(super) fn lower_indirect_call(&mut self, v: Value) {
-        let IrType::Quotation(sig) = self.value_type(v) else {
+        // P7.S3h: `call` is also the *consuming* use of an owning closure --
+        // the pop above discharges its disposal obligation, and running the
+        // body is what actually performs the disposal. Nothing else about the
+        // indirect call differs: same two-slot value, same trailing env arg.
+        let (IrType::Quotation(sig) | IrType::OwningQuotation(sig)) = self.value_type(v) else {
             unreachable!("a non-literal `call` operand is a materialized quotation value")
         };
         let eff = sig.0;

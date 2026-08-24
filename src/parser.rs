@@ -22,6 +22,7 @@ use crate::ast::{
     MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
     StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
     TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
+    OWNING_QUOTATION_KEYWORD,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -218,6 +219,16 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     if matches!(kind, "type" | "variant") && matches!(name, SLICE_TYPE_NAME | MUT_SLICE_TYPE_NAME) {
         return Err(format!(
             "error: `{name}` is reserved for the slice type syntax (`{SLICE_TYPE_NAME}[T]`) and cannot be used as a {kind} name at line {}, col {}",
+            span.line, span.col
+        ));
+    }
+    // P7.S3h: `owning` is intercepted at every type-position entry ahead of
+    // every user registry, so a type or variant declared under that name would
+    // be silently unreachable rather than merely shadowed -- the same reason
+    // `Slice` is reserved just above.
+    if matches!(kind, "type" | "variant") && name == OWNING_QUOTATION_KEYWORD {
+        return Err(format!(
+            "error: `{name}` is reserved for the owning-quotation syntax (`{OWNING_QUOTATION_KEYWORD} [ <in> -- <out> ]`) and cannot be used as a {kind} name at line {}, col {}",
             span.line, span.col
         ));
     }
@@ -1526,6 +1537,29 @@ impl PolyBuilder {
 fn tilde_quotation_position_error(span: Span) -> String {
     format!(
         "error: a `~` quotation cannot appear here at line {}, col {} (`~` is only legal as a word's own declared quotation parameter, never a field, output, referent, or extern parameter type)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3h: the `owning` prefix with nothing that opens a quotation effect
+/// after it. `owning` is a type-position keyword, never a type name of its
+/// own, so `owning Foo`, `owning ~[ -- ]` and a bare trailing `owning` all
+/// land here rather than being blamed on the following token.
+fn owning_without_effect_error(span: Span) -> String {
+    format!(
+        "error: `{OWNING_QUOTATION_KEYWORD}` must be followed by a quotation effect (`{OWNING_QUOTATION_KEYWORD} [ <in> -- <out> ]`) at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S3h: an `owning` effect carrying a type variable inside a polymorphic
+/// signature. `PolyType::Quotation` has nowhere to record the owning flavour,
+/// so folding one would silently produce a plain quotation -- and polymorphism
+/// over plain-versus-owning is out of scope, since the type inequality is what
+/// stops an owning closure reaching a combinator that cannot dispose it.
+fn polymorphic_owning_quotation_error(span: Span) -> String {
+    format!(
+        "error: an `{OWNING_QUOTATION_KEYWORD}` quotation effect cannot carry a type variable at line {}, col {} (a generic word may declare a fully concrete `{OWNING_QUOTATION_KEYWORD} [ ... ]` parameter only)",
         span.line, span.col
     )
 }
@@ -2891,6 +2925,40 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+        // P7.S3h: an `owning` slot. Unlike the `&` and `^` arms above, this is
+        // here *only* for the variable-bearing case: the `parse_type_expr`
+        // fallthrough below already folds a fully-concrete `owning` effect
+        // correctly, but it resolves the effect's slots concretely, so
+        // `owning [ 'T -- ]` would be blamed on `'T` as an unknown type when
+        // the real reason is that `PolyType::Quotation` has nowhere to record
+        // the owning flavour, and folding one would silently hand the caller a
+        // plain quotation.
+        if self.owning_quotation_ahead() {
+            let (_, span) = self.expect_word_any_spanned()?;
+            if !self.quotation_effect_opens_here() {
+                return Err(owning_without_effect_error(span));
+            }
+            self.pos += 1;
+            // An `owning` effect is not inline, so `parse_poly_quotation_inner`
+            // has already rejected a row on either side.
+            let RawTy::Quotation(ins, outs, _, None, None) =
+                self.parse_poly_quotation_inner(builder, false, word_is_output)?
+            else {
+                unreachable!("`parse_poly_quotation_inner` returns a row-free quotation here")
+            };
+            let concrete = |row: &[RawTy]| {
+                row.iter()
+                    .map(|r| match r {
+                        RawTy::Concrete(t) => Some(*t),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<Type>>>()
+            };
+            let (Some(ci), Some(co)) = (concrete(&ins), concrete(&outs)) else {
+                return Err(polymorphic_owning_quotation_error(span));
+            };
+            return Ok(RawTy::Concrete(crate::ast::owning_quotation_type(ci, co)));
+        }
         // P7 slice 3a (R1): a generic type applied to poly slots
         // (`Result['T 'E]`, `Box['T]`), intercepted ahead of the
         // `parse_type_expr` fallthrough below -- which resolves arguments
@@ -3427,6 +3495,18 @@ impl<'t> Parser<'t> {
             let ty = self.parse_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
+        // P7.S3h: an `owning` quotation type is likewise nameless, so it too is
+        // recognised before the name-then-optional-`:type` read. `owning` is an
+        // ordinary word to the lexer, so a slot *named* `owning` (`owning :
+        // i64`) is still legal and falls through -- the keyword is reserved
+        // against `type:`/variant names, which shadow the syntax, not against
+        // every use of the spelling.
+        if self.owning_quotation_ahead()
+            && !matches!(self.tokens.get(self.pos + 1), Some((Token::Word(w), _)) if w == ":")
+        {
+            let ty = self.parse_owning_quotation_type_expr()?;
+            return Ok(TypedSlot { name: None, ty });
+        }
         let (text, span) = self.expect_word_any_spanned()?;
         if matches!(self.peek(), Some((Token::Word(w), _)) if w == ":") {
             self.pos += 1;
@@ -3459,10 +3539,42 @@ impl<'t> Parser<'t> {
             self.parse_ref_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             self.parse_owning_cell_type_expr()
+        } else if self.owning_quotation_ahead() {
+            self.parse_owning_quotation_type_expr()
         } else {
             let (name, span) = self.expect_word_any_spanned()?;
             self.resolve_type_or_apply(&name, span)
         }
+    }
+
+    /// P7.S3h: whether the parser is positioned on the `owning` prefix. It is
+    /// not a lexer delimiter, so it arrives as an ordinary word; type-position
+    /// dispatch is first-token only, so every entry point must intercept it
+    /// here rather than let it fall through to a type-name lookup (which
+    /// reports `unknown type 'owning'`).
+    fn owning_quotation_ahead(&self) -> bool {
+        matches!(self.peek(), Some((Token::Word(w), _)) if w == OWNING_QUOTATION_KEYWORD)
+    }
+
+    /// P7.S3h: parse `owning [ <in> -- <out> ]` into a
+    /// `Type::OwningQuotation`. The prefix is its own word token, so the effect
+    /// behind it is read by the ordinary effect reader and nests exactly as a
+    /// plain `[ ... -- ... ]` does.
+    fn parse_owning_quotation_type_expr(&mut self) -> Result<Type, String> {
+        let (_, span) = self.expect_word_any_spanned()?;
+        if !self.quotation_effect_opens_here() {
+            return Err(owning_without_effect_error(span));
+        }
+        let (inputs, outputs) = self.parse_quotation_effect_rows()?;
+        Ok(crate::ast::owning_quotation_type(inputs, outputs))
+    }
+
+    /// Whether the very next token opens a quotation *effect* (a `[` whose
+    /// matching `]` holds a top-depth `--`) rather than an array type or
+    /// anything else. `quotation_type_ahead` requires its caller to have
+    /// already confirmed the `[`, which the `owning` readers have not.
+    fn quotation_effect_opens_here(&self) -> bool {
+        matches!(self.peek(), Some((Token::LBracket, _))) && self.quotation_type_ahead()
     }
 
     /// `^` is not a lexer delimiter, so `^^i64` arrives as one word.
@@ -3638,12 +3750,20 @@ impl<'t> Parser<'t> {
     /// once `quotation_type_ahead` has confirmed a top-depth `--` exists, so
     /// the input-list scan always terminates on it.
     fn parse_quotation_type_expr(&mut self) -> Result<Type, String> {
+        let (inputs, outputs) = self.parse_quotation_effect_rows()?;
+        Ok(crate::ast::quotation_type(inputs, outputs))
+    }
+
+    /// The two rows of `[ <in-types> -- <out-types> ]`, positioned on the `[`.
+    /// Shared by the plain and the `owning` reader so the two spellings can
+    /// never drift apart on what an effect's rows are.
+    fn parse_quotation_effect_rows(&mut self) -> Result<(Vec<Type>, Vec<Type>), String> {
         self.expect(Token::LBracket)?;
         let inputs = self.parse_quot_type_list(true)?;
         self.expect_word("--")?;
         let outputs = self.parse_quot_type_list(false)?;
         self.expect(Token::RBracket)?;
-        Ok(crate::ast::quotation_type(inputs, outputs))
+        Ok((inputs, outputs))
     }
 
     /// One side of a quotation effect: type expressions until the delimiter
@@ -3932,6 +4052,13 @@ impl<'t> Parser<'t> {
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
             return self.parse_ref_type_expr();
+        }
+        // P7.S3h: an `owning` field must *parse*, not be blamed on an unknown
+        // type name: the containment rule that rejects it is
+        // `audit_quotation_type_registries`, which can only see it once the
+        // field resolves to a real `Type::OwningQuotation`.
+        if self.owning_quotation_ahead() {
+            return self.parse_owning_quotation_type_expr();
         }
         let (ty_name, ty_span) = self.expect_field_type_token()?;
         self.resolve_type_or_apply(&ty_name, ty_span)
@@ -7534,6 +7661,97 @@ mod tests {
             module.words[0].effect.inputs[0].ty,
             module.words[2].effect.inputs[0].ty
         );
+    }
+
+    /// P7.S3h: `owning [ ... ]` parses at every type-position entry. Type
+    /// dispatch is first-token only, so each entry needs its own prefix branch
+    /// -- a missing one reports `unknown type 'owning'` rather than building
+    /// the type. Covered here: a word's own slot (`parse_slot`), a struct field
+    /// and an enum variant field (`parse_field_type_expr`), a nested effect row
+    /// and a nested array element (`parse_type_expr`'s recursion), and a poly
+    /// word's slot (`parse_poly_slot`). The *rejection* of the field and
+    /// element positions is the checker's registry audit, so they must parse to
+    /// reach it.
+    #[test]
+    fn owning_quotation_parses_at_every_type_position() {
+        let module = parse_src(
+            ": slot ( owning [ i64 -- ] -- ) drop ;\n\
+             type: S q owning [ -- ] ;\n\
+             type: E | None | Some q owning [ -- ] ;\n\
+             : nested ( [ owning [ -- ] -- ] -- ) drop ;\n\
+             : elem ( [owning [ -- ] 4] -- ) drop ;\n\
+             : poly ( 'T: Copy owning [ -- ] -- 'T ) drop ;\n",
+        )
+        .unwrap();
+        let own_nil = crate::ast::owning_quotation_type(Vec::new(), Vec::new());
+        assert_eq!(
+            module.words[0].effect.inputs[0].ty,
+            crate::ast::owning_quotation_type(vec![Type::I64], Vec::new())
+        );
+        assert_eq!(module.structs[0].fields[0].1, own_nil);
+        assert_eq!(module.enums[0].variants[1].fields[0].1, own_nil);
+        let Type::Quotation(eff) = module.words[1].effect.inputs[0].ty else {
+            panic!("a `[ ... -- ... ]` slot is a quotation effect");
+        };
+        assert_eq!(eff.inputs, vec![own_nil]);
+        let Type::Array(id, _) = module.words[2].effect.inputs[0].ty else {
+            panic!("a `[T N]` slot is an array");
+        };
+        assert_eq!(module.arrays[id.index()].element, own_nil);
+        assert_eq!(
+            module.words[3].poly.as_ref().unwrap().inputs[1],
+            PolyType::Concrete(own_nil)
+        );
+    }
+
+    /// P7.S3h: `owning` is a type-position keyword, not a type name, so a
+    /// following token that opens no effect is blamed on the keyword rather
+    /// than reported as an unknown type one token later.
+    #[test]
+    fn owning_without_a_quotation_effect_is_located() {
+        for src in [
+            ": f ( owning i64 -- ) drop ;",
+            ": f ( owning [i64 4] -- ) drop ;",
+            ": f ( owning ~[ -- ] -- ) drop ;",
+            "type: S q owning i64 ;",
+        ] {
+            let err = parse_src(src).unwrap_err();
+            assert!(
+                err.contains("`owning` must be followed by a quotation effect"),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h: a variable-bearing `owning` effect is rejected rather than
+    /// folded. `PolyType::Quotation` has nowhere to record the owning flavour,
+    /// so folding one would silently hand the caller a plain quotation -- and
+    /// the type inequality between the flavours is the whole safety story.
+    #[test]
+    fn owning_quotation_carrying_a_type_variable_is_rejected() {
+        let err = parse_src(": f ( 'T: Copy owning [ 'T -- ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot carry a type variable"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3h: `owning` is intercepted ahead of every user type registry, so a
+    /// type or variant declared under that name would be unreachable rather
+    /// than merely shadowed -- the same reason `Slice` is reserved.
+    #[test]
+    fn a_type_or_variant_named_owning_is_reserved() {
+        for (src, kind) in [
+            ("type: owning x i64 ;", "type"),
+            ("type: E | owning | Other ;", "variant"),
+        ] {
+            let err = parse_src(src).unwrap_err();
+            assert!(
+                err.contains("is reserved for the owning-quotation syntax")
+                    && err.contains(&format!("as a {kind} name")),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
     }
 
     /// P7 slice 3c (R1.1, phase 4): `!Slice[T]` is the mutable spelling, the

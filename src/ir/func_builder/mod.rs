@@ -49,7 +49,13 @@ fn is_aggregate(ty: IrType, enums: &Enums) -> bool {
         // would have its single slot written by the back edge while the
         // header still reads it (`project_aggregate_return_aliasing`). It
         // takes the stable-slot + staged-blit path every other aggregate does.
-        IrType::Struct(_) | IrType::Array(_) | IrType::Quotation(_) | IrType::Slice(_) => true,
+        // P7.S3h: an owning quotation value is the same interior pointer to
+        // two-slot storage a plain one is, so it stages identically.
+        IrType::Struct(_)
+        | IrType::Array(_)
+        | IrType::Quotation(_)
+        | IrType::OwningQuotation(_)
+        | IrType::Slice(_) => true,
         _ => false,
     }
 }
@@ -127,6 +133,11 @@ pub(super) struct MaterializedQuot {
     /// inline in the `env` word; two or more packed into a stack bundle the
     /// `env` word points at.
     pub(super) captures: Vec<EnvCapture>,
+    /// P7.S3h: whether this is an *owning* closure. Its env is a heap block
+    /// rather than an inline word or a frame bundle, so the body's prologue
+    /// copies every capture out of it and frees it, and the value the boundary
+    /// builds is `IrType::OwningQuotation`.
+    pub(super) owning: bool,
 }
 
 /// 7b/R16: one of a materialized closure's captured locals, as the lowered
@@ -152,6 +163,10 @@ pub(super) struct EnvCapture {
 pub(super) enum EnvPlan {
     None,
     Env(Vec<EnvCapture>),
+    /// P7.S3h: an owning closure's env. The trailing param is the same `Ptr`,
+    /// but it addresses a heap block laid out by `owning_env_slots`, so the
+    /// prologue copies each capture into the frame and frees the block.
+    OwningEnv(Vec<EnvCapture>),
 }
 
 pub(super) struct FuncBuilder<'a> {
@@ -726,6 +741,68 @@ fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value
     }
 }
 
+/// P7.S3h: the byte offset of each capture in an owning closure's heap env
+/// block, plus the block's total size. Each capture occupies its own *storage*
+/// (an aggregate's whole layout, one word for a scalar or a borrow) rounded up
+/// to a word, unlike the plain env's uniform one-word-per-capture bundle: an
+/// owning env holds the captured values themselves, not pointers into a frame
+/// that is about to die. Computed identically on the build side
+/// (`build_owning_env`) and the read side (`bind_owning_env`) from the same
+/// `EnvCapture` list, which the boundary and the body share.
+fn owning_env_slots(b: &FuncBuilder, caps: &[EnvCapture]) -> (Vec<u32>, u32) {
+    let mut offsets = Vec::with_capacity(caps.len());
+    let mut at = 0u32;
+    for cap in caps {
+        offsets.push(at);
+        let size = b.value_size(cap.ty).max(WORD_WIDTH);
+        at += size.div_ceil(WORD_WIDTH) * WORD_WIDTH;
+    }
+    (offsets, at)
+}
+
+/// P7.S3h: an owning closure body's prologue. Copy every capture out of the
+/// heap env into this frame, bind it as a local, then free the block.
+///
+/// **The free is at entry, not at the return**, and that is the whole reason
+/// the copy-out is unconditional. Once each capture is frame-local the body is
+/// an ordinary word body: it consumes its captures exactly as a word consumes
+/// a linear parameter, and no value it computes or returns can alias storage
+/// that is already gone. Freeing at the return instead would have to prove
+/// that nothing reachable from the returned row points into the block, on
+/// every exit path -- a proof this slice has no machinery for, and one an
+/// `owning [ -- Spy ]` body (return the capture rather than dispose it) would
+/// immediately break.
+fn bind_owning_env(b: &mut FuncBuilder, caps: &[EnvCapture], env: Value) {
+    let (offsets, total) = owning_env_slots(b, caps);
+    for (cap, offset) in caps.iter().zip(&offsets) {
+        let slot = b.field_ptr(env, *offset);
+        let bound = match cap.referent {
+            // A borrow is one word: the pointer itself, rebound with the
+            // referent shape `record_reference` would have given it.
+            Some(referent) => {
+                let word = b.fresh_value(IrType::Ptr);
+                b.push_instr(Instr::FieldLoad(word, slot));
+                b.record_reference(word, referent, cap.ref_mutable);
+                word
+            }
+            // The same copy-out an owning cell's `^>` performs: an aggregate
+            // gets a fresh frame slot and a blit, so nothing survives into the
+            // body as an interior pointer to the block below.
+            None => b.load_owned_payload(slot, cap.ty),
+        };
+        b.locals.push((cap.name.clone(), bound));
+    }
+    if total > 0 {
+        let size_v = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(size_v, total as i64));
+        b.push_instr(Instr::Call(
+            None,
+            FREE_SYMBOL.to_string(),
+            vec![env, size_v],
+        ));
+    }
+}
+
 /// The shared word-body lowering, parameterized by name/effect/body so a
 /// monomorphized instantiation (R9) can lower a polymorphic word's body under
 /// its mangled symbol against a `θ`-substituted concrete effect. The
@@ -760,7 +837,7 @@ pub(super) fn lower_word_parts(
     // parameter after its declared inputs (even when it captures nothing, so
     // `lower_indirect_call` can pass the env slot uniformly).
     let n_declared = params.len();
-    if matches!(env_plan, EnvPlan::Env(_)) {
+    if !matches!(env_plan, EnvPlan::None) {
         params.push(IrType::Ptr);
     }
     let bundle = bundle_of(&effect.outputs, regs.structs);
@@ -812,10 +889,10 @@ pub(super) fn lower_word_parts(
     // 7b/R17: the trailing env param is not a stack input; split it off. Its
     // value binds the captured local (if any); the declared inputs alone seed
     // the stack.
-    let env_value = if matches!(env_plan, EnvPlan::Env(_)) {
-        Some(entry_values[n_declared])
-    } else {
+    let env_value = if matches!(env_plan, EnvPlan::None) {
         None
+    } else {
+        Some(entry_values[n_declared])
     };
     let stack_inputs: Vec<Value> = entry_values[..n_declared].to_vec();
 
@@ -833,8 +910,8 @@ pub(super) fn lower_word_parts(
     // body runs, so its `Call` references resolve. With one capture the env
     // word *is* the capture (inline); with two or more the env word is a
     // pointer to a stack bundle, each capture read from its word offset.
-    if let (Some(env), EnvPlan::Env(caps)) = (env_value, &env_plan) {
-        match caps.as_slice() {
+    match (env_value, &env_plan) {
+        (Some(env), EnvPlan::Env(caps)) => match caps.as_slice() {
             [] => {}
             [cap] => {
                 let bound = bind_env_capture(&mut b, cap, env);
@@ -849,7 +926,9 @@ pub(super) fn lower_word_parts(
                     b.locals.push((cap.name.clone(), bound));
                 }
             }
-        }
+        },
+        (Some(env), EnvPlan::OwningEnv(caps)) => bind_owning_env(&mut b, caps, env),
+        _ => {}
     }
 
     // Every input starts on the stack (D6: the header phi outputs when
@@ -969,7 +1048,10 @@ pub(super) fn lower_materialized(
             resolved_variant_fields,
             poly_arities,
             combinators,
-            EnvPlan::Env(m.captures),
+            match m.owning {
+                true => EnvPlan::OwningEnv(m.captures),
+                false => EnvPlan::Env(m.captures),
+            },
         ));
     }
     out

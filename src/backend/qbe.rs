@@ -381,7 +381,12 @@ fn width(ty: IrType, layouts: Layouts) -> &'static str {
         // A code handle and a quotation value are each one pointer in a
         // register; the quotation's `:Q{n}` aggregate type is only spelled in
         // ABI/member positions.
-        IrType::Code | IrType::Quotation(_) => "l",
+        // P7.S3h: an owning quotation shares the plain one's representation
+        // exactly -- same two-slot aggregate, same `:Q{n}` symbol -- so every
+        // backend spelling pairs the two variants. Only the env *storage* the
+        // frontend builds differs, and that decision is made and finished
+        // before lowering hands anything to this file.
+        IrType::Code | IrType::Quotation(_) | IrType::OwningQuotation(_) => "l",
         // P7 slice 3c (R2.2): a slice value is a pointer to its two-slot
         // `{ptr, len}` storage in a register, like every other aggregate; its
         // `SLICE_TYPE_SYMBOL` type is only spelled in ABI/member positions.
@@ -400,7 +405,9 @@ fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Enum(id) if layouts.enums[id.index()].is_scalar => width(ty, layouts).to_string(),
         IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
-        IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
+        IrType::Quotation(sig) | IrType::OwningQuotation(sig) => {
+            format!(":Q{}", quot_index(layouts, sig))
+        }
         // P7 slice 3c (R3): the soundness-critical wildcard. A slice crossing
         // a param/return/argument boundary is a 16-byte aggregate, so it must
         // be spelled `:{SLICE_TYPE_SYMBOL}` for QBE to apply its by-value
@@ -435,7 +442,14 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Struct(id) => format!(":{}", qbe_name(layouts.structs[id.index()].name)),
         IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
-        IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
+        // P7.S3h: an owning quotation is banned from every field position by
+        // the containment rule, so this arm is unreachable for it -- but it is
+        // spelled rather than left to a refusal, because the ban is a checker
+        // rule and this file must not encode a second, silently divergent
+        // copy of it.
+        IrType::Quotation(sig) | IrType::OwningQuotation(sig) => {
+            format!(":Q{}", quot_index(layouts, sig))
+        }
         // P7 slice 3c (R5): a slice is banned from every field position, so
         // unlike the aggregates above it is never a struct member. This arm
         // refuses rather than spelling `:{SLICE_TYPE_SYMBOL}`, so the ban is
@@ -481,6 +495,7 @@ fn field_load_op(ty: IrType, layouts: Layouts) -> (&'static str, &'static str) {
         | IrType::Enum(_)
         | IrType::Array(_)
         | IrType::Quotation(_)
+        | IrType::OwningQuotation(_)
         | IrType::Slice(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
@@ -511,6 +526,7 @@ fn field_store_op(ty: IrType, layouts: Layouts) -> &'static str {
         | IrType::Enum(_)
         | IrType::Array(_)
         | IrType::Quotation(_)
+        | IrType::OwningQuotation(_)
         | IrType::Slice(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
@@ -1293,7 +1309,7 @@ fn emit_instr(
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
             }
-            IrType::Code | IrType::Quotation(_) => {
+            IrType::Code | IrType::Quotation(_) | IrType::OwningQuotation(_) => {
                 unreachable!("a quotation/code is not a printable scalar; checker rejects it")
             }
             // P7 slice 3c (R2.2/R7): the checker's `.` allowlist deliberately

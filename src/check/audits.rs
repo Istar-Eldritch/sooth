@@ -233,7 +233,9 @@ pub(crate) fn audit_word_quotation_positions(
         // materialization boundary, checked at the exit row by `check_outputs`).
         // The poly path below still rejects a quotation output: polymorphic
         // quotation *values* are out of scope this slice.
-        if matches!(slot.ty, Type::Quotation(_)) {
+        // P7.S3h: an `owning` output is *the* way to hand a caller an owning
+        // closure, so it joins the plain quotation as a legal output position.
+        if matches!(slot.ty, Type::Quotation(_) | Type::OwningQuotation(_)) {
             continue;
         }
         reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
@@ -446,6 +448,61 @@ fn reject_poly_quotation_anywhere(
         )),
         // P7 slice 3b: a body-only marker, never in a declared signature.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
+    }
+}
+
+/// P7.S3h: an owning closure cannot cross a *splice* boundary. A spliced
+/// (`inline`) word's quotation parameter is never a runtime value -- the
+/// caller's literal is inlined in place, so the callee's `call` is a splice and
+/// the heap env this slice builds is never constructed at all. That makes the
+/// declaration a lie in both directions: the splice route compares only the
+/// inline-vs-plain axis, so a plain `[ ... ]` literal silently satisfies an
+/// `owning` slot, and an already-materialized owning value handed to the same
+/// slot would be forwarded into a splice with no body to inline. Rejecting the
+/// *declaration* is what keeps `OwningQuotation(e) != Quotation(e)`
+/// load-bearing rather than decorative.
+///
+/// A *generic* signature is rejected for a neighbouring reason: a polymorphic
+/// call site's quotation arguments are materialized off `CallInst::quot_inputs`,
+/// which records the effect and not the flavour, so an owning parameter there
+/// would be built with a plain closure's frame env. Polymorphism over the
+/// flavour is out of scope this slice, so the signature is refused rather than
+/// half-supported.
+///
+/// Called *after* `check_types` rather than from the pre-pass audit: an owning
+/// parameter is what makes the inherited linear machinery observable, so
+/// `dup`ping such a binding or forgetting it must report its own error rather
+/// than be masked by this one.
+pub(crate) fn reject_owning_quotation_declarations(word: &WordDef) -> Result<(), String> {
+    let name = crate::resolve::demangle_word(&word.name);
+    // An `owning` effect always folds to `Concrete`: the parser rejects a
+    // variable-bearing one outright, so there is no `PolyType::Quotation`
+    // spelling of it to look through.
+    let poly = word.poly.as_ref().and_then(|sig| {
+        sig.inputs.iter().find_map(|pt| match pt {
+            PolyType::Concrete(Type::OwningQuotation(eff)) => Some(*eff),
+            _ => None,
+        })
+    });
+    if let Some(eff) = poly {
+        return Err(format!(
+            "error: `{name}` is generic and declares `{}`: a polymorphic call site materializes its quotation arguments from the declared effect alone, which does not carry the owning flavour",
+            eff.name_static
+        ));
+    }
+    if !crate::check::is_combinator(word) {
+        return Ok(());
+    }
+    let mono = word.effect.inputs.iter().find_map(|slot| match slot.ty {
+        Type::OwningQuotation(eff) => Some(eff),
+        _ => None,
+    });
+    match mono {
+        Some(eff) => Err(format!(
+            "error: `{name}` is spliced (`inline`) and declares `{}`: an owning closure is a runtime value, and a spliced quotation parameter is never materialized, so it cannot carry the disposal obligation the type names",
+            eff.name_static
+        )),
+        None => Ok(()),
     }
 }
 
@@ -850,5 +907,139 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("drop"), "unexpected message: {err}");
         assert!(err.contains("output"), "unexpected message: {err}");
+    }
+
+    /// P7.S3h, the containment rule, and the reason it needed **no new gate**:
+    /// `reject_quotation_type_position` dispatches on `is_quotation_type`,
+    /// which now answers `Some` for an owning quotation, while the
+    /// legal-position carve-outs above match `Type::Quotation` structurally.
+    /// So an owning quotation in an aggregate position falls straight past the
+    /// carve-out into the existing rejection.
+    ///
+    /// This is soundness-critical, not tidiness. An `owning` struct field makes
+    /// its container non-`Copy`, so `drop`ping the container is a legal
+    /// consumption -- but `emit_drop`'s `_ => {}` swallows a quotation and
+    /// `field_is_linear`/`layout_field_is_linear` answer false for one, so
+    /// `synthesize_aggregate_destructors` synthesizes nothing at all. The
+    /// container's `drop` is a no-op: the obligation is discharged, the
+    /// capture's own `drop` never runs, and the env block never gets freed.
+    /// Widening either carve-out to admit `OwningQuotation` reopens exactly
+    /// that hole, and this is the test that catches it.
+    ///
+    /// One aggregate position is **not** on this list, and honestly so: a
+    /// word's synthesized multi-output bundle struct is interned by
+    /// `intern_output_bundles` *after* these type-level audits run, so an
+    /// `owning` output legitimately reaches that struct as a field. It stays
+    /// sound because the bundle is a destructor-free transient ABI carrier
+    /// (`is_bundle`-flagged, no synthesized `drop`), unpacked at the call site
+    /// the instant the word returns: the owning value flows straight back out
+    /// as a linear stack value, so its call-once obligation is never handed to
+    /// a container that could no-op its disposal. That accept case is pinned
+    /// end-to-end (builds and runs) by
+    /// `an_owning_closure_as_one_of_several_outputs_builds_and_runs` in
+    /// tests/phase7_slice3h.rs, so it is deliberately not duplicated here.
+    #[test]
+    fn owning_quotation_is_rejected_in_every_aggregate_position() {
+        for (src, position) in [
+            (
+                "type: Box q owning [ -- ] ;\n",
+                "the field `q` of struct `Box",
+            ),
+            (
+                "type: E | None | Some q owning [ -- ] ;\n",
+                "the field `q` of enum variant `E",
+            ),
+            (
+                ": f ( ^ owning [ -- ] -- ) drop ;\n",
+                "an owned-cell payload",
+            ),
+            (
+                ": f ( & owning [ -- ] -- ) drop ;\n",
+                "a reference referent",
+            ),
+            (
+                "extern: f ( owning [ -- ] -- ) \"f\" ;\n",
+                "an `extern:` boundary type of `f",
+            ),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("cannot appear as") && err.contains(position),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h: an element rejects because the owning marker makes it linear,
+    /// and `check_no_linear_array_elements`/`check_slice_element_gate` refuse
+    /// any element that is not `is_copy`. Those gates run before the audit, so
+    /// this pins which one speaks.
+    ///
+    /// The two positions are *not* equally protected, and the difference
+    /// matters to phase 3: an array element is also swept by the audit above,
+    /// so deleting the array gate still rejects, but
+    /// `audit_quotation_type_registries` never walks `module.slices` at all --
+    /// measured, deleting the slice gate reaches `ir_type_of` and ICEs. The
+    /// slice gate is the only thing holding that position.
+    #[test]
+    fn owning_quotation_element_is_rejected_as_linear() {
+        for src in [
+            ": f ( [owning [ -- ] 4] -- ) drop ;\n",
+            ": f ( Slice[owning [ -- ]] -- ) drop ;\n",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("owning [ -- ]")
+                    && err.contains("is linear and has no `Copy` instance"),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h: the two declaration positions phase 3 made legal -- a word's
+    /// declared `owning` input and its declared `owning` output -- reach
+    /// `ir_type_of` through signature lowering, so "it checks" is the whole
+    /// point here.
+    #[test]
+    fn declared_owning_quotation_positions_are_accepted() {
+        for src in [
+            ": f ( owning [ -- ] -- ) call ;\n",
+            ": mk ( -- owning [ -- ] ) [ ] ;\n",
+        ] {
+            check_src(src).unwrap_or_else(|e| panic!("`{src}` should check: {e}"));
+        }
+    }
+
+    /// P7.S3h: the two routes that never materialize a quotation argument, and
+    /// so cannot honour the flavour the type declares.
+    ///
+    /// A spliced (`inline`) word inlines the caller's literal in place: the
+    /// splice route compares only the inline-versus-plain axis, so with this
+    /// rejection stubbed out a plain `[ 1 . ]` literal satisfies an `owning`
+    /// slot and builds. A generic word's call site materializes off
+    /// `CallInst::quot_inputs`, which records the effect and not the flavour,
+    /// so it would build a plain closure's frame env for an owning parameter.
+    /// Both are what keeps `OwningQuotation(e) != Quotation(e)` load-bearing.
+    #[test]
+    fn an_owning_parameter_is_rejected_where_it_would_never_be_materialized() {
+        let spliced = check_src(": f inline ( owning [ -- ] -- ) | q | q call ;\n").unwrap_err();
+        assert!(
+            spliced.contains("`f` is spliced (`inline`) and declares `owning [ -- ]`"),
+            "unexpected message: {spliced}"
+        );
+        // The generic body has to be *well-formed* to reach this guard, which
+        // runs after `check_types`: a body that `call`s the parameter directly
+        // is rejected by the poly walk first, and one that forgets it by the
+        // inherited linear check. Forwarding it to a monomorphic consumer is
+        // the shape that gets all the way through.
+        let generic = check_src(
+            ": use ( owning [ -- ] -- ) call ;\n\
+             : g ( 'T: Copy owning [ -- ] -- 'T ) | x q | q use x ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            generic.contains("`g` is generic and declares `owning [ -- ]`"),
+            "unexpected message: {generic}"
+        );
     }
 }
