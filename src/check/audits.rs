@@ -956,11 +956,17 @@ mod tests {
         }
     }
 
-    /// P7.S3h: an array or slice element is *doubly* covered -- besides the
-    /// audit above, `check_no_linear_array_elements`/`check_slice_element_gate`
-    /// reject any element that is not `is_copy`, and being linear is exactly
-    /// what the owning marker makes it. Those gates run first, so this pins
-    /// which one speaks; deleting either leaves the other rejecting.
+    /// P7.S3h: an element rejects because the owning marker makes it linear,
+    /// and `check_no_linear_array_elements`/`check_slice_element_gate` refuse
+    /// any element that is not `is_copy`. Those gates run before the audit, so
+    /// this pins which one speaks.
+    ///
+    /// The two positions are *not* equally protected, and the difference
+    /// matters to phase 3: an array element is also swept by the audit above,
+    /// so deleting the array gate still rejects, but
+    /// `audit_quotation_type_registries` never walks `module.slices` at all --
+    /// measured, deleting the slice gate reaches `ir_type_of` and ICEs. The
+    /// slice gate is the only thing holding that position.
     #[test]
     fn owning_quotation_element_is_rejected_as_linear() {
         for src in [
