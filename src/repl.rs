@@ -3049,6 +3049,15 @@ impl Session {
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.
         check::audit_word_quotation_positions(&word, &self.structs, &self.enums, &self.arrays)?;
+        // P7.S3h (phase 2): before the combinator retention route below, which
+        // is where an `owning` parameter would otherwise land -- it makes the
+        // word a combinator, so the session keeps its body and re-splices it,
+        // and the splice route compares a caller's literal on the
+        // inline-versus-ordinary axis only, not plain-versus-owning. Without
+        // this line the session accepts `: f inline ( owning [ -- ] -- )` and
+        // runs `[ 1 . ] f`, admitting a plain literal into an owning slot. The
+        // ordinary-parameter shape is declined below either way.
+        check::reject_owning_quotation_declarations(&word)?;
         // Slice 11 (R3): the same per-word `inline` rejections native `check`
         // runs as a pre-pass, at the REPL's own per-word gate -- the poly half
         // in particular, which the retention route below would otherwise carry

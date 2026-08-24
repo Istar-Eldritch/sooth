@@ -39,7 +39,7 @@ mod word_families;
 use self::audits::*;
 pub(crate) use self::audits::{
     audit_quotation_type_registries, audit_word_quotation_positions, drop_overload_struct_id,
-    find_drop_overloads,
+    find_drop_overloads, reject_owning_quotation_declarations,
 };
 pub use self::builtins::builtin_table;
 use self::builtins::*;
@@ -995,6 +995,12 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;
+    // P7.S3h (phase 2): last, after every type-level check, so a real type
+    // error at an `owning` slot is reported instead of being masked by the
+    // not-built-yet rejection. Phase 3 deletes this and supplies the `IrType`.
+    for w in &module.words {
+        reject_owning_quotation_declarations(w)?;
+    }
     Ok(trait_obligations)
 }
 

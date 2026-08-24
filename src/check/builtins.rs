@@ -242,6 +242,14 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
         // would make a `!Slice[T]` freely duplicable and break exclusivity
         // outright, which is why this arm is anchored rather than left to it.
         Type::Slice(_, mutable, _) => !mutable,
+        // P7.S3h: an `owning` closure carries a disposal obligation for what it
+        // captured, and only running the body can discharge it -- so the value
+        // is linear, and `call` (which pops its receiver) is its consuming use.
+        // Anchored above the wildcard for the same reason `!Slice[T]` is: the
+        // wildcard would make it freely duplicable and forgettable, which is
+        // exactly the leak this marker exists to prevent. Plain
+        // `Type::Quotation` still falls to the wildcard and stays `Copy`.
+        Type::OwningQuotation(_) => false,
         _ => true,
     }
 }
@@ -779,6 +787,26 @@ mod tests {
         // silently and is owed no `drop` (R12, via `is_ref`).
         assert!(!is_linear(shared, &[], &[], &[]));
         assert!(!is_linear(mutable, &[], &[], &[]));
+    }
+
+    /// P7.S3h: the marker's whole mechanism. `owning [ ... ]` is not `Copy`,
+    /// so it *is* linear -- and every exactly-once obligation (move tracking,
+    /// the `dup` gate, the forgotten-value error, consumed-on-every-path) is
+    /// inherited from that one answer with no code of its own. The plain
+    /// quotation stays `Copy`, so no program that exists today gains an
+    /// obligation.
+    ///
+    /// Deleting the `OwningQuotation` arm drops it to the `_ => true`
+    /// wildcard, which fails here: an owning closure would be freely
+    /// duplicated and silently forgotten, leaking whatever it captured.
+    #[test]
+    fn is_copy_owning_quotation_is_linear_plain_quotation_is_copy() {
+        let own = crate::ast::owning_quotation_type(vec![Type::I64], Vec::new());
+        let plain = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(!is_copy(own, &[], &[], &[]));
+        assert!(is_linear(own, &[], &[], &[]));
+        assert!(is_copy(plain, &[], &[], &[]));
+        assert!(!is_linear(plain, &[], &[], &[]));
     }
 
     /// P7 slice 3c (R5): what keeps the declaration-level output ban covering

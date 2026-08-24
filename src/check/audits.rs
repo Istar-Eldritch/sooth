@@ -233,6 +233,17 @@ pub(crate) fn audit_word_quotation_positions(
         // materialization boundary, checked at the exit row by `check_outputs`).
         // The poly path below still rejects a quotation output: polymorphic
         // quotation *values* are out of scope this slice.
+        // P7.S3h: an `owning` output is a legitimate position -- phase 3 makes
+        // it *the* way to hand a caller an owning closure -- so it gets the
+        // not-built-yet rejection rather than the permanent position one.
+        // Reported here rather than deferred like the input half below because
+        // nothing useful happens by letting the exit row check first: every
+        // materialization boundary matches `Type::Quotation` structurally, so a
+        // literal at an `owning` output is blamed for leaving a quotation on
+        // the stack, which is the wrong story.
+        if let Type::OwningQuotation(eff) = slot.ty {
+            return Err(owning_quotation_unrepresented_error(word, eff));
+        }
         if matches!(slot.ty, Type::Quotation(_)) {
             continue;
         }
@@ -446,6 +457,51 @@ fn reject_poly_quotation_anywhere(
         )),
         // P7 slice 3b: a body-only marker, never in a declared signature.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
+    }
+}
+
+/// P7.S3h (phase 2): an `owning` quotation type-checks, but has no runtime
+/// representation yet -- `ir_type_of` has no arm for it. Shared by the two
+/// declaration positions phase 3 makes legal, a word's declared input and its
+/// declared output; every other position (a field, an element, a cell payload,
+/// a referent, an `extern:` boundary, a poly output) keeps its own permanent
+/// rejection, since routing those through this message would silently legalize
+/// them the moment phase 3 deletes it.
+fn owning_quotation_unrepresented_error(word: &str, eff: &'static QuotEffect) -> String {
+    format!(
+        "error: `{word}` declares `{}`, which has no runtime representation this slice: an owning closure's env storage and disposal are not built yet",
+        eff.name_static
+    )
+}
+
+/// P7.S3h (phase 2): the *input* half of the not-built-yet guard. A declared
+/// `owning` parameter reaches `ir_type_of` through signature lowering
+/// (`lower_word_parts`) without ever crossing a materialization boundary, so
+/// the guard has to cover the declaration, not just the capture.
+///
+/// Called *after* `check_types` rather than from the pre-pass audit, which is
+/// why it is a separate entry point from the output half: an owning parameter
+/// is what makes the inherited linear machinery observable, so `dup`ping such a
+/// binding, forgetting it, or handing a plain literal to the word must report
+/// its own error rather than be masked by this one.
+pub fn reject_owning_quotation_declarations(word: &WordDef) -> Result<(), String> {
+    let name = crate::resolve::demangle_word(&word.name);
+    let mono = word.effect.inputs.iter().find_map(|slot| match slot.ty {
+        Type::OwningQuotation(eff) => Some(eff),
+        _ => None,
+    });
+    let owning = mono.or_else(|| {
+        word.poly.as_ref()?.inputs.iter().find_map(|pt| match pt {
+            // An `owning` effect always folds to `Concrete`: the parser rejects
+            // a variable-bearing one outright, so there is no
+            // `PolyType::Quotation` spelling of it to look through.
+            PolyType::Concrete(Type::OwningQuotation(eff)) => Some(*eff),
+            _ => None,
+        })
+    });
+    match owning {
+        Some(eff) => Err(owning_quotation_unrepresented_error(name, eff)),
+        None => Ok(()),
     }
 }
 
@@ -850,5 +906,94 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("drop"), "unexpected message: {err}");
         assert!(err.contains("output"), "unexpected message: {err}");
+    }
+
+    /// P7.S3h, the containment rule, and the reason it needed **no new gate**:
+    /// `reject_quotation_type_position` dispatches on `is_quotation_type`,
+    /// which now answers `Some` for an owning quotation, while the
+    /// legal-position carve-outs above match `Type::Quotation` structurally.
+    /// So an owning quotation in an aggregate position falls straight past the
+    /// carve-out into the existing rejection.
+    ///
+    /// This is soundness-critical, not tidiness. An `owning` struct field makes
+    /// its container non-`Copy`, so `drop`ping the container is a legal
+    /// consumption -- but `emit_drop`'s `_ => {}` swallows a quotation and
+    /// `field_is_linear`/`layout_field_is_linear` answer false for one, so
+    /// `synthesize_aggregate_destructors` synthesizes nothing at all. The
+    /// container's `drop` is a no-op: the obligation is discharged, the
+    /// capture's own `drop` never runs, and the env block never gets freed.
+    /// Widening either carve-out to admit `OwningQuotation` reopens exactly
+    /// that hole, and this is the test that catches it.
+    #[test]
+    fn owning_quotation_is_rejected_in_every_aggregate_position() {
+        for (src, position) in [
+            (
+                "type: Box q owning [ -- ] ;\n",
+                "the field `q` of struct `Box",
+            ),
+            (
+                "type: E | None | Some q owning [ -- ] ;\n",
+                "the field `q` of enum variant `E",
+            ),
+            (
+                ": f ( ^ owning [ -- ] -- ) drop ;\n",
+                "an owned-cell payload",
+            ),
+            (
+                ": f ( & owning [ -- ] -- ) drop ;\n",
+                "a reference referent",
+            ),
+            (
+                "extern: f ( owning [ -- ] -- ) \"f\" ;\n",
+                "an `extern:` boundary type of `f",
+            ),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("cannot appear as") && err.contains(position),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h: an array or slice element is *doubly* covered -- besides the
+    /// audit above, `check_no_linear_array_elements`/`check_slice_element_gate`
+    /// reject any element that is not `is_copy`, and being linear is exactly
+    /// what the owning marker makes it. Those gates run first, so this pins
+    /// which one speaks; deleting either leaves the other rejecting.
+    #[test]
+    fn owning_quotation_element_is_rejected_as_linear() {
+        for src in [
+            ": f ( [owning [ -- ] 4] -- ) drop ;\n",
+            ": f ( Slice[owning [ -- ]] -- ) drop ;\n",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("owning [ -- ]")
+                    && err.contains("is linear and has no `Copy` instance"),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h phase 2: the not-built-yet guard, at both entries. A declared
+    /// `owning` output is rejected in this audit's own pre-pass; a declared
+    /// `owning` input is rejected after `check_types` instead, so the linear
+    /// machinery an owning parameter makes observable reports first. Neither
+    /// path may reach `ir_type_of`, whose arm is an ICE until phase 3.
+    #[test]
+    fn declared_owning_quotation_is_rejected_as_unrepresented() {
+        for src in [
+            ": f ( owning [ -- ] -- ) call ;\n",
+            ": mk ( -- owning [ -- ] ) [ ] ;\n",
+            ": g ( 'T: Copy owning [ -- ] -- 'T ) drop ;\n",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("declares `owning [ -- ]`")
+                    && err.contains("no runtime representation this slice"),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
     }
 }

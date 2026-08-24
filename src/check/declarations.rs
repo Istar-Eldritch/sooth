@@ -1502,8 +1502,11 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // a value-containment node; like a reference it closes no size cycle.
         // Slice 10a: a `~` is never a field (it cannot be materialized), so it
         // reaches this recursion graph only vacuously; it too is a leaf.
+        // P7.S3h: an `owning` quotation is never a field either (the
+        // containment rule), so it is vacuous here for the same reason.
         | Type::Quotation(_)
-        | Type::InlineQuotation(_) => None,
+        | Type::InlineQuotation(_)
+        | Type::OwningQuotation(_) => None,
     }
 }
 

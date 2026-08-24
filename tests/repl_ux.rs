@@ -266,3 +266,47 @@ fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
         "expected the drop override's `twice`-doubled `3` to print, not a panic: {out}"
     );
 }
+
+/// P7.S3h phase 2: the `owning` rejections the REPL must run itself, with the
+/// `inline` line first because it is the load-bearing one. An `owning`
+/// parameter makes a word a combinator, so the session takes the *retention*
+/// route: it keeps the body as raw terms and re-splices it, and the splice
+/// route compares a caller's literal only on the inline-versus-ordinary axis,
+/// not on plain-versus-owning. Measured with the guard stubbed out, the session
+/// prints `defined f` and then happily runs `[ 1 . ] f`, admitting a plain
+/// literal into an `owning` slot -- the type inequality this marker rests on,
+/// gone. The ordinary-parameter line below is declined by the pre-existing
+/// quotation-parameter gate either way, so the guard only sharpens its message.
+/// The `owning` field is the containment rule at the REPL. The session has to
+/// survive all three, which is what the trailing arithmetic line pins.
+#[test]
+fn repl_owning_quotation_declarations_are_errors_not_crashes() {
+    let out = run_session(&[
+        ": f inline ( owning [ -- ] -- ) | q | q call ;",
+        "[ 1 . ] f",
+        ": g ( owning [ -- ] -- ) call ;",
+        "type: Box q owning [ -- ] ;",
+        "1 2 add .",
+    ]);
+    assert_eq!(
+        out.matches("no runtime representation this slice").count(),
+        2,
+        "expected the not-built-yet rejection for both `f` and `g`, got: {out}"
+    );
+    assert!(
+        out.contains("cannot appear as the field `q` of struct `Box`"),
+        "expected the containment rejection for the field, got: {out}"
+    );
+    assert!(
+        !out.contains("defined f") && !out.contains("defined g"),
+        "neither word may be defined: {out}"
+    );
+    assert!(
+        out.contains("unknown word `f`"),
+        "the call line must find no `f` to splice the plain literal into: {out}"
+    );
+    assert!(
+        out.contains("3"),
+        "the session must survive every rejection: {out}"
+    );
+}

@@ -329,6 +329,18 @@ pub fn ir_type_of(ty: Type) -> IrType {
                 "a `~` inline quotation never reaches the backend (it cannot be materialized)"
             )
         }
+        // P7.S3h (phase 2): an `owning` quotation type-checks but has no
+        // representation yet. Unlike the `~` arm above this is not permanent:
+        // phase 3 gives it a real `IrType`. Until then
+        // `reject_owning_quotation_declarations` rejects every declaration
+        // position lowering can read, which is what keeps this arm unreached
+        // -- a declared `owning` parameter reaches here through signature
+        // lowering without ever crossing a materialization boundary.
+        Type::OwningQuotation(_) => {
+            unreachable!(
+                "an `owning` quotation has no representation this slice (every declaration position is rejected check-side)"
+            )
+        }
         // Phase 6 slice 3 (R6): a variant is represented identically to its
         // enum at the backend -- only the frontend distinguishes them, so a
         // `Type::Variant` erases to the same `IrType::Enum(id)` its parent

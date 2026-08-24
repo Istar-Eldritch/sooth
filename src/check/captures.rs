@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::OWNING_QUOTATION_KEYWORD;
 
 /// R6 (Q1): does the quotation `body` read any name in `enclosing` that the
 /// body does not itself bind? The cheap boolean the D3 materialization line
@@ -46,10 +47,22 @@ pub(super) fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>
 /// (`:5501`): the same "a local of this frame ... does not survive" shape, one
 /// frame instead of one loop iteration. Fires for `make-a` (R15) and, in
 /// Phase 2, for a frame capture escaping through a returned carrier (R22).
-pub(super) fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str) -> String {
+///
+/// P7.S3h: a *linear* capture gets the remedy named. `owning [ ... ]` is a
+/// boundary that owns its captures and disposes them by running the body, so
+/// it is exactly the fix here -- and it is not the fix for a `Copy` aggregate
+/// or a borrow, whose problem is a pointer into dead frame storage that no
+/// disposal obligation addresses, so those keep the bare message.
+pub(super) fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str, linear: bool) -> String {
     let _ = ctx;
+    let remedy = match linear {
+        true => format!(
+            "\n  declare the boundary `{OWNING_QUOTATION_KEYWORD} [ ... ]` to hand the closure ownership of `{name}`, so calling it disposes `{name}`"
+        ),
+        false => String::new(),
+    };
     format!(
-        "error: an escaping closure captures `{name}`, a local of this frame, whose storage does not survive the return (line {})",
+        "error: an escaping closure captures `{name}`, a local of this frame, whose storage does not survive the return (line {}){remedy}",
         span.line,
     )
 }
@@ -240,6 +253,7 @@ pub(super) fn check_capture_admission(
     escaping: bool,
     span: Span,
     ctx: &Ctx,
+    arrays: &[ArrayDecl],
     prov: &mut Provenance,
     scope: &Scope,
 ) -> Result<Option<SurvivingCaptureSetId>, String> {
@@ -283,7 +297,11 @@ pub(super) fn check_capture_admission(
             CaptureClass::Scalar => {}
             CaptureClass::FrameRooted => {
                 if escaping {
-                    return Err(past_owning_frame_error(ctx, span, name));
+                    // `arrays` is threaded in for exactly this: `is_linear`
+                    // resolves an array element through the registry, and `Ctx`
+                    // exposes only `structs`/`enums`.
+                    let linear = is_linear(b.ty, ctx.structs(), enums, arrays);
+                    return Err(past_owning_frame_error(ctx, span, name, linear));
                 }
                 members.push(SurvivingCapture {
                     name: name.clone(),
@@ -340,7 +358,7 @@ pub(super) fn materialize_quotation_at_boundary(
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
     let surviving = if body_captures_enclosing(&body, &enclosing) {
-        check_capture_admission(id, escaping, span, ctx, prov, scope)?
+        check_capture_admission(id, escaping, span, ctx, arrays, prov, scope)?
     } else {
         None
     };
@@ -693,7 +711,7 @@ mod tests {
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
         let admit = |prov: &mut Provenance, escaping, scope: &Scope| {
-            check_capture_admission(QuotId(0), escaping, span, &ctx, prov, scope)
+            check_capture_admission(QuotId(0), escaping, span, &ctx, &arrays, prov, scope)
         };
 
         // No real capture: an empty set, and a free global not in scope, both
@@ -770,6 +788,70 @@ mod tests {
             "the all-scalar 2-capture stack bundle marks its set as a bundle"
         );
     }
+    /// P7.S3h: the remedy line is conditioned on linearity rather than bolted
+    /// onto every past-owning-frame rejection. `owning [ ... ]` is the fix for
+    /// a *linear* capture, because an owning closure takes ownership and
+    /// disposes it by running; it fixes nothing for a `Copy` aggregate, whose
+    /// problem is a pointer into dead frame storage that no disposal obligation
+    /// addresses. Both directions, since dropping the condition would put a
+    /// wrong remedy on the `Copy` case.
+    #[test]
+    fn past_owning_frame_names_owning_only_for_a_linear_capture() {
+        let structs = vec![
+            StructDecl {
+                name: "Spy".to_string(),
+                name_static: "Spy",
+                fields: vec![("tag".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: true,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "P".to_string(),
+                name_static: "P",
+                fields: vec![("x".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let cases = [
+            (Type::Struct(StructId::from_index(0), "Spy"), true),
+            (Type::Struct(StructId::from_index(1), "P"), false),
+        ];
+        for (ty, wants_remedy) in cases {
+            assert_eq!(is_linear(ty, &structs, &enums, &[]), wants_remedy);
+            let mut prov = Provenance::default();
+            prov.quotation_captures
+                .push(std::iter::once("v".to_string()).collect());
+            let mut scope = Scope::default();
+            scope.bound.push(capture_binding("v", ty, None));
+            let err = check_capture_admission(QuotId(0), true, span, &ctx, &[], &mut prov, &scope)
+                .expect_err("a frame-rooted capture escaping is past-owning-frame");
+            assert!(
+                err.contains("does not survive the return"),
+                "both cases keep the base rejection: {err}"
+            );
+            assert_eq!(
+                err.contains(OWNING_QUOTATION_KEYWORD),
+                wants_remedy,
+                "remedy presence for `{ty}`: {err}"
+            );
+        }
+    }
+
     /// Slice 10a (R2): the fifth materialization boundary, pinned directly.
     /// A poly signature cannot place an ordinary quotation anywhere but a
     /// direct top-level parameter (`reject_poly_quotation_anywhere`), so a
@@ -802,7 +884,7 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let err = check_capture_admission(QuotId(0), true, span, &ctx, &mut prov, &scope)
+        let err = check_capture_admission(QuotId(0), true, span, &ctx, &[], &mut prov, &scope)
             .expect_err("a captured `~` local must be rejected");
         assert!(
             err.contains("`~`") && err.contains("captured"),
@@ -824,8 +906,9 @@ mod tests {
             &CombinatorIndex::new(),
             None,
         );
-        let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
-            .expect_err("a captured `~` local must be rejected");
+        let word_err =
+            check_capture_admission(QuotId(0), true, span, &word_ctx, &[], &mut prov, &scope)
+                .expect_err("a captured `~` local must be rejected");
         assert!(
             word_err.contains("`outer`"),
             "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"

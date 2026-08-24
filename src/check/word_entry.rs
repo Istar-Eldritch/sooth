@@ -278,7 +278,10 @@ fn check_terms_word(
         for slot in &final_stack {
             if let Some(set) = slot.surviving {
                 if let Some(member) = prov.surviving_set(set).iter().find(|m| m.frame_rooted) {
-                    return Err(past_owning_frame_error(&ctx, exit, &member.name));
+                    // No `owning` remedy: the closure here is already inside a
+                    // returned carrier, and an owning closure may not be stored
+                    // in an aggregate at all (the containment rule).
+                    return Err(past_owning_frame_error(&ctx, exit, &member.name, false));
                 }
                 if prov.surviving_set_is_bundle(set) {
                     return Err(multi_capture_escaping_error(&ctx, exit));

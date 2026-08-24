@@ -433,7 +433,11 @@ fn check_term(
                         if let Some(member) =
                             prov.surviving_set(set).iter().find(|m| m.frame_rooted)
                         {
-                            return Err(past_owning_frame_error(ctx, span, &member.name));
+                            // No `owning` remedy: this is the transitive case,
+                            // where the closure is already stored in a
+                            // carrier, and an owning closure may not be stored
+                            // in an aggregate at all (the containment rule).
+                            return Err(past_owning_frame_error(ctx, span, &member.name, false));
                         }
                         if prov.surviving_set_is_bundle(set) {
                             return Err(multi_capture_escaping_error(ctx, span));
@@ -1295,7 +1299,7 @@ fn check_branch_join(
                     if body_captures_enclosing(&body, &enclosing) {
                         let span = prov.quotations[id.0].span;
                         if let Some(set) =
-                            check_capture_admission(id, escaping, span, ctx, prov, scope)?
+                            check_capture_admission(id, escaping, span, ctx, arrays, prov, scope)?
                         {
                             arm_sets.push(set);
                         }
