@@ -6,7 +6,7 @@
 //! position-aware candidate search (`poly.rs`'s `poly_trait_member_call`)
 //! reaches the *right* implementation rather than merely being permitted to
 //! declare the member. The bounded `uses` body also calls
-//! ordinary `eq`/`if`/`Bool` dispatch (unrelated to any bound) before
+//! ordinary `eq`/`if` dispatch (unrelated to any bound) before
 //! dispatching `at`, pinning that the widened candidate search does not
 //! intercept those -- and that they still resolve (mangled) inside a
 //! bounded generic body.
@@ -45,8 +45,8 @@ impl Drop for Tree {
     }
 }
 
-/// Names this repo's own `lib/` as `core`, so the fixture can pull `eq`/`if`/
-/// `Bool` from `core::prelude`.
+/// Names this repo's own `lib/` as `core`, so the fixture can pull `eq`/`if`
+/// from `core::prelude`.
 fn tree_with_core(tag: &str) -> Tree {
     let t = Tree::new(tag);
     t.write("sooth.pkg", &common::fixture_package(tag));
