@@ -701,3 +701,52 @@ shape this slice produces.
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type,
 not only the numeric tower -- with no per-width boilerplate `impl:` required for the numeric
 tower itself, and every existing `'T: Copy Ord` numeric program unaffected.
+
+**P7.S3u -- Trait objects (an erased owner with a reachable destructor).** Traits dispatch
+statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete
+instantiation against a whole-program `(TraitId, Type)` registry, so every call is
+monomorphized and every destructor is type-directed and statically resolved. There is no way
+to hold a value whose concrete type is unknown at the use site, and therefore no way to reach
+its destructor through the erasure. The shape already exists in the compiler: a materialized
+quotation is a `(code, env)` pair, which is a one-method vtable plus a payload, and
+`lower_indirect_call` (`src/ir/func_builder/quotation.rs:203`) already performs a runtime call
+through a code pointer. What is missing is a vtable with more than one slot, a way to name the
+erased type in a signature, and the disposal answer. **The disposal answer is the whole
+slice.** A trait object owning a linear value needs its destructor reached *through the object*,
+which puts dynamic dispatch on the destructor path, exactly where the linear spine bottoms out.
+DESIGN.md's memory model is explicit that disposal is deterministic and statically resolved,
+so this is a design amendment and not a mechanical extension: it needs a ruling on whether an
+owning trait object's vtable carries a `drop` slot (a hand-rolled `dyn Drop`, one indirect call
+at disposal, no hidden control flow beyond the call the programmer wrote), and on whether an
+object may be `Copy` at all. Sequence after **P7.S3h**, whose spec deliberately avoids the
+mechanism so that this slice introduces it once, with a consumer, rather than being reverse
+engineered from a closure special case. Scope guard: heterogeneous collections (`Vec[dyn T]`)
+are a weak motivation on their own, since a closed enum is usually the better design and
+already works in `core`; the forcing consumer is disposal through erasure, which is why
+**P7.S3v** is sequenced immediately after.
+**Exit:** a value of a user trait can be held and used behind an erased owner whose concrete
+type the use site does not name, a bounded word can be called through it, and an owning trait
+object's destructor runs exactly once through the object with no leak and no double free, with
+the `Copy`-versus-linear rule for objects stated and tested.
+
+**P7.S3v -- Dropping and storing a linear-capturing quotation.** **P7.S3h** ships owning
+closures under two restrictions that exist only because nothing can invoke a per-value
+disposer: an owning closure may not be discarded unexecuted (`drop` on one is a located
+rejection, because releasing the capture requires running the body), and it may not be a
+struct field, array element, slice element or owned-cell payload (a container's synthesized
+glue would have to dispose it, and `emit_drop` (`src/ir/func_builder/quotation.rs:305`) has no
+arm it could take: its `_ => {}` fall-through would silently swallow the field and leak both
+the capture and the env block). Both restrictions dissolve the moment an erased owner can
+carry a destructor, which is what **P7.S3u** supplies. This slice is the consumer that proves
+S3u's disposal answer on a real case: give the owning closure value a disposer reachable
+without running its body, then lift the `drop` rejection and the aggregate-position gate, so an
+owning closure becomes an ordinary linear value that can be stored, forwarded, and discarded.
+Depends on both **P7.S3h** (the marker, the containment rule, the heap env) and **P7.S3u** (the
+mechanism). Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
+`field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:889`) that S3h
+deliberately leaves untouched; the new construction is the disposer itself and the `emit_drop`
+arm, both of which belong to S3u's mechanism rather than to this slice.
+**Exit:** an owning closure can be `drop`ped without being called, disposing its captures and
+env exactly once; it can be stored in a struct field and an array element and disposed
+transitively through the container exactly once; and every S3h golden that asserted a
+rejection has been migrated to assert the new behaviour rather than deleted.

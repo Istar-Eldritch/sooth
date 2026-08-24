@@ -107,7 +107,21 @@ computation (`captures.rs:196-247`), mirroring how a *generic instantiation*'s c
 `StructDecl` is minted by the checker (`instantiate_struct`, `ast.rs:817`), never by
 lowering — lowering only ever reads an already-finalized registry.
 
-## Design ruled here (see conversation record; not re-derived from first principles)
+## Design ruled here — SUPERSEDED by `slice3h-spec.md`
+
+> **Everything from this heading to the end of this file is superseded.** The delivery plan in
+> `slice3h-spec.md` replaced the mechanism described below. It does **not** build a per-closure
+> destructor pointer, a three-word closure value, a widened `QuotLayout`, a new `emit_drop`
+> arm, or a check-time per-literal env `StructDecl` minting pass. Instead the closure value
+> stays two words, a type-level marker (`Type::OwningQuotation`) makes it linear and
+> must-call, `call` is its consuming use, and the compiled body disposes its own captures and
+> frees its own env. An owning closure is rejected in every aggregate position, which is what
+> removes the need for any glue-reachable disposer.
+>
+> The problem statement above (the classifier, the one blocking gate, the live diagnostics) is
+> still accurate and is what the spec builds on. The trait-object framing below is no longer
+> "deferred indefinitely": it is scheduled as **P7.S3u**, with **P7.S3v** as the consumer that
+> lifts this slice's aggregate-position and unexecuted-discard restrictions.
 
 **A `Drop`-as-trait-object framing was considered and explicitly deferred, not adopted.** A
 materialized quotation's `(code, env)` shape is already structurally a one-method trait
