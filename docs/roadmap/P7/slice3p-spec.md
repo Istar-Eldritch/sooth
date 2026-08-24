@@ -63,23 +63,34 @@ Forcing consumer: `Indexable`/`at` (the probe's `Pair` fixture) and, downstream,
      *position* is not a disambiguator here either: `A`'s `t1 ( &'T -- )` and `B`'s
      `t1 ( &'T i64 -- )` on one variable stay ambiguous.
    - **Spanning variables** (`&'T: A &'U: A`, or `&'T: A &'U: B`): narrowed to the one
-     candidate whose full declared input list fits the stack window, and dispatched.
-     Non-decisive narrowing is the ambiguity error: no candidate fits (the operands are wrong
-     for all of them), or several do — reachable through a mixed set (`&'U: C &'T: A B`, all
-     three declaring `t1`), where without a uniqueness requirement `'T`'s two equally-fitting
-     candidates would be resolved by bound declaration order.
+     candidate whose full declared input list fits the stack window, and dispatched. The two
+     non-decisive outcomes are *different problems* and get different diagnostics:
+     - **Several candidates fit** — reachable through a mixed set (`&'U: C &'T: A B`, all
+       three declaring `t1`), where without a uniqueness requirement `'T`'s two
+       equally-fitting candidates would be resolved by bound declaration order. This is the
+       ambiguity error: a module qualifier naming which trait is meant would resolve it.
+     - **No candidate fits** (the operands are wrong for all of them) — its own
+       `no_candidate_fits_operands_error`, not the ambiguity error. Nothing is ambiguous
+       here: every candidate's declared operands already disagree with the stack, so no
+       qualifier changes the outcome. It is a plain operand-shape mismatch, just one with
+       more than one declared shape to be wrong against.
    `ambiguous_trait_member_error` (`poly.rs:5478`) takes the candidate `(trait-name,
    ty-var-name)` set: when every candidate shares one variable it renders exactly as today
    (`` `t1` is required by both `A` and `B` on 'T (line …) ``, note line unchanged); when
    variables differ it names each trait with its variable (`` required by `A` on 'T and `B` on
    'U ``). The single-var rendering is load-bearing for the preserved test and must stay
-   identical.
+   identical. `no_candidate_fits_operands_error` takes the same set and names each trait with
+   its variable, under a `the operands at this call match none of their declared shapes` note.
 5. **The declaration gate is relaxed, not removed: a member must bind the trait variable in
    *some* input.** `member_ends_in_trait_var` becomes `member_binds_trait_var`, true when *any*
    input is `PolyType::Var(0)` or `PolyType::Ref(_, Var(0))` (the trait's own variable is id 0
    in its own `PolySig`), not only the last. A member with no such input is still rejected at
-   `trait:` time. `non_trailing_receiver_error` becomes `zero_receiver_member_error` with text
-   naming the deferral (below). The parser doc comment at `src/parser.rs:432` (`synth_member_word_name`)
+   `trait:` time. The test stays deliberately syntactic, so it also rejects a receiver
+   mentioned only *nested* inside a composite input (`sum ( ['T 4] -- i64 )`): grounding that
+   would need structural unification through the array type, which dispatch does not attempt.
+   `non_trailing_receiver_error` becomes `zero_receiver_member_error`, whose text must
+   distinguish the two — only the nullary case is the P7.S3t deferral (below); a nested
+   mention is not "mentions `'T` nowhere", and saying so would be false. The parser doc comment at `src/parser.rs:432` (`synth_member_word_name`)
    is updated: its invariant "every grounded signature mentions the `for` type" still holds —
    the receiver appears at *some* input, not necessarily last — so only its "last input" wording
    and the cited function name change; the mangling scheme is untouched.
@@ -172,8 +183,9 @@ New coverage:
 - `ambiguous_trait_member_call_is_rejected` unchanged (same-variable text preserved), plus
   cross-variable coverage: `&'T: A &'U: B` both declaring the member *dispatches* per operand
   (each of `t1 t1` recording its own variable), while a call whose operands fit no candidate
-  asserts the widened message names both variables, and a mixed set (`&'U: C &'T: A B`) stays
-  rejected — pins the uniqueness requirement in ruling 4.
+  asserts the distinct `no_candidate_fits_operands_error` naming both variables, and a mixed
+  set (`&'U: C &'T: A B`) stays rejected as the ambiguity — pins both the uniqueness
+  requirement in ruling 4 and its two-diagnostic split.
 - A multi-position, same-variable duplicate (`t1` at different input positions on one variable)
   is still the single-variable ambiguity — pins ruling 4.
 - End-to-end (`tests/phase7_slice3p.rs`, compiled): the probe's `Indexable`/`at` on `Pair`

@@ -1070,16 +1070,28 @@ pub(super) fn poly_call_term(
     // trait. `poly_trait_member_call` is a narrow, self-gating probe: it
     // returns `Ok(None)` unless a `Bound::User` on one of this word's own
     // type variables declares a member of this name (P7.S3p: found by name
-    // over the bounds, not by matching the stack top), so moving it here
-    // changes nothing for the ordinary (non-trait) use of any of these
-    // names -- a member named `eq`/`len`/`call`/`dup` is rejected at
-    // `trait:` declaration time (it collides with the builtin), so no bound
-    // ever actually declares one, and every user word besides arrives here
-    // mangled, never under the bare builtin spelling. It also must run
-    // ahead of the intrinsic-import gate immediately below: bound dispatch
-    // is whole-program and unscoped by import (decision 9), so a bound call
-    // to e.g. `eq` must not be rejected as an unimported comparison
-    // intrinsic before dispatch even gets a chance to try it.
+    // over the bounds, not by matching the stack top).
+    //
+    // Which names a bound can legally claim here, since P7.S3p selects on
+    // name alone and so cannot fall through to the builtin on a shape
+    // mismatch:
+    //   - `len`/`dup`/`branch`/`tag`/`add`/... are in `BUILTIN_WORDS`, and
+    //     `call`, which is not, is special-cased beside it: all are rejected
+    //     as member names at `trait:` declaration time, so no bound declares
+    //     one and no builtin arm below is shadowed.
+    //   - `@`/`!`/`+!` are rejected as member names by the parser's
+    //     `ACCESS_WORDS` gate.
+    //   - the six surface comparisons (`eq`, `lt`, ...) are legal member
+    //     names, and a bound *does* claim them here. That is intended: they
+    //     are `lib/` words, not builtins, and a body that imports one
+    //     receives it mangled, so the two spellings never collide.
+    // Every other user word arrives mangled, never under a bare builtin
+    // spelling.
+    //
+    // It also must run ahead of the intrinsic-import gate immediately below:
+    // bound dispatch is whole-program and unscoped by import (decision 9),
+    // so a bound call to e.g. `eq` must not be rejected as an unimported
+    // comparison intrinsic before dispatch even gets a chance to try it.
     if let Some(next) = poly_trait_member_call(name, span, &mut stack, sig, ctx, tctx)? {
         return Ok(next);
     }

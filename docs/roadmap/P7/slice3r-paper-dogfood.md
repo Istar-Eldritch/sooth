@@ -186,8 +186,8 @@ the new form.
   `poly.rs`, `driver.rs`, `ir/driver.rs`, `tests/phase7_slice3e.rs`.
 - Structural rejections that live at the `trait:` decl or the registry, not the binding:
   `duplicate_impl_for_the_same_trait_and_type`, `impl_binding_missing_a_required_member`
-  (body omits a member), orphan-rule, export/selective-import, P7.S3p `sandwiched_receiver`
-  and zero-input-receiver.
+  (body omits a member), orphan-rule, export/selective-import, and P7.S3p's zero-input-receiver
+  rejection.
 
 ### A NEW ruling the body form forces (not in the brief's OQ list)
 

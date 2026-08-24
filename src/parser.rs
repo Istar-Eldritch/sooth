@@ -374,6 +374,15 @@ fn impl_zero_bindings_error(trait_name: &str, span: Span) -> String {
 /// construct-scoped shadowing the body form admits. Rejected at the
 /// declaration, where the unimplementable member is written, rather than at
 /// each impl body that discovers it.
+///
+/// P7.S3p widened the stakes for `call`, `slice`, and `subslice`. Bound-directed
+/// dispatch now selects a member by *name* over the body's bounds, ahead of
+/// every builtin arm, so a member sharing one of these names captures every
+/// call to that builtin in any body bounded by its trait -- the builtin
+/// becomes unreachable there, not merely shadowed inside the impl. The six
+/// surface comparisons stay legal (they are `lib/` words, and a body that
+/// imports one receives it mangled), but these three need no import and have
+/// no mangled spelling, so only rejection closes them.
 fn builtin_named_trait_member_error(trait_name: &str, member: &str, span: Span) -> String {
     format!(
         "error: trait `{trait_name}` declares a member named `{member}`, which is a builtin word (line {}, col {})\n  note: a trait member becomes a word when implemented, and inside its own body the name would shadow the builtin",
@@ -2122,7 +2131,15 @@ impl<'t> Parser<'t> {
                     if ACCESS_WORDS.contains(&member_name.as_str()) {
                         return Err(shadowed_access_word_error(&member_name, member_span));
                     }
-                    if is_name_dispatched_builtin(&member_name) {
+                    // `call`, `slice`, and `subslice` are tested separately because
+                    // none is in `BUILTIN_WORDS`: each is its own arm in
+                    // `check_term`/`poly_call_term`, so `is_name_dispatched_builtin`
+                    // does not cover them. They cannot join that set either -- that
+                    // set is also what the `intrinsics` import gates (P8 S2 R2), and
+                    // none of the three is import-gated.
+                    if is_name_dispatched_builtin(&member_name)
+                        || matches!(member_name.as_str(), "call" | "slice" | "subslice")
+                    {
                         return Err(builtin_named_trait_member_error(
                             &name,
                             &member_name,

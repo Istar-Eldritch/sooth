@@ -186,8 +186,98 @@ fn trait_member_with_a_zero_input_receiver_is_rejected() {
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
-    assert!(err.contains("takes `'T` (or `&'T`) in no input"), "{err}");
+    assert!(
+        err.contains("never takes `'T` (or `&'T`) directly as an input"),
+        "{err}"
+    );
     assert!(err.contains("P7.S3t"), "{err}");
+}
+
+/// P7.S3p selects a member by name alone, ahead of every builtin arm, so it
+/// cannot fall through to the builtin when the operands do not fit. A member
+/// named `call` would therefore capture *every* `call` in any body bounded by
+/// its trait, making quotation application unreachable there: a body
+/// `( &'T: C [ -- i64 ] -- i64 ) call ...` applying its quotation parameter
+/// stopped compiling, reporting `call` "expects `&'T`, found `[ -- i64 ]`".
+/// The fixture here only needs the declaration, since the rejection is what
+/// keeps that body reachable.
+///
+/// `call` needs its own gate: it is not in `BUILTIN_WORDS`, so P7.S3r (R4)'s
+/// `is_name_dispatched_builtin` rejection does not cover it, and it cannot be
+/// added to that set without also making bare `call` require an `intrinsics`
+/// import (P8 S2 R2).
+#[test]
+fn trait_member_named_call_is_rejected() {
+    let (_t, entry) = single_file(
+        "call-named-member",
+        "trait: C 'T call ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `call`, which is a builtin word (line 2, col 13)"
+        ),
+        "{err}"
+    );
+}
+
+/// Same shape as `call` above: `slice` is its own arm in `poly_call_term`,
+/// absent from `BUILTIN_WORDS`, so a member named `slice` would otherwise
+/// capture every `&[..] slice` in a bounded body.
+#[test]
+fn trait_member_named_slice_is_rejected() {
+    let (_t, entry) = single_file(
+        "slice-named-member",
+        "trait: C 'T slice ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `slice`, which is a builtin word (line 2, col 13)"
+        ),
+        "{err}"
+    );
+}
+
+/// Same shape as `call` above: `subslice` is its own arm in `poly_call_term`,
+/// absent from `BUILTIN_WORDS`, so a member named `subslice` would otherwise
+/// capture every `&[..] .. .. subslice` in a bounded body.
+#[test]
+fn trait_member_named_subslice_is_rejected() {
+    let (_t, entry) = single_file(
+        "subslice-named-member",
+        "trait: C 'T subslice ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `subslice`, which is a builtin word (line 2, col 13)"
+        ),
+        "{err}"
+    );
+}
+
+/// The negative half of the gate above: the six surface comparisons stay legal
+/// member names, and a bound really does claim one here (they are `lib/` words,
+/// not builtin arms, and a body that imports one receives it mangled, so the
+/// spellings never collide). Without this, widening the `call` rejection to the
+/// whole comparison set would go unnoticed.
+#[test]
+fn trait_member_named_after_a_surface_comparison_dispatches() {
+    let (_t, entry) = single_file(
+        "eq-named-member",
+        "type: Tag v i64 ;\n\
+         trait: C 'T eq ( &'T -- i64 ) ;\n\
+         impl: C for Tag\n\
+           : eq | t | t &v @ ;\n\
+         ;\n\
+         : uses ( &'T: C -- i64 ) eq ;\n\
+         : main ( -- ) 5 Tag |t| &t uses . t drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "5\n");
 }
 
 /// The counterexample a post-implementation review built to demonstrate silent
