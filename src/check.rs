@@ -3483,13 +3483,18 @@ mod tests {
     }
 
     /// P7.S3m (R3): a quotation parameter whose own output row still mentions a
-    /// type variable is descended for a nested ground quotation but never
-    /// interned itself -- there is no ground tuple to key a bundle by. It is
-    /// also unusable: `call` admits only a fully-ground quotation operand, so
-    /// widening discovery neither accepts nor interns for this shape.
+    /// type variable is never interned -- there is no ground tuple to key a
+    /// bundle by, and picking the row's concrete slots out would key a bundle by
+    /// a shape no call site can ever have. The fixture's row is deliberately
+    /// *mixed*: an all-variable row would come out empty under that mistake
+    /// too, and so could not tell it apart. Such a parameter is unusable
+    /// anyway, which is what makes not interning safe: `call` admits only a
+    /// fully-ground quotation operand.
     #[test]
     fn variable_bearing_poly_quotation_interns_no_bundle() {
-        assert!(interned_bundles(": call_it ( 'T: Copy [ 'T -- 'T 'T ] -- ) drop ;\n").is_empty());
+        assert!(
+            interned_bundles(": call_it ( 'T: Copy [ i64 -- 'T i64 i64 ] -- ) drop ;\n").is_empty()
+        );
         let err = check_src(
             ": call_it ( 'T: Copy [ 'T -- 'T 'T ] 'T -- ) swap call drop drop ;\n\
              : main ( -- ) ;\n",
