@@ -4515,6 +4515,29 @@ pub(super) fn check_poly_call(
                     )?;
                     quot_inputs.push((i, eff));
                 }
+                // P7.S3l phase 2 (R9p closure): a declared quotation slot
+                // still carrying a variable -- ground it through the `subst`
+                // already built from earlier inputs (the same "once every
+                // variable the row mentions is bound" precondition R2 states
+                // for the body-`call` twin), then materialize exactly as the
+                // ground arm does. Scope rules out an inline/row-carrying
+                // slot ever reaching a non-combinator word's signature, so
+                // `apply_subst`'s `Quotation` arm always grounds to
+                // `Type::Quotation` here, never `Type::InlineQuotation`.
+                pty @ PolyType::Quotation(..) => {
+                    let grounded =
+                        apply_subst(&sig, pty, &subst, name, span, ctx, arrays, cells, refs)?;
+                    let Type::Quotation(eff) = grounded else {
+                        unreachable!(
+                            "a non-combinator word's declared quotation slot is never inline"
+                        )
+                    };
+                    stack[base + i] = materialize_quotation_at_boundary(
+                        id, eff, false, name, span, ctx, env, arrays, cells, refs, slices, prov,
+                        scope, poly,
+                    )?;
+                    quot_inputs.push((i, eff));
+                }
                 _ => return Err(reject_quotation_argument(ctx, span, name)),
             }
         }
@@ -7286,22 +7309,20 @@ mod tests {
         )
         .expect("a ground quotation argument in the last position should materialize");
     }
-    /// R1's negative, re-pinned unmodified against the abstract
-    /// `PolyType::Quotation` shape (still carrying a free variable): a
-    /// declared quotation whose brackets mention `'T` does not fold to
-    /// `Concrete`, so R1's narrowing must not spare it -- the mutation-test
-    /// proof that L1 is not accidentally widened.
+    /// P7.S3l phase 2 (R9p closure): flipped from a rejection to an accept
+    /// case. A declared quotation whose brackets mention `'T` no longer
+    /// falls through R9p's blanket rejection once every variable the row
+    /// mentions is already bound by an earlier input (here, `'T` is bound by
+    /// the plain `7` argument before the quotation argument is reached) --
+    /// the literal is grounded through that `subst` and materialized exactly
+    /// as a ground declared quotation slot is.
     #[test]
-    fn check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position() {
-        let err = check_src(
+    fn check_poly_call_materializes_an_abstract_quotation_argument() {
+        check_src(
             ": run_abstract ( 'T: Copy [ 'T -- 'T ] -- 'T ) drop ;\n\
-             : main ( -- ) 7 [ dup ] run_abstract drop ;\n",
+             : main ( -- ) 7 [ ] run_abstract drop ;\n",
         )
-        .expect_err("a quotation at a still-abstract PolyType::Quotation position stays rejected");
-        assert!(
-            err.contains("a quotation cannot be passed to `run_abstract`"),
-            "{err}"
-        );
+        .expect("a literal argument at an abstract quotation position should materialize");
     }
     /// R2: a capturing literal at the argument boundary runs the existing R15
     /// admission path. An in-frame (non-escaping) capture is admitted; this

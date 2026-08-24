@@ -194,3 +194,23 @@ fn body_boundary_calls_an_abstract_quotation_param() {
         "each instantiation of `'T` must call its own forwarded quotation independently"
     );
 }
+
+/// P7.S3l phase 2 (R9p closure): the headline shape, with the quotation
+/// argument as a *literal* at `apply`'s own call site rather than forwarded
+/// out of a helper word's return value -- the gap `body_boundary_calls_an_
+/// abstract_quotation_param` (above) recorded as still open at phase 1 exit.
+/// `check_poly_call`'s R9p guard now grounds an abstract declared quotation
+/// slot through the `subst` already bound by an earlier plain input before
+/// materializing the literal, exactly as it already did for a ground
+/// declared slot.
+#[test]
+fn headline_apply_accepts_a_literal_quotation_argument() {
+    let src = "import: intrinsics * ;\n\
+               : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+               : main ( -- ) 4 [ 1 add ] apply . ;\n";
+    let prog = Scratch::write("headline-apply-literal-argument", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
+}

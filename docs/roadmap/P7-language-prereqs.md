@@ -538,9 +538,14 @@ rendering, unchanged since before S3f. S3f's own probe pass found no evidence th
 representation -- only a new `poly_call_term` dispatch arm parallel to S3f's R3, grounded
 against the concretely bound instantiation (the `Subst` already carries what each variable
 grounds to) rather than a body-local literal.
-**Exit:** a poly body may `call` its own declared, still-abstract quotation parameter once
-bound by the caller's instantiation, popping/pushing against the row grounded through that
-call's `Subst`, the same way S3f's R3 does for the already-ground case.
+**Exit:** a poly body may `call` its own declared, still-abstract quotation parameter,
+consuming its declared inputs deepest-first and pushing its declared outputs, each row slot
+compared structurally (via `PolyType`'s derived `Eq`) against the operand's own `PolyType` --
+no `Subst` is built or consulted mid-body, since every type variable stays rigid there
+(`docs/roadmap/P7/slice3l-spec.md`, `src/check/poly.rs`, `tests/phase7_slice3f.rs`). A
+literal quotation argument reaching a still-abstract declared position at the *call-site*
+boundary (not the body) grounds through the caller's own `Subst` and materializes exactly as
+a ground declared quotation slot does.
 
 **P7.S3m -- A declared quotation effect with two or more outputs cannot be lowered.**
 Named at P7.S3f's exit (its ">=2-output lowering gap" finding), pre-existing on the concrete
