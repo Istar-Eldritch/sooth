@@ -260,9 +260,10 @@ module collisions have no escape hatch). A bound on a poly *combinator*'s own ty
 variable is a located rejection, tracked separately as **P7.S3o** (a combinator's body
 calling a bounded poly word does resolve, and is tested). Consumer: the array form of
 `sort` (`'T: Copy Order`), Program 2 of `docs/roadmap/P7/slice3-dogfood.md`, runs at two
-distinct concrete instantiations. `Map['K 'V]` stays out of scope, blocked on a generic
-struct's array field being its own type variable (**P7.S3n**), not on anything this slice
-leaves undone.
+distinct concrete instantiations. `Map['K 'V]` stays out of scope: **P7.S3n** landed the
+array-field-of-own-type-variable blocker, but `Map` still needs a struct-header length
+variable and the `Eq`/`Hash`/`Default`-style bounds this slice's own dogfood already named,
+not anything this slice leaves undone.
 Out of scope, unchanged: trait objects/runtime dispatch, associated types, default
 bodies, blanket/supertraits, generic constants, multi-type-variable traits, a
 compiler-known third trait kind for a `Fallible`-style bound (`bool`'s own `.`-overload
@@ -555,25 +556,33 @@ with two or more outputs interns an output bundle the same way a declared word d
 `call`ing one on either the concrete or polymorphic path pushes all declared outputs rather
 than panicking.
 
-**P7.S3n -- A generic struct's array field cannot be its own type variable.** Named at
+**P7.S3n -- A generic struct's field wrapping its own type variable.** `[ done ]` Named at
 P7.S3e's brief (the `Map['K 'V]` consumer's own blocker, `docs/roadmap/P7/slice3e-brief.md`),
-distinct from S3a: a generic *struct* declaration already exists and already accepts a plain
-field of its own type variable (`type: Box 'T val 'T ;`, probe-verified to check) and multiple
-independent type variables each with their own scalar field (`type: Ent 'K 'V k 'K v 'V ;`,
-also probe-verified). What fails is narrower and specific: an *array* field whose element
-type is the struct's own type variable (`type: Pair 'T items ['T 2] ;`) rejects with
-`` error: unknown type `'T` ``, probe-verified against current `main`. This is exactly the
-shape `Map`'s open-addressed backing storage needs (`slots [Ent['K 'V] 8]`), so it blocks
-`Map` regardless of whether S3a and S3e both ship. Not yet recon'd: which layer resolves an
-array's element type inside a struct's own field list and why it does not thread the
-enclosing struct's type-parameter scope through to that resolution (plausibly the same
-parse-time-monomorphization root cause S3a traced for poly *word* signatures,
-`resolve_type_or_apply`/`parse_type_arguments`, `src/parser.rs:3129`, but for a struct's own
-field list instead of a word's effect -- unconfirmed, needs its own recon pass before a
-brief).
-**Exit:** a generic struct may declare an array field whose element type is one of the
-struct's own type variables, resolved correctly per concrete instantiation, unblocking
-`Map['K 'V]`'s backing storage.
+distinct from S3a, which fixed generic-applied-to-own-variable in poly *word* signatures
+rather than in a generic type's own field list. A generic struct or enum field may wrap the
+header's own type variables to any depth: an array (`type: Pair 'T items ['T 2] ;`), a
+nested array, an owned cell (`^'T`), and a generic application over them
+(`slots [Ent['K 'V] 8]`, the shape `Map`'s open-addressed backing storage needs). Each
+grounds per concrete instantiation, interning the shape it produces at each level, and two
+instantiations of the same header get distinct registry ids. One mechanism covers the
+whole family: a recursive field-type parser feeding a substituter that re-enters the
+instantiator.
+Three shapes are located rejections rather than gaps: a **reference** field
+(`&'T`, `&Ent['K i64]`) meets the pre-existing no-stored-reference rule; a **quotation**
+field naming a type variable is rejected at the parser; and a *growing* self-reference
+(`type: A 'T next ^A[^'T] ;`, whose instantiation would never converge) is rejected at
+declaration, while a **permuting** one (`type: A 'K 'V next ^A['V 'K] ;`) is legal.
+A self-referential header terminates because the instantiator mints its id, memo key and a
+placeholder decl *before* substituting fields; an owned cell is the only indirection that
+breaks the size cycle, so a by-value or array-wrapped self-reference is an infinite-size
+error.
+**Exit:** a generic struct or enum may declare a field wrapping one of its own type
+variables under an array, owned cell or generic application, resolved correctly per
+concrete instantiation
+(`docs/roadmap/P7/slice3n-spec.md`, `tests/phase7_slice3n.rs`). This removes the
+array-field-of-own-type-variable blocker; it does **not** unblock `Map['K 'V]`, which
+still needs a struct-header length variable (`'N`) and the `Eq`/`Hash`/`Default`-style
+bounds named above.
 
 **P7.S3o -- A bound on a poly combinator's own type variable has no dispatch mechanism.**
 Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there. S3e's design

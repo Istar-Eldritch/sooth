@@ -278,6 +278,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             sig,
             &inst.subst,
             &module.arrays,
+            &module.owned_cells,
             &module.refs,
             &module.generics,
         );
@@ -666,12 +667,13 @@ fn concrete_effect(
     sig: &PolySig,
     subst: &Subst,
     arrays: &[ArrayDecl],
+    owned_cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     generics: &GenericTypes,
 ) -> StackEffect {
     let slot = |pt: &PolyType| TypedSlot {
         name: None,
-        ty: subst_polytype(pt, subst, arrays, refs, generics),
+        ty: subst_polytype(pt, subst, arrays, owned_cells, refs, generics),
     };
     StackEffect {
         inputs: sig.inputs.iter().map(&slot).collect(),
@@ -687,6 +689,7 @@ pub(super) fn subst_polytype(
     pt: &PolyType,
     subst: &Subst,
     arrays: &[ArrayDecl],
+    owned_cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     generics: &GenericTypes,
 ) -> Type {
@@ -696,7 +699,7 @@ pub(super) fn subst_polytype(
             .ty_of(*v)
             .expect("checked: unification bound every input type variable"),
         PolyType::Array(elem, len) => {
-            let element = subst_polytype(elem, subst, arrays, refs, generics);
+            let element = subst_polytype(elem, subst, arrays, owned_cells, refs, generics);
             let count = match len {
                 Len::Concrete(k) => *k,
                 Len::Var(ln) => subst
@@ -724,12 +727,26 @@ pub(super) fn subst_polytype(
         // produce by the time lowering runs, so a miss here is a gap in that
         // coverage, not a reason to intern from the lowering side.
         PolyType::Ref(referent, mutable) => {
-            let referent = subst_polytype(referent, subst, arrays, refs, generics);
+            let referent = subst_polytype(referent, subst, arrays, owned_cells, refs, generics);
             let idx = refs
                 .iter()
                 .position(|d| d.referent == referent && d.mutable == *mutable)
                 .expect("checked: the concrete reference shape was interned at the call site");
             Type::Ref(RefId::from_index(idx), *mutable, refs[idx].name_static)
+        }
+        // P7.S3n (R3): the cell twin of the `Ref` arm above -- a lookup, not
+        // an intern, for the same reason: `apply_subst` has already interned
+        // every `Type::OwnedCell` this word's instantiations can produce.
+        PolyType::OwnedCell(payload) => {
+            let payload = subst_polytype(payload, subst, arrays, owned_cells, refs, generics);
+            let idx = owned_cells
+                .iter()
+                .position(|d| d.payload == payload)
+                .expect("checked: the concrete cell shape was interned at the call site");
+            Type::OwnedCell(
+                crate::ast::OwnedCellId::from_index(idx),
+                owned_cells[idx].name_static,
+            )
         }
         // P7 slice 3a phase 2 (R2): lowering only *looks up* an
         // already-minted instantiation, exactly as the array/ref arms above
@@ -747,7 +764,7 @@ pub(super) fn subst_polytype(
         } => {
             let concrete_args: Vec<Type> = args
                 .iter()
-                .map(|a| subst_polytype(a, subst, arrays, refs, generics))
+                .map(|a| subst_polytype(a, subst, arrays, owned_cells, refs, generics))
                 .collect();
             let found = if *is_enum {
                 generics.lookup_enum(*idx as usize, *module, &concrete_args)
@@ -835,11 +852,12 @@ pub(crate) fn lower_instantiation(
     resolve: Resolver,
     regs: Registries,
     arrays: &[ArrayDecl],
+    owned_cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     generics: &GenericTypes,
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
-    let effect = concrete_effect(sig, subst, arrays, refs, generics);
+    let effect = concrete_effect(sig, subst, arrays, owned_cells, refs, generics);
     lower_word_parts(
         symbol,
         &effect,
@@ -1575,10 +1593,40 @@ mod tests {
         let subst = Subst::default();
         let generics = GenericTypes::default();
         assert!(
-            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[], &[], &generics))
-                .is_err(),
+            std::panic::catch_unwind(|| {
+                subst_polytype(&poly_quot, &subst, &[], &[], &[], &generics)
+            })
+            .is_err(),
             "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
+    }
+
+    /// P7.S3n (R3): `subst_polytype`'s owned-cell arm resolves `^'T` to the
+    /// *right* registry entry, not merely to some cell.
+    ///
+    /// Asserted here rather than through a golden program because the result
+    /// is unobservable at runtime: `^>` is rejected in a generic body, so a
+    /// monomorphized poly body never loads through the cell, and forcing this
+    /// lookup to index 0 leaves every program's output unchanged. Two entries,
+    /// and the *second* requested, so returning the first (or ignoring the
+    /// payload) fails.
+    #[test]
+    fn subst_polytype_owned_cell_resolves_the_payloads_own_registry_entry() {
+        use crate::ast::{intern_owned_cell_type, PolyType};
+        let mut cells = Vec::new();
+        intern_owned_cell_type(&mut cells, Type::I64);
+        let want = intern_owned_cell_type(&mut cells, Type::U32);
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::U32));
+        let got = subst_polytype(
+            &PolyType::OwnedCell(Box::new(PolyType::Var(0))),
+            &subst,
+            &[],
+            &cells,
+            &[],
+            &GenericTypes::default(),
+        );
+        assert_eq!(got, want, "`^'T` at `'T = u32` is the `^u32` entry");
     }
 
     /// P7.S3e phase 4 (R9): `lower_src` is not enough for a bound-dispatch

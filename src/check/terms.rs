@@ -672,13 +672,15 @@ fn check_term(
             let fall_through_to_env = env.contains_key(name)
                 && poly.env.get(name).is_some_and(|cands| {
                     !cands.iter().any(|(sig, _)| {
-                        poly_sig_could_match(sig, &stack, name, span, ctx, arrays, refs)
+                        poly_sig_could_match(sig, &stack, name, span, ctx, arrays, cells, refs)
                     })
                 });
             if let Some(candidates) = poly.combinators.get(name) {
                 let chosen = match candidates.as_slice() {
                     [only] if !fall_through_to_env => Some(*only),
-                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays, refs),
+                    _ => resolve_combinator_overload(
+                        candidates, &stack, span, ctx, arrays, cells, refs,
+                    ),
                 };
                 match chosen {
                     Some(chosen) => {

@@ -156,6 +156,9 @@ pub(super) fn poly_is_copy(
         // exclusive borrow). The referent's own `Copy`-ness is irrelevant: a
         // `&['T 4]` is `Copy` even where `['T 4]` is linear.
         PolyType::Ref(_, mutable) => !*mutable,
+        // P7.S3n (R3): mirrors `is_copy` on `Type::OwnedCell` -- always
+        // linear regardless of payload, so the payload is not consulted.
+        PolyType::OwnedCell(_) => false,
         // P7 slice 3a (D5): conservatively linear -- `Copy`-ness of a
         // generic over variables depends on its arguments' bounds, and a
         // per-argument derivation is a new rule (out of scope for v1); never
@@ -330,7 +333,10 @@ fn is_reference_slot(pt: &PolyType) -> bool {
     match pt {
         PolyType::Ref(..) => true,
         PolyType::Concrete(t) => t.is_ref(),
-        PolyType::Var(_) | PolyType::Array(..) | PolyType::Quotation(..) => false,
+        PolyType::Var(_)
+        | PolyType::Array(..)
+        | PolyType::Quotation(..)
+        | PolyType::OwnedCell(_) => false,
         // P7 slice 3b (R2): not a value type, so it holds nothing, least of
         // all a reference that would keep a borrow observable.
         PolyType::QuotLit => false,
@@ -394,12 +400,16 @@ pub(super) fn check_poly_combinator_standalone(
     }
     let mut inputs = Vec::with_capacity(sig.inputs.len());
     for pty in &sig.inputs {
-        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
+        let ty = apply_subst(
+            sig, pty, &subst, &word.name, span, &ctx, arrays, cells, refs,
+        )?;
         inputs.push(TypedSlot { name: None, ty });
     }
     let mut outputs = Vec::with_capacity(sig.outputs.len());
     for pty in &sig.outputs {
-        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
+        let ty = apply_subst(
+            sig, pty, &subst, &word.name, span, &ctx, arrays, cells, refs,
+        )?;
         outputs.push(TypedSlot { name: None, ty });
     }
     let terms = &word.body;
@@ -509,7 +519,9 @@ pub fn check_poly_body(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
@@ -562,6 +574,8 @@ pub fn check_poly_body(
         structs,
         enums,
         arrays,
+        cells,
+        refs,
         slices,
         builtin_overloads,
         tctx,
@@ -610,7 +624,9 @@ pub(super) fn poly_walk(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -646,6 +662,8 @@ pub(super) fn poly_walk(
             structs,
             enums,
             arrays,
+            cells,
+            refs,
             slices,
             builtin_overloads,
             tctx,
@@ -667,7 +685,9 @@ pub(super) fn poly_term(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -745,6 +765,8 @@ pub(super) fn poly_term(
                 structs,
                 enums,
                 arrays,
+                cells,
+                refs,
                 slices,
                 builtin_overloads,
                 tctx,
@@ -965,7 +987,9 @@ pub(super) fn poly_call_term(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -1292,6 +1316,8 @@ pub(super) fn poly_call_term(
             structs,
             enums,
             arrays,
+            cells,
+            refs,
             slices,
             builtin_overloads,
             tctx,
@@ -1345,6 +1371,8 @@ pub(super) fn poly_call_term(
             structs,
             enums,
             arrays,
+            cells,
+            refs,
             slices,
             builtin_overloads,
             tctx,
@@ -1388,6 +1416,8 @@ pub(super) fn poly_call_term(
             structs,
             enums,
             arrays,
+            cells,
+            refs,
             slices,
             builtin_overloads,
             tctx,
@@ -1464,7 +1494,7 @@ pub(super) fn poly_call_term(
     // program) commits unconditionally below and errors on a `'T` operand
     // mismatch rather than falling through.
     if let Some(next) = poly_construct_generic(
-        name, span, &mut stack, sig, ctx, env, structs, enums, arrays,
+        name, span, &mut stack, sig, ctx, env, structs, enums, arrays, cells, refs,
     )? {
         return Ok(next);
     }
@@ -1560,6 +1590,8 @@ pub(super) fn poly_call_term(
                             structs,
                             enums,
                             arrays,
+                            cells,
+                            refs,
                             slices,
                             builtin_overloads,
                             tctx,
@@ -2075,6 +2107,7 @@ fn poly_type_mentions_caller_var(pt: &PolyType) -> bool {
         PolyType::Concrete(_) | PolyType::QuotLit => false,
         PolyType::Array(elem, _) => poly_type_mentions_caller_var(elem),
         PolyType::Ref(referent, _) => poly_type_mentions_caller_var(referent),
+        PolyType::OwnedCell(payload) => poly_type_mentions_caller_var(payload),
         PolyType::Generic { args, .. } => args.iter().any(poly_type_mentions_caller_var),
         PolyType::Quotation(ins, outs, ..) => {
             ins.iter().chain(outs).any(poly_type_mentions_caller_var)
@@ -2087,6 +2120,7 @@ fn poly_mentions_len_var(pt: &PolyType) -> bool {
     match pt {
         PolyType::Array(elem, len) => matches!(len, Len::Var(_)) || poly_mentions_len_var(elem),
         PolyType::Ref(referent, _) => poly_mentions_len_var(referent),
+        PolyType::OwnedCell(payload) => poly_mentions_len_var(payload),
         PolyType::Generic { args, .. } => args.iter().any(poly_mentions_len_var),
         PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(poly_mentions_len_var),
         PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
@@ -2274,7 +2308,9 @@ fn poly_ground_quotation_literal(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -2325,6 +2361,8 @@ fn poly_ground_quotation_literal(
         structs,
         enums,
         arrays,
+        cells,
+        refs,
         slices,
         builtin_overloads,
         tctx,
@@ -2479,7 +2517,9 @@ fn poly_eliminator_call(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -2655,6 +2695,8 @@ fn poly_eliminator_call(
         structs,
         enums,
         arrays,
+        cells,
+        refs,
         slices,
         builtin_overloads,
         tctx,
@@ -2719,7 +2761,9 @@ fn poly_walk_arms(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -2759,6 +2803,8 @@ fn poly_walk_arms(
             structs,
             enums,
             arrays,
+            cells,
+            refs,
             slices,
             builtin_overloads,
             tctx,
@@ -3075,7 +3121,9 @@ fn poly_combinator_call(
     combinators: &CombinatorEnv,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     builtin_overloads: &mut HashMap<Span, String>,
     tctx: &mut TraitCtx,
@@ -3250,6 +3298,8 @@ fn poly_combinator_call(
         structs,
         enums,
         arrays,
+        cells,
+        refs,
         slices,
         builtin_overloads,
         tctx,
@@ -3493,7 +3543,9 @@ fn poly_construct_generic(
     env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<Option<Vec<PolySlot>>, String> {
     let Some(cell) = ctx.generics() else {
         return Ok(None);
@@ -3591,12 +3643,16 @@ fn poly_construct_generic(
         })
         .collect();
     let result_pt = if let Some(concrete_args) = all_concrete {
-        let regs = crate::ast::NameRegistries {
+        // P7.S3n (R5): the live cell/ref registries, not the `&[]`/`&[]`
+        // throwaway this used to build -- an instantiation whose field wraps
+        // the header's own variable interns as it grounds, and its rendered
+        // name reads back a cell- or ref-payload argument.
+        let regs = crate::ast::MutRegistries {
             structs,
             enums,
             arrays,
-            cells: &[],
-            refs: &[],
+            cells,
+            refs,
         };
         let mut g = cell.borrow_mut();
         let ty = if is_enum {
@@ -3956,6 +4012,16 @@ pub(super) fn poly_copy_gate(
             op,
             &poly_type_str(pt, sig),
         )),
+        // P7.S3n (R3): an owning cell is linear at every instantiation --
+        // `poly_is_copy` answers `false` unconditionally -- so this always
+        // reaches the error, exactly as the concrete `^i64` does through
+        // `cannot_copy_error`.
+        PolyType::OwnedCell(_) => Err(poly_copy_owned_cell_error(
+            ctx,
+            span,
+            op,
+            &poly_type_str(pt, sig),
+        )),
         // P7 slice 3a (D5/R5.4): `poly_is_copy` never returns `true` for a
         // generic applied to a variable, so this always reaches the error.
         PolyType::Generic { .. } => Err(poly_copy_generic_error(
@@ -4068,6 +4134,7 @@ pub(super) enum PolyOverloadMiss {
 /// untouched. Bounds (R6) are checked only against the chosen candidate by
 /// the caller, matching the single-candidate path: they gate a resolved
 /// instantiation, not resolution itself.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_poly_overload(
     candidates: &[(PolySig, Option<u64>)],
     stack: &[Slot],
@@ -4075,6 +4142,7 @@ pub(super) fn resolve_poly_overload(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     refs: &[RefDecl],
 ) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
     let mut saw_quotation = false;
@@ -4088,7 +4156,7 @@ pub(super) fn resolve_poly_overload(
             saw_quotation = true;
             continue;
         }
-        if poly_sig_unifies(sig, stack, name, span, ctx, arrays, refs) {
+        if poly_sig_unifies(sig, stack, name, span, ctx, arrays, cells, refs) {
             return Ok((sig.clone(), *generation));
         }
     }
@@ -4137,6 +4205,7 @@ pub(super) fn no_poly_overload_matches_error(
 /// unlike `resolve_poly_overload`'s own caller, a combinator's declared
 /// inputs legitimately include a quotation type, so this makes no R9p
 /// judgement about one; that stays the caller's decision.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn poly_sig_unifies(
     sig: &PolySig,
     stack: &[Slot],
@@ -4144,6 +4213,7 @@ pub(super) fn poly_sig_unifies(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     refs: &[RefDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
@@ -4161,6 +4231,7 @@ pub(super) fn poly_sig_unifies(
             span,
             ctx,
             arrays,
+            cells,
             refs,
             &mut subst,
         )
@@ -4181,6 +4252,7 @@ pub(super) fn poly_sig_unifies(
 /// real. Whichever candidate this selects still has every declared position,
 /// quotation included, validated for real exactly once by the existing
 /// single-candidate path this only decides which candidate reaches.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn poly_sig_could_match(
     sig: &PolySig,
     stack: &[Slot],
@@ -4188,6 +4260,7 @@ pub(super) fn poly_sig_could_match(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     refs: &[RefDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
@@ -4219,6 +4292,7 @@ pub(super) fn poly_sig_could_match(
             span,
             ctx,
             arrays,
+            cells,
             refs,
             &mut subst,
         )
@@ -4247,13 +4321,21 @@ pub(super) fn resolve_combinator_overload<'a>(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     refs: &[RefDecl],
 ) -> Option<Combinator<'a>> {
     for comb in candidates {
         let matched = match comb.word.poly.as_ref() {
-            Some(sig) => {
-                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays, refs)
-            }
+            Some(sig) => poly_sig_could_match(
+                sig,
+                stack,
+                comb.word.name.as_str(),
+                span,
+                ctx,
+                arrays,
+                cells,
+                refs,
+            ),
             None => {
                 let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
                 let n = inputs.len();
@@ -4339,7 +4421,7 @@ pub(super) fn check_poly_call(
     let candidates = poly.env.get(name).expect("caller checked membership");
     let (sig, generation) = match candidates.as_slice() {
         [(sig, generation)] => (sig.clone(), *generation),
-        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays, refs) {
+        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays, cells, refs) {
             Ok(chosen) => chosen,
             Err(PolyOverloadMiss::Quotation) => {
                 return Err(reject_quotation_argument(ctx, span, name))
@@ -4389,6 +4471,7 @@ pub(super) fn check_poly_call(
             span,
             ctx,
             arrays,
+            cells,
             refs,
             &mut subst,
         )?;
@@ -4439,7 +4522,7 @@ pub(super) fn check_poly_call(
     let mut outputs: Vec<Type> = Vec::with_capacity(sig.outputs.len());
     for pty in &sig.outputs {
         outputs.push(apply_subst(
-            &sig, pty, &subst, name, span, ctx, arrays, refs,
+            &sig, pty, &subst, name, span, ctx, arrays, cells, refs,
         )?);
     }
     // Review fix (P7 slice 1): a polymorphic word consumes its operands
@@ -4517,6 +4600,7 @@ pub(super) fn discover_transitive_instantiations(
         enums,
         arrays,
         refs,
+        owned_cells,
         statics,
         modules,
         poly_cross_calls,
@@ -4538,7 +4622,7 @@ pub(super) fn discover_transitive_instantiations(
         modules: Some(modules),
         records: poly_cross_calls,
     };
-    let mut transitive = ground.fixpoint(insts, arrays, refs)?;
+    let mut transitive = ground.fixpoint(insts, arrays, refs, owned_cells)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -4590,18 +4674,19 @@ impl CrossGround<'_> {
         insts: &mut HashMap<Span, CallInst>,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
+        cells: &mut Vec<OwnedCellDecl>,
     ) -> Result<Vec<CallInst>, String> {
         let mut seen: HashSet<String> = insts.values().map(|i| i.symbol.clone()).collect();
         let mut frontier: Vec<CallInst> = Vec::new();
         for inst in insts.values_mut() {
-            inst.poly_calls = self.cross_calls_of(inst, arrays, refs)?;
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
         }
         let mut transitive: Vec<CallInst> = Vec::new();
         while !frontier.is_empty() {
             let mut next = Vec::new();
             for mut inst in frontier {
-                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs)?;
+                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
                 enqueue_new(&inst.poly_calls, &mut seen, &mut next);
                 transitive.push(inst);
             }
@@ -4623,6 +4708,7 @@ impl CrossGround<'_> {
         caller: &CallInst,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
+        cells: &mut Vec<OwnedCellDecl>,
     ) -> Result<HashMap<Span, CallInst>, String> {
         let Some(records) = self.records.get(&caller.callee) else {
             return Ok(HashMap::new());
@@ -4693,7 +4779,7 @@ impl CrossGround<'_> {
                 .expect("sole_poly_word yields a polymorphic word");
             routed.insert(
                 record.span,
-                self.compose(record, caller, sig, &ctx, arrays, refs)?,
+                self.compose(record, caller, sig, &ctx, arrays, refs, cells)?,
             );
         }
         Ok(routed)
@@ -4727,6 +4813,7 @@ impl CrossGround<'_> {
     /// input shapes mirror the caller's operand slots (`poly_cross_match`
     /// decomposes structurally, and R6 rejects a compound the caller built
     /// itself), which the caller's own instantiation already interned.
+    #[allow(clippy::too_many_arguments)]
     fn compose(
         &self,
         record: &PolyCrossCall,
@@ -4735,6 +4822,7 @@ impl CrossGround<'_> {
         ctx: &Ctx,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
+        cells: &mut Vec<OwnedCellDecl>,
     ) -> Result<CallInst, String> {
         let mut subst = Subst::default();
         for (v, image) in &record.mapping {
@@ -4759,6 +4847,7 @@ impl CrossGround<'_> {
                 record.span,
                 ctx,
                 arrays,
+                cells,
                 refs,
             )?);
         }
@@ -5012,6 +5101,7 @@ pub(super) fn unify_poly_input(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     subst: &mut Subst,
 ) -> Result<(), String> {
@@ -5045,7 +5135,9 @@ pub(super) fn unify_poly_input(
                 return Err(poly_array_expected_error(ctx, span, name, slot_ty));
             };
             let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
-            unify_poly_input(sig, elem, elem_ty, name, span, ctx, arrays, refs, subst)?;
+            unify_poly_input(
+                sig, elem, elem_ty, name, span, ctx, arrays, cells, refs, subst,
+            )?;
             match len {
                 Len::Concrete(k) => {
                     if *k != count {
@@ -5106,10 +5198,10 @@ pub(super) fn unify_poly_input(
                 ));
             }
             for (p, c) in ins.iter().zip(&eff.inputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, refs, subst)?;
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, cells, refs, subst)?;
             }
             for (p, c) in outs.iter().zip(&eff.outputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, refs, subst)?;
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, cells, refs, subst)?;
             }
         }
         // Slice 13 (R-A6): a declared `&`-slot unifies only against a
@@ -5143,6 +5235,34 @@ pub(super) fn unify_poly_input(
                 span,
                 ctx,
                 arrays,
+                cells,
+                refs,
+                subst,
+            )?;
+        }
+        // P7.S3n (R3): the cell twin of the `Ref` arm -- a declared `^`-slot
+        // unifies only against a concrete owning cell, then recurses on the
+        // payload the registry names. There is no mutability bit to agree on.
+        PolyType::OwnedCell(payload) => {
+            let Type::OwnedCell(id, _) = slot_ty else {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    &slot_ty.to_string(),
+                ));
+            };
+            let slot_payload = cells[id.index()].payload;
+            unify_poly_input(
+                sig,
+                payload,
+                slot_payload,
+                name,
+                span,
+                ctx,
+                arrays,
+                cells,
                 refs,
                 subst,
             )?;
@@ -5205,7 +5325,9 @@ pub(super) fn unify_poly_input(
             let found_args = found_args.to_vec();
             drop(generics);
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
-                unify_poly_input(sig, arg_pty, *arg_ty, name, span, ctx, arrays, refs, subst)?;
+                unify_poly_input(
+                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst,
+                )?;
             }
         }
     }
@@ -5269,6 +5391,7 @@ pub(super) fn apply_subst(
     span: Span,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Result<Type, String> {
     match pty {
@@ -5280,7 +5403,7 @@ pub(super) fn apply_subst(
             poly_unbound_output_error(ctx, span, name, &sig.ty_var_names[*v as usize])
         }),
         PolyType::Array(elem, len) => {
-            let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, refs)?;
+            let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, cells, refs)?;
             let count = match len {
                 Len::Concrete(k) => *k,
                 Len::Var(ln) => subst.len_of(*ln).ok_or_else(|| {
@@ -5298,11 +5421,15 @@ pub(super) fn apply_subst(
         PolyType::Quotation(ins, outs, is_inline, _, _) => {
             let mut cins = Vec::with_capacity(ins.len());
             for p in ins {
-                cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
+                cins.push(apply_subst(
+                    sig, p, subst, name, span, ctx, arrays, cells, refs,
+                )?);
             }
             let mut couts = Vec::with_capacity(outs.len());
             for p in outs {
-                couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
+                couts.push(apply_subst(
+                    sig, p, subst, name, span, ctx, arrays, cells, refs,
+                )?);
             }
             // Slice 10a (R1): ground a `~` effect to `Type::InlineQuotation`
             // rather than `Type::Quotation`, so the materialization
@@ -5318,8 +5445,15 @@ pub(super) fn apply_subst(
         // this is the interning side of the pair (`subst_polytype`, at
         // lowering, only looks a shape up).
         PolyType::Ref(referent, mutable) => {
-            let referent = apply_subst(sig, referent, subst, name, span, ctx, arrays, refs)?;
+            let referent = apply_subst(sig, referent, subst, name, span, ctx, arrays, cells, refs)?;
             Ok(crate::ast::intern_ref_type(refs, referent, *mutable))
+        }
+        // P7.S3n (R3): the cell twin of the `Ref` arm -- grounding the
+        // payload is what mints the `OwnedCellId`, so this is the interning
+        // side of the pair `subst_polytype` only looks up.
+        PolyType::OwnedCell(payload) => {
+            let payload = apply_subst(sig, payload, subst, name, span, ctx, arrays, cells, refs)?;
+            Ok(crate::ast::intern_owned_cell_type(cells, payload))
         }
         // P7 slice 3a phase 2 (R2): mint (or find) the ground monomorph
         // through the live instantiator -- the write side of the pair
@@ -5343,13 +5477,21 @@ pub(super) fn apply_subst(
             };
             let mut concrete_args = Vec::with_capacity(args.len());
             for a in args {
-                concrete_args.push(apply_subst(sig, a, subst, name, span, ctx, arrays, refs)?);
+                concrete_args.push(apply_subst(
+                    sig, a, subst, name, span, ctx, arrays, cells, refs,
+                )?);
             }
-            let regs = crate::ast::NameRegistries {
+            // P7.S3n (R3): `cells` is a live parameter now, so the
+            // instantiation name renders a cell-payload argument against the
+            // real registry rather than the empty slice this used to throw
+            // away -- which would have panicked once a cell entry existed to
+            // look up. P7.S3n (R5): mutable, because the instantiation's own
+            // field substitution interns the shapes it grounds.
+            let regs = crate::ast::MutRegistries {
                 structs: ctx.structs(),
                 enums: ctx.enums(),
                 arrays,
-                cells: &[],
+                cells,
                 refs,
             };
             let mut g = cell.borrow_mut();
@@ -5405,6 +5547,19 @@ pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -
 /// same class of fact as `poly_copy_body_error`'s missing `Copy` bound, but
 /// the reason is exclusivity rather than an absent bound, so the note names
 /// that instead.
+/// P7.S3n (R3): `dup`/`over` on an owning cell whose payload is still
+/// polymorphic. The monomorphic twin is `cannot_copy_error` on a concrete
+/// `^T`; a `^'T` has no concrete `Type` to hand that, so the rendering goes
+/// through `poly_type_str` instead.
+pub(super) fn poly_copy_owned_cell_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.rendered_word_or("`<line>`");
+    format!(
+        "error: cannot `{op}` an owning cell in {where_} (line {})\n  `{ty}` is linear: it owns its payload, so duplicating it would free the same allocation twice",
+        span.line
+    )
+}
+
 pub(super) fn poly_copy_mutable_ref_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
     let op = crate::resolve::demangle_call(op);
     let where_ = ctx.rendered_word_or("`<line>`");
@@ -5461,6 +5616,7 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::Quotation(..) => "a quotation".to_string(),
         PolyType::QuotLit => "a quotation literal".to_string(),
         PolyType::Ref(..) => "a reference".to_string(),
+        PolyType::OwnedCell(_) => "an owning cell".to_string(),
         // P7 slice 3a: rendered with the application, so the diagnostic
         // names which generic header and which arguments, not just "a
         // generic type".
@@ -6174,6 +6330,9 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             if *mutable { "!" } else { "" },
             poly_type_str(referent, sig)
         ),
+        // P7.S3n (R3): the surface spelling, `^` glued to the payload,
+        // exactly as `intern_owned_cell_type` names a concrete one.
+        PolyType::OwnedCell(payload) => format!("^{}", poly_type_str(payload, sig)),
         // P7 slice 3a: `Name['A 'B]` in the signature's own variable
         // spellings -- `name` is cached on the variant for exactly this
         // (see `PolyType::Generic`'s doc), so no registry lookup is needed.
@@ -7235,7 +7394,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -7286,7 +7447,9 @@ mod tests {
                 &CombinatorEnv::default(),
                 &[],
                 &[],
-                &[],
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut Vec::new(),
                 &mut Vec::new(),
                 &mut overloads,
                 &mut TraitCtx::scratch(&mut Vec::new()),
@@ -7465,7 +7628,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut HashMap::new(),
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -7511,7 +7676,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut HashMap::new(),
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -7738,7 +7905,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -7764,7 +7933,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -9002,6 +9173,20 @@ mod tests {
         assert!(err.contains("linear"), "unexpected message: {err}");
     }
     #[test]
+    fn check_poly_dup_of_an_owning_cell_is_rejected() {
+        // P7.S3n (R3): both halves of the cell's `Copy` answer at once.
+        // `poly_is_copy` must say `false` -- a `^T` owns its payload at every
+        // instantiation, so answering `true` would let two names free one
+        // allocation -- and `poly_copy_gate` must then have an arm to render
+        // it, since without one it falls to whichever sibling arm claims the
+        // shape.
+        let err = check_src(": bad ( ^'T -- ^'T ^'T ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `dup` an owning cell in `bad` (line 1)\n  `^'T` is linear: it owns its payload, so duplicating it would free the same allocation twice"
+        );
+    }
+    #[test]
     fn poly_op_on_variable_error_names_a_reference() {
         // Slice 13 (review fix): `poly_op_on_variable_error`'s `Ref` describer
         // (`"a reference"`) is reachable from source -- `len` rejects a
@@ -9040,6 +9225,7 @@ mod tests {
         let structs: [StructDecl; 0] = [];
         let enums: [EnumDecl; 0] = [];
         let arrays: [ArrayDecl; 0] = [];
+        let cells: [OwnedCellDecl; 0] = [];
         let refs: [RefDecl; 0] = [];
         let ctx = Ctx::Line {
             structs: &structs,
@@ -9054,6 +9240,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst,
         )
@@ -9069,6 +9256,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst2,
         )
@@ -9099,6 +9287,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst3,
         )
@@ -9360,7 +9549,9 @@ mod tests {
             &CombinatorEnv::default(),
             &[],
             &[],
-            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
             &mut TraitCtx::scratch(&mut Vec::new()),
@@ -9614,6 +9805,7 @@ mod tests {
         };
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let cells: [OwnedCellDecl; 0] = [];
         let mut refs: Vec<RefDecl> = Vec::new();
         let shared = crate::ast::intern_ref_type(&mut refs, arr_ty, false);
         let mutable = crate::ast::intern_ref_type(&mut refs, arr_ty, true);
@@ -9631,6 +9823,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst,
         )
@@ -9646,6 +9839,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst2,
         )
@@ -9668,6 +9862,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &cells,
             &refs,
             &mut subst3,
         )
@@ -9695,6 +9890,7 @@ mod tests {
         let mut subst = Subst::default();
         subst.ty.push((0, Type::I64));
         let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
         let mut refs: Vec<RefDecl> = Vec::new();
         let ty = apply_subst(
             &sig,
@@ -9704,6 +9900,7 @@ mod tests {
             Span::default(),
             &ctx,
             &mut arrays,
+            &mut cells,
             &mut refs,
         )
         .expect("a bound referent grounds");

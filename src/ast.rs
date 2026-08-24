@@ -574,6 +574,26 @@ pub struct GenericTypes {
     struct_resolved: Vec<Type>,
     /// The enum twin of `struct_resolved`.
     enum_resolved: Vec<Type>,
+    /// P7.S3n (R2): the `structs` indices that are still placeholders --
+    /// registered by `parse_generic_typedefs`' stage (a) with an empty field
+    /// list, so a self-reference inside a header's own field list has a
+    /// header to find, but not yet filled by stage (b). A set of indices
+    /// rather than a `bool` parallel to `structs`: a decl pushed with its
+    /// fields already in place is simply absent, so nothing has to be kept
+    /// in lockstep and a direct `structs.push` cannot desynchronise it.
+    /// An instantiation minted against a pending header cannot compute its
+    /// fields yet, so it lands on `deferred_structs` instead.
+    struct_pending: Vec<usize>,
+    /// The enum twin of `struct_pending`.
+    enum_pending: Vec<usize>,
+    /// P7.S3n (R2): `(inst_structs index, structs index, concrete
+    /// arguments)` for every instantiation minted against a still-pending
+    /// header. The `StructId` is already handed out and never changes; only
+    /// the field list is owed, and `fill_struct_fields` pays it once that
+    /// header's real fields are known.
+    deferred_structs: Vec<(usize, usize, Vec<Type>)>,
+    /// The enum twin of `deferred_structs`.
+    deferred_enums: Vec<(usize, usize, Vec<Type>)>,
     struct_base: usize,
     enum_base: usize,
 }
@@ -598,6 +618,52 @@ pub struct NameRegistries<'a> {
     pub arrays: &'a [ArrayDecl],
     pub cells: &'a [OwnedCellDecl],
     pub refs: &'a [RefDecl],
+}
+
+/// P7.S3n (R5): `NameRegistries` plus the write access substitution needs.
+/// `substitute_generic_field` grounds a field that wraps a type variable
+/// (`['T 2]`, `^'T`, `Ent['K 'V]`), and grounding one *interns*: the array /
+/// cell / ref shape it produces may be one nothing has registered yet, and
+/// its `Generic` arm re-enters `instantiate_struct`/`instantiate_enum`, which
+/// interns in turn. `NameRegistries` is `Copy` over immutable slices and can
+/// intern nothing, so it cannot carry that pair.
+///
+/// A struct rather than five threaded parameters because the pair is mutually
+/// recursive: `substitute_generic_field` calls the instantiator, which calls
+/// back. Not `Copy` (it holds `&mut`), hence `reborrow` at every hop.
+pub struct MutRegistries<'a> {
+    pub structs: &'a [StructDecl],
+    pub enums: &'a [EnumDecl],
+    pub arrays: &'a mut Vec<ArrayDecl>,
+    pub cells: &'a mut Vec<OwnedCellDecl>,
+    pub refs: &'a mut Vec<RefDecl>,
+}
+
+impl MutRegistries<'_> {
+    /// The read-only view `type_instantiation_name` needs, over the *live*
+    /// registries -- not the `cells: &[]`/`refs: &[]` throwaway an earlier
+    /// caller built, which renders a cell- or ref-payload argument wrong (or
+    /// panics on its index) as soon as one exists to look up.
+    pub fn names(&self) -> NameRegistries<'_> {
+        NameRegistries {
+            structs: self.structs,
+            enums: self.enums,
+            arrays: self.arrays,
+            cells: self.cells,
+            refs: self.refs,
+        }
+    }
+
+    /// A shorter-lived copy for one recursive hop.
+    pub fn reborrow(&mut self) -> MutRegistries<'_> {
+        MutRegistries {
+            structs: self.structs,
+            enums: self.enums,
+            arrays: self.arrays,
+            cells: self.cells,
+            refs: self.refs,
+        }
+    }
 }
 
 /// The instantiation-name spelling of one type argument. A primitive
@@ -691,19 +757,77 @@ pub fn generic_surface_name(name: &str) -> &str {
         .expect("split always yields at least one piece")
 }
 
-/// Substitute a generic declaration's field type against a use site's
-/// concrete type arguments. `parse_generic_field_type_expr` admits exactly
-/// two field forms -- a bare bound variable and a fully concrete type (D1
-/// rules out an open application) -- so those are the two shapes here.
-fn substitute_generic_field(pty: &PolyType, args: &[Type]) -> Type {
-    match pty {
-        PolyType::Concrete(t) => *t,
-        PolyType::Var(v) => args[*v as usize],
-        other => unreachable!("a generic `type:` field is never {other:?}"),
-    }
-}
-
 impl GenericTypes {
+    /// Substitute a generic declaration's field type against a use site's
+    /// concrete type arguments.
+    ///
+    /// P7.S3n (R4): a field may wrap the header's own variables to any depth
+    /// (`[['T 2] 2]`, `^'T`, `&'T`, `Ent['K 'V]`), so this recurses and
+    /// interns the ground shape at each level -- the same bottom-up grounding
+    /// `apply_subst` performs for a word signature, and the reason it needs
+    /// `MutRegistries` rather than `NameRegistries`. Its `Generic` arm
+    /// re-enters the instantiator, which is what makes this pair mutually
+    /// recursive; R6's mint-and-memo-before-substitute ordering is what makes
+    /// a self-referential header terminate there.
+    ///
+    /// The remaining panic is truthful, not a deferral. Three shapes reach it
+    /// and none is constructible: a `PolyType::Quotation` (R7 rejects a
+    /// quotation field naming a type variable at the parser, and a *concrete*
+    /// quotation field folds to `Concrete` instead), a `QuotLit` (a poly-body
+    /// marker that never reaches a declaration), and an array over a
+    /// `Len::Var` (N3: a generic `type:` header binds no length variable).
+    fn substitute_generic_field(
+        &mut self,
+        pty: &PolyType,
+        args: &[Type],
+        mut regs: MutRegistries,
+    ) -> Type {
+        match pty {
+            PolyType::Concrete(t) => *t,
+            PolyType::Var(v) => args[*v as usize],
+            // N3: a generic `type:` header binds no length variable
+            // (`parse_generic_header_vars` takes only `'`-prefixed type
+            // variables), so a field's count is always literal. A `Len::Var`
+            // arm here would be unconstructible dead code.
+            PolyType::Array(elem, Len::Concrete(count)) => {
+                let elem = self.substitute_generic_field(elem, args, regs.reborrow());
+                intern_array_type(regs.arrays, elem, *count)
+            }
+            PolyType::Ref(referent, mutable) => {
+                let referent = self.substitute_generic_field(referent, args, regs.reborrow());
+                intern_ref_type(regs.refs, referent, *mutable)
+            }
+            PolyType::OwnedCell(payload) => {
+                let payload = self.substitute_generic_field(payload, args, regs.reborrow());
+                intern_owned_cell_type(regs.cells, payload)
+            }
+            // R4: ground every argument first, then mint (or memo-hit) the
+            // monomorph for the header this field names. R8 has already
+            // rejected a *growing* argument at parse time, so the
+            // `(header, module, args)` set this can reach is finite.
+            PolyType::Generic {
+                is_enum,
+                idx,
+                module,
+                args: header_args,
+                name: _,
+            } => {
+                let mut concrete = Vec::with_capacity(header_args.len());
+                for a in header_args {
+                    concrete.push(self.substitute_generic_field(a, args, regs.reborrow()));
+                }
+                if *is_enum {
+                    self.instantiate_enum(*idx as usize, &concrete, *module, regs)
+                } else {
+                    self.instantiate_struct(*idx as usize, &concrete, *module, regs)
+                }
+            }
+            other => unreachable!(
+                "a generic `type:` field cannot have shape {other:?}: a quotation field naming a type variable is rejected at the parser, a quotation-literal marker never reaches a declaration, and no header binds a length variable"
+            ),
+        }
+    }
+
     /// A registry whose instantiations will be appended onto concrete
     /// registries of the given lengths. The only constructor: a `Default`
     /// would hand out `(0, 0)` bases silently, and a base that does not
@@ -719,6 +843,10 @@ impl GenericTypes {
             enum_keys: Vec::new(),
             struct_resolved: Vec::new(),
             enum_resolved: Vec::new(),
+            struct_pending: Vec::new(),
+            enum_pending: Vec::new(),
+            deferred_structs: Vec::new(),
+            deferred_enums: Vec::new(),
             struct_base,
             enum_base,
         }
@@ -801,6 +929,137 @@ impl GenericTypes {
         Some((*gi, *m, args))
     }
 
+    /// P7.S3n (R2): register a generic struct header with an empty field
+    /// list and mark it pending, so a self-reference *inside that header's
+    /// own field list* has a header to resolve against. `parse_generic_
+    /// typedefs`' stage (b) fills the fields through `fill_struct_fields`.
+    pub fn push_struct_placeholder(&mut self, decl: GenericStructDecl) -> usize {
+        self.structs.push(decl);
+        let idx = self.structs.len() - 1;
+        self.struct_pending.push(idx);
+        idx
+    }
+
+    /// The enum twin of `push_struct_placeholder`.
+    pub fn push_enum_placeholder(&mut self, decl: GenericEnumDecl) -> usize {
+        self.enums.push(decl);
+        let idx = self.enums.len() - 1;
+        self.enum_pending.push(idx);
+        idx
+    }
+
+    /// P7.S3n (R2): fill placeholder header `idx`'s real field list, clear
+    /// its pending flag, and pay off every instantiation that was minted
+    /// against it while it was still pending -- their `StructId`s were handed
+    /// out already, so only `fields` is recomputed, in place.
+    pub fn fill_struct_fields(
+        &mut self,
+        idx: usize,
+        fields: Vec<(String, PolyType)>,
+        mut regs: MutRegistries,
+    ) {
+        self.structs[idx].fields = fields;
+        self.struct_pending.retain(|p| *p != idx);
+        let owed: Vec<(usize, Vec<Type>)> = self
+            .deferred_structs
+            .iter()
+            .filter(|(_, header, _)| *header == idx)
+            .map(|(inst, _, args)| (*inst, args.clone()))
+            .collect();
+        self.deferred_structs
+            .retain(|(_, header, _)| *header != idx);
+        for (inst, args) in owed {
+            let fields = self.substituted_struct_fields(idx, &args, regs.reborrow());
+            self.inst_structs[inst].fields = fields;
+        }
+    }
+
+    /// The enum twin of `fill_struct_fields`. Unlike the struct side this
+    /// needs `regs`: a monomorphized variant's *name* carries the argument
+    /// spelling (`Ok[i64]`), and a placeholder header had no variants at
+    /// all, so the whole `VariantDecl` list -- names included -- is built
+    /// here rather than only its field types being replaced.
+    pub fn fill_enum_variants(
+        &mut self,
+        idx: usize,
+        variants: Vec<GenericVariantDecl>,
+        mut regs: MutRegistries,
+    ) {
+        self.enums[idx].variants = variants;
+        self.enum_pending.retain(|p| *p != idx);
+        let owed: Vec<(usize, Vec<Type>)> = self
+            .deferred_enums
+            .iter()
+            .filter(|(_, header, _)| *header == idx)
+            .map(|(inst, _, args)| (*inst, args.clone()))
+            .collect();
+        self.deferred_enums.retain(|(_, header, _)| *header != idx);
+        for (inst, args) in owed {
+            let name = self.inst_enums[inst].name.clone();
+            let variants = self.substituted_enum_variants(idx, &args, &name, regs.reborrow());
+            self.inst_enums[inst].variants = variants;
+        }
+    }
+
+    /// One instantiation's concrete field list: header `idx`'s declared
+    /// fields with `args` substituted in. Split out of `instantiate_struct`
+    /// so `fill_struct_fields` can recompute exactly the same list for an
+    /// instantiation that was minted before the header had any fields.
+    ///
+    /// R6: the field list is **cloned** before substituting, not
+    /// `mem::take`n. Substitution needs `&mut self` (its `Generic` arm
+    /// re-enters the instantiator), so the borrow of `self.structs[idx]`
+    /// cannot stay live -- but taking the declaration's own list would leave
+    /// the header fieldless for a re-entrant instantiation at a *different*
+    /// argument list, which is exactly the permuting self-reference case.
+    fn substituted_struct_fields(
+        &mut self,
+        idx: usize,
+        args: &[Type],
+        mut regs: MutRegistries,
+    ) -> Vec<(String, Type)> {
+        let fields = self.structs[idx].fields.clone();
+        let mut out = Vec::with_capacity(fields.len());
+        for (fname, pty) in &fields {
+            let ty = self.substitute_generic_field(pty, args, regs.reborrow());
+            out.push((fname.clone(), ty));
+        }
+        out
+    }
+
+    /// The enum twin of `substituted_struct_fields`. `name` is the enclosing
+    /// instantiation's own mangled name, which each variant's `display`
+    /// spelling is built from. An explicit loop over cloned variants for the
+    /// same reason the struct twin clones: a `.map()` closure would hold the
+    /// borrow of `self.enums[idx]` live across a `&mut self` substitution.
+    fn substituted_enum_variants(
+        &mut self,
+        idx: usize,
+        args: &[Type],
+        name: &str,
+        mut regs: MutRegistries,
+    ) -> Vec<VariantDecl> {
+        let variants = self.enums[idx].variants.clone();
+        let mut out = Vec::with_capacity(variants.len());
+        for variant in &variants {
+            let vname = type_instantiation_name(&variant.name, args, regs.names());
+            let display = format!("{name}.{}", generic_surface_name(&variant.name));
+            let mut fields = Vec::with_capacity(variant.fields.len());
+            for (fname, pty) in &variant.fields {
+                let ty = self.substitute_generic_field(pty, args, regs.reborrow());
+                fields.push((fname.clone(), ty));
+            }
+            out.push(VariantDecl {
+                name_static: Box::leak(vname.clone().into_boxed_str()),
+                name: vname,
+                display_static: Box::leak(display.into_boxed_str()),
+                fields,
+                span: variant.span,
+            });
+        }
+        out
+    }
+
     /// The generic struct declaration `name` names in `module`, if any.
     /// `module` is the *declaring* module: an application spells it out
     /// through an import qualifier, exactly as a concrete cross-module type
@@ -834,33 +1093,47 @@ impl GenericTypes {
         idx: usize,
         args: &[Type],
         module: u32,
-        regs: NameRegistries,
+        mut regs: MutRegistries,
     ) -> Type {
         if let Some(ty) = self.lookup_struct(idx, module, args) {
             return ty;
         }
-        let name = type_instantiation_name(&self.structs[idx].name, args, regs);
-        let decl = &self.structs[idx];
-        let fields: Vec<(String, Type)> = decl
-            .fields
-            .iter()
-            .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
-            .collect();
-        let span = decl.span;
+        let name = type_instantiation_name(&self.structs[idx].name, args, regs.names());
+        let span = self.structs[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = StructId::from_index(self.struct_base + self.inst_structs.len());
         let ty = Type::Struct(id, name_static);
+        // R6: mint the id, the memo key, the resolved type and a *fieldless
+        // placeholder decl* before substituting anything. A field that names
+        // this same header at these same arguments re-enters here during that
+        // substitution; with the memo already in place it hits the lookup
+        // above and returns this id instead of recursing forever. All four
+        // pushes stay in lockstep: `struct_keys`, `struct_resolved` and
+        // `inst_structs` are parallel vectors, and the minted id is
+        // `struct_base + inst_structs.len()`.
         self.struct_keys.push((idx, module, args.to_vec()));
         self.struct_resolved.push(ty);
+        let inst = self.inst_structs.len();
         self.inst_structs.push(StructDecl {
             name,
             name_static,
-            fields,
+            fields: Vec::new(),
             span,
             has_drop_overload: false,
             is_bundle: false,
             module,
         });
+        // P7.S3n (R2): a header still being *registered* has no declared
+        // fields to substitute yet, so computing them now would permanently
+        // memoize a fieldless struct with no diagnostic. The id is already
+        // handed out -- a `Type::Struct` is an opaque handle -- so only the
+        // field list is owed, to `fill_struct_fields`.
+        if self.struct_pending.contains(&idx) {
+            self.deferred_structs.push((inst, idx, args.to_vec()));
+        } else {
+            let fields = self.substituted_struct_fields(idx, args, regs.reborrow());
+            self.inst_structs[inst].fields = fields;
+        }
         ty
     }
 
@@ -874,45 +1147,34 @@ impl GenericTypes {
         idx: usize,
         args: &[Type],
         module: u32,
-        regs: NameRegistries,
+        mut regs: MutRegistries,
     ) -> Type {
         if let Some(ty) = self.lookup_enum(idx, module, args) {
             return ty;
         }
-        let name = type_instantiation_name(&self.enums[idx].name, args, regs);
-        let decl = &self.enums[idx];
-        let variants: Vec<VariantDecl> = decl
-            .variants
-            .iter()
-            .map(|variant| {
-                let vname = type_instantiation_name(&variant.name, args, regs);
-                let display = format!("{name}.{}", generic_surface_name(&variant.name));
-                VariantDecl {
-                    name_static: Box::leak(vname.clone().into_boxed_str()),
-                    name: vname,
-                    display_static: Box::leak(display.into_boxed_str()),
-                    fields: variant
-                        .fields
-                        .iter()
-                        .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
-                        .collect(),
-                    span: variant.span,
-                }
-            })
-            .collect();
-        let span = decl.span;
+        let name = type_instantiation_name(&self.enums[idx].name, args, regs.names());
+        let span = self.enums[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
         let ty = Type::Enum(id, name_static);
+        // R6/R2: the struct twin's reasoning and its three-vector lockstep,
+        // verbatim.
         self.enum_keys.push((idx, module, args.to_vec()));
         self.enum_resolved.push(ty);
+        let inst = self.inst_enums.len();
         self.inst_enums.push(EnumDecl {
-            name,
+            name: name.clone(),
             name_static,
-            variants,
+            variants: Vec::new(),
             span,
             module,
         });
+        if self.enum_pending.contains(&idx) {
+            self.deferred_enums.push((inst, idx, args.to_vec()));
+        } else {
+            let variants = self.substituted_enum_variants(idx, args, &name, regs.reborrow());
+            self.inst_enums[inst].variants = variants;
+        }
         ty
     }
 }
@@ -1611,6 +1873,14 @@ pub enum PolyType {
     /// the classification bit (`Copy`-ness, store-vs-fetch, exclusivity),
     /// asked at sites that hold no registry.
     Ref(Box<PolyType>, bool),
+    /// P7.S3n (R3): an owning cell whose payload is still polymorphic
+    /// (`^'T`, `^['T 4]`), deferred for exactly the reason `Ref` documents:
+    /// the payload may be a variable, which no registry entry can name, so
+    /// the `OwnedCellId` is minted only once the payload grounds
+    /// (`apply_subst` / `subst_polytype`, via `intern_owned_cell_type`), and
+    /// a fully-concrete payload folds to `Concrete(Type::OwnedCell(..))` at
+    /// parse time.
+    OwnedCell(Box<PolyType>),
     /// P7 slice 3b (R2): the compile-only marker a quotation *literal* written
     /// inside a non-inline polymorphic body occupies on the poly walk's
     /// virtual stack. Deliberately carries no effect: two literals with one
@@ -2468,6 +2738,29 @@ mod tests {
         refs: &[],
     };
 
+    /// The mutable twin of `EMPTY_REGS`, owning the three interning vecs a
+    /// `MutRegistries` borrows -- it holds `&mut`, so it cannot be a `const`
+    /// the way the read-only view can. Kept live across a test's calls so an
+    /// interned shape from one instantiation is visible to the next.
+    #[derive(Default)]
+    struct ScratchRegs {
+        arrays: Vec<ArrayDecl>,
+        cells: Vec<OwnedCellDecl>,
+        refs: Vec<RefDecl>,
+    }
+
+    impl ScratchRegs {
+        fn regs(&mut self) -> MutRegistries<'_> {
+            MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut self.arrays,
+                cells: &mut self.cells,
+                refs: &mut self.refs,
+            }
+        }
+    }
+
     /// Slice 10a (R1/R10): a `~` renders `~[ ... -- ... ]`, the ordinary
     /// quotation renders `[ ... -- ... ]`, distinguished only by the sigil.
     #[test]
@@ -3103,9 +3396,10 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(3, 1);
         generics.structs.push(decl);
-        let a = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
-        let b = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
-        let c = generics.instantiate_struct(0, &[Type::U32], 0, EMPTY_REGS);
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let b = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let c = generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(generics.inst_structs.len(), 2);
@@ -3114,6 +3408,232 @@ mod tests {
         assert_eq!(
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// A one-variable generic struct header with a single field of the given
+    /// shape, the fixture every R4 substitution test below instantiates.
+    fn header_with_field(name: &'static str, field: PolyType) -> GenericStructDecl {
+        GenericStructDecl {
+            name: name.to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("f".to_string(), field)],
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// P7.S3n (R4): `items ['T 2]` at `'T = i64` grounds to the interned
+    /// `[i64 2]` shape -- the array arm, which panicked in `unreachable!`
+    /// before phase 2.
+    #[test]
+    fn substitute_generic_field_array_of_ty_var_interns_concrete_array() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "Pair",
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2)),
+        ));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let (_, ty) = &generics.inst_structs[0].fields[0];
+        let Type::Array(id, _) = ty else {
+            panic!("an array field grounds to Type::Array: {ty:?}")
+        };
+        assert_eq!(scratch.arrays[id.index()].element, Type::I64);
+        assert_eq!(scratch.arrays[id.index()].count, 2);
+    }
+
+    /// The nesting claim, which the single-level test cannot make: the arm has
+    /// to recurse, not merely look one level down.
+    #[test]
+    fn substitute_generic_field_nested_array_of_ty_var_interns_nested_array() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "NestArr",
+            PolyType::Array(
+                Box::new(PolyType::Array(
+                    Box::new(PolyType::Var(0)),
+                    Len::Concrete(2),
+                )),
+                Len::Concrete(3),
+            ),
+        ));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
+        let (_, ty) = &generics.inst_structs[0].fields[0];
+        let Type::Array(outer, _) = ty else {
+            panic!("expected Type::Array: {ty:?}")
+        };
+        let outer = &scratch.arrays[outer.index()];
+        assert_eq!(outer.count, 3);
+        let Type::Array(inner, _) = outer.element else {
+            panic!("the outer element is itself an array: {:?}", outer.element)
+        };
+        assert_eq!(scratch.arrays[inner.index()].element, Type::U32);
+        assert_eq!(scratch.arrays[inner.index()].count, 2);
+    }
+
+    /// R4/R3: `c ^'T` grounds through `intern_owned_cell_type`. The cell arm
+    /// is what makes a self-referential generic type possible at all, so its
+    /// substitution is load-bearing rather than one shape among five.
+    #[test]
+    fn substitute_generic_field_owned_cell_of_ty_var_interns_concrete_cell() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "Cell",
+            PolyType::OwnedCell(Box::new(PolyType::Var(0))),
+        ));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(0, &[Type::F64], 0, scratch.regs());
+        let (_, ty) = &generics.inst_structs[0].fields[0];
+        let Type::OwnedCell(id, _) = ty else {
+            panic!("a `^` field grounds to Type::OwnedCell: {ty:?}")
+        };
+        assert_eq!(scratch.cells[id.index()].payload, Type::F64);
+    }
+
+    /// R4/R10: `r &'T` grounds to an interned `Type::Ref`. The *declaration*
+    /// is then rejected by the no-stored-reference rule downstream (a build
+    /// test pins that), which it can only reach by substituting to a real
+    /// reference type first -- hence the arm, for a shape that never builds.
+    #[test]
+    fn substitute_generic_field_ref_of_ty_var_interns_concrete_ref() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "Box",
+            PolyType::Ref(Box::new(PolyType::Var(0)), false),
+        ));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let (_, ty) = &generics.inst_structs[0].fields[0];
+        let Type::Ref(id, mutable, _) = ty else {
+            panic!("a `&` field grounds to Type::Ref: {ty:?}")
+        };
+        assert!(!mutable);
+        assert_eq!(scratch.refs[id.index()].referent, Type::I64);
+    }
+
+    /// R4: the enum twin, which shares the arms but not the path -- a
+    /// variant's fields go through `substituted_enum_variants`, and a
+    /// substitution correct for structs and skipped for variants would pass
+    /// every test above.
+    #[test]
+    fn substitute_generic_variant_field_array_of_ty_var_interns_concrete_array() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(GenericEnumDecl {
+            name: "Holder".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Some".to_string(),
+                fields: vec![(
+                    "xs".to_string(),
+                    PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2)),
+                )],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        });
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        let (_, ty) = &generics.inst_enums[0].variants[0].fields[0];
+        let Type::Array(id, _) = ty else {
+            panic!("a variant's array field grounds to Type::Array: {ty:?}")
+        };
+        assert_eq!(scratch.arrays[id.index()].element, Type::I64);
+    }
+
+    /// R6, asserted directly rather than only through the hang it prevents:
+    /// `type: L 'T next ^L['T] ;` at `'T = i64` re-enters `instantiate_struct`
+    /// for the *same* `(idx, module, args)` while substituting its own field.
+    /// The memo key, the resolved type and the placeholder decl are pushed
+    /// before that substitution runs, so the re-entry hits the dedup lookup
+    /// and reads back the very id this call minted. Restore the old
+    /// substitute-then-mint order and this recurses until the stack dies.
+    #[test]
+    fn instantiate_struct_pushes_memo_key_before_substituting_fields() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "L",
+            PolyType::OwnedCell(Box::new(PolyType::Generic {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(0)],
+                name: "L",
+            })),
+        ));
+        let mut scratch = ScratchRegs::default();
+        let ty = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        assert_eq!(
+            generics.inst_structs.len(),
+            1,
+            "the self-reference must memo-hit, not mint a second instantiation"
+        );
+        let (_, field) = &generics.inst_structs[0].fields[0];
+        let Type::OwnedCell(id, _) = field else {
+            panic!("the field is a cell: {field:?}")
+        };
+        assert_eq!(
+            scratch.cells[id.index()].payload,
+            ty,
+            "the cell payload is the id this very call minted"
+        );
+    }
+
+    /// R8's permuting case, at the layer that has to terminate: `A['V 'K]`
+    /// swaps its arguments each hop, so the closure is two instantiations,
+    /// reached in either order, and the memo is what closes the cycle. Two
+    /// entries rather than one -- a memo keyed on the header alone (ignoring
+    /// `args`) would collapse them and give `A[i64 str]` `A[str i64]`'s
+    /// layout.
+    #[test]
+    fn instantiate_struct_permuting_self_reference_terminates_at_two_entries() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(GenericStructDecl {
+            name: "A".to_string(),
+            ty_var_names: vec!["'K".to_string(), "'V".to_string()],
+            fields: vec![(
+                "next".to_string(),
+                PolyType::OwnedCell(Box::new(PolyType::Generic {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                    args: vec![PolyType::Var(1), PolyType::Var(0)],
+                    name: "A",
+                })),
+            )],
+            span: Span::default(),
+            module: 0,
+        });
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_struct(0, &[Type::I64, Type::U32], 0, scratch.regs());
+        assert_eq!(generics.inst_structs.len(), 2);
+        let swapped = generics
+            .lookup_struct(0, 0, &[Type::U32, Type::I64])
+            .expect("the swapped instantiation was minted by the recursion");
+        assert_ne!(a, swapped);
+        let payload_of = |ty: &Type| {
+            let Type::OwnedCell(id, _) = ty else {
+                panic!("the field is a cell: {ty:?}")
+            };
+            scratch.cells[id.index()].payload
+        };
+        let Type::Struct(a_id, _) = a else {
+            panic!("expected a struct")
+        };
+        let Type::Struct(swapped_id, _) = swapped else {
+            panic!("expected a struct")
+        };
+        assert_eq!(
+            payload_of(&generics.inst_structs[a_id.index()].fields[0].1),
+            swapped,
+            "A[i64 u32]'s next points at A[u32 i64]"
+        );
+        assert_eq!(
+            payload_of(&generics.inst_structs[swapped_id.index()].fields[0].1),
+            a,
+            "and back again, which is what makes the closure finite"
         );
     }
 
@@ -3143,14 +3663,15 @@ mod tests {
 
         // Parse-time: one instance, flushed onto the live registry exactly as
         // `assemble_module` does after the whole closure has parsed.
-        let a = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
         generics.flush_structs_into(&mut structs);
         generics.rebase(structs.len(), 0);
 
         // Downstream (check/lowering-time): a *different* argument list mints
         // a fresh entry, whose id must count from the post-flush length, not
         // from the stale base `a` was minted against.
-        let b = generics.instantiate_struct(0, &[Type::U32], 0, EMPTY_REGS);
+        let b = generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
         generics.flush_structs_into(&mut structs);
 
         assert_ne!(a, b, "a downstream mint of a distinct instantiation must not collide with the earlier parse-time one");
@@ -3189,8 +3710,9 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
-        let a = generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
-        let b = generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        let b = generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
         assert_eq!(a, b);
         assert_eq!(generics.inst_enums.len(), 1);
         assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
@@ -3215,7 +3737,8 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
-        generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
         assert_eq!(
             generics.inst_enums[0].variants[0].display_static,
             "Res[i64].Ok"
@@ -3265,7 +3788,8 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
-        generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
         let mono = variant_type(&generics.inst_enums, EnumId::from_index(0), 0);
         assert_eq!(mono.name(), "Res[i64].Ok");
     }

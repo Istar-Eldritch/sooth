@@ -1162,6 +1162,145 @@ mod tests {
         );
     }
 
+    /// P7.S3n (R4/R5), the headline criterion: the `Map`-shaped backing
+    /// storage -- an array field whose element is a generic application over
+    /// the header's own two variables -- instantiated at two *asymmetric*
+    /// key/value pairs. `(i64, str)` and `(str, i64)` rather than a symmetric
+    /// pair on purpose: `Map[i64 i64]` cannot tell a correct substitution
+    /// from one that swaps `'K` and `'V`.
+    ///
+    /// Asserts the resolved field types down to each `Ent`'s own fields, not
+    /// merely that the program builds: a substitution that grounded both
+    /// arguments to the same type, or reused one instantiation for both, would
+    /// build clean and be caught only here.
+    #[test]
+    fn map_shaped_backing_storage_instantiates_at_two_key_value_pairs() {
+        let s = Sandbox::new("generic-map-shaped-field");
+        let entry = s.write(
+            "main.sth",
+            "type: Ent 'K 'V k 'K v 'V ;\n\
+             type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+             : f ( Map[i64 str] -- Map[i64 str] ) ;\n\
+             : g ( Map[str i64] -- Map[str i64] ) ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("a generic array-of-application field checks");
+
+        // `assemble_module(_, true)` mangles every name per module, so the
+        // instantiation spelling is a prefix, not the whole name.
+        let map_id = |args: &str| {
+            let name = format!("Map[{args}]");
+            module
+                .structs
+                .iter()
+                .position(|d| d.name.starts_with(&name))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} is registered; have {:?}",
+                        module.structs.iter().map(|d| &d.name).collect::<Vec<_>>()
+                    )
+                })
+        };
+        let a = map_id("i64 str");
+        let b = map_id("str i64");
+        assert_ne!(
+            a, b,
+            "the two instantiations must mint distinct StructIds, not share one layout"
+        );
+
+        // `Map`'s only field is `[Ent['K 'V] 8]`: an interned array whose
+        // element is the substituted `Ent` instantiation. Both the element's
+        // rendered name *and* its field types are asserted, and the two are
+        // not the same claim: a substitution that swapped `'K`/`'V` would be
+        // applied twice on the way to `Ent`'s own fields (once binding
+        // `Ent`'s arguments, once binding its fields against them) and cancel
+        // out at arity two, leaving only the name wrong.
+        let entry_of = |map: usize| {
+            let (_, slots) = &module.structs[map].fields[0];
+            let crate::ast::Type::Array(arr, _) = slots else {
+                panic!("slots is an array: {slots:?}")
+            };
+            let decl = &module.arrays[arr.index()];
+            assert_eq!(decl.count, 8, "the declared length survives substitution");
+            let crate::ast::Type::Struct(ent, _) = decl.element else {
+                panic!("the element is an Ent instantiation: {:?}", decl.element)
+            };
+            let ent = &module.structs[ent.index()];
+            (
+                ent.name.clone(),
+                ent.fields
+                    .iter()
+                    .map(|(n, t)| (n.clone(), *t))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let (a_name, a_fields) = entry_of(a);
+        let (b_name, b_fields) = entry_of(b);
+        assert!(
+            a_name.starts_with("Ent[i64 str]"),
+            "Map[i64 str]'s element instantiates Ent at ('K, 'V) in that order: {a_name}"
+        );
+        assert!(
+            b_name.starts_with("Ent[str i64]"),
+            "and Map[str i64]'s at the reverse: {b_name}"
+        );
+        assert_eq!(
+            a_fields,
+            vec![
+                ("k".to_string(), crate::ast::Type::I64),
+                ("v".to_string(), crate::ast::Type::Str)
+            ]
+        );
+        assert_eq!(
+            b_fields,
+            vec![
+                ("k".to_string(), crate::ast::Type::Str),
+                ("v".to_string(), crate::ast::Type::I64)
+            ],
+            "the second instantiation binds 'K/'V the other way round"
+        );
+    }
+
+    /// P7.S3n (R5): the nested `Generic` arm renders its instantiation name
+    /// against `MutRegistries::names()`, i.e. the *live* cell and reference
+    /// registries. `type_arg_key` indexes them to spell a wrapped argument
+    /// (`^i64`, `&i64`), so the `cells: &[]`/`refs: &[]` throwaway an earlier
+    /// caller built would panic on the index rather than render `Ent[^i64
+    /// i64]`. Both programs are rejected downstream for unrelated reasons --
+    /// the rendered name inside the diagnostic is the witness, which is why
+    /// this asserts on the message rather than on a successful build.
+    #[test]
+    fn map_shaped_field_instantiation_renders_through_live_cells_and_refs() {
+        for (tag, arg, want) in [
+            ("generic-map-cell-arg", "^i64", "Ent[^i64 i64]"),
+            ("generic-map-ref-arg", "&i64", "Ent[&i64 i64]"),
+        ] {
+            let s = Sandbox::new(tag);
+            let entry = s.write(
+                "main.sth",
+                &format!(
+                    "type: Ent 'K 'V k 'K v 'V ;\n\
+                     type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+                     : f ( Map[{arg} i64] -- Map[{arg} i64] ) ;\n\
+                     : main ( -- ) ;\n"
+                ),
+            );
+            let closure = discover_closure(&entry).expect("closure resolves");
+            let err = match assemble_module(&closure, true) {
+                Err(e) => e,
+                Ok(mut module) => check::check(&mut module)
+                    .expect_err("a wrapped argument is rejected downstream"),
+            };
+            assert!(
+                err.contains(want),
+                "{tag}: the nested instantiation must render its wrapped argument \
+                 from the live registry, got: {err}"
+            );
+        }
+    }
+
     /// A two-file generic closure assembled through the real `assemble_module`
     /// path: `box.sth` declares `Box 'T`, `use.sth` applies it qualified as
     /// `b::Box[i64]`, and the entry file's `import:` order decides which of the

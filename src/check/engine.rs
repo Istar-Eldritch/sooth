@@ -2053,10 +2053,20 @@ mod tests {
                 enums: &[],
             };
             let mut arrays = Vec::new();
+            let mut cells = Vec::new();
             let mut refs = Vec::new();
-            back_edge_declared_shape(&w, None, "w", Span::default(), &ctx, &mut arrays, &mut refs)
-                .unwrap()
-                .2
+            back_edge_declared_shape(
+                &w,
+                None,
+                "w",
+                Span::default(),
+                &ctx,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+            )
+            .unwrap()
+            .2
         }
         // `times`-shape: zero fixed outputs -> empty map.
         assert_eq!(

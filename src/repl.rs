@@ -354,6 +354,17 @@ fn remap_poly_type(
             )),
             *mutable,
         ),
+        // P7.S3n (R3): the poly cell carries no `OwnedCellId` of its own
+        // (minted only at grounding), so only the payload shifts.
+        PolyType::OwnedCell(payload) => PolyType::OwnedCell(Box::new(remap_poly_type(
+            payload,
+            enums,
+            struct_base,
+            array_base,
+            cell_base,
+            ref_base,
+            slice_base,
+        ))),
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
             ins.iter()
                 .map(|q| {
@@ -1567,6 +1578,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.arrays,
+                &self.owned_cells,
                 &self.refs,
                 &empty_generics,
                 &bodies,
@@ -2862,7 +2874,9 @@ impl Session {
             &combinators,
             &self.structs,
             &self.enums,
-            &self.arrays,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
             &mut self.slices,
             &[],
             None,

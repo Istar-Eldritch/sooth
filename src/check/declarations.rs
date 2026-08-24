@@ -577,6 +577,8 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         // Slice 13 (R-A9): a private type named behind a `&` is still named,
         // so export-privacy must see it.
         PolyType::Ref(referent, _) => collect_poly_concrete(referent, out),
+        // P7.S3n (R3): likewise a private type named as a cell payload.
+        PolyType::OwnedCell(payload) => collect_poly_concrete(payload, out),
         // Slice 6a (R5): a declared quotation effect's rows may name concrete
         // types (`[ i64 -- ]`); collect them so export-privacy still sees a
         // private type mentioned inside an effect.
@@ -2010,6 +2012,28 @@ mod tests {
         // that shape directly rather than through a source signature.
         let inner = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
         let pt = PolyType::Ref(Box::new(inner), false);
+        let mut out = Vec::new();
+        collect_poly_concrete(&pt, &mut out);
+        assert_eq!(out, vec![Type::I64]);
+    }
+
+    #[test]
+    fn collect_poly_concrete_sees_through_an_owned_cell() {
+        // P7.S3n (R3): the cell twin of the arm above, and for the same
+        // reason -- a private type named as a `^` payload is still named.
+        // Built directly for the same reason too: a fully-concrete payload
+        // folds to `Concrete(Type::OwnedCell)` at parse time, so only a
+        // variable-bearing one reaches this arm, and reaching it with a
+        // *concrete leaf* inside needs a shape (a generic application's mixed
+        // argument list) that no source signature spells in one token.
+        let payload = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0), PolyType::Concrete(Type::I64)],
+            name: "Ent",
+        };
+        let pt = PolyType::OwnedCell(Box::new(payload));
         let mut out = Vec::new();
         collect_poly_concrete(&pt, &mut out);
         assert_eq!(out, vec![Type::I64]);
