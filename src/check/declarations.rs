@@ -685,20 +685,35 @@ pub fn check_selective_imports(
                     entry.span,
                 ));
             }
-            if locals.contains(entry.name.as_str()) {
-                return Err(selective_collides_with_local_error(
-                    &entry.name,
-                    entry.qualifier.as_deref(),
-                    entry.span,
-                ));
-            }
-            if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_deref()) {
-                return Err(selective_collision_error(
-                    &entry.name,
-                    first,
-                    entry.qualifier.as_deref(),
-                    entry.span,
-                ));
+            // P7.S3q (R5): an entry naming an intrinsic the source module
+            // effectively admits is exempt from both collision rules, because
+            // it binds no word and carries no module identity -- neither rule
+            // has a subject. A local `: drop ( Fd -- )` and the intrinsic
+            // `drop` already coexist in one file (`resolve::mangle` exempts
+            // `drop`), and two hubs both admitting `drop` union to one set, so
+            // an ambiguity error would name an ambiguity with no two answers.
+            // Evaluated *after* the not-exported check above, so a hub that
+            // does not export the name still fails there first.
+            let admitted_intrinsic = crate::ast::is_name_dispatched_builtin(&entry.name)
+                && module.modules[entry.target as usize]
+                    .intrinsics
+                    .admits(&entry.name);
+            if !admitted_intrinsic {
+                if locals.contains(entry.name.as_str()) {
+                    return Err(selective_collides_with_local_error(
+                        &entry.name,
+                        entry.qualifier.as_deref(),
+                        entry.span,
+                    ));
+                }
+                if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_deref()) {
+                    return Err(selective_collision_error(
+                        &entry.name,
+                        first,
+                        entry.qualifier.as_deref(),
+                        entry.span,
+                    ));
+                }
             }
             // R4 (import mirror): a selective import naming a builtin
             // operator must agree with it on input count. The other two
@@ -2306,6 +2321,35 @@ mod tests {
         assert!(
             err.contains("wildcard import of `p`") && err.contains("collides with a local"),
             "wildcard collision wording: {err}"
+        );
+
+        // P7.S3q (R5), both ways on one fixture pair. Module 0 declares its own
+        // destructor `drop` and imports `drop` from two hubs -- a local
+        // collision and a diamond at once. While the hubs admit the intrinsic
+        // the entries bind no word and carry no module identity, so neither
+        // rule has a subject; strip the admission and both rules apply again,
+        // proving the exemption is what carries this and not the name.
+        let hubs = |admits: bool| {
+            let hub = || match admits {
+                true => ModuleInfo {
+                    intrinsics: crate::ast::IntrinsicVisibility::Only(["drop".to_string()].into()),
+                    ..info(&["drop"])
+                },
+                false => info(&["drop"]),
+            };
+            module_with(vec![word("drop", 0)], vec![info(&[]), hub(), hub()])
+        };
+        let entries = vec![
+            vec![sel("drop", "a", 1, 1), sel("drop", "b", 2, 2)],
+            Vec::new(),
+            Vec::new(),
+        ];
+        check_selective_imports(&hubs(true), &entries)
+            .expect("an admitted intrinsic collides with neither the local decl nor its twin");
+        let err = check_selective_imports(&hubs(false), &entries).unwrap_err();
+        assert!(
+            err.contains("collides with a local definition of `drop`"),
+            "without the admission the ordinary rules still apply: {err}"
         );
     }
     /// U3 (R12): the duplicate-type-name check partitions by owning module, so
