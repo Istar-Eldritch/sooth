@@ -368,6 +368,48 @@ fn an_owning_closure_that_does_not_consume_a_linear_capture_is_rejected() {
     );
 }
 
+/// The same obligation at an `if`-join rather than a lone literal: each arm's
+/// materialized closure is checked for its own consumption of `s` before the
+/// two arms are joined (`check_branch_join`), not only for a single top-level
+/// literal. Here the first arm (`a`) is the one that leaves `s` unconsumed.
+#[test]
+fn an_owning_closure_joins_first_arm_unconsumed_is_rejected() {
+    let prog = Scratch::write(
+        "join-first-arm-unconsumed",
+        &format!(
+            "{SPY_DEF}: mk ( Spy Bool -- owning [ -- ] ) | s c |\n  \
+               c ~[ [ &s &tag @ . ] ] ~[ [ s drop ] ] if\n\
+             ;\n\
+             : main ( -- ) 7 Spy True mk call ;\n"
+        ),
+    );
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("an `owning` closure captures `s`, a linear `Spy`, without consuming it"),
+        "unexpected message: {err}"
+    );
+}
+
+/// The mirror of the above: the *second* arm (`b`) is the one that leaves `s`
+/// unconsumed, reached only once the first arm's own check has already passed.
+#[test]
+fn an_owning_closure_joins_second_arm_unconsumed_is_rejected() {
+    let prog = Scratch::write(
+        "join-second-arm-unconsumed",
+        &format!(
+            "{SPY_DEF}: mk ( Spy Bool -- owning [ -- ] ) | s c |\n  \
+               c ~[ [ s drop ] ] ~[ [ &s &tag @ . ] ] if\n\
+             ;\n\
+             : main ( -- ) 7 Spy True mk call ;\n"
+        ),
+    );
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("an `owning` closure captures `s`, a linear `Spy`, without consuming it"),
+        "unexpected message: {err}"
+    );
+}
+
 /// The admission lift is narrowed to *linear* captures on purpose. A `Copy`
 /// aggregate is not moved by the capture, so admitting it would leave the frame
 /// and the env each holding a copy with no rule saying which is authoritative
