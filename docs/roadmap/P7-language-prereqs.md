@@ -605,7 +605,7 @@ bounded member inside its body resolves against the caller's concrete instantiat
 way a non-combinator poly word's bounded call does (S3e's R7/R8/R9), rather than being a
 located rejection.
 
-**P7.S3p -- A trait member declaring its bound variable at any input position.** A member's
+**P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
 (an index/lookup shape) declares and dispatches through a bound.
 
