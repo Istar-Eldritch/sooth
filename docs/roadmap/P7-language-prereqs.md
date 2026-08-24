@@ -603,11 +603,13 @@ receiver may sit anywhere in its declared input list, not only last: `at ( &'T i
 Dispatch (`src/check/poly.rs::poly_trait_member_call`) is **name-first**. It finds which of the
 body's bound traits declares a member of the called name, each candidate carrying its own type
 variable, then reads that member's declared input list to locate the receiver in the operand
-window. Selection never reads operand shape; the per-input check against the stack window is
-the sole place a mismatch is reported, so a wrong operand is a located error rather than a
-fall-through to `env.get`. Bound dispatch continues to front every name-based special case in
-`poly_call_term` (the S3e ordering invariant): position-finding is internal to candidate
-selection, not a change to call order.
+window. Selection never reads operand shape to *decline* a candidate; the per-input check
+against the stack window is the sole place a mismatch is reported, so a wrong operand is a
+located error rather than a fall-through to `env.get`. Shape does decide *which* variable a
+call means when candidates span several (below), never whether to dispatch at all. Bound
+dispatch continues to front every name-based special case in `poly_call_term` (the S3e
+ordering invariant): position-finding is internal to candidate selection, not a change to
+call order.
 
 **Two candidates, two rules.** Candidates sharing one variable are the ambiguity error: no
 operand shape can pick between them without an overload-resolution mechanism the language does
@@ -632,6 +634,7 @@ body. `trait:` therefore rejects any member spelled as a name-dispatched builtin
 absent from `BUILTIN_WORDS`, so each needs its own gate). The six surface comparisons stay
 legal: they are `lib/` words, and a body that imports one receives it mangled, so the
 spellings never collide.
+
 **Exit:** a trait member may declare its bound type variable at any input position, not only
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.

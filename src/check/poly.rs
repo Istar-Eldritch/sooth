@@ -956,16 +956,23 @@ fn poly_trait_member_call(
                 return Err(ambiguous_trait_member_error(span, member, &named));
             }
             CandidateFit::NoFit => {
-                let named: Vec<(&str, &str)> = matched
+                let shapes: Vec<(&str, &str, String)> = matched
                     .iter()
-                    .map(|(v, tid, _)| {
+                    .map(|(v, tid, m)| {
+                        let inputs: Vec<String> = m
+                            .sig
+                            .inputs
+                            .iter()
+                            .map(|t| poly_type_str(&substitute_member_var(t, *v), sig))
+                            .collect();
                         (
                             traits[tid.index()].name.as_str(),
                             sig.ty_var_names[*v as usize].as_str(),
+                            inputs.join(" "),
                         )
                     })
                     .collect();
-                return Err(no_candidate_fits_operands_error(span, member, &named));
+                return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
             }
         },
     };
@@ -5582,20 +5589,32 @@ fn ambiguous_trait_member_error(span: Span, member: &str, candidates: &[(&str, &
 /// operands already disagree with the stack, so no qualifier changes that --
 /// the call is a plain operand-shape mismatch, just one with more than one
 /// declared shape to be wrong against.
+///
+/// Each candidate's *substituted* input list is rendered, so the note that
+/// says the operands match no declared shape also shows the shapes it means
+/// (`trait_member_operand_error` names the one shape it checked against; this
+/// path checked several and must name them all to be equally actionable).
 fn no_candidate_fits_operands_error(
+    ctx: &Ctx,
     span: Span,
     member: &str,
-    candidates: &[(&str, &str)],
+    candidates: &[(&str, &str, String)],
 ) -> String {
+    let where_ = ctx.rendered_word_or("`<line>`");
     let each: Vec<String> = candidates
         .iter()
-        .map(|(t, v)| format!("`{t}` on {v}"))
+        .map(|(t, v, _)| format!("`{t}` on {v}"))
+        .collect();
+    let shapes: Vec<String> = candidates
+        .iter()
+        .map(|(t, v, inputs)| format!("`{t}` on {v} expects `{inputs}`"))
         .collect();
     format!(
-        "error: `{member}` is required by {} (line {}, col {})\n  note: the operands at this call match none of their declared shapes",
+        "error: `{member}` is required by {} in {where_} (line {}, col {})\n  note: the operands at this call match none of their declared shapes: {}",
         joined_with_and(&each),
         span.line,
-        span.col
+        span.col,
+        joined_with_and(&shapes)
     )
 }
 
@@ -6718,14 +6737,44 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err.contains("`t1` is required by `A` on 'T and `B` on 'U (line 3, col 30)"),
+            err.contains("`t1` is required by `A` on 'T and `B` on 'U in `f` (line 3, col 30)"),
             "{err}"
         );
         assert!(
-            err.contains("the operands at this call match none of their declared shapes"),
+            err.contains(
+                "the operands at this call match none of their declared shapes: \
+                 `A` on 'T expects `&'T` and `B` on 'U expects `&'U`"
+            ),
             "{err}"
         );
         assert!(!err.contains("cannot be called unqualified"), "{err}");
+    }
+
+    /// P7.S3p (ruling 4, amended): the no-fit path is reachable for a member
+    /// whose receiver is *trailing*, a shape S3e already admitted, where it
+    /// used to report the single declared shape it checked against. It must
+    /// stay as actionable now that there are several: the note names every
+    /// candidate's substituted input list, and the message keeps the enclosing
+    /// word.
+    #[test]
+    fn a_no_fit_call_on_a_trailing_receiver_member_names_every_declared_shape() {
+        let err = check_src(
+            "trait: A 'T t1 ( i64 &'T -- ) ;\n\
+             : f ( &'T: A &'U: A -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by `A` on 'T and `A` on 'U in `f` (line 2, col 26)"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "none of their declared shapes: \
+                 `A` on 'T expects `i64 &'T` and `A` on 'U expects `i64 &'U`"
+            ),
+            "{err}"
+        );
     }
 
     /// P7.S3p (ruling 4): position is not a disambiguator either. `A`'s `t1`

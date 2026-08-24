@@ -104,6 +104,21 @@ Forcing consumer: `Indexable`/`at` (the probe's `Pair` fixture) and, downstream,
    declaration gate (ruling 5) keeps rejecting any member that binds the variable in no input.
    Lifting this needs a new call-site signal and is out of scope; `zero_receiver_member_error`
    names P7.S3t so the door is a tracked deferral, not an accident.
+7. **The `trait:` gate on builtin-named members widens to `call`, `slice`, and `subslice`.**
+   Ruling 2 makes selection name-only, so a bounded body's call of such a name can no longer
+   fall through to the builtin arm when the operands do not fit: the member captures *every*
+   call of that name in any body bounded by its trait. Probed on the code without the gate: a
+   body applying its quotation parameter dies with `` `call` of `C` … expects `&'T`, found
+   `[ -- i64 ]` ``, and `slice` on a `&[ i64 4 ]` with `` expects `&'T`, found `&[i64 4]` ``,
+   so quotation application and array slicing become unreachable in such a body. S3r (R4)'s
+   existing `is_name_dispatched_builtin` rejection does not cover the three: each is its own
+   arm in `check_term`/`poly_call_term` and absent from `BUILTIN_WORDS`. They cannot simply
+   *join* that set either, since it is also what the `intrinsics` import gates (P8 S2 R2) and
+   none of the three is import-gated, so each gets an explicit name test beside it. This
+   narrows what a `trait:` may declare (`trait: C 'T slice ( &'T -- i64 ) ;` parsed before this
+   slice), which is why it is a ruling and not a refactor. The six surface comparisons stay
+   legal member names: they are `lib/` words, and a body that imports one receives it mangled,
+   so the spellings never collide.
 
 ## What changes
 
@@ -123,6 +138,8 @@ P7.S3t); the `check_trait_decls` call site at `:341-342` updated to the new name
 comment at `:349-358` rewritten to describe the relaxed rule and the deferral.
 
 **`src/parser.rs`.** The `synth_member_word_name` doc comment at `:432` updated (ruling 5).
+`parse_trait_decl`'s member-name gate extended with an explicit `call`/`slice`/`subslice`
+test beside the existing `is_name_dispatched_builtin` rejection (ruling 7).
 
 ## Out of scope
 
@@ -188,6 +205,13 @@ New coverage:
   requirement in ruling 4 and its two-diagnostic split.
 - A multi-position, same-variable duplicate (`t1` at different input positions on one variable)
   is still the single-variable ambiguity — pins ruling 4.
+- A no-fit call on a *trailing*-receiver member (a shape S3e already admitted, so the one
+  place this slice can regress an existing diagnostic) keeps the enclosing word and has the
+  note name every candidate's substituted input list. Pins ruling 4's diagnostic against
+  going vaguer than the single-shape `trait_member_operand_error` it replaces there.
+- A member named `call`, `slice`, or `subslice` is rejected at `trait:`, while the six surface
+  comparisons stay accepted as member names (`tests/phase7_slice3e.rs`). Pins ruling 7 in
+  both directions.
 - End-to-end (`tests/phase7_slice3p.rs`, compiled): the probe's `Indexable`/`at` on `Pair`
   returns `p.a` / `p.b` for index `0` / `1` through a bounded generic body, with ordinary
   `eq`/`if`/`bool` dispatch in the same body unaffected.
