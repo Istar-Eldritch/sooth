@@ -32,7 +32,7 @@ was interned, so `ret` is set to `None`, the `CallIndirect` produces no value, a
 output is therefore never pushed. The first consumer that reads it underflows the stack.
 
 **Confirmed live against `main`:**
-`: call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add print ;` panics at
+`: call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add . ;` panics at
 `src/ir/func_builder/calls.rs:451` (`rhs = self.stack.pop().expect("bin: rhs")` in the
 `add` handler) -- identically whether `call_it` is concrete or, per S3f's R3, polymorphic.
 
@@ -50,13 +50,19 @@ no-op re-intern.
 recursively collects every `Type::Quotation`'s output tuple of length >= 2 reachable from:
 
 1. **Word inputs and outputs.** `module.words[].effect.inputs` and `.outputs`
-   (`Effect`, `ast.rs:2147`; each `TypedSlot.ty` is a `Type`). The existing walk already
+   (`StackEffect`, `ast.rs:2146`; each `TypedSlot.ty` is a `Type`). The existing walk already
    reads `.outputs` for the word's own bundle; it now also descends *into* each slot's
    `Type` looking for a nested `Type::Quotation`, and adds `.inputs`.
 2. **Struct fields.** `module.structs[].fields` (`StructDecl.fields: Vec<(String, Type)>`,
-   `ast.rs:411`).
-3. **Enum variant fields.** `module.enums[].variants[].fields`
-   (`VariantDecl.fields: Vec<(String, Type)>`, `ast.rs:484`).
+   `ast.rs:411`). A quotation is legal as a struct field (a materialization boundary),
+   unlike an *enum variant field*, which the checker rejects outright
+   (`audit_quotation_type_registries`, `src/check/audits.rs`) -- so enum variant fields are
+   not a discovery site.
+3. **Array elements.** A quotation is legal as an array element (the same materialization
+   boundary), but `Type::Array(ArrayId, _)` (`ast.rs:2180`) carries only an `ArrayId`, not
+   the element type inline, so this site is reached by resolving `module.arrays[id].element`
+   (`ArrayDecl.element: Type`, `ast.rs:1242`) -- a registry lookup -- and recursing into the
+   resolved `Type` (see R2).
 4. **Poly signatures.** For each `w.poly` (`WordDef.poly: Option<Box<PolySig>>`,
    `ast.rs:1592`), walk `w.poly.inputs` and `.outputs`
    (`PolySig.inputs`/`.outputs: Vec<PolyType>`, `ast.rs:1930`). This site is separate
@@ -69,18 +75,32 @@ recursively collects every `Type::Quotation`'s output tuple of length >= 2 reach
 `QuotEffect { inputs: Vec<Type>, outputs: Vec<Type> }` (`ast.rs:2269`). When such a type is
 reached and `eff.outputs.len() >= 2`, intern `intern_bundle_struct(&mut module.structs,
 &eff.outputs)`. The recursion also descends through `eff.inputs`/`.outputs` (a quotation
-whose own parameter is itself a multi-output quotation), and through the other composite
-`Type` constructors that can wrap a `Type::Quotation` (array element, reference/owned-cell
-referent, struct/enum by their already-listed fields).
+whose own parameter is itself a multi-output quotation).
+
+The one composite `Type` constructor that can legally wrap a `Type::Quotation` yet is not a
+top-level walk site of its own is the array element. `Type::Array(ArrayId, _)` (`ast.rs:2180`)
+stores no element type inline -- only an `ArrayId` -- so reaching a quotation nested in an
+array element is a distinct step, not inline recursion: resolve `module.arrays[id].element`
+(`ArrayDecl.element: Type`, `ast.rs:1242`), a registry lookup, then recurse into the resolved
+`Type`. R2 does *not* recurse into a reference referent or an owned-cell payload: the checker
+rejects a `Type::Quotation` in either position outright (`audit_quotation_type_registries`,
+`src/check/audits.rs`), so those are dead code, not materialization sites. Struct fields are
+covered by the top-level walk over `module.structs`; enum variant fields cannot carry a
+quotation (same audit), so neither is recursed into here.
 
 **R3 -- `PolyType` recursion for site 4.** From each `PolyType` in a poly signature, recurse
 through the variable-bearing wrappers (`PolyType::Array`, `PolyType::Ref`,
 `PolyType::OwnedCell`, and `PolyType::Quotation`'s own input/output `Vec<PolyType>`,
 `ast.rs:1847`) to reach any nested `PolyType::Concrete(Type::Quotation(..))`, then hand that
-concrete quotation's output tuple to R2's `Type` path. A `PolyType::Var` /
-`PolyType::QuotLit` / `PolyType::Generic` leaf carries no callable ground quotation and is
-skipped. A variable-bearing `PolyType::Quotation` is descended for a *nested* concrete
-quotation but is not itself interned (it has no ground output tuple).
+concrete quotation's output tuple to R2's `Type` path. A `PolyType::Var` or
+`PolyType::QuotLit` leaf carries no callable ground quotation and is skipped.
+`PolyType::Generic` is *not* a leaf (it carries recursive `args`), but the walk skips it too:
+the checker's poly audit already rejects a quotation nested in a generic type argument
+(`audit_poly_input_quotation`'s `Generic` arm, `src/check/audits.rs:403`, and its
+`reject_poly_quotation_anywhere` twin at `:437`), so no ground quotation survives inside a
+generic argument for the discovery walk to find. A variable-bearing `PolyType::Quotation` is
+descended for a *nested* concrete quotation but is not itself interned (it has no ground
+output tuple).
 
 Ordering is unchanged: the widened `intern_output_bundles` still runs where the current call
 sits (`src/check.rs:972`), after every type-level check and `struct_generated_sigs`, and
@@ -103,7 +123,7 @@ quotation effect that can reach the panic site. Both were probed directly, not a
   requires the quotation be given "a declared type (a word output or field) so it can be
   materialized" at the join, and the array/struct storage boundary is gated the same way.
   So every quotation effect capable of reaching the panic is, by construction, already
-  visible to a walk over word signatures, struct fields, and enum variant fields -- there is
+  visible to a walk over word signatures, struct fields, and array elements -- there is
   no inferred-only shape for a second pass to find.
 
 - **No per-instantiation poly shape escapes the walk.** A poly quotation parameter whose own
@@ -149,27 +169,74 @@ Per CLAUDE.md (a unit test beside the stage function; diagnostics/behaviour, not
 pass/fail; `thing_condition_expected` naming):
 
 - **Unit, beside `intern_output_bundles` in `src/check.rs`**
-  (`#[cfg(test)] mod tests`): the widened walk finds each of the four sites.
+  (`#[cfg(test)] mod tests`): the widened walk finds each legal site. `bundle_for` lives on
+  the IR-side `Structs` registry (`src/ir/layout.rs:370`, `pub(super)`) and is unreachable
+  from a `src/check.rs` test, so every assertion instead scans `module.structs` (a
+  `&[StructDecl]`) for an `is_bundle` struct whose `fields` match the expected tuple -- the
+  shape `intern_bundle_struct_same_tuple_dedups_expected` (`src/ast.rs:3375`) already uses
+  (`s.is_bundle && s.fields == vec![("f0".to_string(), Type::I64), ("f1".to_string(), Type::I64)]`).
   - `quotation_param_two_outputs_interns_a_bundle` -- a concrete word taking
-    `[ i64 -- i64 i64 ]`: after `check`, `module.structs.bundle_for(&[i64, i64])` is `Some`.
+    `[ i64 -- i64 i64 ]`: after `check`, `module.structs` contains an `is_bundle` struct
+    with fields `[("f0", i64), ("f1", i64)]`.
   - `poly_signature_quotation_output_interns_a_bundle` -- a poly word whose `w.poly` carries
-    a ground `PolyType::Concrete(Type::Quotation([i64 -- i64 i64]))` param: the same lookup
-    is `Some`, proving site 4 (`w.poly`, not `w.effect`) is walked.
-  - `struct_field_quotation_two_outputs_interns_a_bundle` and
-    `enum_variant_field_quotation_two_outputs_interns_a_bundle` -- the field-carried sites.
+    a ground `PolyType::Concrete(Type::Quotation([i64 -- i64 i64]))` param: the same
+    `is_bundle` struct is present, proving site 4 (`w.poly`, not `w.effect`) is walked.
+  - `struct_field_quotation_two_outputs_interns_a_bundle` -- a struct with a
+    `[ i64 -- i64 i64 ]` field carries the same `is_bundle` struct after `check`.
+  - `array_element_quotation_two_outputs_interns_a_bundle` -- a word taking
+    `( &[ [ i64 -- i64 i64 ] 2 ] -- )` (an array whose element is a two-output quotation,
+    taken by reference): the walk resolves `module.arrays[id].element` to reach the nested
+    `Type::Quotation` and interns the same `is_bundle` struct. This exercises the one live
+    composite site (R2's array-registry step).
   - `quotation_param_single_output_interns_no_bundle` -- a `[ i64 -- i64 ]` param leaves
-    `bundle_for(&[i64])` `None` (the `>= 2` filter holds; guards the walk against
-    over-interning).
+    `module.structs` with no `is_bundle` struct for `[i64]` (the `>= 2` filter holds; guards
+    the walk against over-interning).
+  - `variable_bearing_poly_quotation_interns_no_bundle` -- a poly word declaring a
+    variable-bearing quotation parameter `[ 'T -- 'T 'T ]`: running the widened
+    `intern_output_bundles` directly over the parsed module (as the drop-overload tests call
+    `find_drop_overloads` directly) interns no `is_bundle` struct -- the parameter's output
+    row is not ground, so R3 descends it for a *nested* concrete quotation but never hands
+    it to R2 -- and a full `check` of a body that `call`s it is still rejected
+    (`poly_op_on_variable_error`, `src/check/poly.rs:1372`). Pins that widening discovery
+    neither accepts nor interns a bundle for a non-ground quotation shape.
 
-- **Golden / integration, `tests/phase7_slice3m.rs`** -- both `call_it` shapes from the
-  brief now run and print the *right* values (not merely no panic):
-  - `concrete_call_it_pushes_both_quotation_outputs` -- compiles and runs
-    `: call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add print ;` against a caller supplying
-    a quotation such as `[ dup ]` (`i64 -- i64 i64`), asserting the printed sum
-    (`3 dup` -> `3 3` -> `add` -> `6`).
-  - `polymorphic_call_it_pushes_both_quotation_outputs` -- the S3f R3 polymorphic
-    `call_it` over the same quotation, asserting the identical output, so the poly half of
-    the repro is pinned end-to-end and the `w.poly` walk is exercised through a build.
+- **Golden / integration, `tests/phase7_slice3m.rs`** -- both goldens follow the harness in
+  `tests/phase7_slice3f.rs`/`tests/phase7_slice3p.rs`: a `Scratch` single-file program
+  carrying its own `sooth.pkg` (`common::fixture_package`), an `import: intrinsics * ;`
+  preamble (plus `import: core::bool * ;` where a `Bool` instantiation is used), built and
+  run through the `build_and_run` helper, asserting exit code `0` and exact stdout. Both run
+  and print the *right* values (not merely no panic):
+  - `concrete_call_it_pushes_both_quotation_outputs` -- source:
+
+    ```sooth
+    import: intrinsics * ;
+    : call_it ( [ i64 -- i64 i64 ] -- ) 3 swap call add . ;
+    : main ( -- ) [ dup ] call_it ;
+    ```
+
+    `3 swap call` runs `[ dup ]` on `3` (`3 -> 3 3`), `add` sums them, `.` prints. Expected
+    stdout: `6\n`.
+  - `polymorphic_call_it_pushes_both_quotation_outputs` -- S3f's R3 `call_it`
+    (`( 'T: Copy [ i64 -- 'T ] -- 'T )`) is single-output/variable-output and cannot type a
+    two-output ground quotation, and `call` requires a fully-ground quotation operand
+    (`src/check/poly.rs:1367`), so this golden instead uses a word polymorphic over an
+    unrelated `'T` that takes a *fixed* two-output `[ i64 -- i64 i64 ]` parameter, run at two
+    instantiations of `'T` so the variable is carried rigidly (the S3f golden shape). Source:
+
+    ```sooth
+    import: intrinsics * ;
+    import: core::bool * ;
+    : call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T i64 ) 3 swap call add ;
+    : main ( -- )
+      9 [ dup ] call_it . .
+      True [ dup ] call_it . .
+    ;
+    ```
+
+    Entry stack `['T, q]`; `3 swap call` runs `[ dup ]` on `3` beside the untouched `'T`
+    (`['T, 3, 3]`), `add` sums (`['T, 6]`), matching the declared `'T i64` output. `main`
+    prints the `i64` then the `'T` at each instantiation. Expected stdout: `6\n9\n6\nTrue\n`.
+    This exercises the `w.poly` walk (site 4) through a build.
 
 ## Sizing
 
@@ -183,7 +250,7 @@ invariants above, so it is stated as the mechanism, not a question.
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "Widen intern_output_bundles discovery to word inputs, struct fields, enum variant fields, and poly signatures, recursing Type and PolyType to reach every ground multi-output Type::Quotation; unit tests beside it plus the concrete and polymorphic call_it end-to-end goldens", "effort": "S", "difficulty": "standard" }
+    { "phase": 1, "focus": "Widen intern_output_bundles discovery to word inputs, struct fields, array elements, and poly signatures, recursing Type and PolyType to reach every ground multi-output Type::Quotation; unit tests beside it plus the concrete and polymorphic call_it end-to-end goldens", "effort": "S", "difficulty": "standard" }
   ]
 }
 ```
