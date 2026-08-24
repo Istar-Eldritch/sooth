@@ -3501,23 +3501,24 @@ mod tests {
     /// bundle by, and picking the row's concrete slots out would key a bundle by
     /// a shape no call site can ever have. The fixture's row is deliberately
     /// *mixed*: an all-variable row would come out empty under that mistake
-    /// too, and so could not tell it apart. Such a parameter is unusable
-    /// anyway, which is what makes not interning safe: `call` admits only a
-    /// fully-ground quotation operand.
+    /// too, and so could not tell it apart.
+    ///
+    /// P7.S3l (landed after this slice's own branch point) legalized `call` on
+    /// a poly body's own abstract quotation parameter, so the mixed-row
+    /// fixture below now builds rather than being rejected -- but its pushed
+    /// outputs stay `PolyType`-abstract (`'T`), never a ground
+    /// `Type::Quotation`, so it still keys no bundle. `call` on a fully
+    /// variable-bearing (non-abstract-own-param) quotation is unaffected and
+    /// still admits only a fully-ground quotation operand.
     #[test]
     fn variable_bearing_poly_quotation_interns_no_bundle() {
         assert!(
             interned_bundles(": call_it ( 'T: Copy [ i64 -- 'T i64 i64 ] -- ) drop ;\n").is_empty()
         );
-        let err = check_src(
-            ": call_it ( 'T: Copy [ 'T -- 'T 'T ] 'T -- ) swap call drop drop ;\n\
-             : main ( -- ) ;\n",
+        assert!(interned_bundles(
+            ": call_it ( 'T: Copy [ 'T -- 'T 'T ] 'T -- 'T ) swap call drop drop ;\n"
         )
-        .unwrap_err();
-        assert!(
-            err.contains("`call` is not permitted on a quotation"),
-            "a `call` on a variable-bearing quotation must still be rejected: {err}"
-        );
+        .is_empty());
     }
 
     /// P7.S3e (R17): the obligation pre-pass hoists `check_poly_body` ahead of
