@@ -4,9 +4,11 @@
 //! used to shut out entirely. Dispatching it through `impl: Indexable for
 //! Pair` proves the name-first, position-aware candidate search (`poly.rs`'s
 //! `poly_trait_member_call`) actually reaches an implementation rather than
-//! merely being permitted to declare. The same body also calls ordinary
-//! `eq`/`if`/`Bool` dispatch (unrelated to any bound), pinning that the
-//! widened candidate search does not intercept those.
+//! merely being permitted to declare. The bounded `uses` body also calls
+//! ordinary `eq`/`if`/`Bool` dispatch (unrelated to any bound) before
+//! dispatching `at`, pinning that the widened candidate search does not
+//! intercept those -- and that they still resolve (mangled) inside a
+//! bounded generic body.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,9 +79,9 @@ fn build_and_run(entry: &Path) -> String {
 
 /// The brief's own probe fixture: `at ( &'T i64 -- i64 )` on `Pair`, its
 /// receiver declared first, dispatching index `0`/`1` to `p.a`/`p.b` through
-/// a bounded generic body. The body's `at` selects the field with ordinary
-/// `eq`/`if` (unrelated to the bound), proving the widened candidate search
-/// leaves that dispatch alone.
+/// a bounded generic body. The bounded `uses` body itself runs ordinary
+/// `eq`/`if` (unrelated to the bound) before calling `at`, proving the
+/// widened candidate search leaves that dispatch alone.
 #[test]
 fn indexable_at_on_pair_dispatches_a_non_trailing_receiver() {
     let t = tree_with_core("indexable-pair");
@@ -96,7 +98,11 @@ fn indexable_at_on_pair_dispatches_a_non_trailing_receiver() {
              ~[ p &b @ ]\n\
              if ;\n\
          ;\n\
-         : uses ( &'T: Indexable i64 -- i64 ) at ;\n\
+         : uses ( &'T: Indexable i64 -- i64 )
+           | n | | p |
+           n 0 eq ~[ 0 ] ~[ 1 ] if | i |
+           p i at ;
+\
          : main ( -- )\n\
            7 9 Pair |p1| &p1 0 uses . p1 drop\n\
            7 9 Pair |p2| &p2 1 uses . p2 drop\n\
