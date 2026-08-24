@@ -484,7 +484,7 @@ fn owning_quotation_unrepresented_error(word: &str, eff: &'static QuotEffect) ->
 /// is what makes the inherited linear machinery observable, so `dup`ping such a
 /// binding, forgetting it, or handing a plain literal to the word must report
 /// its own error rather than be masked by this one.
-pub fn reject_owning_quotation_declarations(word: &WordDef) -> Result<(), String> {
+pub(crate) fn reject_owning_quotation_declarations(word: &WordDef) -> Result<(), String> {
     let name = crate::resolve::demangle_word(&word.name);
     let mono = word.effect.inputs.iter().find_map(|slot| match slot.ty {
         Type::OwningQuotation(eff) => Some(eff),
