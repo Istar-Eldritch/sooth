@@ -4551,10 +4551,13 @@ pub(super) fn check_poly_call(
                 pty @ PolyType::Quotation(..) => {
                     let grounded =
                         apply_subst(&sig, pty, &subst, name, span, ctx, arrays, cells, refs)?;
+                    // A `~`/row-carrying slot grounds to `Type::InlineQuotation`
+                    // instead, and `check_inline_quotation_requires_inline` keeps
+                    // one off a non-combinator word's signature -- an invariant
+                    // held two functions away, so this keeps R9p's rejection
+                    // rather than asserting it.
                     let Type::Quotation(eff) = grounded else {
-                        unreachable!(
-                            "a non-combinator word's declared quotation slot is never inline"
-                        )
+                        return Err(reject_quotation_argument(ctx, span, name));
                     };
                     stack[base + i] = materialize_quotation_at_boundary(
                         id, eff, false, name, span, ctx, env, arrays, cells, refs, slices, prov,
@@ -4562,7 +4565,10 @@ pub(super) fn check_poly_call(
                     )?;
                     quot_inputs.push((i, eff));
                 }
-                _ => unreachable!("poly_input_is_quotation guarantees a quotation-shaped input"),
+                // `poly_input_is_quotation` also admits a concrete
+                // `Type::InlineQuotation`, which this match does not handle;
+                // the same non-local declaration guard is what keeps it out.
+                _ => return Err(reject_quotation_argument(ctx, span, name)),
             }
         }
         let slot_ty = stack[base + i].ty;

@@ -221,3 +221,27 @@ fn headline_apply_accepts_a_literal_quotation_argument() {
         "two instantiations of `'T` rule out a coincidental single-shape match"
     );
 }
+
+/// P7.S3l phase 2 (R5): the same headline shape with the declared quotation
+/// slot *before* the plain input that binds `'T`. The two-pass split is what
+/// makes this order work, and the reorder changes what lowering receives, not
+/// only what the checker admits -- so it is pinned end-to-end, not by
+/// `check_ok` alone.
+#[test]
+fn headline_apply_accepts_a_literal_quotation_argument_declared_first() {
+    let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
+               : applyf ( [ 'T -- 'T ] 'T -- 'T ) swap call ;\n\
+               : main ( -- )\n\
+                 [ 1 add ] 4 applyf .\n\
+                 [ ] True applyf .\n\
+               ;\n";
+    let prog = Scratch::write("headline-apply-literal-declared-first", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "5\nTrue\n",
+        "grounding must not depend on the quotation slot following its binding input"
+    );
+}

@@ -14,8 +14,7 @@ position; an abstract `PolyType::Quotation` slot falls to `reject_quotation_argu
 literal call-site argument. Probe-verified live: the headline program below is rejected at
 `main`'s call site, not accepted, with
 `` error: a quotation cannot be passed to `apply`; only `call` accepts one in `main` ``.
-Closing that gap (if it is done at all) is phase 2's concern; see R4 and the phase table
-below. The headline shape *does* build and run when the quotation argument reaches `apply`
+Closing that gap is phase 2's concern, ruled on by R5; see also the phase table below. The headline shape *does* build and run when the quotation argument reaches `apply`
 by some route other than a literal at that call site (e.g. forwarded out of another word's
 return value) — `tests/phase7_slice3f.rs`'s `body_boundary_calls_an_abstract_quotation_param`
 is the phase 1 golden for that shape. The literal-at-call-site form was closed in phase 2
@@ -45,7 +44,9 @@ the *expected* behaviour by two tests, both of which flip to accept cases in thi
 **In scope.** A non-`inline`, non-combinator polymorphic word's `call` on its own declared
 quotation parameter whose declared effect (`PolyType::Quotation(ins, outs, false, None,
 None)`) still mentions a variable, once the caller's instantiation has bound every variable
-the row mentions. This is the direct mirror of S3f's R3 for the ground case, one level
+the row mentions; and (R5) a *literal* quotation argument reaching such a parameter at that
+word's own call site, which R9p refused before this slice and which exit criterion 1's
+headline program needs. This is the direct mirror of S3f's R3 for the ground case, one level
 earlier in the pipeline: pop the quotation, consume its declared inputs deepest-first, push
 its declared outputs, with no body walk and no teardown (there is no body behind the value).
 
@@ -141,8 +142,41 @@ same shape.
 above) is a separate, pre-existing gap at the *argument* boundary, not the body boundary this
 slice's R1–R3 touch. It is out of phase 1's scope: `check_poly_call`'s materialization guard
 is a different function on a different call path (`poly_call_term` is never involved), and
-closing it is a call-site unification change, not a body-`call` dispatch change. Recorded here
-so phase 2 does not understate it as an afterthought.
+closing it is a call-site unification change, not a body-`call` dispatch change. Ruled on by
+R5 below.
+
+**R5: at the call site, ground an abstract declared quotation slot through the completed
+`Subst`, in a second pass.** R1–R4 are all body-boundary; this is the argument-boundary rule
+the recon finding above left open, and the one exit criterion 1's headline program needs.
+In `check_poly_call` (`src/check/poly.rs`), R9p's guard gains a `PolyType::Quotation(..)` arm
+beside its ground `Concrete(Type::Quotation(eff))` one: `apply_subst` grounds the declared row
+through `subst`, and the operand then materializes through the same
+`materialize_quotation_at_boundary` call and records the same `quot_inputs` entry the ground
+arm does. Nothing else about R9p moves — a bare `PolyType::Var` position (S3f's L2) keeps
+rejecting a literal, which is the hazard R9p was written for, and keeps its two tests.
+
+Grounding needs `subst` to already hold every variable the declared row mentions, which the
+single input loop only guarantees when the quotation slot is declared *after* the input that
+binds it. So the loop splits in two, mirroring `check_poly_combinator_args`: pass 1 unifies
+every non-quotation input (skipping quotation slots via `poly_input_is_quotation`, and keeping
+R9p's reject-before-unification for a literal at a non-quotation position); pass 2 grounds and
+materializes every quotation slot against the now-complete `subst`. Order-independence is the
+point, so it is pinned by a test declaring the quotation slot first, at both the check and the
+build-and-run level.
+
+The split cannot regress the ground path: before this slice no quotation input could bind a
+variable at all (an abstract slot was rejected outright, a ground one mentions no variable),
+so deferring quotation unification changes no binding set. Two shapes stay outside the arm and
+keep R9p's rejection rather than asserting their own impossibility — a declared row grounding
+to `Type::InlineQuotation`, and a concrete `Type::InlineQuotation` slot (which
+`poly_input_is_quotation` admits and the match does not name). Both are kept out by
+`check_inline_quotation_requires_inline`, an invariant two functions away, and the rejection
+they fall back to costs nothing. A slot whose variable *no* input binds is not this rule's
+concern: `apply_subst` reports it as a located error already.
+
+Unruled and out of scope: `poly_unbound_output_error`'s wording renders a variable in an
+*input* quotation's row as an "output variable" (the renderer is pre-existing and shared, so
+the misnomer is not this slice's to fix).
 
 ## Tests
 
@@ -195,12 +229,16 @@ so phase 2 does not understate it as an afterthought.
   instantiations of `'T` — not a `check_ok` placebo. It also depends on, and exercises, the
   `subst_polytype` lowering fix (R4) alongside the checker accept arm, so it was the one
   golden that proved the whole phase 1 path end-to-end, headline call-site literal aside.
-- **Phase 2.** `headline_apply_accepts_a_literal_quotation_argument` is the literal
+- **Phase 2 (R5).** `headline_apply_accepts_a_literal_quotation_argument` is the literal
   call-site golden the round-1 correction above could not yet build, now closed by the R9p
   fix; it runs two instantiations of `'T` (`i64` and `Bool`), same discipline as the phase 1
-  golden above. `check_poly_call_materializes_an_abstract_quotation_argument_declared_first`
-  (`src/check/poly.rs`) pins the two-pass reorder itself: the declared quotation slot before
-  the plain input that binds `'T`, the reverse of the phase 2 unit test alongside it.
+  golden above. `headline_apply_accepts_a_literal_quotation_argument_declared_first` is its
+  reordered twin — the declared quotation slot *before* the plain input that binds `'T` — also
+  build-and-run at two instantiations, since the two-pass split changes what lowering
+  receives and not only what the checker admits.
+  `check_poly_call_materializes_an_abstract_quotation_argument_declared_first`
+  (`src/check/poly.rs`) pins the same reorder at the unit level, the reverse of the phase 2
+  unit test alongside it; reverting the split to a single loop turns it red.
 
 The replaced/renamed tests are cited here so the pipeline does not read their diff as a
 regression.
@@ -231,8 +269,10 @@ one, so it does not split further.
    R9p call-site gap (Goal section correction) rejected this exact source at `main`'s
    call site; phase 1's `body_boundary_calls_an_abstract_quotation_param` golden proved the
    same body-boundary shape end-to-end via a non-literal argument instead. **Met at phase 2
-   exit**: `headline_apply_accepts_a_literal_quotation_argument`
-   (`tests/phase7_slice3f.rs`) builds and runs this exact source.
+   exit** (R5): `headline_apply_accepts_a_literal_quotation_argument`
+   (`tests/phase7_slice3f.rs`) builds and runs this exact source, and
+   `headline_apply_accepts_a_literal_quotation_argument_declared_first` the same shape with
+   the declared parameters reordered.
 2. A body `call` whose stack holds fewer operands than the declared quotation's inputs is a
    located underflow (`` `call` needs N values, but the stack holds M``), not the blanket
    message. Met at phase 1 exit.
