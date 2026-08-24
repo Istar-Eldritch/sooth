@@ -38,7 +38,7 @@ its declared outputs, with no body walk and no teardown (there is no body behind
 
 - A **row-typed** or `~`-declared (`is_inline`) abstract quotation parameter never reaches
   this arm at all, on any word: `check_inline_quotation_requires_inline`
-  (`src/check/word_entry.rs:79-122`, called from `check.rs:735` and `repl.rs:3060`) rejects
+  (`src/check/word_entry.rs:122-144`, called from `check.rs:735` and `repl.rs:3060`) rejects
   a `~[ ]` parameter at declaration unless the word also declares `inline` (`is_combinator`,
   `src/check/combinators.rs:155`, is merely the one-line `word.declares_inline` predicate
   that rejection is gated on, not the rejection itself), and
