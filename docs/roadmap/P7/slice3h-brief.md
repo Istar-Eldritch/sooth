@@ -21,9 +21,10 @@ buckets every captured name by its `Binding.ty` alone:
 > `error: an escaping closure captures {name}, a local of this frame, whose storage
 > does not survive the return (line {})`
 
-**This is not a linearity check, and the roadmap's "restricted to `Copy` values" framing
-(DESIGN.md:372) is the description of the surviving case, not an explicit branch anywhere
-in the code.** Live-probed: a `bool` local (an ordinary, payload-free, structurally-`Copy`
+**This is not a linearity check, and the roadmap's "restricted to `Copy` values" framing is
+the description of the surviving case, not an explicit branch anywhere in the code** (and
+not a rule stated in DESIGN.md either — the roadmap's `DESIGN.md:372` citation for it points
+at no such text). Live-probed: a `bool` local (an ordinary, payload-free, structurally-`Copy`
 enum since S3i) captured into an escaping closure hits this exact same rejection —
 
 ```

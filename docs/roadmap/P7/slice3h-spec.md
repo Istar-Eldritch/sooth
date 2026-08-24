@@ -32,9 +32,10 @@ captures (`body_captures_enclosing`, `captures.rs:12`). `classify_capture`
   everywhere.
 
 A `FrameRooted` capture at an escaping boundary is rejected (`captures.rs:249`,
-`past_owning_frame_error`, `:49`). This is not a linearity check, and DESIGN.md:372's
-"restricted to `Copy`" framing describes the surviving case rather than a branch that
-exists: a `bool` local (a payload-free, structurally-`Copy` enum since S3i) hits the same
+`past_owning_frame_error`, `:49`). This is not a linearity check, and the "restricted to
+`Copy`" framing describes the surviving case rather than a branch that exists — DESIGN.md
+states no such rule, and the roadmap's `DESIGN.md:372` citation for it pointed at no such
+text (corrected there): a `bool` local (a payload-free, structurally-`Copy` enum since S3i) hits the same
 rejection, live-probed —
 
 ```sooth
@@ -73,6 +74,7 @@ Three probes against live `main`, and they narrow the work sharply:
      `s` has type `Spy`, which is linear: it is consumed on one `if` arm but not the
      other, so drop it (or return it) on every path
    ```
+
 3. **Exactly one gate blocks the target shape.** `: mk ( Spy -- [ -- ] ) | s | [ s drop ] ;`
    fails with only `past_owning_frame_error` — "an escaping closure captures `s`, a local of
    this frame, whose storage does not survive the return". Not a disposal error, not a

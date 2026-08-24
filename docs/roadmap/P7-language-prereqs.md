@@ -388,8 +388,10 @@ than `self.env.get(name)`, which panics on a poly name.
 generic countdown over a large counter runs in constant stack.
 
 **P7.S3h — An escaping closure may capture a linear value (closure env disposal).**
-Capture into a *materialized* (escaping) closure is restricted to `Copy` values
-(DESIGN.md:372). The restriction is not arbitrary: the captured env is absent from the
+Capture into a *materialized* (escaping) closure is restricted to `Copy` values -- an
+emergent consequence of `classify_capture` (`src/check/captures.rs:144`) treating every
+by-value aggregate as frame-rooted, not a rule stated anywhere in DESIGN.md. The
+restriction is not arbitrary: the captured env is absent from the
 disposal walk entirely -- `src/ir/destructors.rs` synthesizes destructors per concrete
 `IrType::Struct`/`Enum`/`OwnedCell` and never sees a closure env -- so a linear value moved
 into an env would simply never be disposed. This slice gives the env an owner and a

@@ -304,7 +304,7 @@ core       stack semantics, numeric tower, bool, fixed arrays + slices,
 fixed      fixed-capacity vec/map/string/ringbuffer, bounded mailboxes.
 (no-alloc) allocation-free, real-time-safe. the embedded sweet spot.
 
-alloc      growable Vec/Map/String, Box, opt-in Rc/Arc, escaping closures,
+alloc      growable Vec/Map/String, Box, opt-in Rc/Arc, heap-env closures,
            bignum. needs an allocator satisfying core's interface.
 
 hosted     files, stdio, time, net, OS thread spawning, FFI-to-libc,
@@ -312,9 +312,11 @@ hosted     files, stdio, time, net, OS thread spawning, FFI-to-libc,
 ```
 
 Placements worth noting: atomics are core but spawning threads is hosted; string
-slice is core but growable `String` is `alloc`; a non-escaping quotation is core but
-an escaping one is `alloc`; the allocator *interface* is core, its *implementations*
-(arena, pool, malloc) are not.
+slice is core but growable `String` is `alloc`; a non-escaping quotation is core, and an
+escaping closure's layer follows its *env*, not its escape — a `Copy`-only env rides in
+the closure value itself and stays core, while an env owning a linear capture needs
+storage outliving the frame and is `alloc` when that storage is the heap; the allocator
+*interface* is core, its *implementations* (arena, pool, malloc) are not.
 
 Discipline: fix the layer boundaries and the allocator interface on day one and tag
 every stdlib word with the layer it needs, even though the hosted layer is built
@@ -380,6 +382,7 @@ rows, no borrow analysis needed to write the compiler in it.
 - **Memory**: ownership + linear types, deterministic explicit drop, no GC, RC opt-in; second-class refs (Hylo-style), no borrow checker; non-null pointers; hidden/checked return stack. Detail: [memory model](./docs/design/memory-model.md).
 - **Strings**: `str` (pointer + length) and `cstr` (pointer-only), following Zig's split without the sentinel-in-the-type. `Slice[T]`/`!Slice[T]` for array views (Phase 7 Slice 3c). Storage and view are two types: length lives in storage (`[T N]`), carried at runtime by the view (`Slice[T]`).
 - **Destructors**: `drop` overload for a concrete type, not a new declaration form. Forces linearity. `Copy` and a user destructor are mutually exclusive. The body runs instead of synthesized field glue.
+- **Closure captures**: a closure owning a linear capture says so in its *type* (the obligation is visible to whoever must discharge it, since the env itself is erased so combinators can exist), and says nothing about *where* the env lives (so an inline, static, or heap env are all one type). Such a closure is linear and must be called: `call` is its consuming use, and its body disposes what it captured, exactly as a word body disposes a linear argument. Discarding one unexecuted is not expressible — releasing the capture requires running the body.
 - **Foreign calls**: `extern:` (symbol + stack effect). Scalars and refs cross; owned aggregates and `^` returns may not. Declaration site is the trust boundary; no separate `unsafe` marker.
 - **Codegen**: compile-time virtual stack to native; words as functions. Detail: [codegen](./docs/design/codegen.md).
 - **Backend**: QBE (small, legible, multi-arch). No LLVM. Hand-written backend deferred (reconsider after self-hosting). WASM is a sibling lowering off the neutral IR via binaryen. IR keeps `Ptr[T]` abstract. No JIT; REPL via `dlopen`. Detail: [codegen](./docs/design/codegen.md).
