@@ -863,6 +863,10 @@ fn check_term(
             // -- e.g. `Holder>` on `type: Holder q [ i64 -- i64 ] ;`. A
             // quotation-typed output legitimately carries the closure onward
             // exactly as an aggregate output does, so it forwards too.
+            // `OwningQuotation` forwards for the same reason: it may not sit
+            // in an aggregate (the containment rule), so a word passing one
+            // through is its *only* carrier, and dropping the set here would
+            // blind R22 to a frame capture leaving via that output.
             // Review fix (P7 slice 1): an ordinary word call consumes its
             // operands just as `drop` does, so a struct operand a live
             // projection still reaches (the owned-receiver projection arm's
@@ -886,7 +890,8 @@ fn check_term(
             stack.truncate(base);
             for ty in &sig.outputs {
                 let surviving = if carried.is_some()
-                    && (ty.is_aggregate() || matches!(ty, Type::Quotation(_)))
+                    && (ty.is_aggregate()
+                        || matches!(ty, Type::Quotation(_) | Type::OwningQuotation(_)))
                 {
                     carried
                 } else {

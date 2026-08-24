@@ -446,6 +446,52 @@ fn a_declared_owning_parameter_takes_a_literal_and_disposes_its_capture() {
     assert_eq!(build_and_run(prog.path()), "drop 7\n");
 }
 
+/// The same rejection when the closure is laundered through a non-inline word
+/// rather than returned directly. At the materialization boundary `escaping` is
+/// false -- the literal is an argument to `use`, not a return value -- so the
+/// frame-capture rejection has to come from the word-output escape guard
+/// reading the exit row instead, which only sees the closure if the call
+/// forwards its surviving-capture set onto an `owning` output. Without that
+/// forwarding this builds and prints `1` out of `mk`'s dead frame.
+#[test]
+fn an_owning_closure_passed_through_a_word_still_rejects_a_frame_capture() {
+    let prog = Scratch::write(
+        "owning-passthrough",
+        "type: P x i64 y i64 ;\n\
+         : use ( owning [ -- i64 ] -- owning [ -- i64 ] ) ;\n\
+         : mk ( -- owning [ -- i64 ] ) 1 2 P | p | [ &p &x @ ] use ;\n\
+         : main ( -- ) mk call . ;\n",
+    );
+    assert_eq!(
+        build_error(prog.path()),
+        "error: an escaping closure captures `p`, a local of this frame, whose storage does not survive the return (line 3)"
+    );
+}
+
+/// A *borrow* capture, the one `bind_owning_env` arm that does not copy a
+/// payload out of the block: the env slot holds the pointer itself, and the
+/// prologue re-records it as a reference before binding it. `slice` is the
+/// body op that consumes both halves of that record -- it demands the referent
+/// be an array, and reads the mutability off the record because an
+/// `IrType::Ptr` does not carry it -- so a rebinding that loaded the word
+/// without re-recording, or that recorded a shared borrow as mutable, does not
+/// survive this. The store through the view is read back in `main` so the
+/// pointer is pinned to the caller's array, not to a copy.
+#[test]
+fn an_owning_closure_binds_a_borrow_capture_with_its_reference_record() {
+    let prog = Scratch::write(
+        "owning-borrow-capture",
+        ": use ( owning [ -- ] -- ) call ;\n\
+         : main ( -- )\n  \
+           [ i64 ; 3 ] | b |\n  \
+           &!b | r |\n  \
+           [ r slice | v | v 0 >usize &!> | e | e 7 ! ] use\n  \
+           &b 0 >usize &> @ .\n\
+         ;\n",
+    );
+    assert_eq!(build_and_run(prog.path()), "7\n");
+}
+
 /// A *spliced* word may not declare one. The splice route never materializes:
 /// it inlines the caller's literal in place and compares only the
 /// inline-versus-plain axis, so with this rejection removed a plain `[ 1 . ]`

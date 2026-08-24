@@ -337,10 +337,17 @@ disclaimer contradicted by the content.
 ### Phase 3: env storage, the call-once lifecycle, disposal
 
 - `IrType::OwningQuotation` and `ir_type_of`'s real arm; lift phase 2's guard.
-- Heap env via `intern_owned_cell_type`: the captured linear value is *moved* into the block
-  (consumed from the frame, so `Scope::leave`'s unconsumed-local check, `engine.rs:544-551`, is
-  satisfied) and the block outlives the return.
-- The body consumes its captures and frees its own env block before returning.
+- Heap env: a raw `sooth_alloc` block laid out per literal (each capture's own storage,
+  word-aligned) rather than an `intern_owned_cell_type` cell, which holds one payload and so
+  cannot hold N captures. The captured linear value is *moved* into the block (consumed from
+  the frame, so `Scope::leave`'s unconsumed-local check, `engine.rs:544-551`, is satisfied) and
+  the block outlives the return.
+- The body's prologue copies every capture out of the block into its own frame and frees the
+  block **at entry**, not before returning: once each capture is frame-local nothing the body
+  computes or returns can alias the freed storage, whereas an exit free would need a
+  per-path aliasing proof this slice has no machinery for -- and an `owning [ -- Spy ]` body
+  (hand the capture back rather than dispose it) would immediately break under one. The body
+  then consumes its captures exactly as a word consumes a linear parameter.
 - `call` as the consuming use, **no checker change**; the existing consumed-on-every-path
   check already forces a conditional to call it on both arms.
 - `drop` on an owning closure: a located rejection naming the remedy.
