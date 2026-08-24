@@ -101,9 +101,20 @@ bodies are today. The six surface comparisons (`lt`/`gt`/`eq`/`lte`/`gte`/`ne`) 
 derived from `cmp` rather than from the intrinsics directly, and `Bound::Ord` is deleted
 from the `Bound` enum.
 
-**`&'T &'T -- Ordering`, not `'T 'T -- Ordering`.** Two by-value operands consume both,
-so a `sort` cannot compare the same element twice. `Order` in `examples/traits.sth`
-already uses borrows for this reason.
+**Correction from probe: `cmp ( 'T 'T -- Ordering )`, by value, not `&'T &'T`.** The
+previous draft of this brief specified borrows, reasoning that a by-value `cmp` would
+stop `sort` reusing an element after comparing it. Probed and falsified twice over: (1)
+`&i64` is not obtainable from a plain scalar local at all --
+`cannot borrow the scalar local 'a' of type 'i64' ... a scalar has no address; borrow a
+field or an aggregate instead` (`word_families.rs:1397`, confirmed live) -- so a borrowed
+`cmp` cannot be called on `i64` from an ordinary generic body without routing every
+numeric comparison through a synthetic one-field wrapper struct, which is not a real
+option; (2) it is also unnecessary -- every existing `Ord`-adjacent generic word already
+carries `'T: Copy` alongside `'T: Ord` (`lib/cmp.sth`, `mymax`, `arrays.sth`'s
+`sort`/`bin_search`'s own quotation comparator, which is already by-value:
+`~[ 'T 'T -- i64 ]`), so element reuse after a comparison is `Copy`'s job, not `cmp`'s.
+A by-value `cmp` matches the shape the rest of the language already uses and sidesteps
+the scalar-borrow wall entirely.
 
 ### The blocker, probe-confirmed: generic-calls-generic under a user bound
 
@@ -131,6 +142,37 @@ that rejection: the forwarding program **type-checks**. It then ICEs in lowering
 never resolved to a concrete symbol per instantiation on the cross-call path. That
 lowering gap is the substance of this slice.
 
+**Traced to root cause, and it is (b), structurally harder, not a small fix.** The
+checker already records a `PolyCrossCall{callee, span, mapping}` per cross-call site
+(`poly_cross_call`, `poly.rs:1902`) into `module.poly_cross_calls`, but that field is
+destructured and discarded in `check.rs` (`poly_cross_calls: _`) and nothing in `src/ir`
+ever reads it — it is write-only dead data. `calls.rs:737`'s generic fallback arm looks
+the callee up in `env`, which deliberately excludes every polymorphic word by
+construction (`driver.rs`, `!poly_indices.contains(idx)`); the two tables that would
+otherwise carry a resolved symbol (`trait_calls`, populated by `resolve_user_bound`
+against a *concrete* `Subst`; `poly_calls`/`instantiations`, populated per ordinary
+monomorphic-caller-to-poly-callee call) are never populated for a poly-to-poly cross-call,
+because neither the checker nor lowering has a ground `θ` for the *caller* at the point
+the cross-call site is walked — the caller itself is not yet monomorphized. A correct fix
+needs one of: (a) deferring resolution to lowering time, keyed by `(span, caller_θ)`
+rather than `span` alone; or (b) at each monomorphization-expansion of the caller,
+substituting its concrete `θ` into the recorded mapping and minting a resolved-symbol
+entry lowering can read. Either way this is new plumbing threaded through both checker
+and lowering, since today's checker-side record is caller-agnostic and lowering has no
+per-instantiation table to look a cross-call's resolved symbol up in.
+
+**A second, independent soundness hole, found by the same probe.** `(Image::Concrete(_),
+Bound::User(_)) => None` (`poly.rs:1886`) is commented "unreachable", gated only by the
+same blanket rejection. With that rejection removed, a generic word can call a
+`Bound::User`-bounded generic callee on a *concrete* type carrying **zero** matching
+`impl:`, and the program passes `check::check` in full silence — it dies later only on an
+unrelated pre-existing lowering panic (`driver.rs:757`, an unrelated `Ref`-shape lookup),
+not on any diagnostic naming the missing impl. `None` here means "satisfied"; for a type
+with no impl at all, that is a wrongly-typed program silently accepted. **This arm must
+be fixed in the same phase as the cross-call gap**, not deferred: closing the cross-call
+gap without it converts a currently-inert bug into a live one, since the unrelated
+lowering panic that happens to mask it today is not a mechanism to depend on.
+
 ### Scope: the comparisons drop `inline`, and that is deliberate
 
 `is_combinator(word)` is exactly `word.declares_inline` (`combinators.rs:155-157`) —
@@ -141,8 +183,15 @@ review, whose failure mode is silent dispatch to the wrong `impl:`.
 
 This slice therefore ships the six comparisons **non-inline**. Each becomes a real
 monomorphized call frame, and QBE performs no cross-function inlining, so a comparison
-that is one `ult` today becomes a leaf call. That is a genuine, pervasive regression
-against today's codegen, accepted for one slice's duration on the following reasoning:
+that is one `ult` today becomes a leaf call. **Measured, not assumed:** a 20M-iteration
+comparison-heavy loop (two comparisons per iteration, identical output both ways,
+`19958023`) runs in 28.9ms mean with today's inline `lt`/`gt` (7 runs, stdev 1.2ms) versus
+53.9ms with a hand-written non-inline equivalent (7 runs, stdev 1.8ms) -- **+86.6%**,
+spreads non-overlapping. Disassembly confirms the mechanism: straight-line
+`cmp`/`setl`/`cmovcc` inline, versus a real `call` per comparison (40M calls total) with a
+full prologue/epilogue each, non-inline. This is a real, substantial, roughly 2x tax on
+comparison-heavy code -- not noise, and not something to wave through lightly. Accepted
+for one slice's duration on the following reasoning:
 
 - The cross-call lowering gap must be closed either way. `bin_search_internal`
   (`examples/experiments/binary_search.sth`) is a non-inline `'T: Ord` word today and
@@ -163,9 +212,18 @@ against today's codegen, accepted for one slice's duration on the following reas
 `poly_admits` (`declarations.rs:1360`) and `poly_sig_could_match` (`poly.rs:4428`) are
 *not* bound-satisfaction sites — they are slice 10c's overload-admission filter, using
 "has an `Ord` bound && `!is_numeric` → decline" to keep the library's generic `lt` from
-swallowing a user's own concrete `Vec2 lt`. With `Bound::Ord` deleted, that filter goes
-dead and the generic `lt` admits every operand type again. Both sites must become a real
-`(TraitId, Type)` registry lookup: decline unless the operand type has an `impl: Ord`.
+swallowing a user's own concrete `Vec2 lt`. **Both confirmed load-bearing by mutation,
+not assumed.** A baseline program declaring both a concrete `lt ( Vec2 Vec2 -- Bool )`
+and the library's generic `lt ( 'T: Copy Ord 'T -- Bool )` in the same module compiles and
+dispatches correctly today. Neutering `poly_admits` alone breaks it at *declaration*
+time (the two candidates are no longer disambiguable). Restoring that and instead
+neutering `poly_sig_could_match` alone breaks it at the `Vec2 Vec2 lt` *call site*: the
+generic candidate now wins selection, gets instantiated, and its body's `ult` rejects the
+non-numeric `Vec2` operands with a real type error. Both are real, loud rejections —
+neither mutation produced a silent mis-dispatch — but both sites are independently
+necessary for this coexistence and both go dead the moment `Bound::Ord` is deleted. Both
+must become a real `(TraitId, Type)` registry lookup: decline unless the operand type has
+an `impl: Ord`.
 
 ### Diagnostics
 
@@ -196,6 +254,10 @@ the missing `impl:` the way a `Bound::User` failure does.
   not only the numeric tower.
 - A polymorphic body may call a polymorphic word carrying a `Bound::User` on a forwarded
   variable, through lowering, without ICE — the `calls.rs:737` gap closed.
+- A polymorphic body calling a `Bound::User`-bounded generic word on a *concrete* type
+  with no matching `impl:` is a located checker error, not a silent accept — the
+  `(Image::Concrete(_), Bound::User(_)) => None` soundness hole (`poly.rs:1886`) closed
+  in the same phase as the cross-call gap, not deferred.
 - The numeric tower satisfies `'T: Ord` through ordinary `impl:` blocks in `core`, with
   no per-width `impl:` written by the user.
 - `Bound::Ord` no longer exists in the `Bound` enum, and `is_ord` no longer exists.
@@ -208,14 +270,20 @@ the missing `impl:` the way a `Bound::User` failure does.
 
 ## Sizing
 
-Phase shape, roughly: (1) close the cross-call lowering gap — resolve a forwarded
-`Bound::User` obligation to a concrete symbol per instantiation, removing the blanket
-`poly_cross_signature_supported` rejection, with the probed forwarding program as its
-golden; (2) seed `Ord` as a real member-bearing trait with `Ordering` and the numeric
-`impl:` blocks in `core`, deleting `Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six
-comparisons over `cmp`, non-inline; (4) rewrite the two overload-admission sites as
-registry lookups, with a `Vec2 lt` coexistence golden; (5) diagnostics. Phase 1 is the
-one with real unknowns and should be probed before the rest are sized.
+Phase shape, roughly: (1) close the cross-call lowering gap and the concrete-image
+soundness hole together — thread the caller's `θ` through to a lowering-time (or
+monomorphization-time) resolution of the forwarded obligation, removing the blanket
+`poly_cross_signature_supported` rejection, and give `(Image::Concrete(_),
+Bound::User(_))` a real registry check instead of `None`, with the probed forwarding
+program and a no-impl rejection program as its goldens; (2) seed `Ord` as a real
+member-bearing trait with `Ordering` and `cmp ( 'T 'T -- Ordering )` (by value, per the
+probe correction above), plus the numeric `impl:` blocks in `core`, deleting
+`Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six comparisons over `cmp`, non-inline; (4)
+rewrite the two overload-admission sites as registry lookups, with the probed `Vec2 lt`
+coexistence program as its golden; (5) diagnostics. Phase 1 is now confirmed the one with
+real unknowns — probed as structurally harder than a small fix, new plumbing on both the
+checker and lowering side — and should be scoped and possibly sub-spec'd before the rest
+are sized in detail.
 
 ## Ready to spec: yes
 
