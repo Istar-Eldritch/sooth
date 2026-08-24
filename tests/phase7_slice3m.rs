@@ -94,6 +94,26 @@ fn returned_quotation_pushes_both_outputs() {
     );
 }
 
+/// R1, site 2: a quotation reached through a *struct field*, which no word
+/// signature names -- `use_h` takes only `&H`. Only sweeping `module.structs`
+/// finds the field's tuple; without it this panics on the same
+/// `calls.rs` `bin: rhs` as the two signature sites.
+#[test]
+fn struct_field_quotation_pushes_both_outputs() {
+    let src = "import: intrinsics * ;\n\
+               type: H run [ i64 -- i64 i64 ] ;\n\
+               : use_h ( &H -- ) &run @ 3 swap call add . ;\n\
+               : main ( -- ) [ dup ] H | h | &h use_h h drop ;\n";
+    let prog = Scratch::write("struct-field", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "6\n",
+        "a quotation stored in a struct field must still return both values"
+    );
+}
+
 /// R1, site 4: the same parameter on a polymorphic word, whose declared shape
 /// lives in `w.poly` rather than `w.effect`. `'T` is unrelated to the
 /// quotation and carried rigidly through two instantiations (S3f's golden
