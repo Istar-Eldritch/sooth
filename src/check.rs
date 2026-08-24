@@ -1002,15 +1002,78 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
 /// over every declared word. Gated on the output count alone, not on anything
 /// about the word: a `drop` overload has no outputs and an `extern:` is
 /// rejected above one, so neither reaches this.
+///
+/// P7.S3m (R1): a *quotation*'s own declared effect needs the same bundle --
+/// `lower_indirect_call` asks `bundle_of` for the tuple, and with nothing
+/// interned it produced no value at all, so every output past the first was
+/// never pushed. So the walk also descends into each declared type looking for
+/// a `Type::Quotation` of two or more outputs: a word's inputs as well as its
+/// outputs, a struct field and an array element (the two materialization
+/// boundaries a quotation is legal at), and `w.poly`, which is where a
+/// polymorphic word's shape lives -- `w.effect` is empty for one, so a walk
+/// over `w.effect` alone misses every poly quotation parameter.
+///
+/// Purely additive: a bundle is keyed by its exact type list, so a quotation
+/// tuple coinciding with a word's re-interns to the same `StructId`, and the
+/// word-output tuples are still collected first, leaving the registry of a
+/// program with no multi-output quotation byte-identical.
 fn intern_output_bundles(module: &mut Module) {
-    let tuples: Vec<Vec<Type>> = module
+    let mut tuples: Vec<Vec<Type>> = module
         .words
         .iter()
         .filter(|w| w.effect.outputs.len() >= 2)
         .map(|w| w.effect.outputs.iter().map(|s| s.ty).collect())
         .collect();
+    for w in &module.words {
+        for slot in w.effect.inputs.iter().chain(&w.effect.outputs) {
+            collect_quotation_bundles(slot.ty, &mut tuples);
+        }
+        // A poly signature can carry a ground quotation in exactly one shape:
+        // a top-level `Concrete`. `audit_poly_input_quotation` rejects one in a
+        // poly array element, reference referent, cell payload, generic
+        // argument and quotation-effect row, and a variable-bearing
+        // `PolyType::Quotation` has no ground output tuple to key a bundle by.
+        // A *fully* concrete composite (`[ [ i64 -- i64 i64 ] 2 ]`) folds to
+        // `Concrete` at parse time, so it arrives here rather than as a
+        // `PolyType::Array`.
+        for pt in w
+            .poly
+            .iter()
+            .flat_map(|sig| sig.inputs.iter().chain(&sig.outputs))
+        {
+            if let PolyType::Concrete(ty) = pt {
+                collect_quotation_bundles(*ty, &mut tuples);
+            }
+        }
+    }
+    // The two composite sites, taken off the registries rather than descended
+    // into from a signature: every `Type::Struct`/`Type::Array` naming one is
+    // an index into these, so sweeping them covers a quotation nested at any
+    // depth without a containment walk of its own.
+    for (_, fty) in module.structs.iter().flat_map(|s| &s.fields) {
+        collect_quotation_bundles(*fty, &mut tuples);
+    }
+    for a in &module.arrays {
+        collect_quotation_bundles(a.element, &mut tuples);
+    }
     for outputs in tuples {
         intern_bundle_struct(&mut module.structs, &outputs);
+    }
+}
+
+/// P7.S3m (R2): the multi-output quotation effects `ty` itself is or nests. A
+/// quotation's own rows are descended (a quotation-typed struct field may take
+/// another quotation); every other composite that can legally hold a quotation
+/// is a registry the caller sweeps directly.
+fn collect_quotation_bundles(ty: Type, found: &mut Vec<Vec<Type>>) {
+    let Type::Quotation(eff) = ty else {
+        return;
+    };
+    if eff.outputs.len() >= 2 {
+        found.push(eff.outputs.clone());
+    }
+    for nested in eff.inputs.iter().chain(&eff.outputs) {
+        collect_quotation_bundles(*nested, found);
     }
 }
 
@@ -3347,6 +3410,85 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
+    }
+
+    /// P7.S3m: the discovery walk alone, over a parsed module with no prelude,
+    /// so the interned bundles are exactly the ones this program's declarations
+    /// asked for -- a count over a checked module carries the core prelude's
+    /// own bundles and could not tell an over-intern from a baseline.
+    fn interned_bundles(src: &str) -> Vec<Vec<Type>> {
+        let tokens = lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        intern_output_bundles(&mut module);
+        module
+            .structs
+            .iter()
+            .filter(|s| s.is_bundle)
+            .map(|s| s.fields.iter().map(|(_, ty)| *ty).collect())
+            .collect()
+    }
+
+    /// P7.S3m (R1, site 1): a concrete word's quotation *parameter* -- the
+    /// confirmed repro's shape. Its effect's outputs are the bundle
+    /// `lower_indirect_call` reads back, and nothing used to intern it.
+    #[test]
+    fn quotation_param_two_outputs_interns_a_bundle() {
+        let bundles = interned_bundles(": call_it ( [ i64 -- i64 i64 ] -- ) ;\n");
+        assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
+    }
+
+    /// P7.S3m (R1, site 4 / R3): the same parameter on a *polymorphic* word,
+    /// whose declared shape lives in `w.poly` -- `w.effect` is empty here, so
+    /// this passes only if the poly signature is walked. The word's own
+    /// outputs are a single `'T`, so no word-level bundle can supply the tuple
+    /// by coincidence.
+    #[test]
+    fn poly_signature_quotation_param_interns_a_bundle() {
+        let bundles = interned_bundles(": call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T ) ;\n");
+        assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
+    }
+
+    /// P7.S3m (R1, site 2): a struct field, one of the two materialization
+    /// boundaries a quotation type is legal at.
+    #[test]
+    fn struct_field_quotation_two_outputs_interns_a_bundle() {
+        let bundles = interned_bundles("type: Handler run [ i64 -- i64 i64 ] ;\n");
+        assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
+    }
+
+    /// P7.S3m (R1, site 3): an array element, the other materialization
+    /// boundary. The parameter is a `&[..]`, so the quotation is two composites
+    /// deep from the signature and only the array-registry sweep can reach it.
+    #[test]
+    fn array_element_quotation_two_outputs_interns_a_bundle() {
+        let bundles = interned_bundles(": w ( &[ [ i64 -- i64 i64 ] 2 ] -- ) ;\n");
+        assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
+    }
+
+    /// P7.S3m: the `>= 2` filter holds at the widened sites too -- a
+    /// single-output quotation keeps `lower_indirect_call`'s bundle-free path.
+    #[test]
+    fn quotation_param_single_output_interns_no_bundle() {
+        assert!(interned_bundles(": call_it ( [ i64 -- i64 ] -- ) ;\n").is_empty());
+    }
+
+    /// P7.S3m (R3): a quotation parameter whose own output row still mentions a
+    /// type variable is descended for a nested ground quotation but never
+    /// interned itself -- there is no ground tuple to key a bundle by. It is
+    /// also unusable: `call` admits only a fully-ground quotation operand, so
+    /// widening discovery neither accepts nor interns for this shape.
+    #[test]
+    fn variable_bearing_poly_quotation_interns_no_bundle() {
+        assert!(interned_bundles(": call_it ( 'T: Copy [ 'T -- 'T 'T ] -- ) drop ;\n").is_empty());
+        let err = check_src(
+            ": call_it ( 'T: Copy [ 'T -- 'T 'T ] 'T -- ) swap call drop drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`call` is not permitted on a quotation"),
+            "a `call` on a variable-bearing quotation must still be rejected: {err}"
+        );
     }
 
     /// P7.S3e (R17): the obligation pre-pass hoists `check_poly_body` ahead of
