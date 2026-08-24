@@ -7464,9 +7464,10 @@ mod tests {
     /// word's own body. `swap drop` first discards the word's other `'T`
     /// input so the quotation's own `'T` output is the sole thing left on
     /// exit, matching the declared single-`'T` output -- the near miss
-    /// `check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position`
-    /// (a different guard, at the argument boundary, still pinned) does not
-    /// cover: only the *output* side carries the variable, so a dispatch
+    /// `check_poly_call_materializes_an_abstract_quotation_argument` (a
+    /// different guard, at the argument boundary, also flipped by this
+    /// slice's R5) does not cover: only the *output* side carries the
+    /// variable, so a dispatch
     /// predicate that checked the declared inputs were ground (they are, a
     /// single `i64`) would wrongly claim this one.
     #[test]
