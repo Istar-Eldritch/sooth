@@ -59,6 +59,12 @@ fn check_err(src: &str) -> String {
     sooth::check::check(&mut module).expect_err("this program should be rejected")
 }
 
+fn check_ok(src: &str) {
+    let tokens = sooth::lexer::lex(src).unwrap();
+    let mut module = sooth::parser::parse(&tokens).unwrap();
+    sooth::check::check(&mut module).expect("this program should be accepted");
+}
+
 /// C1 behavioural: a non-inline generic word whose literal body names a
 /// bound local, run at two distinct instantiations of `'T` so the splice is
 /// carried rigidly rather than coincidentally matching.
@@ -84,26 +90,21 @@ fn c1_call_on_literal_splices_body_in_place() {
     );
 }
 
-/// C1 negative: `call` on a **non-literal** (declared/forwarded) quotation
-/// operand in a non-inline poly body is a located rejection, not a panic
-/// (L1). The parameter's own effect carries a free `'T`, so it stays
-/// `PolyType::Quotation` rather than folding to `PolyType::Concrete`; R1's
-/// new arm reuses `poly_op_on_variable_error`'s renderer, which names that
-/// variant "a quotation" -- distinct from a `PolyType::QuotLit` top's "a
-/// quotation literal".
+/// C1: `call` on a **non-literal** (declared/forwarded) quotation operand in
+/// a non-inline poly body. The parameter's own effect carries a free `'T`, so
+/// it stays `PolyType::Quotation` rather than folding to `PolyType::Concrete`.
+/// P7.S3l (R1) flips this from a rejection: the checker's new arm consumes
+/// and produces the declared row structurally, so `call` on this shape now
+/// checks clean rather than reporting the old blanket "not permitted on a
+/// quotation" message. No call site: passing a *literal* quotation to this
+/// declared position from a concrete caller hits an unrelated, still-pinned
+/// rejection at the argument boundary (`check_poly_call`'s R9p guard,
+/// `check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position`
+/// in `src/check/poly.rs`) -- out of this slice's scope, since it is the
+/// call site, not the body, that owns that guard.
 #[test]
-fn c1_call_on_non_literal_operand_is_located_rejection() {
-    let err = check_err(
-        ": caller ( 'T [ 'T -- 'T ] -- 'T i64 )\n\
-           call\n\
-         ;\n\
-         : main ( -- ) 1 caller drop drop ;\n",
-    );
-    assert_eq!(
-        err, "error: `call` is not permitted on a quotation in `caller` (line 2)",
-        "{err}"
-    );
-    assert!(!err.contains("unknown word"), "{err}");
+fn c1_call_on_non_literal_operand_is_accepted() {
+    check_ok(": caller ( 'T [ 'T -- 'T ] -- 'T ) call ;\n");
 }
 
 /// C2 behavioural: a poly body passing a literal to a concrete helper that

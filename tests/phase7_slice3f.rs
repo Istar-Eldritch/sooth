@@ -49,6 +49,12 @@ fn check_err(src: &str) -> String {
     sooth::check::check(&mut module).expect_err("this program should be rejected")
 }
 
+fn check_ok(src: &str) {
+    let tokens = sooth::lexer::lex(src).unwrap();
+    let mut module = sooth::parser::parse(&tokens).unwrap();
+    sooth::check::check(&mut module).expect("this program should be accepted");
+}
+
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
     let binary = driver::build(src).expect("program should build");
     let output = std::process::Command::new(&binary)
@@ -163,20 +169,16 @@ fn body_boundary_pops_declared_inputs_deepest_first() {
     );
 }
 
-/// L1 at the golden level: a declared quotation parameter that still carries a
-/// free variable inside its brackets is out of scope for this slice, and
-/// `call`ing it in a poly body keeps its pre-existing wording.
+/// L1 at the golden level, flipped by P7.S3l (R1/R2): a declared quotation
+/// parameter that still carries a free variable inside its brackets is now
+/// accepted at the body boundary, mirroring the headline `apply` shape
+/// (`: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;`). No call site: passing a
+/// *literal* quotation to this declared position hits an unrelated,
+/// still-pinned rejection at the argument boundary (`check_poly_call`'s
+/// R9p guard) that this slice does not touch -- getting the headline
+/// `4 [ 1 add ] apply .` shape past that guard, if it is done at all, is
+/// phase 2's concern (recorded as a phase 1 recon finding).
 #[test]
-fn body_boundary_rejects_an_abstract_quotation_param() {
-    let err = check_err(
-        "import: intrinsics * ;\n\
-         : call_it ( 'T: Copy [ i64 -- 'T ] -- 'T )\n\
-           1 swap call\n\
-         ;\n\
-         : main ( -- ) [ 5 ] call_it drop ;\n",
-    );
-    assert_eq!(
-        err,
-        "error: `call` is not permitted on a quotation in `call_it` (line 3)"
-    );
+fn body_boundary_accepts_an_abstract_quotation_param() {
+    check_ok(": call_it ( 'T [ 'T -- 'T ] -- 'T ) call ;\n");
 }
