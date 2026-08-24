@@ -1,15 +1,22 @@
 # P7.S3o brief — A bound on a poly combinator's own type variable has no dispatch mechanism
 
-## Problem, confirmed live against current `main` (`1bf977c`)
+**Status: parked.** `reject_user_bound_on_combinator` (`src/check/poly.rs:5919`) is a clean,
+correctly-worded diagnostic, not a bug — this is an unimplemented feature, not a broken one.
+Two spec-review rounds (below) found the real mechanism needs a source-derived resolution key
+threaded through both the checker and lowering, a transitive "skip the stand-in check" rule,
+and a fix for a materialized-quotation key collision — core inlining-machinery surgery for a
+narrow feature already scope-cut once before (S3e R9/R17). Not worth forcing green right now;
+this brief stands as the recon record if it's ever picked back up. No spec exists for this
+slice.
 
-`reject_user_bound_on_combinator` (`src/check/poly.rs:5919`) rejects a `'T: TraitName` bound on
-a poly combinator's own type variable before its body is ever checked
-(`src/check.rs:867`, inside the `is_combinator` arm of the second pre-pass loop). The comment
-at the call site (`src/check.rs:865-867`) already states the reason precisely: "the scratch
-records below are exactly why a user trait bound cannot ride a combinator's own type
-variable — nothing here survives to carry a resolved obligation." This brief's job was to
-confirm that diagnosis empirically, and to determine what the real mechanism would need to be
-— not yet recon'd anywhere in the roadmap (`docs/roadmap/P7-language-prereqs.md:610-613`).
+## Problem, confirmed live against current `main`
+
+`reject_user_bound_on_combinator` rejects a `'T: TraitName` bound on a poly combinator's own
+type variable before its body is ever checked (`src/check.rs:867`, inside the `is_combinator`
+arm of the second pre-pass loop). The comment at the call site (`src/check.rs:865-867`) already
+states the reason precisely: "the scratch records below are exactly why a user trait bound
+cannot ride a combinator's own type variable — nothing here survives to carry a resolved
+obligation."
 
 **Live repro, with the rejection bypassed** (probed in a throwaway scratch worktree, not
 shipped anywhere):
@@ -37,200 +44,161 @@ reads like a typo, not "bound dispatch on a combinator is unsupported." `reject_
 on_combinator`'s own message is the honest one; this is what happens if that gate is removed
 without also fixing the underlying gap.
 
-## Two independent gaps, not one — both confirmed by isolation
+## Three independent gaps behind the rejection
 
 **Gap 1 — the standalone `i64`-stand-in check fails on its own, independent of any call
-site.** Removing the *only* call site to `shows` from `main` entirely (so the combinator is
-declared but never spliced anywhere) reproduces the identical error at the identical line.
-This proves the failure originates inside `check_poly_combinator_standalone`
-(`src/check.rs:891`, `src/check/poly.rs:365`) by itself: it substitutes `i64` for `'T` and
-routes the body through the ordinary concrete `check_word` → `check_terms_relaxed`, which has
-zero trait-bound awareness. The reason is structural, not "`i64` doesn't implement `Show`" —
-`impl:` mints a trait member only under its mangled symbol (`member;Trait;module;Type`,
-`src/parser.rs:433`), never under the bare member name, so a bare `show` call fails a plain
+site.** `check_poly_combinator_standalone` (`src/check/poly.rs:365`) substitutes `i64` for `'T`
+and routes the body through the ordinary concrete checker, which has zero trait-bound
+awareness. `impl:` mints a trait member only under its mangled symbol
+(`member;Trait;module;Type`), never the bare member name, so a bare `show` call fails a plain
 `env.get` lookup regardless of what `i64` implements. Standalone checking, as it exists today,
-structurally cannot validate a bound member call at all — not "the wrong instantiation
-was chosen," but "the check performed has no concept of a bound member call."
+structurally cannot validate a bound member call at all.
 
-**Gap 2 — even with gap 1 bypassed, the splice site independently falls through to the same
-plain lookup.** With `check_poly_combinator_standalone` also bypassed (isolating the splice
-path alone), the same `main` calling `shows` still fails with `unknown word 'show' in
-'main'`. `check_poly_combinator_args` (`src/check/combinators.rs:571`), called from
-`inline_combinator` (`src/check/combinators.rs:347`, at line ~372) right before the callee
-body is spliced in, computes a genuinely concrete `Subst` unifying the combinator's own type
-variables against the caller's live stack — confirmed live via a debug print at exactly that
-point:
+**Gap 2 — the splice site independently falls through to the same plain lookup.**
+`check_poly_combinator_args` (`src/check/combinators.rs:571`), called from `inline_combinator`
+(`src/check/combinators.rs:347`), computes a genuinely concrete `Subst` binding the combinator's
+own type variables to the caller's type — confirmed live via a debug print at exactly that
+point. Nothing reads it: `grep -c '\.bounds' src/check/combinators.rs` → `0`. Once the body is
+spliced and checked via `check_terms_relaxed`, there is no branch anywhere in `TermKind::Call`'s
+dispatch that consults `poly.trait_resolve` or anything resembling `poly_trait_member_call`
+(`src/check/poly.rs:904`, the existing abstract bound-dispatch machinery a non-combinator poly
+body's walk already uses). `check_terms_relaxed` treats the spliced-in `show` term identically
+to a caller-written typo.
+
+**Gap 3 — nothing ever records an obligation for a combinator's body in the first place.**
+`TraitResolveCtx::obligations_of` (`src/check/poly.rs:107`) reads `self.recorded:
+&[WordObligations]`, populated only by the non-combinator pre-pass loop
+(`src/check.rs:793-838`), which explicitly skips every combinator
+(`if is_combinator(word) { continue; }`) — indistinguishable, per that function's own
+documented contract, from "this body calls no trait member."
+
+## Existing precedent for the non-combinator case
+
+The mechanism for an ordinary (non-combinator) poly word already exists end-to-end: abstract
+recording during `check_poly_body`'s walk via `poly_trait_member_call`
+(`src/check/poly.rs:904-1038`, pushes a `TraitObligation { span, var, trait_id, member }` with
+no symbol, since `'T` is still abstract); concrete resolution per call site via
+`resolve_user_bound` (`src/check/poly.rs:5137-5196`, an `impl:` lookup plus a lowering-symbol
+lookup, inserted into a `trait_calls: HashMap<Span, String>`); delivery to lowering via
+`CallInst`'s other resolved-symbol tables, which survive into `module.instantiations`. A
+combinator mints no `IrFunc` and is spliced by term substitution before lowering ever sees it,
+so there is no `module.instantiations` entry for it to attach a `trait_calls` map to — the
+analogous table has nowhere to live downstream the way it does for an ordinary poly word.
+
+## Round 1 review: the uid-based key is unsound
+
+A first spec draft closed gaps 1–3 with a narrow obligation-recording scan (mirroring
+`poly_trait_member_call`, skipping the `i64` stand-in check only when the scan found a bound
+member call) plus a resolution key of `(caller word symbol, splice uid, body span)`, on the
+premise that the checker's and lowering's per-splice uid counters mint identical sequences per
+word. Two reviewers independently disproved this with a live repro:
+
+```sooth
+: bump inline ( i64 -- i64 ) 1 add ;
+: seed ( -- [ -- i64 ] ) [ 10 bump ] ;
+: main ( -- ) 5 bump . seed call . ;
+```
+
+`bump` is spliced once directly in `main` and once inside a quotation literal that lowers as
+its **own** `IrFunc` (`lower_materialized`, `src/ir/func_builder/mod.rs:925`, with its own
+`FuncBuilder` and `inline_uid: 0`). The checker walks that same body under the *enclosing
+word's* `Provenance` instead — the two counters diverge by both the caller symbol
+(`seed__m0` vs `seed__m0__quot0`) and the uid itself. Worse: an *annotated* quotation literal is
+checked twice (once at the literal site, once at the materialization boundary), so the checker
+can mint uid `0` for a splice *inside* the literal while lowering mints uid `0` for a *direct*
+splice in the same caller at a different span. Make both splices the same bounded combinator at
+two concrete types and the counters' lookup collision becomes a **silent dispatch to the wrong
+`impl:`** — the exact soundness property the feature exists to guarantee. The miss case (falling
+through to `self.env.get(name).expect("checked user word exists")`,
+`src/ir/func_builder/calls.rs:728`) is the friendlier failure; it just ICEs.
+
+The fix proposed and probed in response: replace the counter with a **`SplicePath`** — the
+chain of enclosing combinator call-site `Span`s, outermost first, maintained as a push/pop stack
+at the same two splice sites (`src/check/combinators.rs:505-507`,
+`src/ir/func_builder/calls.rs:638-639`), with nothing counted so nothing can drift. Verified
+sound against direct splices, transitive (combinator-inside-combinator) splices, and a
+materialized literal in the *caller's* body.
+
+## Round 2 review: the SplicePath key still collides, and R13's suppression breaks R7
+
+Two more, independently-found holes, both reproduced live against `main`:
+
+**The stand-in check's suppression breaks the rewrite it depends on.** The design skips
+splice-site bound resolution under `check_poly_combinator_standalone`'s `i64` stand-in walk (to
+avoid demanding `impl: Trait i64` for an instantiation that never happens), delivered by a
+resolution channel that is `None` there. But an **unbounded** combinator whose body splices a
+**bounded** one still runs through the stand-in walk (the skip is keyed on the *outer*
+combinator's own — empty — obligation scan), and the `None` channel there suppresses not just
+resolution but the term-rewrite that makes the bare member name resolvable at all. The result:
+the inner splice's bare `show` call fails a plain `env.get` inside the *outer* combinator's
+definition-time stand-in check — a hard rejection at exactly the site the design's own test
+plan asserts must be clean. The skip needs to be transitive over the splice tree, not
+per-combinator.
+
+**The SplicePath key still collides — one splice-depth deeper than any probe checked.**
+`lower_materialized` mints a fresh `FuncBuilder` (and the checker's materialization walk runs at
+path depth 0) for *every* materialized quotation, dropping the enclosing splice-site prefix on
+both sides. That's fine for exactly one splice of the enclosing combinator — every probe in the
+round-1 fix only ever exercised one. Splice it twice and the collision reappears:
+
+```sooth
+import: intrinsics * ;
+: bump inline ( i64 -- i64 ) 1 add ;
+: mk   inline ( -- [ -- i64 ] ) [ 10 bump ] ;
+: seedA ( -- [ -- i64 ] ) mk ;
+: seedB ( -- [ -- i64 ] ) mk ;
+: main ( -- ) seedA call . seedB call . ;
+```
 
 ```
-PROBE inline_combinator name=shows__m0 bounds=[(0, User(TraitId(2)))] subst.ty=[(0, Struct(StructId(0), "Point"))]
+$ nm _probe2 | grep quot
+00000000000011c0 T seedA__m0__quot0
+0000000000001200 T seedB__m0__quot0
 ```
 
-So the ingredients for resolution — `sig.bounds` and a concrete `Subst` binding the bounded
-variable to `Point` — exist right there, at the right point, before the splice. Nothing reads
-them: `grep -c '\.bounds' src/check/combinators.rs` → `0`. `poly_subst` is threaded only into
-`back_edge_declared_shape` for the self-tail loop case (`combinators.rs:~490`), never into
-anything bound-resolution-shaped. Once the body is spliced in and checked via
-`check_terms_relaxed`, tracing `TermKind::Call`'s dispatch (`src/check/terms.rs:182` onward)
-shows it checks locals, then `poly.combinators.get(name)`, then `poly.env.contains_key(name)`
-(→ `check_poly_call`, reachable only for a directly-named poly *word*, not a spliced-in term),
-then falls to a bare `env.get(name)`. There is no branch anywhere in that dispatch that
-consults `poly.trait_resolve` or anything resembling `poly_trait_member_call`
-(`src/check/poly.rs:904`, the existing abstract bound-dispatch machinery a non-combinator
-poly body's walk already uses). `check_terms_relaxed` has no way to know a spliced-in term
-came from a bound combinator body — it is the same concrete term-checker a fully monomorphic
-call site uses, and treats the spliced-in `show` term identically to a caller-written typo.
+One source quotation literal (`[ 10 bump ]`, one span, one `mk`) mints two distinct `IrFunc`s
+from two splices of `mk`. Make `mk` bounded and both splices would write the same collapsed
+key with two different implementing symbols — round 1's failure mode, surviving the redesign.
+This is currently *latent*: reaching it needs a quotation inside a combinator body to capture a
+`'T` local, which fails today for an unrelated, pre-existing reason (`unknown word x__inl0`
+across the materialization boundary) — so the hole is real but accidentally gated, not yet
+constructible.
 
-**A third, prior gap makes both of the above moot until it is fixed: nothing ever records an
-obligation for a combinator's body in the first place.** `TraitResolveCtx::obligations_of`
-(`src/check/poly.rs:107`) reads `self.recorded: &[WordObligations]`, populated only by the
-non-combinator pre-pass loop (`src/check.rs:793-838`), which explicitly skips every
-combinator (`src/check.rs:794-796`: `if is_combinator(word) { continue; }`). So even granting
-gap 1 and gap 2 a fix, `obligations_of("shows", sig)` returns `&[]` for any combinator today —
-indistinguishable from "this combinator's body calls no trait member," per that function's
-own documented contract (`poly.rs:103-106`). There is nothing recorded to resolve yet.
+Smaller findings from the same round, not independently blocking but indicative of how much is
+still unsettled: the REPL rejection (mirroring the non-combinator case's REPL carve-out) was
+placed at a site with the wrong caller for the scenario it's meant to cover; a resolution
+channel's payload type was never pinned down across the two phases that would produce and
+consume it; a generic body calling an *unbounded* combinator that itself splices a *bounded*
+one isn't covered by the rejection meant to close that path. Two reviewers, working
+independently, converged on the same root methodological gap: every design probe exercised
+exactly one splice of the enclosing combinator, and the remaining hole in both the uid key and
+the SplicePath key only appears at two.
 
-## Existing precedent for the non-combinator case (what a combinator's fix must mirror, not reinvent)
+## What this does *not* touch, if picked back up
 
-The mechanism for an ordinary (non-combinator) poly word already exists end-to-end and is the
-right template, confirmed by reading it directly rather than re-deriving it:
-
-- **Abstract recording, at declaration-check time.** `poly_trait_member_call`
-  (`src/check/poly.rs:904-1038`) is the bound-directed dispatch branch `check_poly_body`'s walk
-  consults ahead of ordinary dispatch: given a bare member name, it searches the word's own
-  `sig.bounds` for a `Bound::User` declaring that member (with the P7.S3p disambiguation rules
-  for a shared member name across two bounds), type-checks the member call *abstractly* against
-  the trait member's declared signature (never against a concrete stand-in type), and pushes a
-  `TraitObligation { span, var, trait_id, member }` — no symbol, since `'T` is still abstract
-  here (`poly.rs:1034-1039`). This is exactly the abstract check a combinator's raw body would
-  need too, and it does *not* require instantiating the combinator's `'T` at any concrete
-  stand-in (`i64` or otherwise) to run — it checks the member call against the trait's own
-  declared abstract signature, sidestepping gap 1 entirely for the spans it covers.
-- **Concrete resolution, at each call site.** `check_poly_call` (`src/check/poly.rs:4542`,
-  around `:2180-2183`) reads the recorded obligations for the callee it just resolved a
-  concrete `θ` for, and calls `resolve_user_bound` (`src/check/poly.rs:5137-5196`) once per
-  bound variable: an `impl:` registry lookup (linear scan, `tr.impls.iter().find(...)`) keyed
-  on `(trait_id, concrete_ty)`, then, for every obligation on that variable, a lookup of the
-  implementing word's *lowering symbol* (`tr.word_symbols`), inserted into a
-  `trait_calls: HashMap<Span, String>` keyed by the *body's own* call-site span
-  (`poly.rs:5192`). This is a synchronous, immediate resolution once a concrete type is known
-  — there is no deferred "resolve later" step; `resolve_user_bound` is called exactly once per
-  bound variable, right when the concrete type becomes available.
-- **Delivery to lowering without touching the shared term-checker.** The `trait_calls` map
-  produced above is exactly analogous to `CallInst`'s other resolved-symbol tables
-  (`resolved_fields`, `builtin_overloads`) that `check_poly_call` already produces for a
-  non-combinator poly word and that survive into `module.instantiations` for lowering to read.
-  A combinator mints no `IrFunc` and is spliced by *term substitution* before lowering ever
-  sees it (`src/check.rs:868-877`'s own comment: "It mints no `IrFunc` (R20): a call to it is
-  inlined by term-splice at its concrete call sites"), so there is no `module.instantiations`
-  entry for a combinator to attach a `trait_calls` map to at all — the analogous table has
-  nowhere to live downstream of lowering the way it does for an ordinary poly word.
-
-## What the fix needs, given the above — and what is still an open design question
-
-Three things, in order, mirroring the existing mechanism as closely as the combinator's
-different shape (spliced by term substitution, never lowered as its own `IrFunc`) allows:
-
-1. **Record an obligation list for each combinator's raw, unsubstituted body**, the way the
-   pre-pass loop already does for every non-combinator poly word (`src/check.rs:793-838`), so
-   `trait_obligations` (`src/check.rs:786`) carries an entry for a combinator too and
-   `obligations_of` stops returning `&[]` for one. **Open design question, not resolved here:**
-   the non-combinator pre-pass gets this almost for free because `check_poly_body` already
-   walks the whole body doing full abstract stack-effect checking, of which
-   `poly_trait_member_call` is one branch. `check_poly_combinator_standalone` deliberately
-   avoids that whole apparatus — the `i64`-stand-in trick exists specifically so a combinator's
-   body (which may contain `call`/`times` on an *abstract* declared quotation parameter, R8/R9)
-   does not need the full poly-body abstract-effect machinery duplicated for combinators. Two
-   candidate shapes for the missing walk, not chosen between here:
-   - **(a)** Give combinators the full `check_poly_body`-style abstract walk too, replacing
-     `check_poly_combinator_standalone`'s `i64`-stand-in check outright rather than running
-     alongside it. This is the most uniform option but is exactly the substantial rework
-     `check_poly_combinator_standalone`'s own doc comment (`poly.rs:352-358`) explains the
-     `i64` stand-in was chosen to avoid, and risks reopening whatever originally motivated
-     that avoidance (not re-investigated here — out of this brief's probe budget).
-   - **(b)** A narrower walk that does *only* trait-obligation recording — reusing
-     `poly_trait_member_call`'s bound-search and obligation-push logic, but skipping (or
-     stubbing) the operand-shape/underflow checks that logic also performs, since those still
-     need a real abstract stack the narrow walk would have to build just for this purpose.
-     Smaller in scope than (a) but a new, bespoke walk rather than a reuse of an existing one
-     — the risk is drift between this walk's notion of "which calls are trait-member calls"
-     and `poly_trait_member_call`'s own, if the two are not kept in lockstep.
-   Spec must choose between these (or a third option) with a concrete recon pass over
-   `check_poly_combinator_standalone`'s existing responsibilities — this brief only establishes
-   that *something* must fill this gap, not which shape it takes.
-2. **Resolve at the splice site.** In `inline_combinator` (`src/check/combinators.rs:347`),
-   immediately after `check_poly_combinator_args` returns `poly_subst` (`combinators.rs:~372`),
-   for each `(v, Bound::User(tid))` in `comb.word.poly.as_ref().unwrap().bounds`, call
-   `resolve_user_bound` (`poly.rs:5137`) exactly as `check_poly_call` already does — passing the
-   `Subst`'s binding for `v` as the concrete type and `poly.trait_resolve` as the registry —
-   producing a `trait_calls: HashMap<Span, String>` keyed by the combinator body's own
-   (pre-rename) spans. This half is comparatively mechanical: `resolve_user_bound` already
-   exists, is generic over its caller, and needs no changes.
-3. **Deliver the resolution into the spliced term stream without widening the shared
-   term-checker.** Before `alpha_rename_locals(comb.terms, uid)` (`combinators.rs`, just after
-   the splice's `poly_subst` computation), rewrite any `TermKind::Call(member)` term whose span
-   is a key in the `trait_calls` map from step 2 to `TermKind::Call(resolved_symbol)` — i.e.
-   pre-substitute the term to the already-mangled concrete word name (e.g.
-   `show;Show;0;Point`) before the body is spliced into the caller. That mangled name is a
-   real word already present in `env` (the impl's synthesized member, minted by
-   `src/parser.rs:433`), so `check_term`'s existing plain `env.get` dispatch
-   (`src/check/terms.rs:182`) then succeeds with **zero changes to `terms.rs` or `PolyCtx`**.
-   An alternative considered and not preferred: a new `PolyCtx`-carried side table consulted
-   inside `check_term`'s `Call` arm — functionally equivalent, but it touches the shared
-   term-checker every other call site also runs through, where the term-rewrite approach stays
-   entirely localized to the combinator splice path.
-
-## What this does *not* touch
-
-- `poly_trait_member_call` itself, `resolve_user_bound` itself, and the whole non-combinator
-  `CallInst`/`trait_calls` mechanism (`P7.S3e`) are unmodified — this slice reuses them, adds
-  no new field to `CallInst`, and mints no new representation for a resolved trait dispatch.
+- `poly_trait_member_call`, `resolve_user_bound`, `CallInst`, and the whole non-combinator
+  `trait_calls` mechanism (`P7.S3e`) would be reused, not modified.
 - Ambiguity/disambiguation rules for two bounds sharing a member name (`P7.S3p`'s rulings)
-  are inherited as-is via whichever walk step 1 lands on; nothing here revisits them.
-- `reject_user_bound_on_combinator`'s current located-rejection *message* is correct today and
-  is exactly the diagnostic this slice removes the need for — it is not "wrong," it is the
-  honest statement of the gap this brief closes.
-- No new trait-declaration or `impl:` syntax; the trait/impl side of S3e is untouched.
+  would be inherited as-is.
+- `reject_user_bound_on_combinator`'s current message is correct and stays exactly as it is
+  unless and until this is unblocked.
 
-## Exit criteria
+## If this is ever picked back up
 
-- A poly combinator's own type variable may carry a `'T: TraitName` bound
-  (`reject_user_bound_on_combinator`'s call site is removed or narrowed to cases genuinely
-  still unsupported, whichever the spec's chosen mechanism leaves outstanding).
-- A call to a bounded trait member inside such a combinator's body, spliced at a concrete call
-  site, resolves to the correct implementing word for that call site's concrete type — proven
-  by a test with **two different concrete instantiations of the same combinator call site**
-  (mirroring `a_bounded_call_inside_a_combinator_body_resolves`, `poly.rs:7385`, which already
-  does this for the non-combinator case) each dispatching to a distinct implementing word.
-- An unsatisfied bound at a splice site (no matching `impl:` for the concrete type reached) is
-  a located rejection naming the missing word and the trait, mirroring
-  `unsatisfied_user_bound_error`'s existing wording for the non-combinator case — not a silent
-  miss, not the misleading `unknown word` message this brief's probe observed today.
-- `check_poly_combinator_standalone`'s own check no longer fails on a bound member call
-  regardless of whether the combinator is ever called from anywhere (today's gap 1) — a
-  declared-but-uncalled bound combinator must not error at all, since there is no concrete type
-  yet to check the bound against.
-- The probe program in this brief (`shows`/`Show`/`Point`) builds and runs, printing whatever
-  its `show` impl prints, as a golden.
+The open design work is not "choose an obligation-recording walk shape" (that part — a narrow
+scan mirroring `poly_trait_member_call`, skipping the stand-in check only for a
+member-dispatching body — is settled and was not where either review round found a hole). It
+is: (1) make the stand-in-check skip transitive over the splice tree, not keyed on a single
+combinator's own scan result; (2) either prefix a materialized quotation's resolution key with
+the splice path in force at its interning site on both the checker and lowering side, or give it
+an explicit located rejection with a test, rather than leaving the collision latent behind an
+unrelated bug; (3) re-probe every design shape with **two** splices of the enclosing combinator,
+not one — that discipline is what round 2 found round 1 missing, and there is no reason to
+believe two is the last depth that matters until it's actually checked.
 
-## Sizing
+## Ready to spec: no, park it
 
-Not phased in this brief — the split (if any) depends entirely on which shape spec chooses for
-item 1's obligation-recording walk, which is the one piece of real design work here. If spec
-picks option (b) (the narrow walk), this is plausibly a single phase: the narrow walk, the
-splice-site resolution call, and the term-rewrite delivery are each individually small and
-mechanical once (b)'s shape is fixed. If spec picks option (a) (folding combinators into the
-full `check_poly_body` abstract-walk machinery), that is likely to be phase-1-sized on its own,
-with the splice-site resolution and term-rewrite as phase 2 — but that split is spec's call to
-make once it has actually recon'd what replacing `check_poly_combinator_standalone`'s
-`i64`-stand-in trick with a full abstract walk costs elsewhere (e.g. whether the `call`/`times`
-abstract-quotation-parameter checks that trick was built to dodge would need re-deriving for
-combinators specifically).
-
-## Ready to spec: yes, with one instruction for spec-writer
-
-Recon item 1's two candidate shapes — (a) full abstract walk vs. (b) narrow obligation-only
-walk — before locking the plan; this brief deliberately leaves that choice open rather than
-guessing. Everything else (splice-site resolution via `resolve_user_bound`, term-rewrite
-delivery before `alpha_rename_locals`) is concrete enough to spec directly. Verify all line
-citations above against live `main` first — several other P7 slices are landing in parallel
-and line numbers in `check.rs`/`poly.rs`/`combinators.rs` will have drifted.
+Recommend leaving `reject_user_bound_on_combinator` as-is and moving on to other P7 backlog
+items. Revisit only if a concrete program actually needs bound dispatch on a combinator's own
+type variable — at which point start from "If this is ever picked back up" above rather than
+from a spec draft, since the last two drafts were both found unsound in review.
