@@ -9,9 +9,13 @@ already works (`unify_poly_input`'s `Quotation` arm binds the row pointwise); on
 side was closed. The headline shape builds and runs:
 
 ```
+import: intrinsics * ;
 : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;
-: main ( -- ) 4 [ 1 add ] apply print ;
+: main ( -- ) 4 [ 1 add ] apply . ;
 ```
+
+(`print` is not a Sooth word; the print intrinsic is `.`, imported per the line above —
+verified live: `print` alone reports `` unknown word `print` ``.)
 
 Before this slice, `poly_call_term`'s `call` arm had two live accept cases: a quotation
 *literal* (`top.quot`, spliced in place) and a fully **ground**
@@ -33,8 +37,11 @@ its declared outputs, with no body walk and no teardown (there is no body behind
 **Out of scope (pinned, not silent — but structurally unreachable, not guarded).**
 
 - A **row-typed** or `~`-declared (`is_inline`) abstract quotation parameter never reaches
-  this arm at all, on any word: `is_combinator` (`src/check/combinators.rs:155-166`) rejects
-  a `~[ ]` parameter at declaration unless the word also declares `inline`, and
+  this arm at all, on any word: `check_inline_quotation_requires_inline`
+  (`src/check/word_entry.rs:79-122`, called from `check.rs:735` and `repl.rs:3060`) rejects
+  a `~[ ]` parameter at declaration unless the word also declares `inline` (`is_combinator`,
+  `src/check/combinators.rs:155`, is merely the one-line `word.declares_inline` predicate
+  that rejection is gated on, not the rejection itself), and
   `parse_poly_quotation_inner` (`src/parser.rs:3049`) rejects a row-carrying effect
   (`row_in`/`row_out` both `Some`) unless `is_inline` is set. Chained, a non-combinator word
   can never own a `PolyType::Quotation` with `is_inline = true` or either row `Some` in the
@@ -104,12 +111,13 @@ machinery is planned.
   rejection assertion to an accept case: the same `[ i64 -- 'T ]`-shaped source now checks
   clean. Renamed to `thing_condition_expected` form
   (`poly_call_on_an_abstract_quotation_param_is_accepted`).
-- The underflow arm (R3): a declared input with nothing beneath the quotation reports
+- New: `poly_call_on_an_abstract_quotation_param_underflow_is_error` — the underflow arm
+  (R3), a declared input with nothing beneath the quotation, reports
   `` `call` needs N values, but the stack holds M`` (parallel to the ground arm's existing
   `poly_call_on_a_ground_quotation_param_underflow_is_error`).
-- The type-mismatch arm (R3): an operand whose `PolyType` is not structurally equal to the
-  declared input reports through `poly_rendered_type_mismatch_error`, both sides rendered by
-  `poly_type_str`.
+- New: `poly_call_on_an_abstract_quotation_param_mismatch_is_error` — the type-mismatch arm
+  (R3), an operand whose `PolyType` is not structurally equal to the declared input, reports
+  through `poly_rendered_type_mismatch_error`, both sides rendered by `poly_type_str`.
 - `poly_call_on_a_variable_local_is_still_error` stays green (a bare `'T` local is not a
   quotation and keeps its own rejection).
 - No test targets a `~`-declared or row-carrying quotation operand reaching this arm: per the
@@ -118,16 +126,26 @@ machinery is planned.
 
 **Golden, end-to-end (`tests/phase7_slice3f.rs`).**
 
-- `body_boundary_rejects_an_abstract_quotation_param` (`~:170`) is **flipped** to an accept
-  case: the `apply`-shaped source builds and runs. Renamed accordingly
-  (`body_boundary_accepts_an_abstract_quotation_param`).
-- The headline golden: `: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;` with
-  `4 [ 1 add ] apply print` builds, runs, and prints `5`, confirming R4's lowering path
-  end-to-end. A multi-instantiation golden (the same `apply` used at two concrete `'T`) is
-  included only if phase 1's recon shows it exercises a distinct lowering path; otherwise it
-  is redundant with S3f's ground goldens and omitted.
+- `body_boundary_rejects_an_abstract_quotation_param` (`~:170`) is **replaced**, not
+  mechanically flipped: its current source (`` : call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) ``
+  called as `` [ 5 ] call_it drop ``) supplies only the quotation operand to a two-input
+  word, arity-invalid on its own terms — today it never reaches an arity check because the
+  body-internal rejection fires first, but once that rejection is lifted the same source
+  would fail on a *different*, unrelated arity error at the `call_it` call site, not build
+  clean. Verified live: `call_it` declares two inputs (`'T` and the quotation), `main`
+  pushes only one. Swapping `check_err` for `build_and_run` on the unmodified source is not
+  sufficient; the replacement source must supply both operands, e.g. a `main` reading
+  `` 5 [ 5 ] call_it . `` (or the headline `apply` shape below in golden form). Renamed to
+  `body_boundary_accepts_an_abstract_quotation_param`.
+- The headline golden: `import: intrinsics * ;` then `: apply ( 'T [ 'T -- 'T ] -- 'T )
+  call ;` with `4 [ 1 add ] apply .` builds, runs, and prints `5\n` (`.` appends a trailing
+  newline, confirmed by the existing `body_boundary_calls_ground_quotation_param` golden's
+  `stdout` assertion), confirming R4's lowering path end-to-end. A multi-instantiation
+  golden (the same `apply` used at two concrete `'T`) is included only if phase 1's recon
+  shows it exercises a distinct lowering path; otherwise it is redundant with S3f's ground
+  goldens and omitted.
 
-Both flipped tests are cited here so the pipeline does not read their red diff as a
+Both replaced/flipped tests are cited here so the pipeline does not read their red diff as a
 regression.
 
 ## Phase plan
@@ -151,8 +169,8 @@ one, so it does not split further.
 
 ## Exit criteria
 
-1. `: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;` with `4 [ 1 add ] apply print` builds, runs,
-   and prints `5`.
+1. `import: intrinsics * ;` then `: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;` with
+   `4 [ 1 add ] apply .` builds, runs, and prints `5\n`.
 2. A body `call` whose stack holds fewer operands than the declared quotation's inputs is a
    located underflow (`` `call` needs N values, but the stack holds M``), not the blanket
    message.
@@ -161,3 +179,11 @@ one, so it does not split further.
 4. Both formerly-pinned rejection tests (`src/check/poly.rs`,
    `tests/phase7_slice3f.rs`) now assert acceptance.
 5. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` green at each phase exit.
+
+**Note on roadmap wording.** `docs/roadmap/P7-language-prereqs.md`'s S3l entry describes the
+body popping/pushing "against the row grounded through that call's `Subst`." R2 is the
+correct mechanism: no `Subst` is built or consulted mid-body (variables stay rigid; rows are
+compared structurally via `PolyType`'s derived `Eq`, S3b's L1 discipline) — S3f's own ground
+arm this slice mirrors builds no `Subst` either, so the roadmap's phrasing was already loose
+before this spec. This spec's R1–R4 are authoritative; the roadmap entry should be corrected
+to match at exit, not the reverse.
