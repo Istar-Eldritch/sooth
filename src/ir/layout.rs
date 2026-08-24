@@ -739,8 +739,12 @@ impl LayoutBuilder<'_> {
             }
             // Slice 7a: a quotation field/element is the fixed two-slot value
             // aggregate, word-width-derived (`quotation_layout`), not a scalar
-            // -- `scalar_size_align_ww` deliberately panics on it.
-            Type::Quotation(_) => {
+            // -- `scalar_size_align_ww` deliberately panics on it. P7.S3h: an
+            // owning quotation shares that same two-slot value shape, so it
+            // sizes here too -- its only distinction is the env storage
+            // decision, not the layout. It reaches this arm as a synthesized
+            // multi-output bundle field, interned after the containment audit.
+            Type::Quotation(_) | Type::OwningQuotation(_) => {
                 let l = quotation_layout(self.word_width);
                 (l.size, l.align)
             }

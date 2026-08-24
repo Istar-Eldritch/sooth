@@ -279,6 +279,25 @@ fn an_owning_closure_over_two_linear_captures_disposes_both_exactly_once() {
     assert_eq!(build_and_run(prog.path()), "drop 7\ndrop 9\n");
 }
 
+/// An owning quotation returned alongside another output rides a synthesized
+/// multi-output bundle struct, interned after the containment audit, so it
+/// legitimately becomes a bundle *field*. The bundle is unpacked at the call
+/// site, so the owning value flows back out as a linear stack value and its
+/// call-once obligation is preserved; the `i64` and the closure both survive.
+/// This is item 1's ICE repro: the bundle field's layout hit a missing
+/// `OwningQuotation` arm before the fix.
+#[test]
+fn an_owning_closure_as_one_of_several_outputs_builds_and_runs() {
+    let prog = Scratch::write(
+        "multi-output",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- i64 owning [ -- ] ) | s | 5 [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk | n q | n . q call ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "5\ndrop 7\n");
+}
+
 /// `drop` cannot discharge the obligation: disposing the captures means running
 /// the body, which is code only the closure has, and `emit_drop`'s match has no
 /// arm that could run one. Without this rejection the `drop` is silently a

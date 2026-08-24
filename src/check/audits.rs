@@ -925,6 +925,19 @@ mod tests {
     /// capture's own `drop` never runs, and the env block never gets freed.
     /// Widening either carve-out to admit `OwningQuotation` reopens exactly
     /// that hole, and this is the test that catches it.
+    ///
+    /// One aggregate position is **not** on this list, and honestly so: a
+    /// word's synthesized multi-output bundle struct is interned by
+    /// `intern_output_bundles` *after* these type-level audits run, so an
+    /// `owning` output legitimately reaches that struct as a field. It stays
+    /// sound because the bundle is a destructor-free transient ABI carrier
+    /// (`is_bundle`-flagged, no synthesized `drop`), unpacked at the call site
+    /// the instant the word returns: the owning value flows straight back out
+    /// as a linear stack value, so its call-once obligation is never handed to
+    /// a container that could no-op its disposal. That accept case is pinned
+    /// end-to-end (builds and runs) by
+    /// `an_owning_closure_as_one_of_several_outputs_builds_and_runs` in
+    /// tests/phase7_slice3h.rs, so it is deliberately not duplicated here.
     #[test]
     fn owning_quotation_is_rejected_in_every_aggregate_position() {
         for (src, position) in [

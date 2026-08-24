@@ -80,6 +80,15 @@ past the carve-out into the existing rejection, on the native `check()` path and
 No `is_copy`-based struct-field gate was added: one would reject the ordinary linear struct fields
 the language supports.
 
+**One honest exception: the synthesized multi-output bundle.** The rule holds at every *declared*
+type position, because that is where the audit reads. A word with two or more outputs gets a
+synthesized return-bundle struct, interned by `intern_output_bundles` *after* the type-level
+audits run, so an `owning` output does reach that struct as a field. It stays sound: the bundle is
+a destructor-free transient ABI carrier, `is_bundle`-flagged with no synthesized `drop`, unpacked
+at the call site the instant the word returns. The owning value flows straight back out as a
+linear stack value, so its call-once obligation is never handed to a container that could no-op
+its disposal, and the bundle is never itself disposed as a container.
+
 - **Array and slice elements reject, but not symmetrically.** Both are caught by the non-`Copy`
   element gates (`check/declarations.rs`), but only the array position is *additionally* covered
   by the audit: the audit never walks `module.slices`, so `check_slice_element_gate` is the sole
@@ -88,6 +97,14 @@ the language supports.
   slice lifting an element gate must respect that asymmetry.
 - **`field_is_linear` and `layout_field_is_linear` are untouched on purpose.** With the rule in
   force neither can ever see an owning quotation; "fixing" them would quietly reopen the hole.
+- **Containment is a check-time gate on declared type positions only.** The runtime owned-cell
+  wrap `^` applied to a quotation *value* is not check-gated on every route: `^ mk`, where `mk`
+  returns a quotation, slips past the operand guard and is stopped only by a backend
+  `unreachable!` in `src/backend/qbe.rs` (around `:531`). This is pre-existing and not specific to
+  this slice: a plain, non-owning quotation value ICEs identically there. It is called out as a
+  known boundary, not a defect introduced here: if that backend `unreachable!` is ever made to
+  emit the blit naively, an owning closure could land in a cell whose `drop` is a no-op for a
+  quotation payload, so a check-time gate on `^` over a quotation value is needed there first.
 
 Cost: an owning closure cannot be stored in a data structure. It can be created, passed, returned
 and called. Lifting that needs a disposer the synthesized glue can invoke, which is **P7.S3v**,

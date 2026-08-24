@@ -949,7 +949,11 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
                 self.push_instr(Instr::FieldStore(fptr, val));
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
+            IrType::Struct(_)
+            | IrType::Enum(_)
+            | IrType::Array(_)
+            | IrType::Quotation(_)
+            | IrType::OwningQuotation(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
                 }
@@ -971,7 +975,11 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
+            IrType::Struct(_)
+            | IrType::Enum(_)
+            | IrType::Array(_)
+            | IrType::Quotation(_)
+            | IrType::OwningQuotation(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
             _ => {
