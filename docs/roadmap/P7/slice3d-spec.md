@@ -248,17 +248,14 @@ cannot be probed for the exact rejection a deleted guard would produce.
   operand-window check, which renders "a quotation **literal**" for a `QuotLit` slot,
   distinct from the C1 negative's non-literal "a quotation" wording below).
 
-- **C1 negative (`c1_call_on_non_literal_operand_is_located_rejection`)** — `call` on a
-  **non-literal** (abstract/forwarded) quotation operand in a non-inline poly body is a
-  located rejection, not a panic (L1). R1's new arm reuses `poly_op_on_variable_error`'s
-  renderer (the same "is not permitted on" family already used for `dup`/`over` on a
-  quotation literal, `poly.rs:2946`), so the exact expected text is:
-
-  ```text
-  error: `call` is not permitted on a quotation in `<word>` (line <N>)
-  ```
-
-  never `unknown word`.
+- **C1 negative (`c1_call_on_non_literal_operand_is_located_rejection`) — superseded by
+  P7.S3l.** `call` on a **non-literal** (abstract/forwarded) quotation operand in a
+  non-inline poly body was a located rejection at this slice's exit, not a panic (L1),
+  through `poly_op_on_variable_error`'s renderer. P7.S3l (R1) lifted that rejection: the
+  same shape now checks clean through a dedicated accept arm
+  (`poly_call_abstract_quotation_param`). The test this bullet named is renamed and
+  flipped to `c1_call_on_non_literal_operand_is_accepted` in `tests/phase7_slice3d.rs`;
+  this bullet is kept only as the historical record of what this slice's exit asserted.
 
 - **C2 behavioural (`c2_literal_grounds_against_concrete_quotation_param`)** — a poly body
   passing a literal to a **concrete** helper that carries real logic around its own `call`

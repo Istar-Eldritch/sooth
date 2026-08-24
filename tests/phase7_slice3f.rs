@@ -43,12 +43,6 @@ impl Drop for Scratch {
     }
 }
 
-fn check_err(src: &str) -> String {
-    let tokens = sooth::lexer::lex(src).unwrap();
-    let mut module = sooth::parser::parse(&tokens).unwrap();
-    sooth::check::check(&mut module).expect_err("this program should be rejected")
-}
-
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
     let binary = driver::build(src).expect("program should build");
     let output = std::process::Command::new(&binary)
@@ -163,20 +157,91 @@ fn body_boundary_pops_declared_inputs_deepest_first() {
     );
 }
 
-/// L1 at the golden level: a declared quotation parameter that still carries a
-/// free variable inside its brackets is out of scope for this slice, and
-/// `call`ing it in a poly body keeps its pre-existing wording.
+/// L1 at the golden level, flipped by P7.S3l (R1/R2): a declared quotation
+/// parameter that still carries a free variable inside its brackets is now
+/// accepted at the body boundary and lowers end-to-end, mirroring the
+/// headline `apply` shape (`: apply ( 'T [ 'T -- 'T ] -- 'T ) call ;`), run
+/// at two distinct instantiations of `'T` so it is carried rigidly rather
+/// than coincidentally matching. The quotation argument is forwarded through
+/// a helper word (`mk_i64`/`mk_bool`) rather than passed as a literal at the
+/// `apply` call site: a *literal* quotation at that position hits an
+/// unrelated, still-pinned rejection (`check_poly_call`'s R9p guard, which
+/// only materializes a literal against a **ground** `Concrete(Type::
+/// Quotation)` slot, not this abstract one) -- closing that gap, if it is
+/// done at all, is phase 2's concern (recorded as a phase 1 recon finding).
+/// Phase 1 also confirmed and closed a second, lower-level gap this golden
+/// depends on: `subst_polytype`'s `PolyType::Quotation` lowering arm
+/// (`src/ir/driver.rs`) previously asserted this shape could never reach
+/// monomorphized lowering and panicked when it did; it now grounds the row
+/// through `θ`, mirroring check-side `apply_subst`'s existing arm.
 #[test]
-fn body_boundary_rejects_an_abstract_quotation_param() {
-    let err = check_err(
-        "import: intrinsics * ;\n\
-         : call_it ( 'T: Copy [ i64 -- 'T ] -- 'T )\n\
-           1 swap call\n\
-         ;\n\
-         : main ( -- ) [ 5 ] call_it drop ;\n",
-    );
+fn body_boundary_calls_an_abstract_quotation_param() {
+    let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
+               : mk_i64 ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
+               : mk_bool ( -- [ Bool -- Bool ] ) [ ] ;\n\
+               : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+               : main ( -- )\n\
+                 4 mk_i64 apply .\n\
+                 True mk_bool apply .\n\
+               ;\n";
+    let prog = Scratch::write("body-boundary-abstract-quotation", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
     assert_eq!(
-        err,
-        "error: `call` is not permitted on a quotation in `call_it` (line 3)"
+        stdout, "5\nTrue\n",
+        "each instantiation of `'T` must call its own forwarded quotation independently"
+    );
+}
+
+/// P7.S3l phase 2 (R9p closure): the headline shape, with the quotation
+/// argument as a *literal* at `apply`'s own call site rather than forwarded
+/// out of a helper word's return value -- the gap `body_boundary_calls_an_
+/// abstract_quotation_param` (above) recorded as still open at phase 1 exit.
+/// `check_poly_call`'s R9p guard now grounds an abstract declared quotation
+/// slot through the `subst` already bound by an earlier plain input before
+/// materializing the literal, exactly as it already did for a ground
+/// declared slot.
+#[test]
+fn headline_apply_accepts_a_literal_quotation_argument() {
+    let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
+               : apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+               : main ( -- )\n\
+                 4 [ 1 add ] apply .\n\
+                 True [ ] apply .\n\
+               ;\n";
+    let prog = Scratch::write("headline-apply-literal-argument", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "5\nTrue\n",
+        "two instantiations of `'T` rule out a coincidental single-shape match"
+    );
+}
+
+/// P7.S3l phase 2 (R5): the same headline shape with the declared quotation
+/// slot *before* the plain input that binds `'T`. The two-pass split is what
+/// makes this order work, and the reorder changes what lowering receives, not
+/// only what the checker admits -- so it is pinned end-to-end, not by
+/// `check_ok` alone.
+#[test]
+fn headline_apply_accepts_a_literal_quotation_argument_declared_first() {
+    let src = "import: intrinsics * ;\n\
+               import: core::bool * ;\n\
+               : applyf ( [ 'T -- 'T ] 'T -- 'T ) swap call ;\n\
+               : main ( -- )\n\
+                 [ 1 add ] 4 applyf .\n\
+                 [ ] True applyf .\n\
+               ;\n";
+    let prog = Scratch::write("headline-apply-literal-declared-first", src);
+    let (binary, stdout, code) = build_and_run(prog.path());
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(code, 0);
+    assert_eq!(
+        stdout, "5\nTrue\n",
+        "grounding must not depend on the quotation slot following its binding input"
     );
 }

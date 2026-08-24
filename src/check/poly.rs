@@ -1376,6 +1376,21 @@ pub(super) fn poly_call_term(
                 stack.pop();
                 return poly_call_ground_quotation_param(eff, span, stack, ctx, name, sig);
             }
+            // P7.S3l (R1): an abstract `PolyType::Quotation` still carrying a
+            // variable -- matched unconditionally, no `is_inline`/row guard.
+            // A non-combinator word can never carry `is_inline = true` or a
+            // row-carrying effect on a declared quotation slot (rejected at
+            // parse time by `parse_poly_quotation_inner` and, for `is_inline`,
+            // by `check_inline_quotation_requires_inline`), so there is no
+            // live shape here for a guard to exclude.
+            if let PolyType::Quotation(ins, outs, ..) = &top.pt {
+                let ins = ins.clone();
+                let outs = outs.clone();
+                stack.pop();
+                return poly_call_abstract_quotation_param(
+                    &ins, &outs, span, stack, ctx, name, sig,
+                );
+            }
             let pt = top.pt.clone();
             return Err(poly_op_on_variable_error(ctx, span, name, &pt, sig));
         };
@@ -2572,6 +2587,47 @@ fn poly_call_ground_quotation_param(
     stack.truncate(base);
     for out in &eff.outputs {
         stack.push(PolySlot::new(PolyType::Concrete(*out)));
+    }
+    Ok(stack)
+}
+
+/// P7.S3l (R2/R3): `call` on an **abstract** declared quotation parameter --
+/// one whose declared effect still mentions a variable. The abstract twin of
+/// `poly_call_ground_quotation_param`, one level earlier in the pipeline: pop
+/// the quotation (already done by the caller), consume `ins.len()` operands
+/// deepest-first, push `outs`, no body walk and no teardown (there is no body
+/// behind the value). Because the body is checked once, generically, with
+/// every variable rigid, each declared slot is compared **structurally**
+/// against the operand's own `PolyType` via its derived `Eq` -- no `Subst` is
+/// built or consulted (S3b's L1 discipline).
+fn poly_call_abstract_quotation_param(
+    ins: &[PolyType],
+    outs: &[PolyType],
+    span: Span,
+    mut stack: Vec<PolySlot>,
+    ctx: &Ctx,
+    op: &str,
+    sig: &PolySig,
+) -> Result<Vec<PolySlot>, String> {
+    let n = ins.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, op, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    for (i, want) in ins.iter().enumerate() {
+        if &stack[base + i].pt != want {
+            return Err(poly_rendered_type_mismatch_error(
+                ctx,
+                span,
+                op,
+                &poly_type_str(want, sig),
+                &poly_type_str(&stack[base + i].pt, sig),
+            ));
+        }
+    }
+    stack.truncate(base);
+    for out in outs {
+        stack.push(PolySlot::new(out.clone()));
     }
     Ok(stack)
 }
@@ -4531,14 +4587,40 @@ pub(super) fn check_poly_call(
     // `CallInst` so lowering can materialize the caller's phantom argument
     // into a real runtime aggregate before the call.
     let mut quot_inputs: Vec<(usize, &'static QuotEffect)> = Vec::new();
+    // Pass 1: unify every non-quotation input first, so a variable a
+    // declared quotation slot mentions is already bound by the time pass 2
+    // grounds it -- mirroring `check_poly_combinator_args`'s two-pass split,
+    // whatever the parameter order.
     for i in 0..n_in {
+        if poly_input_is_quotation(&sig.inputs[i]) {
+            continue;
+        }
         // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
         // quotation would silently bind `'T` to the placeholder and
-        // monomorphize a call over a phantom. Reject before unification --
-        // unless the declared input is itself a ground `Type::Quotation`
-        // (P7.S3f R1), in which case the operand is materialized into a
-        // real runtime value first (R2) and falls through to ordinary
-        // unification below.
+        // monomorphize a call over a phantom. Reject before unification.
+        if let Some(QuotRef::Known(_)) = stack[base + i].quot {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        let slot_ty = stack[base + i].ty;
+        unify_poly_input(
+            &sig,
+            &sig.inputs[i],
+            slot_ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+        )?;
+    }
+    // Pass 2: materialize each declared quotation input, now that `subst`
+    // holds every binding pass 1 could produce.
+    for i in 0..n_in {
+        if !poly_input_is_quotation(&sig.inputs[i]) {
+            continue;
+        }
         if let Some(QuotRef::Known(id)) = stack[base + i].quot {
             match &sig.inputs[i] {
                 PolyType::Concrete(Type::Quotation(eff)) => {
@@ -4548,6 +4630,33 @@ pub(super) fn check_poly_call(
                     )?;
                     quot_inputs.push((i, eff));
                 }
+                // P7.S3l phase 2 (R9p closure): a declared quotation slot
+                // still carrying a variable -- ground it through `subst`,
+                // now complete from pass 1, then materialize exactly as the
+                // ground arm does. Scope rules out an inline/row-carrying
+                // slot ever reaching a non-combinator word's signature, so
+                // `apply_subst`'s `Quotation` arm always grounds to
+                // `Type::Quotation` here, never `Type::InlineQuotation`.
+                pty @ PolyType::Quotation(..) => {
+                    let grounded =
+                        apply_subst(&sig, pty, &subst, name, span, ctx, arrays, cells, refs)?;
+                    // A `~`/row-carrying slot grounds to `Type::InlineQuotation`
+                    // instead, and `check_inline_quotation_requires_inline` keeps
+                    // one off a non-combinator word's signature -- an invariant
+                    // held two functions away, so this keeps R9p's rejection
+                    // rather than asserting it.
+                    let Type::Quotation(eff) = grounded else {
+                        return Err(reject_quotation_argument(ctx, span, name));
+                    };
+                    stack[base + i] = materialize_quotation_at_boundary(
+                        id, eff, false, false, name, span, ctx, env, arrays, cells, refs, slices,
+                        prov, scope, poly,
+                    )?;
+                    quot_inputs.push((i, eff));
+                }
+                // `poly_input_is_quotation` also admits a concrete
+                // `Type::InlineQuotation`, which this match does not handle;
+                // the same non-local declaration guard is what keeps it out.
                 _ => return Err(reject_quotation_argument(ctx, span, name)),
             }
         }
@@ -7575,22 +7684,32 @@ mod tests {
         )
         .expect("a ground quotation argument in the last position should materialize");
     }
-    /// R1's negative, re-pinned unmodified against the abstract
-    /// `PolyType::Quotation` shape (still carrying a free variable): a
-    /// declared quotation whose brackets mention `'T` does not fold to
-    /// `Concrete`, so R1's narrowing must not spare it -- the mutation-test
-    /// proof that L1 is not accidentally widened.
+    /// P7.S3l phase 2 (R9p closure): flipped from a rejection to an accept
+    /// case. A declared quotation whose brackets mention `'T` no longer
+    /// falls through R9p's blanket rejection once every variable the row
+    /// mentions is already bound by an earlier input (here, `'T` is bound by
+    /// the plain `7` argument before the quotation argument is reached) --
+    /// the literal is grounded through that `subst` and materialized exactly
+    /// as a ground declared quotation slot is.
     #[test]
-    fn check_poly_call_rejects_a_quotation_argument_at_an_abstract_quotation_position() {
-        let err = check_src(
+    fn check_poly_call_materializes_an_abstract_quotation_argument() {
+        check_src(
             ": run_abstract ( 'T: Copy [ 'T -- 'T ] -- 'T ) drop ;\n\
-             : main ( -- ) 7 [ dup ] run_abstract drop ;\n",
+             : main ( -- ) 7 [ ] run_abstract drop ;\n",
         )
-        .expect_err("a quotation at a still-abstract PolyType::Quotation position stays rejected");
-        assert!(
-            err.contains("a quotation cannot be passed to `run_abstract`"),
-            "{err}"
-        );
+        .expect("a literal argument at an abstract quotation position should materialize");
+    }
+    /// P7.S3l phase 2 review: the two-pass split (mirroring
+    /// `check_poly_combinator_args`) makes grounding order-independent -- the
+    /// declared quotation slot comes *before* the plain input that binds
+    /// `'T`, the reverse of the sibling test above.
+    #[test]
+    fn check_poly_call_materializes_an_abstract_quotation_argument_declared_first() {
+        check_src(
+            ": run_abstract_first ( [ 'T: Copy -- 'T ] 'T -- 'T ) swap drop ;\n\
+             : main ( -- ) [ ] 7 run_abstract_first drop ;\n",
+        )
+        .expect("grounding a quotation slot declared before its binding input should succeed");
     }
     /// R2: a capturing literal at the argument boundary runs the existing R15
     /// admission path. An in-frame (non-escaping) capture is admitted; this
@@ -7684,19 +7803,75 @@ mod tests {
             "{err}"
         );
     }
-    /// L1, pinned by exact text: an abstract declared quotation parameter is
-    /// out of scope and keeps its pre-existing rejection. The near miss
-    /// `poly_call_on_non_literal_quotation_operand_is_located_error` does not
-    /// cover: only the *output* side carries the variable, so a dispatch
+    /// P7.S3l (R1/R2): flipped from S3f's pinned rejection -- an abstract
+    /// declared quotation parameter (`[ i64 -- 'T ]`, its output still
+    /// carrying the word's own type variable) is now `call`-able from the
+    /// word's own body. `swap drop` first discards the word's other `'T`
+    /// input so the quotation's own `'T` output is the sole thing left on
+    /// exit, matching the declared single-`'T` output -- the near miss
+    /// `check_poly_call_materializes_an_abstract_quotation_argument` (a
+    /// different guard, at the argument boundary, also flipped by this
+    /// slice's R5) does not cover: only the *output* side carries the
+    /// variable, so a dispatch
     /// predicate that checked the declared inputs were ground (they are, a
     /// single `i64`) would wrongly claim this one.
     #[test]
-    fn poly_call_on_an_abstract_quotation_param_is_still_error() {
-        let err = check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) 1 swap call ;\n")
-            .expect_err("an abstract quotation parameter stays rejected");
+    fn poly_call_on_an_abstract_quotation_param_is_accepted() {
+        check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop 1 swap call ;\n")
+            .expect("an abstract quotation parameter is now call-able");
+    }
+    /// R3's underflow arm, the abstract twin of
+    /// `poly_call_on_a_ground_quotation_param_underflow_is_error`: the
+    /// quotation is there, the operand its declared input demands is not.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_underflow_is_error() {
+        let err = check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop call ;\n")
+            .expect_err("a declared input with nothing beneath the quotation must be rejected");
+        assert!(
+            err.contains("`call` needs 1 values, but the stack holds 0"),
+            "{err}"
+        );
+    }
+    /// R2's ordering, the input side: two heterogeneous declared inputs, so
+    /// consuming them in the wrong order (rather than merely miscounting
+    /// them) is discriminated. Every other R2/R3 test in this file declares
+    /// a single input, which cannot tell deepest-first from its reverse.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_pops_declared_inputs_deepest_first() {
+        check_src(
+            ": call_it ( 'T: Copy [ i64 Bool -- 'T ] -- 'T )\n\
+               swap drop 1 True rot call\n\
+             ;\n",
+        )
+        .expect("the deepest operand must satisfy the first declared input");
+    }
+    /// R2's ordering, the output side: two heterogeneous declared outputs,
+    /// so pushing them in the wrong order is discriminated. The existing
+    /// `poly_call_on_a_ground_quotation_param_pushes_outputs_in_order` pins
+    /// this for the ground twin only; the abstract arm has its own push loop
+    /// (`poly_call_abstract_quotation_param`) and needs its own witness.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_pushes_outputs_in_order() {
+        check_src(
+            ": call_it ( 'T: Copy [ -- 'T Bool ] -- 'T Bool )\n\
+               swap drop call\n\
+             ;\n",
+        )
+        .expect("the first declared output must land deepest");
+    }
+    /// R3's mismatch arm: an operand whose `PolyType` is not structurally
+    /// equal to the declared input.
+    #[test]
+    fn poly_call_on_an_abstract_quotation_param_mismatch_is_error() {
+        let err =
+            check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop True swap call ;\n")
+                .expect_err(
+                    "an operand not structurally equal to the declared input must be rejected",
+                );
         assert_eq!(
             err,
-            "error: `call` is not permitted on a quotation in `call_it` (line 1)"
+            "error: type mismatch in `call_it` (line 1)\n  \
+             `call` expected `i64`, found `Bool`\n  note: declared ( -- )"
         );
     }
     /// L1's other side: the new arm is gated on the operand being a ground
@@ -10782,24 +10957,18 @@ mod tests {
         .expect("an inline literal's body should splice in place too");
     }
 
-    /// P7 slice 3d (C1/R1, L1): `call` on a **non-literal** quotation operand
+    /// P7 slice 3d (C1/R1): `call` on a **non-literal** quotation operand
     /// -- a declared parameter whose effect still carries a free `'T`, so it
     /// stays `PolyType::Quotation` rather than folding to `PolyType::Concrete`
-    /// -- is a located rejection, never a panic and never `unknown word`.
+    /// -- is a located outcome, never a panic and never `unknown word`.
+    /// P7.S3l flips this from a rejection: R1's new arm now dispatches this
+    /// shape (both sides of the declared effect carry `'T`) to
+    /// `poly_call_abstract_quotation_param`, which consumes/produces it
+    /// cleanly, so the body no longer rejects it at all.
     #[test]
-    fn poly_call_on_non_literal_quotation_operand_is_located_error() {
-        let err = check_src(
-            ": caller ( 'T [ 'T -- 'T ] -- 'T i64 )\n\
-               call\n\
-             ;\n\
-             : main ( -- ) 1 caller drop drop ;\n",
-        )
-        .expect_err("a non-literal quotation operand at `call` should be rejected");
-        assert_eq!(
-            err,
-            "error: `call` is not permitted on a quotation in `caller` (line 2)"
-        );
-        assert!(!err.contains("unknown word"), "{err}");
+    fn poly_call_on_non_literal_quotation_operand_is_accepted() {
+        check_src(": caller ( 'T [ 'T -- 'T ] -- 'T ) call ;\n")
+            .expect("a non-literal quotation operand at `call` is now accepted");
     }
 
     /// P7 slice 3d (C1/R1): `call` on an *empty* stack reports the ordinary

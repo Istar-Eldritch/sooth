@@ -715,12 +715,32 @@ pub(super) fn subst_polytype(
                 .expect("checked: the concrete array shape was interned at the call site");
             Type::Array(ArrayId::from_index(idx), arrays[idx].name_static)
         }
-        // Slice 6a (R7): a quotation-taking word is never monomorphized to a
-        // standalone `IrFunc` (R20), so no `θ` is ever applied to a declared
-        // quotation effect at lowering. Unreachable, guarded by R7a's audit
-        // and R20u.
-        PolyType::Quotation(..) => {
-            unreachable!("a quotation effect never reaches monomorphized lowering (R7/R20)")
+        // P7.S3l (phase 1, R4 recon finding): a plain (non-combinator) word
+        // may declare an abstract quotation parameter and call it (S3l), so
+        // it *does* reach standalone monomorphized lowering -- the R7/R20
+        // premise this arm used to assert ("never monomorphized") was
+        // already false before S3l for a word that only `drop`s such a
+        // parameter; S3l's `call` arm just added a second, checker-visible
+        // path to the same pre-existing gap. Mirrors check-side
+        // `apply_subst`'s `Quotation` arm: substitute both rows, then ground
+        // to `Type::Quotation`/`Type::InlineQuotation` exactly as that
+        // function does (no interning needed here -- `quotation_type`/
+        // `inline_quotation_type` mint a fresh leaked effect per call, so a
+        // lookup-only style like the `Array`/`Ref` arms above does not apply).
+        PolyType::Quotation(ins, outs, is_inline, _, _) => {
+            let cins = ins
+                .iter()
+                .map(|p| subst_polytype(p, subst, arrays, owned_cells, refs, generics))
+                .collect();
+            let couts = outs
+                .iter()
+                .map(|p| subst_polytype(p, subst, arrays, owned_cells, refs, generics))
+                .collect();
+            if *is_inline {
+                crate::ast::inline_quotation_type(cins, couts)
+            } else {
+                crate::ast::quotation_type(cins, couts)
+            }
         }
         // P7 slice 3b: a body-only marker, never in a declared signature.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
@@ -1577,30 +1597,31 @@ mod tests {
     }
 
     #[test]
-    fn quotation_type_never_reaches_mangling() {
-        // R7's `subst_polytype` `unreachable!` arm is only sound because R20's
-        // lowering filter keeps a quotation type away from mangling. This
-        // asserts the arm *is* the guard: it panics on a quotation, so
-        // replacing the `unreachable!` with a real mapping (a silent accept)
-        // flips this test from panic to value and fails it. (Slice 7a lifts
-        // the sibling `ir_type_of` guard, which now maps a quotation to a
-        // runtime value; see `ir_type_of_quotation_is_two_slot_aggregate`.)
+    fn quotation_type_grounds_a_still_abstract_row() {
+        // P7.S3l (phase 1, R4): a plain word may now declare an abstract
+        // quotation parameter and call it, so its declared row does reach
+        // monomorphized lowering once the word's own type variable is bound
+        // (the previous `unreachable!` here pinned an already-false "never
+        // monomorphized" premise -- see the arm's own comment). This asserts
+        // the substituted rows ground to the same `Type::Quotation` the
+        // check side's `apply_subst` would produce for the same `θ`.
         use crate::ast::PolyType;
         let poly_quot = PolyType::Quotation(
-            vec![PolyType::Concrete(Type::I64)],
-            Vec::new(),
+            vec![PolyType::Var(0)],
+            vec![PolyType::Var(0)],
             false,
             None,
             None,
         );
-        let subst = Subst::default();
+        let subst = Subst {
+            ty: vec![(0, Type::I64)],
+            len: Vec::new(),
+        };
         let generics = GenericTypes::default();
-        assert!(
-            std::panic::catch_unwind(|| {
-                subst_polytype(&poly_quot, &subst, &[], &[], &[], &generics)
-            })
-            .is_err(),
-            "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
+        let grounded = subst_polytype(&poly_quot, &subst, &[], &[], &[], &generics);
+        assert_eq!(
+            grounded,
+            crate::ast::quotation_type(vec![Type::I64], vec![Type::I64])
         );
     }
 
