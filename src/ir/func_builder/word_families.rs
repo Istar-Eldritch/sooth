@@ -317,7 +317,7 @@ impl<'a> FuncBuilder<'a> {
             IrType::Struct(id) => self.structs.layouts[id.index()].size,
             IrType::Enum(id) => self.enums.layouts[id.index()].size,
             IrType::Array(id) => self.arrays.layouts[id.index()].size,
-            IrType::Quotation(_) => quotation_layout(WORD_WIDTH).size,
+            IrType::Quotation(_) | IrType::OwningQuotation(_) => quotation_layout(WORD_WIDTH).size,
             // P7 slice 3c (R2.2): the whole two-word view, so a loop-carried
             // slice blits both slots. `scalar_size_align`'s wildcard below
             // refuses a slice rather than answering one word.
@@ -551,9 +551,9 @@ impl<'a> FuncBuilder<'a> {
             IrType::Struct(id) => self.alloc_struct(id),
             IrType::Enum(id) => self.alloc_enum(id),
             IrType::Array(id) => self.alloc_array(id),
-            IrType::Quotation(sig) => {
+            IrType::Quotation(_) | IrType::OwningQuotation(_) => {
                 let layout = quotation_layout(WORD_WIDTH);
-                let v = self.fresh_value(IrType::Quotation(sig));
+                let v = self.fresh_value(ty);
                 self.push_alloc(Instr::Alloc(v, layout.size, layout.align));
                 v
             }
@@ -753,7 +753,7 @@ impl<'a> FuncBuilder<'a> {
     /// of `load_owned_payload`. A scalar payload is a width-exact
     /// `FieldStore`; an aggregate is a `Blit` from its frame slot; a
     /// zero-sized payload writes nothing.
-    fn store_owned_payload(&mut self, cell_ptr: Value, val: Value, payload_ty: IrType) {
+    pub(super) fn store_owned_payload(&mut self, cell_ptr: Value, val: Value, payload_ty: IrType) {
         match payload_ty {
             // Slice 9 (R1): a zero-payload-enum payload is a bare scalar.
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {

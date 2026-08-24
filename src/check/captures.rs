@@ -248,9 +248,11 @@ pub(super) fn classify_capture(
 /// aggregate/borrow captures whose referents must outlive the closure's calls,
 /// each tagged frame-rooted (for the R22 escape guard). A scalar-only closure
 /// returns `None` -- a snapshot has no referent that can go dead.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn check_capture_admission(
     id: QuotId,
     escaping: bool,
+    owning: bool,
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
@@ -296,11 +298,22 @@ pub(super) fn check_capture_admission(
         match classify_capture(b, prov, scope, enums) {
             CaptureClass::Scalar => {}
             CaptureClass::FrameRooted => {
+                // `arrays` is threaded in for exactly this: `is_linear`
+                // resolves an array element through the registry, and `Ctx`
+                // exposes only `structs`/`enums`.
+                let linear = is_linear(b.ty, ctx.structs(), enums, arrays);
+                // P7.S3h: at an `owning` boundary a *linear* capture is moved
+                // into the closure's heap env, which outlives the frame, so
+                // the frame's storage dying at return is no longer the
+                // question -- and the frame no longer owns the value either,
+                // so it is not a surviving-set member. The narrowing to linear
+                // is deliberate: a `Copy` aggregate is not moved, so admitting
+                // one here would leave the frame and the env each holding a
+                // copy with no rule saying which is authoritative.
+                if owning && linear {
+                    continue;
+                }
                 if escaping {
-                    // `arrays` is threaded in for exactly this: `is_linear`
-                    // resolves an array element through the registry, and `Ctx`
-                    // exposes only `structs`/`enums`.
-                    let linear = is_linear(b.ty, ctx.structs(), enums, arrays);
                     return Err(past_owning_frame_error(ctx, span, name, linear));
                 }
                 members.push(SurvivingCapture {
@@ -320,7 +333,10 @@ pub(super) fn check_capture_admission(
     // the bundle marker rides onto the interned set regardless, since the
     // in-frame admission is only sound until this closure escapes through a
     // later carrier, which the R22 guard checks at the word-output boundary.
-    let bundle = names.len() >= 2;
+    // P7.S3h: an owning closure's env is a heap block, never the stack bundle
+    // this marker names, so both the 2+-capture deferral and the R22
+    // transitive-escape guard it feeds are inapplicable to it.
+    let bundle = names.len() >= 2 && !owning;
     if escaping && bundle {
         return Err(multi_capture_escaping_error(ctx, span));
     }
@@ -342,6 +358,7 @@ pub(super) fn check_capture_admission(
 pub(super) fn materialize_quotation_at_boundary(
     id: QuotId,
     eff: &'static QuotEffect,
+    owning: bool,
     escaping: bool,
     word: &str,
     span: Span,
@@ -357,8 +374,9 @@ pub(super) fn materialize_quotation_at_boundary(
 ) -> Result<Slot, String> {
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
-    let surviving = if body_captures_enclosing(&body, &enclosing) {
-        check_capture_admission(id, escaping, span, ctx, arrays, prov, scope)?
+    let captures = body_captures_enclosing(&body, &enclosing);
+    let surviving = if captures {
+        check_capture_admission(id, escaping, owning, span, ctx, arrays, prov, scope)?
     } else {
         None
     };
@@ -386,9 +404,20 @@ pub(super) fn materialize_quotation_at_boundary(
             is_arm: false,
             caller_tail: false,
             finalize: false,
+            owning,
         },
         None,
     )?;
+    // P7.S3h: an owning literal *must* consume every linear value it captures.
+    // The boundary lifted the R12 blanket ban on consuming an enclosing linear
+    // local (that consumption is the ownership transfer), which leaves the
+    // opposite hazard: a capture the body merely reads leaves the frame still
+    // owning the value while the env holds its bytes, so it would be disposed
+    // twice. Checked after the body walk, since the move state is what answers
+    // it.
+    if owning && captures {
+        check_owning_captures_consumed(id, span, ctx, arrays, prov, scope)?;
+    }
     // R7 (P7 slice 1 phase 6): a declared quotation effect returning a
     // reference used to reach `lower_reference_word`'s `referent_of` and
     // panic ("checked: every reference value records its referent") instead
@@ -403,10 +432,54 @@ pub(super) fn materialize_quotation_at_boundary(
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
     // R22 escape guard read once the identity is gone.
+    let ty = match owning {
+        true => Type::OwningQuotation(eff),
+        false => Type::Quotation(eff),
+    };
     Ok(Slot {
         surviving,
-        ..Slot::computed(Type::Quotation(eff))
+        ..Slot::computed(ty)
     })
+}
+
+/// P7.S3h: every linear local an owning literal captured must have been
+/// consumed by the literal's body, so ownership genuinely moved into the env
+/// rather than being duplicated. `MaybeMoved` (consumed on one arm of an `if`
+/// inside the body) fails for the same reason it fails everywhere else: it is
+/// neither a completed move nor a live value.
+pub(super) fn check_owning_captures_consumed(
+    id: QuotId,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    prov: &Provenance,
+    scope: &Scope,
+) -> Result<(), String> {
+    let mut names: Vec<&String> = prov
+        .quotation_captures(id)
+        .iter()
+        .filter(|n| scope.local(n).is_some())
+        .collect();
+    names.sort_unstable();
+    for name in names {
+        let b = scope.local(name).expect("filtered to a bound name");
+        if !is_linear(b.ty, ctx.structs(), ctx.enums(), arrays) {
+            continue;
+        }
+        if !matches!(scope.moves.states.get(name), Some(MoveState::Moved(_))) {
+            return Err(owning_capture_not_consumed_error(ctx, span, name, b.ty));
+        }
+    }
+    Ok(())
+}
+
+/// P7.S3h: an owning closure captured a linear local without consuming it.
+fn owning_capture_not_consumed_error(ctx: &Ctx, span: Span, name: &str, ty: Type) -> String {
+    format!(
+        "error: an `{OWNING_QUOTATION_KEYWORD}` closure captures `{name}`, a linear `{ty}`, without consuming it{} (line {}): an owning closure takes ownership of what it captures, so its body must dispose or return each linear capture exactly once",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R7: the quotation-effect twin of `check_reference_free_signature`
@@ -711,7 +784,7 @@ mod tests {
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
         let admit = |prov: &mut Provenance, escaping, scope: &Scope| {
-            check_capture_admission(QuotId(0), escaping, span, &ctx, &arrays, prov, scope)
+            check_capture_admission(QuotId(0), escaping, false, span, &ctx, &arrays, prov, scope)
         };
 
         // No real capture: an empty set, and a free global not in scope, both
@@ -838,8 +911,9 @@ mod tests {
                 .push(std::iter::once("v".to_string()).collect());
             let mut scope = Scope::default();
             scope.bound.push(capture_binding("v", ty, None));
-            let err = check_capture_admission(QuotId(0), true, span, &ctx, &[], &mut prov, &scope)
-                .expect_err("a frame-rooted capture escaping is past-owning-frame");
+            let err =
+                check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
+                    .expect_err("a frame-rooted capture escaping is past-owning-frame");
             assert!(
                 err.contains("does not survive the return"),
                 "both cases keep the base rejection: {err}"
@@ -884,8 +958,9 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let err = check_capture_admission(QuotId(0), true, span, &ctx, &[], &mut prov, &scope)
-            .expect_err("a captured `~` local must be rejected");
+        let err =
+            check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
+                .expect_err("a captured `~` local must be rejected");
         assert!(
             err.contains("`~`") && err.contains("captured"),
             "a captured `~` local should be its own located rejection, not the ordinary \
@@ -906,9 +981,17 @@ mod tests {
             &CombinatorIndex::new(),
             None,
         );
-        let word_err =
-            check_capture_admission(QuotId(0), true, span, &word_ctx, &[], &mut prov, &scope)
-                .expect_err("a captured `~` local must be rejected");
+        let word_err = check_capture_admission(
+            QuotId(0),
+            true,
+            false,
+            span,
+            &word_ctx,
+            &[],
+            &mut prov,
+            &scope,
+        )
+        .expect_err("a captured `~` local must be rejected");
         assert!(
             word_err.contains("`outer`"),
             "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"

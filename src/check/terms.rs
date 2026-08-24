@@ -408,12 +408,16 @@ fn check_term(
             if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
                 let vi = stack.len() - 1;
                 if let Some(QuotRef::Known(id)) = stack[vi].quot {
+                    // P7.S3h: no owning arm here. A `&!` referent is a field,
+                    // an element or a cell payload, and the containment rule
+                    // bans an owning quotation from every one of those, so an
+                    // `owning` referent cannot be declared in the first place.
                     if let Some((Type::Quotation(eff), _)) = ref_parts(stack[vi - 1].ty, refs) {
                         let qspan = prov.quotations[id.0].span;
                         let escaping = !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope);
                         stack[vi] = materialize_quotation_at_boundary(
-                            id, eff, escaping, name, qspan, ctx, env, arrays, cells, refs, slices,
-                            prov, scope, poly,
+                            id, eff, false, escaping, name, qspan, ctx, env, arrays, cells, refs,
+                            slices, prov, scope, poly,
                         )?;
                     }
                 }
@@ -787,11 +791,20 @@ fn check_term(
                 // ordinary user word declaring a quotation parameter alike; an
                 // `extern` never reaches here (its declared effect cannot name
                 // a `Type::Quotation`, rejected at declaration).
-                if let Type::Quotation(eff) = *want {
+                // P7.S3h: an `owning` parameter is the same boundary with the
+                // owning env. It is reachable only on this real-call route:
+                // a spliced or generic word declaring one is rejected at its
+                // declaration, because neither route materializes.
+                let declared = match *want {
+                    Type::Quotation(eff) => Some((eff, false)),
+                    Type::OwningQuotation(eff) => Some((eff, true)),
+                    _ => None,
+                };
+                if let Some((eff, owning)) = declared {
                     if let Some(QuotRef::Known(id)) = found.quot {
                         stack[base + i] = materialize_quotation_at_boundary(
-                            id, eff, false, name, span, ctx, env, arrays, cells, refs, slices,
-                            prov, scope, poly,
+                            id, eff, owning, false, name, span, ctx, env, arrays, cells, refs,
+                            slices, prov, scope, poly,
                         )?;
                         continue;
                     }
@@ -1291,20 +1304,6 @@ fn check_branch_join(
                 // declared output); an in-frame join whose expected
                 // type comes from a consumer is not escaping.
                 let escaping = tail;
-                let enclosing: HashSet<String> =
-                    scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
-                let mut arm_sets: Vec<SurvivingCaptureSetId> = Vec::new();
-                for id in [a, b] {
-                    let body = prov.quotations[id.0].body.clone();
-                    if body_captures_enclosing(&body, &enclosing) {
-                        let span = prov.quotations[id.0].span;
-                        if let Some(set) =
-                            check_capture_admission(id, escaping, span, ctx, arrays, prov, scope)?
-                        {
-                            arm_sets.push(set);
-                        }
-                    }
-                }
                 // The expected quotation type threaded from the
                 // enclosing declared context. At a word-body tail the
                 // merged slot maps to the declared output at index `i`.
@@ -1326,14 +1325,52 @@ fn check_branch_join(
                         .map(|(referent, _)| referent)
                         .filter(|t| matches!(t, Type::Quotation(_)))
                 };
+                // P7.S3h: the declared type decides the flavour here exactly
+                // as it does at every other materialization boundary, and it
+                // has to be known *before* the capture admission below: an
+                // owning boundary admits a linear capture the plain one
+                // rejects.
+                let expected = match expected {
+                    Some(Type::OwningQuotation(eff)) => Some((eff, true)),
+                    Some(Type::Quotation(eff)) => Some((eff, false)),
+                    _ => None,
+                };
+                // R11 ordering pin (continued): the admission still runs
+                // before the id/expected-type resolution's error arms below.
+                let enclosing: HashSet<String> =
+                    scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
+                let owning = matches!(expected, Some((_, true)));
+                let mut arm_sets: Vec<SurvivingCaptureSetId> = Vec::new();
+                for id in [a, b] {
+                    let body = prov.quotations[id.0].body.clone();
+                    if body_captures_enclosing(&body, &enclosing) {
+                        let span = prov.quotations[id.0].span;
+                        if let Some(set) = check_capture_admission(
+                            id, escaping, owning, span, ctx, arrays, prov, scope,
+                        )? {
+                            arm_sets.push(set);
+                        }
+                    }
+                }
                 match expected {
-                    Some(Type::Quotation(eff)) => {
+                    Some((eff, owning)) => {
                         // `literal_effect_mismatch_error` renders what it is
                         // handed (`render_word`), so this hands it the mangled
                         // name rather than a pre-demangled one.
                         let word = ctx.mangled_name().unwrap_or("the branch");
                         let a_span = prov.quotations[a.0].span;
                         let b_span = prov.quotations[b.0].span;
+                        // P7.S3h: the two literals are *alternatives*, and an
+                        // owning one consumes what it captures -- so walking
+                        // them back to back on one move state has the second
+                        // arm report use-after-move on a local the first arm
+                        // consumed on the path the second never takes. Each
+                        // arm starts from the same state and the two are
+                        // joined, exactly as the `if`'s own arm walk above
+                        // already does. Only the owning boundary needs this:
+                        // at a plain one R12 rejects any consumption outright,
+                        // so neither walk moves anything.
+                        let moves_before = scope.moves.states.clone();
                         // Slice 10a (R9): the `if`-join's expected
                         // effect is a `QuotEffect` (no row), so both
                         // arms ground to the empty region.
@@ -1359,9 +1396,19 @@ fn check_branch_join(
                                 is_arm: false,
                                 caller_tail: false,
                                 finalize: false,
+                                owning,
                             },
                             None,
                         )?;
+                        let a_moves = match owning {
+                            true => {
+                                check_owning_captures_consumed(
+                                    a, a_span, ctx, arrays, prov, scope,
+                                )?;
+                                Some(std::mem::replace(&mut scope.moves.states, moves_before))
+                            }
+                            false => None,
+                        };
                         check_literal_against_declared_effect(
                             b,
                             eff,
@@ -1384,9 +1431,15 @@ fn check_branch_join(
                                 is_arm: false,
                                 caller_tail: false,
                                 finalize: false,
+                                owning,
                             },
                             None,
                         )?;
+                        if let Some(states) = a_moves {
+                            check_owning_captures_consumed(b, b_span, ctx, arrays, prov, scope)?;
+                            scope.moves =
+                                Moves::join(Moves { states }, std::mem::take(&mut scope.moves));
+                        }
                         // R23: the merged erased slot's surviving set is
                         // the union of both arms' -- a fresh interned
                         // set, never a mutation of either arm's (keeps
@@ -1395,8 +1448,12 @@ fn check_branch_join(
                             .into_iter()
                             .fold(None, |acc, s| prov.union_surviving(acc, Some(s)));
                         // Erased: a runtime `(code, env)` value with a
-                        // real `Type::Quotation`, no `Known` marker.
-                        (None, Some(Type::Quotation(eff)), merged_set)
+                        // real quotation type, no `Known` marker.
+                        let ty = match owning {
+                            true => Type::OwningQuotation(eff),
+                            false => Type::Quotation(eff),
+                        };
+                        (None, Some(ty), merged_set)
                     }
                     _ => return Err(different_quotations_at_join_error(ctx, span)),
                 }

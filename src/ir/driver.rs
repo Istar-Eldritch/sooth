@@ -371,7 +371,10 @@ pub(crate) fn collect_quot_sigs(
 ) -> Vec<QuotSigLayout> {
     let mut out: Vec<QuotSigLayout> = Vec::new();
     let add = |ty: IrType, out: &mut Vec<QuotSigLayout>| {
-        if let IrType::Quotation(sig) = ty {
+        // P7.S3h: an owning quotation is spelled with the same `:Q{n}` symbol,
+        // so it must seed the same table. Omitting it emits a param or return
+        // naming a type the module never declares.
+        if let IrType::Quotation(sig) | IrType::OwningQuotation(sig) = ty {
             if !out.iter().any(|q| q.effect == sig.0) {
                 out.push(QuotSigLayout { effect: sig.0 });
             }
@@ -561,7 +564,7 @@ pub fn lower_line(
             // A bare quotation on a REPL residual is likewise rejected (7a
             // keeps that rejection), and a `Code` handle is never a slot type.
             IrType::Ptr => unreachable!("a reference can never be a carried slot"),
-            IrType::Code | IrType::Quotation(_) => {
+            IrType::Code | IrType::Quotation(_) | IrType::OwningQuotation(_) => {
                 unreachable!("a bare quotation/code is never a REPL carried slot")
             }
             // P7 slice 3c (R2.2): a slice takes the `Ptr` arm's route, not the

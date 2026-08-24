@@ -245,12 +245,21 @@ fn check_terms_word(
     // escaping boundary) -- before `check_outputs`, whose bare-quotation guard
     // would otherwise reject it outright.
     for (i, want) in declared.iter().enumerate() {
-        if let Type::Quotation(eff) = *want {
+        // P7.S3h: an `owning` output is the same boundary with the owning env,
+        // and it is the way a word hands a caller a closure that owns what it
+        // captured. The flavour comes from the declaration, never from the
+        // literal.
+        let boundary = match *want {
+            Type::Quotation(eff) => Some((eff, false)),
+            Type::OwningQuotation(eff) => Some((eff, true)),
+            _ => None,
+        };
+        if let Some((eff, owning)) = boundary {
             if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
                 let span = prov.quotations[id.0].span;
                 final_stack[i] = materialize_quotation_at_boundary(
-                    id, eff, true, &word.name, span, &ctx, env, arrays, cells, refs, slices,
-                    &mut prov, &mut scope, poly,
+                    id, eff, owning, true, &word.name, span, &ctx, env, arrays, cells, refs,
+                    slices, &mut prov, &mut scope, poly,
                 )?;
             }
         }

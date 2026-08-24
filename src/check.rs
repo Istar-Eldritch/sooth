@@ -2043,6 +2043,14 @@ struct LiteralBoundary {
     /// surviving state itself (`Moves::join`, generalized to N arms) rather
     /// than losing it to a restore that has nothing later to answer to.
     finalize: bool,
+    /// P7.S3h: the boundary declares `owning [ ... ]`. The literal takes
+    /// ownership of what it captures and disposes it by running, so the R12
+    /// ban below on consuming an enclosing linear local is lifted -- that
+    /// consumption *is* the ownership transfer, and it must survive into the
+    /// caller's move state so the frame no longer counts the value as its own.
+    /// The mirror obligation (every linear capture must actually be consumed)
+    /// is checked by the boundary itself, once the body walk has answered it.
+    owning: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2080,6 +2088,7 @@ fn check_literal_against_declared_effect(
         is_arm,
         caller_tail,
         finalize,
+        owning,
     } = boundary;
     let body = prov.quotations[id.0].body.clone();
     // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
@@ -2184,7 +2193,7 @@ fn check_literal_against_declared_effect(
         // re-checks whichever one runs. Without the restore the second arm
         // sees the first arm's consumption and reports use-after-move.
         scope.moves.states = moves_before.clone();
-    } else if !(is_inline && is_arm) {
+    } else if !(owning || is_inline && is_arm) {
         if let Some(local) =
             moves_before
                 .iter()
@@ -2564,6 +2573,7 @@ fn check_eliminator_call(
                 is_arm: true,
                 caller_tail: tail,
                 finalize: true,
+                owning: false,
             },
             Some(&received),
         )?;
@@ -2926,6 +2936,18 @@ fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str
     )
 }
 
+/// P7.S3h: `drop` on an owning closure. Names `call` as the remedy, because
+/// `call` is not a workaround here but the designed consuming use: running the
+/// body is the only thing that can dispose what the closure captured.
+fn cannot_drop_owning_quotation_error(ctx: &Ctx, span: Span, eff: &QuotEffect) -> String {
+    format!(
+        "error: cannot `drop` a value of type `{}`{} (line {}): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body",
+        eff.name_static,
+        in_word(ctx),
+        span.line,
+    )
+}
+
 /// R12: a quotation literal that borrows an enclosing place and leaves the
 /// reference on its row (D3 forbids capturing an enclosing borrow).
 fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
@@ -3268,6 +3290,16 @@ fn check_shuffle(
         }
         "drop" => {
             let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
+            // P7.S3h: `drop` cannot dispose an owning closure. Its captures
+            // are disposed by *running* the body, which is code only the
+            // closure itself has, and `emit_drop` has no arm that could run
+            // one -- so a silent `drop` here would discharge the obligation
+            // while leaking every capture and the env block with them. `call`
+            // is the consuming use instead, and needs no code of its own: it
+            // already pops its receiver.
+            if let Type::OwningQuotation(eff) = top.ty {
+                return Err(cannot_drop_owning_quotation_error(ctx, span, eff));
+            }
             // Review fix (P7 slice 1): dropping a place a live projection
             // still reaches would leave that reference aimed at storage
             // that no longer exists; the anonymous analogue of

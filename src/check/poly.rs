@@ -1245,7 +1245,15 @@ pub(super) fn poly_call_term(
             return Ok(stack);
         }
         "drop" => {
-            stack.pop().ok_or_else(|| need(1, 0))?;
+            let top = stack.pop().ok_or_else(|| need(1, 0))?;
+            // P7.S3h: the generic-body twin of the monomorphic `drop` gate.
+            // A generic word cannot *declare* an owning parameter, but it can
+            // call a word that returns one, so the value reaches this arm
+            // through the body rather than the signature -- and the reason
+            // `drop` cannot dispose it is identical.
+            if let PolyType::Concrete(Type::OwningQuotation(eff)) = top.pt {
+                return Err(cannot_drop_owning_quotation_error(ctx, span, eff));
+            }
             return Ok(stack);
         }
         "len" => {
@@ -4535,8 +4543,8 @@ pub(super) fn check_poly_call(
             match &sig.inputs[i] {
                 PolyType::Concrete(Type::Quotation(eff)) => {
                     stack[base + i] = materialize_quotation_at_boundary(
-                        id, eff, false, name, span, ctx, env, arrays, cells, refs, slices, prov,
-                        scope, poly,
+                        id, eff, false, false, name, span, ctx, env, arrays, cells, refs, slices,
+                        prov, scope, poly,
                     )?;
                     quot_inputs.push((i, eff));
                 }

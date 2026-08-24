@@ -182,6 +182,17 @@ pub enum IrType {
     /// Spelled `:Q{id}` in ABI positions and `l` in a register, like
     /// `Struct`/`Enum`/`Array`.
     Quotation(QuotSigId),
+    /// P7.S3h: an *owning* quotation value. Byte-for-byte the same two-slot
+    /// `{ code, env }` aggregate `IrType::Quotation` is, and it shares the
+    /// `:Q{n}` signature symbol, so nothing about its representation differs.
+    /// The variant exists because lowering has exactly one decision to make
+    /// off it and no other channel to make it from: a materialization
+    /// boundary reads the *declared* `IrType` to decide what to build, and an
+    /// owning closure's env is a heap block its body copies out and frees,
+    /// where a plain closure's is an inline word or a frame bundle. Erasing
+    /// the two together would silently build a frame env for a closure that
+    /// outlives the frame.
+    OwningQuotation(QuotSigId),
     /// P7 slice 3c (R2.1): a borrowed view `Slice[T]`, keyed by the `SliceId`
     /// of its interned `(element, mutable)` shape so `IrType` stays `Copy`,
     /// like `Struct`/`Enum`/`Array`. At runtime a genuine **two-word
@@ -336,11 +347,12 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // position lowering can read, which is what keeps this arm unreached
         // -- a declared `owning` parameter reaches here through signature
         // lowering without ever crossing a materialization boundary.
-        Type::OwningQuotation(_) => {
-            unreachable!(
-                "an `owning` quotation has no representation this slice (every declaration position is rejected check-side)"
-            )
-        }
+        // P7.S3h (phase 3): an owning quotation is represented exactly as a
+        // plain one -- the same two-word `(code, env)` aggregate under the
+        // same `:Q{n}` symbol. The distinct `IrType` carries only the env
+        // *storage* decision into lowering (a heap block the body frees), not
+        // a distinct shape.
+        Type::OwningQuotation(eff) => IrType::OwningQuotation(QuotSigId(eff)),
         // Phase 6 slice 3 (R6): a variant is represented identically to its
         // enum at the backend -- only the frontend distinguishes them, so a
         // `Type::Variant` erases to the same `IrType::Enum(id)` its parent
@@ -523,7 +535,7 @@ pub fn quot_input_slots(inputs: impl IntoIterator<Item = Type>) -> Vec<(usize, I
     inputs
         .into_iter()
         .enumerate()
-        .filter(|(_, ty)| matches!(ty, Type::Quotation(_)))
+        .filter(|(_, ty)| matches!(ty, Type::Quotation(_) | Type::OwningQuotation(_)))
         .map(|(i, ty)| (i, ir_type_of(ty)))
         .collect()
 }

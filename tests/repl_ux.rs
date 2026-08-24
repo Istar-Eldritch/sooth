@@ -267,18 +267,19 @@ fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
     );
 }
 
-/// P7.S3h phase 2: the `owning` rejections the REPL must run itself, with the
-/// `inline` line first because it is the load-bearing one. An `owning`
-/// parameter makes a word a combinator, so the session takes the *retention*
-/// route: it keeps the body as raw terms and re-splices it, and the splice
-/// route compares a caller's literal only on the inline-versus-ordinary axis,
-/// not on plain-versus-owning. Measured with the guard stubbed out, the session
-/// prints `defined f` and then happily runs `[ 1 . ] f`, admitting a plain
-/// literal into an `owning` slot -- the type inequality this marker rests on,
-/// gone. The ordinary-parameter line below is declined by the pre-existing
-/// quotation-parameter gate either way, so the guard only sharpens its message.
-/// The `owning` field is the containment rule at the REPL. The session has to
-/// survive all three, which is what the trailing arithmetic line pins.
+/// P7.S3h: the `owning` rejections the REPL must run itself, with the `inline`
+/// line first because it is the load-bearing one. An `owning` parameter on a
+/// spliced word makes the session take the *retention* route: it keeps the body
+/// as raw terms and re-splices it, and the splice route compares a caller's
+/// literal only on the inline-versus-ordinary axis, not on plain-versus-owning.
+/// Measured with the guard stubbed out, the session prints `defined f` and then
+/// happily runs `[ 1 . ] f`, admitting a plain literal into an `owning` slot --
+/// the type inequality this marker rests on, gone. That is why the rejection is
+/// on the *declaration* rather than on the argument. The ordinary-parameter line
+/// below is declined by the pre-existing quotation-parameter gate (the REPL
+/// cannot lower a real call taking a quotation at all), and the `owning` field
+/// is the containment rule. The session has to survive all three, which is what
+/// the trailing arithmetic line pins.
 #[test]
 fn repl_owning_quotation_declarations_are_errors_not_crashes() {
     let out = run_session(&[
@@ -288,10 +289,13 @@ fn repl_owning_quotation_declarations_are_errors_not_crashes() {
         "type: Box q owning [ -- ] ;",
         "1 2 add .",
     ]);
-    assert_eq!(
-        out.matches("no runtime representation this slice").count(),
-        2,
-        "expected the not-built-yet rejection for both `f` and `g`, got: {out}"
+    assert!(
+        out.contains("`f` is spliced (`inline`) and declares `owning [ -- ]`"),
+        "expected the splice-boundary rejection for `f`, got: {out}"
+    );
+    assert!(
+        out.contains("`g` takes a `[ ... ]` quotation parameter"),
+        "expected the REPL's own real-call quotation-parameter gate for `g`, got: {out}"
     );
     assert!(
         out.contains("cannot appear as the field `q` of struct `Box`"),

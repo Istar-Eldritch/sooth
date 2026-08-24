@@ -218,123 +218,339 @@ fn owning_in_a_term_position_is_an_unknown_word() {
     );
 }
 
-/// The not-built-yet guard, input side. A declared `owning` parameter reaches
-/// `ir_type_of` through *signature* lowering without ever crossing a
-/// materialization boundary, so a capture-side guard alone would ICE here.
+// ---------------------------------------------------------------------------
+// Phase 3: representation, the call-once lifecycle, and env disposal.
+//
+// An owning closure's env is a heap block holding every capture by value. The
+// compiled body copies each capture into its own frame, frees the block, and
+// then consumes the captures exactly as a word body consumes a linear
+// parameter. `call` is the consuming use of the closure value itself (it pops
+// its receiver and never re-pushes it), so the inherited linear machinery is
+// what forces the body to run exactly once.
+// ---------------------------------------------------------------------------
+
+/// The slice's headline program, and the one the exactly-once claim rests on.
+/// `mk` moves a linear `Spy` into a closure it returns; the closure outlives
+/// `mk`'s frame; calling it disposes the `Spy`. **One** observation, not zero
+/// (the block freed without running the destructor) and not two (the frame and
+/// the env each disposing their own copy).
 #[test]
-fn a_declared_owning_parameter_hits_the_guard_with_a_diagnostic() {
+fn an_owning_closure_disposes_its_captured_linear_value_exactly_once() {
     let prog = Scratch::write(
-        "param",
-        ": f ( owning [ -- ] -- ) call ;\n: main ( -- ) ;\n",
+        "dispose-once",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk call ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "drop 7\n");
+}
+
+/// The capture is genuinely *moved*: `mk`'s frame no longer owns the `Spy`, so
+/// `Scope::leave`'s unconsumed-local check is satisfied without the frame
+/// disposing anything. Two closures over two distinct `Spy`s, called in the
+/// opposite order to the order they were built, pin that each env holds its own
+/// value rather than aliasing one frame slot.
+#[test]
+fn two_owning_closures_each_own_their_own_capture() {
+    let prog = Scratch::write(
+        "two-closures",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 1 Spy mk 2 Spy mk | a b | b call a call ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "drop 2\ndrop 1\n");
+}
+
+/// Two linear captures, which the plain env cannot hold at an escaping boundary
+/// at all (`multi_capture_escaping_error` defers a 2+-capture closure whose env
+/// is the one inline word). A heap block has room for both, so the deferral is
+/// lifted for the owning path only, and both are disposed exactly once.
+#[test]
+fn an_owning_closure_over_two_linear_captures_disposes_both_exactly_once() {
+    let prog = Scratch::write(
+        "two-captures",
+        &format!(
+            "{SPY_DEF}: mk ( Spy Spy -- owning [ -- ] ) | s t | [ s drop t drop ] ;\n\
+             : main ( -- ) 7 Spy 9 Spy mk call ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "drop 7\ndrop 9\n");
+}
+
+/// `drop` cannot discharge the obligation: disposing the captures means running
+/// the body, which is code only the closure has, and `emit_drop`'s match has no
+/// arm that could run one. Without this rejection the `drop` is silently a
+/// no-op -- the obligation discharged, the `Spy` and the env block both leaked.
+#[test]
+fn dropping_an_owning_closure_is_a_located_rejection() {
+    let prog = Scratch::write(
+        "drop-owning",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk drop ;\n"
+        ),
     );
     assert_eq!(
         build_error(prog.path()),
-        "error: `f` declares `owning [ -- ]`, which has no runtime representation this slice: an owning closure's env storage and disposal are not built yet"
+        "error: cannot `drop` a value of type `owning [ -- ]` in `main` (line 4): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
     );
 }
 
-/// The guard's output side, which is where a plain literal at an `owning`
-/// boundary lands too: the declaration is rejected before the exit row is ever
-/// judged, so `[ 1 drop ]` never gets blamed for the mismatch.
+/// The call-once lifecycle needs no checker code of its own: the marker makes
+/// the value linear, and the pre-existing consumed-on-every-path check does the
+/// rest. Calling on one arm only is that error verbatim; calling on both arms
+/// builds, runs, and disposes once whichever arm ran.
 #[test]
-fn a_plain_literal_at_an_owning_output_hits_the_guard() {
+fn an_owning_closure_must_be_called_on_every_path() {
+    let one_arm = Scratch::write(
+        "one-arm",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk | q | True ~[ q call ] ~[ 0 . ] if ;\n"
+        ),
+    );
+    let err = build_error(one_arm.path());
+    assert!(
+        err.contains("linear value `q` is not consumed on every path"),
+        "unexpected message: {err}"
+    );
+
+    let both_arms = Scratch::write(
+        "both-arms",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk | q | True ~[ q call ] ~[ q call ] if ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(both_arms.path()), "drop 7\n");
+}
+
+/// The mirror obligation of lifting the R12 ban on consuming an enclosing
+/// linear local: the literal *must* consume every linear value it captures. A
+/// body that only reads one through a borrow leaves the frame still owning the
+/// value while the env holds its bytes, which is a double disposal -- and the
+/// R12 lift is exactly what would otherwise let it through silently.
+#[test]
+fn an_owning_closure_that_does_not_consume_a_linear_capture_is_rejected() {
     let prog = Scratch::write(
-        "output",
-        ": mk ( -- owning [ -- ] ) [ 1 drop ] ;\n: main ( -- ) mk call ;\n",
+        "unconsumed-capture",
+        &format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ &s &tag @ . ] ;\n\
+             : main ( -- ) 7 Spy mk call ;\n"
+        ),
+    );
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("an `owning` closure captures `s`, a linear `Spy`, without consuming it")
+            && err.contains("in `mk` (line 3)"),
+        "unexpected message: {err}"
+    );
+}
+
+/// The admission lift is narrowed to *linear* captures on purpose. A `Copy`
+/// aggregate is not moved by the capture, so admitting it would leave the frame
+/// and the env each holding a copy with no rule saying which is authoritative
+/// -- and its problem (a pointer into dead frame storage) is not one a disposal
+/// obligation addresses. It keeps the plain past-owning-frame rejection, and
+/// without the remedy line, at an `owning` boundary too.
+#[test]
+fn a_copy_aggregate_capture_at_an_owning_boundary_still_rejects() {
+    let prog = Scratch::write(
+        "copy-aggregate",
+        "type: P x i64 y i64 ;\n\
+         : mk ( -- owning [ -- i64 ] ) 1 2 P | p | [ p .x ] ;\n\
+         : main ( -- ) mk call . ;\n",
     );
     assert_eq!(
         build_error(prog.path()),
-        "error: `mk` declares `owning [ -- ]`, which has no runtime representation this slice: an owning closure's env storage and disposal are not built yet"
+        "error: an escaping closure captures `p`, a local of this frame, whose storage does not survive the return (line 2)"
     );
 }
 
-/// The nearest reachable form of the `if`-join case: two arms joining at a
-/// declared `owning` output. A genuinely mixed owning/plain join needs an
-/// owning-typed value, which phase 2 cannot build.
+/// A declared `owning` *parameter*, which reaches `ir_type_of` through
+/// signature lowering rather than through any materialization boundary. The
+/// caller's literal is materialized at the argument slot with the owning env,
+/// and the callee's `call` disposes the capture.
 #[test]
-fn plain_arms_joining_at_an_owning_output_hit_the_guard() {
+fn a_declared_owning_parameter_takes_a_literal_and_disposes_its_capture() {
+    let prog = Scratch::write(
+        "owning-param",
+        &format!(
+            "{SPY_DEF}: use ( owning [ -- ] -- ) call ;\n\
+             : main ( -- ) 7 Spy | s | [ s drop ] use ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(prog.path()), "drop 7\n");
+}
+
+/// A *spliced* word may not declare one. The splice route never materializes:
+/// it inlines the caller's literal in place and compares only the
+/// inline-versus-plain axis, so with this rejection removed a plain `[ 1 . ]`
+/// literal satisfies an `owning` slot and builds and runs -- the type
+/// inequality the whole containment story rests on, silently gone.
+#[test]
+fn a_spliced_word_may_not_declare_an_owning_parameter() {
+    let prog = Scratch::write(
+        "spliced-owning",
+        ": f inline ( owning [ -- ] -- ) | q | q call ;\n: main ( -- ) [ 1 . ] f ;\n",
+    );
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("`f` is spliced (`inline`) and declares `owning [ -- ]`"),
+        "unexpected message: {err}"
+    );
+}
+
+/// A non-capturing owning literal: nothing to own, no allocation, and still
+/// linear, so it must be called. The shape phase 2 could only reject, and the
+/// one a capture-side guard alone would never have seen (`body_captures_enclosing`
+/// is false for it).
+#[test]
+fn a_non_capturing_owning_literal_builds_and_runs() {
+    let prog = Scratch::write(
+        "non-capturing",
+        ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n: main ( -- ) mk call ;\n",
+    );
+    assert_eq!(build_and_run(prog.path()), "1\n");
+}
+
+/// The `if`-join at an `owning` output: two *different* literals, each
+/// materialized in its own arm and phi-joined, with the flavour read off the
+/// declared output rather than off either literal.
+#[test]
+fn two_differing_arms_joining_at_an_owning_output_each_materialize() {
     let prog = Scratch::write(
         "join-owning",
-        ": mk ( Bool -- owning [ -- ] ) ~[ [ 1 drop ] ] ~[ [ 2 drop ] ] if ;\n\
-         : main ( -- ) True mk call ;\n",
-    );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: `mk` declares `owning [ -- ]`, which has no runtime representation this slice: an owning closure's env storage and disposal are not built yet"
-    );
-}
-
-/// The marker inherits every exactly-once obligation from `is_copy` answering
-/// false, with no code of its own: move tracking, the `dup` gate, the
-/// forgotten-value error and the consumed-on-every-path check all fire on an
-/// `owning` binding. These three are the evidence for that claim -- each is a
-/// diagnostic phase 2 wrote nothing to produce, and each reports *before* the
-/// not-built-yet guard, which is why the guard runs after `check_types`.
-#[test]
-fn an_owning_binding_inherits_the_linear_obligations() {
-    for (tag, body, want) in [
-        (
-            "dup",
-            ": f ( owning [ -- ] -- ) | q | q dup call call ;\n",
-            "cannot `dup` a value of type `owning [ -- ]`",
-        ),
-        (
-            "forget",
-            ": f ( owning [ -- ] -- ) | q | ;\n",
-            "linear value `q` is never consumed",
-        ),
-        (
-            "one-arm",
-            ": f ( owning [ -- ] Bool -- ) | q c | c ~[ q call ] ~[ 1 . ] if ;\n",
-            "linear value `q` is not consumed on every path",
-        ),
-    ] {
-        let prog = Scratch::write(tag, &format!("{body}: main ( -- ) ;\n"));
-        let err = build_error(prog.path());
-        assert!(err.contains(want), "unexpected message for {tag}: {err}");
-    }
-}
-
-/// A linear capture at a *plain* boundary names `owning` as the remedy, since
-/// an owning boundary is exactly what would let the closure take ownership of
-/// the capture and dispose it by running. Conditioned on linearity: the `Copy`
-/// struct twin
-/// (`escaping_closure_over_a_copy_struct_local_still_rejects`, above) keeps the
-/// bare message, because its problem is a pointer into dead frame storage that
-/// no disposal obligation addresses.
-#[test]
-fn a_linear_capture_at_a_plain_boundary_names_owning() {
-    let prog = Scratch::write(
-        "linear-capture",
         &format!(
-            "{SPY_DEF}: mk ( Spy -- [ -- ] ) | s | [ s drop ] ;\n: main ( -- ) 7 Spy mk call ;\n"
+            "{SPY_DEF}: mk ( Spy Bool -- owning [ -- ] )\n  \
+               | s c |\n  \
+               c ~[ [ s drop ] ] ~[ [ s drop 9 . ] ] if\n\
+             ;\n\
+             : main ( -- ) 7 Spy True mk call 8 Spy False mk call ;\n"
         ),
     );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: an escaping closure captures `s`, a local of this frame, whose storage does not survive the return (line 3)\n  declare the boundary `owning [ ... ]` to hand the closure ownership of `s`, so calling it disposes `s`"
+    assert_eq!(build_and_run(prog.path()), "drop 7\ndrop 8\n9\n");
+}
+
+// ---------------------------------------------------------------------------
+// Emitted-IL assertions.
+// ---------------------------------------------------------------------------
+
+/// Emit the QBE IL for a self-contained source, through the same path
+/// `tests/qbe_baseline.rs` uses.
+fn emit_il(src: &str) -> String {
+    use sooth::{backend, check, ir, lexer, test_support};
+    let tokens = lexer::lex(src).expect("source should lex");
+    let mut module = test_support::parse_with_core(&tokens).expect("source should parse");
+    check::check(&mut module).expect("source should check");
+    let ir = ir::lower(&module).expect("source should lower");
+    backend::qbe::emit(&ir).expect("QBE IL emission should succeed")
+}
+
+/// One function block of the emitted IL, by its symbol. Matched on ` $symbol(`
+/// rather than on `function $symbol(`, since a return type sits between the two
+/// (`export function :Q0 $mk(...)`).
+fn function_block<'a>(il: &'a str, symbol: &str) -> &'a str {
+    let head = format!(" ${symbol}(");
+    let start = il
+        .find(&head)
+        .unwrap_or_else(|| panic!("expected a `{symbol}` function in:\n{il}"));
+    let end = il[start..]
+        .find("\n}\n")
+        .map(|rel| start + rel)
+        .expect("the function block closes");
+    &il[start..end]
+}
+
+/// The env free, asserted the only way it is checkable: a leaked heap block has
+/// no observable effect in a normal run and the harness has no allocator
+/// accounting, so the assertion is on the *emitted body*. Stubbing the free out
+/// fails here.
+///
+/// The matching allocation is asserted at the boundary in the same breath, since
+/// an emitted `sooth_free` over a block nobody allocated would satisfy half of
+/// this on its own.
+#[test]
+fn an_owning_closure_allocates_its_env_and_the_body_frees_it() {
+    let il = emit_il(
+        "type: Spy tag i64 ;\n\
+         : drop ( Spy -- ) Spy> . ;\n\
+         : mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+         : main ( -- ) 7 Spy mk call ;\n",
+    );
+    let boundary = function_block(&il, "mk");
+    assert!(
+        boundary.contains("call $sooth_alloc("),
+        "the boundary allocates the env block: {boundary}"
+    );
+    assert!(
+        !boundary.contains("call $sooth_free("),
+        "the boundary must not free the block it just handed to the closure: {boundary}"
+    );
+    let body = function_block(&il, "mk__quot0");
+    assert!(
+        body.contains("call $sooth_free("),
+        "the compiled body frees its own env block: {body}"
     );
 }
 
-/// The guard's non-obvious reach path. An `impl:` block's member is a
-/// synthesized `WordDef` under an unforgeable `member;Trait;Type` name, and it
-/// inherits the trait member's signature with `'T` substituted -- so an
-/// `owning` slot can arrive in a lowerable declaration without any word in the
-/// source spelling it. A trait member that nothing implements lowers nothing
-/// and is left alone; the `impl:` is what would reach `ir_type_of`.
+/// The non-obvious reach path into `ir_type_of`, which is why the guard phase 3
+/// lifted had to cover declarations and not only materialization. An `impl:`
+/// block's member is a synthesized `WordDef` under an unforgeable
+/// `member;Trait;Type` name, inheriting the trait member's signature with `'T`
+/// substituted -- so an `owning` slot arrives in a *lowered* signature without
+/// any word in the source spelling it, and it is lowered whether or not
+/// anything calls it. Asserting the emitted parameter spelling is the point:
+/// `ir_type_of` ran over the owning slot and answered the quotation aggregate.
 #[test]
-fn an_owning_parameter_inherited_by_an_impl_member_hits_the_guard() {
-    let prog = Scratch::write(
-        "impl-member",
+fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggregate() {
+    let il = emit_il(
         "type: W x i64 ;\n\
          trait: Own 'T\n  use ( 'T owning [ -- ] -- )\n;\n\
          impl: Own for W\n  : use | w q | w drop q call ;\n;\n\
          : main ( -- ) ;\n",
     );
-    let err = build_error(prog.path());
     assert!(
-        err.contains("declares `owning [ -- ]`")
-            && err.contains("no runtime representation this slice"),
-        "unexpected message: {err}"
+        il.contains("type :Q0 = { l, l }"),
+        "the owning slot interned the quotation signature: {il}"
+    );
+    assert!(
+        il.contains("(:W %v0, :Q0 %v1)"),
+        "the synthesized member lowers its owning parameter as the quotation aggregate: {il}"
+    );
+}
+
+/// The invariant every program that exists today depends on: a plain quotation
+/// is unchanged. Same two-word `{ l, l }` aggregate, the `code` slot still at
+/// offset 0, the env still the capture's live value stored inline -- and no
+/// allocation anywhere, which is what would show if the owning path had been
+/// generalized to every closure.
+#[test]
+fn a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation() {
+    let il = emit_il(
+        ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
+         : main ( -- ) 5 mk call . ;\n",
+    );
+    assert!(
+        il.contains("type :Q0 = { l, l }"),
+        "the quotation aggregate is unchanged: {il}"
+    );
+    let boundary = function_block(&il, "mk");
+    assert!(
+        !boundary.contains("call $sooth_alloc("),
+        "a plain closure allocates nothing: {boundary}"
+    );
+    // The `code` slot is written at offset 0 off the freshly allocated
+    // quotation value, exactly as before the slice.
+    assert!(
+        boundary.contains("=l alloc8 16"),
+        "the quotation value is a 16-byte, 8-aligned frame slot: {boundary}"
+    );
+    let body = function_block(&il, "mk__quot0");
+    assert!(
+        !body.contains("call $sooth_free("),
+        "a plain closure's body frees nothing: {body}"
     );
 }
