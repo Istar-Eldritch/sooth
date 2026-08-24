@@ -298,6 +298,25 @@ fn dropping_an_owning_closure_is_a_located_rejection() {
     );
 }
 
+/// The generic-body twin of the same rejection. A generic word cannot *declare*
+/// an owning parameter, but it can call a word that returns one, so the value
+/// arrives through the body rather than the signature and reaches the poly
+/// walk's own `drop` arm -- which fails open without its own gate, since the
+/// monomorphic one never runs on a poly body.
+#[test]
+fn dropping_an_owning_closure_in_a_generic_body_is_a_located_rejection() {
+    let prog = Scratch::write(
+        "drop-owning-poly",
+        ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n\
+         : g ( 'T: Copy -- 'T ) | x | mk drop x ;\n\
+         : main ( -- ) 5 g . ;\n",
+    );
+    assert_eq!(
+        build_error(prog.path()),
+        "error: cannot `drop` a value of type `owning [ -- ]` in `g` (line 2): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
+    );
+}
+
 /// The call-once lifecycle needs no checker code of its own: the marker makes
 /// the value linear, and the pre-existing consumed-on-every-path check does the
 /// rest. Calling on one arm only is that error verbatim; calling on both arms
