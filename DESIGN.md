@@ -23,7 +23,7 @@ Sooth rather than in Forth or Rust.
 
 But it is not a toy. Embedded and real-time is a first-class target, and Sooth is
 expected to be *used* there. That narrows to a domain where the linear spine adds value. The craft
-constraints are unchanged (small enough to hold in one head, legible compiler, simplicity over reach). 
+constraints are unchanged (small enough to hold in one head, legible compiler, simplicity over reach).
 
 ## Surface language
 
