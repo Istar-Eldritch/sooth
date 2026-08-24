@@ -405,9 +405,13 @@ body may hand a capture back rather than dispose it. There is no drop pointer, n
 slot and no `emit_drop` arm; a plain quotation keeps its two-word `(code, env)` layout and
 gains no allocation.
 **The body is the sole disposer, which is what the containment rule buys.** An owning
-quotation is rejected in every aggregate position (struct field, variant field, array and
-slice element, owned-cell payload, referent, `extern:` slot), so no synthesized glue can reach
-one and `field_is_linear`/`layout_field_is_linear` stay untouched. `drop` on one is a located
+quotation is rejected in every *declared* aggregate position (struct field, variant field,
+array and slice element, owned-cell payload, referent, `extern:` slot), so no synthesized glue
+can reach one and `field_is_linear`/`layout_field_is_linear` stay untouched. One honest
+exception: a multi-output word's synthesized return-bundle struct is interned after these
+audits run, so an `owning` output does reach that struct as a field; it stays sound because the
+bundle is a destructor-free transient carrier, unpacked at the call site the instant the word
+returns, never itself disposed as a container. `drop` on one is a located
 rejection in both a monomorphic and a generic body, since releasing the capture means running
 code only the closure has. Neither a spliced (`inline`) nor a generic word may declare an
 `owning` parameter: the splice route never materializes, and a polymorphic call site
