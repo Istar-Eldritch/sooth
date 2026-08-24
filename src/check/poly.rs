@@ -813,19 +813,54 @@ pub(super) fn poly_term(
     Ok(stack)
 }
 
-/// P7.S3e (R7): the receiver a bound-directed call dispatches on -- the
-/// top-of-stack slot, bare `'T` or `&'T`. Any other shape is not a
-/// trait-member receiver, so a member whose *last* declared input is not the
-/// trait's own variable is unreachable through a bound this slice.
-fn receiver_ty_var(stack: &[PolySlot]) -> Option<u32> {
-    match &stack.last()?.pt {
-        PolyType::Var(v) => Some(*v),
-        PolyType::Ref(referent, _) => match referent.as_ref() {
-            PolyType::Var(v) => Some(*v),
-            _ => None,
-        },
-        _ => None,
+/// P7.S3p (ruling 4, amended): the one candidate whose declared operands fit
+/// the stack window, when the candidates span *more than one* type variable.
+///
+/// Which variable's obligation a call means is decided by which operands it
+/// consumes -- as it was under S3e's top-of-stack discovery, which is what
+/// keeps `f ( &'T: A &'U: A -- ) ta ta` (one trait, two variables, two
+/// obligations resolved against their own thetas) callable. Candidates sharing
+/// one variable are never separated this way: there the operands are the same
+/// either way and picking a trait by shape would be an overload resolution the
+/// language does not have, so `'T: A B` calling a shared member stays the
+/// ambiguity error S3e made it.
+///
+/// The fit must be unique: two candidates on one variable fit the same
+/// operands (that is the same-variable ambiguity, reachable here through a
+/// mixed set -- two traits on `'T` plus one on `'U`), and no candidate fits a
+/// call whose operands are wrong for every one of them. Those two failure
+/// modes are not the same diagnostic: the first is resolved by a module
+/// qualifier (it narrows *which* trait), the second is not (no candidate's
+/// declared operands match, so naming a trait changes nothing) -- `CandidateFit`
+/// keeps them apart for the caller.
+fn candidate_fitting_the_operands<'a>(
+    stack: &[PolySlot],
+    candidates: &[(u32, TraitId, &'a TraitMember)],
+) -> CandidateFit<'a> {
+    if candidates.windows(2).all(|w| w[0].0 == w[1].0) {
+        return CandidateFit::Ambiguous;
     }
+    let mut fitting = candidates.iter().filter(|(var, _, member)| {
+        let inputs = &member.sig.inputs;
+        stack.len() >= inputs.len() && {
+            let base = stack.len() - inputs.len();
+            inputs
+                .iter()
+                .enumerate()
+                .all(|(i, t)| stack[base + i].pt == substitute_member_var(t, *var))
+        }
+    });
+    match (fitting.next(), fitting.next()) {
+        (Some(one), None) => CandidateFit::Unique(*one),
+        (Some(_), Some(_)) => CandidateFit::Ambiguous,
+        (None, _) => CandidateFit::NoFit,
+    }
+}
+
+enum CandidateFit<'a> {
+    Unique((u32, TraitId, &'a TraitMember)),
+    Ambiguous,
+    NoFit,
 }
 
 /// P7.S3e (R7): a trait member's signature is written over the trait's own
@@ -847,9 +882,21 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
 }
 
 /// P7.S3e (R7/R12): the bound-directed dispatch branch. `Ok(None)` means this
-/// is no trait-member obligation and ordinary dispatch proceeds: the receiver
-/// is not one of this word's bounded type variables, or no `Bound::User` on it
-/// declares a member of this name.
+/// is no trait-member obligation and ordinary dispatch proceeds: no
+/// `Bound::User` on any of this word's type variables declares a member of
+/// this name.
+///
+/// P7.S3p (ruling 1/2): the candidate variable comes from the *bounds*, found
+/// by member name, never from the stack -- so a member dispatches whatever
+/// input position its receiver sits at.
+///
+/// P7.S3p (ruling 4, amended): selection reads operand shape only when the
+/// name-based search above finds candidates spanning more than one variable
+/// (`candidate_fitting_the_operands`); a single-variable match never touches
+/// operand shape at all. The per-input check below stays the sole place an
+/// operand *mismatch on the resolved candidate* is reported -- shape only
+/// ever disambiguates *which* candidate, never validates the one it settles
+/// on.
 ///
 /// The obligation records *which trait, which member, which variable* and no
 /// symbol: `'T` is still abstract here, so the implementing word is unknowable
@@ -862,9 +909,6 @@ fn poly_trait_member_call(
     ctx: &Ctx,
     tctx: &mut TraitCtx,
 ) -> Result<Option<Vec<PolySlot>>, String> {
-    let Some(var) = receiver_ty_var(stack) else {
-        return Ok(None);
-    };
     let traits = tctx.traits;
     // R12/decision 6: a qualified call names a *module* alias, never a trait
     // namespace -- it restricts the search to traits that module declares.
@@ -896,42 +940,63 @@ fn poly_trait_member_call(
     // `'T: A A` parses, so one trait can appear twice on one variable; without
     // the dedupe it reads as its own ambiguity ("required by both `A` and
     // `A`").
-    let mut tids: Vec<TraitId> = Vec::new();
+    let mut seen: Vec<(u32, TraitId)> = Vec::new();
+    let mut matched: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
     for (v, bound) in &sig.bounds {
-        if let Bound::User(tid) = bound {
-            if *v == var && !tids.contains(tid) {
-                tids.push(*tid);
-            }
+        let Bound::User(tid) = bound else { continue };
+        if qualified_target.is_some_and(|t| traits[tid.index()].module != t)
+            || seen.contains(&(*v, *tid))
+        {
+            continue;
+        }
+        seen.push((*v, *tid));
+        if let Some(m) = traits[tid.index()]
+            .members
+            .iter()
+            .find(|m| m.name == member)
+        {
+            matched.push((*v, *tid, m));
         }
     }
-    let matched: Vec<(TraitId, &TraitMember)> = tids
-        .into_iter()
-        .filter(|tid| qualified_target.is_none_or(|t| traits[tid.index()].module == t))
-        .filter_map(|tid| {
-            traits[tid.index()]
-                .members
-                .iter()
-                .find(|m| m.name == member)
-                .map(|m| (tid, m))
-        })
-        .collect();
-    let (trait_id, member_decl) = match matched.as_slice() {
+    let (var, trait_id, member_decl) = match matched.as_slice() {
         [] => return Ok(None),
         [one] => *one,
         // R12/decision 5: composing two traits that happen to share a member
         // name is legal to declare; only the ambiguous *call* is the error.
-        _ => {
-            let named: Vec<&str> = matched
-                .iter()
-                .map(|(tid, _)| traits[tid.index()].name.as_str())
-                .collect();
-            return Err(ambiguous_trait_member_error(
-                span,
-                member,
-                &named,
-                &sig.ty_var_names[var as usize],
-            ));
-        }
+        many => match candidate_fitting_the_operands(stack, many) {
+            CandidateFit::Unique(one) => one,
+            CandidateFit::Ambiguous => {
+                let named: Vec<(&str, &str)> = matched
+                    .iter()
+                    .map(|(v, tid, _)| {
+                        (
+                            traits[tid.index()].name.as_str(),
+                            sig.ty_var_names[*v as usize].as_str(),
+                        )
+                    })
+                    .collect();
+                return Err(ambiguous_trait_member_error(span, member, &named));
+            }
+            CandidateFit::NoFit => {
+                let shapes: Vec<(&str, &str, String)> = matched
+                    .iter()
+                    .map(|(v, tid, m)| {
+                        let inputs: Vec<String> = m
+                            .sig
+                            .inputs
+                            .iter()
+                            .map(|t| poly_type_str(&substitute_member_var(t, *v), sig))
+                            .collect();
+                        (
+                            traits[tid.index()].name.as_str(),
+                            sig.ty_var_names[*v as usize].as_str(),
+                            inputs.join(" "),
+                        )
+                    })
+                    .collect();
+                return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
+            }
+        },
     };
     let inputs: Vec<PolyType> = member_decl
         .sig
@@ -1034,14 +1099,30 @@ pub(super) fn poly_call_term(
     // `call`, `dup`, ...) is unreachable through its bound, silently running
     // the builtin or failing with a diagnostic that never mentions the
     // trait. `poly_trait_member_call` is a narrow, self-gating probe: it
-    // returns `Ok(None)` unless the top of stack is one of this word's own
-    // bounded type variables *and* a `Bound::User` on it actually declares a
-    // member of this name, so moving it here changes nothing for the
-    // ordinary (non-trait) use of any of these names. It also must run
-    // ahead of the intrinsic-import gate immediately below: bound dispatch
-    // is whole-program and unscoped by import (decision 9), so a bound call
-    // to e.g. `eq` must not be rejected as an unimported comparison
-    // intrinsic before dispatch even gets a chance to try it.
+    // returns `Ok(None)` unless a `Bound::User` on one of this word's own
+    // type variables declares a member of this name (P7.S3p: found by name
+    // over the bounds, not by matching the stack top).
+    //
+    // Which names a bound can legally claim here, since P7.S3p selects on
+    // name alone and so cannot fall through to the builtin on a shape
+    // mismatch:
+    //   - `len`/`dup`/`branch`/`tag`/`add`/... are in `BUILTIN_WORDS`, and
+    //     `call`, which is not, is special-cased beside it: all are rejected
+    //     as member names at `trait:` declaration time, so no bound declares
+    //     one and no builtin arm below is shadowed.
+    //   - `@`/`!`/`+!` are rejected as member names by the parser's
+    //     `ACCESS_WORDS` gate.
+    //   - the six surface comparisons (`eq`, `lt`, ...) are legal member
+    //     names, and a bound *does* claim them here. That is intended: they
+    //     are `lib/` words, not builtins, and a body that imports one
+    //     receives it mangled, so the two spellings never collide.
+    // Every other user word arrives mangled, never under a bare builtin
+    // spelling.
+    //
+    // It also must run ahead of the intrinsic-import gate immediately below:
+    // bound dispatch is whole-program and unscoped by import (decision 9),
+    // so a bound call to e.g. `eq` must not be rejected as an unimported
+    // comparison intrinsic before dispatch even gets a chance to try it.
     if let Some(next) = poly_trait_member_call(name, span, &mut stack, sig, ctx, tctx)? {
         return Ok(next);
     }
@@ -5628,20 +5709,77 @@ pub(super) fn poly_op_on_variable_error(
     )
 }
 
-/// P7.S3e (R12, decision 5): a member required by two of one variable's
-/// bounds, called unqualified. Composing the two traits stays legal; only the
-/// call is ambiguous, so the diagnostic sits here and not at the declaration.
-fn ambiguous_trait_member_error(span: Span, member: &str, traits: &[&str], var: &str) -> String {
-    let quoted: Vec<String> = traits.iter().map(|t| format!("`{t}`")).collect();
-    let listed = match quoted.split_last() {
+/// P7.S3e (R12, decision 5): a member required by two of a body's bounds,
+/// called unqualified. Composing the traits stays legal; only the call is
+/// ambiguous, so the diagnostic sits here and not at the declaration.
+///
+/// P7.S3p (ruling 4): candidates now span every bounded variable, so each is a
+/// `(trait, type-variable)` pair. When they all share one variable it renders
+/// as it always did ("required by both `A` and `B` on 'T"); when they differ,
+/// each trait is named with its own variable.
+fn ambiguous_trait_member_error(span: Span, member: &str, candidates: &[(&str, &str)]) -> String {
+    let listed = if candidates.windows(2).all(|w| w[0].1 == w[1].1) {
+        let quoted: Vec<String> = candidates.iter().map(|(t, _)| format!("`{t}`")).collect();
+        format!(
+            "both {} on {}",
+            joined_with_and(&quoted),
+            candidates.first().map_or("", |(_, v)| v)
+        )
+    } else {
+        let each: Vec<String> = candidates
+            .iter()
+            .map(|(t, v)| format!("`{t}` on {v}"))
+            .collect();
+        joined_with_and(&each)
+    };
+    format!(
+        "error: `{member}` is required by {listed} (line {}, col {})\n  note: a member required by two of a variable's bounds cannot be called unqualified",
+        span.line, span.col
+    )
+}
+
+/// P7.S3p (ruling 4, amended): the operands at the call fit none of the
+/// candidates spanning more than one variable. This is not the same problem
+/// as `ambiguous_trait_member_error`'s: there, a module qualifier resolves
+/// the call by naming which trait is meant; here every candidate's declared
+/// operands already disagree with the stack, so no qualifier changes that --
+/// the call is a plain operand-shape mismatch, just one with more than one
+/// declared shape to be wrong against.
+///
+/// Each candidate's *substituted* input list is rendered, so the note that
+/// says the operands match no declared shape also shows the shapes it means
+/// (`trait_member_operand_error` names the one shape it checked against; this
+/// path checked several and must name them all to be equally actionable).
+fn no_candidate_fits_operands_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    candidates: &[(&str, &str, String)],
+) -> String {
+    let where_ = ctx.rendered_word_or("`<line>`");
+    let each: Vec<String> = candidates
+        .iter()
+        .map(|(t, v, _)| format!("`{t}` on {v}"))
+        .collect();
+    let shapes: Vec<String> = candidates
+        .iter()
+        .map(|(t, v, inputs)| format!("`{t}` on {v} expects `{inputs}`"))
+        .collect();
+    format!(
+        "error: `{member}` is required by {} in {where_} (line {}, col {})\n  note: the operands at this call match none of their declared shapes: {}",
+        joined_with_and(&each),
+        span.line,
+        span.col,
+        joined_with_and(&shapes)
+    )
+}
+
+fn joined_with_and(items: &[String]) -> String {
+    match items.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
         None => String::new(),
-    };
-    format!(
-        "error: `{member}` is required by both {listed} on {var} (line {}, col {})\n  note: a member required by two of a variable's bounds cannot be called unqualified",
-        span.line, span.col
-    )
+    }
 }
 
 /// P7.S3e (R7): a bound-directed member call whose operands do not match the
@@ -6565,6 +6703,74 @@ mod tests {
         );
     }
 
+    /// P7.S3p: bound-directed dispatch runs ahead of `env.get`, so a concrete
+    /// word of the member's name does not capture the call -- the guard the
+    /// S3e review's mis-dispatch counterexample asked for. Pinned here rather
+    /// than as a golden: a real build mangles the call site to the concrete
+    /// word's own symbol first (S3e R18's ruled outcome), which is what
+    /// `tests/phase7_slice3e.rs` covers.
+    #[test]
+    fn a_member_call_beats_a_concrete_word_of_the_same_name() {
+        let recorded = obligations_of(
+            "type: Point x i64 y i64 ;\n\
+             trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+             impl: Indexable for Point\n\
+               : at | p n | n drop p &x @ ;\n\
+             ;\n\
+             : at ( i64 -- i64 ) 900 add ;\n\
+             : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
+             : main ( -- ) ;\n",
+        );
+        let obs = &recorded["uses"];
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].member, "at");
+    }
+
+    /// P7.S3p (ruling 1): the receiver need not be the member's last input.
+    /// `at`'s receiver is `inputs[0]`, with an `i64` above it, and the
+    /// dispatched variable comes off the *bound* -- pinned by declaring the
+    /// bounded variable second (id 1), so the stack slot a top-of-stack read
+    /// would have seen is the `i64` operand and no dispatch would happen at
+    /// all.
+    #[test]
+    fn a_non_trailing_receiver_dispatches_on_the_bound_variable() {
+        let recorded = obligations_of(
+            "type: Point x i64 y i64 ;\n\
+             trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+             impl: Indexable for Point\n\
+               : at | p n | n drop p &x @ ;\n\
+             ;\n\
+             : uses ( 'U &'T: Indexable -- 'U i64 ) 0 at ;\n\
+             : main ( -- ) ;\n",
+        );
+        let obs = &recorded["uses"];
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].member, "at");
+        assert_eq!(obs[0].var, 1);
+    }
+
+    /// P7.S3p (ruling 2): selection is by member name alone -- a mismatched
+    /// operand at the receiver's position is the located member diagnostic,
+    /// never a fall-through to ordinary dispatch (which would report `at` as
+    /// an unknown word and lose the trait entirely). The bound is on a bare
+    /// `'T` where `at` declares `&'T`, so a structural *selection* gate would
+    /// decline the candidate here.
+    #[test]
+    fn a_non_trailing_receiver_mismatch_is_located_not_unknown() {
+        let err = check_src(
+            "trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+             : uses ( 'T: Indexable -- i64 ) 0 at ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "`at` of `Indexable` in `uses` (line 2, col 35) expects `&'T`, found `'T`"
+            ),
+            "{err}"
+        );
+    }
+
     /// `substitute_member_var` witness: every other fixture in this file puts
     /// the bound variable at index 0, identical to the trait member's own
     /// `'T` (also id 0 in its own `PolySig`), so an identity-stubbed rewrite
@@ -6614,6 +6820,137 @@ mod tests {
             err.contains(
                 "a member required by two of a variable's bounds cannot be called unqualified"
             ),
+            "{err}"
+        );
+    }
+
+    /// P7.S3p (ruling 4, amended): two traits declaring the member on
+    /// *different* variables are separated by the operands the call consumes,
+    /// the same way S3e's top-of-stack discovery separated them -- `&'U` on
+    /// top means `B`'s, and the `&'T` left below means `A`'s. Both dispatch,
+    /// each recording its own variable.
+    #[test]
+    fn cross_variable_candidates_are_separated_by_the_operands() {
+        let recorded = obligations_of(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             : f ( &'T: A &'U: B -- ) t1 t1 ;\n\
+             : main ( -- ) ;\n",
+        );
+        let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
+        assert_eq!(vars, vec![1, 0]);
+    }
+
+    /// P7.S3p (ruling 4): a candidate declaring more inputs than the stack
+    /// holds cannot fit, so it does not compete -- `B`'s three-input `t1` is
+    /// out, leaving `A`'s the unique fit. The length check is not a narrowing
+    /// nicety: the window base is `stack.len() - inputs.len()`, so without it a
+    /// candidate wider than the stack underflows and the compiler panics on a
+    /// program that otherwise checks fine.
+    #[test]
+    fn a_candidate_wider_than_the_stack_does_not_fit() {
+        let recorded = obligations_of(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T i64 i64 -- ) ;\n\
+             : f ( &'U: B &'T: A -- ) t1 drop ;\n\
+             : main ( -- ) ;\n",
+        );
+        let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
+        assert_eq!(vars, vec![1]);
+    }
+
+    /// P7.S3p (ruling 4): a third bound on another variable does not turn the
+    /// same-variable ambiguity into a resolvable call -- `'T`'s two candidates
+    /// fit the operands equally, so the fit is not unique and the call is
+    /// still rejected. Without the uniqueness requirement one of the two is
+    /// picked by bound declaration order.
+    #[test]
+    fn a_same_variable_ambiguity_survives_a_bound_on_another_variable() {
+        let err = check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             trait: C 'T t1 ( &'T -- ) ;\n\
+             : f ( &'U: C &'T: A B -- ) t1 drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by `C` on 'U, `A` on 'T and `B` on 'T"),
+            "{err}"
+        );
+    }
+
+    /// P7.S3p (ruling 4, amended): when the operands fit *no* candidate,
+    /// nothing at the call site picks -- but this is not the same failure as
+    /// an ambiguous call: no module qualifier would fix it, since every
+    /// candidate's declared operands already disagree with the stack. The
+    /// diagnostic says so instead of the "cannot be called unqualified" note,
+    /// which is only true when qualifying would actually help.
+    #[test]
+    fn a_cross_variable_member_call_fitting_no_candidate_names_the_operand_mismatch() {
+        let err = check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T -- ) ;\n\
+             : f ( &'T: A &'U: B i64 -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by `A` on 'T and `B` on 'U in `f` (line 3, col 30)"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "the operands at this call match none of their declared shapes: \
+                 `A` on 'T expects `&'T` and `B` on 'U expects `&'U`"
+            ),
+            "{err}"
+        );
+        assert!(!err.contains("cannot be called unqualified"), "{err}");
+    }
+
+    /// P7.S3p (ruling 4, amended): the no-fit path is reachable for a member
+    /// whose receiver is *trailing*, a shape S3e already admitted, where it
+    /// used to report the single declared shape it checked against. It must
+    /// stay as actionable now that there are several: the note names every
+    /// candidate's substituted input list, and the message keeps the enclosing
+    /// word.
+    #[test]
+    fn a_no_fit_call_on_a_trailing_receiver_member_names_every_declared_shape() {
+        let err = check_src(
+            "trait: A 'T t1 ( i64 &'T -- ) ;\n\
+             : f ( &'T: A &'U: A -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by `A` on 'T and `A` on 'U in `f` (line 2, col 26)"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "none of their declared shapes: \
+                 `A` on 'T expects `i64 &'T` and `A` on 'U expects `i64 &'U`"
+            ),
+            "{err}"
+        );
+    }
+
+    /// P7.S3p (ruling 4): position is not a disambiguator either. `A`'s `t1`
+    /// takes the receiver last, `B`'s takes it first, both on one variable --
+    /// still the single-variable ambiguity, rendered exactly as the
+    /// same-position case.
+    #[test]
+    fn a_multi_position_duplicate_member_is_the_single_variable_ambiguity() {
+        let err = check_src(
+            "trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: B 'T t1 ( &'T i64 -- ) ;\n\
+             : f ( &'T: A B -- ) t1 ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 21)"),
             "{err}"
         );
     }

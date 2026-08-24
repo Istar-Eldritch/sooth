@@ -1,183 +1,130 @@
 # Spec: P7.S3p trait-member dispatch at any input position
 
-**Status:** Ready to implement
-**Discovery:** `docs/roadmap/P7/slice3p-brief.md` (design probe-validated 2026-08-23)
+**Status:** Implemented
+**Discovery:** `docs/roadmap/P7/slice3p-brief.md`
 
 ## Problem
 
-A trait member is dispatchable through a bound only if the bound type variable sits on the
-*top of the stack* at the call. `poly_trait_member_call` (`src/check/poly.rs:835`) discovers
-which variable to dispatch on by reading `receiver_ty_var(stack)` (`poly.rs:798`, called at
-`:843`), which inspects `stack.last()` alone. A member whose bound variable is not its last
-declared input therefore has no dispatch path, so S3e added a *declaration-time* rejection
-(`member_ends_in_trait_var`, `src/check/declarations.rs:359`, wired in `check_trait_decls` at
-`:341-342`, diagnostic `non_trailing_receiver_error` at `:367`). Two shapes are shut out:
+A trait member was dispatchable through a bound only if the bound type variable sat on the
+*top of the stack* at the call: `poly_trait_member_call` found the variable via
+`receiver_ty_var(stack)`, which read `stack.last()` alone. S3e therefore rejected non-trailing
+receivers at *declaration* time (`member_ends_in_trait_var` / `non_trailing_receiver_error`),
+shutting out both `at ( &'T i64 -- i64 )` (receiver at `inputs[0]`) and `fresh ( -- i64 )`
+(no operand carries the variable). Forcing consumer: `Indexable`/`at`, and downstream the
+`cmp`-shaped `Ord` P7.S3r's paper dogfood assumes S3p unblocks.
 
-- **A non-trailing (sandwiched) receiver** — `at ( &'T i64 -- i64 )`, an index/lookup shape
-  whose receiver is `inputs[0]`.
-- **A zero-receiver member** — `fresh ( -- i64 )`, with no operand carrying the variable at all.
+## Design rulings (as shipped)
 
-Forcing consumer: `Indexable`/`at` (the probe's `Pair` fixture) and, downstream, the
-`cmp`-shaped `Ord` that P7.S3r's paper dogfood assumes S3p unblocks.
-
-## Design rulings
-
-1. **Var discovery becomes name-first, off the bounds, not the stack.** The whole gap is
-   *upstream* of the existing operand check: `poly_trait_member_call` already walks the
-   member's full declared input list (`poly.rs:882-887`, via `substitute_member_var`) against
-   the stack window at `base = stack.len() - inputs.len()` (`poly.rs:921-940`) and has no
-   positional assumption. Replace the `receiver_ty_var(stack)` gate with a scan over this
-   body's `sig.bounds` `Bound::User` entries: collect every `(var, TraitId, &TraitMember)`
-   where the trait declares a member named `member` (after the existing `::` qualifier split
-   and `qualified_target` module filter, `poly.rs:857-880`, unchanged). The variable comes
-   from the *bound*, never from `stack.last()`. `receiver_ty_var` is deleted; it has one
-   caller (`poly.rs:843`) and no other use.
-2. **Selection is by member name alone; operand shape is never a selection gate.** A candidate
-   is chosen because one of the body's bound traits declares the member — full stop. Do **not**
-   require the stack slot at the receiver position to structurally match the member's declared
-   receiver before selecting. The existing per-input structural check (`poly.rs:932-940`,
-   `trait_member_operand_error`) stays the sole place a ref/bare or type mismatch is reported.
-   Getting this backwards is the concrete regression the probe caught: a structural
-   *selection* gate made `show` passed a bare `'T` where `&'T` was declared fall through to
-   ordinary dispatch and report `unknown word` instead of the located mismatch, killing
-   `trait_member_operand_mismatch_is_located`. Loose selection, precise downstream check.
-3. **`matched` becomes the whole candidate set across every bound variable, and its count is
-   the only ambiguity signal.** Today `matched` is built from `tids` collected for a single
-   `var` (`poly.rs:874-905`), so it only ever saw same-variable collisions. Name-first search
-   spans all of the body's `Bound::User` variables, so `matched` is `Vec<(u32, TraitId,
-   &TraitMember)>`. `[]` falls through to ordinary `env`/builtin dispatch
-   (preserving `eq`/`if`/`bool` and any non-member word), `[one]` dispatches on that
-   candidate's `var`, and any longer slice is the ambiguity error. This subsumes and generalizes the S3e single-position ambiguity arm.
-4. **Ambiguity (open item 1) is decided by candidate count, not by position, because a
-   concatenative call carries no positional argument to disambiguate with.** Two bound traits
-   declaring the same member name are ambiguous whether their receivers sit at the same input
-   position or different ones — the call names only the member, and nothing at the call site
-   can pick. The multi-position case is therefore *not* a new resolution path; it is the same
-   ambiguity, and the fix is to widen the check off `matched.len() >= 2` rather than off "one
-   shared position." Two sub-cases both reject:
-   - **Same variable** (`'T: A B`, both declare `t1`): preserved byte-for-byte — this is the
-     existing `ambiguous_trait_member_call_is_rejected` behaviour.
-   - **Different variables** (`&'T: A &'U: B`, `A` declares `t1` on `'T`, `B` on `'U`): newly
-     reachable under name-first search (S3e's top-of-stack discovery fixed the variable first,
-     so it could never arise), and equally ambiguous. `ambiguous_trait_member_error`
-     (`poly.rs:5478`) is generalized to take the candidate `(trait-name, ty-var-name)` set:
-     when every candidate shares one variable it renders exactly as today (`` `t1` is required
-     by both `A` and `B` on 'T (line …) ``, note line unchanged); when variables differ it
-     names each trait with its variable (`` required by `A` on 'T and `B` on 'U ``). The
-     single-var rendering is load-bearing for the preserved test and must stay identical.
-5. **The declaration gate is relaxed, not removed: a member must bind the trait variable in
-   *some* input.** `member_ends_in_trait_var` becomes `member_binds_trait_var`, true when *any*
-   input is `PolyType::Var(0)` or `PolyType::Ref(_, Var(0))` (the trait's own variable is id 0
-   in its own `PolySig`), not only the last. A member with no such input is still rejected at
-   `trait:` time. `non_trailing_receiver_error` becomes `zero_receiver_member_error` with text
-   naming the deferral (below). The parser doc comment at `src/parser.rs:432` (`synth_member_word_name`)
-   is updated: its invariant "every grounded signature mentions the `for` type" still holds —
-   the receiver appears at *some* input, not necessarily last — so only its "last input" wording
-   and the cited function name change; the mangling scheme is untouched.
-6. **The zero-receiver member (open item 2, `fresh ( -- i64 )`/`tag`) is explicitly deferred,
-   tracked as P7.S3t, not silently dropped.** With no operand carrying the variable, a
-   name-first search would select the candidate and dispatch, but the variable never grounds
-   from the call (θ is fixed only by other operands), so resolution either lands on an
-   unrelated grounding or hits the pre-existing ungrounded-variable skip — dispatch has no
-   signal for *which* concrete type's `fresh` is meant. The language has no type-argument
-   syntax and no context binding to supply one. Rather than ship a half-working path, the
-   declaration gate (ruling 5) keeps rejecting any member that binds the variable in no input.
-   Lifting this needs a new call-site signal and is out of scope; `zero_receiver_member_error`
-   names P7.S3t so the door is a tracked deferral, not an accident.
-
-## What changes
-
-**`src/check/poly.rs`.** `receiver_ty_var` deleted. `poly_trait_member_call`'s head rewritten:
-`(qualifier, member)` split and `qualified_target` resolution stay; the `tids`/single-`var`
-collection is replaced by a scan over all `Bound::User` entries in `sig.bounds` producing the
-`(var, TraitId, &TraitMember)` candidate set, deduped on `(var, TraitId)` (the existing
-`'T: A A` dedupe must still collapse a repeated bound — otherwise it reads as self-ambiguity).
-The `[] / [one] / _` match drives fall-through / dispatch / ambiguity. Everything from
-`inputs` construction (`poly.rs:882`) through the truncate-and-push and obligation record
-(`poly.rs:942-951`) is unchanged, now reached for any receiver position.
-`ambiguous_trait_member_error` (`poly.rs:5478`) generalized per ruling 4.
-
-**`src/check/declarations.rs`.** `member_ends_in_trait_var` → `member_binds_trait_var` (scan
-all inputs); `non_trailing_receiver_error` → `zero_receiver_member_error` (new text, cites
-P7.S3t); the `check_trait_decls` call site at `:341-342` updated to the new names. The doc
-comment at `:349-358` rewritten to describe the relaxed rule and the deferral.
-
-**`src/parser.rs`.** The `synth_member_word_name` doc comment at `:432` updated (ruling 5).
+1. **Var discovery is name-first, off the bounds, not the stack.** `poly_trait_member_call`
+   (`src/check/poly.rs:882`) scans every `Bound::User` in the body's `sig.bounds`, collecting
+   `(var, TraitId, &TraitMember)` for each trait declaring a member of this name (after the
+   unchanged `::` qualifier split and `qualified_target` module filter), deduped on
+   `(var, TraitId)` so `'T: A A` does not read as self-ambiguity. The member's full declared
+   input list is then matched against the stack window at `base = stack.len() - inputs.len()`,
+   which never had a positional assumption. `receiver_ty_var` is deleted.
+2. **A single candidate is dispatched on name alone; operand shape never declines it.** The
+   per-input check (`trait_member_operand_error`) is the sole place a ref/bare or type mismatch
+   on the resolved candidate is reported. A structural *selection* gate is the concrete
+   regression the probe caught: `show` passed a bare `'T` where `&'T` was declared fell through
+   to ordinary dispatch and reported `unknown word`. Loose selection, precise downstream check.
+3. **`matched` is the whole candidate set across every bound variable.** `[]` falls through to
+   ordinary `env`/builtin dispatch (`Ok(None)`, preserving `eq`/`if`/`bool` and every non-member
+   word), `[one]` dispatches on that candidate's `var`, longer goes to ruling 4.
+4. **Ambiguity is by candidate count *within one variable*; candidates spanning several
+   variables are separated by the operands the call consumes**
+   (`candidate_fitting_the_operands`, `poly.rs:814`, returning `CandidateFit`).
+   Which *trait* a call means is unanswerable when two bounds on one variable declare the
+   member (same operands either way; picking one would be overload resolution the language
+   lacks) — input position is not a disambiguator there either. Which *variable* it means is
+   answerable, and S3e answered it positionally; deciding the multi-variable case on count
+   alone would regress the legal `f ( &'T: A &'U: A -- ) ta ta`
+   (`one_trait_on_two_variables_resolves_each_span_against_its_own_theta`) and make R8's
+   `o.var == v` conjunct dead. So for `matched.len() >= 2`:
+   - **All on one variable** — rejected, byte-for-byte the existing
+     `ambiguous_trait_member_call_is_rejected` behaviour.
+   - **Spanning variables** — narrowed to the *unique* candidate whose declared input list fits
+     the stack window, and dispatched. The two non-decisive outcomes get different diagnostics:
+     several fits (reachable via a mixed set `&'U: C &'T: A B`, where otherwise bound
+     declaration order would decide) is `ambiguous_trait_member_error` (`poly.rs:5564`), which a
+     module qualifier would resolve; no fit is `no_candidate_fits_operands_error`
+     (`poly.rs:5597`), naming each candidate's substituted input list, since no qualifier
+     changes an operand-shape mismatch.
+   The ambiguity error's single-variable rendering is unchanged and load-bearing; when variables
+   differ it names each trait with its variable.
+5. **The declaration gate is relaxed, not removed: a member must take the trait variable
+   *directly* as some input.** `member_binds_trait_var` (`src/check/declarations.rs:367`, wired
+   at `:341`) is true when any input is `PolyType::Var(0)` or `PolyType::Ref(Var(0), _)`, at any
+   position. The test is deliberately syntactic, so it also rejects a receiver mentioned only
+   *nested* in a composite input (`sum ( ['T 4] -- i64 )`) — grounding that needs structural
+   unification dispatch does not attempt. `zero_receiver_member_error` (`:375`) distinguishes
+   the two: only the nullary case is the P7.S3t deferral, so the text does not falsely claim a
+   nested mention never mentions `'T`.
+6. **Zero-receiver/nullary members (`fresh`, `tag`) are deferred, tracked P7.S3t.** With no
+   operand carrying the variable, θ is fixed only by other operands, so dispatch has no signal
+   for which concrete type's `fresh` is meant, and the language has no type-argument syntax or
+   context binding to supply one. The gate keeps rejecting them, and the diagnostic names
+   P7.S3t so the door is a tracked deferral.
+7. **The `trait:` gate on builtin-named members widens to `call`, `slice`, and `subslice`**
+   (`src/parser.rs:2140`). Name-only selection means a member of one of those names captures
+   *every* such call in any body bounded by its trait, making quotation application and array
+   slicing unreachable there (probed: `` `call` of `C` … expects `&'T`, found `[ -- i64 ]` ``).
+   `is_name_dispatched_builtin` does not cover them (each is its own arm in
+   `check_term`/`poly_call_term`, none is in `BUILTIN_WORDS`), and they cannot join that set,
+   which also gates the `intrinsics` import (P8 S2 R2) — hence an explicit name test beside it.
+   The six surface comparisons stay legal member names: they are `lib/` words and arrive
+   mangled, so the spellings never collide.
 
 ## Out of scope
 
-- Zero-receiver / nullary members (`fresh`, `tag`): deferred, tracked **P7.S3t** (ruling 6).
-- Any change to obligation resolution (`check_poly_call`), the impl registry, monomorphization,
-  or lowering — dispatch position is a check-time concern; a resolved obligation still keys on
-  `(var, TraitId, member)` exactly as before.
-- The three-barrier fall-through partition (S3e ruling 7): unaffected, it keys on *whether*
-  dispatch declined, never on receiver position.
-- REPL bound-directed dispatch (already bypassed via `lower_instantiation`, per S3e).
+- Nullary members: P7.S3t (ruling 6).
+- Obligation resolution (`check_poly_call`), the impl registry, monomorphization, lowering — a
+  resolved obligation still keys on `(var, TraitId, member)`.
+- The three-barrier fall-through partition (S3e ruling 7) and REPL bound-directed dispatch
+  (bypassed via `lower_instantiation`).
 
-## Invariants to preserve
+## Invariants
 
-- Selection never reads operand *shape*; only the downstream per-input check does (ruling 2).
+- Selection never reads operand shape to *decline*: a single candidate is always dispatched, so
+  a mismatch is the downstream located diagnostic, never a fall-through to `unknown word`.
+  Shape narrowing applies only to a multi-variable set, deciding *which* variable.
 - `poly_trait_member_call` still runs first in `poly_call_term`, ahead of every name-based
-  special case (S3e review finding 3). The name-first change is *internal* to it — the probe
-  confirmed no ordering collision, ordinary `eq`/`if`/`bool` dispatch in the same bodies is
-  untouched.
-- `matched == []` must fall through to `Ok(None)`, or non-member words break.
-- The `'T: A A` repeated-bound dedupe must survive the candidate-set rewrite.
-- `ambiguous_trait_member_error`'s single-variable rendering stays byte-identical.
-- `check_trait_decls` stays pre-mangle; the gate still rejects a variable-free member.
+  special case; ordinary `eq`/`if`/`bool` dispatch in bounded bodies is untouched.
+- `matched == []` falls through to `Ok(None)`; the `'T: A A` dedupe survives; the
+  single-variable ambiguity rendering stays byte-identical; `check_trait_decls` stays pre-mangle.
 
 ## Tests
 
-Unit tests beside each touched function in `src/check/poly.rs` and
-`src/check/declarations.rs`; an end-to-end golden in a new `tests/phase7_slice3p.rs`.
-Migrate the three now-wrong S3e integration tests in `tests/phase7_slice3e.rs` in the same
-phase that lifts the gate (they fail the instant it lifts):
+Migrated in `tests/phase7_slice3e.rs`: `trait_member_with_a_non_trailing_receiver_dispatches`
+(was `…_is_rejected`); `a_concrete_word_of_the_members_name_captures_the_call` — the intended
+dispatch-correctness claim does *not* hold through a build, since name resolution precedes the
+checker and a concrete `: at` captures the spelling (S3e R18's ruled outcome), so the golden
+keeps the program and asserts an operand/effect rejection, making the old silent `900`
+mis-dispatch impossible; `trait_member_with_a_zero_input_receiver_is_rejected` retained against
+the new text; plus `trait_member_named_{call,slice,subslice}_is_rejected` and
+`trait_member_named_after_a_surface_comparison_dispatches` (ruling 7, both directions).
 
-- `trait_member_with_a_sandwiched_receiver_is_rejected` → rewritten to
-  `trait_member_with_a_non_trailing_receiver_dispatches`: `at ( &'T i64 -- i64 )` on an
-  `impl` now declares *and* dispatches instead of being rejected.
-- `sandwiched_receiver_no_longer_silently_mis_dispatches` → rewritten to a dispatch-correctness
-  golden: with both a trait member `at` and an unrelated concrete `: at`, the bounded call
-  reaches the trait member (name-first, ahead of `env.get`), proving the concrete word is not
-  hijacked — the mirror of the mis-dispatch it used to guard against.
-- `trait_member_with_a_zero_input_receiver_is_rejected`: kept as a rejection, assertion updated
-  to the new `zero_receiver_member_error` text (must contain `P7.S3t`).
+`src/check/poly.rs`: `a_non_trailing_receiver_dispatches_on_the_bound_variable`,
+`a_non_trailing_receiver_mismatch_is_located_not_unknown` (ruling 2's regression witness),
+`a_member_call_beats_a_concrete_word_of_the_same_name` (dispatch over an unresolved same-named
+`env` word), `cross_variable_candidates_are_separated_by_the_operands`,
+`a_cross_variable_member_call_fitting_no_candidate_names_the_operand_mismatch`,
+`a_same_variable_ambiguity_survives_a_bound_on_another_variable`,
+`a_no_fit_call_on_a_trailing_receiver_member_names_every_declared_shape` (guards the diagnostic
+against going vaguer than the single-shape one it replaces),
+`a_multi_position_duplicate_member_is_the_single_variable_ambiguity`,
+`a_repeated_bound_is_not_ambiguous_with_itself`, and the preserved
+`ambiguous_trait_member_call_is_rejected`.
+`src/check/declarations.rs`: `member_binds_trait_var_accepts_any_receiver_position`.
 
-New coverage:
+End-to-end `tests/phase7_slice3p.rs`:
+`indexable_at_on_pair_dispatches_a_non_trailing_receiver` compiles and runs `Indexable`/`at`
+over `Pair` *and* a `Flip` impl that inverts the index, so `7 9 9 7` distinguishes *which* impl
+the bounded call reached; the bounded `uses` body runs ordinary `eq`/`if` before the member
+call, pinning that the widened search leaves that dispatch alone.
 
-- `member_binds_trait_var` accepts a non-trailing and a trailing receiver, rejects a
-  variable-free signature (unit, `src/check/declarations.rs`).
-- A non-trailing receiver dispatches and records the obligation with the right `var`
-  (`check_src`/`obligations_of`, mirroring `trait_member_call_records_an_obligation`).
-- A bound-declared member with a mismatched operand is a *located* `trait_member_operand_error`,
-  not `unknown word` — pins ruling 2 (the probe's regression witness).
-- `ambiguous_trait_member_call_is_rejected` unchanged (same-variable text preserved) plus a new
-  cross-variable ambiguity test (`&'T: A &'U: B`, both declare the member) asserting the widened
-  message names both variables.
-- A multi-position, same-variable duplicate (`t1` at different input positions on one variable)
-  is still the single-variable ambiguity — pins ruling 4.
-- End-to-end (`tests/phase7_slice3p.rs`, compiled): the probe's `Indexable`/`at` on `Pair`
-  returns `p.a` / `p.b` for index `0` / `1` through a bounded generic body, with ordinary
-  `eq`/`if`/`bool` dispatch in the same body unaffected.
+## Phases (delivered)
 
-## Phases
-
-Phase 1 lands the entire checker change and keeps the suite green (it must migrate the S3e
-tests it invalidates). Phase 2 adds the compiled dogfood proof.
-
-```json
-{
-  "phases": [
-    {
-      "phase": 1,
-      "focus": "Name-first position-aware trait-member dispatch: replace receiver_ty_var stack discovery with a bounds scan, loose name-only candidate selection, widen ambiguity across variables and positions, relax the declaration gate to bind-in-some-input while deferring zero-receiver members (P7.S3t), and migrate the three now-wrong S3e tests",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 2,
-      "focus": "End-to-end compiled golden in tests/phase7_slice3p.rs: the Indexable/at Pair dogfood dispatching a non-trailing receiver to the right impl for index 0 and 1 with ordinary dispatch in the same body unaffected",
-      "difficulty": "standard"
-    }
-  ]
-}
-```
+1. The whole checker change — bounds scan, name-only selection, cross-variable operand
+   narrowing with its two diagnostics, the relaxed declaration gate with the P7.S3t deferral,
+   the `call`/`slice`/`subslice` gate, and the S3e test migration.
+2. The compiled `Indexable`/`at` dogfood golden.

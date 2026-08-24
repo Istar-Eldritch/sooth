@@ -605,28 +605,45 @@ bounded member inside its body resolves against the caller's concrete instantiat
 way a non-combinator poly word's bounded call does (S3e's R7/R8/R9), rather than being a
 located rejection.
 
-**P7.S3p -- A trait member is only dispatchable through a bound if its *last* declared
-input is the bound variable.** Named at P7.S3e's post-implementation review. `receiver_ty_var`
-(`src/check/poly.rs:781-790`) only inspects the top-of-stack operand slot to decide whether a
-call is a bound-dispatch candidate; this is exactly the slot a member's *last* declared input
-occupies. A member whose bound variable sits anywhere else in its input list --
-`at ( &'T i64 -- i64 )` (an index/lookup shape), `tag ( -- i64 )` (a zero-input constructor),
-or any shape with a trailing non-`'T` input -- never reaches the three dispatch barriers at
-all; control falls straight through to ordinary `env.get`, which is a silent wrong-answer if
-an unrelated same-named concrete word happens to be reachable, or a confusing "unknown word"
-otherwise. S3e ships a declaration-time rejection for this shape (`check_trait_decls` rejects
-any member whose input list doesn't end in `'T`) rather than attempting real dispatch, since
-`receiver_ty_var`'s single-slot model has no mechanism for locating the bound variable
-anywhere else in the operand window. Probe-validated (`docs/roadmap/P7/slice3p-brief.md`):
-name-first lookup (find which of the body's bound traits declares a member of this name,
-then read that member's own declared input list for the receiver's position) dispatches
-correctly and does not collide with the existing ordering invariant (bound dispatch must
-front every name-based special case) -- the fix is internal to how the candidate variable is
-found, not a change to call order. One caught-and-fixed subtlety: candidate selection must
-match loosely on the underlying variable (ignoring ref-vs-bare shape), or a genuine
-operand-shape mismatch silently degrades to "unknown word" instead of the located mismatch
-diagnostic. The multi-position ambiguity case and the zero-input-member (`tag`) case remain
-unprobed and open for the spec to resolve.
+**P7.S3p -- A trait member declaring its bound variable at any input position.** A member's
+receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
+(an index/lookup shape) declares and dispatches through a bound.
+
+Dispatch (`src/check/poly.rs::poly_trait_member_call`) is **name-first**. It finds which of the
+body's bound traits declares a member of the called name, each candidate carrying its own type
+variable, then reads that member's declared input list to locate the receiver in the operand
+window. Selection never reads operand shape to *decline* a candidate; the per-input check
+against the stack window is the sole place a mismatch is reported, so a wrong operand is a
+located error rather than a fall-through to `env.get`. Shape does decide *which* variable a
+call means when candidates span several (below), never whether to dispatch at all. Bound
+dispatch continues to front every name-based special case in `poly_call_term` (the S3e
+ordering invariant): position-finding is internal to candidate selection, not a change to
+call order.
+
+**Two candidates, two rules.** Candidates sharing one variable are the ambiguity error: no
+operand shape can pick between them without an overload-resolution mechanism the language does
+not have, and input position is not a disambiguator either. Candidates spanning *different*
+variables are separated by the operands the call consumes, which is what keeps one trait bound
+on two variables (`f ( &'T: A &'U: A -- ) ta ta`, two obligations resolved against their own
+thetas) callable. The fit must be unique; several fitting candidates is the ambiguity error,
+and *no* candidate fitting is its own `no_candidate_fits_operands_error` -- nothing is
+ambiguous there, since every candidate's declared operands already disagree with the stack and
+no module qualifier would change that.
+
+**The declaration gate** (`member_binds_trait_var`) requires the trait's variable as `'T` or
+`&'T` *directly* in some input. It is syntactic: a receiver mentioned only nested inside a
+composite input (`sum ( ['T 4] -- i64 )`) is rejected too, since grounding it would need
+structural unification through the array type. A nullary member (`fresh ( -- i64 )`) is the
+zero-receiver case deferred as **P7.S3t** below.
+
+Because selection is by name alone and so cannot fall through to a builtin on a shape
+mismatch, a member name that a builtin arm owns would capture every such call in a bounded
+body. `trait:` therefore rejects any member spelled as a name-dispatched builtin, `call`,
+`slice`, and `subslice` included (each is its own arm in `check_term`/`poly_call_term` and is
+absent from `BUILTIN_WORDS`, so each needs its own gate). The six surface comparisons stay
+legal: they are `lib/` words, and a body that imports one receives it mangled, so the
+spellings never collide.
+
 **Exit:** a trait member may declare its bound type variable at any input position, not only
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.

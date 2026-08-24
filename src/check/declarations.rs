@@ -338,36 +338,46 @@ pub fn check_trait_decls(module: &Module) -> Result<(), String> {
             continue;
         }
         for member in &decl.members {
-            if !member_ends_in_trait_var(member) {
-                return Err(non_trailing_receiver_error(decl, member));
+            if !member_binds_trait_var(member) {
+                return Err(zero_receiver_member_error(decl, member));
             }
         }
     }
     Ok(())
 }
 
-/// P7.S3e (R7 follow-up, post-implementation review): bound dispatch
-/// (`receiver_ty_var`, `src/check/poly.rs`) only ever inspects the
-/// top-of-stack operand, so a member whose *last* declared input is not the
-/// trait's own type variable (bare `'T` or `&'T`) can never be reached
-/// through a bound -- it would otherwise silently fall through to ordinary
-/// `env.get` at the call site instead of dispatching, or fail with a
-/// misleading "unknown word" error. Rejected here, at `trait:` declaration
-/// time, rather than left to mis-dispatch at the call. Lifting this
-/// restriction (dispatching on the bound variable at any input position) is
-/// tracked as P7.S3p.
-fn member_ends_in_trait_var(member: &TraitMember) -> bool {
-    match member.sig.inputs.last() {
-        Some(PolyType::Var(0)) => true,
-        Some(PolyType::Ref(referent, _)) => matches!(referent.as_ref(), PolyType::Var(0)),
+/// P7.S3p (ruling 5): a member must take the trait's own type variable (id 0
+/// in the member's own `PolySig`) as *some* input, bare `'T` or `&'T`, at any
+/// position -- bound dispatch (`poly_trait_member_call`, `src/check/poly.rs`)
+/// finds the variable by member name off the body's bounds and matches the
+/// whole declared input list, so a non-trailing receiver dispatches fine.
+///
+/// A member that never takes the variable *directly* still cannot dispatch:
+/// nothing at the call grounds it, and the language has no type-argument
+/// syntax to say which type's member is meant. Rejected here, at `trait:`
+/// declaration time, rather than left to mis-dispatch at the call.
+///
+/// The test is deliberately syntactic, so it covers two shapes the diagnostic
+/// must not conflate. A nullary `fresh ( -- i64 )` mentions the variable
+/// nowhere: that is the zero-receiver case deferred as P7.S3t. A `sum
+/// ( ['T 4] -- i64 )` does mention it, but only *nested* inside a composite
+/// input, and grounding that would need structural unification through the
+/// array type, which dispatch does not attempt. Both are rejected; only the
+/// first is P7.S3t.
+fn member_binds_trait_var(member: &TraitMember) -> bool {
+    member.sig.inputs.iter().any(|input| match input {
+        PolyType::Var(0) => true,
+        PolyType::Ref(referent, _) => matches!(referent.as_ref(), PolyType::Var(0)),
         _ => false,
-    }
+    })
 }
 
-fn non_trailing_receiver_error(decl: &TraitDecl, member: &TraitMember) -> String {
+fn zero_receiver_member_error(decl: &TraitDecl, member: &TraitMember) -> String {
     format!(
-        "error: trait member `{}` of `{}` (line {}, col {}) does not take `'T` (or `&'T`) as its \
-         last input, so it cannot be dispatched through a bound this slice (tracked as P7.S3p)",
+        "error: trait member `{}` of `{}` (line {}, col {}) never takes `'T` (or `&'T`) directly as \
+         an input, so a call has nothing to dispatch on\n  note: a variable nested inside a \
+         composite input (an array element, say) does not count; a nullary member is the \
+         zero-receiver case tracked as P7.S3t",
         member.name, decl.name, decl.span.line, decl.span.col
     )
 }
@@ -3499,6 +3509,64 @@ mod tests {
     #[test]
     fn check_trait_decls_ok_for_a_clean_declaration() {
         trait_check_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
+    }
+
+    /// P7.S3p (ruling 5): the gate is "takes the trait variable *directly* as
+    /// some input", so a non-trailing receiver (an index/lookup shape) passes
+    /// alongside a trailing one. A signature that never takes it directly is
+    /// rejected -- whether it mentions the variable nowhere (the nullary
+    /// `fresh`, tested here) or only nested inside a composite input (tested
+    /// by `check_trait_decls_rejects_a_receiver_nested_in_an_array_input`).
+    #[test]
+    fn member_binds_trait_var_accepts_any_receiver_position() {
+        let tokens =
+            lex("trait: T 'T at ( &'T i64 -- i64 ) sink ( i64 'T -- ) fresh ( -- i64 ) ;").unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let members = &module
+            .traits
+            .iter()
+            .find(|t| t.name == "T")
+            .expect("the trait parsed")
+            .members;
+        let binds: Vec<(&str, bool)> = members
+            .iter()
+            .map(|m| (m.name.as_str(), member_binds_trait_var(m)))
+            .collect();
+        assert_eq!(binds, vec![("at", true), ("sink", true), ("fresh", false)]);
+    }
+
+    /// The zero-receiver rejection names its deferral (P7.S3t) rather than
+    /// reading as a permanent rule: a call has no operand to ground the
+    /// variable from, and the language has no type-argument syntax to say
+    /// which type's member is meant.
+    #[test]
+    fn check_trait_decls_rejects_a_member_binding_no_receiver() {
+        let err = trait_check_src("trait: Show 'T fresh ( -- i64 ) ;").unwrap_err();
+        assert!(
+            err.contains("`fresh` of `Show`")
+                && err.contains("never takes `'T` (or `&'T`) directly as an input"),
+            "{err}"
+        );
+        assert!(err.contains("P7.S3t"), "{err}");
+    }
+
+    /// The gate is syntactic, so a receiver mentioned only *nested* inside a
+    /// composite input is rejected too -- grounding it would need structural
+    /// unification through the array type. The diagnostic must say so instead
+    /// of claiming the signature mentions `'T` nowhere, which is false here,
+    /// and must not file this shape under P7.S3t (the nullary case).
+    #[test]
+    fn check_trait_decls_rejects_a_receiver_nested_in_an_array_input() {
+        let err = trait_check_src("trait: Show 'T sum ( [ 'T 4 ] -- i64 ) ;").unwrap_err();
+        assert!(
+            err.contains("`sum` of `Show`")
+                && err.contains("never takes `'T` (or `&'T`) directly as an input"),
+            "{err}"
+        );
+        assert!(
+            err.contains("nested inside a composite input"),
+            "the nested shape must not read as the nullary case: {err}"
+        );
     }
 
     #[test]

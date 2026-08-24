@@ -153,32 +153,31 @@ fn user_trait_named_copy_collides_with_the_reserved_entry() {
     assert!(err.contains("already the name of a trait"), "{err}");
 }
 
-/// A trait member whose last declared input is not `'T`/`&'T` (a
-/// sandwiched shape, e.g. an index/lookup member) is rejected at `trait:`
-/// declaration time -- bound dispatch (`receiver_ty_var`) only ever
-/// inspects the top-of-stack operand, so this shape would otherwise
-/// silently fall through to `env.get` at the call site instead of
-/// dispatching (P7.S3p).
+/// P7.S3p: a member whose receiver is not its last declared input (an
+/// index/lookup shape) declares *and* dispatches -- the variable comes off the
+/// body's bounds by member name, not off the top of the stack, so the receiver
+/// sits wherever the signature puts it.
 #[test]
-fn trait_member_with_a_sandwiched_receiver_is_rejected() {
+fn trait_member_with_a_non_trailing_receiver_dispatches() {
     let (_t, entry) = single_file(
-        "sandwiched-receiver",
-        "trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
-         : main ( -- ) ;\n",
+        "non-trailing-receiver",
+        "type: Point x i64 y i64 ;\n\
+         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         impl: Indexable for Point\n\
+           : at | p n | n drop p &x @ ;\n\
+         ;\n\
+         : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
+         : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
     );
-    let err = build_error(&entry);
-    assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
-        "{err}"
-    );
-    assert!(err.contains("P7.S3p"), "{err}");
+    assert_eq!(build_and_run(&entry), "7\n");
 }
 
-/// The same rejection applies to a zero-input member (a constructor shape
-/// with no receiver slot at all). The member is spelled `fresh`, not `tag`:
-/// P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at the
-/// `trait:` declaration, which would preempt the receiver diagnostic this test
-/// is about.
+/// A member binding the trait's variable in *no* input is still rejected at
+/// `trait:` declaration time: a call has no operand to ground the variable
+/// from, and there is no type-argument syntax to supply one. Deferred, not
+/// ruled out -- the message names P7.S3t. The member is spelled `fresh`, not
+/// `tag`: P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at
+/// the declaration, which would preempt the diagnostic this test is about.
 #[test]
 fn trait_member_with_a_zero_input_receiver_is_rejected() {
     let (_t, entry) = single_file(
@@ -188,31 +187,125 @@ fn trait_member_with_a_zero_input_receiver_is_rejected() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        err.contains("never takes `'T` (or `&'T`) directly as an input"),
+        "{err}"
+    );
+    assert!(err.contains("P7.S3t"), "{err}");
+}
+
+/// P7.S3p selects a member by name alone, ahead of every builtin arm, so it
+/// cannot fall through to the builtin when the operands do not fit. A member
+/// named `call` would therefore capture *every* `call` in any body bounded by
+/// its trait, making quotation application unreachable there: a body
+/// `( &'T: C [ -- i64 ] -- i64 ) call ...` applying its quotation parameter
+/// stopped compiling, reporting `call` "expects `&'T`, found `[ -- i64 ]`".
+/// The fixture here only needs the declaration, since the rejection is what
+/// keeps that body reachable.
+///
+/// `call` needs its own gate: it is not in `BUILTIN_WORDS`, so P7.S3r (R4)'s
+/// `is_name_dispatched_builtin` rejection does not cover it, and it cannot be
+/// added to that set without also making bare `call` require an `intrinsics`
+/// import (P8 S2 R2).
+#[test]
+fn trait_member_named_call_is_rejected() {
+    let (_t, entry) = single_file(
+        "call-named-member",
+        "trait: C 'T call ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `call`, which is a builtin word (line 2, col 13)"
+        ),
         "{err}"
     );
 }
 
-/// The counterexample a post-implementation review built to demonstrate
-/// silent mis-dispatch: before the P7.S3p rejection, this program built and
-/// printed `900` (the unrelated concrete `at` word) instead of dispatching
-/// to the trait member at all. It must now fail to compile.
+/// Same shape as `call` above: `slice` is its own arm in `poly_call_term`,
+/// absent from `BUILTIN_WORDS`, so a member named `slice` would otherwise
+/// capture every `&[..] slice` in a bounded body.
 #[test]
-fn sandwiched_receiver_no_longer_silently_mis_dispatches() {
+fn trait_member_named_slice_is_rejected() {
     let (_t, entry) = single_file(
-        "sandwiched-mis-dispatch",
+        "slice-named-member",
+        "trait: C 'T slice ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `slice`, which is a builtin word (line 2, col 13)"
+        ),
+        "{err}"
+    );
+}
+
+/// Same shape as `call` above: `subslice` is its own arm in `poly_call_term`,
+/// absent from `BUILTIN_WORDS`, so a member named `subslice` would otherwise
+/// capture every `&[..] .. .. subslice` in a bounded body.
+#[test]
+fn trait_member_named_subslice_is_rejected() {
+    let (_t, entry) = single_file(
+        "subslice-named-member",
+        "trait: C 'T subslice ( &'T -- i64 ) ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "trait `C` declares a member named `subslice`, which is a builtin word (line 2, col 13)"
+        ),
+        "{err}"
+    );
+}
+
+/// The negative half of the gate above: the six surface comparisons stay legal
+/// member names, and a bound really does claim one here (they are `lib/` words,
+/// not builtin arms, and a body that imports one receives it mangled, so the
+/// spellings never collide). Without this, widening the `call` rejection to the
+/// whole comparison set would go unnoticed.
+#[test]
+fn trait_member_named_after_a_surface_comparison_dispatches() {
+    let (_t, entry) = single_file(
+        "eq-named-member",
+        "type: Tag v i64 ;\n\
+         trait: C 'T eq ( &'T -- i64 ) ;\n\
+         impl: C for Tag\n\
+           : eq | t | t &v @ ;\n\
+         ;\n\
+         : uses ( &'T: C -- i64 ) eq ;\n\
+         : main ( -- ) 5 Tag |t| &t uses . t drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "5\n");
+}
+
+/// The counterexample a post-implementation review built to demonstrate silent
+/// mis-dispatch: this program used to build and print `900` (the unrelated
+/// concrete `at` word) instead of dispatching to the trait member. Lifting the
+/// declaration gate does not bring that back. A real build resolves names
+/// before checking, so the concrete `at` this module declares captures the
+/// call site's spelling (S3e R18: the trait loses a collision with a word of
+/// the member's name, deliberately) -- and the concrete word cannot consume
+/// the receiver, so the mis-dispatch is a located rejection rather than a
+/// wrong answer. Dispatch winning over an *unresolved* same-named word is
+/// pinned in `check::poly`'s own tests.
+#[test]
+fn a_concrete_word_of_the_members_name_captures_the_call() {
+    let (_t, entry) = single_file(
+        "member-name-collision",
         "type: Point x i64 y i64 ;\n\
-         trait: Show 'T at ( &'T i64 -- i64 ) ;\n\
-         impl: Show for Point\n\
+         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         impl: Indexable for Point\n\
            : at | p n | n drop p &x @ ;\n\
          ;\n\
          : at ( i64 -- i64 ) 900 add ;\n\
-         : uses ( &'T: Show -- i64 ) 0 at | v | drop v ;\n\
+         : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
          : main ( -- ) 7 2 Point |p| &p uses . p drop ;\n",
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("does not take `'T` (or `&'T`) as its last input"),
+        err.contains("body leaves `&'T i64`") && err.contains("`uses`"),
         "{err}"
     );
 }

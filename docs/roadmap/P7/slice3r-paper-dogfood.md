@@ -81,9 +81,9 @@ impl: Show for Point
   recursion/shadowing machinery (decisions 4/5) is not exercised by `traits.sth`. It has
   no witness here; its only witnesses live in the brief's own P1/P3 probes.
 - **Signature inheritance loses nothing the *checker* needs.** For both members `'T`
-  appears as `&'T` in the inputs, and the P7.S3p rule already forces every trait member to
-  take `'T`/`&'T` as its last input
-  (`tests/phase7_slice3e.rs::trait_member_with_a_zero_input_receiver_is_rejected`). So a
+  appears as `&'T` in the inputs, and every trait member must take `'T`/`&'T` as some input
+  (`member_binds_trait_var`, pinned by
+  `tests/phase7_slice3e.rs::trait_member_with_a_zero_input_receiver_is_rejected`). So a
   member can never have a fully `'T`-free signature, and the `(trait, for-type)` pair
   always fully determines the grounded effect. Inheritance is never ambiguous.
 - **Signature inheritance has a *reader* cost that scales with signature shape.** At the
@@ -186,8 +186,8 @@ the new form.
   `poly.rs`, `driver.rs`, `ir/driver.rs`, `tests/phase7_slice3e.rs`.
 - Structural rejections that live at the `trait:` decl or the registry, not the binding:
   `duplicate_impl_for_the_same_trait_and_type`, `impl_binding_missing_a_required_member`
-  (body omits a member), orphan-rule, export/selective-import, P7.S3p `sandwiched_receiver`
-  and zero-input-receiver.
+  (body omits a member), orphan-rule, export/selective-import, and P7.S3p's zero-input-receiver
+  rejection.
 
 ### A NEW ruling the body form forces (not in the brief's OQ list)
 

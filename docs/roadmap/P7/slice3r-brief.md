@@ -178,8 +178,9 @@ Companion documents: `slice3r-spike-mangling.md` (the mangling spike) and
    `unexpected token Semicolon`), matching this project's standing hazard that anything
    wired only into `assemble_module` is unenforced at the REPL. Mirror the `export:` /
    `global:` guards at `src/repl.rs:1596/1700`.
-6. **Signature inheritance is never ambiguous.** P7.S3p already forces every trait member
-   to take `'T`/`&'T` as its last input, so a member can never have a `'T`-free signature
+6. **Signature inheritance is never ambiguous.** Every trait member must take `'T`/`&'T`
+   as some input (`member_binds_trait_var`; a member binding it in none is rejected at
+   `trait:` time, deferred as P7.S3t), so a member can never have a `'T`-free signature
    and the `(trait, for-type)` pair always determines the grounded effect. The cost is to
    the *reader*, not the checker, and it grows with signature shape (a member like
    `clone ( &'T -- ['T 4] )` must be grounded by hand at the impl site).

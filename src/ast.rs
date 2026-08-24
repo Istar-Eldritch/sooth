@@ -2724,6 +2724,11 @@ mod tests {
             );
         }
         assert!(is_name_dispatched_builtin("."), "`.` is a real intrinsic");
+        // Quotation application is its own arm in `check_term`/`poly_call_term`,
+        // not a table entry, so this predicate does not cover it and must not be
+        // widened to: it is also the set the `intrinsics` import gates (P8 S2 R2),
+        // and bare `call` is not import-gated. `parse_trait`'s member-name
+        // rejection therefore tests `call` separately (P7.S3p).
         assert!(
             !is_name_dispatched_builtin("call"),
             "`call` is not in the table"

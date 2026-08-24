@@ -41,9 +41,10 @@ The trait component carries `TraitDecl::module` as well as the name: two same-na
 different modules may both be implemented for one type in one module, and the bare name would
 collide. The `Type` component is only the rendered type name, so two same-named types from
 different modules are separated by the ordinary overload-suffix path instead; that works because
-a member's last input must be `'T`/`&'T` (`non_trailing_receiver_error`), so every grounded
-signature mentions the `for` type. If that dispatchability rule is relaxed (P7.S3p), the `Type`
-component needs its own module id.
+a member must take `'T`/`&'T` as *some* input (`member_binds_trait_var`), so every grounded
+signature mentions the `for` type. P7.S3p relaxed that rule from the last input to any input,
+which leaves the guarantee intact; only admitting a member that binds `'T` in no input at all
+(P7.S3t) would make the `Type` component need its own module id.
 
 ## Deleted, and where the intent went
 
