@@ -492,8 +492,18 @@ R9 split of `src/check/audits.rs:942-970`'s `owning_quotation_is_rejected_in_eve
 into an admitted-three and a still-rejected-two test, and every new end-to-end golden in the
 Tests section except the REPL one.
 
-**Out of bounds.** `src/repl.rs` (phase 4), `src/ir/func_builder/`, `src/ir/types.rs`,
-`src/backend/qbe.rs`.
+**Out of bounds.** `src/repl.rs` (phase 4), `src/ir/types.rs`, `src/backend/qbe.rs`.
+
+**Finding.** `src/ir/func_builder/` was scoped out above, but R6's cell carve-out needed a
+lowering arm phase 2 never provided: `load_owned_payload`/`store_owned_payload`
+(`src/ir/func_builder/word_families.rs`) had no case for a quotation payload at all, so an
+owning-quotation cell that phase 3 newly admits would have hit the scalar-`FieldStore`/
+`FieldLoad` fallback instead of the aggregate blit its layout needs. The phase 2 decomposition
+was wrong, on the same standard phase 4 states explicitly for its own out-of-bounds line. The
+fix landed in phase 3 rather than being deferred, since without it the cell carve-out's own
+goldens fail. Both new arms admit only `IrType::OwningQuotation` — a plain quotation cell payload
+stays on the scalar fallback and rejected by the checker, so nothing pre-stages a future D4
+widening.
 
 **Entry.** Phase 2 landed and green.
 
