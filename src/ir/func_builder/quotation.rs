@@ -1024,8 +1024,9 @@ mod tests {
         // R3: `drop` on an owning closure runs the per-construction-site
         // disposer its third slot names, disposing its captures without
         // running its body. Built against a constructed value rather than a
-        // program: the checker still rejects `drop` on this type (phase 3
-        // lifts that), so no source reaches this arm yet.
+        // program because it pins the emitted shape -- the null check and the
+        // indirect call -- which the end-to-end goldens cannot observe: they
+        // see only that a capture's `drop` printed.
         let structs = Structs::default();
         let enums = Enums::default();
         let arrays = Arrays::default();

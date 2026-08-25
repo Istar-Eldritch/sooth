@@ -2842,9 +2842,11 @@ mod tests {
     /// nothing else, so every enabling/routing site routes through one place.
     /// P7.S3h: three variants now. The `owning` row is load-bearing twice
     /// over: `call` reaches `check_abstract_quotation_call` through this
-    /// accessor, and the registry audit's rejection dispatches on it, which is
-    /// what makes the containment rule (never a field, element, payload or
-    /// referent) automatic rather than a gate of its own.
+    /// accessor, and the registry audit dispatches on it. P7.S3v (R6)
+    /// narrowed that second half -- the owning flavour is now admitted as a
+    /// struct field, an enum variant field and an owned-cell payload (each its
+    /// own carve-out), and rejected through this accessor only as an array
+    /// element and a reference referent.
     #[test]
     fn is_quotation_type_accepts_all_three_variants_only() {
         let ord = quotation_type(vec![Type::I64], Vec::new());

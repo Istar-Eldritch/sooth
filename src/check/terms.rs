@@ -408,10 +408,14 @@ fn check_term(
             if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
                 let vi = stack.len() - 1;
                 if let Some(QuotRef::Known(id)) = stack[vi].quot {
-                    // P7.S3h: no owning arm here. A `&!` referent is a field,
-                    // an element or a cell payload, and the containment rule
-                    // bans an owning quotation from every one of those, so an
-                    // `owning` referent cannot be declared in the first place.
+                    // No owning arm here. P7.S3v (R6) admits an owning
+                    // quotation as a struct field, a variant field and a cell
+                    // payload, so a `&!` projection of one does reach this
+                    // point -- but it needs no materialization boundary: the
+                    // owning flavour is `is_linear`, so `check_access_word`
+                    // rejects the store outright ("cannot access the linear
+                    // referent") because overwriting would leak the closure
+                    // being replaced.
                     if let Some((Type::Quotation(eff), _)) = ref_parts(stack[vi - 1].ty, refs) {
                         let qspan = prov.quotations[id.0].span;
                         let escaping = !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope);
@@ -863,10 +867,13 @@ fn check_term(
             // -- e.g. `Holder>` on `type: Holder q [ i64 -- i64 ] ;`. A
             // quotation-typed output legitimately carries the closure onward
             // exactly as an aggregate output does, so it forwards too.
-            // `OwningQuotation` forwards for the same reason: it may not sit
-            // in an aggregate (the containment rule), so a word passing one
-            // through is its *only* carrier, and dropping the set here would
-            // blind R22 to a frame capture leaving via that output.
+            // `OwningQuotation` forwards for the same reason: an owning
+            // output carries the closure onward exactly as a plain quotation
+            // or an aggregate output does, so dropping the set here would
+            // blind R22 to a frame capture leaving via that output. P7.S3v
+            // (R6) made an aggregate a legal carrier too, so this is no
+            // longer a value's *only* carrier -- over-forwarding the set is
+            // harmless, under-forwarding is not.
             // Review fix (P7 slice 1): an ordinary word call consumes its
             // operands just as `drop` does, so a struct operand a live
             // projection still reaches (the owned-receiver projection arm's

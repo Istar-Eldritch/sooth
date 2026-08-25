@@ -134,6 +134,22 @@ fn call_and_drop_run_different_code() {
     assert_eq!(build_and_run(dropped.path()), "drop 7\n");
 }
 
+/// The null-disposer arm of R3's guarded `emit_drop`, at runtime. A closure
+/// with no captures needs no disposer, so its third slot is null and `drop`
+/// must branch past the indirect call rather than jump to zero. Every other
+/// golden here captures a `Spy`, so all of them take the non-null branch; the
+/// null one was pinned only structurally, by `emit_drop`'s unit test. Nothing
+/// is printed by the closure itself, so reaching the trailing `ok` *is* the
+/// assertion: a mis-emitted guard segfaults instead.
+#[test]
+fn dropping_a_capture_free_owning_closure_skips_the_null_disposer() {
+    let prog = Scratch::write(
+        "drop-owning-nullary",
+        ": mk ( -- owning [ -- ] ) [ ] ;\n: main ( -- ) mk drop \"ok\\n\" . ;\n",
+    );
+    assert_eq!(build_and_run(prog.path()), "ok\n");
+}
+
 // -- R5/R6: the three admitted storage positions ------------------------------
 
 /// Migrated from `an_owning_quotation_field_is_rejected`, inverted. The struct

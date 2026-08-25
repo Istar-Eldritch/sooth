@@ -1540,8 +1540,12 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // a value-containment node; like a reference it closes no size cycle.
         // Slice 10a: a `~` is never a field (it cannot be materialized), so it
         // reaches this recursion graph only vacuously; it too is a leaf.
-        // P7.S3h: an `owning` quotation is never a field either (the
-        // containment rule), so it is vacuous here for the same reason.
+        // P7.S3v (R6): an `owning` quotation *is* a legal field, so this arm
+        // is load-bearing rather than vacuous -- and it is still a leaf. The
+        // value is a fixed three-slot aggregate (code, env, disposer) whose
+        // captures live behind the env pointer, so like a reference it holds
+        // no inline copy and closes no size cycle: `type: Box q owning
+        // [ Box -- ] ;` is finite.
         | Type::Quotation(_)
         | Type::InlineQuotation(_)
         | Type::OwningQuotation(_) => None,
