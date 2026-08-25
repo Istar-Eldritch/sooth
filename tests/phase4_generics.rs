@@ -1104,14 +1104,23 @@ fn times_example_matches_hand_threaded_countdown() {
 
 #[test]
 fn poly_mymax_runs_at_i64_and_f64() {
-    // T9: `mymax`'s `'T: Copy Ord` body branches on `gt`, instantiated at `i64`
-    // and `f64` in one program. Slice 10c: `inline`, because `if` is an
-    // ordinary word taking two quotation literals and a non-spliced
-    // polymorphic body rejects a quotation outright; the branch runs through
-    // the ordinary splice now.
+    // T9: `mymax`'s body branches on a raw comparison, instantiated at `i64`
+    // and `f64` in one program, `inline` because `if` is an ordinary word
+    // taking two quotation literals and a non-spliced polymorphic body
+    // rejects a quotation outright (S3o); the branch runs through the
+    // ordinary splice now.
+    //
+    // P7.S3s (R7): `inline` still declares no `Bound::User` variable
+    // (`reject_user_bound_on_combinator`), and `Ord` is one now, so this
+    // fixture keeps its own point -- an `inline` generic body splicing `if`
+    // correctly -- by dropping the `Ord` bound and the library `gt` call it
+    // would need, and comparing through the raw `ugt` intrinsic wrapped in
+    // the same `[ True ] [ False ] branch` construction `gt` itself is built
+    // over, so the body stays genuinely `Bound::User`-free while still
+    // producing the `Bool` its own `if` consumes.
     let (stdout, code) = run_src(
         "poly-mymax",
-        ": mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n\
+        ": mymax inline ( 'T: Copy 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
          : main ( -- ) 3 7 mymax . 3.0 7.0 mymax . ;\n",
         false,
     );

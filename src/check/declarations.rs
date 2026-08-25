@@ -1281,7 +1281,11 @@ fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity:
 /// with a local poly word is already rejected generically by
 /// `check_selective_imports`' local-collision check, regardless of poly vs.
 /// concrete, so that case needs no mirror here.
-pub(super) fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), String> {
+pub(super) fn check_generic_concrete_overlap(
+    words: &[WordDef],
+    traits: &[TraitDecl],
+    impls: &[ImplDecl],
+) -> Result<(), String> {
     let builtins = builtin_table();
     let mut builtin_arity: HashMap<&str, usize> = HashMap::new();
     for (name, rows) in builtins.iter() {
@@ -1300,7 +1304,7 @@ pub(super) fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), St
         let arity = sig.inputs.len();
         let concrete_overlaps = concrete_inputs
             .get(&(word.module, word.name.as_str()))
-            .is_some_and(|inputs| inputs.len() == arity && poly_admits(sig, inputs));
+            .is_some_and(|inputs| inputs.len() == arity && poly_admits(sig, inputs, impls, traits));
         let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity) || concrete_overlaps;
         if overlaps {
             return Err(generic_concrete_overlap_error(
@@ -1388,13 +1392,22 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
 /// Slice 10c: this is what lets `core::cmp`'s `: < ( 'T: Copy Ord 'T --
 /// bool )` coexist with a user's `: < ( Vec2 Vec2 -- bool )`, which slice 8a
 /// shipped and an arity-only test would now reject outright. Only the `Ord`
-/// bound is consulted (`is_ord` is `is_numeric` and nothing else): `Copy` needs
-/// the struct/enum registries this pass does not carry, and leaving it out only
-/// ever keeps the rule *stricter*.
-fn poly_admits(sig: &PolySig, inputs: &[Type]) -> bool {
+/// bound is consulted (P7.S3s: an `impl: Ord` registry lookup, `Ord` no
+/// longer being a reserved predicate): `Copy` needs the struct/enum
+/// registries this pass does not carry, and leaving it out only ever keeps
+/// the rule *stricter*.
+fn poly_admits(sig: &PolySig, inputs: &[Type], impls: &[ImplDecl], traits: &[TraitDecl]) -> bool {
     inputs.iter().zip(&sig.inputs).all(|(ty, pin)| match pin {
         PolyType::Concrete(want) => want == ty,
-        PolyType::Var(v) => !sig.has_bound(*v, Bound::Ord) || ty.is_numeric(),
+        // `ord_trait_id` resolves *this* `sig`'s own `Ord` bound (review
+        // fix: not a whole-program name search, which fails open under a
+        // module-local `trait: Ord`).
+        PolyType::Var(v) => match crate::check::ord_trait_id(sig, *v, traits) {
+            Some(ord) => impls
+                .iter()
+                .any(|i| i.trait_id == ord && i.target_ty == *ty),
+            None => true,
+        },
         _ => true,
     })
 }
@@ -2780,13 +2793,13 @@ mod tests {
         // combination was rejected even though nothing imports across the
         // two modules.
         let words = vec![concrete_word("bump", 1, 1), poly_word("bump", 0, 1)];
-        check_generic_concrete_overlap(&words)
+        check_generic_concrete_overlap(&words, &[], &[])
             .expect("an unrelated same-name concrete word in a different module must not overlap");
 
         // Mutation check: the *same*-module case must still be rejected --
         // module-scoping narrows the key, it does not disable the check.
         let words = vec![concrete_word("bump", 0, 1), poly_word("bump", 0, 1)];
-        let err = check_generic_concrete_overlap(&words).unwrap_err();
+        let err = check_generic_concrete_overlap(&words, &[], &[]).unwrap_err();
         assert!(
             err.contains("generic overload")
                 && err.contains("overlaps a concrete overload of `bump`"),
@@ -3432,11 +3445,13 @@ mod tests {
     }
     #[test]
     fn check_struct_equality_operator_is_error() {
-        // X7: `eq` on two structs is scalar-only, naming the struct type.
+        // X7, revised under P7.S3s R5: `eq` is now the library's non-inline
+        // `'T: Copy Ord` word, so a struct with no `impl: Ord` is rejected at
+        // the bound, not at a scalar-only operand-pair guard.
         let src = "type: Vec2 x i64 y i64 ; : main ( -- Bool ) 1 2 Vec2 1 2 Vec2 eq ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same numeric type"),
+            err.contains("does not satisfy `Ord`"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`Vec2`"), "unexpected message: {err}");
@@ -3560,10 +3575,15 @@ mod tests {
     }
     #[test]
     fn check_enum_equality_operator_is_error() {
-        // X10/M2: `eq` on two enums reaches the operand-pair guard.
+        // X10/M2, revised under P7.S3s R5: `eq` is the library's non-inline
+        // `'T: Copy Ord` word, so an enum with no `impl: Ord` is rejected at
+        // the bound, not at the operand-pair guard.
         let err =
             check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Bool ) eq ;").unwrap_err();
-        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(
+            err.contains("does not satisfy `Ord`"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("Shape"), "unexpected message: {err}");
     }
     #[test]

@@ -11,6 +11,6 @@
 \ imports `core::bool` directly; everything else comes through here.
 import: intrinsics | drop | ;
 import: self::bool | if unless Bool False True | ;
-import: self::cmp | eq lt gt lte gte ne | ;
+import: self::cmp | Ord Ordering Less Equal Greater eq lt gt lte gte ne | ;
 
-export: drop if unless Bool False True eq lt gt lte gte ne ;
+export: drop if unless Bool False True Ord Ordering Less Equal Greater eq lt gt lte gte ne ;

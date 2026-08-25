@@ -1326,7 +1326,11 @@ mod tests {
 
     #[test]
     fn lower_le_ge_ne_route_to_matching_cmpop() {
-        let ir = lower_src(": w ( -- Bool Bool Bool ) 1 2 lte 1 2 gte 1 2 ne ;");
+        // Revised under P7.S3s R5: `lte`/`gte`/`ne` are the library's
+        // non-inline `'T: Copy Ord` words now (a real call through `cmp`,
+        // not a direct `CmpOp`), so the raw primitives (`ulte`/`ugte`/`une`)
+        // are what still exercise this routing directly.
+        let ir = lower_src(": w ( -- u32 u32 u32 ) 1 2 ulte 1 2 ugte 1 2 une ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         for op in [CmpOp::Le, CmpOp::Ge, CmpOp::Ne] {
@@ -1432,7 +1436,12 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 gt ~[ 1 sub go ] ~[ drop ] if ;");
+        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5:
+        // `gt` is a real call now, which would inflate the call count this
+        // test measures; the raw primitive keeps the same stack effect at
+        // zero cost, exactly as `gt`'s own old inline body did).
+        let ir =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1479,8 +1488,12 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact mul`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        let ir =
-            lower_src(": fact ( i64 -- i64 ) dup 0 eq ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;");
+        // `dup 0 ueq [ True ] [ False ] branch` in place of `eq` (P7.S3s R5:
+        // `eq` is a real call now, which would inflate the call count this
+        // test measures).
+        let ir = lower_src(
+            ": fact ( i64 -- i64 ) dup 0 ueq [ True ] [ False ] branch ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;",
+        );
         let f = &ir.funcs[0];
         assert_eq!(
             count(f, is_call_instr),
@@ -1498,7 +1511,10 @@ mod tests {
         // R10 over-eager boundary: the `if` is followed by more terms
         // (`drop 5`), so it is non-terminal and its arms are not in tail
         // position; the self-call stays a real `Instr::Call`.
-        let ir = lower_src(": w ( i64 -- i64 ) dup 0 gt ~[ w ] ~[ drop 0 ] if drop 5 ;");
+        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5).
+        let ir = lower_src(
+            ": w ( i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ w ] ~[ drop 0 ] if drop 5 ;",
+        );
         let f = &ir.funcs[0];
         assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
@@ -1509,7 +1525,10 @@ mod tests {
         // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
         // arm of a terminal `if` back-edges, so the single header phi gains two
         // back-edge arms on top of the entry arm (three total).
-        let ir = lower_src(": go ( i64 -- i64 ) dup 0 gt ~[ 1 sub go ] ~[ 1 add go ] if ;");
+        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5).
+        let ir = lower_src(
+            ": go ( i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub go ] ~[ 1 add go ] if ;",
+        );
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1753,11 +1772,16 @@ mod tests {
         // The array read `&arr i &>` emits the mandatory `sooth_oob_trap`
         // bounds-check call (the hand-threaded twin emits it too); it is not a
         // per-element call to the combinator or its element quotation, so it is
-        // excluded. What must be absent is any call to `each` or a spliced
-        // element op: the loop body is the spliced literal, not a call.
+        // excluded. `TIMES_DEF`'s own `from to lt` is also excluded (P7.S3s
+        // R5: `lt` is a real call now, not spliced) -- pinned verbatim against
+        // `lib/combinators.sth` by `each_lowering_test_times_def_is_pinned_to_
+        // the_library`, so it cannot be rewritten away here without drifting
+        // from the library it stands in for. What must be absent is any call
+        // to `each`/`times`/`times-helper` itself or a spliced element op: the
+        // loop body is the spliced literal, not a call.
         let user_calls: Vec<&str> = call_symbols(main)
             .into_iter()
-            .filter(|s| *s != "sooth_oob_trap")
+            .filter(|s| *s != "sooth_oob_trap" && !s.starts_with("sooth_mono_lt"))
             .collect();
         assert!(
             user_calls.is_empty(),
@@ -1798,9 +1822,13 @@ mod tests {
         // `lower_call` would leave an `Instr::Call` to `while` (or splice the
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
+        // `dup 5 ult [ True ] [ False ] branch` in place of `lt` (P7.S3s R5:
+        // `lt` is a real call now, which would leave an unrelated call in
+        // `main`'s spliced body that this test's own `call_symbols` assertion
+        // must otherwise special-case).
         let ir = lower_src(
             ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n",
+             : main ( -- ) 0 [ dup 5 ult [ True ] [ False ] branch ~[ 1 add True ] ~[ False ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

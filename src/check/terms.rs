@@ -195,7 +195,18 @@ fn check_term(
             // guard already covers it.
             if !type_args.is_empty()
                 && !poly_call_takes_type_args(
-                    name, span, &stack, ctx, env, arrays, cells, refs, scope, poly,
+                    name,
+                    span,
+                    &stack,
+                    ctx,
+                    env,
+                    arrays,
+                    cells,
+                    refs,
+                    scope,
+                    poly,
+                    poly.trait_resolve.impls,
+                    poly.trait_resolve.traits,
                 )
             {
                 return Err(no_type_arguments_error(span, name));
@@ -704,7 +715,18 @@ fn check_term(
             let fall_through_to_env = env.contains_key(name)
                 && poly.env.get(name).is_some_and(|cands| {
                     !cands.iter().any(|(sig, _)| {
-                        poly_sig_could_match(sig, &stack, name, span, ctx, arrays, cells, refs)
+                        poly_sig_could_match(
+                            sig,
+                            &stack,
+                            name,
+                            span,
+                            ctx,
+                            arrays,
+                            cells,
+                            refs,
+                            poly.trait_resolve.impls,
+                            poly.trait_resolve.traits,
+                        )
                     })
                 });
             if let Some(candidates) = poly.combinators.get(name) {
@@ -1067,6 +1089,8 @@ fn poly_call_takes_type_args(
     refs: &[RefDecl],
     scope: &Scope,
     poly: &PolyCtx,
+    impls: &[crate::ast::ImplDecl],
+    traits: &[crate::ast::TraitDecl],
 ) -> bool {
     scope.local(name).is_none()
         && !crate::ast::is_name_dispatched_builtin(name)
@@ -1075,7 +1099,9 @@ fn poly_call_takes_type_args(
         && poly.env.get(name).is_some_and(|candidates| {
             !env.contains_key(name)
                 || candidates.iter().any(|(sig, _)| {
-                    poly_sig_could_match(sig, stack, name, span, ctx, arrays, cells, refs)
+                    poly_sig_could_match(
+                        sig, stack, name, span, ctx, arrays, cells, refs, impls, traits,
+                    )
                 })
         })
 }

@@ -242,10 +242,17 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
     assert!(err.contains("line 1"), "the error is located: {err}");
 }
 
-// -- E-P3-4: comparisons are library words, at no cost -----------------------
+// -- E-P3-4: comparisons are library words --------------------------------
 
 /// Part 1: the six surface names resolve to `lib/` definitions and no
 /// comparison builtin row remains.
+///
+/// Revised under P7.S3s R5: `Ord` became a nominal trait, and
+/// `reject_user_bound_on_combinator` refuses any `Bound::User` on an
+/// `inline` word's own type variable -- so the six comparisons, once `Ord`
+/// stopped being a reserved predicate, could no longer stay `inline` (they
+/// are ordinary non-inline calls now, a measured ~2x tax accepted for this
+/// slice, P7.S3o names the follow-on that could restore the splice).
 #[test]
 fn the_six_comparisons_are_library_words() {
     let core = test_support::core_lib_words();
@@ -256,8 +263,8 @@ fn the_six_comparisons_are_library_words() {
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
-            word.declares_inline,
-            "`{name}` is `inline`, or every comparison becomes a real call"
+            !word.declares_inline,
+            "`{name}` is a real call now (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline` word may not declare"
         );
         let sig = word
             .poly
@@ -345,32 +352,28 @@ fn check_ueq_family_lowers_to_cmpop() {
     }
 }
 
-/// Part 3: the canonical `a b eq if ... ...` pattern costs nothing. The library
-/// `eq` is spliced, so its call site mints no symbol and emits no `Instr::Call`;
-/// the branch-and-construct diamond it adds in IR is what QBE folds away.
+/// Part 3: the canonical `a b eq if ... ...` pattern. `if` is still spliced
+/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is now a real call
+/// through `cmp` (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline`
+/// word cannot declare, so the comparison itself is the accepted ~2x tax,
+/// not a free abstraction any more.
 ///
-/// Measured mutation: drop `inline` from a comparison word and the program
-/// stops building at all -- a polymorphic word's `effect` is empty, so without
-/// the splice its own body checks against a zero-arity signature. The `inline`
-/// declaration is not an optimisation on this path, it is what makes a
-/// polymorphic comparison word exist.
+/// Measured mutation: restore `inline` on `eq` (with its `Ord` bound still in
+/// place) and the program stops building -- `reject_user_bound_on_combinator`
+/// refuses a `Bound::User` on a combinator's own type variable.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
     let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
-        !funcs.iter().any(|f| f.name.starts_with("eq")),
-        "no `IrFunc` is minted for the library `eq`"
+        funcs
+            .iter()
+            .any(|f| f.name.starts_with("sooth_mono_eq") || f.name.starts_with("sooth_mono_cmp")),
+        "an `IrFunc` is minted for the library `eq`/`cmp` monomorphization"
     );
     let w = func(&funcs, "w");
     assert!(
-        !instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
-        "the comparison and the branch are both spliced, so no call is emitted"
-    );
-    assert!(
-        instrs(w)
-            .iter()
-            .any(|i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
-        "the comparison is still one `Cmp`"
+        instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
+        "`eq` is a real call now, unlike the spliced `if`"
     );
 }
 
@@ -414,32 +417,32 @@ fn word_w_assembly(src: &str) -> String {
     s[start..end].trim_end().to_string()
 }
 
-/// Part 3, at the machine-code level. The IR-level test above pins that the
-/// library `eq`/`if` mint no call and add one `Cmp`; this pins the stronger
-/// claim the spec's R-P3-3a actually makes: the library form costs *nothing*
-/// over the raw primitives. `eq [ 1 ] [ 2 ] if` lowers to two branch-and-
-/// construct diamonds in QBE IL (one for `eq`'s `Bool`, one for `if`); the raw
-/// primitive `ueq [ 1 ] [ 2 ] branch` lowers to one. QBE folds both to the same
-/// branchless machine code, so the abstraction is free.
+/// Part 3, at the machine-code level. `if` still folds to the same
+/// branchless machine code as raw `branch` (it stays `inline`); `eq` no
+/// longer does (P7.S3s R5): a real `call` to the library `eq`/`cmp`
+/// monomorphization appears where the raw `ueq` primitive has none. This
+/// pins the accepted ~2x tax as a real machine-code difference, not merely
+/// an IR-level `Instr::Call`, replacing the pre-P7.S3s claim that the two
+/// forms were machine-code identical.
 ///
-/// This is a *relative* equivalence through one QBE on one host, not a pinned
-/// absolute assembly string: the rest of the suite pins portable QBE IL for a
-/// reason, and an x86 golden would rot on a different target or QBE version.
-/// The primitive `ueq ... branch` form is exactly the post-migration lowering of
-/// the pre-migration `= if 1 else 2 end`; that the two agree was cross-checked
-/// out of band against the compiler rebuilt at the pre-P3 checkpoint (builtin
-/// `eq` + `TermKind::If`), whose `w` was the same `cmov`.
-///
-/// Mutation: if the library `if`/`eq` stop splicing (a real `call`, an
-/// unfoldable extra `Bool` materialisation, a lost `inline`) the two blocks
-/// diverge or the build breaks.
+/// Mutation: if the library `eq` starts splicing again (`inline` restored,
+/// which needs `Ord` to stop being a `Bound::User`), the two blocks converge
+/// and this assertion inverts.
 #[test]
-fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
+fn the_library_eq_costs_a_call_the_branch_primitive_does_not() {
     let library = word_w_assembly(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;");
     let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;");
-    assert_eq!(
+    assert_ne!(
         library, primitive,
-        "library `=`/`if` must fold to the same machine code as raw `u=`/`branch`"
+        "the library `eq` is a real call now; it should no longer fold to the same machine code as raw `ueq`/`branch`"
+    );
+    assert!(
+        library.contains("call"),
+        "the library form should still show a real call: {library}"
+    );
+    assert!(
+        !primitive.contains("call"),
+        "the raw primitive form should still be call-free: {primitive}"
     );
 }
 

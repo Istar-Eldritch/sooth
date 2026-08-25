@@ -6,11 +6,19 @@
 import: intrinsics * ;
 import: core::prelude * ;    \ Bool comes through here, the prelude's own re-export.
 
-: mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+\ P7.S3s (R7): neither `mymax` nor `mymax3` is `inline` any more. `Ord` is a
+\ library trait now, so `'T: Copy Ord` is a `Bound::User`, and a combinator's
+\ own type variable may carry none (`reject_user_bound_on_combinator`: a
+\ combinator is spliced at its call sites and records no instantiation a
+\ trait bound could resolve against). Both are therefore ordinary generic
+\ bodies forwarding `'T: Copy Ord` to the non-inline library `gt` -- the
+\ cross-call forwarding case R2 closes -- at the cost of a real call frame
+\ per instantiation.
+: mymax ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;
 
-: mymax3 inline ( 'T: Copy Ord 'T 'T -- 'T )
+: mymax3 ( 'T: Copy Ord 'T 'T -- 'T )
   | a b c |
   a b gt ~[
     a c gt ~[ a ] ~[ c ] if

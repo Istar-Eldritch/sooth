@@ -1684,18 +1684,18 @@ pub enum GlobalMode {
 }
 
 /// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.
-/// `Copy` gates `dup`/`over`; `Ord` gates `gt`/`max`. Both are resolved at the
-/// concrete instantiation by the existing predicates (`is_copy`, the numeric
-/// tower), Kitten-style, with no trait objects.
+/// `Copy` gates `dup`/`over`, resolved at the concrete instantiation by the
+/// existing predicate (`is_copy`), Kitten-style, with no trait objects.
 ///
-/// P7.S3e (R6): `User` is the third, user-declarable variant -- a `trait:`
-/// declaration satisfied nominally by an `impl:` binding, resolved at the
-/// concrete instantiation by a whole-program `(TraitId, Type)` registry
-/// lookup instead of a predicate.
+/// P7.S3e (R6): `User` is the second variant -- a `trait:` declaration
+/// satisfied nominally by an `impl:` binding, resolved at the concrete
+/// instantiation by a whole-program `(TraitId, Type)` registry lookup instead
+/// of a predicate. P7.S3s: `Ord` used to be a third, reserved predicate
+/// variant (numeric-tower membership); it is now an ordinary library trait
+/// declared in `core::cmp` and satisfied through `User` like any other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bound {
     Copy,
-    Ord,
     User(TraitId),
 }
 
@@ -1791,39 +1791,31 @@ pub fn ground_member_type(
     }
 }
 
-/// The shared, lazily-built `Copy`/`Ord` entries (`seed_predicate_traits`),
-/// for a caller that only ever needs the reserved predicate table and no
-/// user `trait:` declarations -- the REPL's per-line word-definition path,
-/// which supports `'T: Copy Ord` but not yet a user trait declaration at
-/// REPL scope (the same bypass pattern `structs`/`enums` already follow
-/// there).
+/// The shared, lazily-built `Copy` entry (`seed_predicate_traits`), for a
+/// caller that only ever needs the reserved predicate table and no user
+/// `trait:` declarations -- the REPL's per-line word-definition path, which
+/// supports `'T: Copy` but not yet a user trait declaration at REPL scope
+/// (the same bypass pattern `structs`/`enums` already follow there). P7.S3s:
+/// `Ord` used to be pre-seeded here too; it is now an ordinary library trait
+/// declared in `core::cmp`, unreachable from a REPL session (R8).
 pub fn predicate_traits() -> &'static [TraitDecl] {
     static TRAITS: std::sync::OnceLock<Vec<TraitDecl>> = std::sync::OnceLock::new();
     TRAITS.get_or_init(seed_predicate_traits)
 }
 
-/// Pre-seed the whole-program trait registry with `Copy`/`Ord` as
-/// `Predicate`-kind entries (R2), so `parse_capabilities` looks them up
-/// through the same trait-table mechanism a user trait uses, rather than a
-/// bespoke reserved-word check. Called once, before any user `trait:`
-/// declaration is registered.
+/// Pre-seed the whole-program trait registry with `Copy` as a
+/// `Predicate`-kind entry (R2), so `parse_capabilities` looks it up through
+/// the same trait-table mechanism a user trait uses, rather than a bespoke
+/// reserved-word check. Called once, before any user `trait:` declaration is
+/// registered.
 pub fn seed_predicate_traits() -> Vec<TraitDecl> {
-    vec![
-        TraitDecl {
-            name: "Copy".to_string(),
-            kind: TraitKind::Predicate(Bound::Copy),
-            members: Vec::new(),
-            module: RESERVED_TRAIT_MODULE,
-            span: Span::default(),
-        },
-        TraitDecl {
-            name: "Ord".to_string(),
-            kind: TraitKind::Predicate(Bound::Ord),
-            members: Vec::new(),
-            module: RESERVED_TRAIT_MODULE,
-            span: Span::default(),
-        },
-    ]
+    vec![TraitDecl {
+        name: "Copy".to_string(),
+        kind: TraitKind::Predicate(Bound::Copy),
+        members: Vec::new(),
+        module: RESERVED_TRAIT_MODULE,
+        span: Span::default(),
+    }]
 }
 
 /// One `impl: Trait for Type ... ;` declaration. `bindings` is a name map

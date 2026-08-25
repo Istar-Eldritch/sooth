@@ -327,7 +327,12 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     // R4's relaxation, inherited: every self-occurrence in tail position is not
     // a splice-forever cycle, because the loop transform lowers it to a
     // back-edge. `5 down` counts to 0.
-    let src = ": down inline ( i64 -- i64 ) dup 0 gt ~[ 1 sub down ] ~[ ] if ;\n\
+    //
+    // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5: `gt`
+    // is a real call now, which would leave an unrelated `Instr::Call` in
+    // `main`'s lowered body that this test's own call-count assertion must
+    // otherwise special-case).
+    let src = ": down inline ( i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub down ] ~[ ] if ;\n\
                : main ( -- ) 5 down . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-self-tail", src);
     std::fs::remove_file(&binary).ok();

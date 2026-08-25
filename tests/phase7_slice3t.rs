@@ -164,19 +164,25 @@ fn a_glued_bracket_after_a_concrete_word_is_rejected() {
     assert!(err.contains(&takes_no_type_arguments("inc", 3)), "{err}");
 }
 
-/// R3, the combinator route: a `lib/` combinator like `lt` is spliced ahead of
-/// the polymorphic-call interception (`poly.combinators`), so it has nowhere
-/// to put a list either. Review fix: this clause of the guard had no witness --
-/// deleting it let `lt[i64]` build to exit 0.
+/// R3, the combinator route: a `lib/` combinator like `while` is spliced ahead
+/// of the polymorphic-call interception (`poly.combinators`), so it has
+/// nowhere to put a list either. Review fix: this clause of the guard had no
+/// witness -- deleting it let `while[i64]` build to exit 0.
+///
+/// P7.S3s: `lt`, this test's original witness, is no longer a `lib/`
+/// combinator (`core::cmp`'s six comparisons are non-inline poly words after
+/// the flip) and reaches the ordinary polymorphic-call route instead, which
+/// legitimately accepts a type-argument list -- it can no longer witness this
+/// clause. `while` (`core::combinators`) is still spliced, unaffected by S3s.
 #[test]
 fn a_glued_bracket_after_a_combinator_is_rejected() {
     let err = build_error(
         "glued-combinator",
         "import: intrinsics * ;\n\
-         import: core::prelude | lt | ;\n\
-         : main ( -- ) lt[i64] ;\n",
+         import: core::combinators | while | ;\n\
+         : main ( -- ) while[i64] ;\n",
     );
-    assert!(err.contains(&takes_no_type_arguments("lt", 3)), "{err}");
+    assert!(err.contains(&takes_no_type_arguments("while", 3)), "{err}");
 }
 
 /// R3, the eliminator route: an enum eliminator like `Shape?` is intercepted
@@ -371,6 +377,14 @@ fn an_explicit_instantiation_disagreeing_with_an_operand_is_rejected() {
 /// R5's blast-radius guard. `poly_var_conflict_error` is reached by the same
 /// branch this slice redirects, so the two-operand case has to be pinned
 /// byte-for-byte or a redirect that fired unconditionally would look green.
+///
+/// P7.S3s: order flipped (`f64` first, `i64` second). `1` is an `i64` literal
+/// at a `Var` position, so `check_poly_call`'s D8 literal-deferral pass (ported
+/// from `check_poly_combinator_args`) defers it to a second pass; `2.5`, not
+/// deferred, binds `'T` first in pass 1, and the deferred `1` is what conflicts
+/// against it in pass 2 -- `prev` (the already-bound value) is `f64`, `slot_ty`
+/// (the new operand) is `i64`. Not a redirect misfire: `was instantiated at`
+/// still does not appear, so this is still the plain two-operand path.
 #[test]
 fn two_operands_disagreeing_still_report_the_old_conflict() {
     let err = build_error(
@@ -380,7 +394,7 @@ fn two_operands_disagreeing_still_report_the_old_conflict() {
          : main ( -- ) 1 2.5 pairwise ;\n",
     );
     assert!(
-        err.contains("`pairwise` in `main` (line 3) resolved `'T` to both `i64` and `f64`"),
+        err.contains("`pairwise` in `main` (line 3) resolved `'T` to both `f64` and `i64`"),
         "{err}"
     );
     assert!(!err.contains("was instantiated at"), "{err}");

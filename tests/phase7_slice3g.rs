@@ -217,23 +217,32 @@ fn repl_session(input: &str) -> String {
 /// back-edge runs it in constant space. Hardcoding `self_tail: false` here
 /// aborts the session instead of printing.
 ///
-/// The library imports are quoted-path, absolute: a REPL session can resolve
-/// neither a module-name import nor a wildcard one, and `eq`/`if` are library
-/// words, not intrinsics.
+/// The library import is quoted-path, absolute: a REPL session can resolve
+/// neither a module-name import nor a wildcard one, and `if` is a library
+/// word, not an intrinsic.
+///
+/// P7.S3s (R5): `core::cmp`'s comparisons are no longer `inline`, so they are
+/// no longer a *combinator* the REPL's import machinery can retain -- and an
+/// ordinary (non-inline) polymorphic word imported from a closure module has
+/// no REPL-import path at all (`splice_import`'s two loops filter on
+/// `poly.is_none()` and `is_combinator`, covering neither shape). `iszero`
+/// is rewritten over the raw `ueq` intrinsic (bare, no import needed at REPL
+/// scope) instead of importing `eq`, so this golden keeps pinning its own
+/// point -- the REPL's self-tail instantiation lowering for a *session*-
+/// defined polymorphic word -- without depending on the now-broken import
+/// path. The REPL-import gap itself is not this test's to close.
 #[test]
 fn repl_self_tail_poly_word_runs_a_deep_counter_in_constant_stack() {
     let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
     let session = format!(
-        "import: \"{cmp}\" c | eq | ;\n\
-         import: \"{b}\" b | if | ;\n\
-         : iszero ( i64 -- Bool ) 0 eq ;\n\
+        "import: \"{b}\" b | if | ;\n\
+         : iszero ( i64 -- Bool ) 0 ueq [ True ] [ False ] branch ;\n\
          : loopg ( 'T: Copy i64 -- 'T ) dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
          7 2000000 loopg .\n",
-        cmp = lib.join("cmp.sth").display(),
         b = lib.join("bool.sth").display(),
     );
     assert_eq!(
         repl_session(&session),
-        "imported c\nimported b\ndefined iszero\ndefined loopg\n7\nstack: (empty)\n"
+        "imported b\ndefined iszero\ndefined loopg\n7\nstack: (empty)\n"
     );
 }

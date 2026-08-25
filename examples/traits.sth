@@ -5,18 +5,25 @@
 \ instead of hardcoding one type, and each required member dispatches to the
 \ caller's own `impl:` at monomorphization -- an ordinary word call resolved
 \ per instantiation, never a runtime vtable.
-
+\
+\ `Order` here is by *reference* (`cmp ( &'T &'T -- Rank )`), deliberately
+\ distinct from `core::cmp`'s by-value `Ord` (P7.S3s): this file's own point
+\ is the `impl:` body-form and a borrowed trait member, not comparison
+\ itself, so `Rank`'s three variants are named apart from `core::cmp`'s
+\ `Ordering`/`Less`/`Equal`/`Greater` rather than reusing them -- two modules
+\ each declaring an enum variant of the same bare name are not otherwise
+\ distinguished at a call site inside either one.
 import: intrinsics * ;
 import: core::prelude | if Bool lt gt | ;
 
-type: Ordering
-| Less
-| Equal
-| Greater
+type: Rank
+| Under
+| Same
+| Over
 ;
 
 trait: Order 'T
-  cmp ( &'T &'T -- Ordering )
+  cmp ( &'T &'T -- Rank )
 ;
 
 trait: Show 'T
@@ -35,18 +42,18 @@ impl: Order for Point
     a &y @ | ay |
     b &y @ | by |
     ay by lt
-    ~[ Less ]
+    ~[ Under ]
     ~[
       ay by gt
-      ~[ Greater ]
+      ~[ Over ]
       ~[
         a &x @ | ax |
         b &x @ | bx |
         ax bx lt
-        ~[ Less ]
+        ~[ Under ]
         ~[
           ax bx gt
-          ~[ Greater ] ~[ Equal ] if
+          ~[ Over ] ~[ Same ] if
         ] if
       ] if
     ] if ;
@@ -65,10 +72,10 @@ impl: Show for Point
 : show_larger ( &'T: Order Show &'T -- )
   | b | | a |
   a b cmp
-  ~[ ( Less ) drop b show ]
-  ~[ ( Equal ) drop a show ]
-  ~[ ( Greater ) drop a show ]
-  Ordering? ;
+  ~[ ( Under ) drop b show ]
+  ~[ ( Same )  drop a show ]
+  ~[ ( Over )  drop a show ]
+  Rank? ;
 
 : main ( -- )
   0 0 Point | origin |

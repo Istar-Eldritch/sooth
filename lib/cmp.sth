@@ -1,27 +1,186 @@
-\ core::cmp -- the typed comparisons over the raw flag primitives.
+\ core::cmp -- the typed comparisons over a nominal `Ord` trait.
 \
-\ The compiler is left with three machine-level primitives here: `branch`,
-\ which jumps on a 32-bit flag and takes two quotations; `tag` (see
-\ `core::bool`), which reads a payload-free enum's discriminant as that flag;
-\ and the six comparison primitives `ueq`/`ult`/`ugt`/`ulte`/`ugte`/`une`,
-\ which produce it. Everything typed -- `bool`, `if`, `eq` -- is written in
-\ Sooth.
+\ `Ord` is an ordinary library trait: `cmp ( 'T 'T -- Ordering )`, satisfied
+\ nominally by one `impl:` block per numeric width. The six surface
+\ comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are derived from `cmp` and its
+\ three-variant result, so the compiler itself needs no reserved notion of
+\ "ordered" at all -- a user type opts in with its own `impl: Ord`, exactly as
+\ any other trait.
 \
-\ Each comparison is `'T: Copy Ord`-polymorphic, so one definition covers the
-\ whole numeric tower rather than narrowing the language to `i64`, and each is
-\ `inline`, so it is spliced at its call site: without that every comparison in
-\ every program would become a real call with a frame. The branch-and-construct
-\ body is also what makes an invalid `bool` impossible to build -- there is
-\ deliberately no operation turning a machine word back into an enum, only
-\ these two named variants.
-import: intrinsics i | ueq ult ugt ulte ugte une branch | ;
+\ The comparisons are deliberately **not** `inline` here (P7.S3s R5): an
+\ `inline` word may declare no `Bound::User` variable at all
+\ (`reject_user_bound_on_combinator`), and `Ord` is now one. Each comparison
+\ is therefore a real call with a frame, a measured ~2x tax over the old
+\ branch-and-construct body on a comparison-heavy loop, accepted for this
+\ slice (P7.S3o names the follow-on that could restore the splice).
+import: intrinsics i | ueq ult ugt ulte ugte une branch drop swap | ;
 import: self::bool b | Bool False True | ;
 
-export: eq lt gt lte gte ne ;
+export: Ord Ordering Less Equal Greater eq lt gt lte gte ne ;
 
-: eq  inline ( 'T: Copy Ord 'T -- Bool ) ueq  [ True ] [ False ] branch ;
-: lt  inline ( 'T: Copy Ord 'T -- Bool ) ult  [ True ] [ False ] branch ;
-: gt  inline ( 'T: Copy Ord 'T -- Bool ) ugt  [ True ] [ False ] branch ;
-: lte inline ( 'T: Copy Ord 'T -- Bool ) ulte [ True ] [ False ] branch ;
-: gte inline ( 'T: Copy Ord 'T -- Bool ) ugte [ True ] [ False ] branch ;
-: ne  inline ( 'T: Copy Ord 'T -- Bool ) une  [ True ] [ False ] branch ;
+\ Declaring these three variant names here effectively reserves them for
+\ every program: a variant constructor's env key is the bare surface name
+\ with no module in it, so a user enum with a variant named `Less`, `Equal`,
+\ or `Greater` captures the constructor `lib/cmp.sth`'s own `impl: Ord`
+\ bodies use, and the build fails inside `cmp`. The module-blind key is
+\ pre-existing (two *user* modules sharing one variant name collide the same
+\ way, and did before `Ordering` existed); what P7.S3s changes is that one of
+\ the colliding parties is now a module every program reaches through the
+\ prelude. Fixing it means keying variant constructors by module, which is
+\ not this slice.
+type: Ordering
+| Less
+| Equal
+| Greater
+;
+
+trait: Ord 'T
+  cmp ( 'T 'T -- Ordering )
+;
+
+\ The eight fixed-width integers (`INT_TYPES`, `src/ast.rs`) and
+\ `usize`/`isize`: `ult`/`ugt` derive signed/unsigned/float behaviour from
+\ the operand type at lowering, so one two-comparison body covers every
+\ width -- `a < b` is `Less`, `a > b` is `Greater`, otherwise `Equal`. `branch`
+\ reads the raw 32-bit flag `ult`/`ugt` themselves produce, the same
+\ primitive `core::bool`'s `if` is built over, so no comparison here goes
+\ through the `Bool` it has not yet built.
+impl: Ord for i8
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for i16
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for i32
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for i64
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for u8
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for u16
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for u32
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for u64
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for usize
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+impl: Ord for isize
+  : cmp
+    | lhs rhs |
+    lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Equal ] branch ] branch ;
+;
+
+\ Both floats. A NaN operand is the one case `Ordering`'s three variants
+\ cannot represent: IEEE-754 makes every ordered comparison false, including
+\ `x = x`, so a partial order wants a fourth "unordered" answer this enum has
+\ no arm for. A real equality check (`ueq`) comes first so a genuinely equal
+\ pair still answers `Equal`; only a NaN pair (neither `ueq`, `ult`, nor
+\ `ugt` holds) falls to the `Greater` default. All six surface comparisons
+\ stay IEEE-correct for NaN over that default: `eq`/`ne`/`lt`/`lte` read
+\ `cmp(a,b)` while `gt`/`gte` read `cmp(b,a)` (see the note above `gt`), so a
+\ NaN pair answers `False` for all five ordered relations and `True` for
+\ `ne`. `eq` in particular stays load-bearing (D4, phase0: NaN is detected
+\ via `x = x`).
+\
+\ The residual is `cmp` itself. It is not in `export:`, but `Ord` is, so any
+\ user writing their own `'T: Copy Ord` word dispatches `cmp` directly -- and
+\ over floats it is not antisymmetric, since `cmp(a,b)` and `cmp(b,a)` are
+\ both `Greater` when either operand is NaN. A `PartialOrd`/`Ordering?`-shaped
+\ split giving the unordered case its own answer is the follow-on
+\ (P7.S3s R5), not this slice.
+impl: Ord for f32
+  : cmp
+    | lhs rhs |
+    lhs rhs ueq [ Equal ] [ lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Greater ] branch ] branch ] branch ;
+;
+
+impl: Ord for f64
+  : cmp
+    | lhs rhs |
+    lhs rhs ueq [ Equal ] [ lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Greater ] branch ] branch ] branch ;
+;
+
+: eq  ( 'T: Copy Ord 'T -- Bool )
+  cmp
+  ~[ ( Less )    drop False ]
+  ~[ ( Equal )   drop True ]
+  ~[ ( Greater ) drop False ]
+  Ordering? ;
+
+: lt  ( 'T: Copy Ord 'T -- Bool )
+  cmp
+  ~[ ( Less )    drop True ]
+  ~[ ( Equal )   drop False ]
+  ~[ ( Greater ) drop False ]
+  Ordering? ;
+
+\ `gt`/`gte` compare with the operands swapped (`a > b` iff `b < a`, `a >= b`
+\ iff `b <= a`, true for every value including a NaN pair under IEEE-754,
+\ where every ordered relation is `False`) rather than reading `cmp(a,b)`'s
+\ `Greater`/`Greater-or-Equal` arms directly. This is what keeps `gt`/`gte`
+\ IEEE-correct for a NaN operand: `lib/cmp.sth`'s float `impl: Ord` answers
+\ `Greater` for a NaN pair (review fix, so `eq`/`ne`/`lt`/`lte` stay correct
+\ for NaN, preserving D4), which would otherwise make `gt`/`gte` answer
+\ `True` for NaN if read directly off that same `Greater` arm.
+: gt  ( 'T: Copy Ord 'T -- Bool )
+  swap cmp
+  ~[ ( Less )    drop True ]
+  ~[ ( Equal )   drop False ]
+  ~[ ( Greater ) drop False ]
+  Ordering? ;
+
+: lte ( 'T: Copy Ord 'T -- Bool )
+  cmp
+  ~[ ( Less )    drop True ]
+  ~[ ( Equal )   drop True ]
+  ~[ ( Greater ) drop False ]
+  Ordering? ;
+
+: gte ( 'T: Copy Ord 'T -- Bool )
+  swap cmp
+  ~[ ( Less )    drop True ]
+  ~[ ( Equal )   drop True ]
+  ~[ ( Greater ) drop False ]
+  Ordering? ;
+
+: ne  ( 'T: Copy Ord 'T -- Bool )
+  cmp
+  ~[ ( Less )    drop True ]
+  ~[ ( Equal )   drop False ]
+  ~[ ( Greater ) drop True ]
+  Ordering? ;

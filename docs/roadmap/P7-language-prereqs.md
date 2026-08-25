@@ -247,9 +247,10 @@ rejection naming no follow-up slice yet
 is satisfied **nominally**: an `impl: Trait for Type  member word ... ;` block maps each
 member to an existing, already-declared *concrete* word (impl checking is signature
 comparison, never body checking), confined by an orphan rule to the trait's or the
-type's own defining module. `Copy`/`Ord` are pre-seeded predicate-kind trait-table
-entries (satisfaction still runs `is_copy`/`is_ord`), so a colliding user `trait: Copy`
-fails as an ordinary duplicate declaration. A bare or ref-to-bare bounded variable's
+type's own defining module. `Copy` is a pre-seeded predicate-kind trait-table entry
+(satisfaction runs `is_copy`), so a colliding user `trait: Copy` fails as an ordinary
+duplicate declaration; `Ord` is an ordinary library trait (**P7.S3s**), pre-seeded
+nowhere. A bare or ref-to-bare bounded variable's
 call to a member its bound set declares is resolved in `poly_call_term` ahead of the
 ordinary `env.get` lookup, mints a per-instantiation dispatch record
 (`CallInst::trait_calls`) keyed on `(callee, θ)`, and lowering only looks the symbol up —
@@ -595,7 +596,16 @@ this slice. **P7.S3s supplies the motivating program** it was parked waiting for
 `inline` comparison over a library `Ord`. S3s ships those comparisons non-inline precisely so
 this slice inherits a differential oracle -- flip `inline` on the same source and diff the
 resolved `impl:` symbols at two and three splices -- which is the entry condition for a third
-attempt, alongside the three open items in its brief.
+attempt, alongside the three open items in its brief. The harness skeleton is already in
+tree (`tests/phase7_slice3s_oracle.rs`): it builds `examples/poly_if.sth` twice and diffs
+stdout plus, per `mymax*` entry point, the dispatch targets its own call graph reaches (the
+`impl: Ord` body, and the monomorphized comparison on the way to it), against itself for now
+since there is no second variant to diff against until this slice flips `mymax`/`mymax3` back
+to `inline`. Besides that flip, the oracle side needs one more thing: `examples/poly_if.sth`'s
+`main` calls `mymax3` only, so `mymax` mints no monomorph and the harness never sees it. A
+source calling both words is what makes the "at two splices, at three" diff exist at all, and
+`tests/corpus_stdout/poly_if.txt` must stay byte-identical, so it belongs in a new fixture
+rather than in the example.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -675,28 +685,27 @@ generic word is not expressible: `parse_type_expr` has no production for a type 
 a generic word cannot forward its own variable through an explicit instantiation (`f['U]`
 inside `g ( 'U: Default -- 'U )` does not parse) -- a stated residual gap, not designed here.
 
-**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
-(`src/ast.rs:1679-1683`) is a reserved, member-less trait-table entry (`seed_predicate_traits`)
-satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded `ty.is_numeric()` check --
-never the whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches
-through. `'T: Ord` therefore categorically excludes a struct or enum, and a user cannot opt
-their own type in: `impl: Ord for Point` is rejected as a built-in predicate.
-`examples/traits.sth` worked around this by inventing a separate `Order` trait.
+**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `[ done ]` `Ord` is an
+ordinary library trait (`lib/cmp.sth`), declaring `cmp ( 'T 'T -- Ordering )` over an
+`Ordering` enum, satisfied nominally by an `impl:` block -- one per numeric width in `core`,
+built from the raw comparison intrinsics -- exactly as any other trait dispatches through the
+whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already uses. The six
+surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are derived from `cmp`. `'T: Ord` bounds
+a struct or enum like any other bound, and a user type opts in with its own `impl: Ord for
+Point`; there is no compiler-hardcoded notion of "ordered" left to reject it.
 
-`Ord` becomes an ordinary library trait declaring `cmp ( &'T &'T -- Ordering )` over an
-`Ordering` enum, with one `impl:` per numeric width in `core` built from the raw comparison
-intrinsics, the six surface comparisons derived from `cmp`, and `Bound::Ord` deleted. The
-blocking gap is generic-calls-generic under a user bound: the checker's symbolic forwarding
-arm already handles it, but lowering ICEs (`calls.rs:737`) because a forwarded obligation is
-never resolved to a symbol per instantiation. See
-[slice3s-brief.md](./P7/slice3s-brief.md) for the probes.
-
-The six comparisons ship **non-inline** here and regress to a real call frame each, because a
-bounded `inline` word is **P7.S3o**, parked. That is deliberate: the cross-call lowering gap
-must close either way, and landing a correct non-inline version first gives S3o the
-differential oracle (flip `inline`, diff resolved `impl:` symbols at two and three splices)
-that both of its failed design rounds lacked. S3o is the named follow-on that restores the
-splice. Sequence before P8.S2's `lib/cmp.sth` migration.
+The six comparisons ship **non-inline**, and regress to a real call frame each, because an
+`inline` word may declare no `Bound::User` variable at all
+(`reject_user_bound_on_combinator`) and `Ord` is now one -- a measured ~2x tax over the old
+branch-and-construct body on a comparison-heavy loop, accepted for this slice. **P7.S3o**
+(parked) is the named follow-on that could restore the splice, using the differential oracle
+this slice's non-inline landing set up (flip `inline`, diff resolved `impl:` symbols at two
+and three splices). The REPL carries no whole-program trait/`impl:` registry, so a bound
+naming `Ord` at REPL scope gets a located, REPL-specific diagnostic pointing at that gap
+rather than claiming the name is wrong (`repl_unknown_capability_error`), in first position
+and after a folded `Copy` alike. Closing the gap itself -- a session carrying its imported
+modules' trait and `impl:` registries, so `'T: Ord` resolves at REPL scope the way it does in
+a file -- has no owning slice.
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;

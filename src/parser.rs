@@ -507,18 +507,31 @@ fn rewrite_member_self_calls(
 /// pre-seeded reserved-module entry (`Copy`/`Ord`, visible everywhere), then
 /// a `qualifier::Base` mapped through `imports`, then a bare name reached via
 /// a selective import.
+///
+/// P7.S3s (R1/C4): both the qualified and the selective branch are one-hop
+/// only, and each falls back to `trait_origin` (mirroring `type_origin`'s
+/// fallback in `resolve_type_name_in_module`) when the direct match fails --
+/// a trait re-exported through a hub module, not declared there, resolves
+/// through the hub's own recorded origin instead of stopping at the hub.
 pub(crate) fn find_trait_in_module(
     traits: &[TraitDecl],
     name: &str,
     module: u32,
     imports: &HashMap<String, u32>,
     selective: &HashMap<String, u32>,
+    trait_origin: &[HashMap<String, u32>],
 ) -> Option<TraitId> {
     if let Some((qualifier, base)) = name.split_once("::") {
         let target = *imports.get(qualifier)?;
         return traits
             .iter()
             .position(|t| t.name == base && t.module == target)
+            .or_else(|| {
+                let origin = *trait_origin.get(target as usize)?.get(base)?;
+                traits
+                    .iter()
+                    .position(|t| t.name == base && t.module == origin)
+            })
             .map(TraitId::from_index);
     }
     if let Some(idx) = traits
@@ -537,6 +550,12 @@ pub(crate) fn find_trait_in_module(
         return traits
             .iter()
             .position(|t| t.name == name && t.module == target)
+            .or_else(|| {
+                let origin = *trait_origin.get(target as usize)?.get(name)?;
+                traits
+                    .iter()
+                    .position(|t| t.name == name && t.module == origin)
+            })
             .map(TraitId::from_index);
     }
     None
@@ -669,6 +688,7 @@ pub fn parse_bodies(
     exports: &[Vec<(String, Span)>],
     selective: &HashMap<String, u32>,
     type_origin: &[HashMap<String, u32>],
+    trait_origin: &[HashMap<String, u32>],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -699,8 +719,10 @@ pub fn parse_bodies(
         exports,
         selective,
         type_origin,
+        trait_origin,
         generics,
         traits,
+        is_repl: false,
     };
     parser.parse_generic_typedefs()?;
     while parser.pos < parser.tokens.len() {
@@ -776,7 +798,9 @@ pub(crate) fn prepass_generic_typedefs(
         selective,
         generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: false,
     };
     parser.parse_generic_typedefs()
 }
@@ -841,11 +865,13 @@ pub(crate) fn prepass_trait_decls(
                 selective,
                 generics,
                 type_origin: &[],
+                trait_origin: &[],
                 // A trait member's own signature can still name a bound
                 // (`'T: Copy`) inside its `( ... )` effect, so this needs the
                 // reserved-predicate table even though it never looks up a
                 // user trait declared earlier in the registry-so-far.
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             let decl = parser.parse_trait_decl()?;
             i = parser.pos;
@@ -894,6 +920,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &no_imports,
         &[],
         &no_imports,
+        &[],
         &[],
         &mut arrays,
         &mut owned_cells,
@@ -1020,7 +1047,9 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 selective: &no_imports,
                 generics: &mut generics,
                 type_origin: &[],
+                trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -1065,7 +1094,9 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 selective: &no_imports,
                 generics: &mut generics,
                 type_origin: &[],
+                trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -1158,10 +1189,16 @@ pub fn parse_line_with_structs(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
-        // P7.S3e (R2): a REPL word def still needs `'T: Copy Ord` to work;
-        // a user `trait:` declaration is not yet supported at REPL scope, so
+        trait_origin: &[],
+        // P7.S3e (R2): a REPL word def still needs `'T: Copy` to work; a
+        // user `trait:` declaration is not yet supported at REPL scope, so
         // the reserved predicate-only table is all this context ever sees.
+        // P7.S3s (R8): `Ord` no longer lives in that table -- it is an
+        // ordinary library trait now, so a REPL bound naming it gets a
+        // located, REPL-specific diagnostic (`is_repl` below), not a silent
+        // fold.
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -1216,7 +1253,9 @@ pub fn parse_typedef_line(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
@@ -1297,7 +1336,9 @@ pub fn parse_enum_typedef_line(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
@@ -1675,7 +1716,23 @@ fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
 
 fn unknown_capability_error(name: &str, span: Span) -> String {
     format!(
-        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy`, `Ord`, or a trait in scope)",
+        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or a trait in scope)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3s (R8): the REPL carries no whole-program trait/`impl:` registry
+/// (`traits` is always `predicate_traits()` there, `Copy` only now that
+/// `Ord` is an ordinary library trait), so `Ord` specifically can never
+/// resolve at REPL scope, not even though it would resolve in a file.
+/// Distinct wording from `unknown_capability_error` so a REPL user hitting
+/// this one real name is pointed at the real cause (no registry) instead of
+/// being told the name is simply wrong. Any other name is not a trait
+/// anywhere, in a file or at the REPL, so it stays on the generic
+/// diagnostic -- see `parse_capabilities`'s two `c == "Ord"` gates.
+fn repl_unknown_capability_error(name: &str, span: Span) -> String {
+    format!(
+        "error: unknown capability `{name}` at line {}, col {} (`{name}` is a core::cmp trait; the REPL carries no trait or impl: registry to resolve it against -- define a word needing it in a file and load that instead)",
         span.line, span.col
     )
 }
@@ -2044,6 +2101,12 @@ struct Parser<'t> {
     /// module id, empty for a REPL line and any parse path with no real
     /// cross-module data.
     type_origin: &'t [std::collections::HashMap<String, u32>],
+    /// P7.S3s (R1): the trait twin of `type_origin` -- for a module reached
+    /// through `imports`/`selective`, the true declaring module of a trait
+    /// name on *its* `export:` list when that name is a re-export rather
+    /// than something it declares itself. Indexed by module id, empty for a
+    /// REPL line and any parse path with no real cross-module data.
+    trait_origin: &'t [std::collections::HashMap<String, u32>],
     /// Phase 5 slice 1 (R2/D5): the generic `type:` declarations in scope and
     /// the concrete struct/enum registry each application of one mints. A
     /// mutable borrow for the same reason `arrays` is one: an instantiation
@@ -2051,13 +2114,21 @@ struct Parser<'t> {
     /// never written) for a REPL line and for the import/export scans, which
     /// have no generic declaration to apply.
     generics: &'t mut GenericTypes,
-    /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`/`Ord`
+    /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`
     /// plus every user `trait:` declaration in the closure), populated by
     /// `prepass_trait_decls` before any body parses -- mirrors `structs`/
     /// `enums`. Empty for a REPL line (`trait:` is not yet supported at REPL
     /// scope, the same bypass pattern `structs`/`enums` already follow
     /// there).
     traits: &'t [TraitDecl],
+    /// P7.S3s (R8): true at the three REPL construction sites
+    /// (`parse_line_with_structs`, `parse_typedef_line`,
+    /// `parse_enum_typedef_line`), false everywhere else. `traits` alone
+    /// cannot distinguish REPL scope from a file-parsing prepass/scratch
+    /// site -- both see only `predicate_traits()` -- so `parse_capabilities`
+    /// needs this explicit signal to choose the REPL-specific
+    /// unknown-capability wording.
+    is_repl: bool,
 }
 
 impl<'t> Parser<'t> {
@@ -2477,6 +2548,7 @@ impl<'t> Parser<'t> {
             self.module,
             self.imports,
             self.selective,
+            self.trait_origin,
         )
         .ok_or_else(|| unknown_trait_error(&trait_name, trait_span))?;
         if let TraitKind::Predicate(_) = self.traits[trait_id.index()].kind {
@@ -3300,7 +3372,25 @@ impl<'t> Parser<'t> {
                 // the enclosing signature's next slot -- unless nothing has
                 // been read yet, where the colon has already committed to a
                 // bound (X3).
-                None if out.is_empty() => return Err(unknown_capability_error(&c, span)),
+                None if out.is_empty() => {
+                    return Err(if self.is_repl && c == "Ord" {
+                        repl_unknown_capability_error(&c, span)
+                    } else {
+                        unknown_capability_error(&c, span)
+                    });
+                }
+                // P7.S3s (R8, review round 2): `Ord` at REPL scope is the one
+                // name that breaks the rule above. `'T: Copy Ord` -- the
+                // shape every in-tree `Ord` signature uses -- folds `Copy`
+                // first, so `Ord` reaches this arm and would become the next
+                // slot, reported by the slot parser as `unknown type `Ord``:
+                // strictly less informative than the generic capability text
+                // R8 set out to improve on. Only when the session declares no
+                // type of that name, since a REPL `type: Ord ...` makes `Ord`
+                // a legitimate slot and that program must keep parsing.
+                None if self.is_repl && c == "Ord" && !self.declares_type(&c) => {
+                    return Err(repl_unknown_capability_error(&c, span));
+                }
                 None => break,
             }
         }
@@ -3308,6 +3398,21 @@ impl<'t> Parser<'t> {
             return Err(unknown_capability_error("<none>", colon_span));
         }
         Ok(out)
+    }
+
+    /// Whether `name` resolves to a declared struct or enum in this scope,
+    /// by the same lookup `resolve_type` performs for a slot.
+    fn declares_type(&self, name: &str) -> bool {
+        crate::ast::resolve_type_name_in_module(
+            self.structs,
+            self.enums,
+            name,
+            self.module,
+            self.imports,
+            self.selective,
+            self.type_origin,
+        )
+        .is_some()
     }
 
     /// P7.S3e (R18): resolve a bound's trait name at parse time, through the
@@ -3332,7 +3437,14 @@ impl<'t> Parser<'t> {
         span: Span,
         is_first: bool,
     ) -> Result<Option<TraitId>, String> {
-        let id = find_trait_in_module(self.traits, name, self.module, self.imports, self.selective);
+        let id = find_trait_in_module(
+            self.traits,
+            name,
+            self.module,
+            self.imports,
+            self.selective,
+            self.trait_origin,
+        );
         let Some((qualifier, base)) = name.split_once("::") else {
             return Ok(id);
         };
@@ -5516,6 +5628,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -5553,6 +5666,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -6143,6 +6257,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -6238,6 +6353,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -6284,6 +6400,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -7660,6 +7777,7 @@ mod tests {
                 &[],
                 &no_imports,
                 &[],
+                &[],
                 &mut arrays,
                 &mut cells,
                 &mut refs,
@@ -7705,6 +7823,7 @@ mod tests {
                         imports,
                         &exports,
                         &no_imports,
+                        &[],
                         &[],
                         &mut arrays,
                         &mut cells,
@@ -7754,6 +7873,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &[],
                 &mut arrays,
                 &mut cells,
@@ -7805,6 +7925,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -8472,7 +8593,7 @@ mod tests {
         // P7.S3e (R1/R3): a trait declaration parses into `Module::traits`,
         // its members sharing one implicit type variable (id 0).
         let module = parse_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
-        assert_eq!(module.traits.len(), 3, "Copy/Ord pre-seeded, plus Show");
+        assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Show");
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
         assert_eq!(show.members[0].name, "show");
@@ -8527,23 +8648,20 @@ mod tests {
 
     #[test]
     fn parse_trait_copy_collides_with_the_reserved_predicate_entry() {
-        // R2: `Copy`/`Ord` are pre-seeded trait-table entries, so parsing a
-        // user `trait: Copy` succeeds (it is a name, not a reserved-word
-        // check) -- the collision is caught by `check_trait_decls`, an
-        // ordinary duplicate/collision, at check time.
+        // R2: `Copy` is a pre-seeded trait-table entry, so parsing a user
+        // `trait: Copy` succeeds (it is a name, not a reserved-word check) --
+        // the collision is caught by `check_trait_decls`, an ordinary
+        // duplicate/collision, at check time. P7.S3s: `Ord` used to collide
+        // the same way, but it is no longer a reserved entry (it is an
+        // ordinary library trait now), so this still fires for `Copy` alone
+        // -- confirmed by asserting `check_trait_decls` still runs the
+        // reserved-module branch and not some other collision arm.
         let module = parse_src("trait: Copy 'T foo ( &'T -- ) ;").unwrap();
-        let err = crate::check::check_trait_decls(&module).unwrap_err();
-        assert!(
-            err.contains("already the name of a trait"),
-            "unexpected message: {err}"
+        assert_eq!(
+            module.traits.len(),
+            2,
+            "Copy pre-seeded, plus the user's own Copy"
         );
-    }
-
-    #[test]
-    fn parse_trait_ord_collides_with_the_reserved_predicate_entry() {
-        // Mirrors the `Copy` case above -- `Ord` is the other pre-seeded
-        // predicate entry and was previously untested.
-        let module = parse_src("trait: Ord 'T foo ( &'T -- ) ;").unwrap();
         let err = crate::check::check_trait_decls(&module).unwrap_err();
         assert!(
             err.contains("already the name of a trait"),
@@ -8575,18 +8693,16 @@ mod tests {
 
     #[test]
     fn parse_impl_decl_for_a_reserved_predicate_trait_is_error() {
-        // R2: the reserved `Copy`/`Ord` entries participate in no orphan-rule
-        // or export check, so an `impl: Copy for i64` used to fall through to
-        // the orphan rule and demand a module that cannot exist.
+        // R2: the reserved `Copy` entry participates in no orphan-rule or
+        // export check, so an `impl: Copy for i64` used to fall through to
+        // the orphan rule and demand a module that cannot exist. P7.S3s:
+        // `Ord` used to be rejected the same way; it is now an ordinary
+        // library trait (`impl: Ord for i64` is exactly how `core::cmp`
+        // satisfies it), so only `Copy` still fires this guard -- confirmed
+        // by asserting the guard still names the built-in-predicate reason.
         let err = parse_src("impl: Copy for i64\n  : show | p | p drop ;\n;").unwrap_err();
         assert!(err.contains("trait `Copy` cannot be implemented"), "{err}");
         assert!(err.contains("built-in predicate"), "{err}");
-    }
-
-    #[test]
-    fn parse_impl_decl_for_reserved_ord_is_error() {
-        let err = parse_src("impl: Ord for i64\n  : show | p | p drop ;\n;").unwrap_err();
-        assert!(err.contains("trait `Ord` cannot be implemented"), "{err}");
     }
 
     #[test]
@@ -8731,18 +8847,128 @@ mod tests {
             module: 1,
             span: Span::default(),
         };
-        let traits = vec![show];
+        let mut traits = crate::ast::seed_predicate_traits();
+        traits.push(show);
         let mut imports = HashMap::new();
         imports.insert("lib".to_string(), 1u32);
-        let no_selective = HashMap::new();
-        assert!(find_trait_in_module(&traits, "Show", 0, &imports, &no_selective).is_none());
+        let mut selective = HashMap::new();
+        selective.insert("Show".to_string(), 1u32);
+        let no_trait_origin: [HashMap<String, u32>; 0] = [];
+        let no_selective: HashMap<String, u32> = HashMap::new();
+        // Own-module: no `Show` declared in module 0, and no selective entry
+        // for it here (a selective fallback would otherwise mask this case).
+        assert!(find_trait_in_module(
+            &traits,
+            "Show",
+            0,
+            &imports,
+            &no_selective,
+            &no_trait_origin
+        )
+        .is_none());
+        // Qualified, one-hop: `lib::Show` maps `lib` to module 1, which
+        // declares `Show` directly.
         assert_eq!(
-            find_trait_in_module(&traits, "lib::Show", 0, &imports, &no_selective),
+            find_trait_in_module(
+                &traits,
+                "lib::Show",
+                0,
+                &imports,
+                &selective,
+                &no_trait_origin
+            ),
+            Some(TraitId::from_index(1))
+        );
+        // Own module, unqualified: module 1 declares `Show` itself.
+        assert_eq!(
+            find_trait_in_module(&traits, "Show", 1, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(1))
+        );
+        // Reserved predicate table: visible from any module, with an empty
+        // `trait_origin` and no import/selective entry for it. P7.S3s: `Ord`
+        // used to be the second reserved entry pinned here; only `Copy`
+        // remains reserved.
+        assert_eq!(
+            find_trait_in_module(&traits, "Copy", 0, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(0))
+        );
+        // One-hop selective: a bare `Show` reached via a selective import
+        // targeting module 1, from a module (2) that neither declares nor
+        // imports it by qualifier.
+        assert_eq!(
+            find_trait_in_module(&traits, "Show", 2, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(1))
+        );
+    }
+
+    /// P7.S3s (R1/C4): both `find_trait_in_module` fallback branches --
+    /// qualified and selective -- resolve a trait re-exported through a hub
+    /// module (declared elsewhere, only named on the hub's `export:` list)
+    /// via `trait_origin`, mirroring `resolve_type_name_in_module`'s
+    /// `type_origin` fallback.
+    #[test]
+    fn find_trait_in_module_falls_back_to_trait_origin_through_a_hub() {
+        let greet = crate::ast::TraitDecl {
+            name: "Greet".to_string(),
+            kind: TraitKind::Nominal,
+            members: Vec::new(),
+            module: 0,
+            span: Span::default(),
+        };
+        let traits = vec![greet];
+        // Module 2 (consumer) imports module 1 (hub) under qualifier `h`;
+        // module 1 does not declare `Greet` itself, it only re-exports it
+        // from module 0.
+        let mut imports = HashMap::new();
+        imports.insert("h".to_string(), 1u32);
+        let mut selective = HashMap::new();
+        selective.insert("Greet".to_string(), 1u32);
+        let mut trait_origin: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        trait_origin[1].insert("Greet".to_string(), 0);
+        assert_eq!(
+            find_trait_in_module(&traits, "h::Greet", 2, &imports, &selective, &trait_origin),
             Some(TraitId::from_index(0))
         );
         assert_eq!(
-            find_trait_in_module(&traits, "Show", 1, &imports, &no_selective),
+            find_trait_in_module(&traits, "Greet", 2, &imports, &selective, &trait_origin),
             Some(TraitId::from_index(0))
+        );
+    }
+
+    /// Pins that both branches consult `trait_origin` rather than scanning
+    /// all modules directly: with an empty table, both the qualified and
+    /// selective forms fail to resolve past the hub. (The fallback code
+    /// itself is mutation-covered by the `hub_reexported_trait_resolves_*`
+    /// integration goldens, not by this unit test.)
+    #[test]
+    fn find_trait_in_module_without_trait_origin_table_cannot_see_past_hub() {
+        let greet = crate::ast::TraitDecl {
+            name: "Greet".to_string(),
+            kind: TraitKind::Nominal,
+            members: Vec::new(),
+            module: 0,
+            span: Span::default(),
+        };
+        let traits = vec![greet];
+        let mut imports = HashMap::new();
+        imports.insert("h".to_string(), 1u32);
+        let mut selective = HashMap::new();
+        selective.insert("Greet".to_string(), 1u32);
+        let no_trait_origin: [HashMap<String, u32>; 0] = [];
+        // With no `trait_origin` table at all, neither the qualified nor the
+        // selective form can see past the hub.
+        assert!(find_trait_in_module(
+            &traits,
+            "h::Greet",
+            2,
+            &imports,
+            &selective,
+            &no_trait_origin
+        )
+        .is_none());
+        assert!(
+            find_trait_in_module(&traits, "Greet", 2, &imports, &selective, &no_trait_origin)
+                .is_none()
         );
     }
 
@@ -8930,14 +9156,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_capabilities_still_folds_copy_ord_byte_for_byte() {
+    fn parse_capabilities_still_folds_copy_byte_for_byte() {
         // P7.S3e (R2): `parse_capabilities`'s rewrite (a trait-table lookup
-        // replacing the two hardcoded string compares) must not change
-        // `'T: Copy Ord`'s existing parse result -- the highest-blast-radius
-        // regression this phase's Codebase Map calls out.
-        let module = parse_src(": f ( 'T: Copy Ord -- 'T ) ;").unwrap();
+        // replacing the hardcoded string compare) must not change
+        // `'T: Copy`'s existing parse result. P7.S3s: `Ord` is no longer a
+        // predicate to fold this way at all -- `Bound::Ord` does not exist to
+        // construct -- so this test now pins `Copy` alone. The
+        // predicate-plus-user-trait companion the flip wanted beside it
+        // already exists:
+        // `parse_capabilities_composes_a_predicate_and_a_user_trait` below
+        // pins `'T: Copy <user trait>` folding to
+        // `[Bound::Copy, Bound::User(id)]`.
+        let module = parse_src(": f ( 'T: Copy -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::Copy), (0, Bound::Ord)]);
+        assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
     }
 
     #[test]
@@ -8948,16 +9180,139 @@ mod tests {
         assert!(err.contains("unknown capability"), "{err}");
     }
 
+    /// P7.S3s (R8): `is_repl` picks the REPL-specific wording, distinct from
+    /// the file-parsing text pinned above -- same unresolved name, different
+    /// message, because the REPL's cause (no trait/`impl:` registry at all)
+    /// is not "the name is wrong".
+    #[test]
+    fn parse_capabilities_at_repl_scope_is_a_located_repl_specific_error() {
+        let tokens = lex(": f ( 'T: Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
+            "{err}"
+        );
+    }
+
+    /// P7.S3s (R8, review round 1): only `Ord` is a real trait the REPL
+    /// cannot resolve. A typo or any other unknown name is not a trait
+    /// anywhere, so it must not be told it is a `core::cmp trait` -- that
+    /// wording is only true for `Ord`.
+    #[test]
+    fn parse_capabilities_at_repl_scope_unknown_name_keeps_the_generic_error() {
+        let tokens = lex(": f ( 'T: Bogus 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown capability `Bogus`"), "{err}");
+        assert!(!err.contains("core::cmp trait"), "{err}");
+    }
+
+    /// P7.S3s (R8, review round 2): the shape R8 exists for. `Copy` folds
+    /// first, so `Ord` is no longer the first bound and reaches the greedy
+    /// list's break arm -- where, without its own gate, it would become the
+    /// next stack slot and be reported as an unknown *type*.
+    #[test]
+    fn parse_capabilities_at_repl_scope_reports_ord_after_a_folded_predicate() {
+        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown type"), "{err}");
+    }
+
+    /// The gate above must stay narrow: a session that declares a type named
+    /// `Ord` makes it a legitimate slot, so `'T: Copy Ord` parses (and fails
+    /// later, on its stack effect) instead of being claimed as the trait.
+    #[test]
+    fn parse_capabilities_at_repl_scope_yields_ord_to_a_declared_type() {
+        let structs = vec![StructDecl {
+            name: "Ord".to_string(),
+            name_static: "Ord",
+            fields: vec![("val".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let line = parse_line_with_structs(
+            &tokens,
+            &structs,
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .expect("`Ord` names a declared type here, so it is the next slot");
+        let Line::Def(def) = line else {
+            panic!("expected a word definition");
+        };
+        let sig = def.poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
+        // Three inputs: the bound site `'T` is itself a slot, then `Ord`,
+        // then the declared `'T`.
+        assert_eq!(sig.inputs.len(), 3, "`Ord` became an input slot");
+    }
+
     #[test]
     fn parse_capabilities_resolves_a_declared_trait_to_a_user_bound() {
         // P7.S3e (R6/R18): a nominal trait name in a bound resolves against
-        // the same table `Copy`/`Ord` do, at parse time, and is baked into
-        // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 2
-        // because the two pre-seeded predicate entries occupy 0 and 1.
+        // the same table `Copy` does, at parse time, and is baked into
+        // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 1
+        // because the one pre-seeded predicate entry (`Copy`) occupies 0.
         let module =
             parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
     }
 
     #[test]
@@ -8970,7 +9325,7 @@ mod tests {
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(
             sig.bounds,
-            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(2)))]
+            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(1)))]
         );
     }
 
@@ -8982,7 +9337,7 @@ mod tests {
         let module =
             parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show i64 -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
         assert_eq!(
             sig.inputs,
             vec![PolyType::Var(0), PolyType::Concrete(Type::I64)]
@@ -9197,6 +9552,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &[],
                 &mut arrays,
                 &mut cells,

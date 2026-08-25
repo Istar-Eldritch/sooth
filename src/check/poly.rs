@@ -85,11 +85,15 @@ pub(crate) struct TraitResolveCtx<'a> {
 
 impl TraitResolveCtx<'_> {
     /// The scratch tables for a path no `Bound::User` can reach: the REPL
-    /// (a session declares no `trait:`, so its bounds are `Copy`/`Ord` only)
-    /// and the REPL's poly-combinator check. An empty `impls` would reject a
-    /// satisfied bound, so a path that *can* see one -- including native's
-    /// poly-combinator-standalone check, whose instantiation records are
-    /// scratch but whose bounds are real -- must pass the real tables.
+    /// (a session declares no `trait:`, and `Ord` is now an ordinary
+    /// library trait rather than a reserved predicate, so `Copy` is the
+    /// only bound a REPL word can carry at all -- `parse_capabilities`
+    /// rejects anything else with a located REPL-specific diagnostic, P7.S3s
+    /// R8) and the REPL's poly-combinator check. An empty `impls` would
+    /// reject a satisfied bound, so a path that *can* see one -- including
+    /// native's poly-combinator-standalone check, whose instantiation
+    /// records are scratch but whose bounds are real -- must pass the real
+    /// tables.
     pub(crate) fn scratch() -> TraitResolveCtx<'static> {
         TraitResolveCtx {
             traits: crate::ast::predicate_traits(),
@@ -111,14 +115,6 @@ impl TraitResolveCtx<'_> {
             .map(|w| w.obligations.as_slice())
             .unwrap_or(&[])
     }
-}
-
-/// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
-/// (every integer width, `usize`/`isize`, and both floats) is totally ordered
-/// for the comparison operators; nothing else is (`bool`, a struct, an array).
-/// `max`'s float carve-out (X9) lives at its own builtin arm, not here.
-pub(super) fn is_ord(ty: Type) -> bool {
-    ty.is_numeric()
 }
 
 /// R7: whether a `PolyType` slot is `Copy`. A bare variable answers *only*
@@ -1836,14 +1832,14 @@ fn poly_cross_call(
             let matched = candidates
                 .iter()
                 .map(|(csig, _)| csig)
-                .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig, traits).is_ok());
+                .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig).is_ok());
             match matched {
                 Some(csig) => csig,
                 None => return Err(no_poly_overload_matches_error(ctx, span, name, candidates)),
             }
         }
     };
-    let mapping = poly_cross_relate(callee_sig, name, &stack, span, ctx, sig, traits)?;
+    let mapping = poly_cross_relate(callee_sig, name, &stack, span, ctx, sig)?;
     // R3: every bound the callee declares on a mapped variable, discharged
     // here, at the call site. For a variable image this is a *symbolic*
     // discharge against the caller's own declared bounds -- the caller's own
@@ -1859,7 +1855,15 @@ fn poly_cross_call(
         let var = &callee_sig.ty_var_names[*v as usize];
         let unsatisfied = match (image, bound) {
             (Image::CallerVar(t), _) => (!sig.has_bound(*t, *bound)).then(|| {
-                poly_cross_bound_error(ctx, span, name, var, &sig.ty_var_names[*t as usize], *bound)
+                poly_cross_bound_error(
+                    ctx,
+                    span,
+                    name,
+                    var,
+                    &sig.ty_var_names[*t as usize],
+                    *bound,
+                    traits,
+                )
             }),
             // N1: `is_copy` resolves a struct/enum id by indexing, and a
             // generic instantiation this body's *own* walk minted (`1 Box`)
@@ -1883,11 +1887,21 @@ fn poly_cross_call(
             }
             (Image::Concrete(ty), Bound::Copy) => (!is_copy(*ty, structs, enums, arrays))
                 .then(|| poly_copy_bound_error(ctx, span, name, var, *ty)),
-            (Image::Concrete(ty), Bound::Ord) => {
-                (!is_ord(*ty)).then(|| poly_ord_bound_error(ctx, span, name, var, *ty))
-            }
-            // A user bound is gated out of a cross-call entirely by
-            // `poly_cross_signature_supported`, so this is unreachable.
+            // Not resolved here: `compose` grounds every mapping entry --
+            // this `Image::Concrete` case and `Image::CallerVar` alike --
+            // into a real `ty` before its own `resolve_user_bound` loop runs
+            // over `sig.bounds`, so that loop re-derives and checks this
+            // exact obligation for every reachable cross-call once the
+            // caller is grounded. This walk-time site defers to it.
+            //
+            // Residual gap, deliberately unenforced (P7.S3s R3): this arm
+            // always records `None` and defers to `compose`'s own loop, but
+            // `compose` only runs against a caller instantiation that
+            // actually exists. A `g` whose body builds its own unimplementing
+            // type and hands it to a `Bound::User`-bounded callee (this arm's
+            // exact shape) is never flagged if nothing in the program ever
+            // instantiates `g` -- no θ to ground the check against, so it
+            // never runs. Builds clean today; not this slice's to close.
             (Image::Concrete(_), Bound::User(_)) => None,
         };
         if let Some(err) = unsatisfied {
@@ -1942,9 +1956,8 @@ fn poly_cross_relate(
     span: Span,
     ctx: &Ctx,
     caller_sig: &PolySig,
-    traits: &[TraitDecl],
 ) -> Result<Vec<(u32, Image)>, String> {
-    poly_cross_signature_supported(callee_sig, callee, span, ctx, traits)?;
+    poly_cross_signature_supported(callee_sig, callee, span, ctx)?;
     let n_in = callee_sig.inputs.len();
     if stack.len() < n_in {
         return Err(underflow_error(ctx, span, callee, n_in, stack.len()));
@@ -2159,7 +2172,7 @@ fn poly_cross_output(
 /// mis-lowered later.
 ///
 /// This is the residual of the gap this slice closes, not a restatement of it:
-/// it fires for four specific declared shapes, where the deleted
+/// it fires for three specific declared shapes, where the deleted
 /// `poly_calls_poly_word_error` fired for *every* cross-call.
 ///
 /// - A row (`..s`) has no image kind to map to, and a row-typed `inline`
@@ -2167,17 +2180,17 @@ fn poly_cross_output(
 /// - A quotation parameter has no runtime representation to pass across a
 ///   real call.
 /// - A length variable is a second, separate id space `Image` does not model.
-/// - A user trait bound would be *satisfied* soundly by the symbolic
-///   discharge above (the caller declares the same bound), but the callee's
-///   own recorded obligations are resolved per ground θ, and nothing composes
-///   them for a cross-call yet -- admitting one here would ship exactly the
-///   monomorphization-time failure N1 forbids.
+///
+/// A `Bound::User` on a mapped variable is *not* rejected here (P7.S3s R2):
+/// the symbolic discharge loop in `poly_cross_call` checks it against the
+/// caller's own declared bounds for a forwarded variable, and `compose`
+/// resolves it against a concrete θ once the caller is grounded -- the same
+/// two-stage shape every other bound already goes through.
 fn poly_cross_signature_supported(
     callee_sig: &PolySig,
     callee: &str,
     span: Span,
     ctx: &Ctx,
-    traits: &[TraitDecl],
 ) -> Result<(), String> {
     let unsupported = |what: &str| Err(poly_cross_call_unsupported_error(ctx, span, callee, what));
     if callee_sig.row_in.is_some() || callee_sig.row_out.is_some() {
@@ -2189,16 +2202,6 @@ fn poly_cross_signature_supported(
     }
     if slots().any(poly_mentions_len_var) {
         return unsupported("a length variable in the callee's signature");
-    }
-    if let Some((_, Bound::User(id))) = callee_sig
-        .bounds
-        .iter()
-        .find(|(_, b)| matches!(b, Bound::User(_)))
-    {
-        let trait_name = traits
-            .get(id.index())
-            .map_or("a user trait", |t| t.name.as_str());
-        return unsupported(&format!("discharging the `{trait_name}` bound"));
     }
     Ok(())
 }
@@ -2282,14 +2285,15 @@ fn poly_cross_bound_error(
     callee_var: &str,
     caller_var: &str,
     bound: Bound,
+    traits: &[TraitDecl],
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     let caller = ctx.rendered_word_or("`<line>`");
     let bound = match bound {
-        Bound::Copy => "Copy",
-        Bound::Ord => "Ord",
-        // Gated out ahead of the discharge (`poly_cross_signature_supported`).
-        Bound::User(_) => "a user trait",
+        Bound::Copy => "Copy".to_string(),
+        Bound::User(id) => traits
+            .get(id.index())
+            .map_or_else(|| "a user trait".to_string(), |t| t.name.clone()),
     };
     format!(
         "error: `{callee_var}` of `{callee}` requires `{bound}`, which `{caller_var}` in {caller} does not declare (line {}, col {})\n  declare `{caller_var}: {bound}` so every instantiation of {caller} satisfies `{callee}`",
@@ -4413,6 +4417,8 @@ pub(super) fn poly_sig_could_match(
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
     refs: &[RefDecl],
+    impls: &[ImplDecl],
+    traits: &[TraitDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
@@ -4424,15 +4430,23 @@ pub(super) fn poly_sig_could_match(
         if poly_input_is_quotation(&sig.inputs[i]) {
             return true;
         }
-        // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
-        // (`is_ord` is `is_numeric` and nothing else), and the bound is what
-        // keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // Slice 10c: an `Ord`-bounded variable admits only a type with its own
+        // `impl: Ord` (P7.S3s: an ordinary `impl:` registry lookup, `Ord` no
+        // longer being a reserved numeric-only predicate), and the bound is
+        // what keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
         // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
-        // library word swallows every operand type.
+        // library word swallows every operand type. `ord_trait_id` resolves
+        // *this* `sig`'s own `Ord` bound (review fix: not a whole-program
+        // name search, which fails open under a module-local `trait: Ord`).
         if let PolyType::Var(v) = &sig.inputs[i] {
-            if sig.has_bound(*v, Bound::Ord) && !stack[base + i].ty.is_numeric() {
-                return false;
+            if let Some(ord) = ord_trait_id(sig, *v, traits) {
+                if !impls
+                    .iter()
+                    .any(|imp| imp.trait_id == ord && imp.target_ty == stack[base + i].ty)
+                {
+                    return false;
+                }
             }
         }
         unify_poly_input(
@@ -4487,6 +4501,11 @@ pub(super) fn resolve_combinator_overload<'a>(
                 arrays,
                 cells,
                 refs,
+                // A combinator's own type variable can carry no `Bound::User`
+                // at all (`reject_user_bound_on_combinator`), so there is
+                // nothing for an `impl:` registry lookup to filter here.
+                &[],
+                &[],
             ),
             None => {
                 let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
@@ -4626,6 +4645,14 @@ pub(super) fn check_poly_call(
     // declared quotation slot mentions is already bound by the time pass 2
     // grounds it -- mirroring `check_poly_combinator_args`'s two-pass split,
     // whatever the parameter order.
+    //
+    // A *fresh integer literal* filling a bare type variable is held back and
+    // unified last, against whatever the variable resolved to -- D8's literal
+    // coercion, ported from `check_poly_combinator_args` (10c) so a non-inline
+    // call (R5's six comparisons, post-flip) keeps `5 3 >usize lt` working:
+    // unifying the bare `5` first would pin `'T` to `i64` and read the `usize`
+    // operand as a conflict.
+    let mut deferred_literals: Vec<usize> = Vec::new();
     for i in 0..n_in {
         if poly_input_is_quotation(&sig.inputs[i]) {
             continue;
@@ -4636,11 +4663,40 @@ pub(super) fn check_poly_call(
         if let Some(QuotRef::Known(_)) = stack[base + i].quot {
             return Err(reject_quotation_argument(ctx, span, name));
         }
-        let slot_ty = stack[base + i].ty;
+        let slot = stack[base + i];
+        if slot.literal && slot.ty == Type::I64 && matches!(sig.inputs[i], PolyType::Var(_)) {
+            deferred_literals.push(i);
+            continue;
+        }
         unify_poly_input(
             &sig,
             &sig.inputs[i],
-            slot_ty,
+            slot.ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+            &seeded,
+        )?;
+    }
+    for i in deferred_literals {
+        let PolyType::Var(v) = &sig.inputs[i] else {
+            unreachable!("only a `Var` parameter is deferred")
+        };
+        // Exactly D8's domain, no wider (10c): a fresh literal fills a
+        // `usize`/`isize` position without an explicit conversion, and
+        // nothing else.
+        let ty = match subst.ty_of(*v) {
+            Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
+            _ => stack[base + i].ty,
+        };
+        unify_poly_input(
+            &sig,
+            &sig.inputs[i],
+            ty,
             name,
             span,
             ctx,
@@ -4749,7 +4805,6 @@ pub(super) fn check_poly_call(
         let unsatisfied = match bound {
             Bound::Copy => (!is_copy(ty, ctx.structs(), ctx.enums(), arrays))
                 .then(|| poly_copy_bound_error(ctx, span, name, var, ty)),
-            Bound::Ord => (!is_ord(ty)).then(|| poly_ord_bound_error(ctx, span, name, var, ty)),
             // P7.S3e (R8): satisfaction of a user trait is an `impl:` registry
             // lookup keyed by `(TraitId, θ(v))`, and each obligation the
             // callee's body recorded on this variable then resolves to a
@@ -4841,9 +4896,18 @@ pub(super) fn check_poly_call(
 /// reachable `(word, θ)` set is finite, and the symbol dedup below reaches a
 /// fixpoint. A mutual `g <-> h` cycle revisits `(g, θ)` at the *same* θ and
 /// stops.
+///
+/// `word_symbols` and `trait_obligations` (P7.S3s R2) are what `compose`
+/// needs to resolve a composed callee's own `Bound::User` obligations against
+/// a concrete θ, mirroring `check_poly_call`'s bound loop -- passed in rather
+/// than read off `module`, since the `TraitResolveCtx` built from them below
+/// must not borrow `module` while the destructure above still needs `&mut`
+/// access to it.
 pub(super) fn discover_transitive_instantiations(
     module: &mut Module,
     insts: &mut HashMap<Span, CallInst>,
+    word_symbols: &[String],
+    trait_obligations: &[WordObligations],
 ) -> Result<Vec<CallInst>, String> {
     // N2: no records means nothing to compose, so every program without a
     // generic-calls-generic call emits identical IL by construction rather
@@ -4861,8 +4925,20 @@ pub(super) fn discover_transitive_instantiations(
         statics,
         modules,
         poly_cross_calls,
+        traits,
+        impls,
         ..
     } = module;
+    // Built here rather than accepted from the caller (R2): a caller-side
+    // `TraitResolveCtx` would borrow `module` immutably for the whole call,
+    // and this function still needs `&mut module` through the destructure
+    // above.
+    let tr = TraitResolveCtx {
+        traits,
+        impls,
+        word_symbols,
+        recorded: trait_obligations,
+    };
     // No `generics_cell` rebase/flush bracket here (review finding 2, phase
     // 2): the callee's declared *outputs* are the only `PolyType`s this
     // fixpoint ever grounds, and every one already passed phase 1's
@@ -4878,6 +4954,7 @@ pub(super) fn discover_transitive_instantiations(
         statics,
         modules: Some(modules),
         records: poly_cross_calls,
+        tr,
     };
     let mut transitive = ground.fixpoint(insts, arrays, refs, owned_cells)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
@@ -4919,6 +4996,7 @@ struct CrossGround<'a> {
     statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
     records: &'a HashMap<String, Vec<PolyCrossCall>>,
+    tr: TraitResolveCtx<'a>,
 }
 
 impl CrossGround<'_> {
@@ -5111,6 +5189,34 @@ impl CrossGround<'_> {
                 refs,
             )?);
         }
+        // R2: the same bound loop `check_poly_call` runs against a concrete
+        // caller, run here once `subst` is grounded -- a `Bound::User` on a
+        // composed callee's own variable is resolved against `self.tr`'s
+        // whole-program tables, the identical diagnostic and the identical
+        // span (`record.span`) a rejection would have used either way.
+        let mut trait_calls: HashMap<Span, String> = HashMap::new();
+        for (v, bound) in &sig.bounds {
+            let Bound::User(trait_id) = bound else {
+                continue;
+            };
+            // Ungrounded variables skip resolution for the same reason they do
+            // in `check_poly_call`: no obligation can name a variable the body
+            // could not have dispatched on.
+            let Some(ty) = subst.ty_of(*v) else { continue };
+            resolve_user_bound(
+                *trait_id,
+                *v,
+                ty,
+                sig,
+                &record.callee,
+                record.span,
+                ctx,
+                &self.tr,
+                arrays,
+                refs,
+                &mut trait_calls,
+            )?;
+        }
         // The caller's `generation` rides along so `instantiation_symbol`
         // stays collision-free across REPL redefinitions.
         let symbol = instantiation_symbol(&record.callee, &subst, caller.generation);
@@ -5122,11 +5228,11 @@ impl CrossGround<'_> {
             output_types: outputs,
             bundle: None,
             generation: caller.generation,
-            // A quotation parameter and a user trait bound are both located
-            // rejections on the cross-call path (`poly_cross_signature_supported`),
-            // so a composed callee has neither to record.
+            // A quotation parameter is a located rejection on the cross-call
+            // path (`poly_cross_signature_supported`), so a composed callee
+            // has none to record.
             quot_inputs: Vec::new(),
-            trait_calls: HashMap::new(),
+            trait_calls,
             poly_calls: HashMap::new(),
         })
     }
@@ -5396,7 +5502,14 @@ pub(super) fn unify_poly_input(
                     });
                 }
             } else {
-                subst.ty.push((*v, slot_ty));
+                // Inserted in `v`-sorted position, not push order: `Subst`'s
+                // own doc comment says it is kept sorted so the mangled
+                // symbol is deterministic, but a caller processing inputs
+                // out of declared order (D8's literal deferral, the
+                // quotation two-pass split) would otherwise push out of
+                // order and mint a second monomorph for the same theta.
+                let pos = subst.ty.partition_point(|(id, _)| *id < *v);
+                subst.ty.insert(pos, (*v, slot_ty));
             }
         }
         PolyType::Array(elem, len) => {
@@ -6543,25 +6656,6 @@ pub(super) fn poly_copy_bound_error(
     }
 }
 
-pub(super) fn poly_ord_bound_error(
-    ctx: &Ctx,
-    span: Span,
-    callee: &str,
-    var: &str,
-    ty: Type,
-) -> String {
-    let callee = crate::resolve::demangle_call(callee);
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in {name} (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
-            span.line
-        , name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}`: `{var}: Ord` is unsatisfied"
-        ),
-    }
-}
-
 pub(super) fn poly_var_conflict_error(
     ctx: &Ctx,
     span: Span,
@@ -6800,13 +6894,12 @@ mod tests {
     /// A source checked the way `driver::assemble_module` checks one: the
     /// declaration checks first (P7.S3e -- `check_impl_decls` is what resolves
     /// each `impl:` binding to the word it names, and no call site can resolve
-    /// an obligation without it), then the body/call-site pass, returning the
-    /// checked module alongside what R17's pre-pass recorded.
+    /// an obligation without it, which `parse_with_core` now runs for every
+    /// caller), then the body/call-site pass, returning the checked module
+    /// alongside what R17's pre-pass recorded.
     fn checked_like_a_build(src: &str) -> Result<(Module, Vec<WordObligations>), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        check_trait_decls(&module)?;
-        check_impl_decls(&mut module)?;
         let recorded = super::super::check_module(&mut module)?;
         Ok((module, recorded))
     }
@@ -6818,12 +6911,15 @@ mod tests {
     /// spelling there -- the test-harness artefact that kept the deleted
     /// six-name comparison carve-out (P7.S3k R7) looking alive. Through here,
     /// `gt` arrives as `gt__mN`, which is what a real call site holds.
+    ///
+    /// The declaration pre-passes run *before* `resolve_modules`, inside
+    /// `parse_with_core`, exactly as `assemble_module` orders them:
+    /// `check_impl_decls` resolves each binding by the name the parser's
+    /// desugar synthesized, which only agrees with `WordDef::name` pre-mangle.
     fn check_src_mangled(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
-        check_trait_decls(&module)?;
-        check_impl_decls(&mut module)?;
         super::super::check_module(&mut module).map(|_| ())
     }
 
@@ -6868,10 +6964,12 @@ mod tests {
         assert_eq!(obs[0].var, 0);
         assert_eq!(obs[0].member, "show");
         assert_eq!(obs[0].span.line, 6);
-        // Index 2: the two pre-seeded `Copy`/`Ord` predicate entries occupy 0
-        // and 1, so a whole-program `TraitId` is what was recorded, not a
-        // per-module or per-word one.
-        assert_eq!(obs[0].trait_id, TraitId::from_index(2));
+        // Index 1: the pre-seeded `Copy` predicate entry occupies 0, `Show`
+        // (declared in this fixture's own source, ahead of the appended
+        // `core::cmp`, which declares its own `Ord` after it) is next -- a
+        // whole-program `TraitId` is what was recorded, not a per-module or
+        // per-word one.
+        assert_eq!(obs[0].trait_id, TraitId::from_index(1));
     }
 
     /// The obligation list is keyed by every non-combinator poly word the
@@ -7649,6 +7747,15 @@ mod tests {
     /// the fixture that resolves cleanly in
     /// `a_satisfied_bound_resolves_to_the_implementing_words_symbol` becomes a
     /// located error, not a silently dropped call, when the two disagree.
+    ///
+    /// P7.S3s (review fix): `parse_with_core` now runs `check_impl_decls` on
+    /// every caller's module (needed so `core::cmp`'s own `impl: Ord` blocks
+    /// resolve `cmp`), so this fixture's `impl: Show for Point` -- which does
+    /// bind `show` correctly -- resolves cleanly through that same call, the
+    /// same as it would in a real build. Reaching R17's backstop deliberately
+    /// now means undoing just that one resolution afterwards, on the `Show`
+    /// impl alone, rather than skipping the whole-module check `core::cmp`
+    /// still needs.
     #[test]
     fn an_unresolvable_obligation_on_a_satisfied_bound_is_a_located_error() {
         let src = format!(
@@ -7657,6 +7764,16 @@ mod tests {
         );
         let tokens = lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let show_impl = module
+            .impls
+            .iter_mut()
+            .find(|i| i.target_ty == crate::ast::Type::Struct(StructId::from_index(0), "Point"))
+            .expect("the fixture's `impl: Show for Point` parsed");
+        assert!(
+            !show_impl.resolved.is_empty(),
+            "parse_with_core's check_impl_decls should have resolved `show`"
+        );
+        show_impl.resolved.clear();
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
@@ -8885,6 +9002,37 @@ mod tests {
         assert!(!err.contains("__m"), "a mangled spelling leaked: {err}");
     }
     #[test]
+    fn check_concrete_overload_is_selected_over_an_ord_bounded_generic() {
+        // P7.S3s (R6), the call-site half of criterion 6: `poly_sig_could_match`
+        // is what makes a `Vec2 Vec2` call fall through the `Ord`-bounded
+        // generic candidate to the concrete one of the same name. `Vec2` has no
+        // `impl: Ord`, so the generic candidate must not admit these operands
+        // even though unification alone would bind `'T` to anything.
+        //
+        // Asserted at the checker boundary rather than on a built program on
+        // purpose: selecting the concrete candidate is the *correct* answer,
+        // and a program that then calls it panics at lowering (`checked user
+        // word exists`, `ir/func_builder/calls.rs`) because
+        // `ast::overload_symbols` counts poly words when deciding a name is
+        // overloaded, so the concrete word carries a `$$0`-suffixed symbol the
+        // call site never records. That gap is pre-existing -- reproduced at
+        // this slice's parent commit with `Bound::Ord` still in place -- and
+        // orthogonal to `Ord`, so there is no run golden to pair with this;
+        // `tests/phase7_slice3s_flip.rs` covers the declaration-time half.
+        //
+        // Mutation-verified: dropping `poly_sig_could_match`'s `impl:`
+        // registry filter makes the generic candidate win, and this fails with
+        // "`Vec2` does not satisfy `Ord`" from inside its instantiated body.
+        check_src_mangled(
+            "type: Vec2 x i64 y i64 ;\n\
+             : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+             : mylt ( Vec2 Vec2 -- Bool )\n\
+               | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
+             : main ( -- ) 1 1 Vec2 2 2 Vec2 mylt drop ;\n",
+        )
+        .unwrap();
+    }
+    #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
         // R1/R5/R9: a length variable is opaque through `len`; the same word
         // instantiates at `[i64 4]` and `[i64 8]`.
@@ -9419,20 +9567,51 @@ mod tests {
         );
     }
 
+    /// P7.S3s (R2, `Bound::User` half of `poly_cross_bound_error`): the same
+    /// walk-time `Image::CallerVar` arm as `check_generic_cross_call_bound_
+    /// mismatch_is_error` above, but with a *user* trait rather than the
+    /// library `Ord` -- `g` forwards its own `'T` to `shows` without
+    /// declaring `Show`, so the callee's bound has no caller obligation to
+    /// discharge against. Pins the real trait name rendering in `bound`'s
+    /// `Bound::User(id)` arm, which had no coverage: collapsing it to the
+    /// placebo `"a user trait"` string left the whole suite green.
+    #[test]
+    fn check_generic_cross_call_forwarded_user_bound_mismatch_is_error() {
+        let err = check_src(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : g ( &'T -- ) shows ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`'T` of `shows` requires `Show`, which `'T` in `g` does not declare"),
+            "unexpected message: {err}"
+        );
+    }
+
     /// P7.S3k (R3): the same discharge against a *concrete* image runs the
     /// ordinary predicate on the spot, so the caller's own bounds are not the
     /// only route to a rejection. `Bool` is `Copy` but not `Ord`.
+    ///
+    /// P7.S3s (review fix): `Ord` is now a `Bound::User`, and `compose`'s own
+    /// `resolve_user_bound` loop -- not the walk-time `Image::Concrete` arm,
+    /// which defers to it (R3) -- is what catches this. `compose` only runs
+    /// for a cross-call reached from `discover_transitive_instantiations`'s
+    /// fixpoint, itself seeded from a real instantiation, so `g` must be
+    /// called from `main`; the old fixture's `g` was dead code, which the
+    /// old `is_ord` (no registry, no reachability gate) still caught but
+    /// this design deliberately does not (R3's named residual).
     #[test]
     fn check_generic_cross_call_concrete_operand_failing_a_bound_is_error() {
         let err = check_src(
             ": biggest ( 'U: Ord -- 'U ) ;\n\
              : g ( 'T -- 'T ) True biggest drop ;\n\
-             : main ( -- ) ;\n",
+             : main ( -- ) 1 g drop ;\n",
         )
         .unwrap_err();
         assert!(
             err.contains("cannot instantiate `'U` of `biggest` with `Bool`")
-                && err.contains("is not `Ord`"),
+                && err.contains("does not satisfy `Ord`"),
             "unexpected message: {err}"
         );
     }
@@ -9600,13 +9779,18 @@ mod tests {
 
     /// P7.S3k: the callee signature shapes a symbolic mapping cannot carry are
     /// each a located rejection naming that shape, not the whole-feature
-    /// narrowing they replaced. Four of the five are pinned here (review
+    /// narrowing they replaced. Three of the four are pinned here (review
     /// fix: the row case was missing, contradicting the deviations doc's
-    /// claim that it was already pinned); the fifth, a declared quotation
+    /// claim that it was already pinned); the fourth, a declared quotation
     /// parameter, is pinned separately by
     /// `poly_quotlit_against_legal_inline_quotation_param_rejects_at_the_cross_call`,
     /// which needs a `~[ ]` fixture this table's plain `check_src` shape
-    /// cannot build.
+    /// cannot build. A fifth shape, a `Bound::User` on a mapped variable,
+    /// used to be pinned here too; P7.S3s R2 deletes that rejection outright
+    /// (`check_generic_cross_call_discharges_a_forwarded_user_bound` and
+    /// `check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error`
+    /// pin the resolution it replaces), so it is no longer a member of this
+    /// table.
     #[test]
     fn check_cross_call_unsupported_callee_shapes_name_themselves() {
         for (fixture, what) in [
@@ -9622,11 +9806,6 @@ mod tests {
                 "returning the compound type `Box['U]` from a polymorphic word",
             ),
             (
-                ": shows ( &'U: Show -- ) show ;\n\
-                 : g ( &'T: Show -- ) shows ;\n: main ( -- ) ;\n",
-                "discharging the `Show` bound",
-            ),
-            (
                 ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
                  : g ( 'T: Copy -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
                 "calling a row-polymorphic word",
@@ -9639,6 +9818,52 @@ mod tests {
                 "expected `{what}`, got: {err}"
             );
         }
+    }
+
+    /// P7.S3s (R2): the headline capability -- a polymorphic body may call
+    /// another polymorphic word carrying a `Bound::User` on a forwarded
+    /// variable, and the composed callee's `trait_calls` resolves to the
+    /// implementing word's own lowering symbol, not merely a program that
+    /// type-checks. `g` forwards its own `'T: Show` to `shows`; `main`
+    /// instantiates `g` at `Point`, and the fixpoint must ground `shows`'s
+    /// body-recorded `show` obligation against that same `Point`.
+    #[test]
+    fn check_generic_cross_call_discharges_a_forwarded_user_bound() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : g ( &'T: Show -- ) shows ;\n\
+             : main ( -- ) 1 2 Point |p| &p g p drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let composed = module
+            .transitive_instantiations
+            .iter()
+            .find(|i| i.callee == "shows")
+            .expect("g's cross-call to shows composed a monomorph");
+        let resolved: Vec<&str> = composed.trait_calls.values().map(String::as_str).collect();
+        assert_eq!(resolved, vec!["show;Show;0;Point"]);
+    }
+
+    /// P7.S3s (R3): the concrete-image half of the same loop. `g`'s body
+    /// builds `Other` itself, a struct already in the registry with no
+    /// `impl: Show`, and hands `&o` to `shows` -- the mapped operand is
+    /// `Image::Concrete(Other)` at walk time, never a forwarded caller
+    /// variable. `compose`'s `resolve_user_bound` loop is what raises this,
+    /// not a code change to the `(Image::Concrete(_), Bound::User(_))`
+    /// walk-time arm (R3): that arm still records `None` and defers.
+    #[test]
+    fn check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error() {
+        let err = check_src(&format!(
+            "{SHOW}type: Other n i64 ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : g ( 'T -- ) drop 7 Other |o| &o shows o drop ;\n\
+             : main ( -- ) 1 g ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`Other` does not satisfy `Show`: no `( &Other -- )` found"),
+            "unexpected message: {err}"
+        );
     }
 
     /// P7.S3k (R2/N1): a grounded cross-call records *only* the symbolic

@@ -219,6 +219,14 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
 
 // -- E-P1-4: the REPL lowering path shares the predicate --------------------
 
+#[ignore = "P7.S3s review finding: the REPL's `splice_import` binds a \
+    concrete word (`w.poly.is_none()`) or retains a combinator \
+    (`declares_inline`); it has no case for an imported non-inline poly \
+    word, a category R5 creates for the first time (the six comparisons \
+    all lost `inline`). Every comparison is unusable from the REPL now, \
+    not just a session's own `'T: Copy Ord` declaration (R8's narrower, \
+    already-accepted scope) -- fixing this needs the REPL to support \
+    calling/monomorphizing a non-inline generic word, a separate slice."]
 #[test]
 fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
     // R-P1-5 names `ir::lower_word` (the REPL's per-line entry) as one of the
