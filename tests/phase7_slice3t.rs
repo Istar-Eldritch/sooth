@@ -161,6 +161,36 @@ fn a_glued_bracket_after_a_concrete_word_is_rejected() {
     assert!(err.contains(&takes_no_type_arguments("inc", 3)), "{err}");
 }
 
+/// R3, the combinator route: a `lib/` combinator like `lt` is spliced ahead of
+/// the polymorphic-call interception (`poly.combinators`), so it has nowhere
+/// to put a list either. Review fix: this clause of the guard had no witness --
+/// deleting it let `lt[i64]` build to exit 0.
+#[test]
+fn a_glued_bracket_after_a_combinator_is_rejected() {
+    let err = build_error(
+        "glued-combinator",
+        "import: intrinsics * ;\n\
+         import: core::prelude | lt | ;\n\
+         : main ( -- ) lt[i64] ;\n",
+    );
+    assert!(err.contains(&takes_no_type_arguments("lt", 3)), "{err}");
+}
+
+/// R3, the eliminator route: an enum eliminator like `Shape?` is intercepted
+/// ahead of the polymorphic-call interception (`poly.eliminators`), so it has
+/// nowhere to put a list either. Review fix: this clause of the guard had no
+/// witness -- deleting it let `Shape?[f64]` build to exit 0.
+#[test]
+fn a_glued_bracket_after_an_eliminator_is_rejected() {
+    let err = build_error(
+        "glued-eliminator",
+        "import: intrinsics * ;\n\
+         type: Shape | Circle f64 | Rect f64 f64 ;\n\
+         : main ( -- ) Shape?[f64] ;\n",
+    );
+    assert!(err.contains(&takes_no_type_arguments("Shape?", 3)), "{err}");
+}
+
 /// R7: a type *variable* argument. `parse_type_expr` has no production for one,
 /// so without its own message this reads as a missing type declaration rather
 /// than as the unsupported forwarding it is.

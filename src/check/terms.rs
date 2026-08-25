@@ -182,10 +182,17 @@ fn check_term(
         TermKind::Call(name, type_args) => {
             // P7.S3t (R3): exactly one of this arm's dispatch routes consumes
             // an explicit type-argument list -- the polymorphic-call
-            // interception far below. The guard is written as an *allow*, so a
-            // route added to this arm later rejects by default: a route that
-            // silently dropped the list would link the wrong specialization,
-            // which is a miscompile rather than a diagnostic.
+            // interception far below. The guard is written as an *allow*, and
+            // only rejects a route added later by default if that route is
+            // one `poly_call_takes_type_args` cannot mistake for the poly
+            // interception: a route added *ahead* of the poly path that
+            // claims a name `poly.env` also holds (as the eliminator and
+            // combinator routes already do) fails open instead, exactly as
+            // it does for those two today. A route that silently dropped the
+            // list would link the wrong specialization, which is a
+            // miscompile rather than a diagnostic, so a genuinely new route
+            // needs its own exclusion here, not just an assumption that the
+            // guard already covers it.
             if !type_args.is_empty()
                 && !poly_call_takes_type_args(
                     name, span, &stack, ctx, env, arrays, cells, refs, scope, poly,
@@ -1026,11 +1033,19 @@ fn check_term(
 /// word -- is denied, and its call site reports `no_type_arguments_error`.
 ///
 /// The four exclusions before the `poly.env` lookup are the routes that would
-/// otherwise claim a name the polymorphic env *also* holds: a body local wins
-/// over every word, a builtin dispatched by name wins over the env, and an
-/// eliminator or combinator is intercepted ahead of the poly path. Those four
-/// together also cover the operator route, which is the one that runs *between*
-/// them and the poly interception: every builtin operator name is a
+/// otherwise claim a name the polymorphic env *also* holds. Two are witnessed
+/// by a mutation test that flips a build to exit 0: an eliminator
+/// (`Shape?[f64]`) and a combinator (`lt[i64]`) can each share a name with a
+/// `poly.env` entry, so their exclusions are load-bearing. The other two are
+/// not: `dup`/`x`-shaped names never enter `poly.env` at all, so the
+/// name-dispatched-builtin exclusion is redundant with that lookup, and the
+/// local-read exclusion is unreachable -- a local named after a poly word is
+/// already rejected at its binding site (`callable_local_error`). Both stay
+/// because the routes they describe are real (a builtin and a local *do* run
+/// ahead of the poly interception in `check_term`'s `Call` arm), even though
+/// nothing here currently depends on either clause to reject a program. The
+/// four together also cover the operator route, which is the one that runs
+/// *between* them and the poly interception: every builtin operator name is a
 /// name-dispatched builtin except the six comparisons, and those are
 /// always-spliced `lib/` combinators, so the combinator clause has already
 /// denied them. The final clause is `fall_through_to_env`'s negation: a name

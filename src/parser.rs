@@ -5267,6 +5267,15 @@ impl<'t> Parser<'t> {
             return Ok(Vec::new());
         }
         self.pos += 1;
+        // R7 (review fix): a variable anywhere in the list -- top-level or
+        // nested inside a generic application/array/ref (`Cell['U]`) -- is
+        // found here, before `parse_type_expr` ever runs. `parse_type_expr`
+        // has no production for a variable at any depth, so without this a
+        // nested one surfaces as its "unknown type" message, with the
+        // first-element note wrongly attached on top.
+        if let Some((var, vspan)) = self.instantiation_list_ty_var() {
+            return Err(instantiation_ty_var_error(&var, vspan));
+        }
         let mut args: Vec<Type> = Vec::new();
         loop {
             match self.peek() {
@@ -5275,11 +5284,6 @@ impl<'t> Parser<'t> {
                     break;
                 }
                 None => return Err(unterminated_instantiation_error(word, span)),
-                // R7: a type variable has no `parse_type_expr` production, so
-                // it would otherwise be blamed as an unknown type name.
-                Some((Token::Word(w), vspan)) if w.starts_with('\'') => {
-                    return Err(instantiation_ty_var_error(w, *vspan));
-                }
                 _ => args.push(self.parse_type_expr().map_err(|e| match args.is_empty() {
                     true => format!("{e}{}", instantiation_element_note()),
                     false => e,
@@ -5290,6 +5294,28 @@ impl<'t> Parser<'t> {
             return Err(empty_instantiation_error(word, span));
         }
         Ok(args)
+    }
+
+    /// The first type-variable token within the coming instantiation list, at
+    /// any nesting depth, or `None` if the list (already open, `self.pos`
+    /// past its `[`) contains none. Bracket-depth tracked so the scan stops at
+    /// the list's own closing `]` rather than reading into whatever follows.
+    fn instantiation_list_ty_var(&self) -> Option<(String, Span)> {
+        let mut depth: i32 = 0;
+        for (tok, tspan) in &self.tokens[self.pos..] {
+            match tok {
+                Token::Word(w) if w.contains('\'') => return Some((w.clone(), *tspan)),
+                Token::LBracket => depth += 1,
+                Token::RBracket => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn parse_term(&mut self) -> Result<Term, String> {
