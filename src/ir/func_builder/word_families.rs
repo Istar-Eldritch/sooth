@@ -585,7 +585,14 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, cell_ptr));
                 v
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            // P7.S3v (R6): a quotation payload is an aggregate like the rest
+            // -- `field_store_op`/`member_ty` refuse to scalar-store one, and
+            // `alloc_aggregate` already knows its layout.
+            IrType::Struct(_)
+            | IrType::Enum(_)
+            | IrType::Array(_)
+            | IrType::Quotation(_)
+            | IrType::OwningQuotation(_) => {
                 let dst = self.alloc_aggregate(payload_ty);
                 let size = self.value_size(payload_ty);
                 if size > 0 {
@@ -759,7 +766,13 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
                 self.push_instr(Instr::FieldStore(cell_ptr, val));
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            // P7.S3v (R6): the store half of `load_owned_payload`'s quotation
+            // arm above.
+            IrType::Struct(_)
+            | IrType::Enum(_)
+            | IrType::Array(_)
+            | IrType::Quotation(_)
+            | IrType::OwningQuotation(_) => {
                 let size = self.value_size(payload_ty);
                 if size > 0 {
                     self.push_instr(Instr::Blit(val, cell_ptr, size));

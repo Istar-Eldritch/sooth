@@ -1245,15 +1245,12 @@ pub(super) fn poly_call_term(
             return Ok(stack);
         }
         "drop" => {
-            let top = stack.pop().ok_or_else(|| need(1, 0))?;
-            // P7.S3h: the generic-body twin of the monomorphic `drop` gate.
-            // A generic word cannot *declare* an owning parameter, but it can
-            // call a word that returns one, so the value reaches this arm
-            // through the body rather than the signature -- and the reason
-            // `drop` cannot dispose it is identical.
-            if let PolyType::Concrete(Type::OwningQuotation(eff)) = top.pt {
-                return Err(cannot_drop_owning_quotation_error(ctx, span, eff));
-            }
+            stack.pop().ok_or_else(|| need(1, 0))?;
+            // P7.S3v (R4): the generic-body twin of the monomorphic `drop`
+            // arm. A generic word cannot *declare* an owning parameter, but it
+            // can call a word that returns one, so an owning closure reaches
+            // this arm through the body rather than the signature -- and
+            // disposes through the same synthesized disposer either way.
             return Ok(stack);
         }
         "len" => {

@@ -277,9 +277,12 @@ fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
 /// the type inequality this marker rests on, gone. That is why the rejection is
 /// on the *declaration* rather than on the argument. The ordinary-parameter line
 /// below is declined by the pre-existing quotation-parameter gate (the REPL
-/// cannot lower a real call taking a quotation at all), and the `owning` field
-/// is the containment rule. The session has to survive all three, which is what
-/// the trailing arithmetic line pins.
+/// cannot lower a real call taking a quotation at all). The `owning` *field* is
+/// no longer a rejection at all since P7.S3v (R6) -- it is admitted, and the
+/// line is kept here as the guard that admitting it did not cost the session
+/// its type registry: `type: Box` must define, not error and not crash. The
+/// session has to survive all three lines, which is what the trailing
+/// arithmetic line pins.
 #[test]
 fn repl_owning_quotation_declarations_are_errors_not_crashes() {
     let out = run_session(&[
@@ -298,8 +301,8 @@ fn repl_owning_quotation_declarations_are_errors_not_crashes() {
         "expected the REPL's own real-call quotation-parameter gate for `g`, got: {out}"
     );
     assert!(
-        out.contains("cannot appear as the field `q` of struct `Box`"),
-        "expected the containment rejection for the field, got: {out}"
+        out.contains("defined type Box") && !out.contains("the field `q` of struct `Box`"),
+        "P7.S3v admits an owning struct field, so the type must define: {out}"
     );
     assert!(
         !out.contains("defined f") && !out.contains("defined g"),

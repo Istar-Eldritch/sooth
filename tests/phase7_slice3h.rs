@@ -152,44 +152,6 @@ fn escaping_closure_over_a_copy_struct_local_still_rejects() {
 /// uses for the linear core.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n";
 
-/// The containment rule, end to end and at the position that motivates it.
-/// A struct holding an `owning` field is non-`Copy`, so `drop`ping it is a
-/// legal consumption -- but `emit_drop`'s `_ => {}` swallows a quotation and
-/// `field_is_linear` answers false for one, so no destructor is synthesized at
-/// all and the container's `drop` becomes a complete no-op. The rejection is
-/// what keeps "the body is the sole disposer" true, and it costs no new gate:
-/// `reject_quotation_type_position` dispatches on `is_quotation_type`, whose
-/// `owning` answer is `Some`, while the legal-position carve-out matches
-/// `Type::Quotation` structurally.
-#[test]
-fn an_owning_quotation_field_is_rejected() {
-    let prog = Scratch::write("field", "type: Box q owning [ -- ] ;\n: main ( -- ) ;\n");
-    let err = build_error(prog.path());
-    assert!(
-        err.contains("a quotation type `owning [ -- ]` cannot appear as the field `q` of struct"),
-        "unexpected message: {err}"
-    );
-}
-
-/// The variant-field half, which is a P0-shaped position exactly like a struct
-/// field: enums do support linear variant fields (`examples/list.sth`'s
-/// `Cons ... next ^List`), so an owning variant field would be just as linear
-/// and just as undisposable.
-#[test]
-fn an_owning_quotation_variant_field_is_rejected() {
-    let prog = Scratch::write(
-        "variant-field",
-        "type: E | None | Some q owning [ -- ] ;\n: main ( -- ) ;\n",
-    );
-    let err = build_error(prog.path());
-    assert!(
-        err.contains(
-            "a quotation type `owning [ -- ]` cannot appear as the field `q` of enum variant"
-        ),
-        "unexpected message: {err}"
-    );
-}
-
 /// `owning` is intercepted ahead of every user type registry, so a `type:`
 /// declared under that name would be silently unreachable rather than merely
 /// shadowed.
@@ -315,44 +277,6 @@ fn an_owning_closure_may_return_its_capture_instead_of_disposing_it() {
         ),
     );
     assert_eq!(build_and_run(prog.path()), "drop 7\n");
-}
-
-/// `drop` cannot discharge the obligation: disposing the captures means running
-/// the body, which is code only the closure has, and `emit_drop`'s match has no
-/// arm that could run one. Without this rejection the `drop` is silently a
-/// no-op -- the obligation discharged, the `Spy` and the env block both leaked.
-#[test]
-fn dropping_an_owning_closure_is_a_located_rejection() {
-    let prog = Scratch::write(
-        "drop-owning",
-        &format!(
-            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
-             : main ( -- ) 7 Spy mk drop ;\n"
-        ),
-    );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: cannot `drop` a value of type `owning [ -- ]` in `main` (line 4): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
-    );
-}
-
-/// The generic-body twin of the same rejection. A generic word cannot *declare*
-/// an owning parameter, but it can call a word that returns one, so the value
-/// arrives through the body rather than the signature and reaches the poly
-/// walk's own `drop` arm -- which fails open without its own gate, since the
-/// monomorphic one never runs on a poly body.
-#[test]
-fn dropping_an_owning_closure_in_a_generic_body_is_a_located_rejection() {
-    let prog = Scratch::write(
-        "drop-owning-poly",
-        ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n\
-         : g ( 'T: Copy -- 'T ) | x | mk drop x ;\n\
-         : main ( -- ) 5 g . ;\n",
-    );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: cannot `drop` a value of type `owning [ -- ]` in `g` (line 2): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
-    );
 }
 
 /// The call-once lifecycle needs no checker code of its own: the marker makes

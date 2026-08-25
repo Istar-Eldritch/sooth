@@ -3601,6 +3601,21 @@ impl<'t> Parser<'t> {
                 return Err(owned_cell_no_payload_error(word, span));
             }
             self.parse_type_expr()?
+        } else if remainder == OWNING_QUOTATION_KEYWORD {
+            // P7.S3v (R7): `^owning` glues into one word, so the `owning`
+            // prefix never reaches `parse_type_expr`'s own
+            // `owning_quotation_ahead` dispatch and the remainder resolves as
+            // an unknown type name. The effect rows still follow as their own
+            // tokens, so read them exactly as the spaced form does.
+            let remainder_span = Span {
+                col: span.col + run_len as u32,
+                ..span
+            };
+            if !self.quotation_effect_opens_here() {
+                return Err(owning_without_effect_error(remainder_span));
+            }
+            let (inputs, outputs) = self.parse_quotation_effect_rows()?;
+            crate::ast::owning_quotation_type(inputs, outputs)
         } else {
             // `span` names the whole word (e.g. `^Nope` starts at the `^`);
             // point at the remainder's own column so the error names and
@@ -7704,9 +7719,39 @@ mod tests {
         );
     }
 
+    /// P7.S3v (R7): `^` is not a lexer delimiter, so `^owning` arrives as one
+    /// word and never reaches `parse_type_expr`'s `owning_quotation_ahead`
+    /// dispatch -- the remainder `owning` used to resolve as an unknown type
+    /// name. The spaced form is the control: it is a genuinely different code
+    /// path (`split_owning_cell_word`'s empty-remainder branch recurses into
+    /// `parse_type_expr`), so the two must be pinned separately, and `^Spy`
+    /// pins that an ordinary payload is unaffected.
+    #[test]
+    fn a_glued_owning_cell_payload_parses_as_an_owning_quotation() {
+        let module = parse_src(
+            "type: Spy tag i64 ;\n\
+             : glued ( ^owning [ -- ] -- ) drop ;\n\
+             : spaced ( ^ owning [ -- ] -- ) drop ;\n\
+             : ordinary ( ^Spy -- ) drop ;\n",
+        )
+        .unwrap();
+        let own_nil = crate::ast::owning_quotation_type(Vec::new(), Vec::new());
+        let payload = |w: usize| {
+            let Type::OwnedCell(id, _) = module.words[w].effect.inputs[0].ty else {
+                panic!("a `^`-led slot is an owned cell");
+            };
+            module.owned_cells[id.index()].payload
+        };
+        assert_eq!(payload(0), own_nil);
+        assert_eq!(payload(1), own_nil);
+        assert!(matches!(payload(2), Type::Struct(..)));
+    }
+
     /// P7.S3h: `owning` is a type-position keyword, not a type name, so a
     /// following token that opens no effect is blamed on the keyword rather
-    /// than reported as an unknown type one token later.
+    /// than reported as an unknown type one token later. P7.S3v (R7) adds the
+    /// glued `^owning` form, which reads the same effect rows and so blames
+    /// the same keyword -- located at the `owning`, not at the leading `^`.
     #[test]
     fn owning_without_a_quotation_effect_is_located() {
         for src in [
@@ -7714,6 +7759,7 @@ mod tests {
             ": f ( owning [i64 4] -- ) drop ;",
             ": f ( owning ~[ -- ] -- ) drop ;",
             "type: S q owning i64 ;",
+            ": f ( ^owning i64 -- ) drop ;",
         ] {
             let err = parse_src(src).unwrap_err();
             assert!(

@@ -2277,21 +2277,22 @@ pub enum Type {
     /// P7.S3h: the owning quotation type `owning [ ... ]`. Same payload as
     /// `Type::Quotation`, and it materializes exactly as one does, but it is
     /// **linear**: it carries a disposal obligation for whatever the closure
-    /// captured, and the only thing that can discharge that obligation is
-    /// running the body, so `call` is its consuming use and `drop` on it is
-    /// rejected. The type names the obligation and nothing else -- never where
-    /// the env lives -- so inline, static and heap storage can all land behind
-    /// one signature. Structural `PartialEq` gives
+    /// captured. Two consuming uses discharge it, running different code:
+    /// `call` runs the body (which disposes the captures itself), and P7.S3v's
+    /// `drop` runs the value's per-construction-site disposer instead,
+    /// discarding the closure unexecuted. The type names the obligation and
+    /// nothing else -- never where the env lives -- so inline, static and heap
+    /// storage can all land behind one signature. Structural `PartialEq` gives
     /// `OwningQuotation(e) != Quotation(e)` for free, so every materialization
     /// boundary and `if`-join separates the two by type inequality. Its
     /// `name_static` carries the `owning [ ... ]` spelling (see
     /// `owning_quotation_type`).
     ///
-    /// Never a field, element, payload or referent: `is_quotation_type` returns
-    /// `Some` for it and the registry audit's legal-position carve-outs match
-    /// `Type::Quotation` structurally, so every aggregate position rejects it.
-    /// That containment is what makes "the body is the sole disposer" true --
-    /// synthesized destructor glue has no way to run a closure body.
+    /// P7.S3v (R6): legal as a struct field, an enum variant field and an
+    /// owned-cell payload -- the three positions whose container synthesizes a
+    /// destructor, which reaches the disposer through `emit_drop`. Still
+    /// rejected as an array/slice element (P7.S5), behind a reference, and at
+    /// an `extern:` boundary: none of those owns what it names.
     OwningQuotation(&'static QuotEffect),
 }
 
