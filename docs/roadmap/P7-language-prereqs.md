@@ -601,7 +601,11 @@ this slice. **P7.S3s supplies the motivating program** it was parked waiting for
 `inline` comparison over a library `Ord`. S3s ships those comparisons non-inline precisely so
 this slice inherits a differential oracle -- flip `inline` on the same source and diff the
 resolved `impl:` symbols at two and three splices -- which is the entry condition for a third
-attempt, alongside the three open items in its brief.
+attempt, alongside the three open items in its brief. The harness skeleton is already in
+tree (`tests/phase7_slice3s_oracle.rs`): it builds `examples/poly_if.sth` twice and diffs
+stdout plus the linked `impl: Ord` symbol table, against itself for now since there is no
+second variant to diff against until this slice flips `mymax`/`mymax3` back to `inline`. That
+swap is this slice's entire remaining work on the oracle side.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -674,7 +678,7 @@ any such member rather than shipping a dispatch path with no grounding signal.
 with some new call-site or context mechanism supplying the concrete type -- mechanism not
 yet designed.
 
-**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
+**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `[ done ]` `Bound::Ord`
 (`src/ast.rs:1679-1683`) is a reserved, member-less trait-table entry (`seed_predicate_traits`)
 satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded `ty.is_numeric()` check --
 never the whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches

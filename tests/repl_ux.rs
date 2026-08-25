@@ -314,3 +314,25 @@ fn repl_owning_quotation_declarations_are_errors_not_crashes() {
         "the session must survive every rejection: {out}"
     );
 }
+
+/// P7.S3s (R8): `Ord` is now an ordinary library trait (`core::cmp`), not a
+/// reserved predicate the REPL's `predicate_traits()` table admits, so a
+/// REPL bound naming it gets a located, REPL-specific diagnostic rather than
+/// the generic "unknown capability" text a file program's misspelled bound
+/// would get.
+#[test]
+fn repl_ord_bound_is_a_located_repl_specific_diagnostic() {
+    let out = run_session(&[": mymax ( 'T: Ord 'T -- 'T ) drop ;"]);
+    assert!(
+        out.contains(
+            "error: unknown capability `Ord` at line 1, col 15 (`Ord` is a core::cmp trait; \
+             the REPL carries no trait or impl: registry to resolve it against -- define a \
+             word needing it in a file and load that instead)"
+        ),
+        "expected the REPL-specific Ord diagnostic, got: {out}"
+    );
+    assert!(
+        !out.contains("defined mymax"),
+        "the bound word must not be defined: {out}"
+    );
+}

@@ -720,6 +720,7 @@ pub fn parse_bodies(
         trait_origin,
         generics,
         traits,
+        is_repl: false,
     };
     parser.parse_generic_typedefs()?;
     while parser.pos < parser.tokens.len() {
@@ -797,6 +798,7 @@ pub(crate) fn prepass_generic_typedefs(
         type_origin: &[],
         trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: false,
     };
     parser.parse_generic_typedefs()
 }
@@ -867,6 +869,7 @@ pub(crate) fn prepass_trait_decls(
                 // reserved-predicate table even though it never looks up a
                 // user trait declared earlier in the registry-so-far.
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             let decl = parser.parse_trait_decl()?;
             i = parser.pos;
@@ -1044,6 +1047,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -1090,6 +1094,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
+                is_repl: false,
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -1183,10 +1188,15 @@ pub fn parse_line_with_structs(
         generics: &mut generics,
         type_origin: &[],
         trait_origin: &[],
-        // P7.S3e (R2): a REPL word def still needs `'T: Copy Ord` to work;
-        // a user `trait:` declaration is not yet supported at REPL scope, so
+        // P7.S3e (R2): a REPL word def still needs `'T: Copy` to work; a
+        // user `trait:` declaration is not yet supported at REPL scope, so
         // the reserved predicate-only table is all this context ever sees.
+        // P7.S3s (R8): `Ord` no longer lives in that table -- it is an
+        // ordinary library trait now, so a REPL bound naming it gets a
+        // located, REPL-specific diagnostic (`is_repl` below), not a silent
+        // fold.
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -1243,6 +1253,7 @@ pub fn parse_typedef_line(
         type_origin: &[],
         trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
@@ -1325,6 +1336,7 @@ pub fn parse_enum_typedef_line(
         type_origin: &[],
         trait_origin: &[],
         traits: crate::ast::predicate_traits(),
+        is_repl: true,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
@@ -1707,6 +1719,20 @@ fn unknown_capability_error(name: &str, span: Span) -> String {
     )
 }
 
+/// P7.S3s (R8): the REPL carries no whole-program trait/`impl:` registry
+/// (`traits` is always `predicate_traits()` there, `Copy` only now that
+/// `Ord` is an ordinary library trait), so a bound naming anything past
+/// `Copy` can never resolve at REPL scope, not even a name that would
+/// resolve in a file. Distinct wording from `unknown_capability_error` so a
+/// REPL user is pointed at the real cause (no registry) instead of being
+/// told the name is simply wrong.
+fn repl_unknown_capability_error(name: &str, span: Span) -> String {
+    format!(
+        "error: unknown capability `{name}` at line {}, col {} (`{name}` is a core::cmp trait; the REPL carries no trait or impl: registry to resolve it against -- define a word needing it in a file and load that instead)",
+        span.line, span.col
+    )
+}
+
 /// P7.S3e (R18): a bound naming a qualified trait (`'T: q::Show`) whose
 /// qualifier is not one of this module's import aliases. `parse_capabilities`
 /// has no `resolve_type` to delegate to (the way `type_is_exported`'s callers
@@ -2044,13 +2070,21 @@ struct Parser<'t> {
     /// never written) for a REPL line and for the import/export scans, which
     /// have no generic declaration to apply.
     generics: &'t mut GenericTypes,
-    /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`/`Ord`
+    /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`
     /// plus every user `trait:` declaration in the closure), populated by
     /// `prepass_trait_decls` before any body parses -- mirrors `structs`/
     /// `enums`. Empty for a REPL line (`trait:` is not yet supported at REPL
     /// scope, the same bypass pattern `structs`/`enums` already follow
     /// there).
     traits: &'t [TraitDecl],
+    /// P7.S3s (R8): true at the three REPL construction sites
+    /// (`parse_line_with_structs`, `parse_typedef_line`,
+    /// `parse_enum_typedef_line`), false everywhere else. `traits` alone
+    /// cannot distinguish REPL scope from a file-parsing prepass/scratch
+    /// site -- both see only `predicate_traits()` -- so `parse_capabilities`
+    /// needs this explicit signal to choose the REPL-specific
+    /// unknown-capability wording.
+    is_repl: bool,
 }
 
 impl<'t> Parser<'t> {
@@ -3294,12 +3328,22 @@ impl<'t> Parser<'t> {
                 // the enclosing signature's next slot -- unless nothing has
                 // been read yet, where the colon has already committed to a
                 // bound (X3).
-                None if out.is_empty() => return Err(unknown_capability_error(&c, span)),
+                None if out.is_empty() => {
+                    return Err(if self.is_repl {
+                        repl_unknown_capability_error(&c, span)
+                    } else {
+                        unknown_capability_error(&c, span)
+                    });
+                }
                 None => break,
             }
         }
         if out.is_empty() {
-            return Err(unknown_capability_error("<none>", colon_span));
+            return Err(if self.is_repl {
+                repl_unknown_capability_error("<none>", colon_span)
+            } else {
+                unknown_capability_error("<none>", colon_span)
+            });
         }
         Ok(out)
     }
@@ -8856,6 +8900,34 @@ mod tests {
         // declared trait is still X3.
         let err = parse_src(": f ( 'T: Nope -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
+    }
+
+    /// P7.S3s (R8): `is_repl` picks the REPL-specific wording, distinct from
+    /// the file-parsing text pinned above -- same unresolved name, different
+    /// message, because the REPL's cause (no trait/`impl:` registry at all)
+    /// is not "the name is wrong".
+    #[test]
+    fn parse_capabilities_at_repl_scope_is_a_located_repl_specific_error() {
+        let tokens = lex(": f ( 'T: Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
+            "{err}"
+        );
     }
 
     #[test]

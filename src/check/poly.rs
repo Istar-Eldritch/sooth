@@ -85,11 +85,15 @@ pub(crate) struct TraitResolveCtx<'a> {
 
 impl TraitResolveCtx<'_> {
     /// The scratch tables for a path no `Bound::User` can reach: the REPL
-    /// (a session declares no `trait:`, so its bounds are `Copy`/`Ord` only)
-    /// and the REPL's poly-combinator check. An empty `impls` would reject a
-    /// satisfied bound, so a path that *can* see one -- including native's
-    /// poly-combinator-standalone check, whose instantiation records are
-    /// scratch but whose bounds are real -- must pass the real tables.
+    /// (a session declares no `trait:`, and `Ord` is now an ordinary
+    /// library trait rather than a reserved predicate, so `Copy` is the
+    /// only bound a REPL word can carry at all -- `parse_capabilities`
+    /// rejects anything else with a located REPL-specific diagnostic, P7.S3s
+    /// R8) and the REPL's poly-combinator check. An empty `impls` would
+    /// reject a satisfied bound, so a path that *can* see one -- including
+    /// native's poly-combinator-standalone check, whose instantiation
+    /// records are scratch but whose bounds are real -- must pass the real
+    /// tables.
     pub(crate) fn scratch() -> TraitResolveCtx<'static> {
         TraitResolveCtx {
             traits: crate::ast::predicate_traits(),
