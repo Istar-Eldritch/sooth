@@ -72,9 +72,11 @@ fix) requires the found trait's `TraitDecl.module` to equal the *immediately* im
 module -- a raw one-hop table. A trait declared in module A and merely re-exported
 (`export: Name ;`, not declared) by hub module B is invisible to a consumer C importing
 only B, even with an explicit `import: B | Name | ;`, confirmed live:
+
 ```
 error: unknown capability `MyOrd` at line 3, col 14 (a bound names `Copy`, `Ord`, or a trait in scope)
 ```
+
 Struct/enum type names already have a purpose-built multi-hop walker for exactly this
 (`resolve_type_export_origins`/`walk_type_export_origin`, `driver.rs:352-421`) and
 intrinsics have their own separate one (P7.S3q). Traits had neither -- nobody wrote the
