@@ -1895,6 +1895,15 @@ fn poly_cross_call(
             // over `sig.bounds`, so that loop re-derives and checks this
             // exact obligation for every reachable cross-call once the
             // caller is grounded. This walk-time site defers to it.
+            //
+            // Residual gap, deliberately unenforced (P7.S3s R3): this arm
+            // always records `None` and defers to `compose`'s own loop, but
+            // `compose` only runs against a caller instantiation that
+            // actually exists. A `g` whose body builds its own unimplementing
+            // type and hands it to a `Bound::User`-bounded callee (this arm's
+            // exact shape) is never flagged if nothing in the program ever
+            // instantiates `g` -- no θ to ground the check against, so it
+            // never runs. Builds clean today; not this slice's to close.
             (Image::Concrete(_), Bound::User(_)) => None,
         };
         if let Some(err) = unsatisfied {
@@ -2165,7 +2174,7 @@ fn poly_cross_output(
 /// mis-lowered later.
 ///
 /// This is the residual of the gap this slice closes, not a restatement of it:
-/// it fires for four specific declared shapes, where the deleted
+/// it fires for three specific declared shapes, where the deleted
 /// `poly_calls_poly_word_error` fired for *every* cross-call.
 ///
 /// - A row (`..s`) has no image kind to map to, and a row-typed `inline`
@@ -9104,6 +9113,28 @@ mod tests {
         );
     }
 
+    /// P7.S3s (R2, `Bound::User` half of `poly_cross_bound_error`): the same
+    /// walk-time `Image::CallerVar` arm as `check_generic_cross_call_bound_
+    /// mismatch_is_error` above, but with a *user* trait rather than the
+    /// library `Ord` -- `g` forwards its own `'T` to `shows` without
+    /// declaring `Show`, so the callee's bound has no caller obligation to
+    /// discharge against. Pins the real trait name rendering in `bound`'s
+    /// `Bound::User(id)` arm, which had no coverage: collapsing it to the
+    /// placebo `"a user trait"` string left the whole suite green.
+    #[test]
+    fn check_generic_cross_call_forwarded_user_bound_mismatch_is_error() {
+        let err = check_src(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : g ( &'T -- ) shows ;\n\
+             : main ( -- ) ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`'T` of `shows` requires `Show`, which `'T` in `g` does not declare"),
+            "unexpected message: {err}"
+        );
+    }
+
     /// P7.S3k (R3): the same discharge against a *concrete* image runs the
     /// ordinary predicate on the spot, so the caller's own bounds are not the
     /// only route to a rejection. `Bool` is `Copy` but not `Ord`.
@@ -9285,17 +9316,18 @@ mod tests {
 
     /// P7.S3k: the callee signature shapes a symbolic mapping cannot carry are
     /// each a located rejection naming that shape, not the whole-feature
-    /// narrowing they replaced. Four of the five are pinned here (review
+    /// narrowing they replaced. Three of the four are pinned here (review
     /// fix: the row case was missing, contradicting the deviations doc's
-    /// claim that it was already pinned); the fifth, a declared quotation
+    /// claim that it was already pinned); the fourth, a declared quotation
     /// parameter, is pinned separately by
     /// `poly_quotlit_against_legal_inline_quotation_param_rejects_at_the_cross_call`,
     /// which needs a `~[ ]` fixture this table's plain `check_src` shape
-    /// cannot build. A fourth shape, a `Bound::User` on a mapped variable,
+    /// cannot build. A fifth shape, a `Bound::User` on a mapped variable,
     /// used to be pinned here too; P7.S3s R2 deletes that rejection outright
-    /// (`check_generic_cross_call_discharges_a_forwarded_user_bound` and the
-    /// `_unsatisfiable_*` fixtures below pin the resolution it replaces it
-    /// with), so it is no longer a member of this table.
+    /// (`check_generic_cross_call_discharges_a_forwarded_user_bound` and
+    /// `check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error`
+    /// pin the resolution it replaces), so it is no longer a member of this
+    /// table.
     #[test]
     fn check_cross_call_unsupported_callee_shapes_name_themselves() {
         for (fixture, what) in [
