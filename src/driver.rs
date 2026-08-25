@@ -2834,6 +2834,21 @@ mod tests {
         );
     }
 
+    /// A hub that imported its base with a qualifier only has nothing on its
+    /// selective map, so the hop is carried by the second arm: the first
+    /// import target declaring the name.
+    #[test]
+    fn walk_trait_export_origin_follows_a_qualifier_only_import() {
+        let declared_traits: Vec<HashSet<&str>> = vec![HashSet::from(["Foo"]), HashSet::new()];
+        let selectives: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        let mut import_maps: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        import_maps[1].insert("b".to_string(), 0);
+        assert_eq!(
+            walk_trait_export_origin(1, "Foo", &declared_traits, &selectives, &import_maps),
+            Some(0)
+        );
+    }
+
     /// A name on a module's `export:` list that is a word, not a trait --
     /// declared nowhere in the reachable graph -- is a dead end, not a panic.
     #[test]

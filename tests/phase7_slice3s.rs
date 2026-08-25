@@ -59,18 +59,19 @@ fn build_and_run(entry: &Path) -> String {
 }
 
 /// `base.sth` declares `Greet` and exports it; `hub.sth` never declares
-/// `Greet` itself, only re-exports the name it selectively imported from
-/// `base.sth`.
-fn base_and_hub(t: &Tree) {
+/// `Greet` itself, only re-exports the name it reached through
+/// `hub_import` -- which decides which arm of `walk_trait_export_origin`
+/// carries the hop out of the hub.
+fn base_and_hub(t: &Tree, hub_import: &str) {
     t.write(
         "base.sth",
         "trait: Greet 'T greet ( &'T -- ) ;\nexport: Greet ;\n",
     );
-    t.write(
-        "hub.sth",
-        "import: \"base.sth\" b | Greet | ;\nexport: Greet ;\n",
-    );
+    t.write("hub.sth", &format!("{hub_import}\nexport: Greet ;\n"));
 }
+
+const SELECTIVE_HUB_IMPORT: &str = "import: \"base.sth\" b | Greet | ;";
+const QUALIFIED_HUB_IMPORT: &str = "import: \"base.sth\" b ;";
 
 /// A trait declared in module A, re-exported (not declared) by hub module B,
 /// consumed by module C via a selective import of the hub -- used as a bound
@@ -78,7 +79,7 @@ fn base_and_hub(t: &Tree) {
 #[test]
 fn hub_reexported_trait_resolves_as_a_bound_via_selective_import() {
     let t = Tree::new("selective");
-    base_and_hub(&t);
+    base_and_hub(&t, SELECTIVE_HUB_IMPORT);
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
@@ -100,7 +101,7 @@ fn hub_reexported_trait_resolves_as_a_bound_via_selective_import() {
 #[test]
 fn hub_reexported_trait_resolves_as_a_bound_via_bare_qualifier() {
     let t = Tree::new("qualified");
-    base_and_hub(&t);
+    base_and_hub(&t, SELECTIVE_HUB_IMPORT);
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
@@ -123,10 +124,12 @@ fn hub_reexported_trait_resolves_as_a_bound_via_bare_qualifier() {
 /// `parse_impl_decl` fallback fails all three -- but only this golden keeps
 /// passing if `bound_trait_id`'s fallback alone regresses, which is what
 /// isolates the `parse_impl_decl` call site from the `bound_trait_id` one.
+/// Nothing calls `greet` here, so `main` prints a value the impl body never
+/// prints: the assertion is about the `impl:` header parsing, not dispatch.
 #[test]
 fn hub_reexported_trait_resolves_as_an_impl_target() {
     let t = Tree::new("impl-target");
-    base_and_hub(&t);
+    base_and_hub(&t, SELECTIVE_HUB_IMPORT);
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
@@ -135,8 +138,31 @@ fn hub_reexported_trait_resolves_as_an_impl_target() {
          impl: Greet for Point\n\
            : greet | p | p drop 7 .  ;\n\
          ;\n\
-         : main ( -- ) 1 2 Point |p| p drop 7 . ;\n",
+         : main ( -- ) 1 2 Point |p| p drop 5 . ;\n",
     );
     let out = build_and_run(&entry);
-    assert_eq!(out, "7\n");
+    assert_eq!(out, "5\n");
+}
+
+/// The hub imports its base with a qualifier only, putting nothing on its
+/// selective map, so the hop out of the hub goes through
+/// `walk_trait_export_origin`'s second arm (the first import target that
+/// declares the name) instead of the first.
+#[test]
+fn trait_reexported_through_a_qualifier_only_hub_resolves() {
+    let t = Tree::new("qualifier-hub");
+    base_and_hub(&t, QUALIFIED_HUB_IMPORT);
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         import: \"hub.sth\" h | Greet | ;\n\
+         type: Point x i64 y i64 ;\n\
+         impl: Greet for Point\n\
+           : greet | p | p drop 42 .  ;\n\
+         ;\n\
+         : greets ( &'T: Greet -- ) greet ;\n\
+         : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert_eq!(out, "42\n");
 }
