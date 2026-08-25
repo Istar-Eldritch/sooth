@@ -4384,6 +4384,7 @@ pub(super) fn poly_sig_unifies(
             cells,
             refs,
             &mut subst,
+            &[],
         )
         .is_ok()
     })
@@ -4445,6 +4446,7 @@ pub(super) fn poly_sig_could_match(
             cells,
             refs,
             &mut subst,
+            &[],
         )
         .is_ok()
     })
@@ -4555,6 +4557,7 @@ pub(super) fn no_combinator_overload_matches_error(
 pub(super) fn check_poly_call(
     name: &str,
     span: Span,
+    type_args: &[Type],
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -4587,6 +4590,33 @@ pub(super) fn check_poly_call(
     }
     let base = stack.len() - n_in;
     let mut subst = Subst::default();
+    // P7.S3t (R4/R5/R6): seed θ from the call site's explicit type-argument
+    // list (`f[Point]`) *before* any operand is unified. Position `i` binds
+    // the `i`-th declared type variable, whether or not an input grounds it:
+    // a prefix rule would make position `i`'s meaning depend on which
+    // variables the inputs happen to reach, so adding an input to the callee
+    // would silently re-point every existing call site.
+    //
+    // Seeding first is what makes a disagreeing operand a diagnostic rather
+    // than an overwrite: `unify_poly_input` finds the variable already bound
+    // and takes its conflict branch, which `seeded` then redirects to the
+    // message that names the instantiation.
+    //
+    // A variable's id *is* its index in `ty_var_names` (`intern_ty_var`
+    // hands ids out as `ty_names.len()`), so position `i` binds variable `i`
+    // and the seed pushes in ascending id. That alone does *not* make a
+    // seeded θ render the same symbol as an inferred one -- see the sort
+    // after pass 2.
+    let mut seeded: Vec<u32> = Vec::new();
+    if !type_args.is_empty() {
+        if type_args.len() != sig.ty_var_names.len() {
+            return Err(instantiation_arity_error(span, name, &sig, type_args.len()));
+        }
+        for (v, ty) in type_args.iter().enumerate() {
+            subst.ty.push((v as u32, *ty));
+            seeded.push(v as u32);
+        }
+    }
     // P7.S3f (R2): the positions materialized against a ground declared
     // `Type::Quotation` input at this call site, threaded onto the recorded
     // `CallInst` so lowering can materialize the caller's phantom argument
@@ -4618,6 +4648,7 @@ pub(super) fn check_poly_call(
             cells,
             refs,
             &mut subst,
+            &seeded,
         )?;
     }
     // Pass 2: materialize each declared quotation input, now that `subst`
@@ -4677,8 +4708,18 @@ pub(super) fn check_poly_call(
             cells,
             refs,
             &mut subst,
+            &seeded,
         )?;
     }
+    // P7.S3t (R5): restore `Subst`'s documented "kept sorted, the mangled
+    // symbol depends on it" invariant, which the two-pass split above breaks:
+    // pass 1 skips the quotation inputs, so for `( [ 'T -- ] 'U 'T -- 'U )`
+    // inference binds `'U` (id 1) before `'T` (id 0) and pushes them in that
+    // order. `instantiation_symbol` renders `subst.ty` in vector order, so
+    // without this an inferred call and a `[...]`-seeded call at the *same* θ
+    // mint two symbols and monomorphize the same specialization twice -- the
+    // divergence R6 makes reachable by allowing a redundant instantiation.
+    subst.ty.sort_by_key(|(v, _)| *v);
     // P7.S3e (R8/R9): the trait-member calls in the callee's own body that
     // this instantiation's θ resolves, filled by the bound loop below and
     // recorded on the `CallInst` for lowering.
@@ -4686,10 +4727,16 @@ pub(super) fn check_poly_call(
     // R6: each declared bound must hold of the concrete type `θ` bound the
     // variable to.
     for (v, bound) in &sig.bounds {
-        // An ungrounded variable (one no input mentions) skips bound checking
-        // entirely, as it always has -- and with it R8's resolution, which is
-        // correct rather than a gap: no obligation can name a variable the
-        // body could not have dispatched on.
+        // An ungrounded variable (one no input mentions and no explicit
+        // instantiation named) skips bound checking entirely, as it always
+        // has. P7.S3t (R9): the old reason -- "no obligation can name a
+        // variable the body could not have dispatched on" -- stops holding
+        // once a nullary trait member exists, since such a body dispatches on
+        // exactly such a variable. The `continue` is still right for a
+        // narrower reason: a variable that reaches an *output* is caught by
+        // `apply_subst` below, which reports it and names `f[SomeType]` as the
+        // remedy, and a variable that reaches no output constrains nothing
+        // this call site could observe.
         let Some(ty) = subst.ty_of(*v) else { continue };
         let var = &sig.ty_var_names[*v as usize];
         let unsatisfied = match bound {
@@ -5007,9 +5054,12 @@ impl CrossGround<'_> {
     /// type the caller supplied outright or `θ_w`'s image of the caller
     /// variable it was matched against. Entry order follows the mapping's,
     /// which is the order the callee's declared inputs first mention each
-    /// variable -- the same order `unify_poly_input` pushes for a concrete
-    /// caller, so a `(callee, θ)` reached both ways mints one symbol and one
-    /// `IrFunc`.
+    /// variable -- and since an id *is* an index handed out in first-mention
+    /// order, and `poly_cross_signature_supported` keeps a quotation
+    /// parameter (the one shape whose grounding is deferred to a second pass)
+    /// off this path entirely, that order is ascending by id. So it agrees
+    /// with the sort `check_poly_call` applies to its own θ, and a
+    /// `(callee, θ)` reached both ways mints one symbol and one `IrFunc`.
     ///
     /// The callee's declared *inputs* are deliberately not ground here. The
     /// only reason to would be `apply_subst`'s interning, and a cross-call's
@@ -5295,6 +5345,15 @@ fn unresolved_trait_obligation_error(
 /// extending `subst`. A repeated variable forced to two concretes is X4; a
 /// non-array where an array is declared, or a mismatched concrete, is the
 /// ordinary type-mismatch error.
+///
+/// P7.S3t (R5): `seeded` names the variables an explicit type-argument list
+/// bound before unification began (empty at every other caller). It exists
+/// only to tell the two conflicts apart: two operands disagreeing is a
+/// symmetric "resolved `'T` to both", while an operand disagreeing with an
+/// instantiation has a written end and an inferred end, and the user needs to
+/// know which is which. Passed rather than recorded on `Subst`, since nothing
+/// downstream compares substitutions -- the symbol is rendered from `ty`/`len`
+/// in vector order -- so a provenance field there would be inert.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn unify_poly_input(
     sig: &PolySig,
@@ -5307,6 +5366,7 @@ pub(super) fn unify_poly_input(
     cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     subst: &mut Subst,
+    seeded: &[u32],
 ) -> Result<(), String> {
     match pty {
         // P7 slice 3b: `pty` is the callee's *declared* input, which a
@@ -5320,14 +5380,13 @@ pub(super) fn unify_poly_input(
         PolyType::Var(v) => {
             if let Some(prev) = subst.ty_of(*v) {
                 if prev != slot_ty {
-                    return Err(poly_var_conflict_error(
-                        ctx,
-                        span,
-                        name,
-                        &sig.ty_var_names[*v as usize],
-                        prev,
-                        slot_ty,
-                    ));
+                    let var = &sig.ty_var_names[*v as usize];
+                    return Err(match seeded.contains(v) {
+                        true => explicit_instantiation_conflict_error(
+                            ctx, span, name, var, prev, slot_ty,
+                        ),
+                        false => poly_var_conflict_error(ctx, span, name, var, prev, slot_ty),
+                    });
                 }
             } else {
                 subst.ty.push((*v, slot_ty));
@@ -5339,7 +5398,7 @@ pub(super) fn unify_poly_input(
             };
             let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
             unify_poly_input(
-                sig, elem, elem_ty, name, span, ctx, arrays, cells, refs, subst,
+                sig, elem, elem_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
             )?;
             match len {
                 Len::Concrete(k) => {
@@ -5401,10 +5460,14 @@ pub(super) fn unify_poly_input(
                 ));
             }
             for (p, c) in ins.iter().zip(&eff.inputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, cells, refs, subst)?;
+                unify_poly_input(
+                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded,
+                )?;
             }
             for (p, c) in outs.iter().zip(&eff.outputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, cells, refs, subst)?;
+                unify_poly_input(
+                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded,
+                )?;
             }
         }
         // Slice 13 (R-A6): a declared `&`-slot unifies only against a
@@ -5441,6 +5504,7 @@ pub(super) fn unify_poly_input(
                 cells,
                 refs,
                 subst,
+                seeded,
             )?;
         }
         // P7.S3n (R3): the cell twin of the `Ref` arm -- a declared `^`-slot
@@ -5468,6 +5532,7 @@ pub(super) fn unify_poly_input(
                 cells,
                 refs,
                 subst,
+                seeded,
             )?;
         }
         // P7 slice 3a phase 2 (R2): a concrete `Type::Struct`/`Type::Enum`
@@ -5529,7 +5594,7 @@ pub(super) fn unify_poly_input(
             drop(generics);
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
                 unify_poly_input(
-                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst,
+                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
                 )?;
             }
         }
@@ -5602,8 +5667,13 @@ pub(super) fn apply_subst(
         // P7 slice 3b: `pty` is a declared signature slot, which a body-only
         // marker never reaches.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
+        // P7.S3t (R9): reachable for the first time as a legal program shape.
+        // A word whose output variable no input mentions could not previously
+        // be *called* -- the only bodies that produce one recurse -- so this
+        // arm existed with nothing able to reach it; `f[SomeType]` is now both
+        // the way to ground such a call and the remedy this names.
         PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
-            poly_unbound_output_error(ctx, span, name, &sig.ty_var_names[*v as usize])
+            poly_unbound_output_ty_error(ctx, span, name, &sig.ty_var_names[*v as usize])
         }),
         PolyType::Array(elem, len) => {
             let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, cells, refs)?;
@@ -6499,6 +6569,70 @@ pub(super) fn poly_var_conflict_error(
     }
 }
 
+/// P7.S3t (R5): an operand disagreeing with the type this call site was
+/// explicitly instantiated at. `poly_var_conflict_error`'s symmetric "resolved
+/// `'T` to both" would be the wrong shape: here one end is written and one is
+/// inferred, and the remedy differs by which the caller meant.
+pub(super) fn explicit_instantiation_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    instantiated: Type,
+    operand: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let line = span.line;
+    match ctx {
+        Ctx::Word { mangled, .. } => format!(
+            "error: `{callee}` in {name} (line {line}) was instantiated at `{var}` = `{instantiated}` but its operand is `{operand}`",
+            name = crate::resolve::render_word(mangled)
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `{callee}` was instantiated at `{var}` = `{instantiated}` but its operand is `{operand}`"
+        ),
+    }
+}
+
+/// P7.S3t (R4): an explicit type-argument list whose length is not the
+/// callee's declared type-variable count. Exact, never a prefix: a partial
+/// list would make position `i`'s meaning depend on which variables the
+/// callee's *inputs* ground, so adding an input would re-point every existing
+/// call site. Length (`'N`) and row (`..s`) variables are not addressable by
+/// this list at all, which is worth saying whenever the callee has one.
+pub(super) fn instantiation_arity_error(
+    span: Span,
+    callee: &str,
+    sig: &PolySig,
+    given: usize,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let declared = match sig.ty_var_names.len() {
+        0 => "no type variables".to_string(),
+        1 => format!("1 type variable (`{}`)", sig.ty_var_names[0]),
+        n => format!(
+            "{n} type variables ({})",
+            sig.ty_var_names
+                .iter()
+                .map(|v| format!("`{v}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let plural = match given {
+        1 => "",
+        _ => "s",
+    };
+    let note = match sig.len_var_names.is_empty() && sig.row_var_names.is_empty() {
+        true => String::new(),
+        false => "\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are".to_string(),
+    };
+    format!(
+        "error: `{callee}` (line {}) declares {declared} but was given {given} type argument{plural}{note}",
+        span.line
+    )
+}
+
 pub(super) fn poly_len_conflict_error(
     ctx: &Ctx,
     span: Span,
@@ -6543,6 +6677,23 @@ pub(super) fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var
     format!(
         "error: `{callee}` in {where_} (line {}) has output variable `{var}` that no input binds",
         span.line
+    )
+}
+
+/// P7.S3t (R9): the same message for a *type* variable, which an explicit
+/// instantiation can now supply. The base text is unchanged; only the remedy
+/// is new, and it is not offered for a length variable, which R4 leaves
+/// unaddressable.
+pub(super) fn poly_unbound_output_ty_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+) -> String {
+    format!(
+        "{}\n  note: supply it explicitly: `{}[SomeType]`",
+        poly_unbound_output_error(ctx, span, callee, var),
+        crate::resolve::demangle_call(callee)
     )
 }
 
@@ -8497,6 +8648,158 @@ mod tests {
         assert_eq!(module.instantiations.len(), 2);
         assert_eq!(symbols.len(), 2);
     }
+    /// P7.S3t (R4/R6/R9): the seed is what a call site's explicit type
+    /// argument *does*. The fixture is the one shape inference cannot reach:
+    /// `'T` appears only in an output, so with no list `apply_subst` reports
+    /// it and no instantiation is recorded at all. (A word with no operand can
+    /// declare a `'T` output only if its body produces one, which before a
+    /// nullary trait member -- phase 3 -- means its own self-call.)
+    #[test]
+    fn an_explicit_instantiation_seeds_the_recorded_substitution() {
+        let module = checked_module(": f ( -- 'T ) f ;\n: main ( -- ) f[i64] drop ;");
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "f")
+            .expect("the seeded call site recorded an instantiation");
+        assert_eq!(inst.subst.ty_of(0), Some(Type::I64));
+        assert!(
+            inst.symbol.contains("i64"),
+            "the seeded theta mints the specialization: {}",
+            inst.symbol
+        );
+        // The same call without the list, which is R9's revived diagnostic at
+        // the site R9 describes: `apply_subst` walking the *declared outputs*.
+        // The end-to-end golden reaches the message through pass 2's
+        // quotation grounding instead, so without this half the output arm
+        // itself has only a passing witness.
+        let bare =
+            check_src(": f ( -- 'T ) f ;\n: main ( -- ) f drop ;").expect_err("nothing binds `'T`");
+        assert_eq!(
+            bare,
+            "error: `f` in `main` (line 2) has output variable `'T` that no input binds\n  \
+             note: supply it explicitly: `f[SomeType]`"
+        );
+    }
+    /// P7.S3t (R5/R6): a seeded and an inferred call at the same θ are the
+    /// same specialization. `instantiation_symbol` renders `subst.ty` in
+    /// vector order, so the two paths agree only if both leave it sorted by
+    /// variable id -- and the *inferred* path does not: `check_poly_call`
+    /// defers a quotation input to pass 2, so `r` binds `'U` (id 1) before
+    /// `'T` (id 0). `id ( 'T -- 'T )` cannot witness this, having one
+    /// variable and so only one possible order; `r` is the smallest signature
+    /// that can. Without the sort, this call pair mints
+    /// `..._t1_f64_t0_i64` and `..._t0_i64_t1_f64` and monomorphizes `r`
+    /// twice.
+    #[test]
+    fn a_seeded_and_an_inferred_call_at_one_type_mint_one_symbol() {
+        let module = checked_module(
+            ": r ( [ 'T -- ] 'U 'T -- 'U ) drop swap drop ;\n\
+             : main ( -- ) [ drop ] 2.5 7 r . [ drop ] 2.5 7 r[i64 f64] . ;",
+        );
+        let insts: Vec<&CallInst> = module
+            .instantiations
+            .values()
+            .filter(|i| i.callee == "r")
+            .collect();
+        assert_eq!(insts.len(), 2, "two call sites are recorded separately");
+        for inst in &insts {
+            assert_eq!(
+                inst.subst.ty,
+                vec![(0, Type::I64), (1, Type::F64)],
+                "theta is kept sorted by variable id: {:?}",
+                inst.subst.ty
+            );
+        }
+        let symbols: std::collections::HashSet<&str> =
+            insts.iter().map(|i| i.symbol.as_str()).collect();
+        assert_eq!(symbols.len(), 1, "one theta, one symbol: {symbols:?}");
+    }
+    /// P7.S3t (R4): exact arity over the callee's declared *type* variables,
+    /// both directions, with the declared ones named -- the list is a
+    /// statement about the callee's signature, so the message renders that
+    /// signature's variables rather than just counting them.
+    #[test]
+    fn a_wrong_arity_instantiation_is_rejected() {
+        let too_many = check_src(": id ( 'T -- 'T ) ;\n: main ( -- ) 7 id[i64 f64] . ;")
+            .expect_err("one declared variable, two given");
+        assert_eq!(
+            too_many,
+            "error: `id` (line 2) declares 1 type variable (`'T`) but was given 2 type arguments"
+        );
+        let too_few =
+            check_src(": pairwise ( 'T 'U -- ) drop drop ;\n: main ( -- ) 1 2.5 pairwise[i64] ;")
+                .expect_err("two declared variables, one given");
+        assert_eq!(
+            too_few,
+            "error: `pairwise` (line 2) declares 2 type variables (`'T`, `'U`) but was given 1 type argument"
+        );
+    }
+    /// P7.S3t (R4): a length variable is not addressable by the list, so a
+    /// callee whose only variable is one declares *no* type variables. Said
+    /// outright, since `alen[i64]` is the natural thing to try.
+    #[test]
+    fn an_instantiation_of_a_length_variable_is_rejected() {
+        let err = check_src(
+            ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+             : main ( -- ) 5 4 fill alen[i64] . drop ;",
+        )
+        .expect_err("a length variable cannot be given explicitly");
+        assert_eq!(
+            err,
+            "error: `alen` (line 2) declares no type variables but was given 1 type argument\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are"
+        );
+    }
+    /// P7.S3t (R5): the redirect itself, at `unify_poly_input`. One prior
+    /// binding, one disagreeing operand, two messages -- the seeded one names
+    /// which end was written, and the unseeded one is byte-identical to what
+    /// two disagreeing operands have always reported.
+    #[test]
+    fn unify_poly_input_finding_a_seeded_variable_names_the_instantiation() {
+        let sig = PolySig {
+            row_in: None,
+            inputs: vec![PolyType::Var(0)],
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let arrays: [ArrayDecl; 0] = [];
+        let cells: [OwnedCellDecl; 0] = [];
+        let refs: [RefDecl; 0] = [];
+        let conflict = |seeded: &[u32]| {
+            let mut subst = Subst::default();
+            subst.ty.push((0, Type::F64));
+            unify_poly_input(
+                &sig,
+                &sig.inputs[0],
+                Type::I64,
+                "f",
+                Span::default(),
+                &ctx,
+                &arrays,
+                &cells,
+                &refs,
+                &mut subst,
+                seeded,
+            )
+            .expect_err("a disagreeing operand is a conflict either way")
+        };
+        assert_eq!(
+            conflict(&[0]),
+            "error: `f` was instantiated at `'T` = `f64` but its operand is `i64`"
+        );
+        assert_eq!(
+            conflict(&[]),
+            "error: `f` resolved `'T` to both `f64` and `i64`"
+        );
+    }
     #[test]
     fn check_generic_comparison_body_with_ord_checks_clean() {
         // P7.S3k (R1/R3/R7): re-expresses the retired
@@ -9768,6 +10071,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst,
+            &[],
         )
         .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
         assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
@@ -9784,6 +10088,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst2,
+            &[],
         )
         .expect_err("an arity mismatch must be a located type mismatch");
         // Slice 10a (R10/R20): pin the *exact* mismatch text. The expected
@@ -9815,6 +10120,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst3,
+            &[],
         )
         .expect_err("a non-quotation slot must be a located type mismatch");
         assert_eq!(
@@ -10351,6 +10657,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst,
+            &[],
         )
         .expect("`&['T 4]` should unify against `&[i64 4]`");
         assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
@@ -10367,6 +10674,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst2,
+            &[],
         )
         .expect_err("a mutability mismatch must be a located type mismatch");
         assert_eq!(
@@ -10390,6 +10698,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst3,
+            &[],
         )
         .expect_err("a non-reference slot must be a located type mismatch");
         assert_eq!(

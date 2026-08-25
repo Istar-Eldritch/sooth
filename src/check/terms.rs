@@ -740,10 +740,14 @@ fn check_term(
             // R5/R14: a call to a polymorphic word is intercepted before the
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
+            //
+            // P7.S3t (R3): the one route that consumes an explicit
+            // type-argument list, which the allow-guard at the top of this arm
+            // has already established is where a non-empty one may arrive.
             if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(
-                    name, span, &mut stack, ctx, env, scope, arrays, cells, refs, slices, prov,
-                    live, at, poly,
+                    name, span, type_args, &mut stack, ctx, env, scope, arrays, cells, refs,
+                    slices, prov, live, at, poly,
                 );
             }
             // R1/R2: one name can carry several candidates. A single one is

@@ -185,7 +185,7 @@ fn a_glued_bracket_after_an_eliminator_is_rejected() {
     let err = build_error(
         "glued-eliminator",
         "import: intrinsics * ;\n\
-         type: Shape | Circle f64 | Rect f64 f64 ;\n\
+         type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
          : main ( -- ) Shape?[f64] ;\n",
     );
     assert!(err.contains(&takes_no_type_arguments("Shape?", 3)), "{err}");
@@ -287,4 +287,138 @@ fn explicit_instantiation_is_rejected_at_the_repl() {
         "{session}"
     );
     assert!(!session.contains("defined w"), "{session}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: the list seeds `Subst`.
+//
+// From here the syntax means something. `check_poly_call` binds the callee's
+// declared type variables from the list before it unifies a single operand,
+// which is what makes a disagreement a diagnostic instead of an overwrite, and
+// what lets a call ground a variable no operand reaches.
+// ---------------------------------------------------------------------------
+
+/// The generic word whose `'T` no operand can bind: a declared quotation
+/// parameter mentioning `'T` is grounded through θ *before* the caller's
+/// literal is materialized against it, so `'T` has to be known by then and the
+/// literal cannot supply it. That makes this the ordinary-word shape phase 2
+/// is observable on, with no trait member and no recursion in it.
+const UNBOUND_QUOT_VAR: &str = "import: intrinsics * ;\n\
+     : q ( [ 'T -- ] 'U -- 'U ) swap drop ;\n";
+
+/// R6/R9: the headline for this phase. The same call is a hard error without
+/// the list (below) and runs with it, so the list is doing the grounding
+/// rather than decorating a call inference had already resolved.
+#[test]
+fn an_explicit_instantiation_grounds_a_variable_no_operand_binds() {
+    let out = build_and_run(
+        "grounds-unbound",
+        &format!("{UNBOUND_QUOT_VAR}: main ( -- ) [ drop ] 8 q[i64 i64] . ;\n"),
+    );
+    assert_eq!(out, "8\n");
+}
+
+/// R9: `poly_unbound_output_error` had no reference anywhere in the tree --
+/// no legal program reached it -- and this slice both revives it and gives it
+/// a remedy. The note is half the point: without it the message states a fact
+/// about the callee's signature and says nothing the caller can act on.
+#[test]
+fn an_uninstantiated_call_names_the_unbound_output_variable() {
+    let err = build_error(
+        "unbound-output",
+        &format!("{UNBOUND_QUOT_VAR}: main ( -- ) [ drop ] 8 q . ;\n"),
+    );
+    assert!(
+        err.contains("`q` in `main` (line 3) has output variable `'T` that no input binds"),
+        "{err}"
+    );
+    assert!(
+        err.contains("note: supply it explicitly: `q[SomeType]`"),
+        "{err}"
+    );
+}
+
+/// R5: the seed is pushed before pass 1, so the operand meets a variable that
+/// is already bound and takes the conflict branch. The message names which end
+/// was written, because the two are not symmetric: the remedy is either a
+/// different argument or a different list.
+#[test]
+fn an_explicit_instantiation_disagreeing_with_an_operand_is_rejected() {
+    let err = build_error(
+        "seed-conflict",
+        "import: intrinsics * ;\n\
+         : id ( 'T -- 'T ) ;\n\
+         : main ( -- ) 7 id[f64] drop ;\n",
+    );
+    assert!(
+        err.contains(
+            "`id` in `main` (line 3) was instantiated at `'T` = `f64` but its operand is `i64`"
+        ),
+        "{err}"
+    );
+}
+
+/// R5's blast-radius guard. `poly_var_conflict_error` is reached by the same
+/// branch this slice redirects, so the two-operand case has to be pinned
+/// byte-for-byte or a redirect that fired unconditionally would look green.
+#[test]
+fn two_operands_disagreeing_still_report_the_old_conflict() {
+    let err = build_error(
+        "operand-conflict",
+        "import: intrinsics * ;\n\
+         : pairwise ( 'T 'T -- ) drop drop ;\n\
+         : main ( -- ) 1 2.5 pairwise ;\n",
+    );
+    assert!(
+        err.contains("`pairwise` in `main` (line 3) resolved `'T` to both `i64` and `f64`"),
+        "{err}"
+    );
+    assert!(!err.contains("was instantiated at"), "{err}");
+}
+
+/// R6: legal on *any* polymorphic call, not gated to the variables operands
+/// leave ungrounded. Both variables here are inferable and both are given
+/// anyway; a gate would have made a call site's legality depend on the
+/// callee's input list, which is R4's objection over again.
+#[test]
+fn an_explicit_instantiation_on_an_already_inferable_call_is_accepted() {
+    let out = build_and_run(
+        "redundant-instantiation",
+        "import: intrinsics * ;\n\
+         : two ( 'T 'U -- 'U 'T ) swap ;\n\
+         : main ( -- ) 1 2.5 two[i64 f64] . . ;\n",
+    );
+    assert_eq!(out, "1\n2.5\n");
+}
+
+/// R4: exact arity over the callee's declared type variables, in both
+/// directions. Not a prefix rule: under one, position `i`'s meaning would
+/// depend on which variables the callee's inputs happen to ground, so adding
+/// an input to `id` would silently re-point every `id[...]` already written.
+#[test]
+fn a_wrong_arity_instantiation_is_rejected() {
+    let too_many = build_error(
+        "arity-too-many",
+        "import: intrinsics * ;\n\
+         : id ( 'T -- 'T ) ;\n\
+         : main ( -- ) 7 id[i64 f64] . ;\n",
+    );
+    assert!(
+        too_many.contains(
+            "`id` (line 3) declares 1 type variable (`'T`) but was given 2 type arguments"
+        ),
+        "{too_many}"
+    );
+    let too_few = build_error(
+        "arity-too-few",
+        "import: intrinsics * ;\n\
+         : two ( 'T 'U -- 'U 'T ) swap ;\n\
+         : main ( -- ) 1 2.5 two[i64] . . ;\n",
+    );
+    assert!(
+        too_few.contains(
+            "`two` (line 3) declares 2 type variables (`'T`, `'U`) but was given 1 type argument"
+        ),
+        "{too_few}"
+    );
 }

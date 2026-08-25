@@ -619,7 +619,17 @@ fn check_poly_combinator_args(
             continue;
         }
         unify_poly_input(
-            sig, pin, found.ty, name, span, ctx, arrays, cells, refs, &mut subst,
+            sig,
+            pin,
+            found.ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+            &[],
         )?;
     }
     for (i, pin) in deferred_literals {
@@ -635,7 +645,17 @@ fn check_poly_combinator_args(
             _ => stack[base + i].ty,
         };
         unify_poly_input(
-            sig, pin, ty, name, span, ctx, arrays, cells, refs, &mut subst,
+            sig,
+            pin,
+            ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+            &[],
         )?;
     }
     // Pass 2: ground each quotation parameter and run the directional + D3
