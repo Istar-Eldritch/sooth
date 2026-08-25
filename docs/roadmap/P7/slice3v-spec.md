@@ -590,6 +590,20 @@ to promote it to R8's golden by asserting the capture's disposal line.
   did in S3h. The claim that the field/`drop` shape avoids the limit is **false**: storing a
   closure is what forces materialization, so R8's golden is blocked outright, and phase 4's
   Finding above records what ships in its place.
+- **Three more stale "containment rule" comments**, found in phase 4 review, out of bounds for
+  phase 4 (source files). `src/check/terms.rs:447` and `src/check/word_entry.rs:292` (a twinned
+  pair, same sentence, both justifying a hardcoded `past_owning_frame_error(..., false)` with "an
+  owning closure may not be stored in an aggregate at all") and `src/parser.rs:4072` ("the
+  containment rule that rejects it is `audit_quotation_type_registries`", which now admits three
+  positions). The conclusions at all three sites still hold post-R6 for unrelated reasons (a
+  by-value linear capture hits D3 first; the parser's point-not-blame split survives), so this is
+  comment-only, same shape as the `qbe.rs:441-445` entry above — left for whichever phase next
+  touches those functions.
+- **A remedy gap opened by R6**: `past_owning_frame_error`'s `owning`-field hint
+  (`src/check/captures.rs:53-55`) is never suggested by `quotation_captures_local_error`
+  (`src/check.rs:2996`), even though changing a plain quotation field to `owning` on the same
+  struct now fixes the by-value-linear-capture error R6 left reachable. Not a soundness issue;
+  a follow-up diagnostic-hint addition for whichever phase next touches `check.rs`'s D3 site.
 
 ## Phases (JSON)
 
