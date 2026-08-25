@@ -336,3 +336,48 @@ fn repl_ord_bound_is_a_located_repl_specific_diagnostic() {
         "the bound word must not be defined: {out}"
     );
 }
+
+/// P7.S3s (R8, review round 2): the same diagnostic must reach `'T: Copy Ord`,
+/// the shape every in-tree `Ord` signature actually uses. `Copy` folds first,
+/// so `Ord` is not the bound list's first word and used to fall through to
+/// the slot parser's `unknown type `Ord``.
+#[test]
+fn repl_ord_bound_after_copy_is_the_same_repl_specific_diagnostic() {
+    let out = run_session(&[": mymax ( 'T: Copy Ord 'T -- 'T ) drop ;", "7 ."]);
+    assert!(
+        out.contains(
+            "error: unknown capability `Ord` at line 1, col 20 (`Ord` is a core::cmp trait; \
+             the REPL carries no trait or impl: registry to resolve it against -- define a \
+             word needing it in a file and load that instead)"
+        ),
+        "expected the REPL-specific Ord diagnostic, got: {out}"
+    );
+    assert!(
+        !out.contains("unknown type `Ord`"),
+        "the slot parser must not get `Ord` first: {out}"
+    );
+    assert!(
+        !out.contains("defined mymax"),
+        "the bound word must not be defined: {out}"
+    );
+    assert!(out.contains("7"), "the session must survive: {out}");
+}
+
+/// The gate above is narrow: a session-declared type named `Ord` keeps its
+/// claim on the slot, so this program parses and fails on its stack effect
+/// instead of being told `Ord` is the `core::cmp` trait.
+#[test]
+fn repl_declared_ord_type_still_parses_as_a_bound_slot() {
+    let out = run_session(&[
+        "type: Ord val i64 ;",
+        ": mymax ( 'T: Copy Ord 'T -- 'T ) drop ;",
+    ]);
+    assert!(
+        out.contains("stack effect mismatch in `mymax`"),
+        "expected `Ord` to be parsed as a slot, got: {out}"
+    );
+    assert!(
+        !out.contains("core::cmp trait"),
+        "a declared type must not be claimed as the trait: {out}"
+    );
+}

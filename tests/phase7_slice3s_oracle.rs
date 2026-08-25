@@ -20,12 +20,21 @@
 //! Review round 1 (Phase 3): the first cut of this harness filtered `nm`'s
 //! whole-binary output for any symbol containing `Ord` and `cmp`. That is a
 //! property of `lib/cmp.sth` being linked in at all, not of which `impl:`
-//! any particular splice site actually dispatches to -- a build with every
-//! comparison in `examples/poly_if.sth` swapped (`gt` -> `lt`) links exactly
-//! the same set of defined symbols. Fixed by keying the diff per entry point
-//! (`sooth_mono_mymax*`) and walking the actual call graph (`objdump -d`) out
-//! of each one to the `impl: Ord` symbol it resolves to, so the diff is over
-//! *resolved dispatch targets*, not *what the module happens to link*.
+//! any particular splice site actually dispatches to. Fixed by keying the
+//! diff per entry point (`sooth_mono_mymax*`) and walking the actual call
+//! graph (`objdump -d`) out of each one, so the diff is over *resolved
+//! dispatch targets*, not *what the module happens to link*: capping that
+//! walk at depth 1 fails the test, because `mymax3`'s per-instantiation
+//! dispatch (i64 to the i64 `impl:`, f64 to the f64 one) is two hops away.
+//!
+//! Review round 2: the reached *`impl:`* set alone still cannot see a
+//! comparison swap. Every surface comparison in `lib/cmp.sth` funnels
+//! through the one `cmp` impl per type, so a build of
+//! `examples/poly_if.sth` with every `gt` swapped to `lt` reaches the same
+//! `cmp.<Ord>.<width>` symbol and produces a byte-identical map. The walk
+//! therefore records the monomorphized comparison words it passes through
+//! (`sooth_mono_gt__*` vs `sooth_mono_lt__*`) as well, which is what makes
+//! the swap visible.
 //!
 //! `mymax` itself (as opposed to `mymax3`) is never called from
 //! `examples/poly_if.sth`'s `main`, so it mints no monomorph and this harness
@@ -79,13 +88,17 @@ fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
     graph
 }
 
-/// The `impl: Ord` symbols transitively reachable from `entry` by following
-/// `graph`'s call edges (BFS, cycle-safe via `seen`). Mangled `impl:` names
-/// carry `Ord` and `cmp` (the trait's sole member) verbatim
-/// (`cmp.<mangled Ord>.<width>`), so a substring filter on the reached set
-/// needs no knowledge of the mangling scheme itself -- only the walk needs
-/// to start from the entry point under test rather than the whole binary.
-fn reached_ord_impls(graph: &HashMap<String, Vec<String>>, entry: &str) -> Vec<String> {
+/// The dispatch targets transitively reachable from `entry` by following
+/// `graph`'s call edges (BFS, cycle-safe via `seen`): the `impl: Ord` bodies
+/// resolved to, plus the monomorphized words reached on the way there.
+/// Mangled `impl:` names carry `Ord` and `cmp` (the trait's sole member)
+/// verbatim (`cmp.<mangled Ord>.<width>`) and a monomorph carries the
+/// `sooth_mono_` prefix, so a substring filter needs no knowledge of the
+/// mangling scheme itself -- only the walk needs to start from the entry
+/// point under test rather than the whole binary. The monomorphs are what
+/// distinguish *which* comparison a site calls; the `impl:` symbols are what
+/// distinguish which type's implementation it lands in.
+fn reached_dispatch_targets(graph: &HashMap<String, Vec<String>>, entry: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut queue = VecDeque::from([entry.to_string()]);
     let mut hits = Vec::new();
@@ -93,7 +106,7 @@ fn reached_ord_impls(graph: &HashMap<String, Vec<String>>, entry: &str) -> Vec<S
         if !seen.insert(name.clone()) {
             continue;
         }
-        if name.contains("Ord") && name.contains("cmp") {
+        if (name.contains("Ord") && name.contains("cmp")) || name.starts_with("sooth_mono_") {
             hits.push(name.clone());
         }
         if let Some(callees) = graph.get(&name) {
@@ -106,8 +119,8 @@ fn reached_ord_impls(graph: &HashMap<String, Vec<String>>, entry: &str) -> Vec<S
 
 /// Every `sooth_mono_mymax*` entry point in `binary`'s symbol table (one per
 /// instantiation of `mymax`/`mymax3`, however many `main` calls into), mapped
-/// to the `impl: Ord` symbols its own call graph resolves to.
-fn mymax_entry_ord_impls(binary: &Path) -> BTreeMap<String, Vec<String>> {
+/// to the dispatch targets its own call graph resolves to.
+fn mymax_entry_dispatch_targets(binary: &Path) -> BTreeMap<String, Vec<String>> {
     let nm = Command::new("nm")
         .arg(binary)
         .output()
@@ -121,23 +134,23 @@ fn mymax_entry_ord_impls(binary: &Path) -> BTreeMap<String, Vec<String>> {
     entries
         .into_iter()
         .map(|entry| {
-            let impls = reached_ord_impls(&graph, &entry);
-            (entry, impls)
+            let targets = reached_dispatch_targets(&graph, &entry);
+            (entry, targets)
         })
         .collect()
 }
 
 /// Build `examples/poly_if.sth` fresh, run it, and read back each `mymax*`
-/// splice site's resolved `impl: Ord` symbols. Each call gets its own
+/// splice site's resolved dispatch targets. Each call gets its own
 /// copy/binary (`common::build_example`), so two calls in the same test
 /// never race each other.
-fn build_run_and_ord_symbols() -> (String, BTreeMap<String, Vec<String>>) {
+fn build_run_and_dispatch_targets() -> (String, BTreeMap<String, Vec<String>>) {
     let binary = common::build_example("examples/poly_if.sth");
     let run = Command::new(&binary)
         .output()
         .expect("the built binary should run");
     assert!(run.status.success(), "the built binary should exit 0");
-    let symbols = mymax_entry_ord_impls(&binary);
+    let symbols = mymax_entry_dispatch_targets(&binary);
     std::fs::remove_file(&binary).ok();
     (String::from_utf8_lossy(&run.stdout).into_owned(), symbols)
 }
@@ -148,19 +161,26 @@ fn build_run_and_ord_symbols() -> (String, BTreeMap<String, Vec<String>>) {
 /// nothing else about this test changes.
 #[test]
 fn poly_if_oracle_harness_reports_a_clean_diff_against_itself() {
-    let (baseline_stdout, baseline_symbols) = build_run_and_ord_symbols();
-    let (candidate_stdout, candidate_symbols) = build_run_and_ord_symbols();
+    let (baseline_stdout, baseline_symbols) = build_run_and_dispatch_targets();
+    let (candidate_stdout, candidate_symbols) = build_run_and_dispatch_targets();
 
     assert!(
         !baseline_symbols.is_empty(),
         "the harness must find at least one `mymax*` splice site to diff, or it is diffing \
          nothing: baseline stdout was {baseline_stdout:?}"
     );
-    for (entry, impls) in &baseline_symbols {
+    for (entry, targets) in &baseline_symbols {
         assert!(
-            !impls.is_empty(),
+            targets
+                .iter()
+                .any(|t| t.contains("Ord") && t.contains("cmp")),
             "{entry} must resolve to at least one `impl: Ord` symbol through its own call \
              graph, not just link one somewhere in the binary"
+        );
+        assert!(
+            targets.iter().any(|t| t.starts_with("sooth_mono_gt")),
+            "{entry} must reach the monomorphized comparison it names, or a `gt` -> `lt` \
+             swap in the source is invisible to this diff"
         );
     }
     assert_eq!(
@@ -169,7 +189,7 @@ fn poly_if_oracle_harness_reports_a_clean_diff_against_itself() {
     );
     assert_eq!(
         baseline_symbols, candidate_symbols,
-        "two builds of the same source must resolve the same `impl: Ord` symbols at each \
+        "two builds of the same source must resolve the same dispatch targets at each \
          `mymax*` splice site"
     );
 }

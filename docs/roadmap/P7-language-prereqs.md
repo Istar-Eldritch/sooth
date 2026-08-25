@@ -247,9 +247,10 @@ rejection naming no follow-up slice yet
 is satisfied **nominally**: an `impl: Trait for Type  member word ... ;` block maps each
 member to an existing, already-declared *concrete* word (impl checking is signature
 comparison, never body checking), confined by an orphan rule to the trait's or the
-type's own defining module. `Copy`/`Ord` are pre-seeded predicate-kind trait-table
-entries (satisfaction still runs `is_copy`/`is_ord`), so a colliding user `trait: Copy`
-fails as an ordinary duplicate declaration. A bare or ref-to-bare bounded variable's
+type's own defining module. `Copy` is a pre-seeded predicate-kind trait-table entry
+(satisfaction runs `is_copy`), so a colliding user `trait: Copy` fails as an ordinary
+duplicate declaration; `Ord` is an ordinary library trait (**P7.S3s**), pre-seeded
+nowhere. A bare or ref-to-bare bounded variable's
 call to a member its bound set declares is resolved in `poly_call_term` ahead of the
 ordinary `env.get` lookup, mints a per-instantiation dispatch record
 (`CallInst::trait_calls`) keyed on `(callee, θ)`, and lowering only looks the symbol up —
@@ -603,9 +604,14 @@ this slice inherits a differential oracle -- flip `inline` on the same source an
 resolved `impl:` symbols at two and three splices -- which is the entry condition for a third
 attempt, alongside the three open items in its brief. The harness skeleton is already in
 tree (`tests/phase7_slice3s_oracle.rs`): it builds `examples/poly_if.sth` twice and diffs
-stdout plus the linked `impl: Ord` symbol table, against itself for now since there is no
-second variant to diff against until this slice flips `mymax`/`mymax3` back to `inline`. That
-swap is this slice's entire remaining work on the oracle side.
+stdout plus, per `mymax*` entry point, the dispatch targets its own call graph reaches (the
+`impl: Ord` body, and the monomorphized comparison on the way to it), against itself for now
+since there is no second variant to diff against until this slice flips `mymax`/`mymax3` back
+to `inline`. Besides that flip, the oracle side needs one more thing: `examples/poly_if.sth`'s
+`main` calls `mymax3` only, so `mymax` mints no monomorph and the harness never sees it. A
+source calling both words is what makes the "at two splices, at three" diff exist at all, and
+`tests/corpus_stdout/poly_if.txt` must stay byte-identical, so it belongs in a new fixture
+rather than in the example.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -695,7 +701,10 @@ branch-and-construct body on a comparison-heavy loop, accepted for this slice. *
 this slice's non-inline landing set up (flip `inline`, diff resolved `impl:` symbols at two
 and three splices). The REPL carries no whole-program trait/`impl:` registry, so a bound
 naming `Ord` at REPL scope gets a located, REPL-specific diagnostic pointing at that gap
-rather than claiming the name is wrong (`repl_unknown_capability_error`).
+rather than claiming the name is wrong (`repl_unknown_capability_error`), in first position
+and after a folded `Copy` alike. Closing the gap itself -- a session carrying its imported
+modules' trait and `impl:` registries, so `'T: Ord` resolves at REPL scope the way it does in
+a file -- has no owning slice.
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;

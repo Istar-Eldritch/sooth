@@ -2884,9 +2884,11 @@ impl Session {
             None,
             &mut builtin_overloads,
             // P7.S3e (R18): a session declares no `trait:`, so the only table
-            // entries are the pre-seeded `Copy`/`Ord` predicates and no
-            // `Bound::User` can reach here; the obligations it records are
-            // scratch, the same bypass `structs`/`enums` already follow.
+            // entry is the pre-seeded `Copy` predicate (P7.S3s: `Ord` is an
+            // ordinary `core::cmp` trait now, and a session carries no
+            // registry to resolve it against) and no `Bound::User` can reach
+            // here; the obligations it records are scratch, the same bypass
+            // `structs`/`enums` already follow.
             &mut check::TraitCtx::scratch(&mut Vec::new()),
             // P7.S3k: an empty callee registry, so a session line calling
             // another polymorphic word still gets `unknown word` rather than

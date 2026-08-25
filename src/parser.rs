@@ -1727,7 +1727,7 @@ fn unknown_capability_error(name: &str, span: Span) -> String {
 /// this one real name is pointed at the real cause (no registry) instead of
 /// being told the name is simply wrong. Any other name is not a trait
 /// anywhere, in a file or at the REPL, so it stays on the generic
-/// diagnostic -- see `parse_capabilities`'s `name == "Ord"` gate.
+/// diagnostic -- see `parse_capabilities`'s two `c == "Ord"` gates.
 fn repl_unknown_capability_error(name: &str, span: Span) -> String {
     format!(
         "error: unknown capability `{name}` at line {}, col {} (`{name}` is a core::cmp trait; the REPL carries no trait or impl: registry to resolve it against -- define a word needing it in a file and load that instead)",
@@ -3337,6 +3337,18 @@ impl<'t> Parser<'t> {
                         unknown_capability_error(&c, span)
                     });
                 }
+                // P7.S3s (R8, review round 2): `Ord` at REPL scope is the one
+                // name that breaks the rule above. `'T: Copy Ord` -- the
+                // shape every in-tree `Ord` signature uses -- folds `Copy`
+                // first, so `Ord` reaches this arm and would become the next
+                // slot, reported by the slot parser as `unknown type `Ord``:
+                // strictly less informative than the generic capability text
+                // R8 set out to improve on. Only when the session declares no
+                // type of that name, since a REPL `type: Ord ...` makes `Ord`
+                // a legitimate slot and that program must keep parsing.
+                None if self.is_repl && c == "Ord" && !self.declares_type(&c) => {
+                    return Err(repl_unknown_capability_error(&c, span));
+                }
                 None => break,
             }
         }
@@ -3344,6 +3356,21 @@ impl<'t> Parser<'t> {
             return Err(unknown_capability_error("<none>", colon_span));
         }
         Ok(out)
+    }
+
+    /// Whether `name` resolves to a declared struct or enum in this scope,
+    /// by the same lookup `resolve_type` performs for a slot.
+    fn declares_type(&self, name: &str) -> bool {
+        crate::ast::resolve_type_name_in_module(
+            self.structs,
+            self.enums,
+            name,
+            self.module,
+            self.imports,
+            self.selective,
+            self.type_origin,
+        )
+        .is_some()
     }
 
     /// P7.S3e (R18): resolve a bound's trait name at parse time, through the
@@ -8952,6 +8979,75 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("unknown capability `Bogus`"), "{err}");
         assert!(!err.contains("core::cmp trait"), "{err}");
+    }
+
+    /// P7.S3s (R8, review round 2): the shape R8 exists for. `Copy` folds
+    /// first, so `Ord` is no longer the first bound and reaches the greedy
+    /// list's break arm -- where, without its own gate, it would become the
+    /// next stack slot and be reported as an unknown *type*.
+    #[test]
+    fn parse_capabilities_at_repl_scope_reports_ord_after_a_folded_predicate() {
+        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown type"), "{err}");
+    }
+
+    /// The gate above must stay narrow: a session that declares a type named
+    /// `Ord` makes it a legitimate slot, so `'T: Copy Ord` parses (and fails
+    /// later, on its stack effect) instead of being claimed as the trait.
+    #[test]
+    fn parse_capabilities_at_repl_scope_yields_ord_to_a_declared_type() {
+        let structs = vec![StructDecl {
+            name: "Ord".to_string(),
+            name_static: "Ord",
+            fields: vec![("val".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let line = parse_line_with_structs(
+            &tokens,
+            &structs,
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .expect("`Ord` names a declared type here, so it is the next slot");
+        let Line::Def(def) = line else {
+            panic!("expected a word definition");
+        };
+        let sig = def.poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
+        // Three inputs: the bound site `'T` is itself a slot, then `Ord`,
+        // then the declared `'T`.
+        assert_eq!(sig.inputs.len(), 3, "`Ord` became an input slot");
     }
 
     #[test]
