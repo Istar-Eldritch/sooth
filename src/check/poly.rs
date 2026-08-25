@@ -5094,6 +5094,9 @@ impl CrossGround<'_> {
             let Bound::User(trait_id) = bound else {
                 continue;
             };
+            // Ungrounded variables skip resolution for the same reason they do
+            // in `check_poly_call`: no obligation can name a variable the body
+            // could not have dispatched on.
             let Some(ty) = subst.ty_of(*v) else { continue };
             resolve_user_bound(
                 *trait_id,
