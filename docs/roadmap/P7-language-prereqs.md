@@ -769,8 +769,43 @@ aggregate's destructor, and carry the same epoch. Missing that fails as an undef
 Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
 `field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:889`) that S3h
 deliberately leaves untouched; the new construction is the disposer itself and the `emit_drop`
-arm, both of which belong to S3u's mechanism rather than to this slice.
+arm, both of which belong to this slice.
 **Exit:** an owning closure can be `drop`ped without being called, disposing its captures and
 env exactly once; it can be stored in a struct field and an array element and disposed
 transitively through the container exactly once; and every S3h golden that asserted a
 rejection has been migrated to assert the new behaviour rather than deleted.
+
+**P7.S4 -- Generic `impl:` targets, with a specificity chain.** An `impl:` target must name one
+concrete type: the whole-program registry S3e built keys on `(TraitId, Type)` and discharges a
+bound per concrete instantiation, so a trait with N conforming shapes needs N hand-written
+`impl:` blocks with identical bodies. S3e listed blanket impls as out of scope with no consumer
+forcing them; `Show` and `Eq` over a shape family are that consumer. Both ends reject a
+non-concrete target today, at different layers: `impl: Show for 'T` resolves no type ("unknown
+type `'T`"), and `impl: Show for [i64 2]` does not parse (`parse_impl_decl` takes the target
+through `parse_type_expr`, which does not admit an array form here).
+
+An `impl:` target may name type variables and shape constructors over them
+(`impl: Show for ['T N]`), and where several targets match a concrete type the most specific
+wins. Sooth is unusually well placed for this: specialization's soundness holes in other
+languages come from lifetimes and associated types, and Sooth has neither, while dispatch is
+whole-program and monomorphizing, so the winning `impl:` is chosen statically per instantiation
+with no cross-unit coherence question and no runtime cost.
+
+**Specificity is a partial order, and this slice rules that ambiguity is an error.** Targets
+`['T N]`, `[i64 N]` and `['T 4]` all match `[i64 4]`, and the last two are incomparable: neither
+matches a strict subset of what the other does. Selecting one requires a tiebreak (declaration
+order, arity, leftmost-concrete) and every such rule is invisible at the use site. So an
+unordered candidate set is a located error naming the competing targets, and the user resolves
+it by writing the more specific `impl:` (here `[i64 4]`). No tiebreak rule is introduced.
+
+Out of scope: `drop`, which is not a trait and is not becoming one -- its blanket behaviour is
+synthesized field-wise glue, not a writable default body, and an owning closure's disposer keys
+on the construction site rather than the type (**P7.S3v**); trait objects (**P7.S3u**, parked);
+default member bodies and supertraits, still unforced. Sequence after **P7.S3s**, which is the
+first slice to give the impl registry a real multi-`impl:` consumer in `core`.
+**Exit:** an `impl:` target may name type variables and shape constructors over them; a bound is
+discharged against it for every matching concrete instantiation with no per-shape `impl:`
+written; a more specific target overrides a more general one at the instantiations they share;
+an unordered candidate set is a located error naming the competing targets; and a trait with one
+generic `impl:` behaves identically to the same trait with the hand-written concrete `impl:`
+blocks it replaces.
