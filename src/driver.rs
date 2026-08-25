@@ -427,6 +427,77 @@ fn walk_type_export_origin(
     }
 }
 
+/// P7.S3s (R1): the trait twin of `resolve_type_export_origins`, same shape
+/// and same tolerance -- a name it cannot place (it names a word, or the walk
+/// dead-ends or cycles) is simply left out, and the ordinary one-hop
+/// `find_trait_in_module` lookup reports the real diagnostic. Exists so a
+/// trait re-exported through a hub module (re-exported, not declared there)
+/// resolves as a bound or an `impl:` target the same way a hub-re-exported
+/// struct/enum name already resolves in an effect signature.
+fn resolve_trait_export_origins(
+    traits: &[TraitDecl],
+    module_count: usize,
+    exports: &[Vec<(String, Span)>],
+    import_maps: &[HashMap<String, u32>],
+    selectives: &[HashMap<String, u32>],
+) -> Vec<HashMap<String, u32>> {
+    // `RESERVED_TRAIT_MODULE` never equals a real module id in `0..module_count`,
+    // so `Copy`/`Ord` never enter this table.
+    let declared_traits: Vec<HashSet<&str>> = (0..module_count)
+        .map(|m| {
+            let m = m as u32;
+            traits
+                .iter()
+                .filter(|t| t.module == m)
+                .map(|t| t.name.as_str())
+                .collect()
+        })
+        .collect();
+    let mut origin: Vec<HashMap<String, u32>> = vec![HashMap::new(); module_count];
+    for (m, list) in exports.iter().enumerate() {
+        for (name, _) in list {
+            if declared_traits[m].contains(name.as_str()) {
+                continue;
+            }
+            if let Some(found) =
+                walk_trait_export_origin(m as u32, name, &declared_traits, selectives, import_maps)
+            {
+                origin[m].insert(name.clone(), found);
+            }
+        }
+    }
+    origin
+}
+
+/// One name's hop-by-hop walk for `resolve_trait_export_origins`, mirroring
+/// `walk_type_export_origin` exactly: from `start`, follow an unqualified
+/// selective re-export, or else the first import target that declares the
+/// name as a trait, until a module actually declaring it as a `trait:` is
+/// found. `None` for a cycle or a dead end, quietly -- this walk is advisory.
+fn walk_trait_export_origin(
+    start: u32,
+    name: &str,
+    declared_traits: &[HashSet<&str>],
+    selectives: &[HashMap<String, u32>],
+    import_maps: &[HashMap<String, u32>],
+) -> Option<u32> {
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut current = start;
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        if declared_traits[current as usize].contains(name) {
+            return Some(current);
+        }
+        current = *selectives[current as usize].get(name).or_else(|| {
+            import_maps[current as usize]
+                .values()
+                .find(|&&dep| declared_traits[dep as usize].contains(name))
+        })?;
+    }
+}
+
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
@@ -647,6 +718,20 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut traits,
         )?;
     }
+    // P7.S3s (R1/C3): computed here, between the trait pre-pass loop above
+    // (which finishes building the whole-closure `traits` registry) and the
+    // per-module body-parse loop below -- `resolve_type_export_origins` sits
+    // next to `type_origin` instead because the struct/enum registry it
+    // needs is already complete before any pre-pass runs; the trait registry
+    // is not.
+    let trait_origin = resolve_trait_export_origins(
+        &traits,
+        closure.nodes.len(),
+        &exports_by_module,
+        &import_by_module,
+        &selective_maps,
+    );
+
     let mut modules = Vec::with_capacity(closure.nodes.len());
     let mut impls: Vec<ImplDecl> = Vec::new();
     for (m, node) in closure.nodes.iter().enumerate() {
@@ -661,6 +746,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &exports_by_module,
             selective_map,
             &type_origin,
+            &trait_origin,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -2711,5 +2797,82 @@ mod tests {
             "symbols: {symbols:?}"
         );
         assert_eq!(resolved, vec![&"show;Show;1;Point__m0".to_string()]);
+    }
+
+    /// P7.S3s (R1): `walk_trait_export_origin` follows two hops -- module 2
+    /// re-exports `Foo` selectively from module 1, which itself only
+    /// re-exports it selectively from module 0, the actual declaring module.
+    #[test]
+    fn walk_trait_export_origin_resolves_multi_hop() {
+        let declared_traits: Vec<HashSet<&str>> =
+            vec![HashSet::from(["Foo"]), HashSet::new(), HashSet::new()];
+        let mut selectives: Vec<HashMap<String, u32>> =
+            vec![HashMap::new(), HashMap::new(), HashMap::new()];
+        selectives[1].insert("Foo".to_string(), 0);
+        selectives[2].insert("Foo".to_string(), 1);
+        let import_maps: Vec<HashMap<String, u32>> =
+            vec![HashMap::new(), HashMap::new(), HashMap::new()];
+        assert_eq!(
+            walk_trait_export_origin(2, "Foo", &declared_traits, &selectives, &import_maps),
+            Some(0)
+        );
+    }
+
+    /// A selective cycle (module 0 re-exports from module 1 and vice versa,
+    /// neither ever declaring the name itself) terminates with `None` rather
+    /// than looping forever.
+    #[test]
+    fn walk_trait_export_origin_terminates_on_a_cycle() {
+        let declared_traits: Vec<HashSet<&str>> = vec![HashSet::new(), HashSet::new()];
+        let mut selectives: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        selectives[0].insert("Foo".to_string(), 1);
+        selectives[1].insert("Foo".to_string(), 0);
+        let import_maps: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        assert_eq!(
+            walk_trait_export_origin(0, "Foo", &declared_traits, &selectives, &import_maps),
+            None
+        );
+    }
+
+    /// A name on a module's `export:` list that is a word, not a trait --
+    /// declared nowhere in the reachable graph -- is a dead end, not a panic.
+    #[test]
+    fn walk_trait_export_origin_word_not_a_trait_is_none() {
+        let declared_traits: Vec<HashSet<&str>> = vec![HashSet::new(), HashSet::new()];
+        let selectives: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        let mut import_maps: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        import_maps[0].insert("lib".to_string(), 1);
+        assert_eq!(
+            walk_trait_export_origin(0, "helper", &declared_traits, &selectives, &import_maps),
+            None
+        );
+    }
+
+    /// `resolve_trait_export_origins` end to end: only a re-exported name (on
+    /// the hub's `export:` list but not declared there) gets an entry; a
+    /// module's own declared trait is excluded (`walk` short-circuits before
+    /// ever needing the table), and the reserved predicate module never
+    /// enters `declared_traits` at all.
+    #[test]
+    fn resolve_trait_export_origins_covers_hub_but_not_own_declarations() {
+        let base = crate::ast::TraitDecl {
+            name: "Foo".to_string(),
+            kind: crate::ast::TraitKind::Nominal,
+            members: Vec::new(),
+            module: 0,
+            span: Span::default(),
+        };
+        let mut traits = crate::ast::seed_predicate_traits();
+        traits.push(base);
+        let exports: Vec<Vec<(String, Span)>> = vec![
+            vec![("Foo".to_string(), Span::default())],
+            vec![("Foo".to_string(), Span::default())],
+        ];
+        let import_maps: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        let mut selectives: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        selectives[1].insert("Foo".to_string(), 0);
+        let origins = resolve_trait_export_origins(&traits, 2, &exports, &import_maps, &selectives);
+        assert!(origins[0].is_empty(), "module 0 declares Foo itself");
+        assert_eq!(origins[1].get("Foo"), Some(&0));
     }
 }

@@ -505,18 +505,31 @@ fn rewrite_member_self_calls(
 /// pre-seeded reserved-module entry (`Copy`/`Ord`, visible everywhere), then
 /// a `qualifier::Base` mapped through `imports`, then a bare name reached via
 /// a selective import.
+///
+/// P7.S3s (R1/C4): both the qualified and the selective branch are one-hop
+/// only, and each falls back to `trait_origin` (mirroring `type_origin`'s
+/// fallback in `resolve_type_name_in_module`) when the direct match fails --
+/// a trait re-exported through a hub module, not declared there, resolves
+/// through the hub's own recorded origin instead of stopping at the hub.
 pub(crate) fn find_trait_in_module(
     traits: &[TraitDecl],
     name: &str,
     module: u32,
     imports: &HashMap<String, u32>,
     selective: &HashMap<String, u32>,
+    trait_origin: &[HashMap<String, u32>],
 ) -> Option<TraitId> {
     if let Some((qualifier, base)) = name.split_once("::") {
         let target = *imports.get(qualifier)?;
         return traits
             .iter()
             .position(|t| t.name == base && t.module == target)
+            .or_else(|| {
+                let origin = *trait_origin.get(target as usize)?.get(base)?;
+                traits
+                    .iter()
+                    .position(|t| t.name == base && t.module == origin)
+            })
             .map(TraitId::from_index);
     }
     if let Some(idx) = traits
@@ -535,6 +548,12 @@ pub(crate) fn find_trait_in_module(
         return traits
             .iter()
             .position(|t| t.name == name && t.module == target)
+            .or_else(|| {
+                let origin = *trait_origin.get(target as usize)?.get(name)?;
+                traits
+                    .iter()
+                    .position(|t| t.name == name && t.module == origin)
+            })
             .map(TraitId::from_index);
     }
     None
@@ -667,6 +686,7 @@ pub fn parse_bodies(
     exports: &[Vec<(String, Span)>],
     selective: &HashMap<String, u32>,
     type_origin: &[HashMap<String, u32>],
+    trait_origin: &[HashMap<String, u32>],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -697,6 +717,7 @@ pub fn parse_bodies(
         exports,
         selective,
         type_origin,
+        trait_origin,
         generics,
         traits,
     };
@@ -774,6 +795,7 @@ pub(crate) fn prepass_generic_typedefs(
         selective,
         generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     parser.parse_generic_typedefs()
@@ -839,6 +861,7 @@ pub(crate) fn prepass_trait_decls(
                 selective,
                 generics,
                 type_origin: &[],
+                trait_origin: &[],
                 // A trait member's own signature can still name a bound
                 // (`'T: Copy`) inside its `( ... )` effect, so this needs the
                 // reserved-predicate table even though it never looks up a
@@ -892,6 +915,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &no_imports,
         &[],
         &no_imports,
+        &[],
         &[],
         &mut arrays,
         &mut owned_cells,
@@ -1018,6 +1042,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 selective: &no_imports,
                 generics: &mut generics,
                 type_origin: &[],
+                trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
             };
             imports.push(parser.parse_import()?);
@@ -1063,6 +1088,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 selective: &no_imports,
                 generics: &mut generics,
                 type_origin: &[],
+                trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
             };
             exports.extend(parser.parse_export()?);
@@ -1156,6 +1182,7 @@ pub fn parse_line_with_structs(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
+        trait_origin: &[],
         // P7.S3e (R2): a REPL word def still needs `'T: Copy Ord` to work;
         // a user `trait:` declaration is not yet supported at REPL scope, so
         // the reserved predicate-only table is all this context ever sees.
@@ -1214,6 +1241,7 @@ pub fn parse_typedef_line(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
@@ -1295,6 +1323,7 @@ pub fn parse_enum_typedef_line(
         selective: ctx.selective,
         generics: &mut generics,
         type_origin: &[],
+        trait_origin: &[],
         traits: crate::ast::predicate_traits(),
     };
     reject_generic_typedef_in_repl(&parser)?;
@@ -2002,6 +2031,12 @@ struct Parser<'t> {
     /// module id, empty for a REPL line and any parse path with no real
     /// cross-module data.
     type_origin: &'t [std::collections::HashMap<String, u32>],
+    /// P7.S3s (R1): the trait twin of `type_origin` -- for a module reached
+    /// through `imports`/`selective`, the true declaring module of a trait
+    /// name on *its* `export:` list when that name is a re-export rather
+    /// than something it declares itself. Indexed by module id, empty for a
+    /// REPL line and any parse path with no real cross-module data.
+    trait_origin: &'t [std::collections::HashMap<String, u32>],
     /// Phase 5 slice 1 (R2/D5): the generic `type:` declarations in scope and
     /// the concrete struct/enum registry each application of one mints. A
     /// mutable borrow for the same reason `arrays` is one: an instantiation
@@ -2435,6 +2470,7 @@ impl<'t> Parser<'t> {
             self.module,
             self.imports,
             self.selective,
+            self.trait_origin,
         )
         .ok_or_else(|| unknown_trait_error(&trait_name, trait_span))?;
         if let TraitKind::Predicate(_) = self.traits[trait_id.index()].kind {
@@ -3290,7 +3326,14 @@ impl<'t> Parser<'t> {
         span: Span,
         is_first: bool,
     ) -> Result<Option<TraitId>, String> {
-        let id = find_trait_in_module(self.traits, name, self.module, self.imports, self.selective);
+        let id = find_trait_in_module(
+            self.traits,
+            name,
+            self.module,
+            self.imports,
+            self.selective,
+            self.trait_origin,
+        );
         let Some((qualifier, base)) = name.split_once("::") else {
             return Ok(id);
         };
@@ -5376,6 +5419,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -5413,6 +5457,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -5921,6 +5966,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -6016,6 +6062,7 @@ mod tests {
             &[],
             &no_imports,
             &[],
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,
@@ -6062,6 +6109,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -7438,6 +7486,7 @@ mod tests {
                 &[],
                 &no_imports,
                 &[],
+                &[],
                 &mut arrays,
                 &mut cells,
                 &mut refs,
@@ -7483,6 +7532,7 @@ mod tests {
                         imports,
                         &exports,
                         &no_imports,
+                        &[],
                         &[],
                         &mut arrays,
                         &mut cells,
@@ -7532,6 +7582,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &[],
                 &mut arrays,
                 &mut cells,
@@ -7583,6 +7634,7 @@ mod tests {
             &no_imports,
             &[],
             &no_imports,
+            &[],
             &[],
             &mut arrays,
             &mut cells,
@@ -8478,18 +8530,124 @@ mod tests {
             module: 1,
             span: Span::default(),
         };
-        let traits = vec![show];
+        let mut traits = crate::ast::seed_predicate_traits();
+        traits.push(show);
         let mut imports = HashMap::new();
         imports.insert("lib".to_string(), 1u32);
-        let no_selective = HashMap::new();
-        assert!(find_trait_in_module(&traits, "Show", 0, &imports, &no_selective).is_none());
+        let mut selective = HashMap::new();
+        selective.insert("Show".to_string(), 1u32);
+        let no_trait_origin: [HashMap<String, u32>; 0] = [];
+        let no_selective: HashMap<String, u32> = HashMap::new();
+        // Own-module: no `Show` declared in module 0, and no selective entry
+        // for it here (a selective fallback would otherwise mask this case).
+        assert!(find_trait_in_module(
+            &traits,
+            "Show",
+            0,
+            &imports,
+            &no_selective,
+            &no_trait_origin
+        )
+        .is_none());
+        // Qualified, one-hop: `lib::Show` maps `lib` to module 1, which
+        // declares `Show` directly.
         assert_eq!(
-            find_trait_in_module(&traits, "lib::Show", 0, &imports, &no_selective),
+            find_trait_in_module(
+                &traits,
+                "lib::Show",
+                0,
+                &imports,
+                &selective,
+                &no_trait_origin
+            ),
+            Some(TraitId::from_index(2))
+        );
+        // Own module, unqualified: module 1 declares `Show` itself.
+        assert_eq!(
+            find_trait_in_module(&traits, "Show", 1, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(2))
+        );
+        // Reserved predicate table: visible from any module, with an empty
+        // `trait_origin` and no import/selective entry for it.
+        assert_eq!(
+            find_trait_in_module(&traits, "Ord", 0, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(1))
+        );
+        // One-hop selective: a bare `Show` reached via a selective import
+        // targeting module 1, from a module (2) that neither declares nor
+        // imports it by qualifier.
+        assert_eq!(
+            find_trait_in_module(&traits, "Show", 2, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(2))
+        );
+    }
+
+    /// P7.S3s (R1/C4): both `find_trait_in_module` fallback branches --
+    /// qualified and selective -- resolve a trait re-exported through a hub
+    /// module (declared elsewhere, only named on the hub's `export:` list)
+    /// via `trait_origin`, mirroring `resolve_type_name_in_module`'s
+    /// `type_origin` fallback.
+    #[test]
+    fn find_trait_in_module_falls_back_to_trait_origin_through_a_hub() {
+        let greet = crate::ast::TraitDecl {
+            name: "Greet".to_string(),
+            kind: TraitKind::Nominal,
+            members: Vec::new(),
+            module: 0,
+            span: Span::default(),
+        };
+        let traits = vec![greet];
+        // Module 2 (consumer) imports module 1 (hub) under qualifier `h`;
+        // module 1 does not declare `Greet` itself, it only re-exports it
+        // from module 0.
+        let mut imports = HashMap::new();
+        imports.insert("h".to_string(), 1u32);
+        let mut selective = HashMap::new();
+        selective.insert("Greet".to_string(), 1u32);
+        let mut trait_origin: Vec<HashMap<String, u32>> = vec![HashMap::new(), HashMap::new()];
+        trait_origin[1].insert("Greet".to_string(), 0);
+        assert_eq!(
+            find_trait_in_module(&traits, "h::Greet", 2, &imports, &selective, &trait_origin),
             Some(TraitId::from_index(0))
         );
         assert_eq!(
-            find_trait_in_module(&traits, "Show", 1, &imports, &no_selective),
+            find_trait_in_module(&traits, "Greet", 2, &imports, &selective, &trait_origin),
             Some(TraitId::from_index(0))
+        );
+    }
+
+    /// Mutation check: reverting either fallback branch alone must fail one
+    /// of the two assertions above -- a twinned guard tested in one half
+    /// only is a known repeat failure in this repo.
+    #[test]
+    fn find_trait_in_module_hub_fallback_is_needed_on_both_branches() {
+        let greet = crate::ast::TraitDecl {
+            name: "Greet".to_string(),
+            kind: TraitKind::Nominal,
+            members: Vec::new(),
+            module: 0,
+            span: Span::default(),
+        };
+        let traits = vec![greet];
+        let mut imports = HashMap::new();
+        imports.insert("h".to_string(), 1u32);
+        let mut selective = HashMap::new();
+        selective.insert("Greet".to_string(), 1u32);
+        let no_trait_origin: [HashMap<String, u32>; 0] = [];
+        // With no `trait_origin` table at all, neither the qualified nor the
+        // selective form can see past the hub.
+        assert!(find_trait_in_module(
+            &traits,
+            "h::Greet",
+            2,
+            &imports,
+            &selective,
+            &no_trait_origin
+        )
+        .is_none());
+        assert!(
+            find_trait_in_module(&traits, "Greet", 2, &imports, &selective, &no_trait_origin)
+                .is_none()
         );
     }
 
@@ -8944,6 +9102,7 @@ mod tests {
                 imports,
                 &no_exports,
                 &no_imports,
+                &[],
                 &[],
                 &mut arrays,
                 &mut cells,
