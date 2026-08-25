@@ -190,7 +190,7 @@ IrType::OwningQuotation(_) => true,
 matching `IrType::OwnedCell(_) => true` immediately above. `IrType::Quotation` (plain) stays on
 the `_ => false` wildcard — no change, no new `Copy` obligation, no IL churn for any program that
 does not use `owning`. This is the one edit `check/audits.rs`'s own doc comment
-(`:922`, in `an_owning_field_is_rejected`'s neighborhood) names as the hole this slice closes on
+(`:922`, in `owning_quotation_is_rejected_in_every_aggregate_position`'s neighborhood) names as the hole this slice closes on
 purpose: with it, `StructLayout::is_linear`/`EnumLayout::is_linear` see an owning field, so
 `synthesize_aggregate_destructors` emits a destructor for the container, and that destructor's
 field-glue loop calls `emit_drop` on the field, which is R3's new arm.
@@ -265,6 +265,37 @@ exactly as every other arm does. No lexer change (`OWNING_QUOTATION_KEYWORD` sta
 word, matching S3h's own no-lexer-change ruling); no change to `parse_type_expr`'s own dispatch,
 which already handles the spaced form correctly.
 
+### R9 — Two existing tests go stale and must be updated in the same phase that stales them
+
+Caught in review, both real and both missed by the original draft.
+
+**`owning_quotation_is_rejected_in_every_aggregate_position`** (`src/check/audits.rs:942-970`)
+asserts all five aggregate positions reject an owning quotation via `check_src(src).unwrap_err()`
+in a loop over five `(src, position)` pairs. R6 admits three of the five (struct field, variant
+field, cell payload); the other two (reference referent, `extern:` boundary) stay rejected. Once
+R6 lands, three of the five `unwrap_err()` calls panic on `Ok`, so this test fails at phase 3's
+own gate if left untouched. **Fix, in phase 3, alongside R6:** split the loop into two —
+`owning_quotation_is_admitted_in_three_positions` keeping the three now-legal `(src, position)`
+pairs as `check_src(src)` assertions that must succeed (not `unwrap_err`), and
+`owning_quotation_is_rejected_in_every_remaining_aggregate_position` keeping the reference and
+`extern:` pairs exactly as they are today. Do not delete either check; this is a split, not a
+drop, and the reference/`extern:` half must keep passing unchanged before and after R6 lands
+(the blast-radius guard for R6's carve-outs already required by the Tests section — this test
+split is where it actually lives, not a new test to write).
+
+**`a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation`**
+(`tests/phase7_slice3h.rs:661-682`) asserts `il.contains("type :Q0 = { l, l }")` and, in the same
+function, a companion assertion on the emitted allocation size for a *different* (owning) case
+two tests up (`:655-666`, `il.contains("(:W %v0, :Q0 %v1)")` — verify the exact byte-size
+assertion at test time, since R1 widens `:Q0` for both variants and this exact string goes stale
+regardless of which function it sits in). **Fix, in phase 1**: update the `{ l, l }` →
+`{ l, l, l }` literal this test checks for, and rename the test itself (its name asserts "keeps
+its two word layout," which becomes false under R1) — e.g.
+`a_plain_quotation_still_carries_a_null_disposer_slot`, asserting the third word is present and
+null rather than absent. This is not optional golden-sweep churn; it is phase 1's own exit
+criterion ("every quotation-bearing golden... still builds") failing if skipped, and `cargo test`
+will catch it regardless — named here so it is not an unplanned discovery mid-phase.
+
 ### R8 — The REPL override-epoch obligation
 
 `src/ir/destructors.rs:8-35`: once a session holds any user `drop` override, every linear
@@ -305,6 +336,9 @@ golden rather than trusting the wiring by inspection.
 | `src/ir/destructors.rs:8-35` | the override-epoch rule — R8, unchanged, just newly exercised |
 | `src/repl.rs:3198,3391` | the two `synthesize_aggregate_destructors` call sites the epoch already flows through |
 | `tests/phase7_slice3h.rs:169,187,335,354` | the four tests R4/R6 migrate, not delete |
+| `src/check/audits.rs:942-970` | `owning_quotation_is_rejected_in_every_aggregate_position` — **breaks under R6, must be split (R9)** |
+| `tests/phase7_slice3h.rs:661-682` | `a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation` — **its own name and byte-size assertion go stale under R1 (R9)** |
+| `src/backend/qbe.rs:441-445` | `member_ty`'s doc comment claims an owning-quotation field arm is unreachable — **goes stale under R6, cosmetic-only, deferred (see Out of scope)** |
 
 ## Tests
 
@@ -371,7 +405,13 @@ Unit, beside each touched function:
   field/variant field/cell payload and still rejecting an owning array element and reference
   referent — the R6 carve-out's own mutation guard, mirroring the existing
   `poly_quotation_behind_a_reference_inside_an_array_element_is_rejected`-style direct-call
-  tests already in this file.
+  tests already in this file. **This is where R9's split of
+  `owning_quotation_is_rejected_in_every_aggregate_position` (`:942-970`) lands**: the three
+  now-admitted `(src, position)` pairs move into a new `owning_quotation_is_admitted_in_three_positions`
+  asserting `check_src(src)` succeeds, and the two still-rejected pairs (reference referent,
+  `extern:` boundary) stay in place, renamed
+  `owning_quotation_is_rejected_in_every_remaining_aggregate_position`, asserting `unwrap_err()`
+  exactly as today.
 
 **Mutation-test before each phase exit**, deleting what each guards and proving the named test
 fails:
@@ -394,12 +434,14 @@ fails:
 ## Phase 1 — widen the quotation value layout (hard)
 
 **Scope.** `src/ir/types.rs` (`QuotLayout`, `quotation_layout`, the doc comment, the unit test),
-`src/backend/qbe.rs:151`, and the QBE IL golden sweep the width change forces.
-`materialize_quot_value` (`quotation.rs:54-90`) is touched only to write a null pointer into the
-new third word unconditionally (both flavours), so every existing owning-closure golden (S3h's)
-stays byte-for-byte correct on the `code`/`env` slots and gains one more null word nobody reads
-yet — a real, immediate consumer of the new offset (not pre-staged plumbing: the write happens
-in this phase, at the site that already writes the other two slots).
+`src/backend/qbe.rs:151`, and the QBE IL golden sweep the width change forces (**R9, named
+explicitly**: `tests/phase7_slice3h.rs:661-682`'s `{ l, l }` assertion and its own name go stale
+under this phase, not a later one, and must be fixed here). `materialize_quot_value`
+(`quotation.rs:54-90`) is touched only to write a null pointer into the new third word
+unconditionally (both flavours), so every existing owning-closure golden (S3h's) stays
+byte-for-byte correct on the `code`/`env` slots and gains one more null word nobody reads yet —
+a real, immediate consumer of the new offset (not pre-staged plumbing: the write happens in this
+phase, at the site that already writes the other two slots).
 
 **Out of bounds.** `emit_drop`, `field_is_linear`/`layout_field_is_linear`, the checker guards,
 the audit, the parser, the REPL, any disposer synthesis.
@@ -439,8 +481,10 @@ nothing yet calls the new symbol at runtime. Full green.
 **Scope.** `src/check.rs:3009,3367-3368` and `src/check/poly.rs:1254-1255` (R4, both halves,
 each independently mutation-tested), `src/ir/layout.rs:66-80,895-911` (R5, both functions,
 independently mutation-tested), `src/check/audits.rs:158-211` (R6, three carve-outs,
-independently mutation-tested), `src/parser.rs:3592-3617` (R7), the four migrated tests, and
-every new end-to-end golden in the Tests section except the REPL one.
+independently mutation-tested), `src/parser.rs:3592-3617` (R7), the four migrated tests, the
+R9 split of `src/check/audits.rs:942-970`'s `owning_quotation_is_rejected_in_every_aggregate_position`
+into an admitted-three and a still-rejected-two test, and every new end-to-end golden in the
+Tests section except the REPL one.
 
 **Out of bounds.** `src/repl.rs` (phase 4), `src/ir/func_builder/`, `src/ir/types.rs`,
 `src/backend/qbe.rs`.
@@ -479,6 +523,12 @@ toggleable. Full green.
   This slice's audit carve-outs (R6) are additive over exactly three positions and must not be
   widened to a fourth even if doing so would "just work" once R5 lands; that is exactly the kind
   of accidental scope creep the blast-radius goldens in Tests exist to catch.
+- **The stale doc comment at `src/backend/qbe.rs:441-445`** (`member_ty`'s `IrType::Quotation |
+  IrType::OwningQuotation` arm, which currently claims an owning-quotation field arm is
+  "unreachable" — false once R6 admits one). Functionally harmless: the arm already emits the
+  correct `:Q{n}` spelling for both variants, so nothing behaves differently. Left for whichever
+  phase next touches that function, rather than reopening `src/backend/qbe.rs` (explicitly out
+  of bounds for phases 2 through 4) for a comment-only edit.
 - **P7.S3u** (trait objects / erased owners) — parked, not a prerequisite, not touched.
 - Polymorphism over plain-versus-owning quotation types, and an owning parameter on a spliced or
   generic word — unchanged since S3h (`reject_owning_quotation_declarations`,
