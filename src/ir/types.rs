@@ -173,8 +173,9 @@ pub enum IrType {
     /// as a table index instead of an address, exactly the opacity `Ptr`
     /// already keeps for data pointers.
     Code,
-    /// Slice 7a (R1/Q2): a quotation value, a pointer to a fixed two-slot
-    /// aggregate `{ code: Code@0, env: Ptr@WORD_WIDTH }` (`quotation_layout`).
+    /// Slice 7a (R1/Q2): a quotation value, a pointer to a fixed three-slot
+    /// aggregate `{ code: Code@0, env: Ptr@WORD_WIDTH,
+    /// disposer: Code@2*WORD_WIDTH }` (`quotation_layout`).
     /// `QuotSigId` carries the declared effect directly, so `IrType` stays
     /// `Copy` and two structurally different effects are distinct `IrType`s,
     /// with no interning table threaded through `ir_type_of` (the
@@ -182,9 +183,12 @@ pub enum IrType {
     /// Spelled `:Q{id}` in ABI positions and `l` in a register, like
     /// `Struct`/`Enum`/`Array`.
     Quotation(QuotSigId),
-    /// P7.S3h: an *owning* quotation value. Byte-for-byte the same two-slot
-    /// `{ code, env }` aggregate `IrType::Quotation` is, and it shares the
-    /// `:Q{n}` signature symbol, so nothing about its representation differs.
+    /// P7.S3h: an *owning* quotation value. Byte-for-byte the same three-slot
+    /// `{ code, env, disposer }` aggregate `IrType::Quotation` is, and it
+    /// shares the `:Q{n}` signature symbol, so nothing about its
+    /// representation differs -- a plain quotation's `disposer` slot is simply
+    /// always null (P7.S3v R1: `:Q{n}` is keyed on the effect alone, so the
+    /// two flavours cannot have different widths without re-keying it).
     /// The variant exists because lowering has exactly one decision to make
     /// off it and no other channel to make it from: a materialization
     /// boundary reads the *declared* `IrType` to decide what to build, and an
@@ -219,7 +223,7 @@ pub struct QuotSigId(pub &'static QuotEffect);
 
 /// Slice 7a (R1/Q2): one entry of the module-level quotation signature table
 /// (`IrModule::quot_sigs`), interned by structural effect equality. The
-/// backend emits a `type :Q{n} = { l, l }` per entry and spells `:Q{n}` for
+/// backend emits a `type :Q{n} = { l, l, l }` per entry and spells `:Q{n}` for
 /// each `IrType::Quotation` naming this effect; the effect is what a
 /// materialization boundary reads to mint the callee `IrFunc`'s signature.
 #[derive(Debug, Clone)]
@@ -227,15 +231,18 @@ pub struct QuotSigLayout {
     pub effect: &'static QuotEffect,
 }
 
-/// Slice 7a (R2/D5): the fixed two-slot layout every quotation value shares,
-/// every figure word-width-derived (backend-neutral invariant): `code` at
-/// offset 0, `env` at offset `word_width`, size `2 * word_width`, align
-/// `word_width`. The `env` slot is always the null pointer in 7a (7b fills
-/// it); it is not elided, so widening to a capturing closure stays additive.
+/// Slice 7a (R2/D5), widened by P7.S3v (R1): the fixed three-slot layout
+/// every quotation value shares, every figure word-width-derived
+/// (backend-neutral invariant): `code` at offset 0, `env` at offset
+/// `word_width`, `disposer` at `2 * word_width`, size `3 * word_width`, align
+/// `word_width`. A slot is the null pointer when the value has nothing to put
+/// in it (a non-capturing literal's `env`, a plain quotation's `disposer`)
+/// rather than elided, so both flavours stay one shape under one `:Q{n}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuotLayout {
     pub code_offset: u32,
     pub env_offset: u32,
+    pub disposer_offset: u32,
     pub size: u32,
     pub align: u32,
 }
@@ -244,7 +251,8 @@ pub fn quotation_layout(word_width: u32) -> QuotLayout {
     QuotLayout {
         code_offset: 0,
         env_offset: word_width,
-        size: 2 * word_width,
+        disposer_offset: 2 * word_width,
+        size: 3 * word_width,
         align: word_width,
     }
 }
@@ -348,8 +356,8 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // -- a declared `owning` parameter reaches here through signature
         // lowering without ever crossing a materialization boundary.
         // P7.S3h (phase 3): an owning quotation is represented exactly as a
-        // plain one -- the same two-word `(code, env)` aggregate under the
-        // same `:Q{n}` symbol. The distinct `IrType` carries only the env
+        // plain one -- the same three-word `(code, env, disposer)` aggregate
+        // under the same `:Q{n}` symbol. The distinct `IrType` carries only the env
         // *storage* decision into lowering (a heap block the body frees), not
         // a distinct shape.
         Type::OwningQuotation(eff) => IrType::OwningQuotation(QuotSigId(eff)),
@@ -674,12 +682,13 @@ mod tests {
     }
 
     #[test]
-    fn ir_type_of_quotation_is_two_slot_aggregate() {
-        // T-irtype (R2/R3): a quotation type maps to a runtime value ---
-        // `IrType::Quotation` naming its effect --- with a fixed two-slot
-        // `{ code@0, env@WORD_WIDTH }` layout: size `2*WORD_WIDTH`, align
+    fn ir_type_of_quotation_is_three_slot_aggregate() {
+        // T-irtype (R2/R3), widened by P7.S3v (R1): a quotation type maps to a
+        // runtime value --- `IrType::Quotation` naming its effect --- with a
+        // fixed three-slot `{ code@0, env@WORD_WIDTH,
+        // disposer@2*WORD_WIDTH }` layout: size `3*WORD_WIDTH`, align
         // `WORD_WIDTH`, every figure word-width-derived, not a hardcoded
-        // 16/8. The carried effect gives value equality, so two structurally
+        // 24/8. The carried effect gives value equality, so two structurally
         // equal effects share one `IrType`.
         use crate::ast::quotation_type;
         let ir = ir_type_of(quotation_type(vec![Type::I64], vec![Type::I64]));
@@ -703,7 +712,12 @@ mod tests {
             layout.env_offset, WORD_WIDTH,
             "env slot at offset WORD_WIDTH"
         );
-        assert_eq!(layout.size, 2 * WORD_WIDTH, "two word-width slots");
+        assert_eq!(
+            layout.disposer_offset,
+            2 * WORD_WIDTH,
+            "disposer slot at offset 2*WORD_WIDTH"
+        );
+        assert_eq!(layout.size, 3 * WORD_WIDTH, "three word-width slots");
         assert_eq!(layout.align, WORD_WIDTH);
     }
 }

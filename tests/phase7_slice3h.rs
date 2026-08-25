@@ -609,6 +609,25 @@ fn function_block<'a>(il: &'a str, symbol: &str) -> &'a str {
     &il[start..end]
 }
 
+/// The value name a `storel` writes into the field at `offset` of the block's
+/// single aggregate. Two lines: an `add %base, offset` naming the slot pointer,
+/// then a `storel %src, %slot` through it.
+fn stored_at_offset(block: &str, offset: u32) -> String {
+    let slot = block
+        .lines()
+        .find_map(|l| l.strip_suffix(&format!(", {offset}")))
+        .and_then(|l| l.split(" =l add ").next())
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("expected a field pointer at offset {offset} in:\n{block}"))
+        .to_string();
+    block
+        .lines()
+        .find_map(|l| l.trim().strip_suffix(&format!(", {slot}")))
+        .and_then(|l| l.strip_prefix("storel "))
+        .unwrap_or_else(|| panic!("expected a store through {slot} in:\n{block}"))
+        .to_string()
+}
+
 /// The env free, asserted the only way it is checkable: a leaked heap block has
 /// no observable effect in a normal run and the harness has no allocator
 /// accounting, so the assertion is on the *emitted body*. Stubbing the free out
@@ -658,7 +677,7 @@ fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggre
          : main ( -- ) ;\n",
     );
     assert!(
-        il.contains("type :Q0 = { l, l }"),
+        il.contains("type :Q0 = { l, l, l }"),
         "the owning slot interned the quotation signature: {il}"
     );
     assert!(
@@ -668,19 +687,21 @@ fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggre
 }
 
 /// The invariant every program that exists today depends on: a plain quotation
-/// is unchanged. Same two-word `{ l, l }` aggregate, the `code` slot still at
-/// offset 0, the env still the capture's live value stored inline -- and no
-/// allocation anywhere, which is what would show if the owning path had been
-/// generalized to every closure.
+/// shares the one `{ l, l, l }` aggregate every quotation value has (P7.S3v
+/// R1), the `code` slot still at offset 0, the env still the capture's live
+/// value stored inline, and the third `disposer` slot written as the null
+/// pointer -- a plain closure has no captures to dispose. And no allocation
+/// anywhere, which is what would show if the owning path had been generalized
+/// to every closure.
 #[test]
-fn a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation() {
+fn a_plain_quotation_still_carries_a_null_disposer_slot() {
     let il = emit_il(
         ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
          : main ( -- ) 5 mk call . ;\n",
     );
     assert!(
-        il.contains("type :Q0 = { l, l }"),
-        "the quotation aggregate is unchanged: {il}"
+        il.contains("type :Q0 = { l, l, l }"),
+        "the quotation aggregate is the shared three-slot one: {il}"
     );
     let boundary = function_block(&il, "mk");
     assert!(
@@ -690,8 +711,16 @@ fn a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation() {
     // The `code` slot is written at offset 0 off the freshly allocated
     // quotation value, exactly as before the slice.
     assert!(
-        boundary.contains("=l alloc8 16"),
-        "the quotation value is a 16-byte, 8-aligned frame slot: {boundary}"
+        boundary.contains("=l alloc8 24"),
+        "the quotation value is a 24-byte, 8-aligned frame slot: {boundary}"
+    );
+    // The disposer slot is present *and* null: the store at offset 16 takes a
+    // value the block defined as `copy 0`. Asserting only the store would pass
+    // on a slot holding whatever the capture happened to be.
+    let disposer = stored_at_offset(boundary, 16);
+    assert!(
+        boundary.contains(&format!("{disposer} =l copy 0")),
+        "the disposer slot is written as the null pointer: {boundary}"
     );
     let body = function_block(&il, "mk__quot0");
     assert!(

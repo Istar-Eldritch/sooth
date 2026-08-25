@@ -50,7 +50,8 @@ impl<'a> FuncBuilder<'a> {
     /// byte), else the one captured local's live value snapshotted from the
     /// enclosing frame -- a scalar's value, or a reference's pointer. The
     /// symbol is `{enclosing}__quot{id}`, unique because word names are unique
-    /// and `QuotId` is per-function.
+    /// and `QuotId` is per-function. P7.S3v (R1): the third `disposer` slot is
+    /// written here too, null for now.
     fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId, owning: bool) -> Value {
         let id = self.quot_bodies[&phantom];
         let symbol = format!("{}__quot{}", self.cur_word_name, id.0);
@@ -87,6 +88,14 @@ impl<'a> FuncBuilder<'a> {
         };
         let env_ptr = self.field_ptr(dst, layout.env_offset);
         self.push_instr(Instr::FieldStore(env_ptr, env));
+        // P7.S3v (R1): the disposer slot, written for both flavours so no
+        // reader ever sees an uninitialized word. Phase 1 always writes null
+        // (nothing reads it yet); phase 2 replaces this with a real synthesized
+        // symbol for a capturing owning literal.
+        let disposer = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::Const(disposer, 0));
+        let disposer_ptr = self.field_ptr(dst, layout.disposer_offset);
+        self.push_instr(Instr::FieldStore(disposer_ptr, disposer));
         dst
     }
 

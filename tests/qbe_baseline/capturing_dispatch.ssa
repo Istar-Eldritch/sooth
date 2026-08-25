@@ -9,18 +9,21 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 type :arr_0 = align 8 { b 24 }
-type :arr_1 = align 8 { b 48 }
-type :Q0 = { l, l }
+type :arr_1 = align 8 { b 72 }
+type :Q0 = { l, l, l }
 
 export function :Q0 $seed__m0() {
 @start
-	%v1 =l alloc8 16
+	%v1 =l alloc8 24
 	%v2 =l copy $seed__m0__quot0
 	%v3 =l add %v1, 0
 	storel %v2, %v3
 	%v4 =l copy 0
 	%v5 =l add %v1, 8
 	storel %v4, %v5
+	%v6 =l copy 0
+	%v7 =l add %v1, 16
+	storel %v6, %v7
 	ret %v1
 }
 
@@ -85,7 +88,7 @@ export function $sooth_main() {
 	%v28 =l add %v2, 0
 	%v29 =:Q0 call $seed__m0()
 	%v30 =l copy 3
-	%v31 =l alloc8 48
+	%v31 =l alloc8 72
 	%v32 =l copy 0
 	jmp @blk8
 @blk8
@@ -94,9 +97,9 @@ export function $sooth_main() {
 	%v35 =w csltl %v33, %v34
 	jnz %v35, @blk9, @blk10
 @blk9
-	%eoff3 =l mul %v33, 16
+	%eoff3 =l mul %v33, 24
 	%v36 =l add %v31, %eoff3
-	blit %v29, %v36, 16
+	blit %v29, %v36, 24
 	%v37 =l copy 1
 	%v38 =l add %v33, %v37
 	jmp @blk8
@@ -113,93 +116,102 @@ export function $sooth_main() {
 	call $sooth_oob_trap(l %v44, l %v41, l %v45)
 	jmp @blk11
 @blk11
-	%eoff4 =l mul %v41, 16
+	%eoff4 =l mul %v41, 24
 	%v46 =l add %v39, %eoff4
-	%v48 =l alloc8 16
+	%v48 =l alloc8 24
 	%v49 =l copy $main__quot0
 	%v50 =l add %v48, 0
 	storel %v49, %v50
 	%v51 =l add %v48, 8
 	storel %v28, %v51
-	blit %v48, %v46, 16
-	%v52 =l add %v31, 0
-	%v53 =l copy 1
-	%v54 =l copy %v53
-	%v55 =l copy 3
-	%v56 =w cultl %v54, %v55
-	jnz %v56, @blk13, @blk14
+	%v52 =l copy 0
+	%v53 =l add %v48, 16
+	storel %v52, %v53
+	blit %v48, %v46, 24
+	%v54 =l add %v31, 0
+	%v55 =l copy 1
+	%v56 =l copy %v55
+	%v57 =l copy 3
+	%v58 =w cultl %v56, %v57
+	jnz %v58, @blk13, @blk14
 @blk14
-	%v57 =l copy 20
-	%v58 =l copy 3
-	call $sooth_oob_trap(l %v57, l %v54, l %v58)
+	%v59 =l copy 20
+	%v60 =l copy 3
+	call $sooth_oob_trap(l %v59, l %v56, l %v60)
 	jmp @blk13
 @blk13
-	%eoff5 =l mul %v54, 16
-	%v59 =l add %v52, %eoff5
-	%v61 =l alloc8 16
-	%v62 =l copy $main__quot1
-	%v63 =l add %v61, 0
-	storel %v62, %v63
-	%v64 =l add %v61, 8
-	storel %v28, %v64
-	blit %v61, %v59, 16
-	%v65 =l add %v31, 0
-	%v66 =l copy 2
-	%v67 =l copy %v66
-	%v68 =l copy 3
-	%v69 =w cultl %v67, %v68
-	jnz %v69, @blk15, @blk16
+	%eoff5 =l mul %v56, 24
+	%v61 =l add %v54, %eoff5
+	%v63 =l alloc8 24
+	%v64 =l copy $main__quot1
+	%v65 =l add %v63, 0
+	storel %v64, %v65
+	%v66 =l add %v63, 8
+	storel %v28, %v66
+	%v67 =l copy 0
+	%v68 =l add %v63, 16
+	storel %v67, %v68
+	blit %v63, %v61, 24
+	%v69 =l add %v31, 0
+	%v70 =l copy 2
+	%v71 =l copy %v70
+	%v72 =l copy 3
+	%v73 =w cultl %v71, %v72
+	jnz %v73, @blk15, @blk16
 @blk16
-	%v70 =l copy 21
-	%v71 =l copy 3
-	call $sooth_oob_trap(l %v70, l %v67, l %v71)
+	%v74 =l copy 21
+	%v75 =l copy 3
+	call $sooth_oob_trap(l %v74, l %v71, l %v75)
 	jmp @blk15
 @blk15
-	%eoff6 =l mul %v67, 16
-	%v72 =l add %v65, %eoff6
-	%v74 =l alloc8 16
-	%v75 =l copy $main__quot2
-	%v76 =l add %v74, 0
-	storel %v75, %v76
-	%v77 =l add %v74, 8
-	storel %v28, %v77
-	blit %v74, %v72, 16
-	%v78 =l add %v31, 0
-	%v79 =l copy 0
-	%eoff7 =l mul %v79, 16
-	%v80 =l add %v78, %eoff7
-	%v81 =l alloc8 16
-	blit %v80, %v81, 16
-	%v82 =l add %v81, 0
-	%v83 =l loadl %v82
-	%v84 =l add %v81, 8
-	%v85 =l loadl %v84
-	%v86 =l call %v83(l %v85)
-	call $printf(l $fmt, l %v86, ...)
-	%v87 =l add %v31, 0
-	%v88 =l copy 1
-	%eoff8 =l mul %v88, 16
-	%v89 =l add %v87, %eoff8
-	%v90 =l alloc8 16
-	blit %v89, %v90, 16
-	%v91 =l add %v90, 0
-	%v92 =l loadl %v91
-	%v93 =l add %v90, 8
-	%v94 =l loadl %v93
-	%v95 =l call %v92(l %v94)
-	call $printf(l $fmt, l %v95, ...)
-	%v96 =l add %v31, 0
-	%v97 =l copy 2
-	%eoff9 =l mul %v97, 16
-	%v98 =l add %v96, %eoff9
-	%v99 =l alloc8 16
-	blit %v98, %v99, 16
-	%v100 =l add %v99, 0
-	%v101 =l loadl %v100
-	%v102 =l add %v99, 8
-	%v103 =l loadl %v102
-	%v104 =l call %v101(l %v103)
-	call $printf(l $fmt, l %v104, ...)
+	%eoff6 =l mul %v71, 24
+	%v76 =l add %v69, %eoff6
+	%v78 =l alloc8 24
+	%v79 =l copy $main__quot2
+	%v80 =l add %v78, 0
+	storel %v79, %v80
+	%v81 =l add %v78, 8
+	storel %v28, %v81
+	%v82 =l copy 0
+	%v83 =l add %v78, 16
+	storel %v82, %v83
+	blit %v78, %v76, 24
+	%v84 =l add %v31, 0
+	%v85 =l copy 0
+	%eoff7 =l mul %v85, 24
+	%v86 =l add %v84, %eoff7
+	%v87 =l alloc8 24
+	blit %v86, %v87, 24
+	%v88 =l add %v87, 0
+	%v89 =l loadl %v88
+	%v90 =l add %v87, 8
+	%v91 =l loadl %v90
+	%v92 =l call %v89(l %v91)
+	call $printf(l $fmt, l %v92, ...)
+	%v93 =l add %v31, 0
+	%v94 =l copy 1
+	%eoff8 =l mul %v94, 24
+	%v95 =l add %v93, %eoff8
+	%v96 =l alloc8 24
+	blit %v95, %v96, 24
+	%v97 =l add %v96, 0
+	%v98 =l loadl %v97
+	%v99 =l add %v96, 8
+	%v100 =l loadl %v99
+	%v101 =l call %v98(l %v100)
+	call $printf(l $fmt, l %v101, ...)
+	%v102 =l add %v31, 0
+	%v103 =l copy 2
+	%eoff9 =l mul %v103, 24
+	%v104 =l add %v102, %eoff9
+	%v105 =l alloc8 24
+	blit %v104, %v105, 24
+	%v106 =l add %v105, 0
+	%v107 =l loadl %v106
+	%v108 =l add %v105, 8
+	%v109 =l loadl %v108
+	%v110 =l call %v107(l %v109)
+	call $printf(l $fmt, l %v110, ...)
 	ret
 }
 
