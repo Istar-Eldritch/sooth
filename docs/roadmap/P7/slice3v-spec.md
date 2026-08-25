@@ -533,6 +533,36 @@ is stubbed out for the test — confirmed once, then left as a comment rather th
 stub, since disabling session-wide epoching is not a state this slice's own tests should leave
 toggleable. Full green.
 
+**Finding: R8's golden is unwritable, and the obligation is unreachable rather than untested.**
+Not a source-edit finding (R8's no-new-plumbing claim stands: `emit_drop` resolves
+`struct_drop_symbol` against the live `drop_generation`, which `apply_drop_generations` sets
+before lowering). What is false is this spec's own Out-of-scope claim that the field/`drop` shape
+sidesteps the REPL's materialization limit. A disposer exists only for a *materialized* closure,
+and storing one in a field is exactly what forces materialization, so the session dies in `ld`
+before any epoch matters:
+
+```
+type: Box q owning [ -- ] ;
+: mk ( Wrap -- owning [ -- ] ) | w | [ w drop ] ;
+\ "cc" failed: relocation R_X86_64_PC32 against symbol `mk__quot0` can not be used
+\   when making a shared object
+```
+
+Measured on this branch, and identical for a plain quotation with no `owning`, no disposer and
+no third-word write (`type: H f [ i64 -- i64 ] ;` then `[ 1 add ] H`), so it is the standing
+hazard P7.S3h's roadmap entry already names, not a regression from this slice. Every other REPL
+route to a disposer is closed too: an `owning` parameter is rejected on a spliced word and a
+real-call quotation parameter is refused at the session boundary, leaving an inline literal
+`call` as the only workable shape — which runs the body, not the disposer.
+
+Delivered instead, in `tests/phase7_slice3v.rs`:
+`explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit` runs R8's intended
+session and asserts the blocked state (no disposal line; the failure is `"cc" failed`, not a
+diagnostic; the session survives), with
+`a_plain_quotation_value_hits_the_same_repl_link_limit` as the not-owning's-fault control. It is
+a tripwire, not a skip: whoever fixes the session-module PIC problem gets a failure telling them
+to promote it to R8's golden by asserting the capture's disposal line.
+
 ## Out of scope
 
 - **Array and slice element positions**, for an owning closure or any other linear type — P7.S5.
@@ -556,9 +586,10 @@ toggleable. Full green.
   needs no new case for this one; not separately tested here beyond the ordinary override path
   already covered by `tests/`'s slice 8b coverage.
 - The REPL's pre-existing inability to link a materialized quotation via `RTLD_GLOBAL`'s
-  non-PIC relocation limits — a *bare* (`call`-only) owning closure joins that existing failure
-  class exactly as it did in S3h; this slice's own REPL golden is scoped to the epoch obligation
-  specifically, using the field/`drop` shape that avoids that unrelated limit.
+  non-PIC relocation limits — an owning closure joins that existing failure class exactly as it
+  did in S3h. The claim that the field/`drop` shape avoids the limit is **false**: storing a
+  closure is what forces materialization, so R8's golden is blocked outright, and phase 4's
+  Finding above records what ships in its place.
 
 ## Phases (JSON)
 

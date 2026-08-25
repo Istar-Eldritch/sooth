@@ -11,7 +11,9 @@
 //! silent otherwise: the whole failure mode this slice guards is a `drop` that
 //! discharges the obligation and frees nothing.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
@@ -50,9 +52,7 @@ impl Drop for Scratch {
 fn build_and_run(src: &Path) -> String {
     let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
         .unwrap_or_else(|e| panic!("program should build: {e}"));
-    let output = std::process::Command::new(&binary)
-        .output()
-        .expect("binary should run");
+    let output = Command::new(&binary).output().expect("binary should run");
     assert!(output.status.success(), "the built binary should exit 0");
     String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
@@ -306,5 +306,91 @@ fn an_owning_cell_payload_of_a_plain_quotation_is_still_rejected() {
     assert_eq!(
         build_error(prog.path()),
         "error: a quotation type `[ -- ]` cannot appear as an owned-cell payload: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7"
+    );
+}
+
+// -- R8: the REPL override-epoch obligation, and why it cannot be exercised ---
+
+/// A scripted REPL session, `tests/repl_ux.rs`'s harness: the failure this pair
+/// is about is a link error the in-process helpers never see.
+fn run_session(lines: &[&str]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("repl should spawn");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    stdin
+        .write_all((lines.join("\n") + "\n").as_bytes())
+        .expect("writing stdin should succeed");
+    drop(stdin);
+    let out = child.wait_with_output().expect("repl should exit cleanly");
+    assert!(out.status.success(), "repl exited with {:?}", out.status);
+    String::from_utf8(out.stdout).expect("stdout should be utf8")
+}
+
+/// R8 wanted `explicit_repl_override_epoch_disposal`: a session holding a user
+/// `drop` override, then a later line building an owning closure over a
+/// *different* linear struct, stored in a field and dropped, so the disposer's
+/// `emit_drop` has to name the capture's destructor at the session-wide
+/// override epoch. That golden cannot be written, and this pins why.
+///
+/// A disposer exists only for a *materialized* closure, and no session line can
+/// link one: the code pointer is a non-PIC relocation into the line's own
+/// shared object, so the session dies in `ld` before anything runs. The spec's
+/// claim that a field/`drop` shape sidesteps that limit is false -- storing the
+/// closure is precisely what forces materialization. The epoch obligation is
+/// therefore unreachable rather than untested: no session can reach the
+/// disposer at all.
+///
+/// Asserted as the blocked state, not skipped, so it is a tripwire: the day the
+/// session-module PIC problem is fixed this fails, and R8's real golden is the
+/// session below with `"drop 7"` asserted in place of the link failure. The
+/// three assertions are the whole claim -- the disposal never happens, the
+/// reason is the linker rather than any checker gate this slice controls, and
+/// the session survives it.
+#[test]
+fn explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit() {
+    let out = run_session(&[
+        "type: Res n i64 ;",
+        ": drop ( Res -- ) | r | \"drop \" . r Res> . ;",
+        "type: Wrap r Res ;",
+        "type: Box q owning [ -- ] ;",
+        ": mk ( Wrap -- owning [ -- ] ) | w | [ w drop ] ;",
+        "7 Res Wrap mk Box drop",
+        "1 2 add .",
+    ]);
+    assert!(
+        !out.contains("drop 7"),
+        "the capture is never disposed, because the closure is never built: {out}"
+    );
+    assert!(
+        out.contains("\"cc\" failed"),
+        "the blocker is the link step, not a diagnostic -- if this session now links, \
+         promote it to R8's real golden and assert `drop 7` instead: {out}"
+    );
+    assert!(
+        out.ends_with("3\nstack: (empty)\n"),
+        "a refused line leaves the session usable: {out}"
+    );
+}
+
+/// The control that keeps the test above from being read as this slice's
+/// regression: the same link failure, with no `owning`, no disposer and no
+/// third-word write involved -- a plain quotation value in a session line dies
+/// identically. P7.S3h's roadmap entry already names this as a standing hazard;
+/// this pins it beside the blocked golden so the two are diagnosed together.
+#[test]
+fn a_plain_quotation_value_hits_the_same_repl_link_limit() {
+    let out = run_session(&["type: H f [ i64 -- i64 ] ;", "[ 1 add ] H", "1 2 add ."]);
+    assert!(
+        out.contains("\"cc\" failed"),
+        "a plain quotation value is unlinkable in a session too: {out}"
+    );
+    assert!(
+        out.ends_with("3\nstack: (empty)\n"),
+        "a refused line leaves the session usable: {out}"
     );
 }

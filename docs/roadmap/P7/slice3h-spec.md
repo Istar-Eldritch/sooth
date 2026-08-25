@@ -33,7 +33,7 @@ So: **a marker in the type, naming the obligation and nothing else.**
 `Type::OwningQuotation(&'static QuotEffect)` (`src/ast.rs:2278`), built by
 `owning_quotation_type` (`:2329`), mirroring `Type::InlineQuotation`: same payload, split purely
 to carry a capability difference, structural `PartialEq` giving `OwningQuotation(e) != Quotation(e)`
-for free. Its `name_static` is prefixed `owning `, so no two of the three quotation variants ever
+for free. Its `name_static` is prefixed with `owning` and a space, so no two of the three variants
 share a `&'static QuotEffect`. `is_copy` is `false` for it (`check/builtins.rs:252`); `is_linear`,
 move tracking, the `dup` gate, the forgotten-value error and the consumed-on-every-path check are
 all inherited with no parallel machinery.
@@ -107,8 +107,9 @@ its disposal, and the bundle is never itself disposed as a container.
   quotation payload, so a check-time gate on `^` over a quotation value is needed there first.
 
 Cost: an owning closure cannot be stored in a data structure. It can be created, passed, returned
-and called. Lifting that needs a disposer the synthesized glue can invoke, which is **P7.S3v**,
-after **P7.S3u** (trait objects) supplies the erased-owner mechanism.
+and called. Lifting that needs a disposer the synthesized glue can invoke, which
+[**P7.S3v**](./slice3v-spec.md) supplies per construction site (**P7.S3u** is parked and was
+never a prerequisite).
 
 ### Surface syntax: `owning [ … ]`, in type positions only
 
@@ -217,8 +218,9 @@ inherited error rather than being masked.
 - The case-2 aggregate-parameter/global narrowing in `classify_capture`.
 - Capturing an already-quotation-typed name by value (`captured_quotation_name_deferred_error`),
   which the `is_quotation_type` → `Some` answer necessarily also defers for owning-typed names.
-- **Storing an owning closure in an aggregate, and discarding one unexecuted** (P7.S3v, after
-  P7.S3u). Strict widenings of this design, not redesigns.
+- **Storing an owning closure in an aggregate, and discarding one unexecuted**: shipped by
+  [P7.S3v](./slice3v-spec.md), which mints a disposer per construction site into the quotation
+  value's third word. Strict widenings of this design, not redesigns.
 - **Inline and static env storage.**
 - Polymorphism over plain versus owning quotation types, and owning parameters on spliced or
   generic words. Consequence: no existing higher-order word declared over `[ … ]` can accept an
