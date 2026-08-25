@@ -4719,10 +4719,12 @@ pub(super) fn check_poly_call(
     // without this an inferred call and a `[...]`-seeded call at the *same* θ
     // mint two symbols and monomorphize the same specialization twice -- the
     // divergence R6 makes reachable by allowing a redundant instantiation.
-    // `len` has no seed path of its own (no length-variable syntax in the
-    // explicit list, R4) and only one producer (`unify_poly_input`), but is
-    // sorted alongside `ty` to keep the invariant unconditional rather than
-    // resting on that.
+    // `len` reorders the same way -- pass 1 skips the quotation input of
+    // `( [ ['T 'N] -- ] ['U 'M] ['T 'N] -- )`, so `'M` (id 1) binds before
+    // `'N` (id 0) -- but not *divergently*: R4 gives it no seed path, so its
+    // order is a function of the callee's signature and every minting path
+    // agrees. Sorted anyway because `Subst`'s derived `Eq`, which
+    // specializations dedup on, compares vectors positionally.
     subst.ty.sort_by_key(|(v, _)| *v);
     subst.len.sort_by_key(|(v, _)| *v);
     // P7.S3e (R8/R9): the trait-member calls in the callee's own body that
@@ -5672,11 +5674,12 @@ pub(super) fn apply_subst(
         // P7 slice 3b: `pty` is a declared signature slot, which a body-only
         // marker never reaches.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
-        // P7.S3t (R9): reachable for the first time as a legal program shape.
-        // A word whose output variable no input mentions could not previously
-        // be *called* -- the only bodies that produce one recurse -- so this
-        // arm existed with nothing able to reach it; `f[SomeType]` is now both
-        // the way to ground such a call and the remedy this names.
+        // P7.S3t (R9): `f[SomeType]` is now the way to ground such a call, and
+        // the remedy this names. Not, contra the spec, reachable for the first
+        // time: pass 2 grounds a declared *quotation input* through this same
+        // walk (P7.S3l), so `q ( [ 'T -- ] 'U -- 'U )` called bare has always
+        // landed here and been told `'T` is an output it appears nowhere in.
+        // R9 freezes the text, so that misdescription stays an open gap.
         PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
             poly_unbound_output_ty_error(ctx, span, name, &sig.ty_var_names[*v as usize])
         }),
@@ -8673,11 +8676,11 @@ mod tests {
             "the seeded theta mints the specialization: {}",
             inst.symbol
         );
-        // The same call without the list, which is R9's revived diagnostic at
-        // the site R9 describes: `apply_subst` walking the *declared outputs*.
-        // The end-to-end golden reaches the message through pass 2's
-        // quotation grounding instead, so without this half the output arm
-        // itself has only a passing witness.
+        // The same call without the list: R9's revived diagnostic at the site
+        // R9 describes, `apply_subst` walking the *declared outputs*. The
+        // message also fires from pass 2's quotation grounding, where it
+        // misdescribes an input as an output, so both witnesses use the
+        // output shape and neither leans on that path.
         let bare =
             check_src(": f ( -- 'T ) f ;\n: main ( -- ) f drop ;").expect_err("nothing binds `'T`");
         assert_eq!(
@@ -8719,6 +8722,31 @@ mod tests {
         let symbols: std::collections::HashSet<&str> =
             insts.iter().map(|i| i.symbol.as_str()).collect();
         assert_eq!(symbols.len(), 1, "one theta, one symbol: {symbols:?}");
+    }
+    /// P7.S3t (R5): `subst.len` goes out of order for the same reason `ty`
+    /// does -- pass 2 defers the quotation input, so `r` binds `'M` (id 1)
+    /// before `'N` (id 0) -- and is sorted for a weaker one. No seed path can
+    /// make two minting paths disagree on a length (R4), so this pins the
+    /// normalization `Subst`'s order-sensitive derived `Eq` documents, not a
+    /// divergence. The two lengths differ so the assertion cannot pass on a
+    /// vector that is merely the right size.
+    #[test]
+    fn a_deferred_quotation_input_leaves_the_length_substitution_sorted() {
+        let module = checked_module(
+            ": r ( [ ['T 'N] -- ] ['U 'M] ['T 'N] -- ) drop drop drop ;\n\
+             : main ( -- ) [ drop ] [ i64 ; 2 ] [ i64 ; 3 ] r ;",
+        );
+        let inst = module
+            .instantiations
+            .values()
+            .find(|i| i.callee == "r")
+            .expect("the call site recorded an instantiation");
+        assert_eq!(
+            inst.subst.len,
+            vec![(0, 3), (1, 2)],
+            "theta is kept sorted by length-variable id: {:?}",
+            inst.subst.len
+        );
     }
     /// P7.S3t (R4): exact arity over the callee's declared *type* variables,
     /// both directions, with the declared ones named -- the list is a

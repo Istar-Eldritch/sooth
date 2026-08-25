@@ -318,15 +318,17 @@ fn an_explicit_instantiation_grounds_a_variable_no_operand_binds() {
     assert_eq!(out, "8\n");
 }
 
-/// R9: `poly_unbound_output_error` had no reference anywhere in the tree --
-/// no legal program reached it -- and this slice both revives it and gives it
-/// a remedy. The note is half the point: without it the message states a fact
-/// about the callee's signature and says nothing the caller can act on.
+/// R9: `poly_unbound_output_error` had no reference anywhere in the tree, and
+/// this slice both pins it and gives it a remedy. The note is half the point:
+/// without it the message states a fact about the callee's signature and says
+/// nothing the caller can act on.
 ///
-/// `f`'s `'T` is a genuine output that no input mentions at all (its only
-/// operand is its own recursive self-call), unlike `q`'s quotation-input
-/// `'T` above: that shape is ungrounded only because pass 1 defers quotation
-/// inputs to pass 2, which is a different mechanism than "no input binds it".
+/// The spec's reason for those zero references -- that no legal program
+/// reached the message -- is false: `UNBOUND_QUOT_VAR`'s `q` called bare
+/// reaches it too, and has since P7.S3l, because pass 2 grounds a declared
+/// quotation input through the same walk. There the message calls `'T` an
+/// output when `q` declares no output variable at all, so this test uses `f`,
+/// whose `'T` is a genuine one (its only operand is its own self-call).
 #[test]
 fn an_uninstantiated_call_names_the_unbound_output_variable() {
     let err = build_error(

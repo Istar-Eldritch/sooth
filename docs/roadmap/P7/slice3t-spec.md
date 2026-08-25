@@ -18,11 +18,16 @@ established that the missing grounding is **not** at the member call but one fra
 call to the *wrapping generic word*: `check_poly_call` (`src/check/poly.rs:4550`) builds `Subst`
 purely by unifying `sig.inputs[i]` against the caller's stack, and at `:4691`
 `let Some(ty) = subst.ty_of(*v) else { continue };` skips bound checking and obligation
-resolution outright for a variable no input grounds. For `f ( 'T: Default -- 'T )` no input
+resolution outright for a variable no input grounds. For `f ( -- 'T: Default )` no input
 mentions `'T`, so `subst` never binds it, the bound is never checked, no obligation resolves,
 and `apply_subst` (`:5599`) would surface the output variable through
 `poly_unbound_output_error` (`:6535`) — a message with zero references anywhere in `src/`,
-`tests/` or `docs/`, because no legal program can currently reach it.
+`tests/` or `docs/`.
+
+> **Phase 2 correction (twice).** The bound must sit in *output* position. A bound-carrying
+> occurrence is an input slot, so `f ( 'T: Default -- 'T )` — the spelling this spec used at
+> all three of its mentions — takes a `'T` operand that grounds it, and `f[Point]` is
+> redundant on it. The zero references are also not evidence of unreachability; see R9.
 
 So this slice is three things in dependency order: a surface syntax that names a concrete type
 at a call, a checker path that seeds `Subst` from it, and only then the relaxed declaration
@@ -242,15 +247,25 @@ That is a golden, not an assumption.
 
 ### R9 — `poly_unbound_output_error` is revived as a deliberate diagnostic, not deleted
 
-Ruling on the brief's fifth open question. Once R8 lands, `f ( 'T: Default -- 'T )` called as a
+Ruling on the brief's fifth open question. Once R8 lands, `f ( -- 'T: Default )` called as a
 bare `f` with no explicit list and no grounding operand is a legal program shape that reaches
-`apply_subst`'s `Var` arm (`:5599`) for the first time. The existing message stays word for word
-and gains a note pointing at the new syntax:
+`apply_subst`'s `Var` arm (`:5599`). The existing message stays word for word and gains a note
+pointing at the new syntax:
 
 ```text
 error: `f` in `main` (line L) has output variable `'T` that no input binds
   note: supply it explicitly: `f[SomeType]`
 ```
+
+**Phase 2 correction: the arm is not reached "for the first time", and the message has a
+second, wrong-worded caller.** `check_poly_call`'s pass 2 grounds each declared *quotation
+input* through `apply_subst` too (P7.S3l), so `: q ( [ 'T -- ] 'U -- 'U ) swap drop ;` called
+as `[ drop ] 8 q` has reached the `Var` arm since long before this slice — verified by
+building it at the slice's parent commit. There the message reports an "output variable `'T`"
+for a `q` that declares no output variable at all. R9 freezes the text, so **this slice does
+not reword it**: the input-position misdescription is a recorded open gap, and a later slice
+that touches this diagnostic should split it (output case keeps the text, input case names the
+quotation parameter). What R9 revives is the message's *use*, not its reachability.
 
 The `:4691` `continue` in the bound loop stays as it is, and its comment is corrected: the claim
 "no obligation can name a variable the body could not have dispatched on" becomes false under
@@ -303,9 +318,15 @@ diagnostic string, never `is_err()`):
 
 - `a_zero_receiver_member_dispatches_through_an_explicit_instantiation` — the headline. Two
   impls of `Default` (`Point`, `Other`) with distinguishable `fresh` bodies, a bounded
-  `f ( 'T: Default -- 'T )`, and `main` calling `f[Point]` and `f[Other]`; the printed output
+  `f ( -- 'T: Default )`, and `main` calling `f[Point]` and `f[Other]`; the printed output
   discriminates *which* impl ran. A golden that only proves it compiles is a placebo here, since
-  a wrong-symbol link is exactly the failure mode.
+  a wrong-symbol link is exactly the failure mode. **The spelling is load-bearing** (phase 2
+  finding): `f ( 'T: Default -- 'T )` declares a `'T` *input*, which an operand grounds, so it
+  cannot witness a zero-receiver call at all. Probed at the end of phase 2:
+  `: f ( -- 'T: Copy ) f ;` builds under `f[i64]`, and under `f[Res]` (a struct with a `drop`
+  overload, hence linear) reports that `Res` is linear and has no `Copy` instance; the same
+  signature at `'T: Ord` rejects `f[Blip]`. So the seed already reaches the bound loop, and
+  phase 3 is a declaration-gate change only.
 - `an_uninstantiated_bounded_call_names_the_unbound_output` (R9), pinning the revived message
   plus its new note.
 - `an_explicit_instantiation_disagreeing_with_an_operand_is_rejected` (R5) and
