@@ -90,6 +90,23 @@ appear as the output of `mk`", and a generic body that builds and calls one loca
 (`: use ( 'T -- ) | s | [ s drop ] call ;`) is lowered per instantiation and runs correctly.
 So there is no construction site at which the capture's type is unknown.
 
+**Every quotation value carries the third word, owning or not.** No new type is introduced:
+`Type::OwningQuotation` has existed since S3h, and `src/ir/types.rs:185-192` states that it is
+not a representation difference at all, being "byte-for-byte the same two-slot `{ code, env }`
+aggregate" sharing the same `:Q{n}` symbol, existing only so lowering can tell a heap env from
+a frame env. The third word is added to that shared layout, and is the null pointer for a
+non-owning quotation.
+
+The alternative, giving only the owning variant a third word, is rejected. `:Q{n}` is keyed on
+`QuotSigId`, the effect alone (`quot_index`, `src/backend/qbe.rs:57-62`), so two `IrType`s with
+the same effect and different owning-ness collapse to one symbol today. Diverging them means
+re-keying the symbol on effect *and* owning-ness, touching every site that maps both variants
+together (`qbe.rs:408-413`, `:450-463`), contradicting the invariant documented at
+`types.rs:185-192`, and introducing a width mismatch anywhere a value could flow between the
+two types. The saving is 8 bytes, and only on a *materialized* quotation value, which is
+already the minority case since combinators are inlined at their call sites rather than
+materialized. Not worth the invariant.
+
 **Rejected alternative, for the record: a runtime descriptor in the env block.** Store a
 disposer pointer per capture slot plus a header, and one generic walker disposes every owning
 closure. It works, and it needs no new symbol per literal. Rejected because it puts runtime
@@ -115,8 +132,8 @@ Widening the value:
   is the only place the width is a literal string.
 - `src/ir/types.rs:706`: the `assert_eq!(layout.size, 2 * WORD_WIDTH)` unit test.
 - Blast radius is QBE IL goldens carrying the literal `{ l, l }`. Expect a sweep, not a design
-  problem. The ABI does not change: `qbe.rs:408-413` already spells both quotation variants as
-  an aggregate passed by value, and a 3-word aggregate is passed the same way.
+  problem. The ABI shape does not change: `qbe.rs:408-413` already spells both quotation
+  variants as an aggregate passed by value, and a 3-word aggregate is passed the same way.
 
 New construction: the disposer synthesis itself, and the `emit_drop` arm that loads and calls
 it. Deletion: the two twinned `drop` guards, and the struct/enum-field and cell-payload arms of
@@ -143,7 +160,7 @@ Note S3h never tested the array-element, slice-element or owned-cell-payload pos
 there is nothing to migrate there and nothing asserting the array rejection that **P7.S5**
 would later have to revisit.
 
-## Ready to spec: yes, with four instructions for spec-writer
+## Ready to spec: yes, with five instructions for spec-writer
 
 1. **Do not claim the array or slice element positions.** They are **P7.S5**. The exit criterion
    is the struct field, the enum variant field, and the owned-cell payload.
@@ -156,3 +173,9 @@ would later have to revisit.
    happens to pass.
 4. **The REPL epoch golden is a required deliverable, not a nice-to-have.** Its failure mode is
    an undefined symbol at `dlopen`, which no checker test will catch.
+5. **The third word goes in the shared layout, so a non-owning quotation grows too.** State that
+   as the ruling and update the doc comment at `src/ir/types.rs:185-192`, which currently asserts
+   the two variants are byte-for-byte identical. That sentence stays true under this ruling and
+   would become false under the rejected per-variant-width alternative, so it is the canary: if
+   a phase finds itself editing it to say the widths differ, the ruling has been reversed by
+   accident.
