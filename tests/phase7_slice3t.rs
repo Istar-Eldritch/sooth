@@ -322,18 +322,23 @@ fn an_explicit_instantiation_grounds_a_variable_no_operand_binds() {
 /// no legal program reached it -- and this slice both revives it and gives it
 /// a remedy. The note is half the point: without it the message states a fact
 /// about the callee's signature and says nothing the caller can act on.
+///
+/// `f`'s `'T` is a genuine output that no input mentions at all (its only
+/// operand is its own recursive self-call), unlike `q`'s quotation-input
+/// `'T` above: that shape is ungrounded only because pass 1 defers quotation
+/// inputs to pass 2, which is a different mechanism than "no input binds it".
 #[test]
 fn an_uninstantiated_call_names_the_unbound_output_variable() {
     let err = build_error(
         "unbound-output",
-        &format!("{UNBOUND_QUOT_VAR}: main ( -- ) [ drop ] 8 q . ;\n"),
+        "import: intrinsics * ;\n: f ( -- 'T ) f ;\n: main ( -- ) f drop ;\n",
     );
     assert!(
-        err.contains("`q` in `main` (line 3) has output variable `'T` that no input binds"),
+        err.contains("`f` in `main` (line 3) has output variable `'T` that no input binds"),
         "{err}"
     );
     assert!(
-        err.contains("note: supply it explicitly: `q[SomeType]`"),
+        err.contains("note: supply it explicitly: `f[SomeType]`"),
         "{err}"
     );
 }

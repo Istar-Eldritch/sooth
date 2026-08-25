@@ -4719,7 +4719,12 @@ pub(super) fn check_poly_call(
     // without this an inferred call and a `[...]`-seeded call at the *same* θ
     // mint two symbols and monomorphize the same specialization twice -- the
     // divergence R6 makes reachable by allowing a redundant instantiation.
+    // `len` has no seed path of its own (no length-variable syntax in the
+    // explicit list, R4) and only one producer (`unify_poly_input`), but is
+    // sorted alongside `ty` to keep the invariant unconditional rather than
+    // resting on that.
     subst.ty.sort_by_key(|(v, _)| *v);
+    subst.len.sort_by_key(|(v, _)| *v);
     // P7.S3e (R8/R9): the trait-member calls in the callee's own body that
     // this instantiation's θ resolves, filled by the bound loop below and
     // recorded on the `CallInst` for lowering.
