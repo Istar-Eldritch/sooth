@@ -702,11 +702,25 @@ pub fn check_selective_imports(
             // exemption swallows a real ambiguity -- an importer declaring its
             // own `dup` alongside an imported `dup` would silently shadow one
             // with the other instead of being told.
+            //
+            // Review fix: a source that *re-exports* a real declaration of
+            // the name (its own `selective` map carries an entry for it) is
+            // exactly as unexempt as one that declares it directly --
+            // `resolve_export_origins` now checks that same `selective` entry
+            // ahead of its own intrinsic-admit branch, so the source's
+            // `export:` entry binds the re-exported word, not the intrinsic,
+            // and this check must agree or it would wave through the same
+            // shadowing ambiguity one level removed (an importer's own `dup`
+            // silently shadowing a `dup` the source re-exports from a further
+            // module, rather than colliding as it must).
             let admitted_intrinsic = crate::ast::is_name_dispatched_builtin(&entry.name)
                 && module.modules[entry.target as usize]
                     .intrinsics
                     .admits(&entry.name)
-                && !local_decl_names(module, entry.target).contains(entry.name.as_str());
+                && !local_decl_names(module, entry.target).contains(entry.name.as_str())
+                && !module.modules[entry.target as usize]
+                    .selective
+                    .contains_key(entry.name.as_str());
             if !admitted_intrinsic {
                 if locals.contains(entry.name.as_str()) {
                     return Err(selective_collides_with_local_error(
@@ -2378,7 +2392,33 @@ mod tests {
             err.contains("collides with a local definition of `drop`"),
             "a declaring source is not exempt: {err}"
         );
+
+        // Review fix, P0 #2: admission alone is not the exemption when the
+        // source *re-exports* a real declaration either -- a source that
+        // selectively imports the name from a further module (rather than
+        // declaring it itself) exports that re-exported word, so the entry
+        // binds a word and the local collision is real. Module 1 is the hub:
+        // it admits `dup` as an intrinsic and selectively re-exports module
+        // 2's real declaration of `dup`; module 0 has its own local `dup`
+        // and selectively imports the hub's, which must collide.
+        let re_exporting_hub = ModuleInfo {
+            intrinsics: crate::ast::IntrinsicVisibility::Only(["dup".to_string()].into()),
+            selective: HashMap::from([("dup".to_string(), 2u32)]),
+            ..info(&["dup"])
+        };
+        let m = module_with(
+            vec![word("dup", 0), word("dup", 2)],
+            vec![info(&[]), re_exporting_hub, info(&["dup"])],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![sel("dup", "h", 1, 1)], Vec::new(), Vec::new()])
+                .unwrap_err();
+        assert!(
+            err.contains("collides with a local definition of `dup`"),
+            "a re-exporting source is not exempt either: {err}"
+        );
     }
+
     /// U3 (R12): the duplicate-type-name check partitions by owning module, so
     /// two modules each declaring `Point` is not a duplicate, while two `Point`
     /// decls in one module still is (reported by the raw `name_static`, not the

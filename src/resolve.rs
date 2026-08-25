@@ -634,19 +634,34 @@ fn resolve_export_origins(
         for (name, span) in list {
             let source = if declared[m].contains(name.as_str()) {
                 m as u32
+            } else if let Some(&target) = selectives[m].get(name) {
+                // P7.S3q review fix: a selective (or wildcard-desugared)
+                // re-export of a *real* declaration always wins over this
+                // module's own intrinsic admission of the same name -- a
+                // module can both `import: intrinsics | dup | ;` and
+                // `import: "./dep.sth" d | dup | ;`, and `export: dup ;`
+                // must mean dep's word, not the intrinsic, exactly as it
+                // would if this module admitted no intrinsic at all. Checked
+                // ahead of the intrinsic-admit branch below for that reason.
+                target
             } else if is_name_dispatched_builtin(name) && intrinsics[m].admits(name) {
                 // P7.S3q (R4): an intrinsic this module effectively admits is
-                // its own source. There is no declaring module to walk to --
-                // the name is compiler-provided -- so the origin is `m`, which
-                // makes `Visibility::origin` return `None` and leaves every
-                // call site bare, as builtin dispatch requires. The predicate
-                // is `is_name_dispatched_builtin`, not `BUILTIN_WORDS`, so the
+                // its own source, *once no real declaration or re-export of
+                // the name exists* (the branch above already claimed that
+                // case). There is no declaring module to walk to -- the name
+                // is compiler-provided -- so the origin is `m`, which makes
+                // `Visibility::origin` return `None` and leaves every call
+                // site bare, as builtin dispatch requires. A hub-of-hubs
+                // chain still resolves: the outer hub's selective entry
+                // routes here to the inner hub, whose own immediate source is
+                // this same branch, and `rewrite` falls back to a bare name
+                // when the resolved origin declares no such word (see
+                // `Visibility::origin`'s doc comment). The predicate is
+                // `is_name_dispatched_builtin`, not `BUILTIN_WORDS`, so the
                 // accept set here is exactly the gate set at the call site
                 // (the six surface comparisons are `core::cmp` words and
                 // re-export as ordinary ones).
                 m as u32
-            } else if let Some(&target) = selectives[m].get(name) {
-                target
             } else {
                 // A dependency imported *qualified only* is reachable as
                 // `dep::name` and appears in neither table above, so its own
@@ -1490,6 +1505,32 @@ mod tests {
         )
         .expect("an admitted intrinsic is exportable");
         assert_eq!(origins[0]["drop"], 0);
+    }
+
+    /// Review fix: a module that both effectively admits an intrinsic itself
+    /// and selectively re-exports a real declaration of the same name from a
+    /// dependency must resolve `export:` to the real declaration, not the
+    /// intrinsic -- the selective branch is checked before the intrinsic-admit
+    /// fallback for exactly this reason. Module 0 is the hub: it admits `dup`
+    /// and selectively imports it from module 1, which declares it.
+    #[test]
+    fn a_selective_re_export_of_a_real_declaration_wins_over_the_hubs_own_admission() {
+        let declared = vec![HashSet::new(), HashSet::from(["dup"])];
+        let origins = resolve_export_origins(
+            &declared,
+            &[exports(&["dup"]), exports(&["dup"])],
+            &[HashMap::new(), HashMap::new()],
+            &[selective("dup", 1), HashMap::new()],
+            &[
+                IntrinsicVisibility::Only(["dup".to_string()].into()),
+                IntrinsicVisibility::None,
+            ],
+        )
+        .expect("a re-exported real declaration is exportable");
+        assert_eq!(
+            origins[0]["dup"], 1,
+            "the hub's own intrinsic admission must not shadow module 1's declaration"
+        );
     }
 
     /// R4: origin == the exporting module is what keeps every call site bare.

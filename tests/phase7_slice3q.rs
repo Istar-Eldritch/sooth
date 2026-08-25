@@ -377,3 +377,59 @@ fn a_consumer_of_core_prelude_calls_drop_bare() {
     );
     assert_eq!(build_and_run(&entry), "");
 }
+
+/// Review fix, P0 #1: a hub that both admits an intrinsic itself
+/// (`import: intrinsics | dup | ;`) and re-exports a real word of the same
+/// name from a dependency must resolve its `export:` entry to the real word,
+/// not the intrinsic. Before the fix, `resolve_export_origins` checked the
+/// intrinsic-admit branch before the selective-import branch, so this
+/// previously-legal program silently changed meaning: base (`c7478ff`) prints
+/// `99\n99\n` (dep's word); the unfixed branch printed `5\n5\n` (the
+/// intrinsic), with no diagnostic.
+#[test]
+fn a_hub_admitting_an_intrinsic_still_re_exports_a_real_word_of_the_same_name() {
+    let t = Tree::new("hub-admits-and-redeclares");
+    t.write(
+        "dep.sth",
+        "import: intrinsics * ;\n: dup ( i64 -- i64 i64 ) | a | 99 99 ;\nexport: dup ;\n",
+    );
+    t.write(
+        "hub.sth",
+        "import: intrinsics | dup | ;\nimport: \"./dep.sth\" d | dup | ;\nexport: dup ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics | . | ;\nimport: \"./hub.sth\" h | dup | ;\n: main ( -- ) 5 dup . . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "99\n99\n");
+}
+
+/// Review fix, P0 #2: the R5 collision exemption must not apply to a source
+/// that *re-exports* a real declaration of the name from a further module,
+/// only to one whose only claim to the name is the intrinsic admission
+/// itself. `a_source_declaring_an_intrinsic_name_still_collides_with_a_local`
+/// above covers the hub *declaring* the name directly; this covers the hub
+/// *re-exporting* it, which the same `local_decl_names` guard did not catch.
+/// Before the fix this built clean and printed `7\n7\n` (the consumer's own
+/// `dup` silently shadowing the hub's re-exported one); base behaviour is the
+/// located collision error.
+#[test]
+fn a_hub_re_exporting_a_real_word_still_collides_with_a_local_of_the_same_name() {
+    let t = Tree::new("hub-re-exports-and-local-collides");
+    t.write(
+        "dep.sth",
+        "import: intrinsics * ;\n: dup ( i64 -- i64 i64 ) | a | 99 99 ;\nexport: dup ;\n",
+    );
+    t.write(
+        "hub.sth",
+        "import: intrinsics | dup | ;\nimport: \"./dep.sth\" d | dup | ;\nexport: dup ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics | . | ;\nimport: \"./hub.sth\" h | dup | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 5 dup . . ;\n",
+    );
+    assert_eq!(
+        build_error(&entry),
+        "error: error: selective import of `dup` from module `h` (line 2, col 25) collides with a local definition of `dup`"
+    );
+}
