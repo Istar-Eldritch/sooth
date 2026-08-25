@@ -98,7 +98,7 @@ fn walk(terms: &[Term], statics: &HashSet<&str>, shadowed: &mut HashSet<String>,
     for term in terms {
         match &term.kind {
             TermKind::Bind(names) => shadowed.extend(names.iter().cloned()),
-            TermKind::Call(name) => {
+            TermKind::Call(name, _) => {
                 if let Some((static_name, mode)) = static_access(name, shadowed, statics) {
                     join_into(&mut out.set, static_name, mode);
                 } else if !shadowed.contains(name.as_str()) {
@@ -334,7 +334,7 @@ mod tests {
 
     fn call(name: &str) -> Term {
         Term {
-            kind: TermKind::Call(name.to_string()),
+            kind: TermKind::Call(name.to_string(), Vec::new()),
             span: span(1),
         }
     }

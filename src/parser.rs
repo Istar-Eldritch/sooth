@@ -484,7 +484,9 @@ fn rewrite_member_self_calls(
                 TermKind::Bind(names) if names.iter().any(|n| n == member) => {
                     return Err(impl_member_binder_shadows_itself_error(member, term.span));
                 }
-                TermKind::Call(name) if name == member => TermKind::Call(synth.to_string()),
+                TermKind::Call(name, type_args) if name == member => {
+                    TermKind::Call(synth.to_string(), type_args.clone())
+                }
                 TermKind::Quotation(inner, is_inline, annot) => TermKind::Quotation(
                     rewrite_member_self_calls(inner, member, synth)?,
                     *is_inline,
@@ -1775,6 +1777,46 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
         span.line,
         span.col,
         vec!["T"; declared].join(" "),
+    )
+}
+
+/// P7.S3t (R2): a glued `[` opened an explicit type instantiation and the end
+/// of input arrived before its `]`. Named after the call rather than reported
+/// as a generic "expected `]`", since the construct only exists because of the
+/// glue and the remedy may well be a space.
+fn unterminated_instantiation_error(name: &str, span: Span) -> String {
+    format!(
+        "error: unterminated explicit type instantiation of `{name}` at line {}, col {} (expected `]`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S3t (R2): `f[]`. An empty list is not "no instantiation": downstream the
+/// two are the same empty vector, so the arity check R4 performs against the
+/// callee's declared variables would never fire for it.
+fn empty_instantiation_error(name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}[]` at line {}, col {} instantiates nothing; name one concrete type per declared variable, or insert a space for a quotation literal",
+        span.line, span.col
+    )
+}
+
+/// P7.S3t (R2): the note a malformed *first* element carries. A glued bracket
+/// re-points a spelling that used to parse as a call followed by a quotation or
+/// array literal, so the element error has to say that the glue is what put the
+/// parse in type position.
+fn instantiation_element_note() -> &'static str {
+    "\n  note: a glued bracket is an explicit type instantiation; insert a space for a quotation or array literal"
+}
+
+/// P7.S3t (R7): a type *variable* as an explicit type argument. It has no
+/// production in `parse_type_expr`, so without this it reports `unknown type
+/// 'U` -- a message that reads as a missing declaration rather than as the
+/// unsupported forwarding it is.
+fn instantiation_ty_var_error(var: &str, span: Span) -> String {
+    format!(
+        "error: `{var}` (line {}, col {}) is a type variable; an explicit instantiation takes concrete types\n  note: forwarding a caller's type variable through an explicit instantiation is not supported",
+        span.line, span.col
     )
 }
 
@@ -5196,6 +5238,60 @@ impl<'t> Parser<'t> {
         Ok(terms)
     }
 
+    /// P7.S3t (R2): the explicit type-argument list of a call, `f[Point]`,
+    /// read at `parse_term`'s `Word` arm with the word already consumed.
+    /// Empty for every call not followed by a *glued* `[`.
+    ///
+    /// Adjacency is decided here, from the two token spans, and the lexer is
+    /// untouched: gluing `Word`+`[` into one token there would fire in type
+    /// position too, where `Box['T]`, `Slice[T]` and `&![ i64 -- ]` are all an
+    /// adjacent word-then-bracket today, and every type reader would have to
+    /// learn the new token. `col` is incremented once per char over the whole
+    /// word scan and the word text is exactly the chars consumed, so the
+    /// arithmetic is exact, not a heuristic.
+    ///
+    /// This narrows the grammar: `foo[Point]` used to parse as a call followed
+    /// by a quotation literal, identically to `foo [Point]`. The spaced
+    /// spelling still does; the glued one is now an instantiation. The element
+    /// loop mirrors `parse_type_arguments` but is not it -- that function
+    /// checks against a type constructor's known arity, and a call site's
+    /// arity is a property of the callee's `PolySig`, which the parser does
+    /// not have (R4 checks it in the checker).
+    fn parse_explicit_type_args(&mut self, word: &str, span: Span) -> Result<Vec<Type>, String> {
+        let glued = matches!(
+            self.peek(),
+            Some((Token::LBracket, b))
+                if b.line == span.line && b.col == span.col + word.chars().count() as u32
+        );
+        if !glued {
+            return Ok(Vec::new());
+        }
+        self.pos += 1;
+        let mut args: Vec<Type> = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => return Err(unterminated_instantiation_error(word, span)),
+                // R7: a type variable has no `parse_type_expr` production, so
+                // it would otherwise be blamed as an unknown type name.
+                Some((Token::Word(w), vspan)) if w.starts_with('\'') => {
+                    return Err(instantiation_ty_var_error(w, *vspan));
+                }
+                _ => args.push(self.parse_type_expr().map_err(|e| match args.is_empty() {
+                    true => format!("{e}{}", instantiation_element_note()),
+                    false => e,
+                })?),
+            }
+        }
+        if args.is_empty() {
+            return Err(empty_instantiation_error(word, span));
+        }
+        Ok(args)
+    }
+
     fn parse_term(&mut self) -> Result<Term, String> {
         let (tok, span) = self
             .peek()
@@ -5240,10 +5336,13 @@ impl<'t> Parser<'t> {
                 "parse error: `{w}` is not a word; `if` is an ordinary word taking two quotations (`~[ then ] ~[ else ] if`) at line {}, col {}",
                 span.line, span.col
             )),
-            Token::Word(w) => Ok(Term {
-                kind: TermKind::Call(w),
-                span,
-            }),
+            Token::Word(w) => {
+                let type_args = self.parse_explicit_type_args(&w, span)?;
+                Ok(Term {
+                    kind: TermKind::Call(w, type_args),
+                    span,
+                })
+            }
             // R2: the term-level `[` is unambiguous against the type-level
             // `[` since every type-position bracket reader is reached only
             // from signature/type parsing, never from `parse_term`.
@@ -5589,14 +5688,14 @@ mod tests {
         // | a b | b 0 = [ a ] [ b a b mod gcd ] if
         assert_eq!(gcd_body.len(), 7);
         assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
-        assert!(matches!(&gcd_body[1].kind, TermKind::Call(w) if w == "b"));
+        assert!(matches!(&gcd_body[1].kind, TermKind::Call(w, _) if w == "b"));
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
-        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "eq"));
+        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w, _) if w == "eq"));
         match &gcd_body[4].kind {
             TermKind::Quotation(then_branch, is_inline, _) => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
-                assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
+                assert!(matches!(&then_branch[0].kind, TermKind::Call(w, _) if w == "a"));
             }
             other => panic!("expected the `then` quotation, got {other:?}"),
         }
@@ -5607,7 +5706,7 @@ mod tests {
             }
             other => panic!("expected the `else` quotation, got {other:?}"),
         }
-        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w) if w == "if"));
+        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w, _) if w == "if"));
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
@@ -5633,7 +5732,7 @@ mod tests {
             TermKind::Bind(names) => assert_eq!(names, &["a"]),
             other => panic!("expected Bind, got {other:?}"),
         }
-        assert!(matches!(&body[2].kind, TermKind::Call(w) if w == "a"));
+        assert!(matches!(&body[2].kind, TermKind::Call(w, _) if w == "a"));
     }
 
     #[test]
@@ -5674,8 +5773,8 @@ mod tests {
     fn parse_true_false_construct_bool_variants() {
         let module = parse_src_with_bool(": w ( -- Bool Bool ) True False ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "True"));
-        assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "True"));
+        assert!(matches!(&body[1].kind, TermKind::Call(w, _) if w == "False"));
     }
 
     /// Slice 10c (E-P3-2): the `if`/`else`/`end` grammar is gone. `else`/`end`
@@ -5691,6 +5790,88 @@ mod tests {
         );
     }
 
+    /// P7.S3t (R2): the adjacency predicate, both ways, on one source pair.
+    /// `foo[i64]` is an explicit type instantiation; `foo [i64]` is the call
+    /// followed by a quotation literal it has always been. Both spellings lex
+    /// identically, so the whole distinction is the column arithmetic here.
+    #[test]
+    fn a_glued_bracket_instantiates_and_a_spaced_one_stays_a_quotation() {
+        let module = parse_src(": w ( -- ) foo[i64] foo [i64] ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 3);
+        match &body[0].kind {
+            TermKind::Call(name, args) => {
+                assert_eq!(name, "foo");
+                assert_eq!(args, &vec![Type::I64]);
+            }
+            other => panic!("expected an instantiated Call, got {other:?}"),
+        }
+        match &body[1].kind {
+            TermKind::Call(name, args) => {
+                assert_eq!(name, "foo");
+                assert!(args.is_empty(), "a spaced bracket instantiates nothing");
+            }
+            other => panic!("expected a bare Call, got {other:?}"),
+        }
+        match &body[2].kind {
+            TermKind::Quotation(terms, _, _) => {
+                assert!(matches!(&terms[0].kind, TermKind::Call(w, _) if w == "i64"));
+            }
+            other => panic!("expected a Quotation, got {other:?}"),
+        }
+    }
+
+    /// P7.S3t (R2): the list takes several arguments, so the syntax extends to
+    /// a multi-variable callee without a second call form.
+    #[test]
+    fn an_instantiation_reads_several_type_arguments() {
+        let module = parse_src(": w ( -- ) foo[i64 f64 i64] ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Call(_, args) => {
+                assert_eq!(args, &vec![Type::I64, Type::F64, Type::I64]);
+            }
+            other => panic!("expected an instantiated Call, got {other:?}"),
+        }
+    }
+
+    /// P7.S3t (R2): the list runs to end of input. The error names the call,
+    /// since the construct exists only because of the glue and one remedy is a
+    /// space.
+    #[test]
+    fn an_unterminated_instantiation_names_the_call() {
+        let err = parse_src(": w ( -- ) foo[i64").unwrap_err();
+        assert!(
+            err.contains("unterminated explicit type instantiation of `foo` at line 1, col 12"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3t (R2): `foo[]`. Empty is not the same as absent -- downstream both
+    /// are one empty vector -- so the arity rule could never fire for it.
+    #[test]
+    fn an_empty_instantiation_is_rejected() {
+        let err = parse_src(": w ( -- ) foo[] ;").unwrap_err();
+        assert!(
+            err.contains("`foo[]` at line 1, col 12 instantiates nothing"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S3t (R2): a malformed *first* element carries the note, because the
+    /// spelling it re-points (a call plus a quotation or array literal) is one
+    /// a space restores. A later element cannot be that mistake -- the parse is
+    /// already committed to a type list by then -- so it does not.
+    #[test]
+    fn a_malformed_first_element_says_the_glue_chose_type_position() {
+        let note = "a glued bracket is an explicit type instantiation";
+        let first = parse_src(": w ( -- ) foo[Nope] ;").unwrap_err();
+        assert!(first.contains("unknown type `Nope`"), "unexpected: {first}");
+        assert!(first.contains(note), "unexpected: {first}");
+        let later = parse_src(": w ( -- ) foo[i64 Nope] ;").unwrap_err();
+        assert!(later.contains("unknown type `Nope`"), "unexpected: {later}");
+        assert!(!later.contains(note), "unexpected: {later}");
+    }
+
     #[test]
     fn quotation_literal_parses_into_quotation_term() {
         // R1: `[ ... ]` parses into `TermKind::Quotation`, nested by
@@ -5703,7 +5884,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "add"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -5737,7 +5918,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "add"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -6207,7 +6388,7 @@ mod tests {
     fn ge_is_not_read_as_a_type_conversion() {
         let module = parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == ">="));
         let err = crate::check::check(
             &mut parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;\n: main ( -- ) 1 2 w drop ;")
                 .unwrap(),
@@ -6230,7 +6411,7 @@ mod tests {
         let module = parse_src(": w ( i64 -- i64 ) if ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 1);
-        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "if"));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "if"));
     }
 
     fn parse_line_src(src: &str) -> Result<Line, String> {
@@ -6244,7 +6425,7 @@ mod tests {
             Line::Expr(terms) => {
                 assert_eq!(terms.len(), 3);
                 assert!(matches!(terms[0].kind, TermKind::IntLit(2)));
-                assert!(matches!(&terms[2].kind, TermKind::Call(w) if w == "add"));
+                assert!(matches!(&terms[2].kind, TermKind::Call(w, _) if w == "add"));
             }
             other => panic!("expected Expr, got {other:?}"),
         }
@@ -8478,7 +8659,7 @@ mod tests {
         let calls: Vec<&str> = inner
             .iter()
             .filter_map(|t| match &t.kind {
-                TermKind::Call(n) => Some(n.as_str()),
+                TermKind::Call(n, _) => Some(n.as_str()),
                 _ => None,
             })
             .collect();

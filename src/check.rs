@@ -1487,6 +1487,34 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
     }
 }
 
+/// P7.S3t (R3): an explicit type-argument list (`f[Point]`) on a call that is
+/// not a polymorphic-word call. Every route other than the polymorphic one
+/// would have to drop the list, and a dropped instantiation links the wrong
+/// specialization rather than reporting anything, so each rejects instead.
+fn no_type_arguments_error(span: Span, name: &str) -> String {
+    format!(
+        "error: `{}` (line {}) takes no type arguments; only a call to a polymorphic word may be explicitly instantiated",
+        crate::resolve::demangle_call(name),
+        span.line
+    )
+}
+
+/// P7.S3t (R1/R3): an explicit type-argument list on a call written inside a
+/// polymorphic word's own body. That path checks symbolically and has no
+/// substitution to seed, so the list is rejected rather than dropped; naming
+/// the enclosing word matters because the remedy is at the *caller* of it.
+fn type_arguments_in_poly_body_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let enclosing = match ctx {
+        Ctx::Word { mangled, .. } => format!(" in {}", crate::resolve::render_word(mangled)),
+        Ctx::Line { .. } => String::new(),
+    };
+    format!(
+        "error: `{}`{enclosing} (line {}) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type argument through a polymorphic body is not supported",
+        crate::resolve::demangle_call(name),
+        span.line
+    )
+}
+
 /// R3: no candidate of an overloaded name accepts the operands on the stack.
 /// Names every candidate's inputs, since the useful question at this call site
 /// is which shapes the name does accept.

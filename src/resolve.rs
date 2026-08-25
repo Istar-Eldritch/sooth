@@ -837,7 +837,7 @@ fn rewrite_terms(
     let mut added: Vec<String> = Vec::new();
     for term in terms.iter_mut() {
         match &mut term.kind {
-            TermKind::Call(name) => {
+            TermKind::Call(name, _) => {
                 if let Some(new) =
                     tables.rewrite(name, module, imports, selective, scope, vis, term.span)?
                 {
@@ -1735,7 +1735,7 @@ mod tests {
     fn collect_calls(terms: &[Term], out: &mut Vec<String>) {
         for t in terms {
             match &t.kind {
-                TermKind::Call(n) => out.push(n.clone()),
+                TermKind::Call(n, _) => out.push(n.clone()),
                 TermKind::Quotation(inner, _, _) => collect_calls(inner, out),
                 _ => {}
             }

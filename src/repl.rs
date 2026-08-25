@@ -441,9 +441,10 @@ fn rewrite_combinator_body_calls(terms: &[Term], rename: &HashMap<String, String
         .iter()
         .map(|term| {
             let kind = match &term.kind {
-                TermKind::Call(name) => {
-                    TermKind::Call(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
-                }
+                TermKind::Call(name, type_args) => TermKind::Call(
+                    rename.get(name).cloned().unwrap_or_else(|| name.clone()),
+                    type_args.clone(),
+                ),
                 TermKind::Quotation(inner, is_inline, annot) => TermKind::Quotation(
                     rewrite_combinator_body_calls(inner, rename),
                     *is_inline,
@@ -582,6 +583,28 @@ fn reject_double_colon_name(kind: &str, name: &str, span: Span) -> Result<(), St
             "error: a REPL-declared {kind} name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`{name}` at line {}, col {})",
             span.line, span.col
         ));
+    }
+    Ok(())
+}
+
+/// P7.S3t (R10): an explicit type instantiation (`f[Point]`) anywhere in a
+/// REPL line, rejected outright and located. A session routes through
+/// `lower_instantiation` and skips the module-level checks the syntax's
+/// correctness argument rests on, so this is a guard rather than a deferred
+/// feature: it fails closed instead of printing success and binding whichever
+/// specialization the session happened to find.
+fn reject_explicit_instantiation(terms: &[Term]) -> Result<(), String> {
+    for term in terms {
+        match &term.kind {
+            TermKind::Call(_, type_args) if !type_args.is_empty() => {
+                return Err(format!(
+                    "error: explicit type instantiation is not available at the REPL (line {}, col {})\n  note: `f[Point]` needs a whole-program impl registry a live session does not assemble",
+                    term.span.line, term.span.col
+                ));
+            }
+            TermKind::Quotation(inner, _, _) => reject_explicit_instantiation(inner)?,
+            _ => {}
+        }
     }
     Ok(())
 }
@@ -1678,6 +1701,13 @@ impl Session {
             &mut self.slices,
             ctx,
         )?;
+        // P7.S3t (R10): before any rewriting or checking, since the guard is
+        // about the session's whole lowering path rather than about this
+        // line's names.
+        match &line {
+            Line::Expr(terms) => reject_explicit_instantiation(terms)?,
+            Line::Def(word) => reject_explicit_instantiation(&word.body)?,
+        }
         // R8c: rewrite body-position `q::w` / `q::T>` calls to their
         // current internal (epoch-tagged) spelling before ordinary checking
         // runs; also raises R15's `not exported` for a private qualified name.
@@ -2556,7 +2586,7 @@ impl Session {
     fn rewrite_terms_imports(&self, terms: &mut [Term]) -> Result<(), String> {
         for term in terms.iter_mut() {
             match &mut term.kind {
-                TermKind::Call(name) => {
+                TermKind::Call(name, _) => {
                     if let Some(new) = self.rewrite_import_call(name, term.span)? {
                         *name = new;
                     }
@@ -3303,7 +3333,7 @@ impl Session {
         };
         let terms: Vec<Term> = (deepest..self.types.len())
             .map(|_| Term {
-                kind: TermKind::Call("drop".to_string()),
+                kind: TermKind::Call("drop".to_string(), Vec::new()),
                 span: Span::default(),
             })
             .collect();

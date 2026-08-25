@@ -179,7 +179,20 @@ fn check_term(
             }
             Ok(stack)
         }
-        TermKind::Call(name) => {
+        TermKind::Call(name, type_args) => {
+            // P7.S3t (R3): exactly one of this arm's dispatch routes consumes
+            // an explicit type-argument list -- the polymorphic-call
+            // interception far below. The guard is written as an *allow*, so a
+            // route added to this arm later rejects by default: a route that
+            // silently dropped the list would link the wrong specialization,
+            // which is a miscompile rather than a diagnostic.
+            if !type_args.is_empty()
+                && !poly_call_takes_type_args(
+                    name, span, &stack, ctx, env, arrays, cells, refs, scope, poly,
+                )
+            {
+                return Err(no_type_arguments_error(span, name));
+            }
             if let Some(binding) = scope.local(name) {
                 let (ty, aliases, held, quot, surviving) = (
                     binding.ty,
@@ -1005,6 +1018,49 @@ fn check_term(
     }
 }
 
+/// P7.S3t (R3): whether a call of `name` reaches the polymorphic-call
+/// interception in `check_term`'s `Call` arm, the sole route that consumes an
+/// explicit type-argument list. Every other route -- a local read, `call` and
+/// `branch`, a reference/access/shuffle/tag/str/array/cell builtin, a cast, an
+/// eliminator, a combinator splice or its self-tail back edge, a concrete `env`
+/// word -- is denied, and its call site reports `no_type_arguments_error`.
+///
+/// The four exclusions before the `poly.env` lookup are the routes that would
+/// otherwise claim a name the polymorphic env *also* holds: a body local wins
+/// over every word, a builtin dispatched by name wins over the env, and an
+/// eliminator or combinator is intercepted ahead of the poly path. Those four
+/// together also cover the operator route, which is the one that runs *between*
+/// them and the poly interception: every builtin operator name is a
+/// name-dispatched builtin except the six comparisons, and those are
+/// always-spliced `lib/` combinators, so the combinator clause has already
+/// denied them. The final clause is `fall_through_to_env`'s negation: a name
+/// with both polymorphic and concrete candidates is a polymorphic call only
+/// while some polymorphic candidate could admit these operands.
+#[allow(clippy::too_many_arguments)]
+fn poly_call_takes_type_args(
+    name: &str,
+    span: Span,
+    stack: &[Slot],
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    scope: &Scope,
+    poly: &PolyCtx,
+) -> bool {
+    scope.local(name).is_none()
+        && !crate::ast::is_name_dispatched_builtin(name)
+        && !poly.eliminators.contains_key(name)
+        && !poly.combinators.contains_key(name)
+        && poly.env.get(name).is_some_and(|candidates| {
+            !env.contains_key(name)
+                || candidates.iter().any(|(sig, _)| {
+                    poly_sig_could_match(sig, stack, name, span, ctx, arrays, cells, refs)
+                })
+        })
+}
+
 /// Phase 6 slice 3 review fix (finding 3): whether the tagged literal at
 /// `siblings[at]` is actually collected as an eliminator arm. Forward-scans
 /// past every immediately-following tagged quotation literal and accepts only
@@ -1034,7 +1090,7 @@ pub(super) fn tagged_literal_reaches_an_eliminator_call(
             TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
                 j += 1;
             }
-            TermKind::Call(name) => return eliminators.contains_key(name),
+            TermKind::Call(name, _) => return eliminators.contains_key(name),
             _ => return false,
         }
     }

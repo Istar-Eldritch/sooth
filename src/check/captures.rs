@@ -19,7 +19,7 @@ pub(super) fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>
                         bound.push(n.clone());
                     }
                 }
-                TermKind::Call(name) => {
+                TermKind::Call(name, _) => {
                     let stripped = name
                         .strip_prefix("&!")
                         .or_else(|| name.strip_prefix('&'))

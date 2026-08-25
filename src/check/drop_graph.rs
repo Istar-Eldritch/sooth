@@ -215,7 +215,7 @@ impl<'a> TailWalk<'a> {
             return;
         };
         let before = &terms[..terms.len() - 1];
-        if let TermKind::Call(name) = &last.kind {
+        if let TermKind::Call(name, _) = &last.kind {
             out.push(TailHit::Name(name.as_str()));
             // Phase 6 slice 4: an eliminator dispatch call (`Shape?`,
             // `Op?`, ...) splices in place exactly like `call`/`branch` does
@@ -310,7 +310,7 @@ fn visible_args<'t>(before: &'t [Term], binds: &HashMap<&'t str, usize>) -> Vec<
     for term in before.iter().rev() {
         match &term.kind {
             TermKind::Quotation(body, _, _) => out.push(Arg::Literal(body)),
-            TermKind::Call(name) => match binds.get(name.as_str()) {
+            TermKind::Call(name, _) => match binds.get(name.as_str()) {
                 Some(&slot) => out.push(Arg::Param(slot)),
                 None => break,
             },
@@ -723,7 +723,7 @@ pub(super) fn all_calls(body: &[Term]) -> Vec<&str> {
 fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
     for term in terms {
         match &term.kind {
-            TermKind::Call(name) => out.push(name.as_str()),
+            TermKind::Call(name, _) => out.push(name.as_str()),
             // Slice 10c: a branch arm is a quotation literal now, so a call
             // written inside one is an ordinary call of the enclosing body.
             // Without this descent `check_combinator_cycles` stops seeing a

@@ -1059,7 +1059,7 @@ fn vm_table_dispatch_matches_eliminator_version() {
         walk_terms(terms, &mut all);
         assert!(
             !all.iter()
-                .any(|t| matches!(&t.kind, TermKind::Call(n) if n == "Op?")),
+                .any(|t| matches!(&t.kind, TermKind::Call(n, _) if n == "Op?")),
             "handler `{name}` must be match-free: it calls the `Op?` eliminator"
         );
         assert!(

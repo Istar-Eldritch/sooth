@@ -2645,8 +2645,16 @@ pub enum TermKind {
     /// A `"..."` string literal (R6): type `str`, decoded content already
     /// escape-resolved by the lexer.
     StrLit(String),
-    /// A word invocation, or a reference to a named local.
-    Call(String),
+    /// A word invocation, or a reference to a named local. The `Vec<Type>` is
+    /// P7.S3t (R3): an explicit call-site type instantiation, `f[Point]`,
+    /// parsed from a bracket glued to the word (R2) and empty for every call
+    /// written without one. Only the polymorphic-call route consumes it; every
+    /// other route a `Call` can take rejects a non-empty list rather than drop
+    /// it (a dropped instantiation would be a wrong-symbol link, not a
+    /// diagnostic), which is why the list widens this variant instead of
+    /// arriving as a new one every existing arm would silently keep matching
+    /// past.
+    Call(String, Vec<Type>),
     /// A `| names |` binding (R1): pops one value per name at the point it
     /// appears, leftmost name taking the deepest value. Its extent is the rest
     /// of the enclosing block (R2), so no closing term is needed.
@@ -2732,7 +2740,9 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
                     .collect();
                 TermKind::Bind(renamed)
             }
-            TermKind::Call(name) => TermKind::Call(rename_call(name, uid, bound)),
+            TermKind::Call(name, type_args) => {
+                TermKind::Call(rename_call(name, uid, bound), type_args.clone())
+            }
             TermKind::Quotation(inner, is_inline, annot) => {
                 let mut inner_bound = bound.clone();
                 TermKind::Quotation(
