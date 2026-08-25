@@ -351,3 +351,27 @@ fn a_conversion_intrinsic_re_exports_through_a_hub() {
     );
     assert_eq!(build_and_run(&entry), "3\n");
 }
+
+/// Phase 2, the roadmap exit criterion's literal wording: `core::prelude` now
+/// gates `drop` in and re-exports it, so a consumer that names only
+/// `core::prelude` in its `import:` -- no `import: intrinsics` line of its own
+/// -- calls `drop` bare and runs.
+#[test]
+fn a_consumer_of_core_prelude_calls_drop_bare() {
+    let t = Tree::new("core-prelude-drop");
+    // A real package, not the anonymous quoted-path tree the other goldens in
+    // this file use: `core::prelude` is a package-qualified import, and this
+    // is the one golden in this file that needs it to resolve.
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7s3q ;\nlayer: hosted ;\ndepends: core path \"{}/lib\" ;\n",
+            env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: core::prelude | drop | ;\n: main ( -- ) 1 drop ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "");
+}
