@@ -553,4 +553,10 @@ fn a_nullary_member_across_two_variables_is_ambiguous() {
         err.contains("`fresh` is required by `A` on 'T and `B` on 'U"),
         "{err}"
     );
+    assert!(
+        err.contains(
+            "note: a member required by two of a variable's bounds cannot be called unqualified"
+        ),
+        "{err}"
+    );
 }
