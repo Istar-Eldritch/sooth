@@ -1,0 +1,233 @@
+//! P7.S3s phase 2 (the flip) goldens: `Ord` is an ordinary library trait, so a
+//! user type opts into a comparison-bounded generic word with its own
+//! `impl: Ord`, and the two overload-admission filters that used to ask the
+//! deleted `is_ord` still keep the library's generic comparisons from
+//! swallowing a user's concrete overload of the same name.
+//!
+//! Everything here goes through the real `sooth` binary against this repo's
+//! own `lib/`, because the capability under test spans the whole pipeline:
+//! `core::cmp` declaring the trait, `core::prelude` re-exporting it, the
+//! parser folding `Ord` into a `Bound::User`, the checker dispatching `cmp`
+//! per instantiation, and lowering finding a symbol for each.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A scratch package tree naming this repo's own `lib/` as `core`, so a fixture
+/// can `import: core::prelude`/`core::cmp` for real. Removed on drop.
+struct Tree(PathBuf);
+
+impl Tree {
+    fn new(tag: &str) -> Tree {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let seq = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "sooth-p7s3s-flip-{}-{tag}-{seq}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("sooth.pkg"), common::fixture_package(tag)).unwrap();
+        Tree(dir)
+    }
+
+    fn entry(&self, src: &str) -> PathBuf {
+        let path = self.0.join("main.sth");
+        std::fs::write(&path, src).unwrap();
+        path
+    }
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn program(tag: &str, src: &str) -> (Tree, PathBuf) {
+    let t = Tree::new(tag);
+    let entry = t.entry(src);
+    (t, entry)
+}
+
+fn sooth_build(entry: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(entry)
+        .output()
+        .expect("sooth build should spawn")
+}
+
+fn build_and_run(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary)
+        .output()
+        .expect("the built binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert!(run.status.success(), "the built binary should exit 0");
+    String::from_utf8_lossy(&run.stdout).into_owned()
+}
+
+fn build_error(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(
+        !build.status.success(),
+        "build should have failed; stdout: {}",
+        String::from_utf8_lossy(&build.stdout)
+    );
+    String::from_utf8_lossy(&build.stderr).into_owned()
+}
+
+/// `impl: Ord for Point`, written by the user over the library trait -- the
+/// exact declaration the pre-flip compiler rejected as a built-in predicate.
+/// `cmp` is by value (`( 'T 'T -- Ordering )`, R4), so the two `Point`s are
+/// owned locals and are dropped explicitly after their fields are read.
+const POINT_IMPL: &str = "type: Point x i64 ;\n\
+     impl: Ord for Point\n\
+       : cmp\n\
+         | a b |\n\
+         &a &x @ | ax | &b &x @ | bx |\n\
+         a drop b drop\n\
+         ax bx lt ~[ Less ] ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if ;\n\
+     ;\n";
+
+/// The slice's headline exit criterion (1): a `'T: Copy Ord`-bounded generic
+/// word instantiated over a **user struct**, built and run.
+///
+/// `mymax` is instantiated twice in one program, at `Point` and at `i64`, and
+/// both answers are asserted. One instantiation would not distinguish "the
+/// user's `impl: Ord` was found" from "every `Ord` bound now resolves to the
+/// same thing": the `Point` line can only come from the user's own `impl:`
+/// block and the `i64` line can only come from `lib/cmp.sth`'s, so the pair
+/// also covers criterion 4 (the numeric tower satisfying `Ord` through
+/// ordinary `impl:` blocks nobody wrote by hand) in the same run.
+#[test]
+fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
+    let (_t, entry) = program(
+        "user-struct",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : mymax ( 'T: Copy Ord 'T -- 'T )\n\
+               | a b | a b gt ~[ a ] ~[ b ] if ;\n\
+             : main ( -- )\n\
+               3 Point 7 Point mymax | m | &m &x @ . m drop\n\
+               9 4 mymax . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "7\n9\n");
+}
+
+/// An unsatisfied `Ord` is an ordinary user-trait failure now, naming the
+/// `impl:` member signature it could not find rather than the deleted
+/// `poly_ord_bound_error`'s "not a numeric type" wording (step 8). Asserted by
+/// exact text, minus the line/column, which is the fixture's layout rather
+/// than the diagnostic's content.
+#[test]
+fn an_unsatisfied_ord_bound_names_the_missing_impl() {
+    let (_t, entry) = program(
+        "no-impl",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool lt | ;\n\
+         type: Vec2 x i64 y i64 ;\n\
+         : main ( -- ) 1 1 Vec2 2 2 Vec2 lt ~[ 1 ] ~[ 0 ] if . ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
+        "unexpected diagnostic: {err}"
+    );
+    assert!(
+        err.contains("`Vec2` does not satisfy `Ord`: no `( Vec2 Vec2 -- Ordering )` found"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// One module declaring both a concrete `mylt ( Vec2 Vec2 -- Bool )` and an
+/// `Ord`-bounded generic `mylt`, where `Vec2` has no `impl: Ord` -- slice
+/// 10c's coexistence, preserved across the flip (criterion 6).
+///
+/// This pins `poly_admits` (`src/check/declarations.rs`), and it is the *only*
+/// shape that does: with the `Ord` bound resolving through the `impl:`
+/// registry, `poly_admits` declines `Vec2` for the generic candidate, so the
+/// two candidates cannot both claim one call site and the pair is declarable.
+/// Mutation-verified: replacing `poly_admits`' `PolyType::Var` arm with a bare
+/// `true` fails this test with `generic_concrete_overlap_error`. An unbounded
+/// generic sibling (`'T: Copy` alone) is rejected by that same rule today, so
+/// the `Ord` bound is load-bearing for the coexistence rather than incidental.
+///
+/// The calls are the *generic* `mylt`, both ways round so the golden pins the
+/// dispatched comparison rather than a constant. Calling the concrete `mylt`
+/// instead panics at lowering (`checked user word exists`,
+/// `src/ir/func_builder/calls.rs`), a pre-existing gap verified at this
+/// slice's parent commit with `Bound::Ord` still in place, and unrelated to
+/// `Ord`: `ast::overload_symbols` counts poly words when deciding a name is
+/// overloaded, so the concrete word gets a `$$0`-suffixed symbol that the
+/// call site never records. That is why criterion 6 has no *run* golden for
+/// the concrete half; the checker-level half lives in `src/check/poly.rs`
+/// (`check_concrete_overload_is_selected_over_an_ord_bounded_generic`).
+#[test]
+fn a_concrete_overload_coexists_with_an_ord_bounded_generic_of_the_same_name() {
+    let (_t, entry) = program(
+        "coexist",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool Ord lt | ;\n\
+         type: Vec2 x i64 y i64 ;\n\
+         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+         : mylt ( Vec2 Vec2 -- Bool )\n\
+           | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
+         : main ( -- )
+           3 5 mylt ~[ 1 ] ~[ 0 ] if .
+           5 3 mylt ~[ 1 ] ~[ 0 ] if . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "1\n0\n");
+}
+
+/// R6's ruling, made reachable by the flip: give `Vec2` an `impl: Ord` and the
+/// coexistence above becomes real ambiguity -- both candidates now admit a
+/// `Vec2 Vec2` call -- so `generic_concrete_overlap_error` fires at
+/// declaration time. Correct behaviour, not a false positive: ranking two
+/// equally-admissible candidates would be real overload resolution, which
+/// this language deliberately does not have.
+///
+/// The twin of the coexistence golden above, differing only by the `impl: Ord
+/// for Vec2` block. Together they are a two-way witness that `poly_admits`
+/// consults the registry rather than answering a fixed way: one asserts the
+/// pair is legal without the `impl:`, the other that it is rejected with it,
+/// and no single mutation of that arm can satisfy both.
+#[test]
+fn an_impl_ord_on_the_concrete_overloads_type_makes_the_pair_an_overlap_error() {
+    let (_t, entry) = program(
+        "overlap",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool Ord lt gt | ;\n\
+         import: core::cmp | Ordering Less Equal Greater | ;\n\
+         type: Vec2 x i64 y i64 ;\n\
+         impl: Ord for Vec2\n\
+           : cmp\n\
+             | a b |\n\
+             &a &x @ | ax | &b &x @ | bx |\n\
+             a drop b drop\n\
+             ax bx lt ~[ Less ] ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if ;\n\
+         ;\n\
+         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+         : mylt ( Vec2 Vec2 -- Bool )\n\
+           | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
+         : main ( -- ) 5 3 mylt ~[ 1 ] ~[ 0 ] if . ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("overlaps a concrete overload of `mylt`; a name cannot mix a generic and a concrete candidate"),
+        "unexpected diagnostic: {err}"
+    );
+}

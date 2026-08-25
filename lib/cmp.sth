@@ -18,6 +18,16 @@ import: self::bool b | Bool False True | ;
 
 export: Ord Ordering Less Equal Greater eq lt gt lte gte ne ;
 
+\ Declaring these three variant names here effectively reserves them for
+\ every program: a variant constructor's env key is the bare surface name
+\ with no module in it, so a user enum with a variant named `Less`, `Equal`,
+\ or `Greater` captures the constructor `lib/cmp.sth`'s own `impl: Ord`
+\ bodies use, and the build fails inside `cmp`. The module-blind key is
+\ pre-existing (two *user* modules sharing one variant name collide the same
+\ way, and did before `Ordering` existed); what P7.S3s changes is that one of
+\ the colliding parties is now a module every program reaches through the
+\ prelude. Fixing it means keying variant constructors by module, which is
+\ not this slice.
 type: Ordering
 | Less
 | Equal
@@ -97,19 +107,22 @@ impl: Ord for isize
 
 \ Both floats. A NaN operand is the one case `Ordering`'s three variants
 \ cannot represent: IEEE-754 makes every ordered comparison false, including
-\ `x = x`, so a partial order needs a fourth "unordered" answer this enum has
-\ no arm for -- mathematically, no single choice of `Less`/`Equal`/`Greater`
-\ for a NaN pair can make both `lte` (`Less or Equal`) and `gte` (`Equal or
-\ Greater`) come out `False`, since together they cover the whole enum. A
-\ real equality check (`ueq`) comes first so a genuinely equal pair still
-\ answers `Equal`; only a NaN pair (neither `ueq`, `ult`, nor `ugt` holds)
-\ falls to the `Greater` default, which keeps `eq`/`ne`/`lt`/`lte`
-\ IEEE-correct for NaN -- in particular `eq` stays the load-bearing one (D4,
-\ phase0: NaN is detected via `x = x`). `gt`/`gte` are the residual: they
-\ answer `True` for a NaN pair where full IEEE-754 says `False`. A total
-\ `Ord` over a partial order is the known, ruled cost of satisfying the
-\ numeric tower nominally (P7.S3s R5); a `PartialOrd`/`Ordering?`-shaped
-\ split that could recover `gt`/`gte` too is the follow-on, not this slice.
+\ `x = x`, so a partial order wants a fourth "unordered" answer this enum has
+\ no arm for. A real equality check (`ueq`) comes first so a genuinely equal
+\ pair still answers `Equal`; only a NaN pair (neither `ueq`, `ult`, nor
+\ `ugt` holds) falls to the `Greater` default. All six surface comparisons
+\ stay IEEE-correct for NaN over that default: `eq`/`ne`/`lt`/`lte` read
+\ `cmp(a,b)` while `gt`/`gte` read `cmp(b,a)` (see the note above `gt`), so a
+\ NaN pair answers `False` for all five ordered relations and `True` for
+\ `ne`. `eq` in particular stays load-bearing (D4, phase0: NaN is detected
+\ via `x = x`).
+\
+\ The residual is `cmp` itself. It is not in `export:`, but `Ord` is, so any
+\ user writing their own `'T: Copy Ord` word dispatches `cmp` directly -- and
+\ over floats it is not antisymmetric, since `cmp(a,b)` and `cmp(b,a)` are
+\ both `Greater` when either operand is NaN. A `PartialOrd`/`Ordering?`-shaped
+\ split giving the unordered case its own answer is the follow-on
+\ (P7.S3s R5), not this slice.
 impl: Ord for f32
   : cmp
     | lhs rhs |

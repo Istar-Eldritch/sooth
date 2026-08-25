@@ -8631,6 +8631,37 @@ mod tests {
         assert!(!err.contains("__m"), "a mangled spelling leaked: {err}");
     }
     #[test]
+    fn check_concrete_overload_is_selected_over_an_ord_bounded_generic() {
+        // P7.S3s (R6), the call-site half of criterion 6: `poly_sig_could_match`
+        // is what makes a `Vec2 Vec2` call fall through the `Ord`-bounded
+        // generic candidate to the concrete one of the same name. `Vec2` has no
+        // `impl: Ord`, so the generic candidate must not admit these operands
+        // even though unification alone would bind `'T` to anything.
+        //
+        // Asserted at the checker boundary rather than on a built program on
+        // purpose: selecting the concrete candidate is the *correct* answer,
+        // and a program that then calls it panics at lowering (`checked user
+        // word exists`, `ir/func_builder/calls.rs`) because
+        // `ast::overload_symbols` counts poly words when deciding a name is
+        // overloaded, so the concrete word carries a `$$0`-suffixed symbol the
+        // call site never records. That gap is pre-existing -- reproduced at
+        // this slice's parent commit with `Bound::Ord` still in place -- and
+        // orthogonal to `Ord`, so there is no run golden to pair with this;
+        // `tests/phase7_slice3s_flip.rs` covers the declaration-time half.
+        //
+        // Mutation-verified: dropping `poly_sig_could_match`'s `impl:`
+        // registry filter makes the generic candidate win, and this fails with
+        // "`Vec2` does not satisfy `Ord`" from inside its instantiated body.
+        check_src_mangled(
+            "type: Vec2 x i64 y i64 ;\n\
+             : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+             : mylt ( Vec2 Vec2 -- Bool )\n\
+               | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
+             : main ( -- ) 1 1 Vec2 2 2 Vec2 mylt drop ;\n",
+        )
+        .unwrap();
+    }
+    #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
         // R1/R5/R9: a length variable is opaque through `len`; the same word
         // instantiates at `[i64 4]` and `[i64 8]`.

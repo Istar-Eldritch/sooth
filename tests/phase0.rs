@@ -853,33 +853,40 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
 }
 
 #[test]
-fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
+fn all_six_comparisons_are_ieee_correct_for_nan_floats() {
     // A real NaN (`0.0 0.0 div`, routed through a call so it isn't
-    // constant-folded away) must report False for the ordered comparisons
-    // `lte`/`gte`/`eq`, and True for `ne` (RISK 1): `ne` is the one comparison
+    // constant-folded away) must report False for all five ordered
+    // comparisons and True for `ne` (RISK 1): `ne` is the one comparison
     // where "NaN involved" flips the answer relative to `eq`.
     //
-    // Revised under P7.S3s R5: `lte`/`gte`/`ne`/`eq` are now derived from a
-    // `'T: Copy Ord` `cmp` call returning a 3-variant `Ordering`, which
-    // cannot represent IEEE-754's fourth "unordered" NaN case directly.
-    // `lib/cmp.sth`'s float `impl: Ord` picks `Greater` for a NaN pair
-    // (`eq`/`ne`/`lt`/`lte` read that arm and so stay IEEE-correct,
-    // preserving D4's load-bearing "NaN detected via `x = x`"); `gte`
-    // (like `gt`) is defined over the *swapped* operand order instead of
-    // reading `cmp`'s `Greater`/`Greater-or-Equal` arms directly (`a >= b`
-    // iff `b <= a`), which keeps it correct for NaN too.
+    // Revised under P7.S3s R5: all six are now derived from a `'T: Copy Ord`
+    // `cmp` call returning a 3-variant `Ordering`, which cannot represent
+    // IEEE-754's fourth "unordered" NaN case directly. `lib/cmp.sth`'s float
+    // `impl: Ord` picks `Greater` for a NaN pair; `eq`/`ne`/`lt`/`lte` read
+    // `cmp(a,b)` and stay IEEE-correct over that choice (preserving D4's
+    // load-bearing "NaN detected via `x = x`"), while `gt`/`gte` read
+    // `cmp(b,a)` -- the swapped operand order (`a > b` iff `b < a`) rather
+    // than `cmp(a,b)`'s `Greater`/`Greater-or-Equal` arms, which is what
+    // keeps *them* correct for NaN too.
+    //
+    // All six, not the four this originally covered: the choice of `Greater`
+    // is only IEEE-correct across the whole set because of the swap, so a
+    // subset that omits `gt`/`lt` cannot distinguish the shipped derivation
+    // from one that reads `Greater` directly and answers `True` for NaN.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  \
-  0.0 0.0 fdiv dup lte ~[ 1 ] ~[ 0 ] if .\n  \
-  0.0 0.0 fdiv dup gte ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if .\n  \
   0.0 0.0 fdiv dup ne ~[ 1 ] ~[ 0 ] if .\n  \
-  0.0 0.0 fdiv dup eq ~[ 1 ] ~[ 0 ] if . ;\n";
+  0.0 0.0 fdiv dup lt ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup gt ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup lte ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup gte ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "0\n0\n1\n0\n");
+    assert_eq!(stdout, "0\n1\n0\n0\n0\n0\n");
     assert_eq!(code, 0);
 }
 

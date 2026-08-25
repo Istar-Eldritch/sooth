@@ -1653,16 +1653,17 @@ mod tests {
         assert_eq!(got, want, "`^'T` at `'T = u32` is the `^u32` entry");
     }
 
-    /// P7.S3e phase 4 (R9): `lower_src` is not enough for a bound-dispatch
-    /// fixture -- `check` does not run the trait/impl pre-passes (`driver.rs`
-    /// does, before it), so without them `ImplDecl::resolved` is empty and
-    /// every member call fails to resolve. Mangles too (P7.S3r): a synthesized
-    /// impl-body member's own call to a builtin-operator-named word (`max`)
-    /// only resolves through `scoped_operator_overloads`, which reads the
-    /// mangled candidate key -- unmangled, the candidate set is always empty
-    /// and every such call falls through to the builtin's own numeric-operand
-    /// rejection. Mirrors the real build's order.
-    fn lower_with_trait_prepasses(src: &str) -> IrModule {
+    /// P7.S3r: `lower_src` is not enough for a bound-dispatch fixture, because
+    /// it does not mangle -- a synthesized impl-body member's own call to a
+    /// builtin-operator-named word (`max`) only resolves through
+    /// `scoped_operator_overloads`, which reads the mangled candidate key;
+    /// unmangled, the candidate set is always empty and every such call falls
+    /// through to the builtin's own numeric-operand rejection. The
+    /// trait/`impl:` pre-passes such a fixture also needs (without them
+    /// `ImplDecl::resolved` is empty and every member call fails to resolve)
+    /// now run inside `parse_with_core` itself, for every caller. Mirrors the
+    /// real build's order.
+    fn lower_with_resolve(src: &str) -> IrModule {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
@@ -1679,7 +1680,7 @@ mod tests {
     /// per-instantiation map from one shared across all of them.
     #[test]
     fn bound_dispatch_lowers_each_instantiation_to_its_own_impl_member() {
-        let m = lower_with_trait_prepasses(
+        let m = lower_with_resolve(
             "trait: Getter 'T get ( &'T -- i64 ) ;\n\
              type: Pt n i64 ;\n\
              type: Qt n i64 ;\n\
@@ -1713,7 +1714,7 @@ mod tests {
     /// literal term, so `called_names` alone spares the overload.
     #[test]
     fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
-        let m = lower_with_trait_prepasses(
+        let m = lower_with_resolve(
             "trait: Getter 'T get ( &'T &'T -- i64 ) ;\n\
              type: Pt n i64 ;\n\
              : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\

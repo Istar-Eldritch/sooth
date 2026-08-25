@@ -8839,27 +8839,15 @@ mod tests {
         // replacing the hardcoded string compare) must not change
         // `'T: Copy`'s existing parse result. P7.S3s: `Ord` is no longer a
         // predicate to fold this way at all -- `Bound::Ord` does not exist to
-        // construct -- so this test now pins `Copy` alone; the companion
-        // below pins a user trait folding to `Bound::User` right beside it.
+        // construct -- so this test now pins `Copy` alone. The
+        // predicate-plus-user-trait companion the flip wanted beside it
+        // already exists:
+        // `parse_capabilities_composes_a_predicate_and_a_user_trait` below
+        // pins `'T: Copy <user trait>` folding to
+        // `[Bound::Copy, Bound::User(id)]`.
         let module = parse_src(": f ( 'T: Copy -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
-    }
-
-    #[test]
-    fn parse_capabilities_folds_copy_and_a_user_trait_byte_for_byte() {
-        // Companion to the `Copy`-alone case above: `'T: Copy SomeUserTrait`
-        // still folds to `[Bound::Copy, Bound::User(id)]`, greedily, in
-        // source order (R5).
-        let module = parse_src(
-            "trait: SomeUserTrait 'T foo ( &'T -- ) ;\n: f ( 'T: Copy SomeUserTrait -- 'T ) ;",
-        )
-        .unwrap();
-        let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(
-            sig.bounds,
-            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(1)))]
-        );
     }
 
     #[test]

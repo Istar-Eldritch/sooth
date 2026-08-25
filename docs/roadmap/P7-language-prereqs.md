@@ -682,7 +682,7 @@ through. `'T: Ord` therefore categorically excludes a struct or enum, and a user
 their own type in: `impl: Ord for Point` is rejected as a built-in predicate.
 `examples/traits.sth` worked around this by inventing a separate `Order` trait.
 
-`Ord` becomes an ordinary library trait declaring `cmp ( &'T &'T -- Ordering )` over an
+`Ord` becomes an ordinary library trait declaring `cmp ( 'T 'T -- Ordering )` over an
 `Ordering` enum, with one `impl:` per numeric width in `core` built from the raw comparison
 intrinsics, the six surface comparisons derived from `cmp`, and `Bound::Ord` deleted. The
 blocking gap is generic-calls-generic under a user bound: the checker's symbolic forwarding

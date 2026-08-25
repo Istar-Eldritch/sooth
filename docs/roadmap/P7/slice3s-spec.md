@@ -743,6 +743,40 @@ Codegen regression is expected and accepted (criterion 8 covers behaviour, not I
   this repo before, and this spec's own review already found 3 real counter-examples (two
   `inline` fixtures, one witness constant) among just the 5 `inline`-tagged sites checked by
   the same method — the remaining ~55 are unverified, not presumed mechanical.
+
+  **Classification pass, completed (review cycle 2).** The raw grep over `src/`+`tests/`
+  `*.rs` finds 65 lines at the parent-plus-flip tree, but that is not 65 migration sites:
+  2 match `Copy Order`, an unrelated *user* trait, and 28 are prose in comments. The real
+  input was **35 fixture/code sites**, of which **4 needed non-mechanical treatment** and
+  31 migrated mechanically (bound unchanged, behaviour unchanged): `src/check/word_entry.rs`'s
+  `EQ` witness and `tests/phase4_generics.rs` + `tests/phase7_slice3b_follow.rs`'s two
+  `mymax` fixtures all had `Ord` dropped from the bound rather than `inline` dropped (R7's
+  revision), and `src/parser.rs`'s `parse_capabilities_still_folds_copy_ord_byte_for_byte`
+  had its assertion rewritten because `Bound::Ord` no longer exists to construct.
+
+  A **fifth** non-mechanical site exists that this grep cannot find, and it is the reason
+  the grep-count plan was the wrong instrument: `tests/phase7_slice3e.rs`'s `sort3` fixture
+  declared its own `type: Ordering | Less | Equal | Greater ;`, which the flip's new
+  `core::cmp` variant names capture. It was migrated to `Rank | Under | Same | Over` and is
+  invisible to a `Copy Ord` grep, since its bound is `'T: Copy Order` on a user trait. Its
+  necessity is verified by reverting it (the build then fails inside `lib/cmp.sth`'s own
+  `impl: Ord for i8`), not assumed. See the variant-name reservation risk below.
+- **The flip reserves `Less`, `Equal` and `Greater` as variant names program-wide, found in
+  review cycle 2.** A variant constructor's env key is the bare surface name with no module
+  in it (`enum_generated_sigs`, `src/check/declarations.rs`), so a user enum with a variant
+  named `Less`, `Equal`, or `Greater` — any one of the three, individually — captures the
+  constructor `lib/cmp.sth`'s `impl: Ord` bodies use, and the build fails inside `cmp` with
+  a confusing "body leaves `Ordering` where the declaration requires `Ordering`". The type
+  name `Ordering` itself is fine; only the variants collide.
+
+  The module-blind key is **pre-existing, not caused by this slice**: verified at the parent
+  commit, where two *user* modules each declaring a variant `Less` collide identically, with
+  `core::cmp` carrying no `Ordering` at all. What the flip changes is that one colliding
+  party is now a module every program reaches through the prelude, so three previously-safe
+  names became unusable. Fixing it means keying variant constructors by module — a real
+  design change to already-shipped machinery, and not this slice's scope. Named here rather
+  than absorbed silently, and deliberately not pinned by a test, since the current behaviour
+  is the bug rather than the contract.
 - **The `+86.6%` comparison tax** is real and user-visible until S3o lands. It is accepted
   for one slice; if S3o stalls again, this becomes a standing cost worth re-litigating.
 - **A generic cross-call inside a spliced combinator's own body is invisible to lowering,
