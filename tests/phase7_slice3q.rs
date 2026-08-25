@@ -18,7 +18,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A scratch tree of `.sth` files outside any package, so imports resolve by
-/// quoted path and no manifest is involved. Removed on drop.
+/// quoted path and no manifest is involved -- except the one golden below
+/// that writes a `sooth.pkg` because it needs `core::prelude` to resolve.
+/// Removed on drop.
 struct Tree(PathBuf);
 
 impl Tree {
