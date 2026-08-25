@@ -422,8 +422,9 @@ it is both `Copy` and scalar-represented, so a payload-free enum passes and a po
 aggregate keeps being rejected however `Copy` it is. At an `owning` boundary the frame-rooted
 rejection and the 2+-capture deferral both lift for a *linear* capture, the heap block having
 replaced the stack bundle they guarded; the in-frame path is unchanged.
-**Two restrictions remain, both waiting on an erased owner:** an owning closure may not be
-discarded unexecuted, nor stored in an aggregate. Both are **P7.S3v**, after **P7.S3u**.
+**Two restrictions remain, both waiting on a per-value disposer:** an owning closure may not be
+discarded unexecuted, nor stored in an aggregate. Both are **P7.S3v**, which depends on no
+other slice.
 Standing hazard, unchanged: a materialized quotation still cannot be linked in the REPL (a
 session line building a `(code, env)` value dies on a non-PIC `__quot0` relocation).
 **Exit:** a linear value can be moved into an escaping closure's env, the closure returned
@@ -701,7 +702,7 @@ a polymorphic body may call a polymorphic word carrying a forwarded user bound w
 the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
 still behaves identically (codegen regresses, behaviour does not).
 
-**P7.S3u -- Trait objects (an erased owner with a reachable destructor).** Traits dispatch
+**P7.S3u -- Trait objects (an erased owner with a reachable destructor).** `[ parked ]` Traits dispatch
 statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete
 instantiation against a whole-program `(TraitId, Type)` registry, so every call is
 monomorphized and every destructor is type-directed and statically resolved. There is no way
@@ -719,10 +720,18 @@ owning trait object's vtable carries a `drop` slot (a hand-rolled `dyn Drop`, on
 at disposal, no hidden control flow beyond the call the programmer wrote), and on whether an
 object may be `Copy` at all. Sequence after **P7.S3h**, whose spec deliberately avoids the
 mechanism so that this slice introduces it once, with a consumer, rather than being reverse
-engineered from a closure special case. Scope guard: heterogeneous collections (`Vec[dyn T]`)
-are a weak motivation on their own, since a closed enum is usually the better design and
-already works in `core`; the forcing consumer is disposal through erasure, which is why
-**P7.S3v** is sequenced immediately after.
+engineered from a closure special case.
+
+**Parked for want of a consumer.** Disposal through erasure was the forcing consumer, and it
+no longer forces this slice: **P7.S3v** disposes an owning closure through a
+per-construction-site disposer symbol, which needs no vtable, no erased type in a signature,
+and no amendment to the statically-resolved disposal rule. Traits could not have supplied that
+answer in any case: a trait keys on a type, and `Type::OwningQuotation` (`src/ast.rs:2295`)
+carries only the effect, so two closures with identical effects and different capture sets are
+the same type and would select the same `impl:`. What remains is heterogeneous collections
+(`Vec[dyn T]`), which the scope guard already called a weak motivation on its own, since a
+closed enum is usually the better design and already works in `core`. Unpark when a consumer
+appears that a closed enum genuinely cannot serve.
 **Exit:** a value of a user trait can be held and used behind an erased owner whose concrete
 type the use site does not name, a bounded word can be called through it, and an owning trait
 object's destructor runs exactly once through the object with no leak and no double free, with
@@ -735,13 +744,29 @@ rejection, because releasing the capture requires running the body), and it may 
 struct field, array element, slice element or owned-cell payload (a container's synthesized
 glue would have to dispose it, and `emit_drop` (`src/ir/func_builder/quotation.rs:305`) has no
 arm it could take: its `_ => {}` fall-through would silently swallow the field and leak both
-the capture and the env block). Both restrictions dissolve the moment an erased owner can
-carry a destructor, which is what **P7.S3u** supplies. This slice is the consumer that proves
-S3u's disposal answer on a real case: give the owning closure value a disposer reachable
-without running its body, then lift the `drop` rejection and the aggregate-position gate, so an
-owning closure becomes an ordinary linear value that can be stored, forwarded, and discarded.
-Depends on both **P7.S3h** (the marker, the containment rule, the heap env) and **P7.S3u** (the
-mechanism). Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
+the capture and the env block).
+
+**Mechanism: a per-construction-site disposer symbol.** The closure value grows a third word
+beside its code and env pointers, holding a compiler-synthesized disposer that copies nothing,
+disposes each capture by its own type through the existing `struct_drop_symbol`, and frees the
+env block. The disposer is keyed on the construction site, not on the closure's type, because
+`Type::OwningQuotation` (`src/ast.rs:2295`) carries only the effect: two closures with identical
+effects and different capture sets are the same type, so nothing type-directed (a `Drop` trait, a
+blanket or specialized `impl:`, a trait object's vtable) can discriminate them. The capture's
+concrete type is always known where the disposer is minted -- an owning closure cannot be
+returned from a generic word (a quotation type is rejected in a poly word's output position),
+and a generic body that builds and calls one locally is lowered per instantiation -- so the
+symbol is always constructible. `emit_drop` gains an arm that loads and calls it: one indirect
+call on the disposal path, no runtime type info in the env block, no dynamic dispatch on any
+user-visible operation. Depends only on **P7.S3h** (the marker, the containment rule, the heap
+env); **P7.S3u** is not a prerequisite and is parked.
+
+REPL obligation: a per-literal disposer calls into aggregate destructors, so it must join the
+session-wide override-epoch suffixing that `src/ir/destructors.rs:8-35` applies to every linear
+aggregate's destructor, and carry the same epoch. Missing that fails as an undefined symbol at
+`dlopen` (`src/repl.rs:3201`) rather than as a diagnostic, so it needs a golden.
+
+Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
 `field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:889`) that S3h
 deliberately leaves untouched; the new construction is the disposer itself and the `emit_drop`
 arm, both of which belong to S3u's mechanism rather than to this slice.
