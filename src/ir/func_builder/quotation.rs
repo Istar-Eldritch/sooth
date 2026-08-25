@@ -1128,8 +1128,9 @@ mod tests {
     fn a_capturing_owning_literal_mints_a_disposer_that_disposes_then_frees() {
         // R1/R2: the boundary writes a real symbol into the third slot, and
         // the function behind it disposes each capture at its own env offset
-        // before freeing the block -- the same order the cell destructor
-        // uses, and the reverse would free storage a destructor still reads.
+        // before freeing the block -- the reverse would free storage a
+        // destructor still reads, since an aggregate capture's `slot_value` is
+        // an interior pointer into the block, not a copy out of it.
         let ir = lower_src(&format!(
             "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
              : main ( -- ) 7 Spy mk call ;"

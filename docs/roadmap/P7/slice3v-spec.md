@@ -392,10 +392,14 @@ Unit, beside each touched function:
 - `src/ir/types.rs`: `quotation_layout`'s three offsets/size/align, mirroring the existing
   two-slot test.
 - `src/ir/func_builder/quotation.rs`: `emit_drop` called directly on a constructed
-  `IrType::OwningQuotation` value — asserts the emitted instructions contain a null check, a
-  `FieldLoad` of the disposer slot, and a `CallIndirect`; and on a null-disposer value, asserts
-  no call is emitted. Constructed directly rather than through a full build, since phase 2 lands
-  before the checker admits any program that reaches this arm for real (R4/R6 land in phase 3).
+  `IrType::OwningQuotation` value — asserts the emitted instructions contain a `FieldLoad` of the
+  disposer slot, a null check on it, and a `CallIndirect` reached only from the guarded block,
+  with no call in the entry block. There is no build-time null-disposer case to assert against:
+  `emit_drop` sees the value's `IrType`, never its slot contents, so the nullness is necessarily
+  a runtime branch. The null half is asserted value-side instead — a capture-free owning literal
+  keeps a null third slot and mints no `__dispose` function. Constructed directly rather than
+  through a full build, since phase 2 lands before the checker admits any program that reaches
+  this arm for real (R4/R6 land in phase 3).
 - `src/ir/layout.rs`: `field_is_linear`/`layout_field_is_linear` on a constructed
   `IrType::OwningQuotation(_)`, asserting `true`, alongside the existing `OwnedCell`/`Struct`
   cases.
@@ -416,9 +420,9 @@ Unit, beside each touched function:
 **Mutation-test before each phase exit**, deleting what each guards and proving the named test
 fails:
 
-- R3's null check on the disposer slot (force an unconditional call) — a capture-free owning
-  closure's `drop` (or its container's) must fault or misbehave observably in the unit test that
-  constructs a null-disposer value.
+- R3's null check on the disposer slot (force an unconditional call) — the `emit_drop` unit test
+  must fail, since the call moves into the entry block and no `Cmp`/`Jnz` pair remains. It cannot
+  be caught by constructing a null-disposer value, which `emit_drop` cannot observe.
 - R4's two guards, independently (restore each deleted arm in isolation) — the corresponding
   migrated `drop`-is-now-legal test must fail with each restored.
 - R5's two widened folds, independently (`field_is_linear` and `layout_field_is_linear`,
@@ -469,9 +473,11 @@ is this phase's own, real, in-phase consumer, not a later one.
 
 **Entry.** Phase 1 landed and green.
 
-**Exit.** `emit_drop` on a constructed `IrType::OwningQuotation` value with a non-null disposer
-emits a null check, a `FieldLoad` of the disposer slot, a `FieldLoad` of the env slot, and a
-`CallIndirect`; with a null disposer it emits nothing. `materialize_quot_value` mints a real
+**Exit.** `emit_drop` on a constructed `IrType::OwningQuotation` value emits a `FieldLoad` of the
+disposer slot and a null check on it, with the `FieldLoad` of the env slot and the `CallIndirect`
+in the guarded block only. The null case is a runtime branch, not a build-time one — `emit_drop`
+cannot see the slot's contents — so it is asserted value-side: a capture-free owning literal
+keeps its null disposer. `materialize_quot_value` mints a real
 `{symbol}__dispose` `IrFunc` for a capturing owning literal and keeps writing null for a
 capture-free one. Every existing S3h golden (`call`-only usage) still passes unchanged, since
 nothing yet calls the new symbol at runtime. Full green.
