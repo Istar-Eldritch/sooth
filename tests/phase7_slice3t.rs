@@ -472,6 +472,36 @@ fn a_zero_receiver_member_dispatches_through_an_explicit_instantiation() {
     assert_eq!(out, "11\n22\n");
 }
 
+/// R8 in isolation. The headline above needs phases 1-2's seed to reach
+/// `fresh` at all, so a seed regression reds it and cannot be told apart
+/// from a gate regression. Here the wrapping word's `'T` is grounded by an
+/// ordinary operand and no type-argument list appears anywhere: the *only*
+/// thing standing between this program and a diagnostic is the relaxed
+/// declaration gate. Distinguishable impls again, since a build-only
+/// assertion would not catch a wrong-symbol link.
+#[test]
+fn a_nullary_member_dispatches_off_an_operand_grounded_variable() {
+    let out = build_and_run(
+        "nullary-operand-grounded",
+        "import: intrinsics * ;\n\
+         trait: Default 'T fresh ( -- i64 ) ;\n\
+         type: Point x i64 ;\n\
+         type: Other x i64 ;\n\
+         impl: Default for Point\n\
+           : fresh 11 ;\n\
+         ;\n\
+         impl: Default for Other\n\
+           : fresh 22 ;\n\
+         ;\n\
+         : g ( 'T: Default -- ) drop fresh . ;\n\
+         : main ( -- )\n\
+           1 Point g\n\
+           2 Other g\n\
+           ;\n",
+    );
+    assert_eq!(out, "11\n22\n");
+}
+
 /// R8: the surviving rejection. A receiver mentioned only *nested* inside a
 /// composite input (an array element) is still rejected -- grounding it
 /// would need structural unification through the array type, which

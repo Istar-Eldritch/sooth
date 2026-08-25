@@ -667,7 +667,10 @@ ahead of operand unification (`check_poly_call`); the declaration gate
 (`member_binds_trait_var`) now admits an empty input list.
 **Exit:** a trait member binding its variable in no input may be declared and dispatched,
 reachable from a concrete call site through one bounded generic word (`f[Point]` grounds
-`f`'s own `'T`, then bound dispatch reaches `fresh`). Chaining through a second bounded
+`f`'s own `'T`, then bound dispatch reaches `fresh`). The explicit list is only needed when
+nothing else grounds the wrapping word's variable: where an ordinary operand does
+(`g ( 'T: Default -- )` called as `1 Point g`), the relaxed gate alone makes the nullary
+member dispatchable. Chaining through a second bounded
 generic word is not expressible: `parse_type_expr` has no production for a type variable, so
 a generic word cannot forward its own variable through an explicit instantiation (`f['U]`
 inside `g ( 'U: Default -- 'U )` does not parse) -- a stated residual gap, not designed here.

@@ -58,12 +58,15 @@ shutting out both `at ( &'T i64 -- i64 )` (receiver at `inputs[0]`) and `fresh (
    *nested* in a composite input (`sum ( ['T 4] -- i64 )`) — grounding that needs structural
    unification dispatch does not attempt. `zero_receiver_member_error` (`:375`) distinguishes
    the two: only the nullary case is the P7.S3t deferral, so the text does not falsely claim a
-   nested mention never mentions `'T`.
-6. **Zero-receiver/nullary members (`fresh`, `tag`) are deferred, tracked P7.S3t.** With no
-   operand carrying the variable, θ is fixed only by other operands, so dispatch has no signal
-   for which concrete type's `fresh` is meant, and the language has no type-argument syntax or
-   context binding to supply one. The gate keeps rejecting them, and the diagnostic names
-   P7.S3t so the door is a tracked deferral.
+   nested mention never mentions `'T`. **Superseded in part by P7.S3t:** the nullary half is no
+   longer rejected, and the function is now `nested_receiver_member_error`.
+6. ~~**Zero-receiver/nullary members (`fresh`, `tag`) are deferred, tracked P7.S3t.**~~
+   **Superseded by P7.S3t, which resolved this.** As written here: with no operand carrying the
+   variable, θ is fixed only by other operands, so dispatch has no signal for which concrete
+   type's `fresh` is meant, and the language has no type-argument syntax or context binding to
+   supply one. The gate kept rejecting them, and the diagnostic named P7.S3t so the door was a
+   tracked deferral. S3t added the call-site type-argument list (`f[Point]`) and relaxed the
+   gate to admit an empty input list; a nullary member is legal and dispatchable today.
 7. **The `trait:` gate on builtin-named members widens to `call`, `slice`, and `subslice`**
    (`src/parser.rs:2140`). Name-only selection means a member of one of those names captures
    *every* such call in any body bounded by its trait, making quotation application and array

@@ -411,7 +411,10 @@ nullary member in this slice).
 **Entry.** Phase 2 landed and green.
 
 **Exit.** The headline golden runs and discriminates the two impls; the impl-swap mutation
-fails it; the nested-receiver rejection is byte-identical to today's for its own case; full
+fails it; a second golden grounds the wrapping word's `'T` from an ordinary operand instead,
+so it isolates the gate from phases 1-2's seed (the seed mutation must leave it green and the
+pre-S3t predicate must red it); the nested-receiver rejection keeps its lead sentence and its
+"nested inside a composite input" note, losing only R8's retracted `P7.S3t` clause; full
 green.
 
 ## Out of scope
