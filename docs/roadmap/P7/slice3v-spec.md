@@ -541,11 +541,12 @@ sidesteps the REPL's materialization limit. A disposer exists only for a *materi
 and storing one in a field is exactly what forces materialization, so the session dies in `ld`
 before any epoch matters:
 
-```
+```sooth
 type: Box q owning [ -- ] ;
-: mk ( Wrap -- owning [ -- ] ) | w | [ w drop ] ;
-\ "cc" failed: relocation R_X86_64_PC32 against symbol `mk__quot0` can not be used
-\   when making a shared object
+7 Res Wrap | w | [ w drop ] Box drop
+\ "cc" failed: warning: relocation against `__quot0__dispose' in read-only section
+\   `.text'; relocation R_X86_64_PC32 against symbol `__quot0` can not be used when
+\   making a shared object
 ```
 
 Measured on this branch, and identical for a plain quotation with no `owning`, no disposer and
@@ -555,13 +556,29 @@ route to a disposer is closed too: an `owning` parameter is rejected on a splice
 real-call quotation parameter is refused at the session boundary, leaving an inline literal
 `call` as the only workable shape — which runs the body, not the disposer.
 
+The closure must be built and stored **on one line**. Routing it through a session-defined
+factory (`: mk ( Wrap -- owning [ -- ] ) | w | [ w drop ] ;`) does not test this slice at all:
+that definition line materializes on its own account and dies in `ld` before `Box`'s admission,
+R5, R6 or any disposer is reached, which is P7.S3h behaviour — reverting R6's struct-field
+carve-out leaves such a session byte-identical. The one-line form discriminates: it prints
+`defined type Box`, mints `__quot0__dispose`, and *then* fails to link.
+
 Delivered instead, in `tests/phase7_slice3v.rs`:
 `explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit` runs R8's intended
-session and asserts the blocked state (no disposal line; the failure is `"cc" failed`, not a
-diagnostic; the session survives), with
+session and asserts the blocked state (the field is admitted and a disposer is minted; no
+disposal line; the failure is `"cc" failed`, not a diagnostic; the session survives), with
 `a_plain_quotation_value_hits_the_same_repl_link_limit` as the not-owning's-fault control. It is
 a tripwire, not a skip: whoever fixes the session-module PIC problem gets a failure telling them
 to promote it to R8's golden by asserting the capture's disposal line.
+
+**Recommendation, not delivered (source-file edit, out of phase 4's bounds): R8's obligation is
+still assertable in-process.** `src/repl.rs`'s `#[cfg(test)] destructor_symbols` helper builds
+real session registries through `apply_drop_generations`, so the same shape could lower an
+owning literal and assert the synthesized `__dispose` body names the epoch-suffixed
+`sooth_struct_drop_N` — the exact wire R8 cares about, with no `dlopen` and therefore no PIC
+problem. It proves less than the golden (it cannot show the session surviving, or the symbol
+resolving at load), but it is the difference between R8 having zero coverage and having a unit
+guard. For whichever phase next opens `src/repl.rs`.
 
 ## Out of scope
 

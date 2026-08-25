@@ -207,4 +207,4 @@ callee's body because there is only ever one, spliced, form of it, and lowering 
 caller's tail position into the splice because the body really does run in place of the
 call. A word declaring an ordinary `[ ... ]` parameter is the other form and none of the
 above holds of it: it is a genuine call that mints an `IrFunc` and receives the quotation
-as a `(code, env)` value.
+as a `(code, env, disposer)` value.

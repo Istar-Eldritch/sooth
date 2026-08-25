@@ -339,18 +339,27 @@ fn run_session(lines: &[&str]) -> String {
 ///
 /// A disposer exists only for a *materialized* closure, and no session line can
 /// link one: the code pointer is a non-PIC relocation into the line's own
-/// shared object, so the session dies in `ld` before anything runs. The spec's
-/// claim that a field/`drop` shape sidesteps that limit is false -- storing the
-/// closure is precisely what forces materialization. The epoch obligation is
+/// shared object, so the session dies in `ld` before anything runs. Storing the
+/// closure in the field is precisely what forces that materialization, so the
+/// shape R8 asked for is the shape that cannot link. The epoch obligation is
 /// therefore unreachable rather than untested: no session can reach the
-/// disposer at all.
+/// disposer's `emit_drop` call at all.
+///
+/// The closure is built and stored on one line, rather than returned from a
+/// session-defined factory word: a `: mk ( Wrap -- owning [ -- ] )` definition
+/// line materializes on its *own* account and dies before `Box` is ever
+/// reached, which is P7.S3h behaviour and would make this a duplicate of the
+/// control below. Written this way it discriminates: revert R6's struct-field
+/// carve-out (`src/check/audits.rs`) and `Box` is refused outright, so the
+/// admission assertion fails and the line never reaches the linker.
 ///
 /// Asserted as the blocked state, not skipped, so it is a tripwire: the day the
 /// session-module PIC problem is fixed this fails, and R8's real golden is the
 /// session below with `"drop 7"` asserted in place of the link failure. The
-/// three assertions are the whole claim -- the disposal never happens, the
-/// reason is the linker rather than any checker gate this slice controls, and
-/// the session survives it.
+/// four assertions are the whole claim -- the container is admitted, a disposer
+/// really is minted for the construction site, the disposal still never happens
+/// because the blocker is the linker rather than any checker gate this slice
+/// controls, and the session survives it.
 #[test]
 fn explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit() {
     let out = run_session(&[
@@ -358,10 +367,19 @@ fn explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit() {
         ": drop ( Res -- ) | r | \"drop \" . r Res> . ;",
         "type: Wrap r Res ;",
         "type: Box q owning [ -- ] ;",
-        ": mk ( Wrap -- owning [ -- ] ) | w | [ w drop ] ;",
-        "7 Res Wrap mk Box drop",
+        "7 Res Wrap | w | [ w drop ] Box drop",
         "1 2 add .",
     ]);
+    assert!(
+        out.contains("defined type Box"),
+        "R6 admits the owning field at the REPL too, so the session gets past the audit: {out}"
+    );
+    assert!(
+        out.contains("__quot0__dispose"),
+        "the construction site really does mint a disposer -- the symbol the link step \
+         cannot place is R2's, so this session fails one step past the disposer, not \
+         before it (the text is `ld`'s relocation warning): {out}"
+    );
     assert!(
         !out.contains("drop 7"),
         "the capture is never disposed, because the closure is never built: {out}"

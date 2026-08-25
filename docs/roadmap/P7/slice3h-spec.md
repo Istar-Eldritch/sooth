@@ -205,12 +205,15 @@ inherited error rather than being masked.
 - `OwningQuotation(e) != Quotation(e)` structurally, so every boundary and `if`-join separates
   them by type inequality before lowering.
 - The type names the obligation only. **Storage never appears in the type.**
-- **An owning quotation is never a field, element, payload or referent**, so no synthesized
-  destructor and no `emit_drop` path can reach one. This is what makes "the body is the sole
-  disposer" true rather than aspirational.
+- **An owning quotation may be a struct field, an enum variant field or an owned-cell payload**,
+  where the container's synthesized destructor reaches it through `emit_drop` and the
+  per-construction-site disposer [P7.S3v](./slice3v-spec.md) mints. It is never an array or slice
+  element (a linear element is P7.S5) and never a reference referent or `extern:` slot, neither
+  of which owns what it names.
 - A capture is snapshotted into the one-word plain env only when it is **scalar-represented**;
   aggregate-backed values are pointers and are never snapshotted at an escaping boundary.
-- `call` is a consuming use and needs no checker change; `drop` on an owning closure is rejected.
+- `call` is a consuming use and needs no checker change; `drop` is the other one, running only
+  the disposer and discarding the closure unexecuted ([P7.S3v](./slice3v-spec.md)).
 - Owningness is inferred at literals and declared in types. No term-level `owning` syntax.
 
 ## Out of scope
