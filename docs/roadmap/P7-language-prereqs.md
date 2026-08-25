@@ -742,9 +742,16 @@ closures under two restrictions that exist only because nothing can invoke a per
 disposer: an owning closure may not be discarded unexecuted (`drop` on one is a located
 rejection, because releasing the capture requires running the body), and it may not be a
 struct field, array element, slice element or owned-cell payload (a container's synthesized
-glue would have to dispose it, and `emit_drop` (`src/ir/func_builder/quotation.rs:305`) has no
+glue would have to dispose it, and `emit_drop` (`src/ir/func_builder/quotation.rs:389`) has no
 arm it could take: its `_ => {}` fall-through would silently swallow the field and leak both
 the capture and the env block).
+
+**Only the struct field is this slice's to lift.** The array and slice positions are not gated by
+S3h at all: a linear element is rejected in an array whatever its type (`[Spy 2]` and
+`[owning [ -- ] 2]` both fail with `linear array elements are not supported yet`, while
+`type: Box s Spy ;` builds), so those positions wait on **P7.S5**, not on a disposer. The
+owned-cell payload is untested in either direction and this slice must establish which gate it
+is under before claiming it.
 
 **Mechanism: a per-construction-site disposer symbol.** The closure value grows a third word
 beside its code and env pointers, holding a compiler-synthesized disposer that copies nothing,
@@ -766,14 +773,22 @@ session-wide override-epoch suffixing that `src/ir/destructors.rs:8-35` applies 
 aggregate's destructor, and carry the same epoch. Missing that fails as an undefined symbol at
 `dlopen` (`src/repl.rs:3201`) rather than as a diagnostic, so it needs a golden.
 
+Fixture bound: a closure capturing an array or a slice ICEs today at `src/backend/qbe.rs:531`
+(`an aggregate field is copied by blit, not scalar-stored`), because the env store assumes one
+word per capture. That is the env block, not the closure value this slice widens, so it is
+orthogonal -- but every fixture here must capture a scalar or a linear struct, both of which
+work end to end.
+
 Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
-`field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:889`) that S3h
+`field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:895`) that S3h
 deliberately leaves untouched; the new construction is the disposer itself and the `emit_drop`
-arm, both of which belong to this slice.
+arm, both of which belong to this slice. The `drop` rejection is a **twinned** guard
+(`src/check.rs:3370` and `src/check/poly.rs:1255`), so both halves need mutation-testing, not
+one.
 **Exit:** an owning closure can be `drop`ped without being called, disposing its captures and
-env exactly once; it can be stored in a struct field and an array element and disposed
-transitively through the container exactly once; and every S3h golden that asserted a
-rejection has been migrated to assert the new behaviour rather than deleted.
+env exactly once; it can be stored in a struct field and disposed transitively through the
+container exactly once; and every S3h golden that asserted a rejection has been migrated to
+assert the new behaviour rather than deleted.
 
 **P7.S4 -- Generic `impl:` targets, with a specificity chain.** An `impl:` target must name one
 concrete type: the whole-program registry S3e built keys on `(TraitId, Type)` and discharges a
@@ -809,3 +824,29 @@ written; a more specific target overrides a more general one at the instantiatio
 an unordered candidate set is a located error naming the competing targets; and a trait with one
 generic `impl:` behaves identically to the same trait with the hand-written concrete `impl:`
 blocks it replaces.
+
+**P7.S5 -- Linear array elements.** `[T N]` rejects a linear element for every linear type:
+`type: Arr xs [Spy 2] ;` and `type: Arr xs [owning [ -- ] 2] ;` both fail with `linear array
+elements are not supported yet` (`src/check.rs:3135`), while the same type as a struct field
+(`type: Box s Spy ;`) builds. So a linear struct is storable but a *collection* of them is not,
+which is the one gap that keeps the linear spine from reaching arrays. The restriction dates to
+P3 (`P3-linear-spine.md:56`, `P3/slice1-spec.md:61`) and has been re-observed from four slices
+since (`P3/slice3-brief.md:70`, `P4/slice6b-brief.md:142`, `P7/slice3c-brief.md:242`, and
+**P7.S3v**), always as somebody else's blocker, never as a slice.
+
+Two things make it a real slice rather than a predicate flip. Construction: `fill` replicates one
+value across every slot, which is a copy per slot and therefore illegal for a linear element, so
+a linear array needs a different construction form and the diagnostic's own wording ("would
+replicate a `{elem}` across every slot") names why. Disposal: an array of linear elements needs
+synthesized element-wise glue with a static trip count, plus the partially-initialized window
+during construction, which is the first place in the language where a value is neither wholly
+live nor wholly disposed.
+
+Out of scope: a dynamically-sized or growable array (that is a library `Vec` over an allocator,
+and needs a struct header length variable that **P7.S3n** named and did not land); a linear
+element reached through a `Slice[T]` view, since a view does not own what it points at.
+**Exit:** `[T N]` admits a linear `T`; such an array can be constructed without any element
+being copied; dropping it disposes every element exactly once; a partially-constructed array
+abandoned mid-construction is either rejected with a located error or disposes exactly the slots
+already initialized, with the rule stated; and the `linear array elements are not supported yet`
+diagnostic is gone rather than reworded.
