@@ -117,7 +117,12 @@ fn hub_reexported_trait_resolves_as_a_bound_via_bare_qualifier() {
 }
 
 /// C4's second caller: an `impl:` naming a hub-re-exported trait as its
-/// target resolves too, not only a bound use.
+/// target resolves too, not only a bound use. Deliberately has no bound
+/// consumer of `Greet` (unlike the two goldens above): every `impl:` still
+/// needs to parse for the bound goldens to build too, so a broken
+/// `parse_impl_decl` fallback fails all three -- but only this golden keeps
+/// passing if `bound_trait_id`'s fallback alone regresses, which is what
+/// isolates the `parse_impl_decl` call site from the `bound_trait_id` one.
 #[test]
 fn hub_reexported_trait_resolves_as_an_impl_target() {
     let t = Tree::new("impl-target");
@@ -130,8 +135,7 @@ fn hub_reexported_trait_resolves_as_an_impl_target() {
          impl: Greet for Point\n\
            : greet | p | p drop 7 .  ;\n\
          ;\n\
-         : greets ( &'T: Greet -- ) greet ;\n\
-         : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
+         : main ( -- ) 1 2 Point |p| p drop 7 . ;\n",
     );
     let out = build_and_run(&entry);
     assert_eq!(out, "7\n");

@@ -8616,11 +8616,13 @@ mod tests {
         );
     }
 
-    /// Mutation check: reverting either fallback branch alone must fail one
-    /// of the two assertions above -- a twinned guard tested in one half
-    /// only is a known repeat failure in this repo.
+    /// Pins that both branches consult `trait_origin` rather than scanning
+    /// all modules directly: with an empty table, both the qualified and
+    /// selective forms fail to resolve past the hub. (The fallback code
+    /// itself is mutation-covered by the `hub_reexported_trait_resolves_*`
+    /// integration goldens, not by this unit test.)
     #[test]
-    fn find_trait_in_module_hub_fallback_is_needed_on_both_branches() {
+    fn find_trait_in_module_without_trait_origin_table_cannot_see_past_hub() {
         let greet = crate::ast::TraitDecl {
             name: "Greet".to_string(),
             kind: TraitKind::Nominal,
