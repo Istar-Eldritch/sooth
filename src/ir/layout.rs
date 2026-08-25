@@ -59,10 +59,11 @@ pub struct StructLayout {
     pub drop_generation: Option<u64>,
 }
 
-/// Whether a field's `IrType` is linear: an owning cell directly, or a nested
-/// aggregate whose own layout is linear. `ensure_struct`/`ensure_enum` cannot
-/// call this: each computes its own `is_linear` inline while `layouts` is
-/// still being built, before a nested field's entry exists here.
+/// Whether a field's `IrType` is linear: an owning cell or an owning closure
+/// directly, or a nested aggregate whose own layout is linear.
+/// `ensure_struct`/`ensure_enum` cannot call this: each computes its own
+/// `is_linear` inline while `layouts` is still being built, before a nested
+/// field's entry exists here.
 pub(super) fn field_is_linear(
     ty: IrType,
     structs: &Structs,
@@ -72,6 +73,11 @@ pub(super) fn field_is_linear(
     match ty {
         // Always linear whatever its payload, so no payload lookup.
         IrType::OwnedCell(_) => true,
+        // P7.S3v (R5): an owning closure owns its captures and its env block,
+        // so a container holding one is linear and needs a destructor -- whose
+        // field glue reaches `emit_drop`'s disposer arm. A *plain* quotation
+        // stays on the wildcard below: it owns nothing.
+        IrType::OwningQuotation(_) => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
         IrType::Enum(id) => enums.layouts[id.index()].is_linear,
         IrType::Array(id) => arrays.layouts[id.index()].is_linear,
@@ -333,8 +339,9 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
         IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
         IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
-        // A quotation value is a two-slot aggregate; it marshals like any
-        // aggregate, its size rounded up so the next slot stays 8-aligned.
+        // A quotation value is a three-slot aggregate (code, env, disposer);
+        // it marshals like any aggregate, its size rounded up so the next
+        // slot stays 8-aligned.
         IrType::Quotation(_) | IrType::OwningQuotation(_) => {
             round_up(quotation_layout(WORD_WIDTH).size, 8)
         }
@@ -737,10 +744,10 @@ impl LayoutBuilder<'_> {
                 let l = self.array_memo[id.index()].as_ref().expect("inner layout");
                 (l.size, l.align)
             }
-            // Slice 7a: a quotation field/element is the fixed two-slot value
+            // Slice 7a: a quotation field/element is the fixed three-slot value
             // aggregate, word-width-derived (`quotation_layout`), not a scalar
             // -- `scalar_size_align_ww` deliberately panics on it. P7.S3h: an
-            // owning quotation shares that same two-slot value shape, so it
+            // owning quotation shares that same three-slot value shape, so it
             // sizes here too -- its only distinction is the env storage
             // decision, not the layout. It reaches this arm as a synthesized
             // multi-output bundle field, interned after the containment audit.
@@ -888,14 +895,17 @@ impl LayoutBuilder<'_> {
     }
 
     /// Whether a just-laid-out field's `IrType` is linear (R7): an owning
-    /// cell directly, or a nested struct/enum whose own memoized layout is
-    /// linear. Shared by the struct and enum `is_linear` folds; both call
-    /// sites have already ensured the nested aggregate's memo entry via
-    /// `size_align`.
+    /// cell or an owning closure directly, or a nested struct/enum whose own
+    /// memoized layout is linear. Shared by the struct and enum `is_linear`
+    /// folds; both call sites have already ensured the nested aggregate's memo
+    /// entry via `size_align`.
     fn layout_field_is_linear(&self, ty: IrType) -> bool {
         match ty {
             // Always linear whatever its payload, so no payload lookup.
             IrType::OwnedCell(_) => true,
+            // P7.S3v (R5): the memoized twin of `field_is_linear`'s owning-
+            // closure arm; a plain quotation stays non-linear.
+            IrType::OwningQuotation(_) => true,
             IrType::Struct(id) => {
                 self.struct_memo[id.index()]
                     .as_ref()
@@ -1439,6 +1449,50 @@ mod tests {
         assert!(!ir.structs[1].is_linear, "Plain has no linear field");
         assert!(ir.structs[2].is_linear, "Holds carries a Spy directly");
         assert!(ir.structs[3].is_linear, "Wraps carries one transitively");
+    }
+
+    /// P7.S3v (R5): the two linearity folds, on an owning-quotation field.
+    /// Both are asserted because they are a twinned pair over the same
+    /// question, decided in two places: `layout_field_is_linear` answers the
+    /// container's `is_linear` (so `synthesize_aggregate_destructors` emits a
+    /// destructor at all) and `field_is_linear` answers the field glue inside
+    /// it (so that destructor actually calls `emit_drop` on the field).
+    /// Reverting either alone leaks the closure's captures silently.
+    ///
+    /// A *plain* quotation field is the control: it owns nothing, so it stays
+    /// on the wildcard and its container stays non-linear.
+    #[test]
+    fn an_owning_quotation_field_is_linear_in_both_folds() {
+        let ir = lower_src("type: Box q owning [ -- ] ; type: Plain q [ -- ] ; : w ( -- ) ;");
+        let (structs, enums, arrays) = (&ir.structs, &ir.enums, &ir.arrays);
+        let structs = Structs {
+            layouts: structs.clone(),
+            ..Structs::default()
+        };
+        let enums = Enums {
+            layouts: enums.clone(),
+            ..Enums::default()
+        };
+        let arrays = Arrays {
+            layouts: arrays.clone(),
+        };
+        let owning = &structs.layouts[0];
+        assert!(
+            owning.is_linear,
+            "`layout_field_is_linear` must see the owning field"
+        );
+        assert!(
+            field_is_linear(owning.fields[0].ty, &structs, &enums, &arrays),
+            "`field_is_linear` must see the owning field"
+        );
+        let plain = &structs.layouts[1];
+        assert!(!plain.is_linear, "a plain quotation field owns nothing");
+        assert!(!field_is_linear(
+            plain.fields[0].ty,
+            &structs,
+            &enums,
+            &arrays
+        ));
     }
 
     #[test]

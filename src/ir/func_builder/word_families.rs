@@ -585,7 +585,12 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, cell_ptr));
                 v
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            // P7.S3v (R6): an owning-quotation payload is an aggregate like
+            // the rest -- a plain quotation cell payload is rejected by the
+            // checker, so this arm never sees `IrType::Quotation`.
+            // `field_store_op`/`member_ty` refuse to scalar-store one, and
+            // `alloc_aggregate` already knows its layout.
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::OwningQuotation(_) => {
                 let dst = self.alloc_aggregate(payload_ty);
                 let size = self.value_size(payload_ty);
                 if size > 0 {
@@ -615,7 +620,7 @@ impl<'a> FuncBuilder<'a> {
         for (fi, field) in fields.iter().enumerate() {
             if Some(fi) != skip && field_is_linear(field.ty, self.structs, self.enums, self.arrays)
             {
-                let v = self.field_value(base, *field);
+                let v = self.slot_value(base, field.offset, field.ty);
                 self.emit_drop(v);
             }
         }
@@ -699,7 +704,7 @@ impl<'a> FuncBuilder<'a> {
             _ => unreachable!("a level's path starts at one of its own fields"),
         };
         self.drop_level_fields(base, fields, Some(fi));
-        let field = self.field_value(base, fields[fi]);
+        let field = self.slot_value(base, fields[fi].offset, fields[fi].ty);
         let next = match cell {
             Some(cell) => self.emit_unwrap(field, cell),
             None => field,
@@ -759,7 +764,9 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
                 self.push_instr(Instr::FieldStore(cell_ptr, val));
             }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            // P7.S3v (R6): the store half of `load_owned_payload`'s
+            // owning-quotation arm above.
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::OwningQuotation(_) => {
                 let size = self.value_size(payload_ty);
                 if size > 0 {
                     self.push_instr(Instr::Blit(val, cell_ptr, size));
@@ -962,16 +969,19 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
-    /// or the interior pointer as a nested struct/enum/quotation value (a
-    /// destructure reads a stored quotation back out as a runtime value).
-    pub(super) fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
-        match field.ty {
+    /// The value held at `offset` in aggregate `base`: a width-exact scalar
+    /// load, or the interior pointer as a nested struct/enum/quotation value
+    /// (a destructure reads a stored quotation back out as a runtime value).
+    /// Takes the offset and type rather than a `FieldLayout` so an anonymous
+    /// slot (P7.S3v: a capture in an owning closure's env block) reads through
+    /// the same split a declared field does.
+    pub(super) fn slot_value(&mut self, base: Value, offset: u32, ty: IrType) -> Value {
+        match ty {
             // Slice 9 (R1): a zero-payload-enum field loads as a scalar, not
             // as the interior-pointer aggregate view below.
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
-                let fptr = self.field_ptr(base, field.offset);
-                let v = self.fresh_value(field.ty);
+                let fptr = self.field_ptr(base, offset);
+                let v = self.fresh_value(ty);
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
@@ -979,12 +989,10 @@ impl<'a> FuncBuilder<'a> {
             | IrType::Enum(_)
             | IrType::Array(_)
             | IrType::Quotation(_)
-            | IrType::OwningQuotation(_) => {
-                self.field_aggregate_value(base, field.offset, field.ty)
-            }
+            | IrType::OwningQuotation(_) => self.field_aggregate_value(base, offset, ty),
             _ => {
-                let fptr = self.field_ptr(base, field.offset);
-                let v = self.fresh_value(field.ty);
+                let fptr = self.field_ptr(base, offset);
+                let v = self.fresh_value(ty);
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
@@ -992,7 +1000,7 @@ impl<'a> FuncBuilder<'a> {
     }
 
     pub(super) fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
-        let v = self.field_value(base, field);
+        let v = self.slot_value(base, field.offset, field.ty);
         self.stack.push(v);
     }
 }

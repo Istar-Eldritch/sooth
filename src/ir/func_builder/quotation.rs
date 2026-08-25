@@ -50,7 +50,9 @@ impl<'a> FuncBuilder<'a> {
     /// byte), else the one captured local's live value snapshotted from the
     /// enclosing frame -- a scalar's value, or a reference's pointer. The
     /// symbol is `{enclosing}__quot{id}`, unique because word names are unique
-    /// and `QuotId` is per-function.
+    /// and `QuotId` is per-function. P7.S3v (R1/R2): the third `disposer` slot
+    /// is written here too, holding `{symbol}__dispose` for a *capturing owning*
+    /// literal and the null pointer otherwise.
     fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId, owning: bool) -> Value {
         let id = self.quot_bodies[&phantom];
         let symbol = format!("{}__quot{}", self.cur_word_name, id.0);
@@ -78,7 +80,7 @@ impl<'a> FuncBuilder<'a> {
         let dst = self.fresh_value(ty);
         self.push_alloc(Instr::Alloc(dst, layout.size, layout.align));
         let code = self.fresh_value(IrType::Code);
-        self.push_instr(Instr::FuncAddr(code, symbol));
+        self.push_instr(Instr::FuncAddr(code, symbol.clone()));
         let code_ptr = self.field_ptr(dst, layout.code_offset);
         self.push_instr(Instr::FieldStore(code_ptr, code));
         let env = match owning {
@@ -87,6 +89,27 @@ impl<'a> FuncBuilder<'a> {
         };
         let env_ptr = self.field_ptr(dst, layout.env_offset);
         self.push_instr(Instr::FieldStore(env_ptr, env));
+        // P7.S3v (R1/R2): the disposer slot, written for both flavours so no
+        // reader ever sees an uninitialized word. Only a capturing owning
+        // literal has anything to dispose; a plain one, and a capture-free
+        // owning one (which allocates no block either), store null, and
+        // `emit_drop`'s null check is what makes that the no-op it means.
+        // `lower_materialized` mints the function under the same emptiness
+        // test, so the slot never names a symbol nobody emitted.
+        let disposer = match owning && !captures.is_empty() {
+            true => {
+                let d = self.fresh_value(IrType::Code);
+                self.push_instr(Instr::FuncAddr(d, quot_disposer_symbol(&symbol)));
+                d
+            }
+            false => {
+                let d = self.fresh_value(IrType::Ptr);
+                self.push_instr(Instr::Const(d, 0));
+                d
+            }
+        };
+        let disposer_ptr = self.field_ptr(dst, layout.disposer_offset);
+        self.push_instr(Instr::FieldStore(disposer_ptr, disposer));
         dst
     }
 
@@ -263,7 +286,7 @@ impl<'a> FuncBuilder<'a> {
         // P7.S3h: `call` is also the *consuming* use of an owning closure --
         // the pop above discharges its disposal obligation, and running the
         // body is what actually performs the disposal. Nothing else about the
-        // indirect call differs: same two-slot value, same trailing env arg.
+        // indirect call differs: same three-slot value, same trailing env arg.
         let (IrType::Quotation(sig) | IrType::OwningQuotation(sig)) = self.value_type(v) else {
             unreachable!("a non-literal `call` operand is a materialized quotation value")
         };
@@ -361,10 +384,13 @@ impl<'a> FuncBuilder<'a> {
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
     /// struct/enum whose `is_linear` is set, or an owning cell) this is a
     /// plain `Call` to the (builtin or synthesized) destructor; a `Copy`
-    /// value is discarded with no runtime effect. Shared by `drop`,
-    /// `drop_level_fields`' drop-the-rest, and the synthesized struct/enum
-    /// destructors themselves, so "how a value is disposed" lives in one
-    /// place.
+    /// value is discarded with no runtime effect. On an owning quotation
+    /// (P7.S3v R3) it instead seals the current block and opens two more, to
+    /// guard the indirect call on the disposer's runtime nullness -- the one
+    /// arm here that is not a single instruction in the caller's own block.
+    /// Shared by `drop`, `drop_level_fields`' drop-the-rest, and the
+    /// synthesized struct/enum destructors themselves, so "how a value is
+    /// disposed" lives in one place.
     pub(in crate::ir) fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
             // A cell always frees on drop, regardless of its payload's own
@@ -386,6 +412,32 @@ impl<'a> FuncBuilder<'a> {
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
                 "checked: a linear array element is rejected wherever an array type is named"
             ),
+            // P7.S3v (R3): dropping an owning closure runs its per-
+            // construction-site disposer (R2) on its env block -- disposing
+            // its captures without running its body, the one thing `call`
+            // cannot do. The null check is the capture-free case: that value
+            // owns no block and names no function, exactly as a
+            // non-capturing literal's env is null.
+            IrType::OwningQuotation(_) => {
+                let layout = quotation_layout(WORD_WIDTH);
+                let disposer_ptr = self.field_ptr(v, layout.disposer_offset);
+                let disposer = self.fresh_value(IrType::Code);
+                self.push_instr(Instr::FieldLoad(disposer, disposer_ptr));
+                let null = self.fresh_value(IrType::Code);
+                self.push_instr(Instr::Const(null, 0));
+                let present = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(present, CmpOp::Ne, disposer, null));
+                let dispose = self.fresh_block();
+                let join = self.fresh_block();
+                self.seal_block(Terminator::Jnz(present, dispose, join));
+                self.start_block(dispose);
+                let env_ptr = self.field_ptr(v, layout.env_offset);
+                let env = self.fresh_value(IrType::Ptr);
+                self.push_instr(Instr::FieldLoad(env, env_ptr));
+                self.push_instr(Instr::CallIndirect(None, disposer, vec![env]));
+                self.seal_block(Terminator::Jmp(join));
+                self.start_block(join);
+            }
             _ => {}
         }
     }
@@ -962,5 +1014,229 @@ mod tests {
         let ir = lower_src(": w ( -- ) 7 drop ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, is_call_instr), 0);
+    }
+
+    // P7.S3v: the disposer -- the third slot of a quotation value, the
+    // function it names, and `emit_drop`'s arm that runs it.
+
+    #[test]
+    fn emit_drop_of_an_owning_quotation_calls_its_disposer_under_a_null_check() {
+        // R3: `drop` on an owning closure runs the per-construction-site
+        // disposer its third slot names, disposing its captures without
+        // running its body. Built against a constructed value rather than a
+        // program because it pins the emitted shape -- the null check and the
+        // indirect call -- which the end-to-end goldens cannot observe: they
+        // see only that a capture's `drop` printed.
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let env: HashMap<String, Arity> = HashMap::new();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                slices: empty_slices(),
+                statics: empty_statics(),
+            },
+        );
+        let v = b.fresh_value(ir_type_of(crate::ast::owning_quotation_type(
+            Vec::new(),
+            Vec::new(),
+        )));
+        b.emit_drop(v);
+        b.seal_block(Terminator::Ret(None));
+
+        let layout = quotation_layout(WORD_WIDTH);
+        let entry = &b.blocks[0];
+        let disposer = loaded_slot(entry, v, layout.disposer_offset)
+            .expect("the entry block loads the disposer slot");
+        // The guard: a capture-free owning literal writes null there and mints
+        // no function, so an unconditional call would jump through null.
+        let null = entry
+            .instrs
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(n, 0) => Some(*n),
+                _ => None,
+            })
+            .expect("the entry block materializes the null pointer to compare against");
+        assert!(
+            entry.instrs.iter().any(|i| matches!(
+                i,
+                Instr::Cmp(_, CmpOp::Ne, a, z) if *a == disposer && *z == null
+            )),
+            "the disposer slot is compared against null: {:?}",
+            entry.instrs
+        );
+        assert!(
+            !entry.instrs.iter().any(is_call_instr),
+            "the call must sit behind the guard, not in the entry block: {:?}",
+            entry.instrs
+        );
+        let Terminator::Jnz(cond, dispose, join) = &entry.term else {
+            panic!("expected a guarded branch, got {:?}", entry.term)
+        };
+        assert_eq!(b.value_type(*cond), IrType::Bool);
+
+        let guarded = block(&b, *dispose);
+        let env_word =
+            loaded_slot(guarded, v, layout.env_offset).expect("the guarded block loads the env");
+        assert!(
+            guarded.instrs.iter().any(|i| matches!(
+                i,
+                Instr::CallIndirect(None, f, args) if *f == disposer && args[..] == [env_word]
+            )),
+            "the disposer is called indirectly on the env block: {:?}",
+            guarded.instrs
+        );
+        assert!(
+            !block(&b, *join).instrs.iter().any(is_call_instr),
+            "the join runs nothing: {:?}",
+            block(&b, *join).instrs
+        );
+    }
+
+    /// The value a block loads out of `base`'s slot at `offset`, or `None` if
+    /// it never reads that slot -- so an assertion cannot be satisfied by a
+    /// load of the neighbouring word.
+    fn loaded_slot(block: &Block, base: Value, offset: u32) -> Option<Value> {
+        let ptr = block.instrs.iter().find_map(|i| match i {
+            Instr::PtrOffset(p, b, off) if *b == base && *off == offset as i64 => Some(*p),
+            _ => None,
+        })?;
+        block.instrs.iter().find_map(|i| match i {
+            Instr::FieldLoad(v, p) if *p == ptr => Some(*v),
+            _ => None,
+        })
+    }
+
+    fn block<'a>(b: &'a FuncBuilder<'a>, id: BlockId) -> &'a Block {
+        b.blocks
+            .iter()
+            .find(|block| block.id == id)
+            .expect("a sealed block")
+    }
+
+    #[test]
+    fn a_capturing_owning_literal_mints_a_disposer_that_disposes_then_frees() {
+        // R1/R2: the boundary writes a real symbol into the third slot, and
+        // the function behind it disposes each capture at its own env offset
+        // before freeing the block -- the reverse would free storage a
+        // destructor still reads, since an aggregate capture's `slot_value` is
+        // an interior pointer into the block, not a copy out of it.
+        let ir = lower_src(&format!(
+            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
+             : main ( -- ) 7 Spy mk call ;"
+        ));
+        let mk = func(&ir, "mk");
+        assert!(
+            instrs(mk)
+                .iter()
+                .any(|i| matches!(i, Instr::FuncAddr(_, sym) if sym == "mk__quot0__dispose")),
+            "the boundary names the disposer: {:?}",
+            instrs(mk)
+        );
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(
+            call_symbols(func(&ir, "mk__quot0__dispose")),
+            vec![spy_drop.as_str(), FREE_SYMBOL]
+        );
+    }
+
+    #[test]
+    fn a_capture_free_owning_literal_keeps_a_null_disposer_and_mints_no_function() {
+        // R2: nothing to dispose and no block to free, so the value keeps the
+        // null third slot its null env mirrors -- the case `emit_drop`'s null
+        // check exists for. Minting an empty disposer instead would make that
+        // check dead and hide a regression in it.
+        let ir = lower_src(
+            ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n\
+             : main ( -- ) mk call ;",
+        );
+        assert!(
+            !ir.funcs.iter().any(|f| f.name.ends_with("__dispose")),
+            "no disposer is minted: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !instrs(func(&ir, "mk"))
+                .iter()
+                .any(|i| matches!(i, Instr::FuncAddr(_, sym) if sym.ends_with("__dispose"))),
+            "the boundary writes null, not a symbol: {:?}",
+            instrs(func(&ir, "mk"))
+        );
+    }
+
+    #[test]
+    fn a_capturing_plain_literal_keeps_a_null_disposer() {
+        // R1: the third slot is shared by both flavours, but only an owning
+        // closure owns its captures -- a plain one snapshots a frame it does
+        // not own, so minting a disposer for it would free another frame's
+        // value.
+        let ir = lower_src(
+            ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
+             : main ( -- ) 5 mk call . ;",
+        );
+        assert!(
+            !ir.funcs.iter().any(|f| f.name.ends_with("__dispose")),
+            "a plain closure mints no disposer: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !instrs(func(&ir, "mk"))
+                .iter()
+                .any(|i| matches!(i, Instr::FuncAddr(_, sym) if sym.ends_with("__dispose"))),
+            "the boundary writes null, not a symbol: {:?}",
+            instrs(func(&ir, "mk"))
+        );
+    }
+
+    #[test]
+    fn an_owning_disposer_reads_each_capture_at_its_own_env_offset() {
+        // R2: the disposer and `build_owning_env` compute the block's layout
+        // from one `owning_env_slots` call, so a capture wider than a word
+        // (`Pair`) moves the next one along. The middle capture is a borrow,
+        // which owns nothing and is disposed by nobody -- but still holds its
+        // slot, so skipping it must not slide the capture after it up.
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+             : mk ( Pair &Spy Spy -- owning [ -- ] ) | a b c | [ a drop b &tag @ . c drop ] ;\n\
+             : main ( -- ) 1 Spy 2 Spy Pair 3 Spy | p s | p &s 4 Spy mk call s drop ;"
+        ));
+        let disposer = func(&ir, "mk__quot0__dispose");
+        let offsets: Vec<i64> = instrs(disposer)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::PtrOffset(_, _, off) => Some(*off),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            vec![0, 24],
+            "the 16-byte `Pair` at 0, the borrow's word skipped at 16, the `Spy` at 24"
+        );
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let pair_drop = struct_drop_symbol(StructId::from_index(1), None);
+        assert_eq!(
+            call_symbols(disposer),
+            vec![pair_drop.as_str(), spy_drop.as_str(), FREE_SYMBOL],
+            "each owned capture is disposed once, in env order, then the block is freed"
+        );
+        assert!(
+            instrs(disposer)
+                .iter()
+                .any(|i| matches!(i, Instr::Const(_, 32))),
+            "the whole block is freed, borrow slot included: {:?}",
+            instrs(disposer)
+        );
     }
 }

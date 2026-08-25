@@ -1,558 +1,233 @@
 # Phase 7 Slice 3v: dropping and storing a linear-capturing quotation
 
-**Status:** specified, not implemented.
-**Discovery:** `docs/roadmap/P7/slice3v-brief.md` (written and re-verified against `1dabcbc`;
-this spec re-verified every load-bearing citation against `3b85119`).
-**Roadmap:** `docs/roadmap/P7-language-prereqs.md`, the **P7.S3v** entry, bounded by the
-**P7.S3u** (parked, not a prerequisite) and **P7.S5** (linear array elements, not this slice's)
-entries.
-**Predecessor:** `docs/roadmap/P7/slice3h-spec.md` — ships the owning-closure type and its two
-restrictions, both lifted here for three positions only.
+**Status:** Implemented (4 phases, landed on `impl/slice3v_spec-2608251924`)
+**Discovery:** `docs/roadmap/P7/slice3v-brief.md`
+**Predecessor:** `docs/roadmap/P7/slice3h-spec.md`, which shipped `owning [ … ]` and the two
+restrictions this slice lifts for three positions.
 
 ## Problem
 
-**P7.S3h** shipped `owning [ … ]`: a closure whose type marks a disposal obligation, discharged
-by `call`. Two restrictions exist because nothing can invoke a per-value disposer:
+S3h's owning closure could only be discharged by `call`, because nothing could invoke a
+per-value disposer. Two restrictions followed:
 
-**(i) `drop` on an owning closure is a located rejection**, twinned on the concrete
-(`src/check.rs:3367-3368`) and generic (`src/check/poly.rs:1254-1255`) paths, both calling
-`cannot_drop_owning_quotation_error` (`src/check.rs:3009`). Probed against `3b85119`:
+1. `drop` on an owning closure was a located rejection, twinned on the concrete
+   (`check.rs`) and generic (`check/poly.rs`) `"drop"` arms, both calling
+   `cannot_drop_owning_quotation_error`.
+2. An owning closure could not sit in any aggregate position:
+   `audit_quotation_type_registries` carved out only a *plain* `Type::Quotation` struct field
+   (D4) and array element, so struct field, variant field and cell payload were all rejected.
+   The glued spelling `^owning [ -- ]` never even reached the audit: `split_owning_cell_word`
+   resolved the remainder `"owning"` as an unknown type name.
 
-```
-import: intrinsics * ;
-type: Spy tag i64 ;
-: drop ( Spy -- ) | s | "drop " . s Spy> . ;
-: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;
-: main ( -- ) 7 Spy mk drop ;
-\ error: cannot `drop` a value of type `owning [ -- ]` in `main` (line 5): an owning closure
-\   disposes its captures by running, so `call` it -- no destructor can run a closure body
-```
+Lowering could not have absorbed a lifted gate either: `emit_drop` had no quotation arm,
+and `field_is_linear`/`layout_field_is_linear` answered `false` for one, so no container's
+`is_linear` fold saw an owning field and no destructor was synthesized. Deleting the checker
+gates alone would have leaked the capture and the heap env block on every container `drop`.
 
-**(ii) An owning closure may not sit in an aggregate position.** One audit,
-`reject_quotation_type_position` (`src/check/audits.rs:510`), dispatches on `is_quotation_type`
-across every declared position; `audit_quotation_type_registries`
-(`src/check/audits.rs:158-211`) walks struct fields, enum variant fields, array elements, cell
-payloads and reference referents. Re-probed per position, one fixture each, against `3b85119`:
-
-| Position | Result today | Whose gate |
-|---|---|---|
-| struct field | rejected: "cannot appear as the field `q` of struct" | **this slice** |
-| enum variant field | rejected: same audit, "field `q` of enum variant" | **this slice** |
-| owned-cell payload, spaced (`^ owning [ -- ]`) | rejected: "cannot appear as an owned-cell payload" | **this slice** |
-| owned-cell payload, glued (`^owning [ -- ]`) | rejected: `unknown type \`owning\`` at the `^` remainder — the parser never reaches the audit | **this slice**, parser fix |
-| array element | rejected: `linear array elements are not supported yet` | **P7.S5** |
-| slice element | rejected: a view does not own what it points at | **P7.S5** |
-
-The array and slice rows are not this slice's gate. Probed: `type: Arr xs [Spy 2] ;` fails with
-the identical "linear array elements are not supported yet" message for an ordinary linear
-struct, with no `owning` anywhere in the source — `audit_quotation_type_registries`'s own array
-loop (`:195-203`) already carves out a *plain* `Type::Quotation` element (a pre-existing D4
-materialization boundary) but not an owning one, so an owning array element does still reach
-`reject_quotation_type_position` today. Whether that audit or the general non-`Copy`-element gate
-in `src/check/declarations.rs` is the one that actually fires first is immaterial to this slice:
-**this slice does not touch the array loop, the general element gate, or any slice-element
-gate.** Widening the array carve-out to admit `OwningQuotation` is explicitly out of scope (R1) —
-doing so would let an owning closure past the audit into whatever gate fires second, and that
-gate's own soundness for a per-construction-site disposer is P7.S5's question to answer, not
-this slice's.
-
-**Why lowering cannot currently be reached even if the checker admitted these positions.**
-`emit_drop` (`src/ir/func_builder/quotation.rs:368-390`) has no arm for a quotation type — its
-`_ => {}` swallows one silently. `field_is_linear` (`src/ir/layout.rs:66-80`) and
-`layout_field_is_linear` (`:895-911`) likewise fall through to `false` for a quotation type, so
-no container's `is_linear` fold sees an owning field, and `synthesize_aggregate_destructors`
-(`src/ir/destructors.rs:37`) never emits a destructor for it. If the checker gates were deleted
-without any of this, an owning field would fall through the whole pipeline and leak both the
-capture and the heap env block, silently, on every container `drop`.
-
-## Design
+## Design rulings (as shipped)
 
 ### R1 — The disposer is a third word in the shared quotation value, keyed on the construction site
 
-`Type::OwningQuotation` carries only the declared effect (`src/ast.rs:2295`), so two closures
-with identical effects and different capture sets are one type — nothing type-directed (a
-`Drop` trait, a specialized `impl:`, a trait-object vtable) can discriminate them. The value
-itself grows a third word, populated at the one place the capture's concrete types are known:
-`materialize_quot_value` (`src/ir/func_builder/quotation.rs:54`), where a compiler-synthesized
-disposer symbol is minted per literal, exactly as `code`'s `FuncAddr` already is.
-
-`quotation_layout` (`src/ir/types.rs:243-250`) widens from `2 * word_width` to `3 * word_width`,
-gaining a `disposer_offset` field on `QuotLayout` (`:236-241`) at `2 * word_width`. Every field
-offset used by lowering is read from this struct (`materialize_quot_value`,
-`lower_indirect_call` at `src/ir/func_builder/quotation.rs:203`), so no call site needs an
-offset literal edited.
-
-**Every quotation value carries the third word, owning or not** — the alternative (a
-per-variant width) is rejected in the brief: `:Q{n}` is keyed on effect alone
-(`quot_index`, `src/backend/qbe.rs:57-62`), collapsing a plain and an owning quotation of the
-same effect to one symbol today, and the doc comment at `src/ir/types.rs:185-197` already
-asserts they are byte-for-byte identical. Diverging the width would re-key that symbol on
-effect *and* owning-ness across every site that maps both variants together
-(`src/backend/qbe.rs:405-413,449-463`), for an 8-byte saving on the minority case (a
-materialized rather than inlined closure). **This is the canary named in the brief: if a phase
-finds itself editing `types.rs:185-197` to say the two variants' widths differ, the ruling has
-been reversed by accident — stop and report it, do not proceed.** A non-owning quotation's third
-word is always the null pointer, mirroring the existing null-env convention for a non-capturing
-literal.
-
-Backend sites touched, all mechanical width/text changes with no shape decision:
-
-- `src/backend/qbe.rs:151` — the hardcoded `type :Q{idx} = { l, l }` → `{ l, l, l }`, the only
-  literal-string spelling of the width.
-- `src/ir/types.rs:700-704` (`ir_type_of_quotation_is_two_slot_aggregate`) — the
-  `assert_eq!(layout.size, 2 * WORD_WIDTH)` becomes `3 * WORD_WIDTH`, and the test gains a
-  `disposer_offset` assertion at `2 * WORD_WIDTH`.
-- Every QBE IL golden carrying the literal `type :Q{n} = { l, l }` — a mechanical sweep, not a
-  design problem, called out here so a phase does not treat a wave of golden diffs as a
-  regression.
-
-`width`/`qbe_abi_ty`/`member_ty`/`field_store_op` (`src/backend/qbe.rs:395-463,520-540`) already
-pair `IrType::Quotation` and `IrType::OwningQuotation` in every arm (S3h's doing); none of them
-spell the width literally, so none change here.
-
-### R2 — The disposer's body composes existing per-type disposal; it invents no dispatch
-
-At each owning-closure construction site, `build_owning_env` (`quotation.rs:101`) already lays
-out one heap slot per capture via `owning_env_slots` (`src/ir/func_builder/mod.rs:752`) with a
-known `(offset, IrType)` per capture. The new disposer is a synthesized `IrFunc`, one per
-literal (named `{symbol}__dispose`, alongside the existing `{enclosing}__quot{id}` body
-symbol), taking the env pointer as its sole parameter:
-
-1. For each capture, at its known offset: `FieldLoad` the value, then call the **existing**
-   `FuncBuilder::emit_drop` (`quotation.rs:368-390`) on it — the exact primitive a struct's own
-   field-glue destructor already calls per field. A scalar or borrow capture takes `emit_drop`'s
-   `_ => {}` no-op arm, matching what the closure body's own prologue does with one (uses it,
-   never frees it); a linear struct/enum/cell capture takes its existing arm and calls that
-   type's own `struct_drop_symbol`/`enum_drop_symbol`/cell destructor.
-2. Free the block (`FREE_SYMBOL`), guarded exactly as `build_owning_env`'s existing zero-capture
-   case: a capture-free literal stores a null disposer, mirroring its null env, and needs no
-   synthesized function at all.
-
-This reuses `emit_drop` rather than re-deriving per-type disposal, so the disposer is not new
-recursive machinery — it is the same fold `synthesize_struct_destructor`'s field loop performs,
-applied to an anonymous capture list instead of a declared field list.
-
-### R3 — `emit_drop` gains the one arm that makes both `drop` and containment work
-
-`emit_drop`'s match (`quotation.rs:368-390`) gains:
-
-```rust
-IrType::OwningQuotation(_) => {
-    // load the layout's disposer slot; if non-null, indirect-call it with
-    // the loaded env slot as its sole argument (mirrors lower_indirect_call's
-    // code-slot load, R1's third word instead of the first)
-}
-```
-
-guarded by a null check on the disposer slot, symmetric with the null-env convention. This one
-arm is what both consumers below reduce to:
-
-- **`drop` on a bare owning closure value** discharges through the ordinary `"drop"` shuffle
-  arm in `src/check.rs` and its poly twin — once the checker stops rejecting the type (R4), the
-  value reaches `FuncBuilder::emit_drop` exactly like a struct value does, and this arm fires.
-  This is a **new consuming use, distinct from `call`**: `call` runs the closure's own code,
-  which may do arbitrary work before disposing its captures via the body's own logic; `drop`
-  runs *only* the disposer, discarding the closure unexecuted. Both are legal, and they run
-  different code — this is the "discarding one unexecuted" capability S3h's own out-of-scope
-  section named for this slice.
-- **A container's `drop`** (a struct/enum holding an owning field) reaches this arm through the
-  *existing, unmodified* `synthesize_struct_destructor`/`synthesize_enum_destructor` field-glue
-  loop, once `field_is_linear` (R5) tells that loop the field is linear at all. No change to
-  destructor synthesis itself is needed — R5 is the whole of what makes the existing machinery
-  see the field.
-
-### R4 — Delete the twinned `drop` rejection
-
-`src/check.rs:3367-3368` and `src/check/poly.rs:1254-1255` (both matching `OwningQuotation` and
-calling `cannot_drop_owning_quotation_error`) are deleted. `cannot_drop_owning_quotation_error`
-itself (`src/check.rs:3009`) is deleted too if nothing else calls it (verify with a
-workspace-wide reference check before removing; if some other located error reuses its message
-text, keep the function and just drop the two call sites).
-
-This is a **twinned guard** (this project's own repeat failure mode): the monomorphic path
-(`check.rs`'s `"drop"` shuffle arm) and the generic path (`poly.rs`'s `"drop"` arm, reached only
-from an actual generic body) must each be **mutation-tested independently** — restore each
-deleted arm in isolation and confirm the corresponding migrated test (R7) fails. The generic-path
-test must go through a real generic body (mirroring S3h's own
-`dropping_an_owning_closure_in_a_generic_body_is_a_located_rejection`, which calls a poly word
-returning an owning closure built by an ordinary one), not a monomorphic program that happens to
-type-check under the poly checker.
-
-### R5 — Widen the two linearity folds, and only them
-
-`field_is_linear` (`src/ir/layout.rs:66-80`) and `layout_field_is_linear`
-(`:895-911`) each gain:
-
-```rust
-IrType::OwningQuotation(_) => true,
-```
-
-matching `IrType::OwnedCell(_) => true` immediately above. `IrType::Quotation` (plain) stays on
-the `_ => false` wildcard — no change, no new `Copy` obligation, no IL churn for any program that
-does not use `owning`. This is the one edit `check/audits.rs`'s own doc comment
-(`:922`, in `owning_quotation_is_rejected_in_every_aggregate_position`'s neighborhood) names as the hole this slice closes on
-purpose: with it, `StructLayout::is_linear`/`EnumLayout::is_linear` see an owning field, so
-`synthesize_aggregate_destructors` emits a destructor for the container, and that destructor's
-field-glue loop calls `emit_drop` on the field, which is R3's new arm.
-
-No change to `crate::check::is_copy`: its `Type::OwningQuotation` arm has answered `false` since
-S3h, so the checker already treats a struct with an owning field as non-`Copy`/linear. This gap
-was purely on the IR/backend side.
-
-### R6 — Lift the containment audit for three positions only
-
-`audit_quotation_type_registries` (`src/check/audits.rs:158-211`) gains three carve-outs, not
-two mirrored ones. The struct-field loop already carves out plain `Type::Quotation` (`:169-171`,
-R8/D4), which this slice widens:
-
-```rust
-if matches!(fty, Type::Quotation(_)) { continue; }
-```
-
-to
-
-```rust
-if matches!(fty, Type::Quotation(_) | Type::OwningQuotation(_)) { continue; }
-```
-
-**The enum-variant loop (`:180-191`) has no such carve-out today, for either quotation flavour**
-— probed: `type: E | A q [ -- ] ;` (a *plain* quotation variant field) is rejected on `3b85119`
-with "cannot appear as the field `q` of enum variant", the identical message the struct-field
-case gets *before* R8/D4's own carve-out. This is not a sibling to mirror; it is its own new
-carve-out, admitting only the owning flavour (a plain quotation variant field stays out of scope
-and rejected, matching S3h's own scoping of D4 to struct fields only):
-
-```rust
-if matches!(fty, Type::OwningQuotation(_)) { continue; }
-```
-
-and a **third, separately new** carve-out on the owned-cell loop (`:204-206`), which today has
-*no* plain-quotation exception at all (a plain `Type::Quotation` cell payload is out of scope,
-unchanged, and stays rejected):
-
-```rust
-if matches!(c.payload, Type::OwningQuotation(_)) { continue; }
-```
-
-**Nothing else in this function changes.** The array loop (`:195-203`) keeps its existing
-carve-out unchanged (plain `Quotation` only); the reference-referent loop (`:207-209`) gains no
-carve-out. An owning closure behind a reference, as an array element, or at an `extern:`
-boundary stays exactly as rejected as it is on `3b85119`.
-
-### R7 — The owned-cell parser gap: the glued `^owning` form
-
-`^i64` lexes as one glued `Word` token; `split_owning_cell_word`
-(`src/parser.rs:3592-3617`) peels the leading `^`-run and recurses on the remainder. For
-`^owning`, the remainder is the bare string `"owning"`, which matches none of the function's
-existing arms (empty / starts with `'` / else) and falls to `resolve_type_or_apply("owning",
-…)`, reporting `unknown type \`owning\``. Reproduced on`3b85119`:
-
-```
-: mk ( -- ^owning [ -- ] ) 0 . [ 0 . ] ;
-\ error: unknown type `owning` at line 2, col 12
-```
-
-The spaced form (`^ owning [ -- ]`, `^` and `owning` as two tokens) already works today —
-`parse_owning_cell_type_expr`'s empty-remainder branch (`:3595-3603`) recurses into
-`parse_type_expr`, which already dispatches on `owning_quotation_ahead()` (`:3542-3543`).
-Reproduced: it reaches the audit and is rejected with "cannot appear as an owned-cell payload",
-confirming the parser is not the blocker for that spelling.
-
-**Fix, scoped to the glued form only:** `split_owning_cell_word`'s remainder match gains an arm
-for `remainder == OWNING_QUOTATION_KEYWORD`, calling the same quotation-effect reader
-`parse_owning_quotation_type_expr` uses, then folding the result through `intern_owned_cell_type`
-exactly as every other arm does. No lexer change (`OWNING_QUOTATION_KEYWORD` stays an ordinary
-word, matching S3h's own no-lexer-change ruling); no change to `parse_type_expr`'s own dispatch,
-which already handles the spaced form correctly.
-
-### R9 — Two existing tests go stale and must be updated in the same phase that stales them
-
-Caught in review, both real and both missed by the original draft.
-
-**`owning_quotation_is_rejected_in_every_aggregate_position`** (`src/check/audits.rs:942-970`)
-asserts all five aggregate positions reject an owning quotation via `check_src(src).unwrap_err()`
-in a loop over five `(src, position)` pairs. R6 admits three of the five (struct field, variant
-field, cell payload); the other two (reference referent, `extern:` boundary) stay rejected. Once
-R6 lands, three of the five `unwrap_err()` calls panic on `Ok`, so this test fails at phase 3's
-own gate if left untouched. **Fix, in phase 3, alongside R6:** split the loop into two —
-`owning_quotation_is_admitted_in_three_positions` keeping the three now-legal `(src, position)`
-pairs as `check_src(src)` assertions that must succeed (not `unwrap_err`), and
-`owning_quotation_is_rejected_in_every_remaining_aggregate_position` keeping the reference and
-`extern:` pairs exactly as they are today. Do not delete either check; this is a split, not a
-drop, and the reference/`extern:` half must keep passing unchanged before and after R6 lands
-(the blast-radius guard for R6's carve-outs already required by the Tests section — this test
-split is where it actually lives, not a new test to write).
-
-**`a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation`**
-(`tests/phase7_slice3h.rs:661-682`) asserts `il.contains("type :Q0 = { l, l }")` and, in the same
-function, a companion assertion on the emitted allocation size for a *different* (owning) case
-two tests up (`:655-666`, `il.contains("(:W %v0, :Q0 %v1)")` — verify the exact byte-size
-assertion at test time, since R1 widens `:Q0` for both variants and this exact string goes stale
-regardless of which function it sits in). **Fix, in phase 1**: update the `{ l, l }` →
-`{ l, l, l }` literal this test checks for, and rename the test itself (its name asserts "keeps
-its two word layout," which becomes false under R1) — e.g.
-`a_plain_quotation_still_carries_a_null_disposer_slot`, asserting the third word is present and
-null rather than absent. This is not optional golden-sweep churn; it is phase 1's own exit
-criterion ("every quotation-bearing golden... still builds") failing if skipped, and `cargo test`
-will catch it regardless — named here so it is not an unplanned discovery mid-phase.
-
-### R8 — The REPL override-epoch obligation
-
-`src/ir/destructors.rs:8-35`: once a session holds any user `drop` override, every linear
-struct's/enum's/cell's destructor is epoch-suffixed session-wide, because any of them may
-transitively call the overridden one. The per-construction-site disposer (R2) calls into those
-destructors through `emit_drop` exactly as a struct's own field glue does, so it inherits the
-same obligation — the disposer is minted at `materialize_quot_value`, in the same
-`self.materialized`/lowering path both `repl.rs` entry points already thread through
-`synthesize_aggregate_destructors` with `self.apply_drop_generations` (`src/repl.rs:3198`,
-`:3391`, the sites already citing "R12: this module/line must carry its own struct/enum
-destructors"). **No new plumbing is required for the disposer to see the live epoch** — it calls
-`emit_drop`, and `emit_drop`'s existing arms already resolve `struct_drop_symbol`/
-`enum_drop_symbol` against `self.structs.layouts[..].drop_generation`, which
-`apply_drop_generations` has already set before lowering runs. The risk is not a missing wire; it
-is an **untested** one, whose failure mode is a silent `dlopen` link failure
-(`src/repl.rs`'s `Library::open`), not a diagnostic — exactly why the brief requires a dedicated
-golden rather than trusting the wiring by inspection.
-
-## Codebase map
-
-| Anchor | Role in this slice |
-| --- | --- |
-| `src/ir/types.rs:236-250` | `QuotLayout`/`quotation_layout` — R1's width and new `disposer_offset` |
-| `src/ir/types.rs:185-197` | the byte-identical-variants doc comment — update to name the third slot; the canary (R1) |
-| `src/ir/types.rs:700-704` | the two-slot-aggregate unit test — R1's size/offset assertions |
-| `src/backend/qbe.rs:151` | the hardcoded `:Q{idx}` type string — R1's only literal-width site |
-| `src/ir/func_builder/quotation.rs:54-90` | `materialize_quot_value` — where R1's disposer symbol is minted |
-| `src/ir/func_builder/quotation.rs:101-124` | `build_owning_env` — R2's capture offsets, reused not rebuilt |
-| `src/ir/func_builder/mod.rs:752` | `owning_env_slots` — the offset/type table R2's disposer body reads |
-| `src/ir/func_builder/quotation.rs:368-390` | `emit_drop` — R3's new `OwningQuotation` arm |
-| `src/check.rs:3009,3367-3368` | `cannot_drop_owning_quotation_error` + the mono `drop` guard — R4 |
-| `src/check/poly.rs:1254-1255` | the poly-path twin of the same guard — R4 |
-| `src/ir/layout.rs:66-80,895-911` | `field_is_linear`/`layout_field_is_linear` — R5 |
-| `src/check/audits.rs:158-211` | `audit_quotation_type_registries` — R6's three carve-outs |
-| `src/check/audits.rs:510` | `reject_quotation_type_position` — unchanged, reached only for the positions still rejected |
-| `src/parser.rs:3592-3617` | `split_owning_cell_word` — R7's glued-token fix |
-| `src/parser.rs:3528-3548` | `parse_type_expr`'s `owning_quotation_ahead()` dispatch — unchanged, already handles the spaced form |
-| `src/ir/destructors.rs:8-35` | the override-epoch rule — R8, unchanged, just newly exercised |
-| `src/repl.rs:3198,3391` | the two `synthesize_aggregate_destructors` call sites the epoch already flows through |
-| `tests/phase7_slice3h.rs:169,187,335,354` | the four tests R4/R6 migrate, not delete |
-| `src/check/audits.rs:942-970` | `owning_quotation_is_rejected_in_every_aggregate_position` — **breaks under R6, must be split (R9)** |
-| `tests/phase7_slice3h.rs:661-682` | `a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation` — **its own name and byte-size assertion go stale under R1 (R9)** |
-| `src/backend/qbe.rs:441-445` | `member_ty`'s doc comment claims an owning-quotation field arm is unreachable — **goes stale under R6, cosmetic-only, deferred (see Out of scope)** |
-
-## Tests
-
-End-to-end, `tests/phase7_slice3v.rs` (through the real binary; every negative pins the exact
-diagnostic string):
-
-- **Migrated from `tests/phase7_slice3h.rs`** (delete from that file, add here with the new
-  assertion):
-  - `an_owning_quotation_field_is_rejected` (:169) → **admitted**, and its `Spy` capture is
-    disposed exactly once when the containing struct is `drop`ped without the closure ever being
-    `call`ed.
-  - `an_owning_quotation_variant_field_is_rejected` (:187) → same, for an enum variant field.
-  - `dropping_an_owning_closure_is_a_located_rejection` (:335) → **admitted**: `drop` on a bare
-    owning closure disposes its capture exactly once, and the closure's own body (which would
-    print something `call` does not) never runs — assert the captured side effect fires once and
-    the body-only side effect does not fire at all.
-  - `dropping_an_owning_closure_in_a_generic_body_is_a_located_rejection` (:354) → same,
-    through a generic body (`g ( 'T: Copy -- 'T ) | x | mk drop x ;` shape), pinning the
-    generic-path mutation guard (R4).
-- `an_owning_quotation_cell_payload_is_admitted_spaced` and
-  `an_owning_quotation_cell_payload_is_admitted_glued` (R6/R7) — `^ owning [ -- ]` and
-  `^owning [ -- ]` both build; `^>` extracts and `call`s or `drop`s the closure, disposing its
-  capture once either way.
-- `an_owning_cell_of_owning_quotation_is_disposed_on_cell_drop` — `drop` on the *cell itself*
-  (never unwrapped) disposes the capture exactly once, exercising the cell's own destructor
-  calling into R3's `emit_drop` arm rather than a user unwrapping it first.
-- `call_and_drop_run_different_code` (R3's headline) — a closure whose body prints one message
-  and whose capture's own `drop` prints another; `call`ing it prints both (body, then capture);
-  `drop`ping it prints only the capture's — pinned as two separate goldens on the same source,
-  branching on the last line.
-- `an_owning_field_disposes_alongside_its_siblings_exactly_once` — a struct with an owning field
-  *and* a plain linear field (e.g. two `Spy`s), `drop`ped once: both captures' disposal messages
-  appear exactly once each, in field order — guards against the disposer double-running or the
-  container's own field glue double-visiting the quotation field.
-- `an_array_element_owning_closure_is_still_rejected` and
-  `a_reference_referent_owning_closure_is_still_rejected` — the two positions R6 explicitly
-  leaves alone stay byte-identical to `3b85119`'s messages; these are the blast-radius guard on
-  R6's carve-outs, not new coverage.
-- `an_owning_cell_payload_of_a_plain_quotation_is_still_rejected` — the un-widened half of R6's
-  new cell carve-out: a *plain* (non-owning) `^[ -- ]` stays rejected, unchanged.
-- `explicit_repl_override_epoch_disposal` (R8, required) — at the REPL: define a struct with a
-  user `drop` override, then on a later line build an owning closure capturing a *different*
-  linear struct (not the overridden one) inside a struct field, and `drop` the container. Without
-  R8's epoch flowing to the disposer's `emit_drop` call this dies at `dlopen` with an undefined
-  `sooth_struct_drop_N`; with it, the session prints the capture's disposal line. This must run
-  through the actual `repl` test harness (not `build_and_run`), since the failure mode is a link
-  error a native build's single-module destructor set cannot reproduce.
-
-Unit, beside each touched function:
-
-- `src/ir/types.rs`: `quotation_layout`'s three offsets/size/align, mirroring the existing
-  two-slot test.
-- `src/ir/func_builder/quotation.rs`: `emit_drop` called directly on a constructed
-  `IrType::OwningQuotation` value — asserts the emitted instructions contain a null check, a
-  `FieldLoad` of the disposer slot, and a `CallIndirect`; and on a null-disposer value, asserts
-  no call is emitted. Constructed directly rather than through a full build, since phase 2 lands
-  before the checker admits any program that reaches this arm for real (R4/R6 land in phase 3).
-- `src/ir/layout.rs`: `field_is_linear`/`layout_field_is_linear` on a constructed
-  `IrType::OwningQuotation(_)`, asserting `true`, alongside the existing `OwnedCell`/`Struct`
-  cases.
-- `src/parser.rs`: `split_owning_cell_word` on `^owning [ -- ]`, asserting the interned
-  `Type::OwnedCell` payload is `Type::OwningQuotation`; a control asserting `^Spy` is unaffected.
-- `src/check/audits.rs`: `audit_quotation_type_registries` directly, admitting an owning struct
-  field/variant field/cell payload and still rejecting an owning array element and reference
-  referent — the R6 carve-out's own mutation guard, mirroring the existing
-  `poly_quotation_behind_a_reference_inside_an_array_element_is_rejected`-style direct-call
-  tests already in this file. **This is where R9's split of
-  `owning_quotation_is_rejected_in_every_aggregate_position` (`:942-970`) lands**: the three
-  now-admitted `(src, position)` pairs move into a new `owning_quotation_is_admitted_in_three_positions`
-  asserting `check_src(src)` succeeds, and the two still-rejected pairs (reference referent,
-  `extern:` boundary) stay in place, renamed
-  `owning_quotation_is_rejected_in_every_remaining_aggregate_position`, asserting `unwrap_err()`
-  exactly as today.
-
-**Mutation-test before each phase exit**, deleting what each guards and proving the named test
-fails:
-
-- R3's null check on the disposer slot (force an unconditional call) — a capture-free owning
-  closure's `drop` (or its container's) must fault or misbehave observably in the unit test that
-  constructs a null-disposer value.
-- R4's two guards, independently (restore each deleted arm in isolation) — the corresponding
-  migrated `drop`-is-now-legal test must fail with each restored.
-- R5's two widened folds, independently (`field_is_linear` and `layout_field_is_linear`,
-  restoring each to its `_ => false` wildcard alone) — `an_owning_quotation_field_is_rejected`'s
-  migrated form must fail (container drop leaks/no-ops) with either one reverted.
-- R6's three carve-outs, independently — each of the three admitted-position goldens must fail
-  when its own carve-out alone is reverted, and the two still-rejected goldens must keep passing
-  throughout (proving the carve-outs are additive, not a widened wildcard).
-- R7's glued-form fix — reverting `split_owning_cell_word`'s new arm must fail
-  `an_owning_quotation_cell_payload_is_admitted_glued` while leaving the spaced-form golden
-  passing (proving the two forms are genuinely two different code paths, not one).
-
-## Phase 1 — widen the quotation value layout (hard)
-
-**Scope.** `src/ir/types.rs` (`QuotLayout`, `quotation_layout`, the doc comment, the unit test),
-`src/backend/qbe.rs:151`, and the QBE IL golden sweep the width change forces (**R9, named
-explicitly**: `tests/phase7_slice3h.rs:661-682`'s `{ l, l }` assertion and its own name go stale
-under this phase, not a later one, and must be fixed here). `materialize_quot_value`
-(`quotation.rs:54-90`) is touched only to write a null pointer into the new third word
-unconditionally (both flavours), so every existing owning-closure golden (S3h's) stays
-byte-for-byte correct on the `code`/`env` slots and gains one more null word nobody reads yet —
-a real, immediate consumer of the new offset (not pre-staged plumbing: the write happens in this
-phase, at the site that already writes the other two slots).
-
-**Out of bounds.** `emit_drop`, `field_is_linear`/`layout_field_is_linear`, the checker guards,
-the audit, the parser, the REPL, any disposer synthesis.
-
-**Entry.** `3b85119`, green.
-
-**Exit.** `quotation_layout(WORD_WIDTH).size == 3 * WORD_WIDTH`; `disposer_offset ==
-2 * WORD_WIDTH`; every quotation-bearing golden (plain and owning) still builds and runs
-byte-identically on program *output*, with its IL golden's `:Q{n}` declaration updated to `{ l,
-l, l }`; the doc comment at `types.rs:185-197` still asserts variant identity, now naming three
-slots; `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
---no-fail-fast` green.
-
-## Phase 2 — disposer synthesis and the `emit_drop` arm (hard)
-
-**Scope.** `src/ir/func_builder/quotation.rs` (a new disposer-synthesis method beside
-`build_owning_env`, wired into `materialize_quot_value` to replace phase 1's unconditional null
-write with a real symbol whenever `owning_env_slots` reports at least one capture; R3's new
-`emit_drop` arm), the `emit_drop` unit tests (constructed values, per the Tests section above).
-
-**Out of bounds.** `src/check.rs`, `src/check/poly.rs`, `src/check/audits.rs`, `src/parser.rs`,
-`src/repl.rs`, `src/ir/layout.rs`. Nothing in this phase is reachable by any program the checker
-currently admits — every consumer is the direct unit-level `emit_drop` call named in Tests, which
-is this phase's own, real, in-phase consumer, not a later one.
-
-**Entry.** Phase 1 landed and green.
-
-**Exit.** `emit_drop` on a constructed `IrType::OwningQuotation` value with a non-null disposer
-emits a null check, a `FieldLoad` of the disposer slot, a `FieldLoad` of the env slot, and a
-`CallIndirect`; with a null disposer it emits nothing. `materialize_quot_value` mints a real
-`{symbol}__dispose` `IrFunc` for a capturing owning literal and keeps writing null for a
-capture-free one. Every existing S3h golden (`call`-only usage) still passes unchanged, since
-nothing yet calls the new symbol at runtime. Full green.
-
-## Phase 3 — checker: delete the twinned guard, lift the audit, fix the parser gap (hard)
-
-**Scope.** `src/check.rs:3009,3367-3368` and `src/check/poly.rs:1254-1255` (R4, both halves,
-each independently mutation-tested), `src/ir/layout.rs:66-80,895-911` (R5, both functions,
-independently mutation-tested), `src/check/audits.rs:158-211` (R6, three carve-outs,
-independently mutation-tested), `src/parser.rs:3592-3617` (R7), the four migrated tests, the
-R9 split of `src/check/audits.rs:942-970`'s `owning_quotation_is_rejected_in_every_aggregate_position`
-into an admitted-three and a still-rejected-two test, and every new end-to-end golden in the
-Tests section except the REPL one.
-
-**Out of bounds.** `src/repl.rs` (phase 4), `src/ir/func_builder/`, `src/ir/types.rs`,
-`src/backend/qbe.rs`.
-
-**Entry.** Phase 2 landed and green.
-
-**Exit.** All four migrated tests pass in their new (admitting) form and are removed from
-`tests/phase7_slice3h.rs`; `an_owning_quotation_field_is_rejected` and its variant-field sibling
-no longer exist under those names in that file. Every mutation check named in Tests for R4/R5/R6/
-R7 fails as specified when its guard is individually reverted. The array-element and
-reference-referent still-rejected goldens pass unchanged. `call_and_drop_run_different_code`
-passes both branches. Full green.
-
-## Phase 4 — the REPL override-epoch golden (standard)
-
-**Scope.** `tests/`-level REPL harness test only (`explicit_repl_override_epoch_disposal`);
-`docs/roadmap/P7-language-prereqs.md`'s S3v entry, closed out; `docs/roadmap/P7/slice3h-spec.md`'s
-"Out of scope" line naming storage/discard as S3v's follow-on, updated to point at this document
-instead of describing it prospectively.
-
-**Out of bounds.** Any source file. If this phase needs a source edit, R8's claim that no new
-plumbing is required was wrong, and that is the finding to report rather than a quiet fix folded
-into a "docs" phase.
-
-**Entry.** Phase 3 landed and green.
-
-**Exit.** `explicit_repl_override_epoch_disposal` passes, run through the REPL harness, and
-fails (an undefined-symbol `dlopen` error, not a checker diagnostic) if `apply_drop_generations`
-is stubbed out for the test — confirmed once, then left as a comment rather than a permanent
-stub, since disabling session-wide epoching is not a state this slice's own tests should leave
-toggleable. Full green.
+`Type::OwningQuotation` carries only the declared effect, so two closures with identical
+effects and different capture sets are one type: nothing type-directed can discriminate them.
+The value gained a third slot instead, written at `materialize_quot_value`
+(`src/ir/func_builder/quotation.rs`), the one place the captures' concrete types are known.
+`quotation_layout` (`src/ir/types.rs`) is `{ code, env, disposer }`, `3 * word_width`, with
+`disposer_offset` on `QuotLayout`; every lowering site reads offsets from that struct.
+
+**Both flavours carry the third word.** `:Q{n}` is keyed on effect alone, collapsing a plain
+and an owning quotation of one effect to a single symbol; a per-variant width would re-key that
+symbol on effect *and* owning-ness across every site that maps the two together, to save 8
+bytes on materialized closures. A plain quotation's disposer slot is always null, mirroring the
+existing null-env convention. **Canary: an edit to `src/ir/types.rs`'s variant-identity doc
+comment claiming the two widths differ means this ruling was reversed by accident.**
+`src/backend/qbe.rs`'s hardcoded `type :Q{idx} = { l, l, l }` is the only literal spelling of
+the width.
+
+### R2 — The disposer's body composes existing per-type disposal
+
+`synthesize_owning_disposer` (`src/ir/func_builder/mod.rs`, symbol
+`quot_disposer_symbol` = `{symbol}__dispose`) takes the env block as its sole parameter, and for
+each capture at its `owning_env_slots` offset applies the same `field_is_linear` gate plus
+`slot_value` + `emit_drop` fold a struct's field glue (`drop_level_fields`) performs, then frees
+the block. A borrowed capture is `IrType::Ptr`, never linear, and is skipped for free, but its
+slot still counts so later offsets do not shift. A capture-free literal allocates no block,
+mints no function, and stores a null disposer.
+
+`drop` and `call` are alternatives, never both: `call` runs the body, whose prologue
+(`bind_owning_env`) frees the same block and whose own logic consumes the same captures.
+
+### R3 — `emit_drop` gains one `OwningQuotation` arm
+
+It loads the disposer slot, compares against null, and indirect-calls it with the loaded env
+slot in a guarded block. This is the only `emit_drop` arm that is not a single instruction in
+the caller's block: it seals the current block and opens two. The nullness is necessarily a
+*runtime* branch, since `emit_drop` sees the value's `IrType` and never its slot contents.
+Both consumers reduce to this arm: a bare `drop`, and a container's synthesized destructor
+reaching the field through the unmodified struct/enum field glue once R5 makes it linear.
+
+### R4 — The twinned `drop` rejection is deleted
+
+Both arms and `cannot_drop_owning_quotation_error` are gone. The generic twin stays reachable
+even though a generic word cannot *declare* an owning parameter: it can call a word returning
+one, so an owning closure arrives through the body rather than the signature.
+
+### R5 — Two linearity folds widened, and only them
+
+`field_is_linear` and `layout_field_is_linear` (`src/ir/layout.rs`) answer `true` for
+`IrType::OwningQuotation`, alongside `OwnedCell`. Plain `IrType::Quotation` stays on the
+`_ => false` wildcard: no new `Copy` obligation, no IL churn for a program without `owning`.
+`crate::check::is_copy` needed no change; its `Type::OwningQuotation` arm has answered `false`
+since S3h, so the gap was purely IR-side.
+
+### R6 — Containment lifted for three positions only
+
+`audit_quotation_type_registries` gained three separate carve-outs, not two mirrored ones:
+the struct-field one widened to `Type::Quotation(_) | Type::OwningQuotation(_)`, and two new
+owning-only ones on the enum-variant loop and the owned-cell loop (neither of which ever had a
+plain-quotation exception). The array loop keeps its plain-only carve-out and the
+reference-referent loop gains none, so an array element, a reference referent and an `extern:`
+boundary stay exactly as rejected as before. `type_node` (`src/check/declarations.rs`) treats an
+owning field as a containment leaf, load-bearing rather than vacuous now: the value is a fixed
+three-slot aggregate whose captures live behind the env pointer, so `type: Box q owning [ Box -- ] ;`
+is finite. `check/terms.rs`'s `!`/`+!` materialization boundary needs no owning arm: the flavour
+is `is_linear`, so `check_access_word` rejects the overwriting store outright.
+
+### R7 — The glued `^owning` parser gap
+
+`split_owning_cell_word` gained a `remainder == OWNING_QUOTATION_KEYWORD` arm that reads the
+effect rows through the shared `quotation_effect_opens_here`/`parse_quotation_effect_rows`
+pair (raising the existing `owning_without_effect_error` when they are absent) and folds the
+result through `intern_owned_cell_type` like every other arm. No lexer change; the spaced form
+already worked through `parse_type_expr`'s `owning_quotation_ahead()` dispatch, and the two
+spellings remain genuinely distinct code paths.
+
+### Finding (phase 3) — the phase 2 decomposition missed a lowering arm
+
+`load_owned_payload`/`store_owned_payload` (`src/ir/func_builder/word_families.rs`) had no
+quotation case, so an owning-quotation cell payload newly admitted by R6 would have hit the
+scalar `FieldLoad`/`FieldStore` fallback instead of the aggregate blit its layout needs. Fixed
+in phase 3 rather than deferred, since the cell carve-out's own goldens fail without it. Both
+arms admit `IrType::OwningQuotation` only: a plain quotation payload stays on the scalar
+fallback and rejected by the checker, pre-staging no future D4 widening.
+
+### R8 — The REPL override-epoch obligation is unreachable, not untested
+
+R8's no-new-plumbing claim stands: the disposer calls `emit_drop`, whose arms already resolve
+`struct_drop_symbol`/`enum_drop_symbol` against the `drop_generation` that
+`apply_drop_generations` sets before lowering. What was false is this spec's own earlier claim
+that the field/`drop` shape sidesteps the REPL's materialization limit. A disposer exists only
+for a *materialized* closure, and storing one in a field is exactly what forces materialization,
+so the session dies in `ld` on a non-PIC relocation against `__quot0`/`__quot0__dispose` before
+any epoch matters. Measured identical for a plain quotation with no `owning`, no disposer and no
+third-word write, so it is P7.S3h's standing hazard, not a regression here. Every other REPL
+route to a disposer is closed: an `owning` parameter is rejected on a spliced word, a real-call
+quotation parameter is refused at the session boundary, and an inline literal `call` runs the
+body rather than the disposer.
+
+Delivered instead: a blocked-state tripwire (see Tests), not a skip. The closure must be built
+and stored **on one line**; routing it through a session-defined factory word tests nothing,
+since that definition line materializes on its own account and dies before `Box`'s admission,
+R5 or R6 are reached.
 
 ## Out of scope
 
-- **Array and slice element positions**, for an owning closure or any other linear type — P7.S5.
-  This slice's audit carve-outs (R6) are additive over exactly three positions and must not be
-  widened to a fourth even if doing so would "just work" once R5 lands; that is exactly the kind
-  of accidental scope creep the blast-radius goldens in Tests exist to catch.
-- **The stale doc comment at `src/backend/qbe.rs:441-445`** (`member_ty`'s `IrType::Quotation |
-  IrType::OwningQuotation` arm, which currently claims an owning-quotation field arm is
-  "unreachable" — false once R6 admits one). Functionally harmless: the arm already emits the
-  correct `:Q{n}` spelling for both variants, so nothing behaves differently. Left for whichever
-  phase next touches that function, rather than reopening `src/backend/qbe.rs` (explicitly out
-  of bounds for phases 2 through 4) for a comment-only edit.
-- **P7.S3u** (trait objects / erased owners) — parked, not a prerequisite, not touched.
+- **Array and slice element positions**, for an owning closure or any linear type: P7.S5. R6's
+  carve-outs are additive over exactly three positions and must not grow a fourth here, even
+  once R5 makes it look free.
+- **P7.S3u** (trait objects / erased owners), parked.
 - Polymorphism over plain-versus-owning quotation types, and an owning parameter on a spliced or
-  generic word — unchanged since S3h (`reject_owning_quotation_declarations`,
-  `src/check/audits.rs:476`, untouched by this slice).
-- Inline and static env storage for an owning closure — unchanged since S3h.
-- A user-declared `drop` overload's interaction with an owning-quotation *field* specifically
-  (i.e. can a struct holding one also declare its own `drop` body instead of the synthesized
-  glue) — the existing override machinery (`DropOverrides`) is generic over any linear field and
-  needs no new case for this one; not separately tested here beyond the ordinary override path
-  already covered by `tests/`'s slice 8b coverage.
-- The REPL's pre-existing inability to link a materialized quotation via `RTLD_GLOBAL`'s
-  non-PIC relocation limits — a *bare* (`call`-only) owning closure joins that existing failure
-  class exactly as it did in S3h; this slice's own REPL golden is scoped to the epoch obligation
-  specifically, using the field/`drop` shape that avoids that unrelated limit.
+  generic word: unchanged since S3h (`reject_owning_quotation_declarations`).
+- Inline and static env storage for an owning closure: unchanged since S3h.
+- A user `drop` overload on a struct holding an owning field: `DropOverrides` is generic over
+  any linear field and needed no new case.
+- The REPL's inability to link a materialized quotation (R8). An owning closure joins that
+  existing failure class.
 
-## Phases (JSON)
+**Known-stale comments, deliberately left** for whichever phase next opens each file, all
+comment-only and functionally harmless: `src/backend/qbe.rs`'s `member_ty` arm calling an
+owning-quotation field "unreachable"; the twinned `past_owning_frame_error(..., false)`
+justification in `src/check/terms.rs` and `src/check/word_entry.rs`; and `src/parser.rs`'s
+"the containment rule that rejects it" note. Each conclusion still holds post-R6 for unrelated
+reasons.
 
-```json
-{
-  "phases": [
-    { "phase": 1, "focus": "widen the shared quotation value layout to three words and sweep the QBE IL goldens", "effort": "M", "difficulty": "hard" },
-    { "phase": 2, "focus": "synthesize the per-construction-site disposer and add the emit_drop arm that calls it", "effort": "M", "difficulty": "hard" },
-    { "phase": 3, "focus": "delete the twinned drop guard, widen field_is_linear, lift the audit for struct/variant/cell positions, fix the glued ^owning parser gap", "effort": "L", "difficulty": "hard" },
-    { "phase": 4, "focus": "the REPL override-epoch golden closing out P7.S3v", "effort": "S", "difficulty": "standard" }
-  ]
-}
-```
+**Two follow-ups, not delivered:**
+
+- `past_owning_frame_error`'s `owning`-field hint (`src/check/captures.rs`) is never suggested by
+  `quotation_captures_local_error` (`src/check.rs`), even though switching a plain quotation
+  field to `owning` now fixes the by-value-linear-capture error R6 left reachable. A
+  diagnostic-hint addition for whichever phase next touches that D3 site.
+- R8's obligation is still assertable in-process: `src/repl.rs`'s `#[cfg(test)]`
+  `destructor_symbols` helper builds real session registries through `apply_drop_generations`,
+  so the same shape could lower an owning literal and assert the synthesized `__dispose` body
+  names the epoch-suffixed `sooth_struct_drop_N`, with no `dlopen` and so no PIC problem. It
+  proves less than the golden but is the difference between zero coverage and a unit guard.
+
+## Invariants
+
+- Every quotation value is three words wide, both flavours, sharing one `:Q{n}` symbol per
+  effect (R1's canary).
+- A null disposer means "nothing to dispose", exactly as a null env means "nothing captured";
+  the check is at runtime, in the guarded block `emit_drop` opens.
+- The disposer re-derives no per-type disposal: it is `field_is_linear` + `emit_drop`, the same
+  primitives a struct's field glue uses, over an anonymous capture list.
+- Destructor synthesis itself is unchanged. R5 is the whole of what makes the existing machinery
+  see an owning field.
+- R6's carve-outs are per-position and owning-only (except the pre-existing plain struct-field
+  and array-element ones); a plain quotation gains no new position.
+
+## Tests
+
+End-to-end, `tests/phase7_slice3v.rs`, through the real binary, every negative pinning the exact
+diagnostic: `dropping_an_owning_closure_disposes_its_capture_once` and its
+`…_in_a_generic_body_…` twin (the R4 mutation guards, the second through a real generic body);
+`call_and_drop_run_different_code` (R3's headline, two branches on one source);
+`dropping_a_capture_free_owning_closure_skips_the_null_disposer`;
+`an_owning_quotation_field_is_disposed_on_container_drop` and its variant-field sibling;
+`an_owning_quotation_cell_payload_is_admitted_{spaced,glued}` (R6/R7, two code paths);
+`an_owning_cell_of_owning_quotation_is_disposed_on_cell_drop`;
+`an_owning_field_disposes_alongside_its_siblings_exactly_once` (order and exactly-once, against
+a double-visiting field glue); and the blast-radius trio
+`an_array_element_owning_closure_is_still_rejected`,
+`a_reference_referent_owning_closure_is_still_rejected`,
+`an_owning_cell_payload_of_a_plain_quotation_is_still_rejected`.
+
+R8 ships as `explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit`, asserting
+the blocked state through the scripted REPL harness: `Box` is admitted, `__quot0__dispose` is
+minted, `drop 7` never prints, the failure is `"cc" failed` rather than a diagnostic, and the
+session survives. Reverting R6's struct-field carve-out refuses `Box` and fails it, so it
+discriminates this slice rather than restating S3h. `a_plain_quotation_value_hits_the_same_repl_link_limit`
+is the not-owning's-fault control. When the session-module PIC problem is fixed this fails, and
+the fixer promotes it by asserting the disposal line.
+
+Four S3h tests migrated out of `tests/phase7_slice3h.rs` (the two `…_is_rejected` field tests and
+the two `dropping_an_owning_closure…_is_a_located_rejection` tests), and
+`a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation` became
+`a_plain_quotation_still_carries_a_null_disposer_slot`.
+
+Unit: `src/ir/types.rs` on the three offsets/size/align; `src/ir/func_builder/quotation.rs` on
+`emit_drop` over a constructed `IrType::OwningQuotation` (disposer `FieldLoad`, null `Cmp`, and
+the env load plus `CallIndirect` in the guarded block only, none in the entry block), with the
+null half asserted value-side instead, since `emit_drop` cannot see slot contents;
+`src/ir/layout.rs` on both widened folds; `src/parser.rs` on `^owning [ -- ]` and a `^Spy`
+control; `src/check/audits.rs` on `audit_quotation_type_registries` directly, where R9's split of
+the old five-position test lives as `owning_quotation_is_admitted_in_three_positions` plus
+`owning_quotation_is_rejected_in_every_remaining_aggregate_position`.
+
+Mutation-tested per phase: R3's null check (the call moves to the entry block, no `Cmp`/`Jnz`
+pair remains), R4's two guards independently, R5's two folds independently, R6's three carve-outs
+independently with the still-rejected goldens passing throughout, and R7's glued-form arm with
+the spaced-form golden still passing.
+
+## Phases (delivered)
+
+1. Widen the quotation value to three slots, write a null disposer for both flavours at
+   `materialize_quot_value`, sweep the `{ l, l }` QBE IL goldens and the stale two-slot comments
+   (the comment sweep ran to two review rounds and reached `func_builder/`, `layout.rs`,
+   `repl.rs`, `check/captures.rs`, `check/poly.rs`, `backend/qbe.rs`).
+2. `synthesize_owning_disposer` plus R3's `emit_drop` arm, reachable at this point only from the
+   unit tests, since no admitted program yet reaches it.
+3. R4, R5, R6, R7, the four migrated tests, the R9 audit-test split, every new end-to-end golden
+   bar the REPL one, and the out-of-scope-but-required owned-payload lowering arms (Finding).
+4. R8's blocked-state tripwire and its control, plus the roadmap and S3h close-out. No source
+   edit was needed, which is what the phase's out-of-bounds line demanded.

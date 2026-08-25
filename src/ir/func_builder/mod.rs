@@ -50,7 +50,7 @@ fn is_aggregate(ty: IrType, enums: &Enums) -> bool {
         // header still reads it (`project_aggregate_return_aliasing`). It
         // takes the stable-slot + staged-blit path every other aggregate does.
         // P7.S3h: an owning quotation value is the same interior pointer to
-        // two-slot storage a plain one is, so it stages identically.
+        // three-slot storage a plain one is, so it stages identically.
         IrType::Struct(_)
         | IrType::Array(_)
         | IrType::Quotation(_)
@@ -656,7 +656,7 @@ impl<'a> FuncBuilder<'a> {
     /// stable slot) emits nothing, every other arg is snapshotted into its temp
     /// (read phase) before being stored into its stable slot (write phase), so
     /// an arg that reads a stable slot (a swap) or points into one (an interior
-    /// `field_value` pointer) is copied out before any store lands, with no
+    /// `slot_value` pointer) is copied out before any store lands, with no
     /// aliasing analysis. The scalar phi back-patch mutates the header while the
     /// staging blits append to predecessor blocks, so the two run as separate
     /// passes rather than under one borrow.
@@ -800,6 +800,63 @@ fn bind_owning_env(b: &mut FuncBuilder, caps: &[EnvCapture], env: Value) {
             FREE_SYMBOL.to_string(),
             vec![env, size_v],
         ));
+    }
+}
+
+/// P7.S3v (R1/R2): the symbol of the disposer minted alongside the closure
+/// body `symbol`. Derived rather than stored so the boundary writing the
+/// value's third word and `lower_materialized` minting the function agree by
+/// construction.
+pub(super) fn quot_disposer_symbol(symbol: &str) -> String {
+    format!("{symbol}__dispose")
+}
+
+/// P7.S3v (R2): the disposer for one owning closure literal -- the function
+/// its value's third word points at, taking the heap env block as its sole
+/// parameter. Disposes each capture at its own offset, then frees the block:
+/// the same `slot_value` + `emit_drop` fold a struct's field glue performs
+/// (`drop_level_fields`), over the anonymous capture list instead of a
+/// declared field list, so per-type disposal is not re-derived here.
+///
+/// This is what `drop` on an owning closure runs *instead of* its body. The
+/// body, when `call`ed, disposes the same captures itself by consuming them
+/// (and frees the same block in its prologue, `bind_owning_env`) -- the two
+/// are alternatives, never both, because both are reached only by consuming
+/// the one linear closure value.
+fn synthesize_owning_disposer(
+    m: &MaterializedQuot,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
+    let block = b.fresh_value(IrType::Ptr);
+    let (offsets, total) = owning_env_slots(&b, &m.captures);
+    for (cap, offset) in m.captures.iter().zip(&offsets) {
+        // The same gate a struct's field glue applies (`drop_level_fields`). A
+        // borrowed capture owns nothing and is skipped by it for free: every
+        // reference value is an `IrType::Ptr`, which is never linear. The slot
+        // is still counted -- a skipped capture must not shift the offsets of
+        // the ones after it.
+        if field_is_linear(cap.ty, regs.structs, regs.enums, regs.arrays) {
+            let v = b.slot_value(block, *offset, cap.ty);
+            b.emit_drop(v);
+        }
+    }
+    let size_v = b.fresh_value(IrType::I64);
+    b.push_instr(Instr::Const(size_v, total as i64));
+    b.push_instr(Instr::Call(
+        None,
+        FREE_SYMBOL.to_string(),
+        vec![block, size_v],
+    ));
+    b.seal_block(Terminator::Ret(None));
+    IrFunc {
+        name: quot_disposer_symbol(&m.symbol),
+        params: vec![IrType::Ptr],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
     }
 }
 
@@ -1017,6 +1074,13 @@ pub(super) fn lower_materialized(
 ) -> Vec<IrFunc> {
     let mut out = Vec::new();
     for m in mats {
+        // P7.S3v (R2): a capture-free owning literal allocates no block and
+        // stores a null disposer (mirroring its null env), so it needs no
+        // function at all -- the same emptiness test `build_owning_env` and
+        // `materialize_quot_value` make on the value side.
+        if m.owning && !m.captures.is_empty() {
+            out.push(synthesize_owning_disposer(&m, env, resolve, regs));
+        }
         let effect = StackEffect {
             inputs: m
                 .effect

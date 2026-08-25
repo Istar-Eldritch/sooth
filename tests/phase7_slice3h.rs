@@ -152,44 +152,6 @@ fn escaping_closure_over_a_copy_struct_local_still_rejects() {
 /// uses for the linear core.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n";
 
-/// The containment rule, end to end and at the position that motivates it.
-/// A struct holding an `owning` field is non-`Copy`, so `drop`ping it is a
-/// legal consumption -- but `emit_drop`'s `_ => {}` swallows a quotation and
-/// `field_is_linear` answers false for one, so no destructor is synthesized at
-/// all and the container's `drop` becomes a complete no-op. The rejection is
-/// what keeps "the body is the sole disposer" true, and it costs no new gate:
-/// `reject_quotation_type_position` dispatches on `is_quotation_type`, whose
-/// `owning` answer is `Some`, while the legal-position carve-out matches
-/// `Type::Quotation` structurally.
-#[test]
-fn an_owning_quotation_field_is_rejected() {
-    let prog = Scratch::write("field", "type: Box q owning [ -- ] ;\n: main ( -- ) ;\n");
-    let err = build_error(prog.path());
-    assert!(
-        err.contains("a quotation type `owning [ -- ]` cannot appear as the field `q` of struct"),
-        "unexpected message: {err}"
-    );
-}
-
-/// The variant-field half, which is a P0-shaped position exactly like a struct
-/// field: enums do support linear variant fields (`examples/list.sth`'s
-/// `Cons ... next ^List`), so an owning variant field would be just as linear
-/// and just as undisposable.
-#[test]
-fn an_owning_quotation_variant_field_is_rejected() {
-    let prog = Scratch::write(
-        "variant-field",
-        "type: E | None | Some q owning [ -- ] ;\n: main ( -- ) ;\n",
-    );
-    let err = build_error(prog.path());
-    assert!(
-        err.contains(
-            "a quotation type `owning [ -- ]` cannot appear as the field `q` of enum variant"
-        ),
-        "unexpected message: {err}"
-    );
-}
-
 /// `owning` is intercepted ahead of every user type registry, so a `type:`
 /// declared under that name would be silently unreachable rather than merely
 /// shadowed.
@@ -315,44 +277,6 @@ fn an_owning_closure_may_return_its_capture_instead_of_disposing_it() {
         ),
     );
     assert_eq!(build_and_run(prog.path()), "drop 7\n");
-}
-
-/// `drop` cannot discharge the obligation: disposing the captures means running
-/// the body, which is code only the closure has, and `emit_drop`'s match has no
-/// arm that could run one. Without this rejection the `drop` is silently a
-/// no-op -- the obligation discharged, the `Spy` and the env block both leaked.
-#[test]
-fn dropping_an_owning_closure_is_a_located_rejection() {
-    let prog = Scratch::write(
-        "drop-owning",
-        &format!(
-            "{SPY_DEF}: mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
-             : main ( -- ) 7 Spy mk drop ;\n"
-        ),
-    );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: cannot `drop` a value of type `owning [ -- ]` in `main` (line 4): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
-    );
-}
-
-/// The generic-body twin of the same rejection. A generic word cannot *declare*
-/// an owning parameter, but it can call a word that returns one, so the value
-/// arrives through the body rather than the signature and reaches the poly
-/// walk's own `drop` arm -- which fails open without its own gate, since the
-/// monomorphic one never runs on a poly body.
-#[test]
-fn dropping_an_owning_closure_in_a_generic_body_is_a_located_rejection() {
-    let prog = Scratch::write(
-        "drop-owning-poly",
-        ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n\
-         : g ( 'T: Copy -- 'T ) | x | mk drop x ;\n\
-         : main ( -- ) 5 g . ;\n",
-    );
-    assert_eq!(
-        build_error(prog.path()),
-        "error: cannot `drop` a value of type `owning [ -- ]` in `g` (line 2): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body"
-    );
 }
 
 /// The call-once lifecycle needs no checker code of its own: the marker makes
@@ -609,6 +533,25 @@ fn function_block<'a>(il: &'a str, symbol: &str) -> &'a str {
     &il[start..end]
 }
 
+/// The value name a `storel` writes into the field at `offset` of the block's
+/// single aggregate. Two lines: an `add %base, offset` naming the slot pointer,
+/// then a `storel %src, %slot` through it.
+fn stored_at_offset(block: &str, offset: u32) -> String {
+    let slot = block
+        .lines()
+        .find_map(|l| l.strip_suffix(&format!(", {offset}")))
+        .and_then(|l| l.split(" =l add ").next())
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("expected a field pointer at offset {offset} in:\n{block}"))
+        .to_string();
+    block
+        .lines()
+        .find_map(|l| l.trim().strip_suffix(&format!(", {slot}")))
+        .and_then(|l| l.strip_prefix("storel "))
+        .unwrap_or_else(|| panic!("expected a store through {slot} in:\n{block}"))
+        .to_string()
+}
+
 /// The env free, asserted the only way it is checkable: a leaked heap block has
 /// no observable effect in a normal run and the harness has no allocator
 /// accounting, so the assertion is on the *emitted body*. Stubbing the free out
@@ -658,7 +601,7 @@ fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggre
          : main ( -- ) ;\n",
     );
     assert!(
-        il.contains("type :Q0 = { l, l }"),
+        il.contains("type :Q0 = { l, l, l }"),
         "the owning slot interned the quotation signature: {il}"
     );
     assert!(
@@ -668,19 +611,21 @@ fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggre
 }
 
 /// The invariant every program that exists today depends on: a plain quotation
-/// is unchanged. Same two-word `{ l, l }` aggregate, the `code` slot still at
-/// offset 0, the env still the capture's live value stored inline -- and no
-/// allocation anywhere, which is what would show if the owning path had been
-/// generalized to every closure.
+/// shares the one `{ l, l, l }` aggregate every quotation value has (P7.S3v
+/// R1), the `code` slot still at offset 0, the env still the capture's live
+/// value stored inline, and the third `disposer` slot written as the null
+/// pointer -- a plain closure has no captures to dispose. And no allocation
+/// anywhere, which is what would show if the owning path had been generalized
+/// to every closure.
 #[test]
-fn a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation() {
+fn a_plain_quotation_still_carries_a_null_disposer_slot() {
     let il = emit_il(
         ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
          : main ( -- ) 5 mk call . ;\n",
     );
     assert!(
-        il.contains("type :Q0 = { l, l }"),
-        "the quotation aggregate is unchanged: {il}"
+        il.contains("type :Q0 = { l, l, l }"),
+        "the quotation aggregate is the shared three-slot one: {il}"
     );
     let boundary = function_block(&il, "mk");
     assert!(
@@ -690,8 +635,16 @@ fn a_plain_quotation_keeps_its_two_word_layout_and_gains_no_allocation() {
     // The `code` slot is written at offset 0 off the freshly allocated
     // quotation value, exactly as before the slice.
     assert!(
-        boundary.contains("=l alloc8 16"),
-        "the quotation value is a 16-byte, 8-aligned frame slot: {boundary}"
+        boundary.contains("=l alloc8 24"),
+        "the quotation value is a 24-byte, 8-aligned frame slot: {boundary}"
+    );
+    // The disposer slot is present *and* null: the store at offset 16 takes a
+    // value the block defined as `copy 0`. Asserting only the store would pass
+    // on a slot holding whatever the capture happened to be.
+    let disposer = stored_at_offset(boundary, 16);
+    assert!(
+        boundary.contains(&format!("{disposer} =l copy 0")),
+        "the disposer slot is written as the null pointer: {boundary}"
     );
     let body = function_block(&il, "mk__quot0");
     assert!(

@@ -655,8 +655,9 @@ fn materialized_multi_capture_builds_stack_bundle() {
     // materialization stack-allocates a two-word bundle and points `env` at it
     // (R16). Witness: `main` gains exactly one 16-byte `Alloc` over the
     // otherwise-identical single-capture program (the quotation value and the
-    // `Holder` shell are the same 16 bytes in both; only the bundle is new).
-    // The run confirms both words are read back: `10 + 20 = 30`.
+    // `Holder` shell are 24 bytes each since the disposer widening, so the
+    // 16-byte filter names the bundle alone). The run confirms both words are
+    // read back: `10 + 20 = 30`.
     let two = "type: Holder q [ -- i64 ] ;\n\
                : main ( -- )\n\
                10 1 fill | a |\n\

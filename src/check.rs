@@ -3003,18 +3003,6 @@ fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str
     )
 }
 
-/// P7.S3h: `drop` on an owning closure. Names `call` as the remedy, because
-/// `call` is not a workaround here but the designed consuming use: running the
-/// body is the only thing that can dispose what the closure captured.
-fn cannot_drop_owning_quotation_error(ctx: &Ctx, span: Span, eff: &QuotEffect) -> String {
-    format!(
-        "error: cannot `drop` a value of type `{}`{} (line {}): an owning closure disposes its captures by running, so `call` it -- no destructor can run a closure body",
-        eff.name_static,
-        in_word(ctx),
-        span.line,
-    )
-}
-
 /// R12: a quotation literal that borrows an enclosing place and leaves the
 /// reference on its row (D3 forbids capturing an enclosing borrow).
 fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
@@ -3357,16 +3345,10 @@ fn check_shuffle(
         }
         "drop" => {
             let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
-            // P7.S3h: `drop` cannot dispose an owning closure. Its captures
-            // are disposed by *running* the body, which is code only the
-            // closure itself has, and `emit_drop` has no arm that could run
-            // one -- so a silent `drop` here would discharge the obligation
-            // while leaking every capture and the env block with them. `call`
-            // is the consuming use instead, and needs no code of its own: it
-            // already pops its receiver.
-            if let Type::OwningQuotation(eff) = top.ty {
-                return Err(cannot_drop_owning_quotation_error(ctx, span, eff));
-            }
+            // P7.S3v (R3/R4): `drop` on an owning closure is legal and runs
+            // its per-construction-site disposer, which disposes the captures
+            // without running the body. `call` remains the other consuming
+            // use: it runs the body instead.
             // Review fix (P7 slice 1): dropping a place a live projection
             // still reaches would leave that reference aimed at storage
             // that no longer exists; the anonymous analogue of

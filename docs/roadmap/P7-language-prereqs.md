@@ -401,20 +401,14 @@ them and the block outlives the return. The compiled body's prologue copies ever
 into its own frame, rebinding a borrow capture with its reference record, and *then* frees the
 block -- at entry, not at the return, so the body is thereafter an ordinary word body that
 consumes its captures exactly as a word consumes a linear parameter, and an `owning [ -- Spy ]`
-body may hand a capture back rather than dispose it. There is no drop pointer, no third layout
-slot and no `emit_drop` arm; a plain quotation keeps its two-word `(code, env)` layout and
-gains no allocation.
-**The body is the sole disposer, which is what the containment rule buys.** An owning
-quotation is rejected in every *declared* aggregate position (struct field, variant field,
-array and slice element, owned-cell payload, referent, `extern:` slot), so no synthesized glue
-can reach one and `field_is_linear`/`layout_field_is_linear` stay untouched. One honest
-exception: a multi-output word's synthesized return-bundle struct is interned after these
-audits run, so an `owning` output does reach that struct as a field; it stays sound because the
+body may hand a capture back rather than dispose it. A plain quotation gains no allocation, and
+the closure value's third slot (the per-site disposer **P7.S3v** added) is null for one.
+**The body is a disposer, and was the sole one until P7.S3v.** A multi-output word's
+synthesized return-bundle struct is interned after the containment audits run, so an `owning`
+output reaches that struct as a field whatever those audits say; it stays sound because the
 bundle is a destructor-free transient carrier, unpacked at the call site the instant the word
-returns, never itself disposed as a container. `drop` on one is a located
-rejection in both a monomorphic and a generic body, since releasing the capture means running
-code only the closure has. Neither a spliced (`inline`) nor a generic word may declare an
-`owning` parameter: the splice route never materializes, and a polymorphic call site
+returns, never itself disposed as a container. Neither a spliced (`inline`) nor a generic word
+may declare an `owning` parameter: the splice route never materializes, and a polymorphic call site
 materializes from the declared effect alone, which does not carry the flavour -- so in both
 the distinction would be silently unenforced.
 **Capture admission.** `classify_capture`'s aggregate arm admits a capture as scalar only when
@@ -422,15 +416,15 @@ it is both `Copy` and scalar-represented, so a payload-free enum passes and a po
 aggregate keeps being rejected however `Copy` it is. At an `owning` boundary the frame-rooted
 rejection and the 2+-capture deferral both lift for a *linear* capture, the heap block having
 replaced the stack bundle they guarded; the in-frame path is unchanged.
-**Two restrictions remain, both waiting on a per-value disposer:** an owning closure may not be
-discarded unexecuted, nor stored in an aggregate. Both are **P7.S3v**, which depends on no
-other slice.
+**Two restrictions shipped here, both since lifted by P7.S3v's per-construction-site disposer:**
+discarding an owning closure unexecuted (`drop`), and storing one in an aggregate (a struct
+field, a variant field or an owned cell; an array or slice element waits on **P7.S5**).
 Standing hazard, unchanged: a materialized quotation still cannot be linked in the REPL (a
 session line building a `(code, env)` value dies on a non-PIC `__quot0` relocation).
 **Exit:** a linear value can be moved into an escaping closure's env, the closure returned
 from the word that built it, and calling it observes the capture and disposes it exactly once
--- one observation, not zero and not two -- with a forgotten closure, a `drop`ped one and a
-capture the body never consumes each a located error rather than a silent miscompile.
+-- one observation, not zero and not two -- with a forgotten closure and a capture the body
+never consumes each a located error rather than a silent miscompile.
 
 **P7.S3i — `bool` as an ordinary enum, not a compiler-injected one.** `[ done ]` The type was
 a plain two-variant zero-payload enum already; the only thing making it special was that
@@ -737,58 +731,48 @@ type the use site does not name, a bounded word can be called through it, and an
 object's destructor runs exactly once through the object with no leak and no double free, with
 the `Copy`-versus-linear rule for objects stated and tested.
 
-**P7.S3v -- Dropping and storing a linear-capturing quotation.** **P7.S3h** ships owning
-closures under two restrictions that exist only because nothing can invoke a per-value
-disposer: an owning closure may not be discarded unexecuted (`drop` on one is a located
-rejection, because releasing the capture requires running the body), and it may not be a
-struct field, array element, slice element or owned-cell payload (a container's synthesized
-glue would have to dispose it, and `emit_drop` (`src/ir/func_builder/quotation.rs:389`) has no
-arm it could take: its `_ => {}` fall-through would silently swallow the field and leak both
-the capture and the env block).
-
-**Only the struct field is this slice's to lift.** The array and slice positions are not gated by
-S3h at all: a linear element is rejected in an array whatever its type (`[Spy 2]` and
-`[owning [ -- ] 2]` both fail with `linear array elements are not supported yet`, while
-`type: Box s Spy ;` builds), so those positions wait on **P7.S5**, not on a disposer. The
-owned-cell payload is untested in either direction and this slice must establish which gate it
-is under before claiming it.
-
-**Mechanism: a per-construction-site disposer symbol.** The closure value grows a third word
-beside its code and env pointers, holding a compiler-synthesized disposer that copies nothing,
-disposes each capture by its own type through the existing `struct_drop_symbol`, and frees the
-env block. The disposer is keyed on the construction site, not on the closure's type, because
+**P7.S3v -- Dropping and storing a linear-capturing quotation.** `[ done ]` A quotation value
+carries three words: its code pointer, its env pointer, and a disposer synthesized per
+*construction site*, which disposes each capture through that capture's own type and frees the
+env block. The disposer is keyed on the construction site rather than on the type because
 `Type::OwningQuotation` (`src/ast.rs:2295`) carries only the effect: two closures with identical
-effects and different capture sets are the same type, so nothing type-directed (a `Drop` trait, a
-blanket or specialized `impl:`, a trait object's vtable) can discriminate them. The capture's
-concrete type is always known where the disposer is minted -- an owning closure cannot be
-returned from a generic word (a quotation type is rejected in a poly word's output position),
-and a generic body that builds and calls one locally is lowered per instantiation -- so the
-symbol is always constructible. `emit_drop` gains an arm that loads and calls it: one indirect
+effects and different capture sets are the same type, so nothing type-directed (a `Drop` trait,
+a blanket or specialized `impl:`, a trait object's vtable) could discriminate them. The capture
+types are always known where the symbol is minted (`materialize_quot_value`), so it is always
+constructible. `emit_drop` loads the slot, null-checks it and calls it indirectly: one indirect
 call on the disposal path, no runtime type info in the env block, no dynamic dispatch on any
-user-visible operation. Depends only on **P7.S3h** (the marker, the containment rule, the heap
-env); **P7.S3u** is not a prerequisite and is parked.
+user-visible operation.
 
-REPL obligation: a per-literal disposer calls into aggregate destructors, so it must join the
-session-wide override-epoch suffixing that `src/ir/destructors.rs:8-35` applies to every linear
-aggregate's destructor, and carry the same epoch. Missing that fails as an undefined symbol at
-`dlopen` (`src/repl.rs:3201`) rather than as a diagnostic, so it needs a golden.
+**Both flavours carry the third word**, and a capture-free literal's is null, mirroring its null
+env. `:Q{n}` is keyed on the effect alone (`quot_index`, `src/backend/qbe.rs:57`), so a plain and
+an owning quotation of the same effect are one backend symbol and must stay byte-identical;
+diverging the width would re-key that symbol on owning-ness across every site that maps the two
+together, to save eight bytes on a materialized closure.
 
-Fixture bound: a closure capturing an array or a slice ICEs today at `src/backend/qbe.rs:531`
+**`drop` on an owning closure is a consuming use distinct from `call`.** `call` runs the body,
+which may do arbitrary work before disposing the captures itself; `drop` runs only the disposer,
+discarding the closure unexecuted. An owning closure may be a struct field, an enum variant
+field or an owned-cell payload: `field_is_linear`/`layout_field_is_linear` (`src/ir/layout.rs:66`,
+`:895`) see one, so the container synthesizes a destructor and its ordinary field glue reaches
+`emit_drop`. Array and slice elements stay rejected -- a linear element is **P7.S5**, whatever its
+type -- as do a reference referent and an `extern:` slot, neither of which owns what it names.
+
+Standing hazard: a closure capturing an array or a slice ICEs at `src/backend/qbe.rs:531`
 (`an aggregate field is copied by blit, not scalar-stored`), because the env store assumes one
-word per capture. That is the env block, not the closure value this slice widens, so it is
-orthogonal -- but every fixture here must capture a scalar or a linear struct, both of which
-work end to end.
+word per capture. That is the env block, not the closure value, and a scalar or linear-struct
+capture works end to end.
 
-Sizing note: the checker work is mostly *deletion* of S3h's gates plus the
-`field_is_linear`/`layout_field_is_linear` widening (`src/ir/layout.rs:66`, `:895`) that S3h
-deliberately leaves untouched; the new construction is the disposer itself and the `emit_drop`
-arm, both of which belong to this slice. The `drop` rejection is a **twinned** guard
-(`src/check.rs:3370` and `src/check/poly.rs:1255`), so both halves need mutation-testing, not
-one.
+REPL: the disposer calls aggregate destructors through `emit_drop`, which resolves them against
+the live `drop_generation`, so it carries the session-wide override epoch
+(`src/ir/destructors.rs:8-35`) with no plumbing of its own. Unreachable rather than untested: a
+disposer exists only for a *materialized* closure, and no session line can link one (the standing
+`__quot0` non-PIC relocation, which storing a closure in a field forces exactly as building a bare
+one does), so no session reaches the disposer at all. Pinned as a blocked-state tripwire in
+`tests/phase7_slice3v.rs`, beside a plain-quotation control showing the limit is not owning's.
 **Exit:** an owning closure can be `drop`ped without being called, disposing its captures and
-env exactly once; it can be stored in a struct field and disposed transitively through the
-container exactly once; and every S3h golden that asserted a rejection has been migrated to
-assert the new behaviour rather than deleted.
+env exactly once; it can be stored in a struct field, a variant field or an owned cell and
+disposed transitively through the container exactly once; and every S3h golden that asserted a
+rejection has been migrated to assert the new behaviour rather than deleted.
 
 **P7.S4 -- Generic `impl:` targets, with a specificity chain.** An `impl:` target must name one
 concrete type: the whole-program registry S3e built keys on `(TraitId, Type)` and discharges a

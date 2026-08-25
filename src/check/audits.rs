@@ -166,9 +166,11 @@ pub(crate) fn audit_quotation_type_registries(
         for (fname, fty) in &s.fields {
             // R8 (D4): a quotation type is legal as a struct field this slice
             // (a materialization boundary); the store of a literal into it is
-            // checked at the constructor/setter call site (R7). Every other
-            // registry position below stays rejected.
-            if matches!(fty, Type::Quotation(_)) {
+            // checked at the constructor/setter call site (R7). P7.S3v (R6)
+            // widens the same carve-out to the owning flavour: the container's
+            // synthesized destructor disposes it (R5 makes the field linear,
+            // `emit_drop`'s disposer arm does the work).
+            if matches!(fty, Type::Quotation(_) | Type::OwningQuotation(_)) {
                 continue;
             }
             reject_quotation_type_position(
@@ -180,6 +182,15 @@ pub(crate) fn audit_quotation_type_registries(
     for e in enums {
         for v in &e.variants {
             for (idx, (fname, fty)) in v.fields.iter().enumerate() {
+                // P7.S3v (R6): an owning variant field is admitted for the
+                // same reason a struct field is -- the enum's destructor
+                // disposes it. This is its own carve-out, not a mirror of the
+                // struct one: a *plain* quotation variant field has never been
+                // admitted (D4 scoped its boundary to struct fields) and stays
+                // rejected below.
+                if matches!(fty, Type::OwningQuotation(_)) {
+                    continue;
+                }
                 reject_quotation_type_position(
                     *fty,
                     &format!(
@@ -202,6 +213,12 @@ pub(crate) fn audit_quotation_type_registries(
         reject_quotation_type_position(a.element, "an array element")?;
     }
     for c in cells {
+        // P7.S3v (R6): the cell's own destructor drops its payload, which for
+        // an owning closure is the disposer call. A plain quotation payload is
+        // not a D4 boundary and stays rejected.
+        if matches!(c.payload, Type::OwningQuotation(_)) {
+            continue;
+        }
         reject_quotation_type_position(c.payload, "an owned-cell payload")?;
     }
     for r in refs {
@@ -909,24 +926,70 @@ mod tests {
         assert!(err.contains("output"), "unexpected message: {err}");
     }
 
-    /// P7.S3h, the containment rule, and the reason it needed **no new gate**:
-    /// `reject_quotation_type_position` dispatches on `is_quotation_type`,
-    /// which now answers `Some` for an owning quotation, while the
-    /// legal-position carve-outs above match `Type::Quotation` structurally.
-    /// So an owning quotation in an aggregate position falls straight past the
-    /// carve-out into the existing rejection.
+    /// P7.S3v (R6): the three storage positions this slice admits, and the
+    /// mutation guard on their three *separate* carve-outs. Each one is its
+    /// own `matches!` in `audit_quotation_type_registries`, so reverting any
+    /// one of them alone must fail exactly its row here -- what proves the
+    /// three are additive rather than one widened wildcard.
     ///
-    /// This is soundness-critical, not tidiness. An `owning` struct field makes
-    /// its container non-`Copy`, so `drop`ping the container is a legal
-    /// consumption -- but `emit_drop`'s `_ => {}` swallows a quotation and
-    /// `field_is_linear`/`layout_field_is_linear` answer false for one, so
-    /// `synthesize_aggregate_destructors` synthesizes nothing at all. The
-    /// container's `drop` is a no-op: the obligation is discharged, the
-    /// capture's own `drop` never runs, and the env block never gets freed.
-    /// Widening either carve-out to admit `OwningQuotation` reopens exactly
-    /// that hole, and this is the test that catches it.
+    /// What makes them sound is not the audit but what sits behind it:
+    /// `field_is_linear`/`layout_field_is_linear` answer `true` for an owning
+    /// quotation (R5), so `synthesize_aggregate_destructors` emits a
+    /// destructor for the container, whose field glue calls `emit_drop`, whose
+    /// owning-quotation arm (R3) runs the value's per-construction-site
+    /// disposer. Revert any of those three and the container's `drop` silently
+    /// becomes a no-op again; the end-to-end goldens in
+    /// `tests/phase7_slice3v.rs` are what catch that, since a checker-level
+    /// test cannot see a leak.
     ///
-    /// One aggregate position is **not** on this list, and honestly so: a
+    /// The variant-field and cell-payload carve-outs admit the **owning**
+    /// flavour only: a plain quotation in either position is not a D4
+    /// materialization boundary and stays rejected
+    /// (`a_plain_quotation_is_still_rejected_outside_a_struct_field` below).
+    #[test]
+    fn owning_quotation_is_admitted_in_three_positions() {
+        for src in [
+            "type: Box q owning [ -- ] ;\n",
+            "type: E | None | Some q owning [ -- ] ;\n",
+            ": f ( ^ owning [ -- ] -- ) drop ;\n",
+        ] {
+            check_src(src).unwrap_or_else(|e| panic!("`{src}` should check: {e}"));
+        }
+    }
+
+    /// The un-widened half of R6's two new carve-outs: they are keyed on
+    /// `Type::OwningQuotation` specifically, so a *plain* quotation variant
+    /// field or cell payload keeps the rejection it has always had. Without
+    /// this, widening either carve-out to `Type::Quotation(_) |
+    /// Type::OwningQuotation(_)` (the tempting symmetry with the struct-field
+    /// one) would go unnoticed -- and a plain quotation there has no D4 store
+    /// check behind it at all.
+    #[test]
+    fn a_plain_quotation_is_still_rejected_outside_a_struct_field() {
+        for (src, position) in [
+            (
+                "type: E | None | Some q [ -- ] ;\n",
+                "the field `q` of enum variant `E",
+            ),
+            (": f ( ^ [ -- ] -- ) drop ;\n", "an owned-cell payload"),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("cannot appear as") && err.contains(position),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    /// P7.S3h's containment rule, minus the three positions P7.S3v (R6)
+    /// admits. A reference referent and an `extern:` boundary type stay
+    /// rejected: neither owns what it names, so neither can dispose it, and
+    /// `reject_quotation_type_position` still reaches both.
+    ///
+    /// These two are also the blast-radius guard on R6: they must pass
+    /// unchanged before and after the carve-outs land.
+    ///
+    /// One aggregate position is **not** on either list, and honestly so: a
     /// word's synthesized multi-output bundle struct is interned by
     /// `intern_output_bundles` *after* these type-level audits run, so an
     /// `owning` output legitimately reaches that struct as a field. It stays
@@ -939,20 +1002,8 @@ mod tests {
     /// `an_owning_closure_as_one_of_several_outputs_builds_and_runs` in
     /// tests/phase7_slice3h.rs, so it is deliberately not duplicated here.
     #[test]
-    fn owning_quotation_is_rejected_in_every_aggregate_position() {
+    fn owning_quotation_is_rejected_in_every_remaining_aggregate_position() {
         for (src, position) in [
-            (
-                "type: Box q owning [ -- ] ;\n",
-                "the field `q` of struct `Box",
-            ),
-            (
-                "type: E | None | Some q owning [ -- ] ;\n",
-                "the field `q` of enum variant `E",
-            ),
-            (
-                ": f ( ^ owning [ -- ] -- ) drop ;\n",
-                "an owned-cell payload",
-            ),
             (
                 ": f ( & owning [ -- ] -- ) drop ;\n",
                 "a reference referent",

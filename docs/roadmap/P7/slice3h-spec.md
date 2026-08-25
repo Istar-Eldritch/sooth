@@ -33,7 +33,7 @@ So: **a marker in the type, naming the obligation and nothing else.**
 `Type::OwningQuotation(&'static QuotEffect)` (`src/ast.rs:2278`), built by
 `owning_quotation_type` (`:2329`), mirroring `Type::InlineQuotation`: same payload, split purely
 to carry a capability difference, structural `PartialEq` giving `OwningQuotation(e) != Quotation(e)`
-for free. Its `name_static` is prefixed `owning `, so no two of the three quotation variants ever
+for free. Its `name_static` is prefixed with `owning` and a space, so no two of the three variants
 share a `&'static QuotEffect`. `is_copy` is `false` for it (`check/builtins.rs:252`); `is_linear`,
 move tracking, the `dup` gate, the forgotten-value error and the consumed-on-every-path check are
 all inherited with no parallel machinery.
@@ -107,8 +107,9 @@ its disposal, and the bundle is never itself disposed as a container.
   quotation payload, so a check-time gate on `^` over a quotation value is needed there first.
 
 Cost: an owning closure cannot be stored in a data structure. It can be created, passed, returned
-and called. Lifting that needs a disposer the synthesized glue can invoke, which is **P7.S3v**,
-after **P7.S3u** (trait objects) supplies the erased-owner mechanism.
+and called. Lifting that needs a disposer the synthesized glue can invoke, which
+[**P7.S3v**](./slice3v-spec.md) supplies per construction site (**P7.S3u** is parked and was
+never a prerequisite).
 
 ### Surface syntax: `owning [ … ]`, in type positions only
 
@@ -204,12 +205,15 @@ inherited error rather than being masked.
 - `OwningQuotation(e) != Quotation(e)` structurally, so every boundary and `if`-join separates
   them by type inequality before lowering.
 - The type names the obligation only. **Storage never appears in the type.**
-- **An owning quotation is never a field, element, payload or referent**, so no synthesized
-  destructor and no `emit_drop` path can reach one. This is what makes "the body is the sole
-  disposer" true rather than aspirational.
+- **An owning quotation may be a struct field, an enum variant field or an owned-cell payload**,
+  where the container's synthesized destructor reaches it through `emit_drop` and the
+  per-construction-site disposer [P7.S3v](./slice3v-spec.md) mints. It is never an array or slice
+  element (a linear element is P7.S5) and never a reference referent or `extern:` slot, neither
+  of which owns what it names.
 - A capture is snapshotted into the one-word plain env only when it is **scalar-represented**;
   aggregate-backed values are pointers and are never snapshotted at an escaping boundary.
-- `call` is a consuming use and needs no checker change; `drop` on an owning closure is rejected.
+- `call` is a consuming use and needs no checker change; `drop` is the other one, running only
+  the disposer and discarding the closure unexecuted ([P7.S3v](./slice3v-spec.md)).
 - Owningness is inferred at literals and declared in types. No term-level `owning` syntax.
 
 ## Out of scope
@@ -217,8 +221,9 @@ inherited error rather than being masked.
 - The case-2 aggregate-parameter/global narrowing in `classify_capture`.
 - Capturing an already-quotation-typed name by value (`captured_quotation_name_deferred_error`),
   which the `is_quotation_type` → `Some` answer necessarily also defers for owning-typed names.
-- **Storing an owning closure in an aggregate, and discarding one unexecuted** (P7.S3v, after
-  P7.S3u). Strict widenings of this design, not redesigns.
+- **Storing an owning closure in an aggregate, and discarding one unexecuted**: shipped by
+  [P7.S3v](./slice3v-spec.md), which mints a disposer per construction site into the quotation
+  value's third word. Strict widenings of this design, not redesigns.
 - **Inline and static env storage.**
 - Polymorphism over plain versus owning quotation types, and owning parameters on spliced or
   generic words. Consequence: no existing higher-order word declared over `[ … ]` can accept an

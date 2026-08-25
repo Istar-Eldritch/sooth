@@ -8,8 +8,8 @@ data $freefmt = { b "free %ld\n", b 0 }
 data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
-type :Q0 = { l, l }
-type :Q1 = { l, l }
+type :Q0 = { l, l, l }
+type :Q1 = { l, l, l }
 
 export function l $apply__m0(:Q0 %v0, l %v1) {
 @start
@@ -40,34 +40,43 @@ export function l $run__m0(:Q1 %v0) {
 export function $sooth_main() {
 @start
 	%v1 =l copy 5
-	%v2 =l alloc8 16
+	%v2 =l alloc8 24
 	%v3 =l copy $main__quot0
 	%v4 =l add %v2, 0
 	storel %v3, %v4
 	%v5 =l copy 0
 	%v6 =l add %v2, 8
 	storel %v5, %v6
-	%v7 =l call $apply__m0(:Q0 %v2, l %v1)
-	call $printf(l $fmt, l %v7, ...)
-	%v9 =l copy 20
-	%v10 =l alloc8 16
-	%v11 =l copy $main__quot1
-	%v12 =l add %v10, 0
-	storel %v11, %v12
-	%v13 =l copy 0
-	%v14 =l add %v10, 8
+	%v7 =l copy 0
+	%v8 =l add %v2, 16
+	storel %v7, %v8
+	%v9 =l call $apply__m0(:Q0 %v2, l %v1)
+	call $printf(l $fmt, l %v9, ...)
+	%v11 =l copy 20
+	%v12 =l alloc8 24
+	%v13 =l copy $main__quot1
+	%v14 =l add %v12, 0
 	storel %v13, %v14
-	%v15 =l call $apply2__m0(:Q0 %v10, l %v9)
-	call $printf(l $fmt, l %v15, ...)
-	%v17 =l alloc8 16
-	%v18 =l copy $main__quot2
-	%v19 =l add %v17, 0
-	storel %v18, %v19
-	%v20 =l copy 0
-	%v21 =l add %v17, 8
-	storel %v20, %v21
-	%v22 =l call $run__m0(:Q1 %v17)
-	call $printf(l $fmt, l %v22, ...)
+	%v15 =l copy 0
+	%v16 =l add %v12, 8
+	storel %v15, %v16
+	%v17 =l copy 0
+	%v18 =l add %v12, 16
+	storel %v17, %v18
+	%v19 =l call $apply2__m0(:Q0 %v12, l %v11)
+	call $printf(l $fmt, l %v19, ...)
+	%v21 =l alloc8 24
+	%v22 =l copy $main__quot2
+	%v23 =l add %v21, 0
+	storel %v22, %v23
+	%v24 =l copy 0
+	%v25 =l add %v21, 8
+	storel %v24, %v25
+	%v26 =l copy 0
+	%v27 =l add %v21, 16
+	storel %v26, %v27
+	%v28 =l call $run__m0(:Q1 %v21)
+	call $printf(l $fmt, l %v28, ...)
 	ret
 }
 
