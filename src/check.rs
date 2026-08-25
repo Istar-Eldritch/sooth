@@ -990,7 +990,8 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // registry interning `apply_subst` performs, both of which live here and
     // neither of which lowering can redo -- so the transitive closure of
     // "which monomorphs does this program need" is computed at check time.
-    module.transitive_instantiations = discover_transitive_instantiations(module, &mut insts)?;
+    module.transitive_instantiations =
+        discover_transitive_instantiations(module, &mut insts, &symbols, &trait_obligations)?;
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;

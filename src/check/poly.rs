@@ -1831,14 +1831,14 @@ fn poly_cross_call(
             let matched = candidates
                 .iter()
                 .map(|(csig, _)| csig)
-                .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig, traits).is_ok());
+                .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig).is_ok());
             match matched {
                 Some(csig) => csig,
                 None => return Err(no_poly_overload_matches_error(ctx, span, name, candidates)),
             }
         }
     };
-    let mapping = poly_cross_relate(callee_sig, name, &stack, span, ctx, sig, traits)?;
+    let mapping = poly_cross_relate(callee_sig, name, &stack, span, ctx, sig)?;
     // R3: every bound the callee declares on a mapped variable, discharged
     // here, at the call site. For a variable image this is a *symbolic*
     // discharge against the caller's own declared bounds -- the caller's own
@@ -1854,7 +1854,15 @@ fn poly_cross_call(
         let var = &callee_sig.ty_var_names[*v as usize];
         let unsatisfied = match (image, bound) {
             (Image::CallerVar(t), _) => (!sig.has_bound(*t, *bound)).then(|| {
-                poly_cross_bound_error(ctx, span, name, var, &sig.ty_var_names[*t as usize], *bound)
+                poly_cross_bound_error(
+                    ctx,
+                    span,
+                    name,
+                    var,
+                    &sig.ty_var_names[*t as usize],
+                    *bound,
+                    traits,
+                )
             }),
             // N1: `is_copy` resolves a struct/enum id by indexing, and a
             // generic instantiation this body's *own* walk minted (`1 Box`)
@@ -1881,8 +1889,12 @@ fn poly_cross_call(
             (Image::Concrete(ty), Bound::Ord) => {
                 (!is_ord(*ty)).then(|| poly_ord_bound_error(ctx, span, name, var, *ty))
             }
-            // A user bound is gated out of a cross-call entirely by
-            // `poly_cross_signature_supported`, so this is unreachable.
+            // Not resolved here: `compose` grounds every mapping entry --
+            // this `Image::Concrete` case and `Image::CallerVar` alike --
+            // into a real `ty` before its own `resolve_user_bound` loop runs
+            // over `sig.bounds`, so that loop re-derives and checks this
+            // exact obligation for every reachable cross-call once the
+            // caller is grounded. This walk-time site defers to it.
             (Image::Concrete(_), Bound::User(_)) => None,
         };
         if let Some(err) = unsatisfied {
@@ -1937,9 +1949,8 @@ fn poly_cross_relate(
     span: Span,
     ctx: &Ctx,
     caller_sig: &PolySig,
-    traits: &[TraitDecl],
 ) -> Result<Vec<(u32, Image)>, String> {
-    poly_cross_signature_supported(callee_sig, callee, span, ctx, traits)?;
+    poly_cross_signature_supported(callee_sig, callee, span, ctx)?;
     let n_in = callee_sig.inputs.len();
     if stack.len() < n_in {
         return Err(underflow_error(ctx, span, callee, n_in, stack.len()));
@@ -2162,17 +2173,17 @@ fn poly_cross_output(
 /// - A quotation parameter has no runtime representation to pass across a
 ///   real call.
 /// - A length variable is a second, separate id space `Image` does not model.
-/// - A user trait bound would be *satisfied* soundly by the symbolic
-///   discharge above (the caller declares the same bound), but the callee's
-///   own recorded obligations are resolved per ground θ, and nothing composes
-///   them for a cross-call yet -- admitting one here would ship exactly the
-///   monomorphization-time failure N1 forbids.
+///
+/// A `Bound::User` on a mapped variable is *not* rejected here (P7.S3s R2):
+/// the symbolic discharge loop in `poly_cross_call` checks it against the
+/// caller's own declared bounds for a forwarded variable, and `compose`
+/// resolves it against a concrete θ once the caller is grounded -- the same
+/// two-stage shape every other bound already goes through.
 fn poly_cross_signature_supported(
     callee_sig: &PolySig,
     callee: &str,
     span: Span,
     ctx: &Ctx,
-    traits: &[TraitDecl],
 ) -> Result<(), String> {
     let unsupported = |what: &str| Err(poly_cross_call_unsupported_error(ctx, span, callee, what));
     if callee_sig.row_in.is_some() || callee_sig.row_out.is_some() {
@@ -2184,16 +2195,6 @@ fn poly_cross_signature_supported(
     }
     if slots().any(poly_mentions_len_var) {
         return unsupported("a length variable in the callee's signature");
-    }
-    if let Some((_, Bound::User(id))) = callee_sig
-        .bounds
-        .iter()
-        .find(|(_, b)| matches!(b, Bound::User(_)))
-    {
-        let trait_name = traits
-            .get(id.index())
-            .map_or("a user trait", |t| t.name.as_str());
-        return unsupported(&format!("discharging the `{trait_name}` bound"));
     }
     Ok(())
 }
@@ -2277,14 +2278,16 @@ fn poly_cross_bound_error(
     callee_var: &str,
     caller_var: &str,
     bound: Bound,
+    traits: &[TraitDecl],
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     let caller = ctx.rendered_word_or("`<line>`");
     let bound = match bound {
-        Bound::Copy => "Copy",
-        Bound::Ord => "Ord",
-        // Gated out ahead of the discharge (`poly_cross_signature_supported`).
-        Bound::User(_) => "a user trait",
+        Bound::Copy => "Copy".to_string(),
+        Bound::Ord => "Ord".to_string(),
+        Bound::User(id) => traits
+            .get(id.index())
+            .map_or_else(|| "a user trait".to_string(), |t| t.name.clone()),
     };
     format!(
         "error: `{callee_var}` of `{callee}` requires `{bound}`, which `{caller_var}` in {caller} does not declare (line {}, col {})\n  declare `{caller_var}: {bound}` so every instantiation of {caller} satisfies `{callee}`",
@@ -4782,9 +4785,18 @@ pub(super) fn check_poly_call(
 /// reachable `(word, θ)` set is finite, and the symbol dedup below reaches a
 /// fixpoint. A mutual `g <-> h` cycle revisits `(g, θ)` at the *same* θ and
 /// stops.
+///
+/// `word_symbols` and `trait_obligations` (P7.S3s R2) are what `compose`
+/// needs to resolve a composed callee's own `Bound::User` obligations against
+/// a concrete θ, mirroring `check_poly_call`'s bound loop -- passed in rather
+/// than read off `module`, since the `TraitResolveCtx` built from them below
+/// must not borrow `module` while the destructure above still needs `&mut`
+/// access to it.
 pub(super) fn discover_transitive_instantiations(
     module: &mut Module,
     insts: &mut HashMap<Span, CallInst>,
+    word_symbols: &[String],
+    trait_obligations: &[WordObligations],
 ) -> Result<Vec<CallInst>, String> {
     // N2: no records means nothing to compose, so every program without a
     // generic-calls-generic call emits identical IL by construction rather
@@ -4802,8 +4814,20 @@ pub(super) fn discover_transitive_instantiations(
         statics,
         modules,
         poly_cross_calls,
+        traits,
+        impls,
         ..
     } = module;
+    // Built here rather than accepted from the caller (R2): a caller-side
+    // `TraitResolveCtx` would borrow `module` immutably for the whole call,
+    // and this function still needs `&mut module` through the destructure
+    // above.
+    let tr = TraitResolveCtx {
+        traits,
+        impls,
+        word_symbols,
+        recorded: trait_obligations,
+    };
     // No `generics_cell` rebase/flush bracket here (review finding 2, phase
     // 2): the callee's declared *outputs* are the only `PolyType`s this
     // fixpoint ever grounds, and every one already passed phase 1's
@@ -4819,6 +4843,7 @@ pub(super) fn discover_transitive_instantiations(
         statics,
         modules: Some(modules),
         records: poly_cross_calls,
+        tr,
     };
     let mut transitive = ground.fixpoint(insts, arrays, refs, owned_cells)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
@@ -4860,6 +4885,7 @@ struct CrossGround<'a> {
     statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
     records: &'a HashMap<String, Vec<PolyCrossCall>>,
+    tr: TraitResolveCtx<'a>,
 }
 
 impl CrossGround<'_> {
@@ -5049,6 +5075,31 @@ impl CrossGround<'_> {
                 refs,
             )?);
         }
+        // R2: the same bound loop `check_poly_call` runs against a concrete
+        // caller, run here once `subst` is grounded -- a `Bound::User` on a
+        // composed callee's own variable is resolved against `self.tr`'s
+        // whole-program tables, the identical diagnostic and the identical
+        // span (`record.span`) a rejection would have used either way.
+        let mut trait_calls: HashMap<Span, String> = HashMap::new();
+        for (v, bound) in &sig.bounds {
+            let Bound::User(trait_id) = bound else {
+                continue;
+            };
+            let Some(ty) = subst.ty_of(*v) else { continue };
+            resolve_user_bound(
+                *trait_id,
+                *v,
+                ty,
+                sig,
+                &record.callee,
+                record.span,
+                ctx,
+                &self.tr,
+                arrays,
+                refs,
+                &mut trait_calls,
+            )?;
+        }
         // The caller's `generation` rides along so `instantiation_symbol`
         // stays collision-free across REPL redefinitions.
         let symbol = instantiation_symbol(&record.callee, &subst, caller.generation);
@@ -5060,11 +5111,11 @@ impl CrossGround<'_> {
             output_types: outputs,
             bundle: None,
             generation: caller.generation,
-            // A quotation parameter and a user trait bound are both located
-            // rejections on the cross-call path (`poly_cross_signature_supported`),
-            // so a composed callee has neither to record.
+            // A quotation parameter is a located rejection on the cross-call
+            // path (`poly_cross_signature_supported`), so a composed callee
+            // has none to record.
             quot_inputs: Vec::new(),
-            trait_calls: HashMap::new(),
+            trait_calls,
             poly_calls: HashMap::new(),
         })
     }
@@ -9240,7 +9291,11 @@ mod tests {
     /// parameter, is pinned separately by
     /// `poly_quotlit_against_legal_inline_quotation_param_rejects_at_the_cross_call`,
     /// which needs a `~[ ]` fixture this table's plain `check_src` shape
-    /// cannot build.
+    /// cannot build. A fourth shape, a `Bound::User` on a mapped variable,
+    /// used to be pinned here too; P7.S3s R2 deletes that rejection outright
+    /// (`check_generic_cross_call_discharges_a_forwarded_user_bound` and the
+    /// `_unsatisfiable_*` fixtures below pin the resolution it replaces it
+    /// with), so it is no longer a member of this table.
     #[test]
     fn check_cross_call_unsupported_callee_shapes_name_themselves() {
         for (fixture, what) in [
@@ -9256,11 +9311,6 @@ mod tests {
                 "returning the compound type `Box['U]` from a polymorphic word",
             ),
             (
-                ": shows ( &'U: Show -- ) show ;\n\
-                 : g ( &'T: Show -- ) shows ;\n: main ( -- ) ;\n",
-                "discharging the `Show` bound",
-            ),
-            (
                 ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
                  : g ( 'T: Copy -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
                 "calling a row-polymorphic word",
@@ -9273,6 +9323,52 @@ mod tests {
                 "expected `{what}`, got: {err}"
             );
         }
+    }
+
+    /// P7.S3s (R2): the headline capability -- a polymorphic body may call
+    /// another polymorphic word carrying a `Bound::User` on a forwarded
+    /// variable, and the composed callee's `trait_calls` resolves to the
+    /// implementing word's own lowering symbol, not merely a program that
+    /// type-checks. `g` forwards its own `'T: Show` to `shows`; `main`
+    /// instantiates `g` at `Point`, and the fixpoint must ground `shows`'s
+    /// body-recorded `show` obligation against that same `Point`.
+    #[test]
+    fn check_generic_cross_call_discharges_a_forwarded_user_bound() {
+        let (module, _) = checked_like_a_build(&format!(
+            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+             : g ( &'T: Show -- ) shows ;\n\
+             : main ( -- ) 1 2 Point |p| &p g p drop ;\n"
+        ))
+        .expect("the fixture checks");
+        let composed = module
+            .transitive_instantiations
+            .iter()
+            .find(|i| i.callee == "shows")
+            .expect("g's cross-call to shows composed a monomorph");
+        let resolved: Vec<&str> = composed.trait_calls.values().map(String::as_str).collect();
+        assert_eq!(resolved, vec!["show;Show;0;Point"]);
+    }
+
+    /// P7.S3s (R3): the concrete-image half of the same loop. `g`'s body
+    /// builds `Other` itself, a struct already in the registry with no
+    /// `impl: Show`, and hands `&o` to `shows` -- the mapped operand is
+    /// `Image::Concrete(Other)` at walk time, never a forwarded caller
+    /// variable. `compose`'s `resolve_user_bound` loop is what raises this,
+    /// not a code change to the `(Image::Concrete(_), Bound::User(_))`
+    /// walk-time arm (R3): that arm still records `None` and defers.
+    #[test]
+    fn check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error() {
+        let err = check_src(&format!(
+            "{SHOW}type: Other n i64 ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : g ( 'T -- ) drop 7 Other |o| &o shows o drop ;\n\
+             : main ( -- ) 1 g ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`Other` does not satisfy `Show`: no `( &Other -- )` found"),
+            "unexpected message: {err}"
+        );
     }
 
     /// P7.S3k (R2/N1): a grounded cross-call records *only* the symbolic
