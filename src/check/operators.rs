@@ -822,11 +822,14 @@ mod tests {
     #[test]
     fn check_cmp_le_ge_ne_on_bool_is_error() {
         // Comparisons stay numeric-only: `Bool` is never accepted, even
-        // though it now is for `and`/`or`/`xor`.
+        // though it now is for `and`/`or`/`xor`. Revised under P7.S3s R5:
+        // `lte` is the library's non-inline `'T: Copy Ord` word, so `Bool`
+        // (no `impl: Ord`) is rejected at the bound, not the operand-pair
+        // guard.
         let src = ": w ( -- Bool ) True False lte ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same numeric type"),
+            err.contains("does not satisfy `Ord`"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`Bool`"), "unexpected message: {err}");

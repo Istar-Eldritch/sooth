@@ -319,6 +319,18 @@ are. `impl:` for a scalar target is already legal inside the trait's own declari
 `check_impl_decls_orphan_scalar_target_names_only_the_trait_module`,
 `src/check/declarations.rs:3698`).
 
+Ruled during review: deriving all six comparisons from one `cmp` call needs care around a
+NaN operand, since IEEE-754 treats a NaN pair as a fourth, "unordered" case none of
+`Less`/`Equal`/`Greater` can represent directly. `lib/cmp.sth`'s float `impl: Ord` answers
+`Greater` for a NaN pair (after ruling out true equality via `ueq`), which keeps
+`eq`/`ne`/`lt`/`lte` IEEE-correct for NaN by construction -- preserving Phase 0's D4 (NaN
+detected via `x = x`). `gt`/`gte` cannot read that same `Greater`/`Greater-or-Equal` arm
+directly without also answering `True` for NaN; instead they compare with the operands
+swapped (`a > b` iff `b < a`, `a >= b` iff `b <= a`, an IEEE-754 identity that holds for
+every value including a NaN pair, where both sides are `False`), which keeps all six
+comparisons IEEE-correct for NaN with the existing 3-variant `Ordering` -- no fourth
+variant or `PartialOrd` split needed.
+
 ### R6 — Both overload-admission sites become registry lookups
 
 `poly_admits` (`src/check/declarations.rs:1395-1401`) and `poly_sig_could_match`
@@ -443,6 +455,31 @@ the bug.
 
 Named follow-on: a REPL session carrying its imported modules' trait/`impl:` registries.
 Out of scope here.
+
+**Scope correction, found during review: the REPL loses every comparison, not only a
+session's own `'T: Copy Ord` declaration.** `repl.rs`'s `splice_import` binds an imported
+module-0 word into `self.env` only if `w.poly.is_none()` (an ordinary concrete word), and
+retains it in the combinator store only if `check::is_combinator(w)` (`declares_inline`).
+Before R5, every polymorphic library word was `inline`, so this pair of cases was exhaustive
+for everything the REPL could import; R5 is what creates the first *non-inline* polymorphic
+library word (all six comparisons), and it falls into neither case, so it is never bound at
+all. Importing `eq`/`lt`/`gt`/`lte`/`gte`/`ne` and then using one, at a session line or inside
+a spliced combinator's arm, is `error: unknown word`. This is strictly wider than R8's own
+framing above (which only anticipated a session's own generic *declaration* losing `Ord`):
+importing and calling the library's already-compiled comparisons is broken too, with no bound
+resolution involved at all -- the imported closure's `impl:` bindings are already resolved by
+`assemble_module` before the REPL ever sees them. Closing it needs the REPL to support
+calling/monomorphizing a non-inline generic word for the first time (a new binding case in
+`splice_import`, and a call-site instantiation mechanism the REPL's `dlopen`-per-word model has
+never needed before), which is a separate slice, not this one's. Left `#[ignore]`d with this
+note: `sign_definable_and_callable_in_repl`,
+`self_tail_recursive_word_completes_in_constant_stack_in_repl`, `vm_dogfood_runs_in_repl`
+(`tests/phase1.rs`), `usize_comparison_across_a_repl_line_matches_same_line_semantics`
+(`tests/phase3_strings.rs`), `repl_while_define_runs_to_fixpoint`,
+`repl_two_output_combinator_define_and_call`, `repl_imported_while_runs_to_fixpoint`,
+`repl_imported_filter_runs`, `repl_combinators_dogfood_matches_native`
+(`tests/phase4_combinators.rs`), and `repl_defined_spliced_self_tail_loops_in_constant_stack`
+(`tests/phase4_slice10c_tail_splice.rs`).
 
 ### R9 — What this hands P7.S3o
 
@@ -708,3 +745,26 @@ Codegen regression is expected and accepted (criterion 8 covers behaviour, not I
   the same method — the remaining ~55 are unverified, not presumed mechanical.
 - **The `+86.6%` comparison tax** is real and user-visible until S3o lands. It is accepted
   for one slice; if S3o stalls again, this becomes a standing cost worth re-litigating.
+- **A generic cross-call inside a spliced combinator's own body is invisible to lowering,
+  found during review.** `lib/combinators.sth`'s `times-helper` calls the library `lt`
+  internally (`from to lt`); now that `lt` is a real generic call (R5) rather than spliced,
+  that cross-call needs an instantiation lowering can look up. It has none: combinators are
+  excluded from cross-call discovery entirely (P7.S3e's documented "R9 scope cut" --
+  `check_poly_combinator_standalone` records no `PolyCrossCall`, `src/check.rs:813`), a
+  pre-existing limitation from an earlier, already-shipped phase that this slice's
+  comparisons flip newly exposes rather than causes: `lt` was always spliced inline before,
+  so no instantiation lookup was ever needed for a call reached this way. Reproduces as an
+  `Option::expect` panic at lowering (`checked user word exists`,
+  `src/ir/func_builder/calls.rs:737`) for *any* non-inline generic body that uses `times`,
+  `each`, `map`, `fold`, or `filter` (all route through `times-helper`); `while` is
+  unaffected (no internal comparison). **Not a corpus regression**: every shipped example
+  and golden calls comparisons from a body's own top level or from `if`/`unless`'s arms,
+  never from inside a *combinator's own declared body* — `examples/poly_if.sth`'s `gt` sits
+  at `mymax`'s top level and still builds. The three `tests/phase7_slice3b_follow.rs` goldens
+  that do exercise this combination (`times_in_a_non_inline_generic_body_compiles_and_runs`,
+  `clampsum_golden_behavioural_matrix`,
+  `clampsum_structural_characterization_one_definition_per_instantiation`) are marked
+  `#[ignore]` with this finding cited, rather than fixed here: closing it means widening
+  `check_poly_combinator_standalone`/P7.S3k's cross-call discovery to walk into a
+  combinator's own body too, a change to already-shipped P7.S3e/P7.S3k machinery and a
+  separate slice's scope, not this one's.

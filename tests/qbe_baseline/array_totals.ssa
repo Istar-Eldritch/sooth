@@ -477,50 +477,72 @@ export function w $cmp.3b.Ord.3b.4.3b.isize__m4(l %v0, l %v1) {
 
 export function w $cmp.3b.Ord.3b.4.3b.f32__m4(s %v0, s %v1) {
 @start
-	%v2 =w cgts %v1, %v0
+	%cmp0 =w ceqs %v0, %v1
+	%cmp1 =w cos %v0, %v1
+	%v2 =w and %cmp0, %cmp1
 	jnz %v2, @blk1, @blk2
 @blk1
-	%v5 =w copy 0
+	%v5 =w copy 1
 	jmp @blk3
 @blk2
-	%v6 =w cgts %v0, %v1
+	%v6 =w cgts %v1, %v0
 	jnz %v6, @blk4, @blk5
 @blk4
-	%v9 =w copy 2
+	%v9 =w copy 0
 	jmp @blk6
 @blk5
-	%v10 =w copy 1
+	%v10 =w cgts %v0, %v1
+	jnz %v10, @blk7, @blk8
+@blk7
+	%v13 =w copy 2
+	jmp @blk9
+@blk8
+	%v14 =w copy 2
+	jmp @blk9
+@blk9
+	%v15 =w phi @blk7 %v13, @blk8 %v14
 	jmp @blk6
 @blk6
-	%v11 =w phi @blk4 %v9, @blk5 %v10
+	%v16 =w phi @blk4 %v9, @blk9 %v15
 	jmp @blk3
 @blk3
-	%v12 =w phi @blk1 %v5, @blk6 %v11
-	ret %v12
+	%v17 =w phi @blk1 %v5, @blk6 %v16
+	ret %v17
 }
 
 export function w $cmp.3b.Ord.3b.4.3b.f64__m4(d %v0, d %v1) {
 @start
-	%v2 =w cgtd %v1, %v0
+	%cmp0 =w ceqd %v0, %v1
+	%cmp1 =w cod %v0, %v1
+	%v2 =w and %cmp0, %cmp1
 	jnz %v2, @blk1, @blk2
 @blk1
-	%v5 =w copy 0
+	%v5 =w copy 1
 	jmp @blk3
 @blk2
-	%v6 =w cgtd %v0, %v1
+	%v6 =w cgtd %v1, %v0
 	jnz %v6, @blk4, @blk5
 @blk4
-	%v9 =w copy 2
+	%v9 =w copy 0
 	jmp @blk6
 @blk5
-	%v10 =w copy 1
+	%v10 =w cgtd %v0, %v1
+	jnz %v10, @blk7, @blk8
+@blk7
+	%v13 =w copy 2
+	jmp @blk9
+@blk8
+	%v14 =w copy 2
+	jmp @blk9
+@blk9
+	%v15 =w phi @blk7 %v13, @blk8 %v14
 	jmp @blk6
 @blk6
-	%v11 =w phi @blk4 %v9, @blk5 %v10
+	%v16 =w phi @blk4 %v9, @blk9 %v15
 	jmp @blk3
 @blk3
-	%v12 =w phi @blk1 %v5, @blk6 %v11
-	ret %v12
+	%v17 =w phi @blk1 %v5, @blk6 %v16
+	ret %v17
 }
 
 export function w $sooth_mono_lt__m4__t0_i64(l %v0, l %v1) {

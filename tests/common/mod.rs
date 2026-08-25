@@ -117,6 +117,21 @@ fn fixture_imports(src: &str) -> String {
         .copied()
         .filter(|w| !declared.contains(w) && tokens.contains(w))
         .collect();
+    // P7.S3s: `Ord` is an ordinary `core::cmp` trait now, re-exported through
+    // `core::prelude` like `Bool`, rather than a reserved predicate needing no
+    // import at all -- a fixture spelling `'T: Copy Ord` in a bound clause
+    // (never a body call, so `CORE_WORDS`' own word-usage filter above never
+    // sees it) needs the same auto-import treatment. `declared` excludes a
+    // fixture that names its own `Ord`-shadowing `trait:`/`type:`, and
+    // `import: core::cmp`/`core::prelude` both defer to a fixture's own
+    // explicit import, exactly as the `Bool` block below does.
+    if !declared.contains(&"Ord")
+        && tokens.contains(&"Ord")
+        && !src.contains("import: core::cmp")
+        && !src.contains("import: core::prelude")
+    {
+        wanted.push("Ord");
+    }
     // A fixture that names `import: core::bool` itself already binds
     // `Bool`/`False`/`True` from there; adding the same names again through
     // `core::prelude` would double-bind them, so this route defers to that

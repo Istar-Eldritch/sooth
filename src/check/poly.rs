@@ -4408,7 +4408,7 @@ pub(super) fn poly_sig_could_match(
     cells: &[OwnedCellDecl],
     refs: &[RefDecl],
     impls: &[ImplDecl],
-    ord_trait: Option<TraitId>,
+    traits: &[TraitDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
@@ -4426,14 +4426,17 @@ pub(super) fn poly_sig_could_match(
         // what keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
         // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
-        // library word swallows every operand type.
-        if let (PolyType::Var(v), Some(ord)) = (&sig.inputs[i], ord_trait) {
-            if sig.has_bound(*v, Bound::User(ord))
-                && !impls
+        // library word swallows every operand type. `ord_trait_id` resolves
+        // *this* `sig`'s own `Ord` bound (review fix: not a whole-program
+        // name search, which fails open under a module-local `trait: Ord`).
+        if let PolyType::Var(v) = &sig.inputs[i] {
+            if let Some(ord) = ord_trait_id(sig, *v, traits) {
+                if !impls
                     .iter()
                     .any(|imp| imp.trait_id == ord && imp.target_ty == stack[base + i].ty)
-            {
-                return false;
+                {
+                    return false;
+                }
             }
         }
         unify_poly_input(
@@ -4491,7 +4494,7 @@ pub(super) fn resolve_combinator_overload<'a>(
                 // at all (`reject_user_bound_on_combinator`), so there is
                 // nothing for an `impl:` registry lookup to filter here.
                 &[],
-                None,
+                &[],
             ),
             None => {
                 let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
@@ -4603,6 +4606,14 @@ pub(super) fn check_poly_call(
     // declared quotation slot mentions is already bound by the time pass 2
     // grounds it -- mirroring `check_poly_combinator_args`'s two-pass split,
     // whatever the parameter order.
+    //
+    // A *fresh integer literal* filling a bare type variable is held back and
+    // unified last, against whatever the variable resolved to -- D8's literal
+    // coercion, ported from `check_poly_combinator_args` (10c) so a non-inline
+    // call (R5's six comparisons, post-flip) keeps `5 3 >usize lt` working:
+    // unifying the bare `5` first would pin `'T` to `i64` and read the `usize`
+    // operand as a conflict.
+    let mut deferred_literals: Vec<usize> = Vec::new();
     for i in 0..n_in {
         if poly_input_is_quotation(&sig.inputs[i]) {
             continue;
@@ -4613,11 +4624,39 @@ pub(super) fn check_poly_call(
         if let Some(QuotRef::Known(_)) = stack[base + i].quot {
             return Err(reject_quotation_argument(ctx, span, name));
         }
-        let slot_ty = stack[base + i].ty;
+        let slot = stack[base + i];
+        if slot.literal && slot.ty == Type::I64 && matches!(sig.inputs[i], PolyType::Var(_)) {
+            deferred_literals.push(i);
+            continue;
+        }
         unify_poly_input(
             &sig,
             &sig.inputs[i],
-            slot_ty,
+            slot.ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut subst,
+        )?;
+    }
+    for i in deferred_literals {
+        let PolyType::Var(v) = &sig.inputs[i] else {
+            unreachable!("only a `Var` parameter is deferred")
+        };
+        // Exactly D8's domain, no wider (10c): a fresh literal fills a
+        // `usize`/`isize` position without an explicit conversion, and
+        // nothing else.
+        let ty = match subst.ty_of(*v) {
+            Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
+            _ => stack[base + i].ty,
+        };
+        unify_poly_input(
+            &sig,
+            &sig.inputs[i],
+            ty,
             name,
             span,
             ctx,
@@ -5387,7 +5426,14 @@ pub(super) fn unify_poly_input(
                     ));
                 }
             } else {
-                subst.ty.push((*v, slot_ty));
+                // Inserted in `v`-sorted position, not push order: `Subst`'s
+                // own doc comment says it is kept sorted so the mangled
+                // symbol is deterministic, but a caller processing inputs
+                // out of declared order (D8's literal deferral, the
+                // quotation two-pass split) would otherwise push out of
+                // order and mint a second monomorph for the same theta.
+                let pos = subst.ty.partition_point(|(id, _)| *id < *v);
+                subst.ty.insert(pos, (*v, slot_ty));
             }
         }
         PolyType::Array(elem, len) => {
@@ -7521,6 +7567,15 @@ mod tests {
     /// the fixture that resolves cleanly in
     /// `a_satisfied_bound_resolves_to_the_implementing_words_symbol` becomes a
     /// located error, not a silently dropped call, when the two disagree.
+    ///
+    /// P7.S3s (review fix): `parse_with_core` now runs `check_impl_decls` on
+    /// every caller's module (needed so `core::cmp`'s own `impl: Ord` blocks
+    /// resolve `cmp`), so this fixture's `impl: Show for Point` -- which does
+    /// bind `show` correctly -- resolves cleanly through that same call, the
+    /// same as it would in a real build. Reaching R17's backstop deliberately
+    /// now means undoing just that one resolution afterwards, on the `Show`
+    /// impl alone, rather than skipping the whole-module check `core::cmp`
+    /// still needs.
     #[test]
     fn an_unresolvable_obligation_on_a_satisfied_bound_is_a_located_error() {
         let src = format!(
@@ -7529,6 +7584,16 @@ mod tests {
         );
         let tokens = lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let show_impl = module
+            .impls
+            .iter_mut()
+            .find(|i| i.target_ty == crate::ast::Type::Struct(StructId::from_index(0), "Point"))
+            .expect("the fixture's `impl: Show for Point` parsed");
+        assert!(
+            !show_impl.resolved.is_empty(),
+            "parse_with_core's check_impl_decls should have resolved `show`"
+        );
+        show_impl.resolved.clear();
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
@@ -9125,17 +9190,26 @@ mod tests {
     /// P7.S3k (R3): the same discharge against a *concrete* image runs the
     /// ordinary predicate on the spot, so the caller's own bounds are not the
     /// only route to a rejection. `Bool` is `Copy` but not `Ord`.
+    ///
+    /// P7.S3s (review fix): `Ord` is now a `Bound::User`, and `compose`'s own
+    /// `resolve_user_bound` loop -- not the walk-time `Image::Concrete` arm,
+    /// which defers to it (R3) -- is what catches this. `compose` only runs
+    /// for a cross-call reached from `discover_transitive_instantiations`'s
+    /// fixpoint, itself seeded from a real instantiation, so `g` must be
+    /// called from `main`; the old fixture's `g` was dead code, which the
+    /// old `is_ord` (no registry, no reachability gate) still caught but
+    /// this design deliberately does not (R3's named residual).
     #[test]
     fn check_generic_cross_call_concrete_operand_failing_a_bound_is_error() {
         let err = check_src(
             ": biggest ( 'U: Ord -- 'U ) ;\n\
              : g ( 'T -- 'T ) True biggest drop ;\n\
-             : main ( -- ) ;\n",
+             : main ( -- ) 1 g drop ;\n",
         )
         .unwrap_err();
         assert!(
             err.contains("cannot instantiate `'U` of `biggest` with `Bool`")
-                && err.contains("is not `Ord`"),
+                && err.contains("does not satisfy `Ord`"),
             "unexpected message: {err}"
         );
     }

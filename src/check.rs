@@ -533,19 +533,32 @@ fn check_array_element_gate(
     Ok(())
 }
 
-/// P7.S3s (R6): `Ord` is no longer a reserved `Bound` variant, so the two
-/// overload-admission filters that used to ask `is_ord`
-/// (`poly_admits`/`poly_sig_could_match`) now need `Ord`'s own `TraitId` to
-/// look a candidate type up in the whole-program `impl:` registry. Shared
-/// here, the lowest common ancestor of `declarations.rs` and `poly.rs`, since
-/// both call sites need exactly this and nothing more. `None` if no module in
-/// the build declares `Ord` at all (every admission filter then declines to
-/// filter, exactly as it already does for any other user trait).
-fn ord_trait_id(traits: &[TraitDecl]) -> Option<TraitId> {
-    traits
-        .iter()
-        .position(|t| t.name == "Ord")
-        .map(TraitId::from_index)
+/// P7.S3s (R6, review fix): `Ord` is no longer a reserved `Bound` variant, so
+/// the two overload-admission filters that used to ask `is_ord`
+/// (`poly_admits`/`poly_sig_could_match`) need `Ord`'s own `TraitId` to look
+/// a candidate type up in the whole-program `impl:` registry. This resolves
+/// it from *that specific candidate's own* `sig.bounds` rather than a
+/// whole-program "first trait named `Ord`" search: the parser already
+/// resolved the correct `Ord` for this declaration (own-module shadowing and
+/// Phase 0's hub-reexport walk both included) when it parsed the bound, and
+/// recorded it as a `Bound::User(tid)` on the signature. A first-match global
+/// search is module-blind and fails open the moment any module in the build
+/// declares its own unrelated `trait: Ord` -- the earlier version of this
+/// function found *that* trait first and every admission filter using it
+/// stopped filtering at all. `None` if `v` carries no bound naming a trait
+/// called `Ord`.
+fn ord_trait_id(sig: &PolySig, v: u32, traits: &[TraitDecl]) -> Option<TraitId> {
+    sig.bounds.iter().find_map(|(bv, bound)| {
+        if *bv != v {
+            return None;
+        }
+        match bound {
+            Bound::User(tid) if traits.get(tid.index()).is_some_and(|t| t.name == "Ord") => {
+                Some(*tid)
+            }
+            _ => None,
+        }
+    })
 }
 
 pub fn check(module: &mut Module) -> Result<(), String> {
@@ -4444,12 +4457,20 @@ mod tests {
     }
     #[test]
     fn infer_line_carries_slot_types_expected() {
-        // A comparison line leaves a `Bool` on the carried stack -- the enum
-        // `core::bool` declares, which the helper seeds exactly as a session
-        // does.
+        // A `Bool`-producing line leaves a `Bool` on the carried stack -- the
+        // enum `core::bool` declares, which the helper seeds exactly as a
+        // session does.
+        //
+        // Revised under P7.S3s: the six comparisons (`gt` included) now
+        // dispatch a real `impl: Ord` trait member (`cmp`), which needs a
+        // whole-program `impl:` registry `infer_line` has no parameter for
+        // (mirroring the REPL's own loss of `'T: Copy Ord`, R8) -- `and` is a
+        // plain `Bool`-typed operator, needing no trait resolution, so it
+        // still exercises the same "a line's result type is carried"
+        // property this test pins.
         let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
             .expect("`core::bool` declares `Bool`");
-        assert_eq!(infer_src("5 3 gt", &[]).unwrap(), vec![bool_ty]);
+        assert_eq!(infer_src("True False and", &[]).unwrap(), vec![bool_ty]);
     }
     #[test]
     fn line_underflow_against_carried_stack_is_error() {

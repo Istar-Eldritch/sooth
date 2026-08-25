@@ -767,13 +767,16 @@ fn negative_shift_count_masks_to_type_width() {
 
 #[test]
 fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
+    // Revised under P7.S3s R5: `lte` is the library's non-inline
+    // `'T: Copy Ord` word, so `Bool` (no `impl: Ord`) is rejected at the
+    // bound, not at an operand-pair guard.
     let src = ": w ( -- Bool ) True False lte ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
-        err.contains("same numeric type"),
+        err.contains("does not satisfy `Ord`"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`Bool`"), "unexpected message: {err}");
@@ -855,6 +858,16 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
     // constant-folded away) must report False for the ordered comparisons
     // `lte`/`gte`/`eq`, and True for `ne` (RISK 1): `ne` is the one comparison
     // where "NaN involved" flips the answer relative to `eq`.
+    //
+    // Revised under P7.S3s R5: `lte`/`gte`/`ne`/`eq` are now derived from a
+    // `'T: Copy Ord` `cmp` call returning a 3-variant `Ordering`, which
+    // cannot represent IEEE-754's fourth "unordered" NaN case directly.
+    // `lib/cmp.sth`'s float `impl: Ord` picks `Greater` for a NaN pair
+    // (`eq`/`ne`/`lt`/`lte` read that arm and so stay IEEE-correct,
+    // preserving D4's load-bearing "NaN detected via `x = x`"); `gte`
+    // (like `gt`) is defined over the *swapped* operand order instead of
+    // reading `cmp`'s `Greater`/`Greater-or-Equal` arms directly (`a >= b`
+    // iff `b <= a`), which keeps it correct for NaN too.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b div ;\n\n\
 : main ( -- )\n  \
   0.0 0.0 fdiv dup lte ~[ 1 ] ~[ 0 ] if .\n  \
