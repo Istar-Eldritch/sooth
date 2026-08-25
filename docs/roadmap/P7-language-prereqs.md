@@ -678,28 +678,24 @@ any such member rather than shipping a dispatch path with no grounding signal.
 with some new call-site or context mechanism supplying the concrete type -- mechanism not
 yet designed.
 
-**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `[ done ]` `Bound::Ord`
-(`src/ast.rs:1679-1683`) is a reserved, member-less trait-table entry (`seed_predicate_traits`)
-satisfied by `is_ord` (`src/check/poly.rs:120-122`), a hardcoded `ty.is_numeric()` check --
-never the whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already dispatches
-through. `'T: Ord` therefore categorically excludes a struct or enum, and a user cannot opt
-their own type in: `impl: Ord for Point` is rejected as a built-in predicate.
-`examples/traits.sth` worked around this by inventing a separate `Order` trait.
+**P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `[ done ]` `Ord` is an
+ordinary library trait (`lib/cmp.sth`), declaring `cmp ( 'T 'T -- Ordering )` over an
+`Ordering` enum, satisfied nominally by an `impl:` block -- one per numeric width in `core`,
+built from the raw comparison intrinsics -- exactly as any other trait dispatches through the
+whole-program `(TraitId, Type)` impl registry `Bound::User` (S3e) already uses. The six
+surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are derived from `cmp`. `'T: Ord` bounds
+a struct or enum like any other bound, and a user type opts in with its own `impl: Ord for
+Point`; there is no compiler-hardcoded notion of "ordered" left to reject it.
 
-`Ord` becomes an ordinary library trait declaring `cmp ( 'T 'T -- Ordering )` over an
-`Ordering` enum, with one `impl:` per numeric width in `core` built from the raw comparison
-intrinsics, the six surface comparisons derived from `cmp`, and `Bound::Ord` deleted. The
-blocking gap is generic-calls-generic under a user bound: the checker's symbolic forwarding
-arm already handles it, but lowering ICEs (`calls.rs:737`) because a forwarded obligation is
-never resolved to a symbol per instantiation. See
-[slice3s-brief.md](./P7/slice3s-brief.md) for the probes.
-
-The six comparisons ship **non-inline** here and regress to a real call frame each, because a
-bounded `inline` word is **P7.S3o**, parked. That is deliberate: the cross-call lowering gap
-must close either way, and landing a correct non-inline version first gives S3o the
-differential oracle (flip `inline`, diff resolved `impl:` symbols at two and three splices)
-that both of its failed design rounds lacked. S3o is the named follow-on that restores the
-splice. Sequence before P8.S2's `lib/cmp.sth` migration.
+The six comparisons ship **non-inline**, and regress to a real call frame each, because an
+`inline` word may declare no `Bound::User` variable at all
+(`reject_user_bound_on_combinator`) and `Ord` is now one -- a measured ~2x tax over the old
+branch-and-construct body on a comparison-heavy loop, accepted for this slice. **P7.S3o**
+(parked) is the named follow-on that could restore the splice, using the differential oracle
+this slice's non-inline landing set up (flip `inline`, diff resolved `impl:` symbols at two
+and three splices). The REPL carries no whole-program trait/`impl:` registry, so a bound
+naming `Ord` at REPL scope gets a located, REPL-specific diagnostic pointing at that gap
+rather than claiming the name is wrong (`repl_unknown_capability_error`).
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;

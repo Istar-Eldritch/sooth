@@ -1721,11 +1721,13 @@ fn unknown_capability_error(name: &str, span: Span) -> String {
 
 /// P7.S3s (R8): the REPL carries no whole-program trait/`impl:` registry
 /// (`traits` is always `predicate_traits()` there, `Copy` only now that
-/// `Ord` is an ordinary library trait), so a bound naming anything past
-/// `Copy` can never resolve at REPL scope, not even a name that would
-/// resolve in a file. Distinct wording from `unknown_capability_error` so a
-/// REPL user is pointed at the real cause (no registry) instead of being
-/// told the name is simply wrong.
+/// `Ord` is an ordinary library trait), so `Ord` specifically can never
+/// resolve at REPL scope, not even though it would resolve in a file.
+/// Distinct wording from `unknown_capability_error` so a REPL user hitting
+/// this one real name is pointed at the real cause (no registry) instead of
+/// being told the name is simply wrong. Any other name is not a trait
+/// anywhere, in a file or at the REPL, so it stays on the generic
+/// diagnostic -- see `parse_capabilities`'s `name == "Ord"` gate.
 fn repl_unknown_capability_error(name: &str, span: Span) -> String {
     format!(
         "error: unknown capability `{name}` at line {}, col {} (`{name}` is a core::cmp trait; the REPL carries no trait or impl: registry to resolve it against -- define a word needing it in a file and load that instead)",
@@ -3329,7 +3331,7 @@ impl<'t> Parser<'t> {
                 // been read yet, where the colon has already committed to a
                 // bound (X3).
                 None if out.is_empty() => {
-                    return Err(if self.is_repl {
+                    return Err(if self.is_repl && c == "Ord" {
                         repl_unknown_capability_error(&c, span)
                     } else {
                         unknown_capability_error(&c, span)
@@ -3339,11 +3341,7 @@ impl<'t> Parser<'t> {
             }
         }
         if out.is_empty() {
-            return Err(if self.is_repl {
-                repl_unknown_capability_error("<none>", colon_span)
-            } else {
-                unknown_capability_error("<none>", colon_span)
-            });
+            return Err(unknown_capability_error("<none>", colon_span));
         }
         Ok(out)
     }
@@ -8928,6 +8926,32 @@ mod tests {
             err.contains("the REPL carries no trait or impl: registry to resolve it against"),
             "{err}"
         );
+    }
+
+    /// P7.S3s (R8, review round 1): only `Ord` is a real trait the REPL
+    /// cannot resolve. A typo or any other unknown name is not a trait
+    /// anywhere, so it must not be told it is a `core::cmp trait` -- that
+    /// wording is only true for `Ord`.
+    #[test]
+    fn parse_capabilities_at_repl_scope_unknown_name_keeps_the_generic_error() {
+        let tokens = lex(": f ( 'T: Bogus 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown capability `Bogus`"), "{err}");
+        assert!(!err.contains("core::cmp trait"), "{err}");
     }
 
     #[test]
