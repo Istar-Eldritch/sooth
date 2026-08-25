@@ -62,17 +62,47 @@ error: unknown capability `MyOrd` at line 4, col 21 (a bound names `Copy`, `Ord`
 there is no third mechanism to fall back on. **There used to be a general auto-visible-everywhere
 mechanism (a compiler-injected prelude) and it was deliberately deleted in P8.S2** --
 `core::prelude` today requires an ordinary explicit `import: core::prelude * ;` like any
-other module. So "every existing `'T: Copy Ord` program still compiles" (this brief's own
-exit criterion) is not automatic: it depends entirely on where `Ord`'s declaration ends
-up living. Counted live: 14 real `'T: ... Ord`-bound signatures exist today across
-`lib/cmp.sth` (6), `docs/roadmap/P8/dogfood/core/cmp.sth` (6, itself stale, see below),
-and `examples/poly_if.sth` (2). If `Ord` is declared in the same module as `cmp.sth`'s
-bodies, the own-module clause of `find_trait_in_module` covers all 6 of that file's own
-sites for free and only `poly_if.sth`'s 2 external call sites need a new import line. If
-`Ord` lives anywhere else, all 14 do. **This is a phase-2 design decision, not an
-implementation detail** -- where `Ord` is declared determines whether the exit criterion
-is met trivially or requires an import-line migration across every existing consumer, and
-the spec should pick the module deliberately with this in mind, not incidentally.
+other module.
+
+**Second-order finding, also probed: re-exporting `Ord` through `core::prelude` (the
+obvious fix) doesn't work either, for an unrelated reason -- and this one is a real,
+previously unnamed compiler gap, now fixed and validated (see "Phase 0" below).**
+`find_trait_in_module`'s selective-import lookup (`src/parser.rs:530-534`, prior to the
+fix) requires the found trait's `TraitDecl.module` to equal the *immediately* imported
+module -- a raw one-hop table. A trait declared in module A and merely re-exported
+(`export: Name ;`, not declared) by hub module B is invisible to a consumer C importing
+only B, even with an explicit `import: B | Name | ;`, confirmed live:
+```
+error: unknown capability `MyOrd` at line 3, col 14 (a bound names `Copy`, `Ord`, or a trait in scope)
+```
+Struct/enum type names already have a purpose-built multi-hop walker for exactly this
+(`resolve_type_export_origins`/`walk_type_export_origin`, `driver.rs:352-421`) and
+intrinsics have their own separate one (P7.S3q). Traits had neither -- nobody wrote the
+trait equivalent. **Built, tested, and left as a validated, ready-to-land fix**
+(`resolve_trait_export_origins`/`walk_trait_export_origin`, mirroring the type walker
+exactly): full diff is five files (`driver.rs` +84, `parser.rs` +69/-6 threading a
+`trait_origin` parameter through every `Parser`/`parse_bodies` call site, two trivial
+test-fixture updates), two new end-to-end goldens (one exercising the selective-import
+form, one the bare-qualifier form `h::Greet`, both actually **run** and asserting real
+output, not just compiling), full `cargo test --no-fail-fast` green (no regressions),
+`cargo fmt --check` and `cargo clippy -- -D warnings` clean. The original one-hop and
+`Copy`/`Ord` reserved-predicate lookups are unchanged and re-verified working. This must
+land as **this slice's own phase 0** (see Sizing) -- it is a real, independent compiler
+fix, not a design choice, and nothing about `Ord` proper can be built on top of a broken
+re-export path.
+
+With phase 0 landed, the import-visibility question above resolves cleanly rather than
+forcing a migration: declare `Ord` in `core::cmp` (alongside the rest of the comparison
+machinery, where it belongs) and re-export it through `core::prelude`
+(`export: Ord ;`). Every existing `'T: ... Ord` call site checked already imports
+`core::prelude *` (`examples/poly_if.sth:6`: `import: core::prelude * ;    \ Bool comes
+through here, the prelude's own re-export.` -- the exact same pattern this slice now
+needs for `Ord`), so the hub re-export reaches all of them for free, with **zero new
+import lines** -- the exit criterion below is met exactly, not approximately. Counted
+live for reference: 14 real `'T: ... Ord`-bound signatures exist today across
+`lib/cmp.sth` (6, own-module, never needed an import anyway), `docs/roadmap/P8/dogfood/core/cmp.sth`
+(6, itself stale, see below), and `examples/poly_if.sth` (2, covered by the existing
+`core::prelude *` import once phase 0 and the hub re-export are both in place).
 
 The consequence for a user: `'T: Ord` bounds a struct or enum out categorically. `sort`,
 `bin_search`, or any comparison-bounded generic word can only ever be instantiated over
@@ -364,39 +394,46 @@ exists in the codebase today.
   has no `impl: Ord` — slice 10c's coexistence preserved through the rewritten
   admission filter.
 - Every existing `'T: Copy Ord` numeric program still compiles **with no new import
-  line** — this is only automatic if `Ord`'s declaring module is chosen to match
-  `cmp.sth`'s own module (see "a second, more consequential migration cost" above); the
-  spec must decide this deliberately, not by default.
+  line** -- delivered via phase 0 (trait-through-hub fix, validated) plus declaring `Ord`
+  in `core::cmp` and re-exporting it through `core::prelude`, which every checked call
+  site already imports.
 - Every existing `'T: Copy Ord` numeric program still produces the same results. Codegen
   is *expected* to regress (a call frame per comparison); behaviour is not.
 
 ## Sizing
 
-Phase shape: (1) close the cross-call lowering gap and the concrete-image soundness hole
-together — **the cross-call half is now a validated design, not just a characterization**:
-thread a `TraitResolveCtx` into `CrossGround`, resolve the callee's `Bound::User`
-obligations via `resolve_user_bound` once `compose` grounds its `θ`, and store the result
-in the `CallInst` it already produces -- `calls.rs` needs no change, since it already
-reads `trait_calls` by span regardless of which path populated it. Built and verified
-clean (build/tests/fmt/clippy) in a probe worktree; re-derive against current `main`
-rather than copy-paste, and reuse the probe's own golden shape
-(`check_generic_cross_call_discharges_a_forwarded_user_bound`). The concrete-image half
-(`(Image::Concrete(_), Bound::User(_)) => None`) was exercised in the same probe but its
-output wasn't recoverable from the session log -- re-confirm this specific case fresh,
-don't inherit it as closed; (2) decide `Ord`'s declaring module deliberately (own-module
-vs. elsewhere is the whole difference between 2 and 14 required import-line additions,
-per the migration-cost finding above), then seed it as a real member-bearing trait with
-`Ordering` and `cmp ( 'T 'T -- Ordering )` (by value, per the probe correction above),
-plus the numeric `impl:` blocks, deleting `Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six
-comparisons over `cmp`, non-inline; (4) rewrite the two overload-admission sites as
-registry lookups, with the probed `Vec2 lt` coexistence program as its golden; (5)
-diagnostics.
+Phase shape: **(0) land the trait-through-hub fix -- built, tested, and verified
+clean (full suite/fmt/clippy) in a probe worktree, diff already exists** (five files:
+`driver.rs` gains `resolve_trait_export_origins`/`walk_trait_export_origin` mirroring the
+existing type-name walker; `parser.rs` threads a `trait_origin` table through every
+`Parser`/`parse_bodies` call site; two new end-to-end goldens, both run and checked for
+real output, not just compiled). Re-derive against current `main` rather than
+copy-paste (the probe worktree is scratch); this is a real, independent compiler fix with
+no open design question, land it as its own reviewable phase before anything `Ord`-shaped
+touches it; (1) close the cross-call lowering gap and the concrete-image soundness hole
+together -- **also a validated design, not just a characterization**: thread a
+`TraitResolveCtx` into `CrossGround`, resolve the callee's `Bound::User` obligations via
+`resolve_user_bound` once `compose` grounds its `θ`, and store the result in the
+`CallInst` it already produces -- `calls.rs` needs no change, since it already reads
+`trait_calls` by span regardless of which path populated it. Built and verified clean in
+a separate probe worktree; re-derive rather than copy-paste, and reuse the probe's own
+golden shape (`check_generic_cross_call_discharges_a_forwarded_user_bound`). The
+concrete-image half (`(Image::Concrete(_), Bound::User(_)) => None`) was exercised in the
+same probe but its output wasn't recoverable from the session log -- re-confirm this
+specific case fresh, don't inherit it as closed; (2) declare `Ord` in `core::cmp`, seed it
+as a real member-bearing trait with `Ordering` and `cmp ( 'T 'T -- Ordering )` (by value,
+per the probe correction above), plus the numeric `impl:` blocks, deleting `Bound::Ord`,
+and re-export it through `core::prelude`; (3) rewrite `lib/cmp.sth`'s six comparisons
+over `cmp`, non-inline; (4) rewrite the two overload-admission sites as registry lookups,
+with the probed `Vec2 lt` coexistence program as its golden; (5) diagnostics.
 
 ## Ready to spec: yes
 
-The design is decided, the blocker has a validated fix design (not just a
-characterization), and the import-visibility migration cost is now a named, countable
-decision rather than an unexamined assumption. Re-verify every line citation and re-derive
-phase 1's diff against live `main` before locking phases — `poly.rs`, `declarations.rs`
-and `ast.rs` are actively churned by other in-flight slices, and the numbers in this brief
+The design is decided, both blocking gaps (cross-call lowering, trait-through-hub
+re-export) have validated, tested fix designs rather than characterizations, and the
+import-visibility question is closed outright -- declare `Ord` in `core::cmp`, re-export
+through `core::prelude`, zero new import lines anywhere. Re-verify every line citation and
+re-derive both probed diffs against live `main` before locking phases (do not copy-paste
+from the scratch worktrees) -- `poly.rs`, `declarations.rs`, `parser.rs`, `driver.rs` and
+`ast.rs` are actively churned by other in-flight slices, and the numbers in this brief
 have already drifted once.
