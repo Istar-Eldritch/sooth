@@ -424,8 +424,12 @@ mod tests {
         // at all. P8 S2 (R3): this is declared in the test source rather than
         // pulled out of the deleted prelude -- with nothing injected, `eq` is
         // an ordinary name a source may define.
-        const EQ: &str =
-            ": eq inline ( 'T: Copy Ord 'T -- Bool ) ueq [ True ] [ False ] branch ;\n";
+        // P7.S3s (R7): `Ord` dropped from the witness's bound list -- its
+        // real purpose here is only to hit the builtin-name overlap gate for
+        // a word named `eq`, and `Ord`'s presence was incidental, not
+        // load-bearing (it is now a `Bound::User`, unaffected by the
+        // `inline` gate this test actually exercises).
+        const EQ: &str = ": eq inline ( 'T: Copy 'T -- Bool ) ueq [ True ] [ False ] branch ;\n";
         let tokens = lex(EQ).unwrap();
         let eq = crate::test_support::parse_with_core(&tokens)
             .unwrap()

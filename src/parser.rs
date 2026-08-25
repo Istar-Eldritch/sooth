@@ -1702,7 +1702,7 @@ fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
 
 fn unknown_capability_error(name: &str, span: Span) -> String {
     format!(
-        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy`, `Ord`, or a trait in scope)",
+        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or a trait in scope)",
         span.line, span.col
     )
 }
@@ -8271,7 +8271,7 @@ mod tests {
         // P7.S3e (R1/R3): a trait declaration parses into `Module::traits`,
         // its members sharing one implicit type variable (id 0).
         let module = parse_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
-        assert_eq!(module.traits.len(), 3, "Copy/Ord pre-seeded, plus Show");
+        assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Show");
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
         assert_eq!(show.members[0].name, "show");
@@ -8326,23 +8326,20 @@ mod tests {
 
     #[test]
     fn parse_trait_copy_collides_with_the_reserved_predicate_entry() {
-        // R2: `Copy`/`Ord` are pre-seeded trait-table entries, so parsing a
-        // user `trait: Copy` succeeds (it is a name, not a reserved-word
-        // check) -- the collision is caught by `check_trait_decls`, an
-        // ordinary duplicate/collision, at check time.
+        // R2: `Copy` is a pre-seeded trait-table entry, so parsing a user
+        // `trait: Copy` succeeds (it is a name, not a reserved-word check) --
+        // the collision is caught by `check_trait_decls`, an ordinary
+        // duplicate/collision, at check time. P7.S3s: `Ord` used to collide
+        // the same way, but it is no longer a reserved entry (it is an
+        // ordinary library trait now), so this still fires for `Copy` alone
+        // -- confirmed by asserting `check_trait_decls` still runs the
+        // reserved-module branch and not some other collision arm.
         let module = parse_src("trait: Copy 'T foo ( &'T -- ) ;").unwrap();
-        let err = crate::check::check_trait_decls(&module).unwrap_err();
-        assert!(
-            err.contains("already the name of a trait"),
-            "unexpected message: {err}"
+        assert_eq!(
+            module.traits.len(),
+            2,
+            "Copy pre-seeded, plus the user's own Copy"
         );
-    }
-
-    #[test]
-    fn parse_trait_ord_collides_with_the_reserved_predicate_entry() {
-        // Mirrors the `Copy` case above -- `Ord` is the other pre-seeded
-        // predicate entry and was previously untested.
-        let module = parse_src("trait: Ord 'T foo ( &'T -- ) ;").unwrap();
         let err = crate::check::check_trait_decls(&module).unwrap_err();
         assert!(
             err.contains("already the name of a trait"),
@@ -8374,18 +8371,16 @@ mod tests {
 
     #[test]
     fn parse_impl_decl_for_a_reserved_predicate_trait_is_error() {
-        // R2: the reserved `Copy`/`Ord` entries participate in no orphan-rule
-        // or export check, so an `impl: Copy for i64` used to fall through to
-        // the orphan rule and demand a module that cannot exist.
+        // R2: the reserved `Copy` entry participates in no orphan-rule or
+        // export check, so an `impl: Copy for i64` used to fall through to
+        // the orphan rule and demand a module that cannot exist. P7.S3s:
+        // `Ord` used to be rejected the same way; it is now an ordinary
+        // library trait (`impl: Ord for i64` is exactly how `core::cmp`
+        // satisfies it), so only `Copy` still fires this guard -- confirmed
+        // by asserting the guard still names the built-in-predicate reason.
         let err = parse_src("impl: Copy for i64\n  : show | p | p drop ;\n;").unwrap_err();
         assert!(err.contains("trait `Copy` cannot be implemented"), "{err}");
         assert!(err.contains("built-in predicate"), "{err}");
-    }
-
-    #[test]
-    fn parse_impl_decl_for_reserved_ord_is_error() {
-        let err = parse_src("impl: Ord for i64\n  : show | p | p drop ;\n;").unwrap_err();
-        assert!(err.contains("trait `Ord` cannot be implemented"), "{err}");
     }
 
     #[test]
@@ -8560,25 +8555,27 @@ mod tests {
                 &selective,
                 &no_trait_origin
             ),
-            Some(TraitId::from_index(2))
+            Some(TraitId::from_index(1))
         );
         // Own module, unqualified: module 1 declares `Show` itself.
         assert_eq!(
             find_trait_in_module(&traits, "Show", 1, &imports, &selective, &no_trait_origin),
-            Some(TraitId::from_index(2))
+            Some(TraitId::from_index(1))
         );
         // Reserved predicate table: visible from any module, with an empty
-        // `trait_origin` and no import/selective entry for it.
+        // `trait_origin` and no import/selective entry for it. P7.S3s: `Ord`
+        // used to be the second reserved entry pinned here; only `Copy`
+        // remains reserved.
         assert_eq!(
-            find_trait_in_module(&traits, "Ord", 0, &imports, &selective, &no_trait_origin),
-            Some(TraitId::from_index(1))
+            find_trait_in_module(&traits, "Copy", 0, &imports, &selective, &no_trait_origin),
+            Some(TraitId::from_index(0))
         );
         // One-hop selective: a bare `Show` reached via a selective import
         // targeting module 1, from a module (2) that neither declares nor
         // imports it by qualifier.
         assert_eq!(
             find_trait_in_module(&traits, "Show", 2, &imports, &selective, &no_trait_origin),
-            Some(TraitId::from_index(2))
+            Some(TraitId::from_index(1))
         );
     }
 
@@ -8837,14 +8834,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_capabilities_still_folds_copy_ord_byte_for_byte() {
+    fn parse_capabilities_still_folds_copy_byte_for_byte() {
         // P7.S3e (R2): `parse_capabilities`'s rewrite (a trait-table lookup
-        // replacing the two hardcoded string compares) must not change
-        // `'T: Copy Ord`'s existing parse result -- the highest-blast-radius
-        // regression this phase's Codebase Map calls out.
-        let module = parse_src(": f ( 'T: Copy Ord -- 'T ) ;").unwrap();
+        // replacing the hardcoded string compare) must not change
+        // `'T: Copy`'s existing parse result. P7.S3s: `Ord` is no longer a
+        // predicate to fold this way at all -- `Bound::Ord` does not exist to
+        // construct -- so this test now pins `Copy` alone; the companion
+        // below pins a user trait folding to `Bound::User` right beside it.
+        let module = parse_src(": f ( 'T: Copy -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::Copy), (0, Bound::Ord)]);
+        assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
+    }
+
+    #[test]
+    fn parse_capabilities_folds_copy_and_a_user_trait_byte_for_byte() {
+        // Companion to the `Copy`-alone case above: `'T: Copy SomeUserTrait`
+        // still folds to `[Bound::Copy, Bound::User(id)]`, greedily, in
+        // source order (R5).
+        let module = parse_src(
+            "trait: SomeUserTrait 'T foo ( &'T -- ) ;\n: f ( 'T: Copy SomeUserTrait -- 'T ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(
+            sig.bounds,
+            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(1)))]
+        );
     }
 
     #[test]
@@ -8858,13 +8873,13 @@ mod tests {
     #[test]
     fn parse_capabilities_resolves_a_declared_trait_to_a_user_bound() {
         // P7.S3e (R6/R18): a nominal trait name in a bound resolves against
-        // the same table `Copy`/`Ord` do, at parse time, and is baked into
-        // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 2
-        // because the two pre-seeded predicate entries occupy 0 and 1.
+        // the same table `Copy` does, at parse time, and is baked into
+        // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 1
+        // because the one pre-seeded predicate entry (`Copy`) occupies 0.
         let module =
             parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
     }
 
     #[test]
@@ -8877,7 +8892,7 @@ mod tests {
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(
             sig.bounds,
-            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(2)))]
+            vec![(0, Bound::Copy), (0, Bound::User(TraitId::from_index(1)))]
         );
     }
 
@@ -8889,7 +8904,7 @@ mod tests {
         let module =
             parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show i64 -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(2)))]);
+        assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
         assert_eq!(
             sig.inputs,
             vec![PolyType::Var(0), PolyType::Concrete(Type::I64)]

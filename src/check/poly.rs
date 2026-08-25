@@ -113,14 +113,6 @@ impl TraitResolveCtx<'_> {
     }
 }
 
-/// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
-/// (every integer width, `usize`/`isize`, and both floats) is totally ordered
-/// for the comparison operators; nothing else is (`bool`, a struct, an array).
-/// `max`'s float carve-out (X9) lives at its own builtin arm, not here.
-pub(super) fn is_ord(ty: Type) -> bool {
-    ty.is_numeric()
-}
-
 /// R7: whether a `PolyType` slot is `Copy`. A bare variable answers *only*
 /// from its bound set (never a concrete-type predicate), a concrete slot
 /// delegates to `is_copy`, and an array is `Copy` iff its element is.
@@ -1886,9 +1878,6 @@ fn poly_cross_call(
             }
             (Image::Concrete(ty), Bound::Copy) => (!is_copy(*ty, structs, enums, arrays))
                 .then(|| poly_copy_bound_error(ctx, span, name, var, *ty)),
-            (Image::Concrete(ty), Bound::Ord) => {
-                (!is_ord(*ty)).then(|| poly_ord_bound_error(ctx, span, name, var, *ty))
-            }
             // Not resolved here: `compose` grounds every mapping entry --
             // this `Image::Concrete` case and `Image::CallerVar` alike --
             // into a real `ty` before its own `resolve_user_bound` loop runs
@@ -2293,7 +2282,6 @@ fn poly_cross_bound_error(
     let caller = ctx.rendered_word_or("`<line>`");
     let bound = match bound {
         Bound::Copy => "Copy".to_string(),
-        Bound::Ord => "Ord".to_string(),
         Bound::User(id) => traits
             .get(id.index())
             .map_or_else(|| "a user trait".to_string(), |t| t.name.clone()),
@@ -4419,6 +4407,8 @@ pub(super) fn poly_sig_could_match(
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
     refs: &[RefDecl],
+    impls: &[ImplDecl],
+    ord_trait: Option<TraitId>,
 ) -> bool {
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
@@ -4430,14 +4420,19 @@ pub(super) fn poly_sig_could_match(
         if poly_input_is_quotation(&sig.inputs[i]) {
             return true;
         }
-        // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
-        // (`is_ord` is `is_numeric` and nothing else), and the bound is what
-        // keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // Slice 10c: an `Ord`-bounded variable admits only a type with its own
+        // `impl: Ord` (P7.S3s: an ordinary `impl:` registry lookup, `Ord` no
+        // longer being a reserved numeric-only predicate), and the bound is
+        // what keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
         // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
         // library word swallows every operand type.
-        if let PolyType::Var(v) = &sig.inputs[i] {
-            if sig.has_bound(*v, Bound::Ord) && !stack[base + i].ty.is_numeric() {
+        if let (PolyType::Var(v), Some(ord)) = (&sig.inputs[i], ord_trait) {
+            if sig.has_bound(*v, Bound::User(ord))
+                && !impls
+                    .iter()
+                    .any(|imp| imp.trait_id == ord && imp.target_ty == stack[base + i].ty)
+            {
                 return false;
             }
         }
@@ -4492,6 +4487,11 @@ pub(super) fn resolve_combinator_overload<'a>(
                 arrays,
                 cells,
                 refs,
+                // A combinator's own type variable can carry no `Bound::User`
+                // at all (`reject_user_bound_on_combinator`), so there is
+                // nothing for an `impl:` registry lookup to filter here.
+                &[],
+                None,
             ),
             None => {
                 let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
@@ -4702,7 +4702,6 @@ pub(super) fn check_poly_call(
         let unsatisfied = match bound {
             Bound::Copy => (!is_copy(ty, ctx.structs(), ctx.enums(), arrays))
                 .then(|| poly_copy_bound_error(ctx, span, name, var, ty)),
-            Bound::Ord => (!is_ord(ty)).then(|| poly_ord_bound_error(ctx, span, name, var, ty)),
             // P7.S3e (R8): satisfaction of a user trait is an `impl:` registry
             // lookup keyed by `(TraitId, θ(v))`, and each obligation the
             // callee's body recorded on this variable then resolves to a
@@ -6517,25 +6516,6 @@ pub(super) fn poly_copy_bound_error(
     }
 }
 
-pub(super) fn poly_ord_bound_error(
-    ctx: &Ctx,
-    span: Span,
-    callee: &str,
-    var: &str,
-    ty: Type,
-) -> String {
-    let callee = crate::resolve::demangle_call(callee);
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in {name} (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
-            span.line
-        , name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => format!(
-            "error: cannot instantiate `{var}` of `{callee}` with `{ty}`: `{var}: Ord` is unsatisfied"
-        ),
-    }
-}
-
 pub(super) fn poly_var_conflict_error(
     ctx: &Ctx,
     span: Span,
@@ -6688,13 +6668,12 @@ mod tests {
     /// A source checked the way `driver::assemble_module` checks one: the
     /// declaration checks first (P7.S3e -- `check_impl_decls` is what resolves
     /// each `impl:` binding to the word it names, and no call site can resolve
-    /// an obligation without it), then the body/call-site pass, returning the
-    /// checked module alongside what R17's pre-pass recorded.
+    /// an obligation without it, which `parse_with_core` now runs for every
+    /// caller), then the body/call-site pass, returning the checked module
+    /// alongside what R17's pre-pass recorded.
     fn checked_like_a_build(src: &str) -> Result<(Module, Vec<WordObligations>), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        check_trait_decls(&module)?;
-        check_impl_decls(&mut module)?;
         let recorded = super::super::check_module(&mut module)?;
         Ok((module, recorded))
     }
@@ -6706,12 +6685,15 @@ mod tests {
     /// spelling there -- the test-harness artefact that kept the deleted
     /// six-name comparison carve-out (P7.S3k R7) looking alive. Through here,
     /// `gt` arrives as `gt__mN`, which is what a real call site holds.
+    ///
+    /// The declaration pre-passes run *before* `resolve_modules`, inside
+    /// `parse_with_core`, exactly as `assemble_module` orders them:
+    /// `check_impl_decls` resolves each binding by the name the parser's
+    /// desugar synthesized, which only agrees with `WordDef::name` pre-mangle.
     fn check_src_mangled(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
-        check_trait_decls(&module)?;
-        check_impl_decls(&mut module)?;
         super::super::check_module(&mut module).map(|_| ())
     }
 
@@ -6756,10 +6738,12 @@ mod tests {
         assert_eq!(obs[0].var, 0);
         assert_eq!(obs[0].member, "show");
         assert_eq!(obs[0].span.line, 6);
-        // Index 2: the two pre-seeded `Copy`/`Ord` predicate entries occupy 0
-        // and 1, so a whole-program `TraitId` is what was recorded, not a
-        // per-module or per-word one.
-        assert_eq!(obs[0].trait_id, TraitId::from_index(2));
+        // Index 1: the pre-seeded `Copy` predicate entry occupies 0, `Show`
+        // (declared in this fixture's own source, ahead of the appended
+        // `core::cmp`, which declares its own `Ord` after it) is next -- a
+        // whole-program `TraitId` is what was recorded, not a per-module or
+        // per-word one.
+        assert_eq!(obs[0].trait_id, TraitId::from_index(1));
     }
 
     /// The obligation list is keyed by every non-combinator poly word the

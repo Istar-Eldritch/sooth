@@ -64,10 +64,25 @@ pub fn core_bool_enums() -> Vec<EnumDecl> {
 /// a located diagnostic reports, and its own `type:` declarations keep the
 /// registry positions they would have had alone (so `bool` never displaces a
 /// test's first enum).
+///
+/// P7.S3s: `core::cmp`'s six comparisons now dispatch a real trait member
+/// (`cmp`) through `impl:` bindings, exactly as any other `trait:`/`impl:`
+/// pair does -- resolving that binding is `check_impl_decls`' job
+/// (`driver::assemble_module` runs it between parse and `check::check`), not
+/// something `check::check` re-derives on its own. Run here too, mirroring
+/// that order, so every caller of this helper gets a module whose bound
+/// members are already resolved, the same as a real build's -- without this,
+/// a caller that only runs `check::check` (most of them) would see `eq`/`lt`/
+/// etc. fail with "binds no word for member `cmp`", a resolution gap in the
+/// test harness, not in the checker.
 pub fn parse_with_core(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut all = tokens.to_vec();
     for src in CORE_SOURCES {
         all.extend(crate::lexer::lex(src).expect("a lib/ core module lexes"));
     }
-    crate::parser::parse(&all)
+    let module = crate::parser::parse(&all)?;
+    crate::check::check_trait_decls(&module)?;
+    let mut module = module;
+    crate::check::check_impl_decls(&mut module)?;
+    Ok(module)
 }

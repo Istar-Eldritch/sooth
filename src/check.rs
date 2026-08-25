@@ -533,6 +533,21 @@ fn check_array_element_gate(
     Ok(())
 }
 
+/// P7.S3s (R6): `Ord` is no longer a reserved `Bound` variant, so the two
+/// overload-admission filters that used to ask `is_ord`
+/// (`poly_admits`/`poly_sig_could_match`) now need `Ord`'s own `TraitId` to
+/// look a candidate type up in the whole-program `impl:` registry. Shared
+/// here, the lowest common ancestor of `declarations.rs` and `poly.rs`, since
+/// both call sites need exactly this and nothing more. `None` if no module in
+/// the build declares `Ord` at all (every admission filter then declines to
+/// filter, exactly as it already does for any other user trait).
+fn ord_trait_id(traits: &[TraitDecl]) -> Option<TraitId> {
+    traits
+        .iter()
+        .position(|t| t.name == "Ord")
+        .map(TraitId::from_index)
+}
+
 pub fn check(module: &mut Module) -> Result<(), String> {
     check_module(module).map(|_| ())
 }
@@ -619,7 +634,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // arity (a builtin row or a local monomorphic word) is rejected here too,
     // before either enters `poly_env`/`env` below -- there is no ranking that
     // could otherwise pick between them.
-    check_generic_concrete_overlap(&module.words)?;
+    check_generic_concrete_overlap(&module.words, &module.traits, &module.impls)?;
     // Two poly words (or two poly combinators) declaring the exact same
     // signature under one name are rejected before either enters `poly_env`
     // below -- unresolvable ambiguity, not a legitimate second overload.

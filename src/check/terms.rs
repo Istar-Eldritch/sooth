@@ -677,10 +677,22 @@ fn check_term(
             // user overload (8a R2). Computed once and consulted by both the
             // combinator interception and the poly-call one below, since a
             // poly combinator sits in both tables.
+            let ord_trait = ord_trait_id(poly.trait_resolve.traits);
             let fall_through_to_env = env.contains_key(name)
                 && poly.env.get(name).is_some_and(|cands| {
                     !cands.iter().any(|(sig, _)| {
-                        poly_sig_could_match(sig, &stack, name, span, ctx, arrays, cells, refs)
+                        poly_sig_could_match(
+                            sig,
+                            &stack,
+                            name,
+                            span,
+                            ctx,
+                            arrays,
+                            cells,
+                            refs,
+                            poly.trait_resolve.impls,
+                            ord_trait,
+                        )
                     })
                 });
             if let Some(candidates) = poly.combinators.get(name) {

@@ -281,9 +281,18 @@ fn a_mutual_non_growing_generic_pair_compiles_runs_and_terminates() {
          : main ( -- ) 7 5 g . ;\n",
     );
     assert_eq!(build_and_run(&entry), "7\n");
+    // P7.S3s (R5): `gt` is no longer `inline`, so `h`/`g`'s cross-call to it
+    // (itself a `Bound::User` obligation, R2) is composed and monomorphized
+    // like any other reachable generic callee -- a third symbol, not codegen
+    // parity with the pre-flip splice (exit criterion 8 scopes parity to
+    // behaviour/stdout, not IL).
     assert_eq!(
         monomorph_symbols(&entry),
-        ["sooth_mono_g__m0__t0_i64", "sooth_mono_h__m0__t0_i64"]
+        [
+            "sooth_mono_g__m0__t0_i64",
+            "sooth_mono_gt__m3__t0_i64",
+            "sooth_mono_h__m0__t0_i64"
+        ]
     );
 }
 

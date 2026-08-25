@@ -1665,8 +1665,6 @@ mod tests {
     fn lower_with_trait_prepasses(src: &str) -> IrModule {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        crate::check::check_trait_decls(&module).unwrap();
-        crate::check::check_impl_decls(&mut module).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module).unwrap();
         crate::ir::lower(&module).unwrap()

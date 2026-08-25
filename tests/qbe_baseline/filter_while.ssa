@@ -123,116 +123,425 @@ export function $sooth_main() {
 	%v6 =l copy 0
 	jmp @blk1
 @blk1
-	%v7 =l phi @start %v4, @blk15 %v46
-	%v8 =l phi @start %v6, @blk15 %v48
-	%v9 =l phi @start %v3, @blk15 %v9
-	%v10 =w csltl %v8, %v9
-	jnz %v10, @blk2, @blk3
+	%v7 =l phi @start %v4, @blk9 %v36
+	%v8 =l phi @start %v6, @blk9 %v38
+	%v9 =l phi @start %v3, @blk9 %v9
+	%v10 =w call $sooth_mono_lt__m4__t0_i64(l %v8, l %v9)
+	%v13 =w copy %v10
+	jnz %v13, @blk2, @blk3
 @blk2
-	%v13 =w copy 1
-	jmp @blk4
+	%v14 =l add %v0, 0
+	%v15 =l copy %v8
+	%v16 =l copy 5
+	%v17 =w cultl %v15, %v16
+	jnz %v17, @blk5, @blk6
+@blk6
+	%v18 =l copy 68
+	%v19 =l copy 5
+	call $sooth_oob_trap(l %v18, l %v15, l %v19)
+	jmp @blk5
+@blk5
+	%eoff0 =l mul %v15, 8
+	%v20 =l add %v14, %eoff0
+	%v21 =l loadl %v20
+	%v22 =l copy 4
+	%v23 =w call $sooth_mono_gt__m4__t0_i64(l %v21, l %v22)
+	%v26 =w copy %v23
+	jnz %v26, @blk7, @blk8
+@blk7
+	%v27 =l add %v0, 0
+	%v28 =l copy %v7
+	%v29 =l copy 5
+	%v30 =w cultl %v28, %v29
+	jnz %v30, @blk10, @blk11
+@blk11
+	%v31 =l copy 69
+	%v32 =l copy 5
+	call $sooth_oob_trap(l %v31, l %v28, l %v32)
+	jmp @blk10
+@blk10
+	%eoff1 =l mul %v28, 8
+	%v33 =l add %v27, %eoff1
+	storel %v21, %v33
+	%v34 =l copy 1
+	%v35 =l add %v7, %v34
+	jmp @blk9
+@blk8
+	jmp @blk9
+@blk9
+	%v36 =l phi @blk10 %v35, @blk8 %v7
+	%v37 =l copy 1
+	%v38 =l add %v8, %v37
+	jmp @blk1
 @blk3
-	%v14 =w copy 0
 	jmp @blk4
 @blk4
-	%v15 =w phi @blk2 %v13, @blk3 %v14
-	%v18 =w copy %v15
-	jnz %v18, @blk5, @blk6
-@blk5
-	%v19 =l add %v0, 0
-	%v20 =l copy %v8
-	%v21 =l copy 5
-	%v22 =w cultl %v20, %v21
-	jnz %v22, @blk8, @blk9
-@blk9
-	%v23 =l copy 68
-	%v24 =l copy 5
-	call $sooth_oob_trap(l %v23, l %v20, l %v24)
-	jmp @blk8
-@blk8
-	%eoff0 =l mul %v20, 8
-	%v25 =l add %v19, %eoff0
-	%v26 =l loadl %v25
-	%v27 =l copy 4
-	%v28 =w csgtl %v26, %v27
-	jnz %v28, @blk10, @blk11
-@blk10
-	%v31 =w copy 1
-	jmp @blk12
-@blk11
-	%v32 =w copy 0
+	%v39 =l copy %v7
+	call $printf(l $ufmt, l %v39, ...)
+	%v40 =l copy 0
 	jmp @blk12
 @blk12
-	%v33 =w phi @blk10 %v31, @blk11 %v32
-	%v36 =w copy %v33
-	jnz %v36, @blk13, @blk14
+	%v42 =l phi @blk4 %v40, @blk16 %v52
+	%v43 =l copy 5
+	%v44 =w call $sooth_mono_lt__m4__t0_i64(l %v42, l %v43)
+	%v47 =w copy %v44
+	jnz %v47, @blk13, @blk14
 @blk13
-	%v37 =l add %v0, 0
-	%v38 =l copy %v7
-	%v39 =l copy 5
-	%v40 =w cultl %v38, %v39
-	jnz %v40, @blk16, @blk17
-@blk17
-	%v41 =l copy 69
-	%v42 =l copy 5
-	call $sooth_oob_trap(l %v41, l %v38, l %v42)
-	jmp @blk16
-@blk16
-	%eoff1 =l mul %v38, 8
-	%v43 =l add %v37, %eoff1
-	storel %v26, %v43
-	%v44 =l copy 1
-	%v45 =l add %v7, %v44
+	%v48 =l copy 1
+	%v49 =l add %v42, %v48
+	%v50 =w copy 1
 	jmp @blk15
 @blk14
+	%v51 =w copy 0
 	jmp @blk15
 @blk15
-	%v46 =l phi @blk16 %v45, @blk14 %v7
-	%v47 =l copy 1
-	%v48 =l add %v8, %v47
-	jmp @blk1
-@blk6
-	jmp @blk7
-@blk7
-	%v49 =l copy %v7
-	call $printf(l $ufmt, l %v49, ...)
-	%v50 =l copy 0
+	%v52 =l phi @blk13 %v49, @blk14 %v42
+	%v53 =w phi @blk13 %v50, @blk14 %v51
+	%v56 =w copy %v53
+	jnz %v56, @blk16, @blk17
+@blk16
+	jmp @blk12
+@blk17
 	jmp @blk18
 @blk18
-	%v52 =l phi @blk7 %v50, @blk25 %v67
-	%v53 =l copy 5
-	%v54 =w csltl %v52, %v53
-	jnz %v54, @blk19, @blk20
-@blk19
-	%v57 =w copy 1
-	jmp @blk21
-@blk20
-	%v58 =w copy 0
-	jmp @blk21
-@blk21
-	%v59 =w phi @blk19 %v57, @blk20 %v58
-	%v62 =w copy %v59
-	jnz %v62, @blk22, @blk23
-@blk22
-	%v63 =l copy 1
-	%v64 =l add %v52, %v63
-	%v65 =w copy 1
-	jmp @blk24
-@blk23
-	%v66 =w copy 0
-	jmp @blk24
-@blk24
-	%v67 =l phi @blk22 %v64, @blk23 %v52
-	%v68 =w phi @blk22 %v65, @blk23 %v66
-	%v71 =w copy %v68
-	jnz %v71, @blk25, @blk26
-@blk25
-	jmp @blk18
-@blk26
-	jmp @blk27
-@blk27
-	call $printf(l $fmt, l %v67, ...)
+	call $printf(l $fmt, l %v52, ...)
 	ret
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.i8__m4(w %v0, w %v1) {
+@start
+	%v2 =w csltw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w csgtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.i16__m4(w %v0, w %v1) {
+@start
+	%v2 =w csltw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w csgtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.i32__m4(w %v0, w %v1) {
+@start
+	%v2 =w csltw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w csgtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.i64__m4(l %v0, l %v1) {
+@start
+	%v2 =w csltl %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w csgtl %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.u8__m4(w %v0, w %v1) {
+@start
+	%v2 =w cultw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cugtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.u16__m4(w %v0, w %v1) {
+@start
+	%v2 =w cultw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cugtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.u32__m4(w %v0, w %v1) {
+@start
+	%v2 =w cultw %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cugtw %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.u64__m4(l %v0, l %v1) {
+@start
+	%v2 =w cultl %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cugtl %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.usize__m4(l %v0, l %v1) {
+@start
+	%v2 =w cultl %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cugtl %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.isize__m4(l %v0, l %v1) {
+@start
+	%v2 =w csltl %v0, %v1
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w csgtl %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.f32__m4(s %v0, s %v1) {
+@start
+	%v2 =w cgts %v1, %v0
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cgts %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $cmp.3b.Ord.3b.4.3b.f64__m4(d %v0, d %v1) {
+@start
+	%v2 =w cgtd %v1, %v0
+	jnz %v2, @blk1, @blk2
+@blk1
+	%v5 =w copy 0
+	jmp @blk3
+@blk2
+	%v6 =w cgtd %v0, %v1
+	jnz %v6, @blk4, @blk5
+@blk4
+	%v9 =w copy 2
+	jmp @blk6
+@blk5
+	%v10 =w copy 1
+	jmp @blk6
+@blk6
+	%v11 =w phi @blk4 %v9, @blk5 %v10
+	jmp @blk3
+@blk3
+	%v12 =w phi @blk1 %v5, @blk6 %v11
+	ret %v12
+}
+
+export function w $sooth_mono_gt__m4__t0_i64(l %v0, l %v1) {
+@start
+	%v2 =w call $cmp.3b.Ord.3b.4.3b.i64__m4(l %v0, l %v1)
+	%v6 =w copy 0
+	%v7 =w ceqw %v2, %v6
+	jnz %v7, @blk1, @blk4
+@blk4
+	%v8 =w copy 1
+	%v9 =w ceqw %v2, %v8
+	jnz %v9, @blk2, @blk3
+@blk1
+	%v10 =w copy 0
+	jmp @blk5
+@blk2
+	%v11 =w copy 0
+	jmp @blk5
+@blk3
+	%v12 =w copy 1
+	jmp @blk5
+@blk5
+	%v13 =w phi @blk1 %v10, @blk2 %v11, @blk3 %v12
+	ret %v13
+}
+
+export function w $sooth_mono_lt__m4__t0_i64(l %v0, l %v1) {
+@start
+	%v2 =w call $cmp.3b.Ord.3b.4.3b.i64__m4(l %v0, l %v1)
+	%v6 =w copy 0
+	%v7 =w ceqw %v2, %v6
+	jnz %v7, @blk1, @blk4
+@blk4
+	%v8 =w copy 1
+	%v9 =w ceqw %v2, %v8
+	jnz %v9, @blk2, @blk3
+@blk1
+	%v10 =w copy 1
+	jmp @blk5
+@blk2
+	%v11 =w copy 0
+	jmp @blk5
+@blk3
+	%v12 =w copy 0
+	jmp @blk5
+@blk5
+	%v13 =w phi @blk1 %v10, @blk2 %v11, @blk3 %v12
+	ret %v13
 }
 
 function $sooth_oob_trap(l %line, l %idx, l %len) {

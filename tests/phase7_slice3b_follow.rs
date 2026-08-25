@@ -663,8 +663,17 @@ fn inline_generic_body_still_splices_a_row_combinator() {
     // concrete caller and grounds its row against a real stack
     // (`examples/poly_if.sth`'s shape), and that path does not go through the
     // poly walk at all.
+    //
+    // P7.S3s (R7): `Ord` dropped and `gt` replaced with its own wrapped
+    // intrinsic (`ugt [ True ] [ False ] branch`) for the same reason
+    // `poly_mymax_runs_at_i64_and_f64` does -- `inline` may declare no
+    // `Bound::User` variable at all, and `Ord` is one now; this keeps the
+    // fixture's actual point (an `inline` generic body splices `if`
+    // correctly) legal to declare `inline` without a bound this slice
+    // retires from the `inline` surface. See P7.S3s R5/S3o for why the
+    // comparisons themselves cannot stay `inline`.
     let src =
-        ": mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n\
+        ": mymax inline ( 'T: Copy 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
                : main ( -- ) 2 9 mymax . 9.5 2.5 mymax . ;\n";
     let scratch = Scratch::write("inline-splice", src);
     let (stdout, code) = build_and_run(scratch.path());

@@ -139,9 +139,9 @@ fn impl_body_form_builds_and_runs() {
         "body-form",
         "import: intrinsics * ;\n\
          import: core::prelude | if Bool lt gt | ;\n\
-         type: Ordering | Less | Equal | Greater ;\n\
+         type: Rank | Under | Same | Over ;\n\
          trait: Order 'T\n\
-           cmp ( &'T &'T -- Ordering )\n\
+           cmp ( &'T &'T -- Rank )\n\
          ;\n\
          trait: Show 'T\n\
            show ( &'T -- )\n\
@@ -153,16 +153,16 @@ fn impl_body_form_builds_and_runs() {
              a &y @ | ay |\n\
              b &y @ | by |\n\
              ay by lt\n\
-             ~[ Less ]\n\
+             ~[ Under ]\n\
              ~[\n\
                ay by gt\n\
-               ~[ Greater ]\n\
+               ~[ Over ]\n\
                ~[\n\
                  a &x @ | ax |\n\
                  b &x @ | bx |\n\
                  ax bx lt\n\
-                 ~[ Less ]\n\
-                 ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if\n\
+                 ~[ Under ]\n\
+                 ~[ ax bx gt ~[ Over ] ~[ Same ] if ] if\n\
                ] if\n\
              ] if ;\n\
          ;\n\
@@ -173,10 +173,10 @@ fn impl_body_form_builds_and_runs() {
          : show_larger ( &'T: Order Show &'T -- )\n\
            | b | | a |\n\
            a b cmp\n\
-           ~[ ( Less ) drop b show ]\n\
-           ~[ ( Equal ) drop a show ]\n\
-           ~[ ( Greater ) drop a show ]\n\
-           Ordering? ;\n\
+           ~[ ( Under ) drop b show ]\n\
+           ~[ ( Same ) drop a show ]\n\
+           ~[ ( Over ) drop a show ]\n\
+           Rank? ;\n\
          : main ( -- )\n\
            0 0 Point | origin |\n\
            3 4 Point | corner |\n\
