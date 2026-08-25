@@ -5681,7 +5681,13 @@ pub(super) fn apply_subst(
         // landed here and been told `'T` is an output it appears nowhere in.
         // R9 freezes the text, so that misdescription stays an open gap.
         PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
-            poly_unbound_output_ty_error(ctx, span, name, &sig.ty_var_names[*v as usize])
+            poly_unbound_output_ty_error(
+                ctx,
+                span,
+                name,
+                &sig.ty_var_names[*v as usize],
+                sig.ty_var_names.len(),
+            )
         }),
         PolyType::Array(elem, len) => {
             let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, cells, refs)?;
@@ -6691,17 +6697,22 @@ pub(super) fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var
 /// P7.S3t (R9): the same message for a *type* variable, which an explicit
 /// instantiation can now supply. The base text is unchanged; only the remedy
 /// is new, and it is not offered for a length variable, which R4 leaves
-/// unaddressable.
+/// unaddressable. The remedy names one `SomeType` per declared type variable
+/// (`ty_var_count`): a callee with more than one would otherwise be told a
+/// syntax that immediately re-fails on arity.
 pub(super) fn poly_unbound_output_ty_error(
     ctx: &Ctx,
     span: Span,
     callee: &str,
     var: &str,
+    ty_var_count: usize,
 ) -> String {
+    let args = vec!["SomeType"; ty_var_count].join(" ");
     format!(
-        "{}\n  note: supply it explicitly: `{}[SomeType]`",
+        "{}\n  note: supply it explicitly: `{}[{}]`",
         poly_unbound_output_error(ctx, span, callee, var),
-        crate::resolve::demangle_call(callee)
+        crate::resolve::demangle_call(callee),
+        args
     )
 }
 
@@ -8687,6 +8698,20 @@ mod tests {
             bare,
             "error: `f` in `main` (line 2) has output variable `'T` that no input binds\n  \
              note: supply it explicitly: `f[SomeType]`"
+        );
+    }
+    /// P7.S3t (R9): the remedy names one `SomeType` per declared type
+    /// variable, not a single one regardless of arity -- a two-variable
+    /// callee's note must read `f[SomeType SomeType]`, since `f[SomeType]`
+    /// would just fail again on arity.
+    #[test]
+    fn an_unbound_output_note_matches_a_two_variable_signatures_arity() {
+        let bare = check_src(": f ( 'T -- 'U ) f ;\n: main ( -- ) 1 f drop ;")
+            .expect_err("nothing binds `'U`");
+        assert_eq!(
+            bare,
+            "error: `f` in `main` (line 2) has output variable `'U` that no input binds\n  \
+             note: supply it explicitly: `f[SomeType SomeType]`"
         );
     }
     /// P7.S3t (R5/R6): a seeded and an inferred call at the same θ are the
