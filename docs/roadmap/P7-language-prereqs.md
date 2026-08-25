@@ -623,10 +623,10 @@ ambiguous there, since every candidate's declared operands already disagree with
 no module qualifier would change that.
 
 **The declaration gate** (`member_binds_trait_var`) requires the trait's variable as `'T` or
-`&'T` *directly* in some input. It is syntactic: a receiver mentioned only nested inside a
-composite input (`sum ( ['T 4] -- i64 )`) is rejected too, since grounding it would need
-structural unification through the array type. A nullary member (`fresh ( -- i64 )`) is the
-zero-receiver case deferred as **P7.S3t** below.
+`&'T` *directly* in some input, or admits an empty input list outright. It is syntactic: a
+receiver mentioned only nested inside a composite input (`sum ( ['T 4] -- i64 )`) is still
+rejected, since grounding it would need structural unification through the array type. A
+nullary member (`fresh ( -- i64 )`) is the zero-receiver case, resolved by **P7.S3t** below.
 
 Because selection is by name alone and so cannot fall through to a builtin on a shape
 mismatch, a member name that a builtin arm owns would capture every such call in a bounded
@@ -658,15 +658,19 @@ hub calls it bare with no `import: intrinsics` line of its own. A hub's own
 **Exit:** a module that imports a hub re-exporting a gated intrinsic (e.g. `drop` through
 `core::prelude`) may call it bare, with no direct `import: intrinsics` line of its own.
 
-**P7.S3t -- A zero-receiver trait member has no call-site signal to dispatch on.** Named at
-P7.S3p's spec, out of scope there. `fresh ( -- i64 )` (a nullary constructor) binds its
-trait's type variable in no declared input, so nothing at the call site grounds *which*
-concrete type's member is meant -- the language has no type-argument syntax and no context
-binding to supply one. P7.S3p's declaration gate (`member_binds_trait_var`) keeps rejecting
-any such member rather than shipping a dispatch path with no grounding signal.
+**P7.S3t -- A zero-receiver trait member has no call-site signal to dispatch on.** `[ done ]`
+Named at P7.S3p's spec, out of scope there. `fresh ( -- i64 )` (a nullary constructor) binds
+its trait's type variable in no declared input, so nothing at the call site grounds *which*
+concrete type's member is meant. Resolved by an explicit call-site type-argument list,
+`f[Point]`, parsed by span adjacency on the callee's token spans and seeded into `Subst`
+ahead of operand unification (`check_poly_call`); the declaration gate
+(`member_binds_trait_var`) now admits an empty input list.
 **Exit:** a trait member binding its variable in no input may be declared and dispatched,
-with some new call-site or context mechanism supplying the concrete type -- mechanism not
-yet designed.
+reachable from a concrete call site through one bounded generic word (`f[Point]` grounds
+`f`'s own `'T`, then bound dispatch reaches `fresh`). Chaining through a second bounded
+generic word is not expressible: `parse_type_expr` has no production for a type variable, so
+a generic word cannot forward its own variable through an explicit instantiation (`f['U]`
+inside `g ( 'U: Default -- 'U )` does not parse) -- a stated residual gap, not designed here.
 
 **P7.S3s -- `Ord` as a library trait, not a compiler-hardcoded bound.** `Bound::Ord`
 (`src/ast.rs:1679-1683`) is a reserved, member-less trait-table entry (`seed_predicate_traits`)

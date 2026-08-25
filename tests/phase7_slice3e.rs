@@ -172,25 +172,25 @@ fn trait_member_with_a_non_trailing_receiver_dispatches() {
     assert_eq!(build_and_run(&entry), "7\n");
 }
 
-/// A member binding the trait's variable in *no* input is still rejected at
-/// `trait:` declaration time: a call has no operand to ground the variable
-/// from, and there is no type-argument syntax to supply one. Deferred, not
-/// ruled out -- the message names P7.S3t. The member is spelled `fresh`, not
-/// `tag`: P7.S3r (R4) rejects a member spelled as a name-dispatched builtin at
-/// the declaration, which would preempt the diagnostic this test is about.
+/// A member binding the trait's variable in *no* input is admitted at
+/// `trait:` declaration time as of P7.S3t: a call to the *wrapping* generic
+/// word can now ground the variable explicitly (`f[Point]`), so the gate no
+/// longer needs to shut the door before that mechanism runs. See
+/// `tests/phase7_slice3t.rs` for the dispatching golden; this only pins that
+/// declaration alone no longer fails.
 #[test]
-fn trait_member_with_a_zero_input_receiver_is_rejected() {
+fn trait_member_with_a_zero_input_receiver_is_accepted() {
     let (_t, entry) = single_file(
         "zero-input-receiver",
         "trait: Show 'T fresh ( -- i64 ) ;\n\
          : main ( -- ) ;\n",
     );
-    let err = build_error(&entry);
+    let build = sooth_build(&entry);
     assert!(
-        err.contains("never takes `'T` (or `&'T`) directly as an input"),
-        "{err}"
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
     );
-    assert!(err.contains("P7.S3t"), "{err}");
 }
 
 /// P7.S3p selects a member by name alone, ahead of every builtin arm, so it

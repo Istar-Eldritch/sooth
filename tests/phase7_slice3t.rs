@@ -1,8 +1,11 @@
-//! P7.S3t goldens, phase 1: the call-site explicit type instantiation
-//! `f[Point]` as a *surface syntax*. Phase 1 delivers the parse and the
-//! rejections; nothing here observes an instantiation grounding a type
-//! variable, because `check_poly_call` still ignores the list (phase 2 seeds
-//! `Subst` from it).
+//! P7.S3t goldens, all three phases. Phase 1 (below) delivers the call-site
+//! explicit type instantiation `f[Point]` as a *surface syntax* -- the parse
+//! and the rejections, with `check_poly_call` still ignoring the list. Phase
+//! 2 seeds `Subst` from it, so a call can ground a variable no operand
+//! reaches. Phase 3 relaxes the trait-member declaration gate to admit a
+//! nullary member and dogfoods it end to end: a zero-receiver member
+//! dispatched through a bounded generic word instantiated at its own
+//! concrete call site.
 //!
 //! The rejections are the load-bearing half. Exactly one of `check_term`'s
 //! dozen dispatch routes for a `Call` can consume a type-argument list -- the
@@ -427,5 +430,127 @@ fn a_wrong_arity_instantiation_is_rejected() {
             "`two` (line 3) declares 2 type variables (`'T`, `'U`) but was given 1 type argument"
         ),
         "{too_few}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3: `member_binds_trait_var` admits the empty input list, so a
+// zero-receiver trait member (`fresh ( -- 'T )`) can be declared and, via a
+// bounded generic word instantiated at its own call site, dispatched.
+//
+// A bound written in *output* position (`( -- 'T: Default )`) declares no
+// input slot -- the only spelling that leaves nothing to ground `'T`, so the
+// wrapping word itself needs its own explicit instantiation at its call site.
+// ---------------------------------------------------------------------------
+
+/// R1/R8, the headline. Two impls of `Default` on distinguishable types, a
+/// zero-receiver `fresh`, and a bounded `f` whose own `'T` no operand can
+/// bind; `f[Point]` and `f[Other]` at a concrete call site in `main` reach
+/// different `fresh` bodies. A golden that only proves the build succeeds is
+/// a placebo here -- a wrong-symbol link is exactly the failure mode this
+/// slice guards against.
+#[test]
+fn a_zero_receiver_member_dispatches_through_an_explicit_instantiation() {
+    let out = build_and_run(
+        "zero-receiver-headline",
+        "import: intrinsics * ;\n\
+         trait: Default 'T fresh ( -- 'T ) ;\n\
+         type: Point x i64 ;\n\
+         type: Other x i64 ;\n\
+         impl: Default for Point\n\
+           : fresh 11 Point ;\n\
+         ;\n\
+         impl: Default for Other\n\
+           : fresh 22 Other ;\n\
+         ;\n\
+         : f ( -- 'T: Default ) fresh ;\n\
+         : main ( -- )\n\
+           f[Point] |p| &p &x @ . p drop\n\
+           f[Other] |o| &o &x @ . o drop\n\
+           ;\n",
+    );
+    assert_eq!(out, "11\n22\n");
+}
+
+/// R8: the surviving rejection. A receiver mentioned only *nested* inside a
+/// composite input (an array element) is still rejected -- grounding it
+/// would need structural unification through the array type, which
+/// dispatch does not attempt. Byte-identical to the pre-P7.S3t message for
+/// this shape, minus the note that used to name the (now-legal) nullary
+/// case as a separate deferral.
+#[test]
+fn a_nested_receiver_member_is_still_rejected() {
+    let err = build_error(
+        "nested-receiver",
+        "import: intrinsics * ;\n\
+         trait: Show 'T sum ( [ 'T 4 ] -- i64 ) ;\n",
+    );
+    assert!(
+        err.contains(
+            "`sum` of `Show` (line 2, col 8) never takes `'T` (or `&'T`) directly as an input, \
+             so a call has nothing to dispatch on"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("note: a variable nested inside a composite input (an array element, say) does not count"),
+        "{err}"
+    );
+}
+
+/// R8, S3p ruling 4's ambiguity path, single-variable case: two traits
+/// bound to the same variable both declare a nullary member of the same
+/// name. Same-variable candidates are the unconditional ambiguity --
+/// `candidate_fitting_the_operands` never reaches operand shape for them --
+/// so this fires regardless of the (empty, here) operand list.
+#[test]
+fn a_nullary_member_of_two_traits_on_one_variable_is_ambiguous() {
+    let err = build_error(
+        "ambiguous-one-var",
+        "import: intrinsics * ;\n\
+         trait: A 'T fresh ( -- 'T ) ;\n\
+         trait: B 'T fresh ( -- 'T ) ;\n\
+         type: Point x i64 ;\n\
+         impl: A for Point\n\
+           : fresh 1 Point ;\n\
+         ;\n\
+         impl: B for Point\n\
+           : fresh 2 Point ;\n\
+         ;\n\
+         : f ( -- 'T: A B ) fresh ;\n\
+         : main ( -- ) f[Point] drop ;\n",
+    );
+    assert!(
+        err.contains("`fresh` is required by both `A` and `B` on 'T"),
+        "{err}"
+    );
+}
+
+/// R8, S3p ruling 4's ambiguity path, cross-variable case: a nullary member
+/// declares no operand at all, so `candidate_fitting_the_operands`'s
+/// operand-shape filter fits *every* candidate spanning different
+/// variables -- more than one fit is still the ambiguity error, not a
+/// silent first-match.
+#[test]
+fn a_nullary_member_across_two_variables_is_ambiguous() {
+    let err = build_error(
+        "ambiguous-two-vars",
+        "import: intrinsics * ;\n\
+         trait: A 'T fresh ( -- 'T ) ;\n\
+         trait: B 'T fresh ( -- 'T ) ;\n\
+         type: Point x i64 ;\n\
+         type: Other x i64 ;\n\
+         impl: A for Point\n\
+           : fresh 1 Point ;\n\
+         ;\n\
+         impl: B for Other\n\
+           : fresh 2 Other ;\n\
+         ;\n\
+         : f ( -- 'T: A 'U: B ) fresh drop fresh ;\n\
+         : main ( -- ) f[Point Other] drop ;\n",
+    );
+    assert!(
+        err.contains("`fresh` is required by `A` on 'T and `B` on 'U"),
+        "{err}"
     );
 }
