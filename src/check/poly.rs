@@ -6066,8 +6066,8 @@ fn poly_borrow_of_non_aggregate_local_error(
 
 /// A quotation local, split out from `poly_borrow_of_non_aggregate_local_error`
 /// (review, post-slice-12 rebase): a non-`inline` word's ordinary `[ ... ]`
-/// parameter lowers to a real two-word `(code, env)` aggregate at the ABI
-/// level, so "is not an aggregate" is false at the representation the
+/// parameter lowers to a real three-word `(code, env, disposer)` aggregate at
+/// the ABI level, so "is not an aggregate" is false at the representation the
 /// backend actually emits, even though it is true at the type-system level
 /// this slice reasons over. Naming the actual reason -- unsupported, not
 /// shapeless -- avoids a claim the ABI contradicts; borrowing a quotation is
@@ -10479,7 +10479,7 @@ mod tests {
         // instantiation. Second update (review): a quotation gets its own
         // wording (`poly_borrow_of_quotation_local_error`), not the generic
         // "not an aggregate" text -- a non-`inline` word's ordinary `[ ... ]`
-        // parameter *is* a two-word aggregate at the ABI level, so that claim
+        // parameter *is* a three-word aggregate at the ABI level, so that claim
         // is False at the representation the backend emits even though the
         // type system still refuses the borrow.
         let err = check_src(

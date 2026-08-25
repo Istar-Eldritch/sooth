@@ -385,7 +385,7 @@ fn width(ty: IrType, layouts: Layouts) -> &'static str {
         // register; the quotation's `:Q{n}` aggregate type is only spelled in
         // ABI/member positions.
         // P7.S3h: an owning quotation shares the plain one's representation
-        // exactly -- same two-slot aggregate, same `:Q{n}` symbol -- so every
+        // exactly -- same three-slot aggregate, same `:Q{n}` symbol -- so every
         // backend spelling pairs the two variants. Only the env *storage* the
         // frontend builds differs, and that decision is made and finished
         // before lowering hands anything to this file.

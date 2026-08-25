@@ -95,8 +95,9 @@ pub(super) fn multi_capture_escaping_error(ctx: &Ctx, span: Span) -> String {
 }
 
 /// R15 case 4: a captured quotation-typed name. Admitting it would need a
-/// two-word `(code, env)` env slot and a recursive surviving-set fold no exit
-/// criterion requires, so it is deferred, parallel to the 2+-capture deferral.
+/// three-word `(code, env, disposer)` env slot and a recursive surviving-set
+/// fold no exit criterion requires, so it is deferred, parallel to the
+/// 2+-capture deferral.
 pub(super) fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> String {
     let _ = ctx;
     format!(
