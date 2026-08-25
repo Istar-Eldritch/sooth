@@ -50,7 +50,7 @@ fn is_aggregate(ty: IrType, enums: &Enums) -> bool {
         // header still reads it (`project_aggregate_return_aliasing`). It
         // takes the stable-slot + staged-blit path every other aggregate does.
         // P7.S3h: an owning quotation value is the same interior pointer to
-        // two-slot storage a plain one is, so it stages identically.
+        // three-slot storage a plain one is, so it stages identically.
         IrType::Struct(_)
         | IrType::Array(_)
         | IrType::Quotation(_)

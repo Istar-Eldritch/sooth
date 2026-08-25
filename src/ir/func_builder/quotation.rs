@@ -272,7 +272,7 @@ impl<'a> FuncBuilder<'a> {
         // P7.S3h: `call` is also the *consuming* use of an owning closure --
         // the pop above discharges its disposal obligation, and running the
         // body is what actually performs the disposal. Nothing else about the
-        // indirect call differs: same two-slot value, same trailing env arg.
+        // indirect call differs: same three-slot value, same trailing env arg.
         let (IrType::Quotation(sig) | IrType::OwningQuotation(sig)) = self.value_type(v) else {
             unreachable!("a non-literal `call` operand is a materialized quotation value")
         };

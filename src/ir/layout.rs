@@ -333,8 +333,9 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
         IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
         IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
-        // A quotation value is a two-slot aggregate; it marshals like any
-        // aggregate, its size rounded up so the next slot stays 8-aligned.
+        // A quotation value is a three-slot aggregate (code, env, disposer);
+        // it marshals like any aggregate, its size rounded up so the next
+        // slot stays 8-aligned.
         IrType::Quotation(_) | IrType::OwningQuotation(_) => {
             round_up(quotation_layout(WORD_WIDTH).size, 8)
         }
@@ -737,10 +738,10 @@ impl LayoutBuilder<'_> {
                 let l = self.array_memo[id.index()].as_ref().expect("inner layout");
                 (l.size, l.align)
             }
-            // Slice 7a: a quotation field/element is the fixed two-slot value
+            // Slice 7a: a quotation field/element is the fixed three-slot value
             // aggregate, word-width-derived (`quotation_layout`), not a scalar
             // -- `scalar_size_align_ww` deliberately panics on it. P7.S3h: an
-            // owning quotation shares that same two-slot value shape, so it
+            // owning quotation shares that same three-slot value shape, so it
             // sizes here too -- its only distinction is the env storage
             // decision, not the layout. It reaches this arm as a synthesized
             // multi-output bundle field, interned after the containment audit.

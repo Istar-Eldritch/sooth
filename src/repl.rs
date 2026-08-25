@@ -821,7 +821,7 @@ fn rich_value_size(
         ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
         ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
         // Slice 7a: a code handle is one word; a quotation value spans its
-        // fixed two-slot layout (only reached as a struct/enum/array field).
+        // fixed three-slot layout (only reached as a struct/enum/array field).
         ir::IrType::Code => ir::WORD_WIDTH as usize,
         ir::IrType::Quotation(_) | ir::IrType::OwningQuotation(_) => {
             ir::quotation_layout(ir::WORD_WIDTH).size as usize
