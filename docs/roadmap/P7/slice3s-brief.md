@@ -91,7 +91,7 @@ numeric-tower knowledge:
 type: Ordering | Less | Equal | Greater ;
 
 trait: Ord 'T
-  cmp ( &'T &'T -- Ordering )
+  cmp ( 'T 'T -- Ordering )
 ;
 ```
 
@@ -230,6 +230,46 @@ an `impl: Ord`.
 `poly_ord_bound_error` and `poly.rs:2285`'s `Bound::Ord => "Ord"` naming disappear with
 the variant. An unsatisfied `Ord` becomes an ordinary user-trait failure, and should name
 the missing `impl:` the way a `Bound::User` failure does.
+
+### Named, deliberately out of scope: a borrowed impl for a linear element
+
+The registry key is `(TraitId, Type)`, and `Type::Ref` is a distinct `Type` from its
+referent -- `impl: Ord for &Point` is not a variant of `impl: Ord for Point`, it is an
+independent entry. Probed live: it parses (`parse_type_expr` already handles `&` in an
+impl target position), passes the orphan rule (a `Type::Ref` target falls to
+`impl_target_module`'s scalar-like `_ => None` arm, same bucket as `i64`), and a generic
+word bounding its own `'T` directly as the reference type (`is_less ( 'T: Ord 'T -- Bool
+)`, called as `&p1 &p2 is_less`) dispatches and runs correctly.
+
+This does **not** subsume the by-value `cmp` above, and is not a variant reading of the
+same trait -- confirmed by probe, not assumed: a generic word whose `'T` infers to the
+*owned* type (`3 4 is_less`, `'T` = `i64`) fails outright against a registry that only
+holds `(Ord, &i64)` --
+```
+error: cannot instantiate `'T` of `is_less` with `i64`
+  `i64` does not satisfy `Ord`: no `( i64 i64 -- Ordering )` found
+```
+-- there is no autoref: the checker never tries "does `&i64` satisfy this, given an
+`i64`". A bare literal or an unaddressable local can never produce the `&i64` this path
+would require, so an owned-type impl remains mandatory for ordinary numeric code to work
+at all; a ref-type impl is an *additional*, separate registration, not a replacement.
+
+The reason to name it here rather than drop it: `bin_search_internal`
+(`examples/experiments/binary_search.sth`, aspirational syntax, does not compile as-is)
+already assumes exactly this shape -- `Slice['T: Ord 'N] &'T`, comparing a borrowed
+element, with no `Copy` bound anywhere. That is deliberate, not an oversight: `Copy`
+alongside `Ord` is only there so a by-value `cmp` doesn't strand the element it just
+consumed, and a **linear** element -- the language's own default, an owned value used
+exactly once -- can never carry `Copy`. A by-value `Ord` therefore categorically excludes
+linear elements from ever being sorted or searched; only a borrowed `cmp` can compare a
+linear element without consuming it. `'T` does not "support both" through one impl --
+there is no receiver polymorphism, no auto-deref search from `'T` to `&'T` -- so a
+linear-friendly `sort`/`bin_search` needs its own borrowed-`cmp` impls and, most likely,
+its own generic-word bodies written against a `&'T`-shaped comparison rather than the
+by-value one this slice ships. Real, and worth a named follow-on once a concrete linear
+consumer needs it, but it is not a gap in this slice's own promise: **the exit criteria
+below only ever commit to `'T: Copy Ord`**, exactly the numeric/Copy-struct case that
+exists in the codebase today.
 
 ## Dependencies / sequencing
 
