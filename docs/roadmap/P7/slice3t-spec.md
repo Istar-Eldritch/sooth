@@ -1,6 +1,6 @@
 # Phase 7 Slice 3t: explicit call-site type instantiation, and the zero-receiver trait member
 
-**Status:** specified, not implemented.
+**Status:** implemented.
 **Discovery:** `docs/roadmap/P7/slice3t-brief.md` (written against `6b8affa`; this spec
 re-verified every citation against `6b8affa` and corrects two of them, below).
 **Roadmap:** `docs/roadmap/P7-language-prereqs.md:668-676`.
