@@ -694,10 +694,19 @@ pub fn check_selective_imports(
             // an ambiguity error would name an ambiguity with no two answers.
             // Evaluated *after* the not-exported check above, so a hub that
             // does not export the name still fails there first.
+            //
+            // A source that *declares* the name is never exempt, however much
+            // it also admits the intrinsic: `resolve_export_origins` resolves
+            // its `export:` entry to that declaration, so the entry does bind
+            // a word and both rules have their subject back. Without this the
+            // exemption swallows a real ambiguity -- an importer declaring its
+            // own `dup` alongside an imported `dup` would silently shadow one
+            // with the other instead of being told.
             let admitted_intrinsic = crate::ast::is_name_dispatched_builtin(&entry.name)
                 && module.modules[entry.target as usize]
                     .intrinsics
-                    .admits(&entry.name);
+                    .admits(&entry.name)
+                && !local_decl_names(module, entry.target).contains(entry.name.as_str());
             if !admitted_intrinsic {
                 if locals.contains(entry.name.as_str()) {
                     return Err(selective_collides_with_local_error(
@@ -2350,6 +2359,24 @@ mod tests {
         assert!(
             err.contains("collides with a local definition of `drop`"),
             "without the admission the ordinary rules still apply: {err}"
+        );
+
+        // P7.S3q (R5): admission alone is not the exemption. A hub that also
+        // *declares* `drop` exports that declaration, so the entry binds a
+        // word again and the local collision is real.
+        let declaring_hub = ModuleInfo {
+            intrinsics: crate::ast::IntrinsicVisibility::Only(["drop".to_string()].into()),
+            ..info(&["drop"])
+        };
+        let m = module_with(
+            vec![word("drop", 0), word("drop", 1)],
+            vec![info(&[]), declaring_hub],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![sel("drop", "a", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(
+            err.contains("collides with a local definition of `drop`"),
+            "a declaring source is not exempt: {err}"
         );
     }
     /// U3 (R12): the duplicate-type-name check partitions by owning module, so

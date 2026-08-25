@@ -209,19 +209,93 @@ fn a_local_destructor_coexists_with_a_wildcard_hub_import() {
 /// slot. This pins the cross-module analogue of the local-destructor case
 /// above; it is not a design ruling that this shape must stay legal, only a
 /// record of what it does today.
+///
+/// `other`'s destructor prints, because an empty stdout cannot tell it from
+/// the intrinsic: the assertion has to show which of the two same-named
+/// entries ran. Both do -- the `Fd` goes to the imported word, the bare `1`
+/// to the intrinsic admitted through the hub.
 #[test]
 fn a_hub_admitted_intrinsic_and_another_modules_real_word_share_a_name() {
     let t = Tree::new("cross-module-drop");
     t.write("hub.sth", "import: intrinsics | drop | ;\nexport: drop ;\n");
     t.write(
         "other.sth",
-        "import: intrinsics | drop | ;\ntype: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\nexport: Fd drop ;\n",
+        "import: intrinsics | . | ;\ntype: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> . ;\nexport: Fd drop ;\n",
     );
     let entry = t.write(
         "main.sth",
-        "import: \"./hub.sth\" a | drop | ;\nimport: \"./other.sth\" b | Fd drop | ;\n: main ( -- ) 7 Fd drop ;\n",
+        "import: \"./hub.sth\" a | drop | ;\nimport: \"./other.sth\" b | Fd drop | ;\n: main ( -- ) 1 drop 7 Fd drop ;\n",
     );
-    assert_eq!(build_and_run(&entry), "");
+    assert_eq!(build_and_run(&entry), "7\n");
+}
+
+/// R5, the other side of that exemption: admission alone does not earn it. A
+/// source that *declares* the name exports that declaration -- the entry binds
+/// a word after all -- so an importer with its own `dup` is told about the
+/// collision instead of silently shadowing one with the other. Pinned
+/// byte-for-byte against the pre-slice diagnostic.
+#[test]
+fn a_source_declaring_an_intrinsic_name_still_collides_with_a_local() {
+    let t = Tree::new("declaring-source");
+    t.write(
+        "hub.sth",
+        "import: intrinsics | dup | ;\n: dup ( i64 -- i64 i64 ) | a | 42 42 ;\nexport: dup ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: \"./hub.sth\" h | dup | ;\nimport: intrinsics | . | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 1 dup . . ;\n",
+    );
+    assert_eq!(
+        build_error(&entry),
+        "error: error: selective import of `dup` from module `h` (line 1, col 25) collides with a local definition of `dup`"
+    );
+}
+
+/// Not a defect of this slice, and the reason R1 credits an operator name even
+/// when the hub declares a word of that name: for the 18 operator-dispatch
+/// names, `resolve::rewrite` deliberately leaves a bare call unmangled and
+/// `check_operator` dispatches on operand types. A word declared over the
+/// builtin's own operand types therefore loses to the builtin *in its own
+/// module*, with no import in sight -- both halves below print `13`. All the
+/// hub adds is the admission that lets the consumer's call reach that dispatch
+/// at all.
+#[test]
+fn an_operator_name_dispatches_the_same_through_a_hub_as_it_does_alone() {
+    let t = Tree::new("operator-solo");
+    let solo = t.write(
+        "solo.sth",
+        "import: intrinsics | add sub . | ;\n: add ( i64 i64 -- i64 ) | a b | a b sub ;\n: main ( -- ) 10 3 add . ;\n",
+    );
+    assert_eq!(build_and_run(&solo), "13\n");
+
+    let t = Tree::new("operator-hub");
+    t.write(
+        "hub.sth",
+        "import: intrinsics | add sub | ;\n: add ( i64 i64 -- i64 ) | a b | a b sub ;\nexport: add ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: \"./hub.sth\" h | add | ;\nimport: intrinsics | . | ;\n: main ( -- ) 10 3 add . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "13\n");
+}
+
+/// The capability that same crediting buys: an overload on a *user* type. The
+/// gate fires on the bare operator name before dispatch, so without the hub's
+/// admission crossing, a consumer of an exported `add ( Vec2 Vec2 -- Vec2 )`
+/// cannot call it at all (pre-slice this program is `ungated_intrinsic_error`).
+#[test]
+fn an_overload_on_a_user_type_crosses_a_hub_and_dispatches() {
+    let t = Tree::new("operator-overload");
+    t.write(
+        "hub.sth",
+        "import: intrinsics | add drop | ;\ntype: Vec2 x i64 y i64 ;\n: add ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2> drop b Vec2> drop add 0 Vec2 ;\nexport: Vec2 add ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: \"./hub.sth\" h | Vec2 add | ;\nimport: intrinsics | . drop | ;\n: main ( -- ) 1 2 Vec2 3 4 Vec2 add Vec2> drop . ;\n",
+    );
+    assert_eq!(build_and_run(&entry), "4\n");
 }
 
 /// R5: two hubs both admitting `drop` union to the same set, so a collision
