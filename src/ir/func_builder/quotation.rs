@@ -384,10 +384,13 @@ impl<'a> FuncBuilder<'a> {
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
     /// struct/enum whose `is_linear` is set, or an owning cell) this is a
     /// plain `Call` to the (builtin or synthesized) destructor; a `Copy`
-    /// value is discarded with no runtime effect. Shared by `drop`,
-    /// `drop_level_fields`' drop-the-rest, and the synthesized struct/enum
-    /// destructors themselves, so "how a value is disposed" lives in one
-    /// place.
+    /// value is discarded with no runtime effect. On an owning quotation
+    /// (P7.S3v R3) it instead seals the current block and opens two more, to
+    /// guard the indirect call on the disposer's runtime nullness -- the one
+    /// arm here that is not a single instruction in the caller's own block.
+    /// Shared by `drop`, `drop_level_fields`' drop-the-rest, and the
+    /// synthesized struct/enum destructors themselves, so "how a value is
+    /// disposed" lives in one place.
     pub(in crate::ir) fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
             // A cell always frees on drop, regardless of its payload's own
@@ -1184,6 +1187,13 @@ mod tests {
             !ir.funcs.iter().any(|f| f.name.ends_with("__dispose")),
             "a plain closure mints no disposer: {:?}",
             ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !instrs(func(&ir, "mk"))
+                .iter()
+                .any(|i| matches!(i, Instr::FuncAddr(_, sym) if sym.ends_with("__dispose"))),
+            "the boundary writes null, not a symbol: {:?}",
+            instrs(func(&ir, "mk"))
         );
     }
 

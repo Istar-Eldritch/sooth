@@ -656,7 +656,7 @@ impl<'a> FuncBuilder<'a> {
     /// stable slot) emits nothing, every other arg is snapshotted into its temp
     /// (read phase) before being stored into its stable slot (write phase), so
     /// an arg that reads a stable slot (a swap) or points into one (an interior
-    /// `field_value` pointer) is copied out before any store lands, with no
+    /// `slot_value` pointer) is copied out before any store lands, with no
     /// aliasing analysis. The scalar phi back-patch mutates the header while the
     /// staging blits append to predecessor blocks, so the two run as separate
     /// passes rather than under one borrow.
