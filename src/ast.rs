@@ -190,6 +190,23 @@ impl IntrinsicVisibility {
             IntrinsicVisibility::None => false,
         }
     }
+
+    /// P7.S3q (R1): widen by one name. A hub contributes *names*, never its
+    /// own bit, so this is the only way an import ever adds to a module's
+    /// visibility: `All` can be reached by writing `import: intrinsics * ;`
+    /// and no other way. Idempotent, since `Only` holds a set.
+    pub fn admitting(self, name: &str) -> IntrinsicVisibility {
+        match self {
+            IntrinsicVisibility::All => IntrinsicVisibility::All,
+            IntrinsicVisibility::Only(mut names) => {
+                names.insert(name.to_string());
+                IntrinsicVisibility::Only(names)
+            }
+            IntrinsicVisibility::None => {
+                IntrinsicVisibility::Only(std::iter::once(name.to_string()).collect())
+            }
+        }
+    }
 }
 
 /// P8 slice 1a (F2): where a module-name import's first segment is rooted.

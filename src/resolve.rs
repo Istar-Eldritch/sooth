@@ -15,7 +15,7 @@
 //! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
 //! so today's symbols and output are unchanged.
 
-use crate::ast::{Module, Span, Term, TermKind};
+use crate::ast::{is_name_dispatched_builtin, IntrinsicVisibility, Module, Span, Term, TermKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
@@ -607,11 +607,12 @@ fn build_exported_origin(
     exports: &[Vec<(String, Span)>],
     import_maps: &[HashMap<String, u32>],
     selectives: &[HashMap<String, u32>],
+    intrinsics: &[IntrinsicVisibility],
 ) -> Result<Vec<HashMap<String, u32>>, String> {
     let declared: Vec<HashSet<&str>> = (0..exports.len())
         .map(|m| exportable_names(module, m as u32))
         .collect();
-    resolve_export_origins(&declared, exports, import_maps, selectives)
+    resolve_export_origins(&declared, exports, import_maps, selectives, intrinsics)
 }
 
 /// `build_exported_origin` over already-collected declaration sets: the whole
@@ -621,6 +622,7 @@ fn resolve_export_origins(
     exports: &[Vec<(String, Span)>],
     import_maps: &[HashMap<String, u32>],
     selectives: &[HashMap<String, u32>],
+    intrinsics: &[IntrinsicVisibility],
 ) -> Result<Vec<HashMap<String, u32>>, String> {
     let n = exports.len();
     // The *immediate* source of each exported name: one hop, which for a
@@ -633,7 +635,33 @@ fn resolve_export_origins(
             let source = if declared[m].contains(name.as_str()) {
                 m as u32
             } else if let Some(&target) = selectives[m].get(name) {
+                // P7.S3q review fix: a selective (or wildcard-desugared)
+                // re-export of a *real* declaration always wins over this
+                // module's own intrinsic admission of the same name -- a
+                // module can both `import: intrinsics | dup | ;` and
+                // `import: "./dep.sth" d | dup | ;`, and `export: dup ;`
+                // must mean dep's word, not the intrinsic, exactly as it
+                // would if this module admitted no intrinsic at all. Checked
+                // ahead of the intrinsic-admit branch below for that reason.
                 target
+            } else if is_name_dispatched_builtin(name) && intrinsics[m].admits(name) {
+                // P7.S3q (R4): an intrinsic this module effectively admits is
+                // its own source, *once no real declaration or re-export of
+                // the name exists* (the branch above already claimed that
+                // case). There is no declaring module to walk to -- the name
+                // is compiler-provided -- so the origin is `m`, which makes
+                // `Visibility::origin` return `None` and leaves every call
+                // site bare, as builtin dispatch requires. A hub-of-hubs
+                // chain still resolves: the outer hub's selective entry
+                // routes here to the inner hub, whose own immediate source is
+                // this same branch, and `rewrite` falls back to a bare name
+                // when the resolved origin declares no such word (see
+                // `Visibility::origin`'s doc comment). The predicate is
+                // `is_name_dispatched_builtin`, not `BUILTIN_WORDS`, so the
+                // accept set here is exactly the gate set at the call site
+                // (the six surface comparisons are `core::cmp` words and
+                // re-export as ordinary ones).
+                m as u32
             } else {
                 // A dependency imported *qualified only* is reachable as
                 // `dep::name` and appears in neither table above, so its own
@@ -729,8 +757,19 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     // reference a name through a hub whose own export list has not been
     // reached yet. This is also where an `export:` name with no origin, and an
     // ambiguous or cyclic re-export, are rejected.
+    let intrinsics: Vec<IntrinsicVisibility> = module
+        .modules
+        .iter()
+        .map(|m| m.intrinsics.clone())
+        .collect();
     let vis = Visibility {
-        exported_origin: build_exported_origin(module, &exports, &import_maps, &selectives)?,
+        exported_origin: build_exported_origin(
+            module,
+            &exports,
+            &import_maps,
+            &selectives,
+            &intrinsics,
+        )?,
         exports,
     };
     for word in &mut module.words {
@@ -1402,6 +1441,7 @@ mod tests {
             &[exports(&["lw"]), exports(&["lw"]), exports(&["lw"])],
             &[HashMap::new(), HashMap::new(), HashMap::new()],
             &[selective("lw", 1), selective("lw", 2), HashMap::new()],
+            &ungated(3),
         )
         .expect("a two-hop re-export chain resolves");
         assert_eq!(origins[0]["lw"], 2, "the hub of hubs reaches the declarer");
@@ -1426,6 +1466,7 @@ mod tests {
             &[both.clone(), both.clone(), both],
             &[HashMap::new(), HashMap::new(), HashMap::new()],
             &[top, hub, HashMap::new()],
+            &ungated(3),
         )
         .expect("two names through one hub is a diamond, not a cycle");
         assert_eq!((origins[0]["a"], origins[0]["b"]), (2, 2));
@@ -1441,11 +1482,95 @@ mod tests {
             &[vec![("lw".to_string(), at(4, 1))], exports(&["lw"])],
             &[HashMap::new(), HashMap::new()],
             &[selective("lw", 1), selective("lw", 0)],
+            &ungated(2),
         )
         .expect_err("a re-export cycle never reaches a declaration");
         assert_eq!(
             err,
             "error: `lw` re-exports itself through a cycle of `export:` chains (line 4, col 1)"
+        );
+    }
+
+    /// P7.S3q (R4): a module that effectively admits an intrinsic is its own
+    /// source for it, so `export: drop ;` resolves with `origin == m`. There is
+    /// no declaring module to walk to -- the name is compiler-provided.
+    #[test]
+    fn export_of_an_admitted_intrinsic_originates_in_the_exporting_module() {
+        let origins = resolve_export_origins(
+            &[HashSet::new()],
+            &[vec![("drop".to_string(), at(2, 9))]],
+            &[HashMap::new()],
+            &[HashMap::new()],
+            &[IntrinsicVisibility::Only(["drop".to_string()].into())],
+        )
+        .expect("an admitted intrinsic is exportable");
+        assert_eq!(origins[0]["drop"], 0);
+    }
+
+    /// Review fix: a module that both effectively admits an intrinsic itself
+    /// and selectively re-exports a real declaration of the same name from a
+    /// dependency must resolve `export:` to the real declaration, not the
+    /// intrinsic -- the selective branch is checked before the intrinsic-admit
+    /// fallback for exactly this reason. Module 0 is the hub: it admits `dup`
+    /// and selectively imports it from module 1, which declares it.
+    #[test]
+    fn a_selective_re_export_of_a_real_declaration_wins_over_the_hubs_own_admission() {
+        let declared = vec![HashSet::new(), HashSet::from(["dup"])];
+        let origins = resolve_export_origins(
+            &declared,
+            &[exports(&["dup"]), exports(&["dup"])],
+            &[HashMap::new(), HashMap::new()],
+            &[selective("dup", 1), HashMap::new()],
+            &[
+                IntrinsicVisibility::Only(["dup".to_string()].into()),
+                IntrinsicVisibility::None,
+            ],
+        )
+        .expect("a re-exported real declaration is exportable");
+        assert_eq!(
+            origins[0]["dup"], 1,
+            "the hub's own intrinsic admission must not shadow module 1's declaration"
+        );
+    }
+
+    /// R4: origin == the exporting module is what keeps every call site bare.
+    /// `Visibility::origin` returns `None` for it, so `rewrite` never mangles a
+    /// re-exported intrinsic against the hub -- builtin dispatch needs the raw
+    /// name.
+    #[test]
+    fn an_exported_intrinsic_is_never_mangled_against_the_hub() {
+        let exported_origin = resolve_export_origins(
+            &[HashSet::new()],
+            &[vec![("drop".to_string(), at(2, 9))]],
+            &[HashMap::new()],
+            &[HashMap::new()],
+            &[IntrinsicVisibility::Only(["drop".to_string()].into())],
+        )
+        .expect("an admitted intrinsic is exportable");
+        let vis = Visibility {
+            exports: vec![exports(&["drop"])],
+            exported_origin,
+        };
+        assert_eq!(vis.origin(0, "drop"), None);
+    }
+
+    /// R4: the accept is conditioned on the exporting module admitting the
+    /// name, not on the name merely being an intrinsic -- a module with no
+    /// `import: intrinsics` line covering `drop` still has nothing to
+    /// re-export.
+    #[test]
+    fn export_of_an_unadmitted_intrinsic_is_still_an_error() {
+        let err = resolve_export_origins(
+            &[HashSet::new()],
+            &[vec![("drop".to_string(), at(2, 9))]],
+            &[HashMap::new()],
+            &[HashMap::new()],
+            &[IntrinsicVisibility::Only(["dup".to_string()].into())],
+        )
+        .expect_err("a name this module does not admit has no origin");
+        assert_eq!(
+            err,
+            "error: `drop` in `export:` names nothing declared or imported in this module (line 2, col 9)"
         );
     }
 
@@ -1458,6 +1583,7 @@ mod tests {
             &[vec![("nonexistent".to_string(), at(2, 9))]],
             &[HashMap::new()],
             &[HashMap::new()],
+            &ungated(1),
         )
         .expect_err("an export naming nothing is an error");
         assert_eq!(
@@ -1486,6 +1612,7 @@ mod tests {
             ],
             &[imports, HashMap::new(), HashMap::new()],
             &[HashMap::new(), HashMap::new(), HashMap::new()],
+            &ungated(3),
         )
         .expect_err("two qualified origins cannot be disambiguated");
         assert_eq!(
@@ -1508,6 +1635,7 @@ mod tests {
             &[exports(&["lw"]), exports(&["lw"])],
             &[imports, HashMap::new()],
             &[HashMap::new(), HashMap::new()],
+            &ungated(2),
         )
         .expect("a qualified-only re-export has an origin");
         assert_eq!(origins[0]["lw"], 1);
@@ -1571,6 +1699,12 @@ mod tests {
     /// A one-entry selective-import map: `name` resolves to module `target`.
     fn selective(name: &str, target: u32) -> HashMap<String, u32> {
         HashMap::from([(name.to_string(), target)])
+    }
+
+    /// No module admits any intrinsic, so R4's self-source branch never fires:
+    /// the shape every origin-resolution test that predates P7.S3q assumes.
+    fn ungated(n: usize) -> Vec<IntrinsicVisibility> {
+        vec![IntrinsicVisibility::None; n]
     }
 
     /// The `Visibility` of a closure where every module declares what it

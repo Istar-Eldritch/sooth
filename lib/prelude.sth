@@ -4,16 +4,13 @@
 \ line per module. Nothing is implicit: a program that wants none of this
 \ imports none of it.
 \
-\ Two of `core::bool`'s names do not appear here. `drop` cannot, at all: it is
-\ a gated intrinsic (`import: intrinsics | drop | ;`), not a declared or
-\ selectively-imported word, so `export:`'s existence check has no origin to
-\ record for it (tracked as P7.S3q). The bool `.` overload cannot either: an
-\ operator overload's candidate lookup considers the calling module and the
-\ module it selectively imported the name from, one hop, so a hub in between
-\ hides the declaring module. A program that calls `drop`, or prints a `Bool`,
-\ imports `intrinsics`/`core::bool` directly; everything else comes through
-\ here.
+\ One of `core::bool`'s names does not appear here. The bool `.` overload
+\ cannot: an operator overload's candidate lookup considers the calling
+\ module and the module it selectively imported the name from, one hop, so a
+\ hub in between hides the declaring module. A program that prints a `Bool`
+\ imports `core::bool` directly; everything else comes through here.
+import: intrinsics | drop | ;
 import: self::bool | if unless Bool False True | ;
 import: self::cmp | eq lt gt lte gte ne | ;
 
-export: if unless Bool False True eq lt gt lte gte ne ;
+export: drop if unless Bool False True eq lt gt lte gte ne ;

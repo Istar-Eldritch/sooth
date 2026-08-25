@@ -645,23 +645,21 @@ spellings never collide.
 last, and a call to it dispatches correctly regardless of position -- the S3e declaration-time
 rejection for a non-trailing `'T` is lifted.
 
-**P7.S3q -- An intrinsic gated into a module cannot be re-exported through a hub.** Named
-while writing `examples/traits.sth` against `lib/prelude.sth`. `import: intrinsics | drop | ;`
-flips a permission bit (`IntrinsicVisibility`) on the importing module; it is not a real
-`Module` import (`driver.rs::names_the_intrinsics` resolves the `intrinsics` name to no module
-at all), so it never touches the `declared`/`selectives`/`import_maps` tables
-`resolve.rs::resolve_export_origins` uses to decide what `export:` may name. Naming `drop` on
-a hub's own `export:` list fails with an unknown-name error, probe-verified against current
-`main`. This is a two-part gap, not one: even after `export:` learns to accept a gated
-intrinsic name, the caller-side check (`check/word_families.rs::intrinsic_is_gated_out`) only
-ever consults the *calling* module's own `intrinsics` gate -- it does not walk an import
-chain -- so a module that reaches `drop` only through a hub (never writing
-`import: intrinsics` itself) would still be rejected calling it bare. Not yet recon'd:
-whether the gate check should walk the same one-hop selective-import resolution
-`rewrite`/`Visibility::origin` already does for words, or something else; unrelated to S3e,
-this is a pre-existing hub/`export:` gap S3e's own example surfaced (`Bool`, a type,
-re-exports through a hub without issue, confirmed by direct probe, so this is specific to the
-intrinsic-gate mechanism, not types or ordinary words in general).
+**P7.S3q -- An intrinsic gated into a module can be re-exported through a hub.** `[ done ]`
+`import: intrinsics | drop | ;` flips a permission bit (`IntrinsicVisibility`) on a module; a
+module's *effective* visibility (`driver.rs::effective_intrinsics`) unions that bit with every
+intrinsic name transitively reachable through a selectively-imported hub that itself admits
+it, computed once per module before `ModuleInfo` is built. `export:` accepts a name the
+exporting module effectively admits, with `resolve.rs::resolve_export_origins` resolving its
+origin to the exporting module itself (never mangled against a hub, so builtin dispatch still
+sees the bare name) -- but only once a real declared or re-exported word of that name is ruled
+out first, so a hub that both admits an intrinsic and re-exports a real word of the same name
+still resolves to the real word. The caller-side gate
+(`check/word_families.rs::intrinsic_is_gated_out`) is unchanged: it consults the calling
+module's own (now effective) `intrinsics` field, so a module reaching `drop` only through a
+hub calls it bare with no `import: intrinsics` line of its own. A hub's own
+`import: intrinsics * ;` does not leak all intrinsics through it -- only names on its own
+`export:` list cross. `core::prelude` re-exports `drop`.
 **Exit:** a module that imports a hub re-exporting a gated intrinsic (e.g. `drop` through
 `core::prelude`) may call it bare, with no direct `import: intrinsics` line of its own.
 

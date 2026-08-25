@@ -280,6 +280,76 @@ fn widen_intrinsics(current: IntrinsicVisibility, imp: &Import) -> IntrinsicVisi
     }
 }
 
+/// P7.S3q (R1): each module's *effective* intrinsic visibility -- what its own
+/// `import: intrinsics` lines admit, plus every intrinsic name it selectively
+/// imports (or wildcard-desugars) from a module that effectively admits that
+/// name. `own[m]` is `widen_intrinsics`' per-file fold; the result replaces it
+/// on `ModuleInfo.intrinsics`, so every consumer of that field -- the caller
+/// gate in `check::word_families`, `export:` origin resolution, the selective
+/// collision exemption -- reads one table and none of them walks an import.
+///
+/// The union is per *name*, never per bit: each entry was built from its
+/// source's `export:` list, so `IntrinsicVisibility::All` has no path across a
+/// hub (R3) and a wildcard `import: intrinsics * ;` in a hub contributes
+/// exactly what the hub exports.
+///
+/// The routes are the per-entry list, not the name-keyed `selective_maps`:
+/// one name imported from two modules is two entries, and R5 lets that shape
+/// through when one of them names an admitted intrinsic. Folded over the map,
+/// only the last import of the name would survive, so whether the intrinsic
+/// crossed at all would depend on the order of the importer's `import:` lines.
+fn effective_intrinsics(
+    own: &[IntrinsicVisibility],
+    selectives: &[Vec<check::SelectiveName>],
+) -> Vec<IntrinsicVisibility> {
+    let mut memo: Vec<Option<IntrinsicVisibility>> = vec![None; own.len()];
+    (0..own.len() as u32)
+        .map(|m| {
+            let mut visiting = HashSet::new();
+            effective_intrinsics_of(m, own, selectives, &mut memo, &mut visiting)
+        })
+        .collect()
+}
+
+/// One module's `effective_intrinsics` entry, memoized. `closure.nodes` is
+/// discovery order, not topological, so the hub's value is computed on demand
+/// rather than read from an earlier slot.
+///
+/// R8: `reject_cycles` has already run by the time this is called, but the walk
+/// does not assume it -- a revisited module contributes nothing (the
+/// `walk_type_export_origin` convention) so a fabricated back edge terminates
+/// instead of recursing forever. On such a graph the memo freezes whatever the
+/// truncated walk produced, which is why termination, not the value, is all the
+/// back-edge test asserts.
+fn effective_intrinsics_of(
+    m: u32,
+    own: &[IntrinsicVisibility],
+    selectives: &[Vec<check::SelectiveName>],
+    memo: &mut Vec<Option<IntrinsicVisibility>>,
+    visiting: &mut HashSet<u32>,
+) -> IntrinsicVisibility {
+    if let Some(cached) = &memo[m as usize] {
+        return cached.clone();
+    }
+    if !visiting.insert(m) {
+        return IntrinsicVisibility::None;
+    }
+    let mut effective = own[m as usize].clone();
+    for entry in selectives[m as usize].iter() {
+        if !crate::ast::is_name_dispatched_builtin(&entry.name) {
+            continue;
+        }
+        if effective_intrinsics_of(entry.target, own, selectives, memo, visiting)
+            .admits(&entry.name)
+        {
+            effective = effective.admitting(&entry.name);
+        }
+    }
+    visiting.remove(&m);
+    memo[m as usize] = Some(effective.clone());
+    effective
+}
+
 /// P7.S3q-follow: a tolerant type-only counterpart to what `resolve.rs`'s
 /// whole-program `resolve_export_origins` does for every export category.
 /// For each module's `export:` list, the module that actually *declares* the
@@ -491,6 +561,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         selective_by_module.push(selective_entries);
         intrinsics_by_module.push(intrinsics);
     }
+
+    // P7.S3q (R1): fold hub re-exports into each module's own visibility, once
+    // every file's `import:` lines and selective map are known. From here on
+    // `intrinsics_by_module` is the *effective* table.
+    let intrinsics_by_module = effective_intrinsics(&intrinsics_by_module, &selective_by_module);
 
     // P7.S3q-follow: a struct/enum name reached only through a hub's
     // `export:` list (re-exported, not declared there) resolves fine in a
@@ -1806,6 +1881,132 @@ mod tests {
             let module = assemble_module(&closure, true).expect("assembles");
             assert_eq!(module.modules[0].intrinsics, want, "for {file}");
         }
+    }
+
+    fn only(names: &[&str]) -> IntrinsicVisibility {
+        IntrinsicVisibility::Only(names.iter().map(|n| n.to_string()).collect())
+    }
+
+    fn selective(entries: &[(&str, u32)]) -> Vec<check::SelectiveName> {
+        entries
+            .iter()
+            .map(|(n, t)| check::SelectiveName {
+                name: n.to_string(),
+                qualifier: None,
+                target: *t,
+                span: crate::ast::Span::default(),
+            })
+            .collect()
+    }
+
+    /// P7.S3q (R1/R3): the effective-visibility fold, read directly over a
+    /// hand-built closure. Own-only passes through; a hub contributes the
+    /// intrinsic names the importer selectively took from it; the two union;
+    /// a hub's `All` bit never crosses (only the names on its export list,
+    /// which is what the selective map holds); and a non-intrinsic name in the
+    /// selective map contributes nothing at all.
+    #[test]
+    fn effective_intrinsics_unions_own_and_hub_names() {
+        let own = [only(&["dup"]), IntrinsicVisibility::All];
+        // Module 0 takes `drop` and the ordinary word `lw` from module 1.
+        let selectives = [selective(&[("drop", 1), ("lw", 1)]), Vec::new()];
+        let got = effective_intrinsics(&own, &selectives);
+        assert_eq!(got[0], only(&["dup", "drop"]));
+        assert_eq!(
+            got[1],
+            IntrinsicVisibility::All,
+            "the hub keeps its own bit"
+        );
+
+        // Own-only: nothing selectively imported, nothing added.
+        let bare = effective_intrinsics(&own, &[Vec::new(), Vec::new()]);
+        assert_eq!(bare[0], only(&["dup"]));
+
+        // Hub-only: the importer has no `import: intrinsics` line of its own.
+        let hub_only = effective_intrinsics(
+            &[IntrinsicVisibility::None, IntrinsicVisibility::All],
+            &selectives,
+        );
+        assert_eq!(hub_only[0], only(&["drop"]));
+    }
+
+    /// R3, the narrowing this slice rules on: the hub wildcards `intrinsics`,
+    /// but the consumer's selective map was built from the hub's *export:*
+    /// list, so only `drop` crosses -- `add` does not, and the result is never
+    /// `All`.
+    #[test]
+    fn effective_intrinsics_does_not_propagate_the_wildcard_bit() {
+        let got = effective_intrinsics(
+            &[IntrinsicVisibility::None, IntrinsicVisibility::All],
+            &[selective(&[("drop", 1)]), Vec::new()],
+        );
+        assert_eq!(got[0], only(&["drop"]));
+        assert!(!got[0].admits("add"), "the hub's `All` bit does not cross");
+    }
+
+    /// R4: the middle link of a chain re-exports outward what it took inward,
+    /// so the fold has to read the *effective* value of each hub, not its own
+    /// `import:` lines. Module 2 gates `drop` in; module 1 only re-exports it.
+    #[test]
+    fn effective_intrinsics_carries_a_depth_two_chain() {
+        let got = effective_intrinsics(
+            &[
+                IntrinsicVisibility::None,
+                IntrinsicVisibility::None,
+                only(&["drop"]),
+            ],
+            &[
+                selective(&[("drop", 1)]),
+                selective(&[("drop", 2)]),
+                Vec::new(),
+            ],
+        );
+        assert!(got[0].admits("drop"), "two hops: {:?}", got[0]);
+        assert!(got[1].admits("drop"));
+    }
+
+    /// One name imported from two modules is two routes, not one: the
+    /// admitting hub's entry credits the intrinsic whether it is written
+    /// before or after the entry that takes a real word of the same name.
+    #[test]
+    fn effective_intrinsics_reads_every_route_for_one_name() {
+        let own = [
+            IntrinsicVisibility::None,
+            only(&["drop"]),
+            IntrinsicVisibility::None,
+        ];
+        let hub_first = effective_intrinsics(
+            &own,
+            &[
+                selective(&[("drop", 1), ("drop", 2)]),
+                Vec::new(),
+                Vec::new(),
+            ],
+        );
+        let hub_last = effective_intrinsics(
+            &own,
+            &[
+                selective(&[("drop", 2), ("drop", 1)]),
+                Vec::new(),
+                Vec::new(),
+            ],
+        );
+        assert!(hub_first[0].admits("drop"));
+        assert_eq!(hub_first[0], hub_last[0], "import order does not decide it");
+    }
+
+    /// R8: `reject_cycles` has already run in the real pipeline, but the fold
+    /// does not assume it. A fabricated back edge terminates -- this test hangs
+    /// rather than fails if the revisit guard goes -- and the revisited module
+    /// contributes nothing rather than panicking.
+    #[test]
+    fn effective_intrinsics_terminates_on_a_fabricated_back_edge() {
+        let got = effective_intrinsics(
+            &[only(&["drop"]), IntrinsicVisibility::None],
+            &[selective(&[("dup", 1)]), selective(&[("dup", 0)])],
+        );
+        assert_eq!(got[0], only(&["drop"]));
+        assert_eq!(got[1], IntrinsicVisibility::None);
     }
 
     /// P8 slice 1a: two imports binding the same qualifier -- here both
