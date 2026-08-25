@@ -46,6 +46,34 @@ collision must stop applying to `Ord` (or `Ord`'s seeded declaration must itself
 the library one). Both are phase-2 work, and both need a test that the guard still fires
 for `Copy`.
 
+**A second, more consequential migration cost, found by probe: `Ord` loses its
+"visible with no import" property, and nothing in the compiler can give that back for
+free.** `find_trait_in_module` (`src/parser.rs:508-538`) resolves a bound name in exactly
+this order: own module -> the hardcoded `RESERVED_TRAIT_MODULE` entries (`Copy`/`Ord`,
+today) -> an ordinary qualified/selective import. Once `Ord` is deleted from the reserved
+set, it falls all the way through to ordinary import machinery, confirmed live with a
+two-module probe (`'T: MyOrd` used unimported):
+
+```
+error: unknown capability `MyOrd` at line 4, col 21 (a bound names `Copy`, `Ord`, or a trait in scope)
+```
+
+-- the error message itself names `Copy`/`Ord` as the only two exemptions, confirming
+there is no third mechanism to fall back on. **There used to be a general auto-visible-everywhere
+mechanism (a compiler-injected prelude) and it was deliberately deleted in P8.S2** --
+`core::prelude` today requires an ordinary explicit `import: core::prelude * ;` like any
+other module. So "every existing `'T: Copy Ord` program still compiles" (this brief's own
+exit criterion) is not automatic: it depends entirely on where `Ord`'s declaration ends
+up living. Counted live: 14 real `'T: ... Ord`-bound signatures exist today across
+`lib/cmp.sth` (6), `docs/roadmap/P8/dogfood/core/cmp.sth` (6, itself stale, see below),
+and `examples/poly_if.sth` (2). If `Ord` is declared in the same module as `cmp.sth`'s
+bodies, the own-module clause of `find_trait_in_module` covers all 6 of that file's own
+sites for free and only `poly_if.sth`'s 2 external call sites need a new import line. If
+`Ord` lives anywhere else, all 14 do. **This is a phase-2 design decision, not an
+implementation detail** -- where `Ord` is declared determines whether the exit criterion
+is met trivially or requires an import-line migration across every existing consumer, and
+the spec should pick the module deliberately with this in mind, not incidentally.
+
 The consequence for a user: `'T: Ord` bounds a struct or enum out categorically. `sort`,
 `bin_search`, or any comparison-bounded generic word can only ever be instantiated over
 the numeric tower, by construction — and a user cannot opt their own type in, since the
@@ -73,9 +101,13 @@ Ordering )`) rather than using the language's own `Ord` — because the language
   non-trailing receiver would dispatch too (P7.S3p).
 - **`lib/cmp.sth` already exists and is real, not a P8-planned dogfood sketch.** `eq`,
   `lt`, `gt`, `lte`, `gte`, `ne` are `'T: Copy Ord`-bounded `inline` words over the six
-  raw comparison intrinsics (`ueq`/`ult`/.../`une`) and `bool`'s `branch`. (The identical
-  file also exists at `docs/roadmap/P8/dogfood/core/cmp.sth` as a planning artifact —
-  the two should be checked for drift before this slice touches either.)
+  raw comparison intrinsics (`ueq`/`ult`/.../`une`) and `bool`'s `branch`.
+  `docs/roadmap/P8/dogfood/core/cmp.sth` is **not** a live planning artifact for this --
+  checked by probe and confirmed stale on two independent axes: it predates the
+  `bool`->`Bool`/`true`->`True` rename (`b2c0d9a`, 2026-08-22; the dogfood file still uses
+  lowercase and no longer parses standalone), and it predates P8.S2's real package split
+  (`d539032`, 2026-08-21) that it was ostensibly sketching -- `docs/roadmap/P8/dogfood/README.md`
+  says outright "none of this compiles." Ignore it; `lib/cmp.sth` is the only real file.
 - **P7.S3k (generic-calls-generic) is closed**, landed and merged (`92e7391`, `6115c86`,
   `4c8e6b5`). A non-`inline` generic word calling `Ord`-bounded library comparisons is no
   longer blocked by that gap. (Superseding stale project memory that called this "closed
@@ -142,24 +174,43 @@ that rejection: the forwarding program **type-checks**. It then ICEs in lowering
 never resolved to a concrete symbol per instantiation on the cross-call path. That
 lowering gap is the substance of this slice.
 
-**Traced to root cause, and it is (b), structurally harder, not a small fix.** The
-checker already records a `PolyCrossCall{callee, span, mapping}` per cross-call site
-(`poly_cross_call`, `poly.rs:1902`) into `module.poly_cross_calls`, but that field is
-destructured and discarded in `check.rs` (`poly_cross_calls: _`) and nothing in `src/ir`
-ever reads it — it is write-only dead data. `calls.rs:737`'s generic fallback arm looks
-the callee up in `env`, which deliberately excludes every polymorphic word by
-construction (`driver.rs`, `!poly_indices.contains(idx)`); the two tables that would
-otherwise carry a resolved symbol (`trait_calls`, populated by `resolve_user_bound`
-against a *concrete* `Subst`; `poly_calls`/`instantiations`, populated per ordinary
-monomorphic-caller-to-poly-callee call) are never populated for a poly-to-poly cross-call,
-because neither the checker nor lowering has a ground `θ` for the *caller* at the point
-the cross-call site is walked — the caller itself is not yet monomorphized. A correct fix
-needs one of: (a) deferring resolution to lowering time, keyed by `(span, caller_θ)`
-rather than `span` alone; or (b) at each monomorphization-expansion of the caller,
-substituting its concrete `θ` into the recorded mapping and minting a resolved-symbol
-entry lowering can read. Either way this is new plumbing threaded through both checker
-and lowering, since today's checker-side record is caller-agnostic and lowering has no
-per-instantiation table to look a cross-call's resolved symbol up in.
+**Revised down from "structurally harder" to a small, checker-only fix -- built and
+verified, not just characterized.** An initial trace judged this new plumbing on both
+the checker and lowering side. A follow-up probe built it instead: `calls.rs:737` needed
+no change at all. `CallInst.trait_calls` (a `HashMap<Span, String>`) already flows from
+the checker to lowering unconditionally, for the *ordinary* concrete-caller path
+(`resolve_user_bound` populates it once the caller's own `Subst` is ground). The
+cross-call compose step (`CrossGround::compose`, `poly.rs`) was simply building its
+`CallInst` with `trait_calls: HashMap::new()` -- hardcoded empty, since a `Bound::User`
+never reached this point before. The fix: thread a `TraitResolveCtx` into `CrossGround`
+(built fresh inside `discover_transitive_instantiations` from `module.traits`/`.impls`,
+since a caller-side context would freeze `module` while this function still needs `&mut
+module`), and once `compose` grounds the callee's `θ` (which it already does, to resolve
+ordinary output types), call `resolve_user_bound` there too, exactly as the concrete path
+does, and store the result in the `CallInst` it already produces. Lowering picks it up
+with zero changes, because it was already reading `trait_calls` by span for every
+`CallInst` regardless of which path produced it.
+
+Verified in a probe worktree: `cargo build`, `cargo test --no-fail-fast` (full suite),
+`cargo fmt --check`, and `cargo clippy -- -D warnings` all green, plus a new passing
+test (`check_generic_cross_call_discharges_a_forwarded_user_bound`) asserting the
+composed `CallInst.trait_calls` actually resolves to `impl: Show for Point`'s symbol,
+replacing an existing test's stale case that had pinned the old blanket rejection. Diff
+is five call sites: `poly_cross_signature_supported`'s rejection deleted,
+`discover_transitive_instantiations` gains two parameters
+(`word_symbols`, `trait_obligations`) to build its own `TraitResolveCtx`, `CrossGround`
+gains a `tr` field, and `compose` gains the same `resolve_user_bound` loop
+`check_poly_call` already runs. The probe's own worktree was reverted to pristine per
+instructions (this is a validated design, not a landed change) -- **re-derive rather than
+copy-paste at implementation time**, and re-run the exact test added here as this phase's
+golden.
+
+**The concrete-image soundness hole (below) was exercised in the same probe session but
+its exact output was not recoverable from the archived session log** -- the probe's own
+closing summary says the edge case "errors correctly," but the transcript format used for
+this run doesn't retain tool stdout, so that claim rests on the probe's word alone, not on
+pasted evidence this brief can verify. Treat it as unconfirmed and re-run explicitly
+before relying on it.
 
 **A second, independent soundness hole, found by the same probe.** `(Image::Concrete(_),
 Bound::User(_)) => None` (`poly.rs:1886`) is commented "unreachable", gated only by the
@@ -245,10 +296,12 @@ This does **not** subsume the by-value `cmp` above, and is not a variant reading
 same trait -- confirmed by probe, not assumed: a generic word whose `'T` infers to the
 *owned* type (`3 4 is_less`, `'T` = `i64`) fails outright against a registry that only
 holds `(Ord, &i64)` --
+
 ```
 error: cannot instantiate `'T` of `is_less` with `i64`
   `i64` does not satisfy `Ord`: no `( i64 i64 -- Ordering )` found
 ```
+
 -- there is no autoref: the checker never tries "does `&i64` satisfy this, given an
 `i64`". A bare literal or an unaddressable local can never produce the `&i64` this path
 would require, so an owned-type impl remains mandatory for ordinary numeric code to work
@@ -281,11 +334,17 @@ exists in the codebase today.
 - **No dependency on P7.S3p.** `cmp`'s receiver is trailing; the non-trailing fix is not
   needed.
 - **No dependency on P7.S3k**, already closed.
-- **Sequence before P8.S2's `lib/cmp.sth` migration.** P8.S2 moves the surface
-  comparisons out of the compiled-in prelude into a gated-import module, still
-  `'T: Copy Ord`-bounded as today. This slice changes what `Ord` *is* and what those
-  bodies are built from, so P8.S2 must be written against the post-S3s shape or one of
-  the two gets redone.
+- **Correction: P8.S2 already shipped (`d539032`, 2026-08-21) -- this brief's own
+  "sequence before" language was stale the moment it was written.** Checked against
+  `slice2-brief.md`/`slice2-spec.md` directly: P8.S2 deleted the compiler-injected
+  prelude, gated `intrinsics` imports, and split `lib/` into a real `core` package --
+  import/visibility mechanics only. It never touched `Ord`'s satisfaction mechanism, and
+  both docs mention `'T: Copy Ord` only in passing as an example of an *existing* bound
+  used unchanged. There is no live sequencing hazard: nothing P8.S2 shipped assumes `Ord`
+  is a predicate rather than a trait. Retained here only as a correction, not a
+  dependency -- the real, still-open dependency this slice creates is the import-visibility
+  question above ("a second, more consequential migration cost"), which is orthogonal to
+  P8.S2 and unresolved by it.
 
 ## Exit criteria
 
@@ -304,30 +363,40 @@ exists in the codebase today.
 - The generic `lt` still does not swallow a user's own concrete `Vec2 lt` where `Vec2`
   has no `impl: Ord` — slice 10c's coexistence preserved through the rewritten
   admission filter.
-- Every existing `'T: Copy Ord` numeric program still compiles and produces the same
-  results. Codegen is *expected* to regress (a call frame per comparison); behaviour is
-  not.
+- Every existing `'T: Copy Ord` numeric program still compiles **with no new import
+  line** — this is only automatic if `Ord`'s declaring module is chosen to match
+  `cmp.sth`'s own module (see "a second, more consequential migration cost" above); the
+  spec must decide this deliberately, not by default.
+- Every existing `'T: Copy Ord` numeric program still produces the same results. Codegen
+  is *expected* to regress (a call frame per comparison); behaviour is not.
 
 ## Sizing
 
-Phase shape, roughly: (1) close the cross-call lowering gap and the concrete-image
-soundness hole together — thread the caller's `θ` through to a lowering-time (or
-monomorphization-time) resolution of the forwarded obligation, removing the blanket
-`poly_cross_signature_supported` rejection, and give `(Image::Concrete(_),
-Bound::User(_))` a real registry check instead of `None`, with the probed forwarding
-program and a no-impl rejection program as its goldens; (2) seed `Ord` as a real
-member-bearing trait with `Ordering` and `cmp ( 'T 'T -- Ordering )` (by value, per the
-probe correction above), plus the numeric `impl:` blocks in `core`, deleting
-`Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six comparisons over `cmp`, non-inline; (4)
-rewrite the two overload-admission sites as registry lookups, with the probed `Vec2 lt`
-coexistence program as its golden; (5) diagnostics. Phase 1 is now confirmed the one with
-real unknowns — probed as structurally harder than a small fix, new plumbing on both the
-checker and lowering side — and should be scoped and possibly sub-spec'd before the rest
-are sized in detail.
+Phase shape: (1) close the cross-call lowering gap and the concrete-image soundness hole
+together — **the cross-call half is now a validated design, not just a characterization**:
+thread a `TraitResolveCtx` into `CrossGround`, resolve the callee's `Bound::User`
+obligations via `resolve_user_bound` once `compose` grounds its `θ`, and store the result
+in the `CallInst` it already produces -- `calls.rs` needs no change, since it already
+reads `trait_calls` by span regardless of which path populated it. Built and verified
+clean (build/tests/fmt/clippy) in a probe worktree; re-derive against current `main`
+rather than copy-paste, and reuse the probe's own golden shape
+(`check_generic_cross_call_discharges_a_forwarded_user_bound`). The concrete-image half
+(`(Image::Concrete(_), Bound::User(_)) => None`) was exercised in the same probe but its
+output wasn't recoverable from the session log -- re-confirm this specific case fresh,
+don't inherit it as closed; (2) decide `Ord`'s declaring module deliberately (own-module
+vs. elsewhere is the whole difference between 2 and 14 required import-line additions,
+per the migration-cost finding above), then seed it as a real member-bearing trait with
+`Ordering` and `cmp ( 'T 'T -- Ordering )` (by value, per the probe correction above),
+plus the numeric `impl:` blocks, deleting `Bound::Ord`; (3) rewrite `lib/cmp.sth`'s six
+comparisons over `cmp`, non-inline; (4) rewrite the two overload-admission sites as
+registry lookups, with the probed `Vec2 lt` coexistence program as its golden; (5)
+diagnostics.
 
 ## Ready to spec: yes
 
-The design is decided and the blocker is probe-confirmed rather than assumed. Re-verify
-every line citation against live `main` before locking phases — `poly.rs`,
-`declarations.rs` and `ast.rs` are actively churned by other in-flight slices, and the
-numbers in this brief have already drifted once.
+The design is decided, the blocker has a validated fix design (not just a
+characterization), and the import-visibility migration cost is now a named, countable
+decision rather than an unexamined assumption. Re-verify every line citation and re-derive
+phase 1's diff against live `main` before locking phases — `poly.rs`, `declarations.rs`
+and `ast.rs` are actively churned by other in-flight slices, and the numbers in this brief
+have already drifted once.
