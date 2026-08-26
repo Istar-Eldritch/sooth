@@ -1500,6 +1500,11 @@ fn check_branch_join(
                         // at a plain one R12 rejects any consumption outright,
                         // so neither walk moves anything.
                         let moves_before = scope.moves.states.clone();
+                        // P7.S3o Phase 4 (R5): set `in_materialized_quot`
+                        // around both arm body checks so a bare trait member
+                        // call inside either materialized arm is rejected.
+                        let saved_in_materialized = prov.in_materialized_quot;
+                        prov.in_materialized_quot = true;
                         // Slice 10a (R9): the `if`-join's expected
                         // effect is a `QuotEffect` (no row), so both
                         // arms ground to the empty region.
@@ -1569,6 +1574,7 @@ fn check_branch_join(
                             scope.moves =
                                 Moves::join(Moves { states }, std::mem::take(&mut scope.moves));
                         }
+                        prov.in_materialized_quot = saved_in_materialized;
                         // R23: the merged erased slot's surviving set is
                         // the union of both arms' -- a fresh interned
                         // set, never a mutation of either arm's (keeps

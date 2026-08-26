@@ -191,6 +191,11 @@ struct PolyCtx<'a> {
     /// sig/subst are local to the caller and `PolyCtx` outlives them.
     combinator_sig: Option<PolySig>,
     combinator_subst: Option<Subst>,
+    /// P7.S3o Phase 4 (R5): the combinator's own name, set alongside
+    /// `combinator_sig`/`combinator_subst` during the splice walk and the
+    /// standalone check. Used by the materialized-quotation bound-dispatch
+    /// rejection to name the combinator in the error message.
+    combinator_name: Option<String>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -960,6 +965,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     splice_trait_calls: &mut scratch_trait_calls,
                     combinator_sig: None,
                     combinator_subst: None,
+                    combinator_name: None,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -993,6 +999,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 splice_trait_calls: &mut splice_trait_calls,
                 combinator_sig: None,
                 combinator_subst: None,
+                combinator_name: None,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -1290,6 +1297,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         splice_trait_calls: &mut splice_trait_recs,
         combinator_sig: None,
         combinator_subst: None,
+        combinator_name: None,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -1381,6 +1389,7 @@ pub(crate) fn infer_line(
         splice_trait_calls: &mut splice_trait_recs,
         combinator_sig: None,
         combinator_subst: None,
+        combinator_name: None,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,

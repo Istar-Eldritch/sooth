@@ -433,8 +433,10 @@ pub(super) fn check_poly_combinator_standalone(
     // context is unaffected.
     let saved_comb_sig = poly.combinator_sig.take();
     let saved_comb_subst = poly.combinator_subst.take();
+    let saved_comb_name = poly.combinator_name.take();
     poly.combinator_sig = Some(sig.clone());
     poly.combinator_subst = Some(subst.clone());
+    poly.combinator_name = Some(word.name.clone());
     let result = check_word(
         &concrete,
         enums,
@@ -452,6 +454,7 @@ pub(super) fn check_poly_combinator_standalone(
     );
     poly.combinator_sig = saved_comb_sig;
     poly.combinator_subst = saved_comb_subst;
+    poly.combinator_name = saved_comb_name;
     result
 }
 
@@ -499,6 +502,7 @@ pub(crate) fn check_poly_combinator_repl(
         splice_trait_calls: &mut scratch_trait_calls,
         combinator_sig: None,
         combinator_subst: None,
+        combinator_name: None,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -1053,6 +1057,26 @@ pub(super) fn resolve_splice_member_call(
             }
         }
     };
+    // P7.S3o Phase 4 (R5): reject bound dispatch inside a materialized
+    // quotation from a bounded combinator. The materialized quotation gets
+    // its own `IrFunc` with `inline_uid: 0` during lowering, so the per-splice
+    // `splice_trait_calls` key `(uid, span)` recorded here would not be found
+    // — two splices at different types would silently miscompile. The flag
+    // is set by `materialize_quotation_at_boundary` (and the branch join)
+    // around the quotation body check; `splice_uid` being `Some` means this
+    // is a real splice, not the standalone check.
+    if prov.in_materialized_quot && prov.splice_uid.is_some() {
+        let comb_name = poly
+            .combinator_name
+            .as_deref()
+            .map(|n| crate::resolve::render_word(n).into_owned())
+            .unwrap_or_else(|| "a bounded combinator".to_string());
+        return Err(format!(
+            "error: bound trait member `{member}` (line {}) is called inside a materialized quotation within the combinator {comb_name}, but bound dispatch in materialized quotations is unsupported\n\
+             note: a materialized quotation is lowered to its own function with no splice-site prefix, so two splices at different concrete types would collide on the dispatch key",
+            span.line
+        ));
+    }
     // Ground the member's input/output types against the concrete θ.
     let Some(ty) = subst.ty_of(var) else {
         return Ok(None);

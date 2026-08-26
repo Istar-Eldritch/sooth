@@ -2636,3 +2636,60 @@ fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
         "an unbounded combinator splicing a bounded one calling `cmp` should compile and run at i64 and f64"
     );
 }
+
+/// P7.S3o Phase 4 (R5): bound dispatch inside a materialized quotation from a
+/// bounded combinator is rejected with a located error. The materialized
+/// quotation gets its own `IrFunc` with `inline_uid: 0` during lowering, so
+/// the per-splice `splice_trait_calls` key would not be found — two splices at
+/// different types would silently miscompile. The quotation `[ a b cmp drop ]`
+/// captures `a` and `b` from the bounded combinator `foo` and dispatches `cmp`
+/// (a bare `Ord` member) inside the materialized body. The rejection fires at
+/// the materialization boundary (`materialize_quotation_at_boundary`), where
+/// `in_materialized_quot` is set, and `resolve_splice_member_call` detects that
+/// a bound member is being dispatched inside a materialized quotation during a
+/// real splice.
+#[test]
+fn bound_dispatch_in_materialized_quotation_is_rejected() {
+    let src = "type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T: Copy Ord 'T -- )
+\
+         | a b |
+\
+         [ a b cmp drop ] Thunk drop ;
+\
+         : main ( -- ) 1 2 foo ;
+";
+    let err = check_error(src);
+    assert!(
+        err.contains("bound dispatch in materialized quotations is unsupported"),
+        "should reject bound dispatch in a materialized quotation, got: {err}"
+    );
+    assert!(
+        err.contains("`cmp`"),
+        "the error should name the member `cmp`, got: {err}"
+    );
+    assert!(
+        err.contains("`foo`"),
+        "the error should name the combinator `foo`, got: {err}"
+    );
+}
+
+/// P7.S3o Phase 4 (R5): a bounded combinator whose body contains a quotation
+/// without a bare member call materializes without triggering the rejection.
+/// The `in_materialized_quot` flag is set, but no bound member is
+/// dispatched inside the materialized body, so the rejection does not fire.
+/// This confirms the rejection is targeted at bound dispatch, not at
+/// materialization itself.
+#[test]
+fn materialized_quotation_without_bare_member_is_not_rejected() {
+    let src = "type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T: Copy Ord 'T -- )
+\
+         | a b | a b cmp drop [ ] Thunk drop ;
+\
+         : main ( -- ) 1 2 foo ;
+";
+    check_ok(src);
+}

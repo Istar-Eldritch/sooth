@@ -191,6 +191,16 @@ pub(super) struct Provenance {
     /// resolve at their own `uid`. `None` on the monomorphic and standalone
     /// paths.
     pub(super) splice_uid: Option<u32>,
+    /// P7.S3o Phase 4 (R5): `true` while the body of a *materialized*
+    /// quotation is being checked (inside `check_literal_against_declared_
+    /// effect` called from `materialize_quotation_at_boundary` or a branch
+    /// join). When set alongside `splice_uid` (a real splice), a bare trait
+    /// member call inside the materialized quotation is rejected: the
+    /// materialized quotation gets its own `IrFunc` with `inline_uid: 0`, so
+    /// two splices at different types would collide on the per-splice
+    /// `splice_trait_calls` key. Saved and restored so nested materializations
+    /// and the enclosing context are unaffected.
+    pub(super) in_materialized_quot: bool,
 }
 
 impl Provenance {

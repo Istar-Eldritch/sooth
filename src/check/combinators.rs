@@ -533,8 +533,10 @@ pub(super) fn inline_combinator(
     // combinators resolve at their own θ.
     let saved_comb_sig = poly.combinator_sig.take();
     let saved_comb_subst = poly.combinator_subst.take();
+    let saved_comb_name = poly.combinator_name.take();
     poly.combinator_sig = comb.word.poly.as_deref().cloned();
     poly.combinator_subst = poly_subst.clone();
+    poly.combinator_name = Some(name.to_string());
     let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
     let depth = scope.depth();
     let saved_marker = if self_tail {
@@ -578,6 +580,7 @@ pub(super) fn inline_combinator(
     prov.splice_uid = saved_splice_uid;
     poly.combinator_sig = saved_comb_sig;
     poly.combinator_subst = saved_comb_subst;
+    poly.combinator_name = saved_comb_name;
     stack = result?;
     leave_block(
         ctx,
