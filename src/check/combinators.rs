@@ -370,13 +370,18 @@ pub(super) fn inline_combinator(
     // the body's `call`/`times` fusion), so the extra increments would
     // diverge the checker's uid sequence from the lowering's. Save and
     // restore `inline_uid` around the argument check so the quotation body's
-    // combinator splices are invisible to the uid counter. Also set
-    // `splice_uid` to `None` so poly calls in the quotation body go to `insts`
-    // (not `splice_records` at the parent's uid); the body walk re-records
-    // them at the current combinator's uid, which is what lowering reads.
+    // combinator splices are invisible to the uid counter.
+    //
+    // P7.S3o Phase 2: the parent's `splice_uid` is kept (not cleared to
+    // `None`) during the argument check. When inside a splice (e.g. `if`
+    // spliced inside `mymax3`), poly calls in the quotation-parameter bodies
+    // (e.g. `gt` inside `if`'s `~[ ... ]` arms) go to `splice_records` at the
+    // parent's uid instead of the span-keyed `insts`, which would collide when
+    // the enclosing combinator is spliced at two types. The body walk
+    // re-records them at the current combinator's uid (via `branch` →
+    // `check_branch_join`), which is what lowering reads; the arg-check entries
+    // at the parent's uid are harmless duplicates.
     let saved_inline_uid = prov.inline_uid;
-    let saved_arg_splice_uid = prov.splice_uid;
-    prov.splice_uid = None;
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
             sig, span, &stack, name, ctx, env, arrays, cells, refs, slices, prov, scope, poly,
@@ -471,7 +476,6 @@ pub(super) fn inline_combinator(
         None
     };
     prov.inline_uid = saved_inline_uid;
-    prov.splice_uid = saved_arg_splice_uid;
     // R6: a self-tail combinator opens a splice-time loop. Its body is spliced
     // with `tail = true` so its own tail-position self-call is recognized as
     // the back-edge (above). 6d/R6: the nested-loop rejection is retired --
