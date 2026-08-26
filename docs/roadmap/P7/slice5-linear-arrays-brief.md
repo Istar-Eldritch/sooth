@@ -67,13 +67,16 @@ place; the missing piece is the drop arm and the synthesized destructor.
 `src/parser.rs:4021`). The syntax is `[ Type ; Count ]` (spaces around the
 semicolon), producing a `TermKind::ArrayCtor`. The lowering
 (`src/ir/func_builder/calls.rs:74`) is a byte-granular zero-init loop over
-`ArrayLayout::size` bytes — confirmed as a memset-equivalent, not a per-element
-constructor call. It takes a *type*, not a value, so it cannot produce valid linear
-elements (zeroed memory is not a constructed value). It shares the same
+`ArrayLayout::size` bytes — a memset-equivalent, not a per-element constructor
+call. It takes a *type*, not a value, so it cannot produce valid linear elements
+(zeroed memory is not a constructed value). It shares the same
 `check_array_element_gate` as `fill`, but with `zero_safety = true` (rejecting
-zero-unsafe types) in addition to the linearity gate. Only two runtime construction
-forms exist today: `[Type; Count]` and `fill`. No literal array syntax `[1 2 3]`
-exists — that parses as a quotation. No `tabulate` word exists.
+zero-unsafe types) in addition to the linearity gate. It is recognized in the term
+parser by `array_ctor_ahead` (`src/parser.rs:3990`), a two-token lookahead that
+distinguishes `[Type; Count]` from a quotation — the same class of disambiguation
+heuristic S6 deletes from the type parser by naming the array type. Only two runtime
+construction forms exist today: `[Type; Count]` and `fill`. No literal array syntax
+`[1 2 3]` exists — that parses as a quotation. No `tabulate` word exists.
 
 **`times` and the splice mechanism.** `times` is a *library word*
 (`lib/combinators.sth:40`), not a builtin IR word family — the IR has `fill` and
@@ -99,7 +102,7 @@ discriminant-0 nullary variant. `Option` is a regular generic enum
 
 ## The three pieces
 
-### 1. Construction: `tabulate` and the nullary-variant relaxation
+### 1. Construction: `tabulate`, nullary-variant `fill`, and dropping `[Type; Count]`
 
 **`tabulate`.** A generation combinator — `tabulate ( usize ~[ -- T ] -- [T N] )` —
 whose lowering is `fill`'s loop body with one swap: instead of storing a replicated
@@ -122,13 +125,13 @@ value that is stored into the array; the value does not persist across iteration
 This is exactly what makes `tabulate` safe for linear elements — no value is
 replicated, each slot gets a distinct, freshly-constructed value.
 
-**Nullary-variant `fill` relaxation.** `fill` (and the `[Type; Count]` constructor)
-could admit a *nullary-variant seed* (e.g. `None 3 fill`) even when the enum type is
-linear, because a nullary variant carries no linear data to replicate — only a
-discriminant. This does not solve the general case (a linear array of *distinct*
-values still needs `tabulate`) but it covers the sentinel-initialized backing array
-the `fixed`-layer collections (P9.S1) need: an `array[Option[T] N]` initialized with
-`None` in every slot, overwritten as values arrive.
+**Nullary-variant `fill` relaxation.** `fill` could admit a *nullary-variant seed*
+(e.g. `None 3 fill`) even when the enum type is linear, because a nullary variant
+carries no linear data to replicate — only a discriminant. This does not solve the
+general case (a linear array of *distinct* values still needs `tabulate`) but it
+covers the sentinel-initialized backing array the `fixed`-layer collections (P9.S1)
+need: an `array[Option[T] N]` initialized with `None` in every slot, overwritten as
+values arrive.
 
 The gate today (`check_array_element_gate`, `src/check.rs:510`) checks `is_copy` on
 the *type* and receives a `Type`, not a `Slot` or value. To admit a nullary-variant
@@ -155,12 +158,38 @@ a `Default` trait (a `Default`-based construction would still be replication und
 another name, the same contradiction `fill` hits for a truly linear type with a real
 destructor obligation).
 
-For the `[Type; Count]` constructor path, the relaxation is different: it takes a
-*type*, not a seed value, so "is the seed nullary" is not the question. Instead, the
-gate would check whether the enum type has a nullary variant available (i.e., can be
-zero-initialized to a valid value), which is a property of the type, not the seed.
-This is a simpler check — `is_copy` OR `has_nullary_variant` — but it is a separate
-mechanism from the `fill` path's seed-value check.
+**Dropping `[Type; Count]`.** With `tabulate` for distinct values and the
+nullary-variant `fill` relaxation for sentinel-init, the `[Type; Count]` constructor
+is the redundant third construction path — and the one that is semantically at odds
+with the rest. It takes a *type*, not a value, and zero-initializes via memset, which
+is exactly why it cannot produce valid linear values (zeroed memory is not a
+constructed value). It works only for the case S5 is *not* extending (copy types)
+and fails for the case S5 *is* extending (linear types). Keeping it means
+maintaining a third parser path (`parse_array_ctor_term`, `src/parser.rs:4021`), a
+third checker path (`TermKind::ArrayCtor`, `src/check/terms.rs:1033`), a third IR
+path (`src/ir/func_builder/calls.rs:74`), the `array_ctor_ahead` term-parser
+lookahead (`src/parser.rs:3990`), and the `zero_safety` flag in
+`check_array_element_gate` — all for a form that overlaps with `fill`.
+
+Dropping it also eliminates `array_ctor_ahead`, the term-level lookahead that
+distinguishes `[Type; Count]` from a quotation. That is the same class of heuristic
+S6 deletes from the type parser by naming the array type; removing it here makes
+S6's "bare `[` unambiguously opens a quotation" truly clean in the term parser too,
+not just the type parser.
+
+Migration is mechanical: 6 usages in `examples/array_ctor.sth`, all rewriting to
+`fill` — `[i64; 10]` → `0 10 fill`, `[Bool; 4]` → `False 4 fill`,
+`[i8; 10]` → `0 >i8 10 fill`. The example itself stays (it still tests the store
+loop overwriting dirty stack residue); it becomes a `fill` test rather than a
+separate ctor test.
+
+No performance is lost. The memset-zero path survives as a `fill` lowering
+optimization: when the seed's bit pattern is all zeros (a discriminant-0 nullary
+variant, or integer `0`), `fill`'s store loop can lower to the same byte-granular
+memset the `[Type; Count]` path uses today. The optimization is a lowering choice
+inside `fill`, not a separate surface construction form. This keeps the language's
+construction story uniform: every array is built value-level, through a constructor
+that takes a seed or a quotation — never a type.
 
 ### 2. Disposal: array destructor synthesis
 
@@ -212,9 +241,6 @@ has today: if `fill`'s seed construction traps, the process exits.
 
 ## What this does not touch
 
-- `check_array_element_gate`'s `zero_safety` flag (the `[Type; Count]` path's
-  rejection of zero-unsafe types) — unchanged. The nullary-variant relaxation
-  loosens the *linearity* gate, not the zero-safety gate.
 - `is_copy` (`src/check/builtins.rs:219`) — unchanged. The relaxation is a new
   condition alongside `is_copy`, not a modification of it.
 - `Slice[T]` views — a view does not own what it points at, so linear elements
@@ -222,10 +248,6 @@ has today: if `fill`'s seed construction traps, the process exits.
 - `fill`'s existing semantics for copy types — unchanged. `fill` still replicates a
   copy-type seed; the relaxation only admits nullary-variant seeds for linear types.
 - The `len` constant fold (`src/ir/func_builder/word_families.rs:508`) — unchanged.
-- The `[Type; Count]` constructor's zero-init path — the nullary-variant relaxation
-  for this path is a type-level check (`has_nullary_variant`), not a seed-value
-  check, and may land as a follow-up if the `fill` path's seed-value relaxation
-  proves the more useful shape first.
 
 ## Open questions for the spec
 
@@ -246,11 +268,11 @@ has today: if `fill`'s seed construction traps, the process exits.
    generate; an unrolled sequence is simpler to verify. The spec should pick one
    and state why.
 
-4. **Nullary-variant relaxation for `[Type; Count]`.** Whether to land the
-   type-level `has_nullary_variant` check for the type-count constructor in this
-   slice or defer it. The `fill`-path seed-value relaxation is the higher-value
-   shape (it covers `None N fill`, the sentinel-init pattern); the `[Type; Count]`
-   path is a narrower win.
+4. **`fill` memset optimization.** Whether to implement the all-zeros-seed memset
+   optimization (lowering `fill` to a byte-granular memset when the seed is
+   discriminant-0 nullary or integer `0`) in this slice or as a follow-up. The
+   optimization preserves the performance of the dropped `[Type; Count]` path but is
+   not required for correctness or for the linear-element exit criterion.
 
 ## Out of scope
 
@@ -276,5 +298,6 @@ nullary-variant seed that carries no linear data); dropping it disposes every
 element exactly once (via synthesized array destructor glue with a static trip
 count); a partially-constructed array abandoned mid-construction is either rejected
 with a located error or disposes exactly the slots already initialized, with the
-rule stated; and the `linear array elements are not supported yet` diagnostic is
-gone rather than reworded.
+rule stated; the `[Type; Count]` constructor is gone, its usages migrated to `fill`,
+and the `array_ctor_ahead` term-parser lookahead is deleted; and the `linear array
+elements are not supported yet` diagnostic is gone rather than reworded.

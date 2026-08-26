@@ -841,10 +841,15 @@ Three things make it a real slice rather than a predicate flip.
 **Construction.** `fill` replicates one value across every slot, which is a copy per slot
 and therefore illegal for a linear element — the diagnostic's own wording ("would replicate a
 `{elem}` across every slot") names why. The `[Type; Count]` constructor (`parse_array_ctor_term`,
-`src/parser.rs:3719`) is a separate path: it takes a *type* (not a value) and zero-initializes
+`src/parser.rs:4021`) is a separate path: it takes a *type* (not a value) and zero-initializes
 the allocation (`src/ir/func_builder/calls.rs:74`, a byte-granular memset loop), so it cannot
-produce a valid linear element either, since zeroed memory is not a constructed value. A linear
-array needs a construction form that produces N *distinct* values, never one replicated N times.
+produce a valid linear element either, since zeroed memory is not a constructed value. It is
+the redundant third construction path — overlapping with `fill` for copy types, useless for
+linear types — and this slice drops it, migrating its usages to `fill` and deleting the
+`array_ctor_ahead` term-parser lookahead (`src/parser.rs:3990`) that distinguishes it from a
+quotation. The memset-zero path survives as a `fill` lowering optimization (when the seed's bit
+pattern is all zeros), not a separate surface form. A linear array needs a construction form that
+produces N *distinct* values, never one replicated N times.
 The cheapest shape is an intrinsic generation combinator — `tabulate ( usize ~[ -- T ] -- [T N] )`
 — whose lowering is `fill`'s loop body with one swap: instead of storing a replicated seed each
 iteration, the loop calls the quotation (spliced, so `tabulate` is `inline` like `times`), gets a
@@ -855,11 +860,10 @@ exactly the boundary a generation combinator needs. No new storage category is r
 "no uninitialized memory" rule is a type-system boundary, not an IR constraint, and the IR
 already crosses it inside `fill`.
 
-A narrower relaxation also reaches some linear arrays without a new word: `fill` (and the
-`[Type; Count]` constructor) could admit a *nullary-variant seed* (e.g. `None 3 fill`) even when
-the enum type is linear, because a nullary variant carries no linear data to replicate — only
-a discriminant. The gate (`check_array_element_gate`, `src/check.rs:505`) currently checks
-`is_copy` on the *type*; it could instead check whether the *seed value* is nullary, which is
+A narrower relaxation also reaches some linear arrays without a new word: `fill` could admit a
+*nullary-variant seed* (e.g. `None 3 fill`) even when the enum type is linear, because a nullary
+variant carries no linear data to replicate — only a discriminant. The gate
+(`check_array_element_gate`, `src/check.rs:510`) currently checks `is_copy` on the *type*; it could instead check whether the *seed value* is nullary, which is
 safe regardless of the type's linearity. The lowering choice follows from the discriminant: a
 discriminant-0 nullary variant (the first-declared, like `None`) can memset to zero (its bit
 pattern is all zeros, same as the `[Type; Count]` path); a non-zero nullary variant needs `fill`'s
@@ -878,7 +882,7 @@ language where a value is neither wholly live nor wholly disposed.
 **Why not a capacity/length array type.** A `[T N M]`-shaped type baking a runtime length into
 the array was considered and rejected: it collapses the storage/view split (DESIGN.md: "length
 lives in storage (`[T N]`), carried at runtime by the view (`Slice[T]`)"), breaks `len`'s
-constant fold (`src/ir/func_builder/word_families.rs:1457`), kills compile-time index checking
+constant fold (`src/ir/func_builder/word_families.rs:508`), kills compile-time index checking
 (`check_array_index`, `src/check/word_families.rs:1280`), and makes `dup`/`drop` semantics
 ambiguous (copy/dispose N slots or M?). The fully-initialized fixed array is a common value type
 (lookup tables, coefficient banks, pixel data) that should not pay a runtime-length tax for the
@@ -906,7 +910,9 @@ being copied (via a generation combinator that produces N distinct values, or a 
 seed that carries no linear data); dropping it disposes every element exactly once; a
 partially-constructed array abandoned mid-construction is either rejected with a located error
 or disposes exactly the slots already initialized, with the rule stated; and the `linear array
-elements are not supported yet` diagnostic is gone rather than reworded.
+elements are not supported yet` diagnostic is gone rather than reworded. The `[Type; Count]`
+constructor is dropped, its usages migrated to `fill`, and the `array_ctor_ahead` term-parser
+lookahead is deleted.
 Detail: [slice5-linear-arrays-brief](./P7/slice5-linear-arrays-brief.md). Probe-verified
 against the current tree (five `litellm/syn-large-text` worktree-isolated read-only probes);
 corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`),
