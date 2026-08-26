@@ -4998,7 +4998,8 @@ pub(super) fn discover_transitive_instantiations(
     // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
     // The member word is polymorphic (poly: Some), so lowering finds it in
     // `poly_words` and computes the concrete effect from the sig + subst.
-    let combs = CombinatorIndex::new();
+    // Shared with `fixpoint`'s own mid-composition discoveries via
+    // `impl_mono_seed`, so both routes materialize the same CallInst shape.
     let mut extra_seeds: Vec<CallInst> = Vec::new();
     for (word_name, subst) in &impl_monos {
         let symbol = instantiation_symbol(word_name, subst, None);
@@ -5006,37 +5007,9 @@ pub(super) fn discover_transitive_instantiations(
         if extra_seeds.iter().any(|s| s.symbol == symbol) {
             continue;
         }
-        let Some(word) = words.iter().find(|w| &w.name == word_name) else {
-            continue;
-        };
-        let Some(sig) = &word.poly else { continue };
-        let ctx = word_ctx(word, structs, enums, statics, Some(modules), &combs, None);
-        let mut outputs = Vec::with_capacity(sig.outputs.len());
-        for pty in &sig.outputs {
-            outputs.push(apply_subst(
-                sig,
-                pty,
-                subst,
-                word_name,
-                word.span,
-                &ctx,
-                arrays,
-                owned_cells,
-                refs,
-            )?);
+        if let Some(seed) = ground.impl_mono_seed(word_name, subst, arrays, refs, owned_cells)? {
+            extra_seeds.push(seed);
         }
-        extra_seeds.push(CallInst {
-            callee: word_name.clone(),
-            subst: subst.clone(),
-            symbol,
-            out_arity: outputs.len(),
-            output_types: outputs,
-            bundle: None,
-            generation: None,
-            quot_inputs: Vec::new(),
-            trait_calls: HashMap::new(),
-            poly_calls: HashMap::new(),
-        });
     }
     // N2: no records and no impl monos means nothing to compose.
     if poly_cross_calls.is_empty() && extra_seeds.is_empty() {
@@ -5100,31 +5073,59 @@ impl CrossGround<'_> {
     ) -> Result<Vec<CallInst>, String> {
         let mut seen: HashSet<String> = insts.values().map(|i| i.symbol.clone()).collect();
         let mut frontier: Vec<CallInst> = Vec::new();
+        // P7.S4 (R6, review fix): a composed cross-call's own `Bound::User`
+        // obligation can resolve to a *generic*-impl member word, discovering
+        // a monomorph mid-composition rather than at a top-level call site
+        // (e.g. `outer` calls `inner` calls `show`, and only `inner`'s own
+        // bound resolves the generic `impl:`). `cross_calls_of` drains every
+        // such discovery into this accumulator so the loop below can seed it
+        // too -- otherwise the member word's body is never emitted and
+        // lowering panics on the dangling symbol.
+        let mut discovered: Vec<(String, Subst)> = Vec::new();
         for inst in insts.values_mut() {
-            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells)?;
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
         }
         // P7.S4 (R6): seed the generic-impl member-word monomorphs into the
         // fixpoint, so their bodies' poly cross-calls get composed and their
         // own `poly_calls` routing maps are filled.
-        let mut impl_frontier: Vec<CallInst> = Vec::new();
         for mut inst in impl_seeds {
             if !seen.insert(inst.symbol.clone()) {
                 continue;
             }
-            inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
-            enqueue_new(&inst.poly_calls, &mut seen, &mut impl_frontier);
+            inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
+            enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
             frontier.push(inst);
         }
         let mut transitive: Vec<CallInst> = Vec::new();
-        while !frontier.is_empty() {
-            let mut next = Vec::new();
-            for mut inst in frontier {
-                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
-                enqueue_new(&inst.poly_calls, &mut seen, &mut next);
-                transitive.push(inst);
+        loop {
+            while !frontier.is_empty() {
+                let mut next = Vec::new();
+                for mut inst in frontier {
+                    inst.poly_calls =
+                        self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
+                    enqueue_new(&inst.poly_calls, &mut seen, &mut next);
+                    transitive.push(inst);
+                }
+                frontier = next;
             }
-            frontier = next;
+            // Seed anything composition discovered along the way and loop
+            // again if that introduces new work -- a generic-impl member
+            // word whose own body calls another poly word still needs its
+            // cross-calls composed, and its resolution can discover yet
+            // another impl mono in turn.
+            for (word_name, subst) in std::mem::take(&mut discovered) {
+                let symbol = instantiation_symbol(&word_name, &subst, None);
+                if !seen.insert(symbol) {
+                    continue;
+                }
+                if let Some(seed) = self.impl_mono_seed(&word_name, &subst, arrays, refs, cells)? {
+                    frontier.push(seed);
+                }
+            }
+            if frontier.is_empty() {
+                break;
+            }
         }
         // `insts` iterates a `HashMap`, so the discovery order is randomized;
         // sort so the recorded set is a deterministic sequence and not merely
@@ -5132,6 +5133,57 @@ impl CrossGround<'_> {
         // reading this field should not have to.
         transitive.sort_by(|a, b| a.symbol.cmp(&b.symbol));
         Ok(transitive)
+    }
+
+    /// Build the seed `CallInst` for one generic-impl member-word monomorph
+    /// `(word_name, subst)` discovered by resolving a `Bound::User`
+    /// obligation -- either a top-level call's or a composed cross-call's.
+    /// `None` when the name resolves to no polymorphic word, which should not
+    /// happen: `resolve_user_bound` only ever pushes a resolved impl's own
+    /// member word.
+    fn impl_mono_seed(
+        &self,
+        word_name: &str,
+        subst: &Subst,
+        arrays: &mut Vec<ArrayDecl>,
+        refs: &mut Vec<RefDecl>,
+        cells: &mut Vec<OwnedCellDecl>,
+    ) -> Result<Option<CallInst>, String> {
+        let Some(word) = self.words.iter().find(|w| w.name == word_name) else {
+            return Ok(None);
+        };
+        let Some(sig) = &word.poly else {
+            return Ok(None);
+        };
+        let combs = CombinatorIndex::new();
+        let ctx = word_ctx(
+            word,
+            self.structs,
+            self.enums,
+            self.statics,
+            self.modules,
+            &combs,
+            None,
+        );
+        let mut outputs = Vec::with_capacity(sig.outputs.len());
+        for pty in &sig.outputs {
+            outputs.push(apply_subst(
+                sig, pty, subst, word_name, word.span, &ctx, arrays, cells, refs,
+            )?);
+        }
+        let symbol = instantiation_symbol(word_name, subst, None);
+        Ok(Some(CallInst {
+            callee: word_name.to_string(),
+            subst: subst.clone(),
+            symbol,
+            out_arity: outputs.len(),
+            output_types: outputs,
+            bundle: None,
+            generation: None,
+            quot_inputs: Vec::new(),
+            trait_calls: HashMap::new(),
+            poly_calls: HashMap::new(),
+        }))
     }
 
     /// Ground every cross-call recorded in `caller`'s body against `caller`'s
@@ -5143,6 +5195,7 @@ impl CrossGround<'_> {
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
+        impl_monos: &mut Vec<(String, Subst)>,
     ) -> Result<HashMap<Span, CallInst>, String> {
         let Some(records) = self.records.get(&caller.callee) else {
             return Ok(HashMap::new());
@@ -5213,7 +5266,7 @@ impl CrossGround<'_> {
                 .expect("sole_poly_word yields a polymorphic word");
             routed.insert(
                 record.span,
-                self.compose(record, caller, sig, &ctx, arrays, refs, cells)?,
+                self.compose(record, caller, sig, &ctx, arrays, refs, cells, impl_monos)?,
             );
         }
         Ok(routed)
@@ -5260,6 +5313,7 @@ impl CrossGround<'_> {
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
+        impl_monos: &mut Vec<(String, Subst)>,
     ) -> Result<CallInst, String> {
         let mut subst = Subst::default();
         for (v, image) in &record.mapping {
@@ -5294,7 +5348,6 @@ impl CrossGround<'_> {
         // whole-program tables, the identical diagnostic and the identical
         // span (`record.span`) a rejection would have used either way.
         let mut trait_calls: HashMap<Span, String> = HashMap::new();
-        let mut compose_monos: Vec<(String, Subst)> = Vec::new();
         for (v, bound) in &sig.bounds {
             let Bound::User(trait_id) = bound else {
                 continue;
@@ -5316,7 +5369,7 @@ impl CrossGround<'_> {
                 cells,
                 refs,
                 &mut trait_calls,
-                &mut compose_monos,
+                impl_monos,
             )?;
         }
         // The caller's `generation` rides along so `instantiation_symbol`
@@ -5462,20 +5515,7 @@ fn ambiguity_error(
 ) -> String {
     let targets: Vec<String> = maximal
         .iter()
-        .map(|&i| {
-            let target = &candidates[i].0.target;
-            let sig = crate::ast::PolySig {
-                row_in: None,
-                inputs: Vec::new(),
-                outputs: Vec::new(),
-                row_out: None,
-                bounds: Vec::new(),
-                ty_var_names: target.ty_var_names.clone(),
-                len_var_names: target.len_var_names.clone(),
-                row_var_names: Vec::new(),
-            };
-            format!("    `{}`", poly_type_str(&target.pattern, &sig))
-        })
+        .map(|&i| format!("    `{}`", impl_target_str(&candidates[i].0.target)))
         .collect();
     format!(
         "error: ambiguous `impl:` dispatch for `{trait_name}` at `{ty}` (line {}, col {})\n  matching targets:\n{}\n  no target is more specific than another; write a more specific `impl:` to resolve",
@@ -6078,22 +6118,294 @@ fn same_class(a: &Position, b: &Position) -> bool {
     }
 }
 
+/// Review fix (P7.S4 Phase 2): a leaf reached while walking two patterns
+/// *together* against the concrete `ty` they both matched. Most leaves are
+/// `Aligned` -- both patterns bottom out here (at a variable or a concrete
+/// value), feeding the equivalence-class machinery below. But when one
+/// side is a bare variable and the other is genuinely structured (an
+/// `Array`/`Generic`/`Ref`/`OwnedCell`/`Quotation`, or a `Concrete` folding
+/// a *structured* type), the variable places no constraint anywhere within
+/// that structure, so the structured side is unconditionally more specific
+/// over the whole region -- however unconstrained *its own* internals may
+/// be. Independently flattening each pattern into same-length position
+/// vectors (the pre-fix approach) can't express this: a bare `'T` and a
+/// compound `['T 'N]` flatten to different lengths and were reported
+/// incomparable no matter how the rest of the patterns compared.
+enum PairedLeaf {
+    Aligned(Position, Position),
+    AMoreSpecific,
+    BMoreSpecific,
+}
+
+/// One side of a pairing is a bare variable (`var_pos`); `other` is
+/// whatever the counterpart pattern is at this exact position. If `other`
+/// also bottoms out at a single leaf (another variable, or `Concrete` on a
+/// scalar/opaque type), this is an ordinary aligned pair. If `other` is
+/// genuinely structured here, the variable side contributes nothing and
+/// `other`'s side wins this whole region unconditionally. `var_is_b`
+/// selects which side of the `Aligned`/`*MoreSpecific` pair the variable
+/// occupies.
+#[allow(clippy::too_many_arguments)]
+fn collect_var_vs_other(
+    var_pos: Position,
+    other: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    out: &mut Vec<PairedLeaf>,
+    var_is_b: bool,
+) -> Option<()> {
+    let mut other_pos = Vec::new();
+    collect_positions(other, ty, arrays, cells, refs, generics, &mut other_pos)?;
+    if other_pos.len() == 1 {
+        out.push(if var_is_b {
+            PairedLeaf::Aligned(other_pos[0], var_pos)
+        } else {
+            PairedLeaf::Aligned(var_pos, other_pos[0])
+        });
+    } else {
+        out.push(if var_is_b {
+            PairedLeaf::AMoreSpecific
+        } else {
+            PairedLeaf::BMoreSpecific
+        });
+    }
+    Some(())
+}
+
+/// The array/ref/cell/quotation twins below extract a pattern's sub-parts
+/// for paired recursion, transparently unfolding a folded `Concrete` leaf
+/// against `ty`'s own shape (R1: a fully concrete target folds to one
+/// `Concrete` node, so it must decompose exactly like the structural
+/// pattern it stands in for). The caller has already excluded `Var` (via
+/// `collect_var_vs_other`) and both-`Concrete` (nothing to recurse into),
+/// so `pattern` is always either the matching compound variant or a
+/// `Concrete` leaf here.
+fn array_elem_len(pattern: &PolyType, elem_ty: Type, count: u32) -> (PolyType, Len) {
+    match pattern {
+        PolyType::Array(e, l) => ((**e).clone(), l.clone()),
+        PolyType::Concrete(_) => (PolyType::Concrete(elem_ty), Len::Concrete(count)),
+        _ => unreachable!("ty is array-shaped, so a matching pattern is Array or Concrete"),
+    }
+}
+
+fn len_position(len: Len) -> Position {
+    match len {
+        Len::Concrete(_) => Position::LenConcrete,
+        Len::Var(v) => Position::LenVar(v),
+    }
+}
+
+fn ref_referent(pattern: &PolyType, referent_ty: Type) -> PolyType {
+    match pattern {
+        PolyType::Ref(r, _) => (**r).clone(),
+        PolyType::Concrete(_) => PolyType::Concrete(referent_ty),
+        _ => unreachable!("ty is ref-shaped, so a matching pattern is Ref or Concrete"),
+    }
+}
+
+fn cell_payload(pattern: &PolyType, payload_ty: Type) -> PolyType {
+    match pattern {
+        PolyType::OwnedCell(p) => (**p).clone(),
+        PolyType::Concrete(_) => PolyType::Concrete(payload_ty),
+        _ => {
+            unreachable!("ty is owned-cell-shaped, so a matching pattern is OwnedCell or Concrete")
+        }
+    }
+}
+
+fn generic_args_of(pattern: &PolyType, ty_args: &[Type]) -> Vec<PolyType> {
+    match pattern {
+        PolyType::Generic { args, .. } => args.clone(),
+        PolyType::Concrete(_) => ty_args.iter().map(|t| PolyType::Concrete(*t)).collect(),
+        _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
+    }
+}
+
+fn quotation_parts(pattern: &PolyType, eff: &QuotEffect) -> (Vec<PolyType>, Vec<PolyType>) {
+    match pattern {
+        PolyType::Quotation(ins, outs, _, _, _) => (ins.clone(), outs.clone()),
+        PolyType::Concrete(_) => (
+            eff.inputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
+            eff.outputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
+        ),
+        _ => unreachable!("ty is quotation-shaped, so a matching pattern is Quotation or Concrete"),
+    }
+}
+
+/// Walk `a` and `b` *together* against the concrete `ty` they both matched,
+/// producing one `PairedLeaf` per point where at least one side stops
+/// recursing. This is `collect_positions` run twice, but paired rather than
+/// independent: a depth mismatch (one side a bare variable, the other
+/// still-structured) is classified explicitly via `collect_var_vs_other`
+/// instead of silently producing differently-sized position vectors.
+#[allow(clippy::too_many_arguments)]
+fn collect_paired_positions(
+    a: &PolyType,
+    b: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    out: &mut Vec<PairedLeaf>,
+) -> Option<()> {
+    match (a, b) {
+        (PolyType::Var(va), PolyType::Var(vb)) => {
+            out.push(PairedLeaf::Aligned(
+                Position::TyVar(*va),
+                Position::TyVar(*vb),
+            ));
+            return Some(());
+        }
+        (PolyType::Var(v), other) => {
+            return collect_var_vs_other(
+                Position::TyVar(*v),
+                other,
+                ty,
+                arrays,
+                cells,
+                refs,
+                generics,
+                out,
+                false,
+            );
+        }
+        (other, PolyType::Var(v)) => {
+            return collect_var_vs_other(
+                Position::TyVar(*v),
+                other,
+                ty,
+                arrays,
+                cells,
+                refs,
+                generics,
+                out,
+                true,
+            );
+        }
+        (PolyType::Concrete(_), PolyType::Concrete(_)) => return Some(()),
+        _ => {}
+    }
+    match ty {
+        Type::Array(id, _) => {
+            let elem_ty = arrays[id.index()].element;
+            let count = arrays[id.index()].count;
+            let (ea, la) = array_elem_len(a, elem_ty, count);
+            let (eb, lb) = array_elem_len(b, elem_ty, count);
+            collect_paired_positions(&ea, &eb, elem_ty, arrays, cells, refs, generics, out)?;
+            out.push(PairedLeaf::Aligned(len_position(la), len_position(lb)));
+            Some(())
+        }
+        Type::Ref(id, _, _) => {
+            let referent_ty = refs[id.index()].referent;
+            let ra = ref_referent(a, referent_ty);
+            let rb = ref_referent(b, referent_ty);
+            collect_paired_positions(&ra, &rb, referent_ty, arrays, cells, refs, generics, out)
+        }
+        Type::OwnedCell(id, _) => {
+            let payload_ty = cells[id.index()].payload;
+            let pa = cell_payload(a, payload_ty);
+            let pb = cell_payload(b, payload_ty);
+            collect_paired_positions(&pa, &pb, payload_ty, arrays, cells, refs, generics, out)
+        }
+        Type::Struct(id, _) => {
+            let generics = generics?;
+            let (_, _, ty_args) = generics.struct_instantiation_of(id)?;
+            if ty_args.is_empty() {
+                return Some(());
+            }
+            let ty_args = ty_args.to_vec();
+            let a_args = generic_args_of(a, &ty_args);
+            let b_args = generic_args_of(b, &ty_args);
+            for ((pa, pb), arg_ty) in a_args.iter().zip(b_args.iter()).zip(ty_args.iter()) {
+                collect_paired_positions(
+                    pa,
+                    pb,
+                    *arg_ty,
+                    arrays,
+                    cells,
+                    refs,
+                    Some(generics),
+                    out,
+                )?;
+            }
+            Some(())
+        }
+        Type::Enum(id, _) => {
+            let generics = generics?;
+            let (_, _, ty_args) = generics.enum_instantiation_of(id)?;
+            if ty_args.is_empty() {
+                return Some(());
+            }
+            let ty_args = ty_args.to_vec();
+            let a_args = generic_args_of(a, &ty_args);
+            let b_args = generic_args_of(b, &ty_args);
+            for ((pa, pb), arg_ty) in a_args.iter().zip(b_args.iter()).zip(ty_args.iter()) {
+                collect_paired_positions(
+                    pa,
+                    pb,
+                    *arg_ty,
+                    arrays,
+                    cells,
+                    refs,
+                    Some(generics),
+                    out,
+                )?;
+            }
+            Some(())
+        }
+        Type::Quotation(eff) | Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => {
+            let (a_ins, a_outs) = quotation_parts(a, eff);
+            let (b_ins, b_outs) = quotation_parts(b, eff);
+            if a_ins.len() != eff.inputs.len()
+                || a_outs.len() != eff.outputs.len()
+                || b_ins.len() != eff.inputs.len()
+                || b_outs.len() != eff.outputs.len()
+            {
+                return None;
+            }
+            for ((pa, pb), c) in a_ins.iter().zip(b_ins.iter()).zip(eff.inputs.iter()) {
+                collect_paired_positions(pa, pb, *c, arrays, cells, refs, generics, out)?;
+            }
+            for ((pa, pb), c) in a_outs.iter().zip(b_outs.iter()).zip(eff.outputs.iter()) {
+                collect_paired_positions(pa, pb, *c, arrays, cells, refs, generics, out)?;
+            }
+            Some(())
+        }
+        // Neither side is `Var` and not both are `Concrete` (excluded
+        // above), yet `ty` is a scalar/opaque leaf -- unreachable, since
+        // only `Concrete`/`Var` can match a scalar `ty` in the first place.
+        _ => Some(()),
+    }
+}
+
 /// P7.S4 (R3): the specificity partial order over two `impl:` target
-/// patterns, both of which matched the same concrete `ty`. Collects
-/// flattened position slots for each pattern, then compares equivalence
-/// classes.
+/// patterns, both of which matched the same concrete `ty`. Walks the two
+/// patterns together (`collect_paired_positions`), then compares
+/// equivalence classes over the aligned leaves and combines that with any
+/// one-sided (depth-mismatch) evidence.
 ///
 /// Returns `Some(Less)` if A is strictly more specific than B (A ≺ B),
 /// `Some(Greater)` if B is strictly more specific than A (B ≺ A), or `None`
 /// if neither is strictly more specific (equal or incomparable).
 ///
-/// Pattern A ≺ B iff:
+/// Over the aligned leaves, pattern A ≺ B iff:
 /// (1) every position where B has a concrete value, A also has a concrete
 /// value (A doesn't relax B's concreteness);
 /// (2) B's equivalence classes refine A's — every pair sharing a class in B
 /// also shares a class in A (A is coarser/more-merged/more-constraining);
 /// (3) A is strictly more constrained somewhere — A has concrete where B has
 /// a variable, or B has a strictly finer partition (A has a coarser one).
+///
+/// A one-sided leaf (a bare variable on one side against structure on the
+/// other) contributes unconditional evidence for whichever side has the
+/// structure; conflicting one-sided evidence (each side wins some region)
+/// is incomparable outright, and consistent one-sided evidence combines
+/// with the aligned-leaf verdict, disagreeing only if the aligned leaves
+/// favor the *other* side.
 ///
 /// Concrete positions are singletons. Type-variable and length-variable
 /// equivalence classes are separate namespaces (type var 0 and length var 0
@@ -6108,17 +6420,38 @@ fn specificity(
     refs: &[RefDecl],
     generics: Option<&GenericTypes>,
 ) -> Option<Ordering> {
-    let mut a_pos = Vec::new();
-    let mut b_pos = Vec::new();
-    collect_positions(a, ty, arrays, cells, refs, generics, &mut a_pos)?;
-    collect_positions(b, ty, arrays, cells, refs, generics, &mut b_pos)?;
-    // Structures must be parallel (same number of positions).
-    if a_pos.len() != b_pos.len() {
+    let mut paired = Vec::new();
+    collect_paired_positions(a, b, ty, arrays, cells, refs, generics, &mut paired)?;
+    let mut a_leaves = Vec::new();
+    let mut b_leaves = Vec::new();
+    let mut a_one_sided = false;
+    let mut b_one_sided = false;
+    for leaf in &paired {
+        match leaf {
+            PairedLeaf::Aligned(pa, pb) => {
+                a_leaves.push(*pa);
+                b_leaves.push(*pb);
+            }
+            PairedLeaf::AMoreSpecific => a_one_sided = true,
+            PairedLeaf::BMoreSpecific => b_one_sided = true,
+        }
+    }
+    if a_one_sided && b_one_sided {
         return None;
     }
-    let a_prec = is_strictly_more_specific(&a_pos, &b_pos);
-    let b_prec = is_strictly_more_specific(&b_pos, &a_pos);
-    match (a_prec, b_prec) {
+    let a_over_b = is_strictly_more_specific(&a_leaves, &b_leaves);
+    let b_over_a = is_strictly_more_specific(&b_leaves, &a_leaves);
+    if a_one_sided {
+        return if b_over_a { None } else { Some(Ordering::Less) };
+    }
+    if b_one_sided {
+        return if a_over_b {
+            None
+        } else {
+            Some(Ordering::Greater)
+        };
+    }
+    match (a_over_b, b_over_a) {
         (true, false) => Some(Ordering::Less),
         (false, true) => Some(Ordering::Greater),
         _ => None,
@@ -12784,18 +13117,64 @@ mod tests {
 
     #[test]
     fn match_impl_target_shared_var_consistency() {
-        // `['T 'T]` (e.g. a 2-element array of the same type) against [i64 i64]
-        let arrays = vec![ArrayDecl {
-            element: Type::I64,
-            count: 1,
-            name_static: "array",
-        }];
-        let pattern = PolyType::Var(0);
-        let ty = Type::I64;
-        let subst = match_impl_target(&pattern, ty, &arrays, &[], &[], None).expect("should match");
+        // Review fix (P2): the previous version of this test matched a
+        // *fresh* `Subst` twice, so the `prev == ty` consistency branch in
+        // `match_impl_target_rec`'s `Var` arm was never exercised -- both
+        // calls simply bound an empty variable. A `Quotation` pattern lets
+        // the *same* var appear at two independent positions within one
+        // match, so consistency actually gets checked: `'T` used at both
+        // input slots matches `[i64 -- ]` but not the shape below.
+        use crate::ast::quotation_type;
+        let pattern = PolyType::Quotation(
+            vec![PolyType::Var(0), PolyType::Var(0)],
+            Vec::new(),
+            false,
+            None,
+            None,
+        );
+        let same = quotation_type(vec![Type::I64, Type::I64], Vec::new());
+        let subst = match_impl_target(&pattern, same, &[], &[], &[], None).expect("should match");
         assert_eq!(subst.ty_of(0), Some(Type::I64));
-        // Matching the same var against a different type fails
-        assert!(match_impl_target(&pattern, Type::U32, &arrays, &[], &[], None).is_some());
+        // `'T` bound to `i64` at the first slot must hold at the second too.
+        let mismatched = quotation_type(vec![Type::I64, Type::U32], Vec::new());
+        assert!(match_impl_target(&pattern, mismatched, &[], &[], &[], None).is_none());
+    }
+
+    #[test]
+    fn match_impl_target_shared_len_var_consistency() {
+        // The `Len::Var` twin: `[[i64 'N] 'N]` (outer length shares the
+        // inner array's length variable) matches `[[i64 4] 4]` but not
+        // `[[i64 4] 2]`, exercising `Len::Var`'s own `prev == count` branch.
+        let arrays = vec![
+            ArrayDecl {
+                element: Type::I64,
+                count: 4,
+                name_static: "inner",
+            },
+            ArrayDecl {
+                element: Type::Array(ArrayId::from_index(0), "inner"),
+                count: 4,
+                name_static: "outer_matching",
+            },
+            ArrayDecl {
+                element: Type::Array(ArrayId::from_index(0), "inner"),
+                count: 2,
+                name_static: "outer_mismatched",
+            },
+        ];
+        let pattern = PolyType::Array(
+            Box::new(PolyType::Array(
+                Box::new(PolyType::Concrete(Type::I64)),
+                Len::Var(0),
+            )),
+            Len::Var(0),
+        );
+        let matching_ty = Type::Array(ArrayId::from_index(1), "outer_matching");
+        let subst =
+            match_impl_target(&pattern, matching_ty, &arrays, &[], &[], None).expect("len 4 == 4");
+        assert_eq!(subst.len_of(0), Some(4));
+        let mismatched_ty = Type::Array(ArrayId::from_index(2), "outer_mismatched");
+        assert!(match_impl_target(&pattern, mismatched_ty, &arrays, &[], &[], None).is_none());
     }
 
     // P7.S4 Phase 2 (R3): `specificity` / `is_strictly_more_specific` unit
@@ -12973,6 +13352,97 @@ mod tests {
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
             specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+    }
+
+    // Review fix (P7.S4 Phase 2): `specificity` used to flatten each pattern
+    // independently and reject any pair of different lengths as
+    // incomparable, so a bare `'T` (1 position) could never lose to a
+    // deeper structural pattern (2+ positions) even when the deeper one is
+    // strictly more specific. `collect_paired_positions` walks both
+    // patterns together instead, so a depth mismatch is classified
+    // explicitly rather than silently producing differently-sized vectors.
+
+    #[test]
+    fn specificity_bare_var_vs_array_pattern_depth_mismatch() {
+        // `'T` (1 position) vs `['T 'N]` (2 positions): `['T 'N]` wins --
+        // a bare variable is unconditionally less specific than any
+        // structural pattern, regardless of the depth mismatch.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Var(0);
+        let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        assert_eq!(
+            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn specificity_bare_var_vs_fully_concrete_array_depth_mismatch() {
+        // `'T` (1 position) vs the folded `Concrete([i64 4])` (2 positions
+        // once unfolded): the fully concrete impl wins.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Var(0);
+        let b = PolyType::Concrete(ty);
+        assert_eq!(
+            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn specificity_nested_array_more_specific_than_shallow_at_mismatched_depth() {
+        // `['T 'N]` vs `[['T 'N] 'M]` at `[[i64 4] 2]`: the nested pattern's
+        // element position is itself an array pattern where the shallow
+        // pattern only has a bare variable -- a depth mismatch one level
+        // in, not just at the top. The nested pattern wins.
+        let inner_arr = ArrayId::from_index(0);
+        let outer_arr = ArrayId::from_index(1);
+        let arrays = vec![
+            ArrayDecl {
+                element: Type::I64,
+                count: 4,
+                name_static: "inner",
+            },
+            ArrayDecl {
+                element: Type::Array(inner_arr, "inner"),
+                count: 2,
+                name_static: "outer",
+            },
+        ];
+        let ty = Type::Array(outer_arr, "outer");
+        // `['T 'N]`
+        let shallow = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        // `[['T 'N] 'M]`
+        let nested = PolyType::Array(
+            Box::new(PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0))),
+            Len::Var(1),
+        );
+        assert_eq!(
+            specificity(&shallow, &nested, ty, &arrays, &[], &[], None),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            specificity(&nested, &shallow, ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
     }

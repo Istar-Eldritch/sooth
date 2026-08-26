@@ -108,6 +108,34 @@ trait: Show 'T show ( &'T -- ) ;\n\
     assert!(out_generic.contains("99"), "{out_generic}");
 }
 
+/// Review fix: a generic-impl dispatch resolved while composing a poly
+/// word's cross-call (here, `outer` calls `inner`, and only `inner`'s own
+/// bound resolves the `impl:`) must still have its member-word monomorph
+/// recorded for lowering. Previously the compose path's discovery was
+/// dropped, and lowering panicked with "checked resolved call exists".
+#[test]
+fn generic_impl_dispatch_via_composed_cross_call_runs() {
+    let (_t, entry) = single_file(
+        "composed_dispatch",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for ['T 'N]\n\
+           : show | a | a drop ;\n\
+         ;\n\
+         : inner ( &'T: Show -- ) show ;\n\
+         : outer ( &'T: Show -- ) inner ;\n\
+         : main ( -- )\n\
+           42 .\n\
+           0 4 fill |a|\n\
+           &a outer\n\
+           a drop\n\
+           99 .\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert!(out.contains("42"), "{out}");
+    assert!(out.contains("99"), "{out}");
+}
+
 /// R1: `impl: Show for 'T` resolves the type variable instead of erroring
 /// "unknown type `'T`".
 #[test]
@@ -271,6 +299,76 @@ fn concrete_impl_overrides_generic_at_shared_instantiation() {
     );
 }
 
+/// Review fix (tests): the same scenario as
+/// `concrete_impl_overrides_generic_at_shared_instantiation`, but with the
+/// generic `impl:` declared *first* and the concrete one second. Both
+/// declaration orders must pick the same winner by specificity, not by
+/// which one was written first -- a test that only ever declares the
+/// winner first can't tell `select_most_specific` apart from a plain
+/// first-match rule.
+#[test]
+fn concrete_impl_overrides_generic_reversed_declaration_order() {
+    let (_t, entry) = single_file(
+        "override_reversed",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for ['T 'N]\n\
+           : show | a | 2 . a drop ;\n\
+         ;\n\
+         impl: Show for [i64 4]\n\
+           : show | a | 1 . a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |a|\n\
+           &a shows\n\
+           a drop\n\
+           0 2 fill |b|\n\
+           &b shows\n\
+           b drop\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert!(
+        out.contains("1\n"),
+        "concrete impl should win at [i64 4] regardless of declaration order: {out}"
+    );
+    assert!(
+        out.contains("2\n"),
+        "generic impl should cover [i64 2]: {out}"
+    );
+}
+
+/// Review fix (R3): a bare-variable target (`'T`, one structural position)
+/// loses to a structurally deeper target (`['T 'N]`, two positions) at a
+/// shared instantiation, even though the two targets don't flatten to the
+/// same length. Before the fix, `specificity` rejected any differently-
+/// sized pair as incomparable, so this raised a spurious ambiguity error
+/// instead of dispatching to the array impl.
+#[test]
+fn array_impl_overrides_bare_var_impl_depth_mismatch() {
+    let (_t, entry) = single_file(
+        "depth_mismatch",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for 'T\n\
+           : show | a | 1 . a drop ;\n\
+         ;\n\
+         impl: Show for ['T 'N]\n\
+           : show | a | 2 . a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |a|\n\
+           &a shows\n\
+           a drop\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert_eq!(
+        out, "2\n",
+        "the array impl should win over the bare var: {out}"
+    );
+}
+
 /// R12: two incomparable matching targets (`[i64 'N]` vs `['T 4]` at
 /// `[i64 4]`) produce a located ambiguity error naming both targets and
 /// the concrete type.
@@ -297,9 +395,12 @@ fn incomparable_targets_produce_ambiguity_error() {
     assert!(err.contains("Show"), "{err}");
     // The concrete type `[i64 4]` must appear in the diagnostic.
     assert!(err.contains("[i64 4]"), "{err}");
-    // Both competing targets must be named.
-    assert!(err.contains("[i64"), "{err}");
-    assert!(err.contains("4]"), "{err}");
+    // Review fix (R8): both competing target *patterns* must be named, not
+    // merely subsumed by the concrete-instantiation check above (which
+    // `[i64` / `4]` substring checks were -- both are satisfied by
+    // `[i64 4]` alone and would pass even if neither target rendered).
+    assert!(err.contains("[i64 'N]"), "{err}");
+    assert!(err.contains("['T 4]"), "{err}");
 }
 
 /// R12: `[['T 'N] 'N]` and `[['T 'N] 'M]` both match `[[i64 4] 4]` and
@@ -333,6 +434,42 @@ fn shared_var_target_more_specific_wins() {
     assert!(
         out.contains("1\n"),
         "[['T 'N] 'N] should win at [[i64 4] 4]: {out}"
+    );
+    assert!(
+        !out.contains("2\n"),
+        "[['T 'N] 'M] should not dispatch: {out}"
+    );
+}
+
+/// Review fix (tests): the same scenario as
+/// `shared_var_target_more_specific_wins`, but with the less-specific
+/// (distinct-var) impl declared first and the more-specific (shared-var)
+/// impl second. The winner must depend on specificity, not declaration
+/// order.
+#[test]
+fn shared_var_target_more_specific_reversed_declaration_order() {
+    let (_t, entry) = single_file(
+        "shared_var_reversed",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for [['T 'N] 'M]\n\
+           : show | a | 2 . a drop ;\n\
+         ;\n\
+         impl: Show for [['T 'N] 'N]\n\
+           : show | a | 1 . a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |inner|\n\
+           inner 4 fill |outer|\n\
+           &outer shows\n\
+           outer drop\n\
+           inner drop\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert!(
+        out.contains("1\n"),
+        "[['T 'N] 'N] should win at [[i64 4] 4] regardless of declaration order: {out}"
     );
     assert!(
         !out.contains("2\n"),

@@ -546,22 +546,6 @@ fn impl_orphan_error(
     )
 }
 
-/// P7.S4 (R1): render an `ImplTarget` for diagnostics, using the impl's own
-/// variable name tables so `'T`/`'N` spell as the user wrote them.
-fn impl_target_str(target: &crate::ast::ImplTarget) -> String {
-    let sig = crate::ast::PolySig {
-        row_in: None,
-        inputs: Vec::new(),
-        outputs: Vec::new(),
-        row_out: None,
-        bounds: Vec::new(),
-        ty_var_names: target.ty_var_names.clone(),
-        len_var_names: target.len_var_names.clone(),
-        row_var_names: Vec::new(),
-    };
-    poly_type_str(&target.pattern, &sig)
-}
-
 fn impl_duplicate_member_error(trait_name: &str, member: &str, span: Span) -> String {
     format!(
         "error: `impl: {trait_name}` binds member `{member}` more than once at line {}, col {}",

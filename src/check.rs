@@ -16,10 +16,10 @@ use crate::ast::{
     intern_bundle_struct, intern_owned_cell_type, intern_ref_type, intern_slice_type,
     is_builtin_word_name, is_name_dispatched_builtin, resolve_bool_type, variant_type, ArrayDecl,
     Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Image,
-    ImplDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolyCrossCall, PolySig, PolyType, QuotAnnot,
-    QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId, Subst,
-    Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
-    VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
+    ImplDecl, ImplTarget, Len, Module, ModuleInfo, OwnedCellDecl, PolyCrossCall, PolySig, PolyType,
+    QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId,
+    Subst, Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl,
+    VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
 mod audits;
@@ -1531,6 +1531,24 @@ fn check_outputs(
 /// A word's location, for locating a whole-word diagnostic like X1.
 pub(crate) fn word_span(word: &WordDef) -> Span {
     word.span
+}
+
+/// P7.S4 (R1/R8): render an `ImplTarget` for diagnostics, using the impl's
+/// own variable name tables so `'T`/`'N` spell as the user wrote them.
+/// Shared by `declarations.rs`'s duplicate-target error and `poly.rs`'s
+/// ambiguity error -- elevated here, their lowest common ancestor.
+pub(super) fn impl_target_str(target: &ImplTarget) -> String {
+    let sig = PolySig {
+        row_in: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        row_out: None,
+        bounds: Vec::new(),
+        ty_var_names: target.ty_var_names.clone(),
+        len_var_names: target.len_var_names.clone(),
+        row_var_names: Vec::new(),
+    };
+    poly::poly_type_str(&target.pattern, &sig)
 }
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
