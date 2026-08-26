@@ -907,3 +907,15 @@ seed that carries no linear data); dropping it disposes every element exactly on
 partially-constructed array abandoned mid-construction is either rejected with a located error
 or disposes exactly the slots already initialized, with the rule stated; and the `linear array
 elements are not supported yet` diagnostic is gone rather than reworded.
+
+**P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
+surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
+`Slice[T]` already is, so a bare `[` unambiguously opens a quotation and the
+`quotation_type_ahead` lookahead scan is deleted); `type:`/`trait:` binding sites move from
+postfix type variables (`type: Box 'T`, `trait: Ord 'T`) to bracketed parameter lists
+(`type: Box['T]`, `trait: Ord['T]`), unifying the spelling with generic application
+(`Box[i64]`); and a word's bounds move from inside the effect (`: word ( 'T: Ord 'T -- )`)
+to a bracket before it (`: word['T: Ord] ( 'T -- )`), separating variable-and-bound
+declaration from the stack effect. The `'` prefix on type variables is retained; `^'T` (owning
+cell) and `&'T` (reference) stay sigiled. Parser-and-test change only: the AST and every
+downstream checker/lowering/IR consumer are unchanged. Detail: [slice6-brief](./P7/slice6-brief.md).
