@@ -7,9 +7,10 @@
 // symbol table this grammar doesn't have. Some of those conventions (clause
 // heads like `| Cons` with no matching close-pipe) are genuinely undecidable
 // from tokens alone. So this grammar mirrors the same split: only the truly
-// unambiguous structure — top-level `: ... ;` / `type: ... ;` / ... forms and
-// real paired `(...)`/`[...]` delimiters — gets a grammar rule; everything
-// else is a flat `word` token, and highlights.scm classifies it by regex.
+// unambiguous structure — top-level `: ... ;` / `type: ... ;` / `trait:` /
+// `impl:` / ... forms and real paired `(...)`/`[...]`/`~[...]` delimiters —
+// gets a grammar rule; everything else is a flat `word` token, and
+// highlights.scm classifies it by regex.
 
 module.exports = grammar({
 	name: "sooth",
@@ -26,6 +27,8 @@ module.exports = grammar({
 				$.word_definition,
 				$.type_definition,
 				$.extern_definition,
+				$.trait_definition,
+				$.impl_definition,
 				$.import_definition,
 				$.export_definition,
 				$.static_definition,
@@ -36,15 +39,33 @@ module.exports = grammar({
 			seq("type:", field("name", $.word), repeat($._atom), ";"),
 		extern_definition: ($) =>
 			seq("extern:", field("name", $.word), repeat($._atom), ";"),
+		// `trait:` has no nested `;` — member signatures are `( ... )` groups,
+		// each a single atom, so the simple `repeat($._atom)` body works.
+		trait_definition: ($) =>
+			seq("trait:", field("name", $.word), repeat($._atom), ";"),
+		// `impl:` contains member bodies (`: word ... ;`), each ending in `;`,
+		// so `;` must be an admissible atom inside the block. The greedy `repeat`
+		// backtracks one step so the final `;` terminates the declaration.
+		impl_definition: ($) =>
+			seq("impl:", field("trait", $.word), repeat(choice($._atom, ";")), ";"),
 		import_definition: ($) =>
-			seq("import:", field("alias", $.word), repeat($._atom), ";"),
+			seq(
+				"import:",
+				field("alias", choice($.word, $.string)),
+				repeat($._atom),
+				";",
+			),
 		export_definition: ($) => seq("export:", repeat($._atom), ";"),
 		static_definition: ($) =>
 			seq("static:", field("name", $.word), repeat($._atom), ";"),
 
-		// A stack effect `( ... )` and a quotation/array-type `[ ... ]` are the
-		// only genuinely unambiguous, always-paired delimiters in the language;
-		// everything they contain is just more atoms.
+		// A stack effect `( ... )`, a quotation/array-type `[ ... ]`, and an
+		// inline quotation `~[ ... ]` are the genuinely unambiguous, always-
+		// paired delimiters in the language; everything they contain is just
+		// more atoms. `~[` is a single token (matching src/lexer.rs's
+		// `TildeLBracket`, Slice 10a R1) — `~` glued to `[` with zero whitespace
+		// — so `~ [` (spaced) still lexes as `word("~")` + `"["` and is a parse
+		// error in the real compiler, not a silently-accepted quotation.
 		_atom: ($) =>
 			choice(
 				$.word,
@@ -54,29 +75,36 @@ module.exports = grammar({
 				"|",
 				$.paren_group,
 				$.bracket_group,
+				$.tilde_bracket_group,
 			),
 		paren_group: ($) => seq("(", repeat($._atom), ")"),
-		bracket_group: ($) => seq("[", repeat($._atom), "]"),
+		// `;` is admissible inside `[ ... ]` for the `[ Type ; Count ]` array
+		// constructor (Slice 6h D1), distinguished from a quotation `[ -- ]`
+		// by the real parser's depth scan — not replicable here, so both are
+		// accepted, which is harmless for highlighting.
+		bracket_group: ($) => seq("[", repeat(choice($._atom, ";")), "]"),
+		tilde_lbracket: (_) => token(prec(2, "~[")),
+		tilde_bracket_group: ($) => seq($.tilde_lbracket, repeat($._atom), "]"),
 
 		// Base word chars exclude `; ( ) | [ ] "` and whitespace, except that a
 		// mid-word `|` glues into the token when immediately followed by `>`
 		// (the `S|>fi` peek-word rule in lexer.rs) — but only after at least one
 		// ordinary char, so a leading `|` always stays the standalone delimiter.
-		word: ($) =>
+		word: (_) =>
 			token(
 				prec(1, seq(/[^\s;()|\x5b\]"]/, repeat(choice(/[^\s;()|\x5b\]"]/, "|>")))),
 			),
 
-		int: ($) => token(prec(2, /-?[0-9]+/)),
-		float: ($) => token(prec(2, /-?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?/)),
+		int: (_) => token(prec(2, /-?[0-9]+/)),
+		float: (_) => token(prec(2, /-?[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?/)),
 
-		string: ($) =>
+		string: (_) =>
 			token(seq('"', repeat(choice(/[^"\\\n]/, seq("\\", /./))), '"')),
 
 		// `\` starts a comment only when it stands alone as its own word (i.e.
 		// is immediately followed by whitespace or EOF) — `\x` glued to more
 		// text is just an ordinary (almost always erroneous) word to the real
 		// lexer, not a comment.
-		comment: ($) => token(prec(2, choice(seq("\\", /[ \t][^\n]*/), "\\"))),
+		comment: (_) => token(prec(2, choice(seq("\\", /[ \t][^\n]*/), "\\"))),
 	},
 });

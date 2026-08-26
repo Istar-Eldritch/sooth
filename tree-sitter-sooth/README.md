@@ -8,10 +8,11 @@ conventions (`^Type`, `&!x`, `Foo>bar`, `mod::word`, capitalised type names,
 checker, which carry a symbol table this grammar doesn't have. Some of those
 (clause heads with no matching close-pipe) are genuinely undecidable from
 tokens alone. So `grammar.js` mirrors the same split: only the unambiguous
-structure — top-level `: ... ;` / `type: ... ;` / `extern:` / `import:` /
-`export:` / `static:` forms, and the always-paired `(...)`/`[...]` delimiters —
-gets a grammar rule. Everything else is a flat `word` token that `queries/highlights.scm`
-classifies by shape (regex/exact-set predicates over the token text).
+structure — top-level `: ... ;` / `type: ... ;` / `extern:` / `trait:` / `impl:` /
+`import:` / `export:` / `static:` forms, and the always-paired `(...)`/`[...]`/
+`~[...]` delimiters — gets a grammar rule. Everything else is a flat `word`
+token that `queries/highlights.scm` classifies by shape (regex/exact-set
+predicates over the token text).
 
 ## Rebuilding
 

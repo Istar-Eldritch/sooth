@@ -28,6 +28,10 @@
           "named": true
         },
         {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
           "type": "word",
           "named": true
         }
@@ -60,6 +64,10 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
           "named": true
         },
         {
@@ -109,6 +117,10 @@
           "named": true
         },
         {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
           "type": "word",
           "named": true
         }
@@ -116,10 +128,10 @@
     }
   },
   {
-    "type": "import_definition",
+    "type": "impl_definition",
     "named": true,
     "fields": {
-      "alias": {
+      "trait": {
         "multiple": false,
         "required": true,
         "types": [
@@ -152,6 +164,64 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
+          "type": "word",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "import_definition",
+    "named": true,
+    "fields": {
+      "alias": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "word",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "bracket_group",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "int",
+          "named": true
+        },
+        {
+          "type": "paren_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
           "named": true
         },
         {
@@ -190,6 +260,10 @@
           "named": true
         },
         {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
           "type": "word",
           "named": true
         }
@@ -214,11 +288,19 @@
           "named": true
         },
         {
+          "type": "impl_definition",
+          "named": true
+        },
+        {
           "type": "import_definition",
           "named": true
         },
         {
           "type": "static_definition",
+          "named": true
+        },
+        {
+          "type": "trait_definition",
           "named": true
         },
         {
@@ -272,6 +354,103 @@
           "named": true
         },
         {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
+          "type": "word",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "tilde_bracket_group",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "bracket_group",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "int",
+          "named": true
+        },
+        {
+          "type": "paren_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
+          "type": "tilde_lbracket",
+          "named": true
+        },
+        {
+          "type": "word",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "trait_definition",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "word",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "bracket_group",
+          "named": true
+        },
+        {
+          "type": "float",
+          "named": true
+        },
+        {
+          "type": "int",
+          "named": true
+        },
+        {
+          "type": "paren_group",
+          "named": true
+        },
+        {
+          "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
           "type": "word",
           "named": true
         }
@@ -318,6 +497,10 @@
           "named": true
         },
         {
+          "type": "tilde_bracket_group",
+          "named": true
+        },
+        {
           "type": "word",
           "named": true
         }
@@ -361,6 +544,10 @@
         },
         {
           "type": "string",
+          "named": true
+        },
+        {
+          "type": "tilde_bracket_group",
           "named": true
         },
         {
@@ -412,6 +599,10 @@
     "named": true
   },
   {
+    "type": "impl:",
+    "named": false
+  },
+  {
     "type": "import:",
     "named": false
   },
@@ -426,6 +617,14 @@
   {
     "type": "string",
     "named": true
+  },
+  {
+    "type": "tilde_lbracket",
+    "named": true
+  },
+  {
+    "type": "trait:",
+    "named": false
   },
   {
     "type": "type:",

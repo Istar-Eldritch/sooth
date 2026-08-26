@@ -19,6 +19,8 @@
 ":" @keyword
 "type:" @keyword
 "extern:" @keyword
+"trait:" @keyword
+"impl:" @keyword
 "import:" @keyword
 "export:" @keyword
 "static:" @keyword
@@ -26,11 +28,14 @@
 "|" @punctuation.special
 ["(" ")"] @punctuation.bracket
 ["[" "]"] @punctuation.bracket
+(tilde_lbracket) @punctuation.bracket
 
 ; --- definition names (uses the grammar's field annotations) ---
 (word_definition name: (word) @function)
 (type_definition name: (word) @type)
 (extern_definition name: (word) @function)
+(trait_definition name: (word) @type)
+(impl_definition trait: (word) @type)
 (import_definition alias: (word) @module)
 (static_definition name: (word) @variable)
 
@@ -70,6 +75,11 @@
 ((word) @punctuation.special
  (#lua-match? @punctuation.special "^%-%-$"))
 
+; `global:` (a word, not a grammar literal) and the `impl:` separator `for`,
+; the `inline` word modifier, and the `owning` quotation-type keyword.
+((word) @keyword
+ (#any-of? @keyword "global:" "for" "inline" "owning"))
+
 ; control flow / booleans / common stack-and-arith words: fixed sets, so an
 ; exact-match predicate (no pattern-syntax pitfalls) is both simplest and
 ; the most robust in the face of stray sigil chars.
@@ -82,5 +92,18 @@
  (#any-of? @boolean "true" "false"))
 
 ((word) @function.builtin
- (#any-of? @function.builtin "dup" "drop" "swap" "over" "rot" "nip" "tuck"
-   "call" "times" "fill" "mod" "and" "or" "not" "len" "cstr"))
+ (#any-of? @function.builtin
+   ; stack shuffle
+   "dup" "drop" "swap" "over" "rot" "nip" "tuck"
+   ; arithmetic / bitwise
+   "add" "sub" "mul" "div" "mod" "and" "or" "xor" "not" "shl" "shr"
+   ; comparison primitives (32-bit flag)
+   "ueq" "ult" "ugt" "ulte" "ugte" "une"
+   ; surface comparisons (lib/cmp.sth words)
+   "eq" "lt" "gt" "lte" "gte" "ne"
+   ; control / discriminant
+   "call" "tag" "branch"
+   ; arrays / strings / slices
+   "times" "fill" "len" "cstr" "slice" "subslice"
+   ; print
+   "."))
