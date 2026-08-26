@@ -829,7 +829,7 @@ with bounds.
 
 **P7.S5 -- Linear array elements.** `[T N]` rejects a linear element for every linear type:
 `type: Arr xs [Spy 2] ;` and `type: Arr xs [owning [ -- ] 2] ;` both fail with `linear array
-elements are not supported yet` (`src/check.rs:3135`), while the same type as a struct field
+elements are not supported yet` (`src/check.rs:3227`), while the same type as a struct field
 (`type: Box s Spy ;`) builds. So a linear struct is storable but a *collection* of them is not,
 which is the one gap that keeps the linear spine from reaching arrays. The restriction dates to
 P3 (`P3-linear-spine.md:56`, `P3/slice1-spec.md:61`) and has been re-observed from four slices
@@ -907,6 +907,14 @@ seed that carries no linear data); dropping it disposes every element exactly on
 partially-constructed array abandoned mid-construction is either rejected with a located error
 or disposes exactly the slots already initialized, with the rule stated; and the `linear array
 elements are not supported yet` diagnostic is gone rather than reworded.
+Detail: [slice5-linear-arrays-brief](./P7/slice5-linear-arrays-brief.md). Probe-verified
+against the current tree (five `litellm/syn-large-text` worktree-isolated read-only probes);
+corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`),
+`parse_array_ctor_term` is at `src/parser.rs:4021` (not `:3719`), `fill`'s lowering is at
+`src/ir/func_builder/word_families.rs:394-455`, array drop is `unreachable!` at
+`src/ir/func_builder/quotation.rs:412`, and `synthesize_aggregate_destructors`
+(`src/ir/destructors.rs:37`) does not handle arrays. The orphaned testing-vocabulary brief
+was renamed `slice5-testing-brief.md`.
 
 **P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
 surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
