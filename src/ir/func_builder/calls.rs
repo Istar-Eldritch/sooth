@@ -1728,8 +1728,9 @@ mod tests {
         // The array read `&arr i &>` emits the mandatory `sooth_oob_trap`
         // bounds-check call (the hand-threaded twin emits it too); it is not a
         // per-element call to the combinator or its element quotation, so it is
-        // excluded. `TIMES_DEF`'s own `from to lt` is also excluded (P7.S3s
-        // R5: `lt` is a real call now, not spliced) -- pinned verbatim against
+        // excluded. `TIMES_DEF`'s own `from to lt` is also excluded: `lt` is
+        // `inline` so it splices, but its `cmp` call dispatches through the
+        // `Ord` trait (`cmp;Ord;0;i64`), a real call by design (P7.S3s R5) --
         // `lib/combinators.sth` by `each_lowering_test_times_def_is_pinned_to_
         // the_library`, so it cannot be rewritten away here without drifting
         // from the library it stands in for. What must be absent is any call
@@ -1737,7 +1738,11 @@ mod tests {
         // loop body is the spliced literal, not a call.
         let user_calls: Vec<&str> = call_symbols(main)
             .into_iter()
-            .filter(|s| *s != "sooth_oob_trap" && !s.starts_with("sooth_mono_lt"))
+            .filter(|s| {
+                *s != "sooth_oob_trap"
+                    && !s.starts_with("sooth_mono_lt")
+                    && !s.starts_with("cmp;Ord")
+            })
             .collect();
         assert!(
             user_calls.is_empty(),
