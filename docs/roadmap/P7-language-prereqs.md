@@ -834,19 +834,74 @@ P3 (`P3-linear-spine.md:56`, `P3/slice1-spec.md:61`) and has been re-observed fr
 since (`P3/slice3-brief.md:70`, `P4/slice6b-brief.md:142`, `P7/slice3c-brief.md:242`, and
 **P7.S3v**), always as somebody else's blocker, never as a slice.
 
-Two things make it a real slice rather than a predicate flip. Construction: `fill` replicates one
-value across every slot, which is a copy per slot and therefore illegal for a linear element, so
-a linear array needs a different construction form and the diagnostic's own wording ("would
-replicate a `{elem}` across every slot") names why. Disposal: an array of linear elements needs
-synthesized element-wise glue with a static trip count, plus the partially-initialized window
-during construction, which is the first place in the language where a value is neither wholly
-live nor wholly disposed.
+Three things make it a real slice rather than a predicate flip.
+
+**Construction.** `fill` replicates one value across every slot, which is a copy per slot
+and therefore illegal for a linear element — the diagnostic's own wording ("would replicate a
+`{elem}` across every slot") names why. The `[Type; Count]` constructor (`parse_array_ctor_term`,
+`src/parser.rs:3719`) is a separate path: it takes a *type* (not a value) and zero-initializes
+the allocation (`src/ir/func_builder/calls.rs:74`, a byte-granular memset loop), so it cannot
+produce a valid linear element either, since zeroed memory is not a constructed value. A linear
+array needs a construction form that produces N *distinct* values, never one replicated N times.
+The cheapest shape is an intrinsic generation combinator — `tabulate ( usize ~[ -- T ] -- [T N] )`
+— whose lowering is `fill`'s loop body with one swap: instead of storing a replicated seed each
+iteration, the loop calls the quotation (spliced, so `tabulate` is `inline` like `times`), gets a
+fresh `T`, and stores that. The IR pattern is already proven: `fill`'s `alloc_array` → store
+loop → `push dst` (`src/ir/func_builder/word_families.rs:394-454`) allocates raw, uninitialized
+storage that never surfaces as a type-system value until every slot is written, which is
+exactly the boundary a generation combinator needs. No new storage category is required — the
+"no uninitialized memory" rule is a type-system boundary, not an IR constraint, and the IR
+already crosses it inside `fill`.
+
+A narrower relaxation also reaches some linear arrays without a new word: `fill` (and the
+`[Type; Count]` constructor) could admit a *nullary-variant seed* (e.g. `None 3 fill`) even when
+the enum type is linear, because a nullary variant carries no linear data to replicate — only
+a discriminant. The gate (`check_array_element_gate`, `src/check.rs:505`) currently checks
+`is_copy` on the *type*; it could instead check whether the *seed value* is nullary, which is
+safe regardless of the type's linearity. The lowering choice follows from the discriminant: a
+discriminant-0 nullary variant (the first-declared, like `None`) can memset to zero (its bit
+pattern is all zeros, same as the `[Type; Count]` path); a non-zero nullary variant needs `fill`'s
+store loop writing the correct discriminant. This does not require `Option` to be intrinsic
+(DESIGN.md is explicit that it is an ordinary generic enum, never a compiler primitive), and it
+does not require a `Default` trait (a `Default`-based construction would still be replication
+under another name, which is the same contradiction `fill` hits for a truly linear type with a
+real destructor obligation). It does not solve the general case — a linear array of *distinct*
+values still needs the generation combinator — but it covers the sentinel-initialized backing
+array the `fixed`-layer collections (P9.S1) need.
+
+**Disposal.** An array of linear elements needs synthesized element-wise glue with a static trip
+count, plus the partially-initialized window during construction, which is the first place in the
+language where a value is neither wholly live nor wholly disposed.
+
+**Why not a capacity/length array type.** A `[T N M]`-shaped type baking a runtime length into
+the array was considered and rejected: it collapses the storage/view split (DESIGN.md: "length
+lives in storage (`[T N]`), carried at runtime by the view (`Slice[T]`)"), breaks `len`'s
+constant fold (`src/ir/func_builder/word_families.rs:1457`), kills compile-time index checking
+(`check_array_index`, `src/check/word_families.rs:1280`), and makes `dup`/`drop` semantics
+ambiguous (copy/dispose N slots or M?). The fully-initialized fixed array is a common value type
+(lookup tables, coefficient banks, pixel data) that should not pay a runtime-length tax for the
+container case. The container with a capacity/length distinction belongs in the `fixed` layer
+(P9.S1) as an ordinary library struct wrapping `[Option[T] N]` + `usize`, not as a redesign
+of the language's array type.
+
+**The RT reservation question.** The `Option[T]` sentinel approach initializes N `None` slots at
+construction and overwrites them as values arrive, which is bounded and predictable but not
+free. The IR's `Instr::Alloc` (`src/ir/types.rs:431`) gives raw, unzeroed storage; `fill`'s
+lowering already uses it and writes the seed in a loop. A zero-cost reservation (allocate raw,
+gate access by a runtime length, never let the type system see an uninitialized slot) is
+mechanically available at the IR level but would be a carve-out from the "no uninitialized memory
+in the type system" principle, the same shape as the static-storage carve-out from linearity
+(`docs/design/embedded.md`). This is deferred to P11 (bare metal), where a concrete RT program
+can prove the sentinel init cost bites; the `Option[T]` sentinel version is correct and safe
+today, and the intrinsic is the optimization a real program would demand.
 
 Out of scope: a dynamically-sized or growable array (that is a library `Vec` over an allocator,
 and needs a struct header length variable that **P7.S3n** named and did not land); a linear
-element reached through a `Slice[T]` view, since a view does not own what it points at.
+element reached through a `Slice[T]` view, since a view does not own what it points at;
+zero-cost reservation without a sentinel (P11, pending a concrete RT consumer).
 **Exit:** `[T N]` admits a linear `T`; such an array can be constructed without any element
-being copied; dropping it disposes every element exactly once; a partially-constructed array
-abandoned mid-construction is either rejected with a located error or disposes exactly the slots
-already initialized, with the rule stated; and the `linear array elements are not supported yet`
-diagnostic is gone rather than reworded.
+being copied (via a generation combinator that produces N distinct values, or a nullary-variant
+seed that carries no linear data); dropping it disposes every element exactly once; a
+partially-constructed array abandoned mid-construction is either rejected with a located error
+or disposes exactly the slots already initialized, with the rule stated; and the `linear array
+elements are not supported yet` diagnostic is gone rather than reworded.

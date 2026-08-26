@@ -53,6 +53,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
 | **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-2, 3a-3d, 3f-3g, 3i) |
+| **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — type-class abstraction over type constructors |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
 | **P10** | [Concurrency (library)](./P10-concurrency.md) | `[M]` |
@@ -85,7 +86,9 @@ completion. The piped (non-tty) path is unchanged byte-for-byte.
   within that band by what you want to play with first, which for a craft project is
   a legitimate way to choose. Two orderings are not free: the stdlib layers (9) are
   built as packages, so they follow packages (8), and packages need Phase 7's bounds
-  before an exported signature's API description can be baselined. Phase 12 depends on
+  before an exported signature's API description can be baselined. Higher-kinded types
+(7b) need P7.S4's polymorphic impl targets and are independent of P8-P12; take it up
+whenever the type-system work is what you want to play with. Phase 12 depends on
   Phase 8 too, but not on 9-11: self-hosting is planned as a progressive, stage-by-stage
   takeover rather than a rewrite-and-cutover, and the FFI boundary that depends on
   (richer `extern:` payloads, unmangled exports) is P8.S4, not new content in Phase 12.

@@ -57,6 +57,19 @@ runs.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
+**Unicode and `str`.** `str` is a byte sequence and stays byte-oriented across all
+layers: `len` returns byte count, indexing is byte addressing, and `Slice[u8]` is the
+runtime-length view. Unicode is library code layered above `core`: `fixed` (P9.S1) gets
+fixed-capacity string builders and byte-level scanning (lead-byte counting); `alloc` or
+`hosted` gets decode/encode iterators, character classification, normalization, and
+grapheme segmentation — the table-heavy work that does not belong in `no_std` `core`. A
+`char` type, if it earns its keep, is a library newtype (`type: Char code u32 ;`) in the
+layer that has the Unicode tables, never a language primitive: `u32` already holds a Unicode
+scalar value, and the semantics (is this a digit, a combining mark, a grapheme boundary) are
+functions over that `u32`, not type-system properties. Making `char` primitive would push
+Unicode tables into `core`, contradicting the layer design. `str`'s representation needs no
+change for Unicode — it holds UTF-8 bytes today.
+
 **P9.S4 — Worklist-based disposal for branching structures (optional, no forcing
 dependency).** A multi-child recursive type's synthesized destructor
 loops only its *last* recursive field and recurses the rest, so a left-leaning tree still
