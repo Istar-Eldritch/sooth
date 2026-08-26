@@ -1602,6 +1602,39 @@ pub(super) fn poly_call_term(
             stack.push(PolySlot::new(receiver));
             return Ok(stack);
         }
+        // `tag ( E -- u32 )`: pop a payloadless scalar enum, push its u32
+        // discriminant. The poly twin of `check_tag_word`, needed so a
+        // combinator body like `cmptag`'s -- which calls `cmp` then `tag` on
+        // the concrete `Ordering` result -- can be walked by `check_poly_body`.
+        // A type variable or any non-enum is a located error; a payload-carrying
+        // enum is too.
+        "tag" => {
+            let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
+            // A quotation literal on the operand position keeps the located
+            // rejection the name-based guard produced before this arm existed.
+            if top.quot.is_some() {
+                return Err(poly_quotation_combinator_unsupported_error(
+                    ctx, span, "tag",
+                ));
+            }
+            match &top.pt {
+                PolyType::Concrete(Type::Enum(id, _)) => {
+                    if !enums[id.index()]
+                        .variants
+                        .iter()
+                        .all(|v| v.fields.is_empty())
+                    {
+                        return Err(poly_op_on_variable_error(ctx, span, "tag", &top.pt, sig));
+                    }
+                    stack.pop();
+                    stack.push(PolySlot::new(PolyType::Concrete(Type::U32)));
+                }
+                _ => {
+                    return Err(poly_op_on_variable_error(ctx, span, "tag", &top.pt, sig));
+                }
+            }
+            return Ok(stack);
+        }
         _ => {}
     }
     // P7.S3k (R7): the six-name "comparisons need `Ord`" carve-out that used
@@ -5617,32 +5650,41 @@ impl CrossGround<'_> {
                     record.span,
                 ));
             };
-            // An `inline` callee is *spliced* at this site and mints no
-            // `IrFunc` of its own, so composing a monomorph for it would
-            // route the span to a symbol that never exists. Phase 1 records
-            // the call either way -- "this body calls `h` with this mapping"
-            // is true regardless of how `h` is lowered.
+            // An `inline` callee with a `Bound::User` is composed like any
+            // other cross-call: its body was walked by `check_poly_body`
+            // (the pre-pass runs for combinator words with user bounds), so
+            // its trait obligations are recorded and `compose` resolves them
+            // against the caller's concrete θ. Lowering finds the composed
+            // `CallInst` in `poly_calls` (checked before the combinator
+            // splice), so the call routes to a real function and the splice
+            // is never reached.
             //
-            // But `h`'s own body is never walked by `check_poly_body`: an
-            // `inline` word is checked standalone, with every type variable
-            // stood in for a concrete dummy (`check_poly_combinator_standalone`),
-            // so a call from `h`'s body to another polymorphic word never
-            // reaches the cross-call recorder at all -- `self.records` has no
-            // entry for `h` to consult. Lowering, unlike that standalone
-            // check, really does splice `h`'s *generic* body here, so a
-            // syntactic scan of it is the only view this fixpoint has:
-            // conservative (a call inside an untaken branch still counts),
-            // but sound -- nothing here can under-detect and silently
-            // mis-route.
+            // An `inline` callee *without* a `Bound::User` keeps the old
+            // behavior: its body was not walked by `check_poly_body` (it may
+            // use builtins `poly_call_term` does not dispatch, like `if`'s
+            // `tag`/`branch`), so its own cross-calls are unrecorded and the
+            // fixpoint cannot compose them. Splicing is safe only if the
+            // body calls no polymorphic word; otherwise it is a located
+            // error rather than a silent miscompile.
             if is_combinator(callee_word) {
-                if body_calls_a_poly_word(&callee_word.body, self.words) {
-                    return Err(inline_callee_cross_call_error(
-                        &caller.callee,
-                        &record.callee,
-                        record.span,
-                    ));
+                let callee_sig = callee_word
+                    .poly
+                    .as_ref()
+                    .expect("sole_poly_word yields a polymorphic word");
+                if !callee_sig
+                    .bounds
+                    .iter()
+                    .any(|(_, b)| matches!(b, Bound::User(_)))
+                {
+                    if body_calls_a_poly_word(&callee_word.body, self.words) {
+                        return Err(inline_callee_cross_call_error(
+                            &caller.callee,
+                            &record.callee,
+                            record.span,
+                        ));
+                    }
+                    continue;
                 }
-                continue;
             }
             let sig = callee_word
                 .poly

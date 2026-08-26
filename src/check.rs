@@ -833,7 +833,13 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     let mut poly_cross_calls: HashMap<String, Vec<PolyCrossCall>> = HashMap::new();
     for word in words.iter() {
         let Some(sig) = &word.poly else { continue };
-        if is_combinator(word) {
+        // Walk a combinator body here too when it carries a `Bound::User`, so
+        // its trait obligations are recorded for the transitive fixpoint to
+        // resolve at each call site's concrete θ. A combinator without a
+        // user bound has no trait obligations, and its body may use builtins
+        // (`tag`/`branch` in `if`) that `poly_call_term` does not dispatch,
+        // so it stays on the standalone-only path.
+        if is_combinator(word) && !sig.bounds.iter().any(|(_, b)| matches!(b, Bound::User(_))) {
             continue;
         }
         let mut obligations = Vec::new();
