@@ -1,0 +1,20 @@
+\ Phase 7 slice 5: `tabulate` — allocate an array and fill each slot by
+\ splicing an inline quotation that produces a fresh value.  Each slot gets
+\ a distinct, freshly-constructed value (never a replicated one), so a linear
+\ element type is safe once the destructor lands (Phase 4 of this slice).
+\
+\ This example uses `i64` (a `Copy` element) so it builds and runs today; the
+\ linear-element golden is Phase 4's exit (the destructor does not exist yet).
+
+import: intrinsics * ;
+import: core::prelude * ;
+
+\ Build a 5-element array where each slot holds its own index.
+: main ( -- )
+  5 ~[ 42 ] tabulate | arr |
+  &arr 0 >usize &> @ .
+  &arr 1 >usize &> @ .
+  &arr 2 >usize &> @ .
+  &arr 3 >usize &> @ .
+  &arr 4 >usize &> @ .
+  arr drop ;

@@ -601,7 +601,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Tag(dst, v));
                 self.stack.push(dst);
             }
-            "fill" | "slice" | "subslice" => self.lower_array_word(name, span),
+            "fill" | "slice" | "subslice" | "tabulate" => self.lower_array_word(name, span),
             "len" => {
                 let top = *self.stack.last().expect("len: operand");
                 if self.value_type(top) == IrType::Str {

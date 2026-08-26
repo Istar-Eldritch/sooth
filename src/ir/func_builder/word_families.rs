@@ -458,6 +458,95 @@ impl<'a> FuncBuilder<'a> {
 
                 self.restore_loop_state(saved_loop_state);
             }
+            // R1: `tabulate ( usize ~[ -- T ] -- [T N] )` allocates an array
+            // and, for each index 0..N, splices the quotation to produce a
+            // fresh `T` and stores it. The quotation body is spliced via
+            // `lower_terms` (the same `call`-of-literal uses), so each slot
+            // gets a distinct, freshly-constructed value — never a replicated
+            // one — and a linear `T` is safe.
+            //
+            // The first iteration is unrolled: `alloc_array` needs the element
+            // type to find the array ID, and the element type is the body's
+            // output type, known only after lowering. The first value is
+            // stored into slot 0 immediately (no leak), and the loop runs
+            // 1..N. For N == 1 there is no loop at all.
+            "tabulate" => {
+                let quot_v = self.stack.pop().expect("tabulate: quotation");
+                let count_v = self.stack.pop().expect("tabulate: count");
+                let n = *self
+                    .const_vals
+                    .get(&count_v)
+                    .expect("tabulate's count is a checked literal") as u32;
+                let quot_id = self
+                    .quot_bodies
+                    .get(&quot_v)
+                    .copied()
+                    .expect("tabulate: quotation literal");
+                let body = self.quot_defs[quot_id.0].clone();
+
+                let saved_loop_state = self.save_loop_state();
+
+                // Lower the body once: determine the element type and produce
+                // the value for slot 0.
+                let locals_depth = self.locals.len();
+                self.lower_terms(&body, false);
+                let first_val = self.stack.pop().expect("tabulate: body produces one value");
+                self.locals.truncate(locals_depth);
+                let elem = self.value_type(first_val);
+                let id = self.array_id_of(elem, n);
+                let (stride, _, _) = self.array_parts(id);
+                let dst = self.alloc_array(id);
+
+                // Store the first value into slot 0.
+                let zero = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(zero, 0));
+                self.const_vals.insert(zero, 0);
+                let fptr = self.elem_addr(dst, zero, stride);
+                self.store_elem(fptr, first_val, elem);
+
+                if n > 1 {
+                    // Loop from 1 to N: splice the body and store.
+                    let start = self.fresh_value(IrType::I64);
+                    self.push_instr(Instr::Const(start, 1));
+                    self.const_vals.insert(start, 1);
+                    let outs = self.begin_loop(&[start], false);
+                    let index_phi = outs[0];
+
+                    let bound = self.fresh_value(IrType::I64);
+                    self.push_instr(Instr::Const(bound, n as i64));
+                    self.const_vals.insert(bound, n as i64);
+                    let cmp = self.fresh_value(IrType::Bool);
+                    self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, bound));
+                    let body_block = self.fresh_block();
+                    let exit_block = self.fresh_block();
+                    self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+
+                    self.start_block(body_block);
+                    self.terminated = false;
+                    let locals_depth2 = self.locals.len();
+                    self.lower_terms(&body, false);
+                    let val = self.stack.pop().expect("tabulate: body produces one value");
+                    self.locals.truncate(locals_depth2);
+                    let fptr = self.elem_addr(dst, index_phi, stride);
+                    self.store_elem(fptr, val, elem);
+
+                    let one = self.fresh_value(IrType::I64);
+                    self.push_instr(Instr::Const(one, 1));
+                    self.const_vals.insert(one, 1);
+                    let index_next = self.fresh_value(IrType::I64);
+                    self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+                    self.back_edges.push((self.cur_id, vec![index_next]));
+                    self.seal_block(Terminator::Jmp(self.header.expect("tabulate loop header")));
+
+                    self.finalize_loop();
+
+                    self.start_block(exit_block);
+                    self.terminated = false;
+                }
+
+                self.stack.push(dst);
+                self.restore_loop_state(saved_loop_state);
+            }
             // P7 slice 3c (R10.1): `slice` reads the receiver's compile-time
             // count once, here, and writes it into the view as a runtime
             // length; from then on nothing rediscovers it.
@@ -526,7 +615,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, count as i64));
                 self.stack.push(v);
             }
-            _ => unreachable!("lower_array_word only handles fill/len/slice/subslice"),
+            _ => unreachable!("lower_array_word only handles fill/tabulate/len/slice/subslice"),
         }
     }
 
@@ -1693,5 +1782,109 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    // --- Phase 7 slice 5: `tabulate` IR lowering ---
+
+    /// R1: `tabulate` lowers to one `Alloc` (the array storage) plus a
+    /// constant-trip-count loop that splices the quotation body each
+    /// iteration and stores the result.
+    #[test]
+    fn tabulate_lowers_to_alloc_plus_store_loop() {
+        let module = lower_src(": f ( -- [i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
+        let f = func(&module, "f");
+        // One `Alloc` for the array.
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::Alloc(..))),
+            1,
+            "tabulate should alloc exactly one array: {:?}",
+            instrs(f)
+        );
+        // The quotation body's `42` (`Instr::Const`) appears: once unrolled
+        // (slot 0) + once in the loop body (slots 1..N) = 2 for N=3.
+        let consts = count(f, |i| matches!(i, Instr::Const(_, 42)));
+        assert_eq!(
+            consts,
+            2,
+            "tabulate should splice the body once unrolled + once in the loop: {:?}",
+            instrs(f)
+        );
+        // The store: `store_elem` on an `i64` is a `FieldStore`. 2 stores
+        // total (1 unrolled for slot 0 + 1 in the loop body for slots 1..N).
+        let stores = count(f, |i| matches!(i, Instr::FieldStore(..)));
+        assert_eq!(
+            stores,
+            2,
+            "tabulate should store once unrolled + once in the loop body: {:?}",
+            instrs(f)
+        );
+    }
+
+    /// R1: the loop has a header phi (the induction index) and a back-edge
+    /// (`Jmp` to the header).  N=3 means the loop runs 2 iterations (slots 1
+    /// and 2; slot 0 is unrolled).
+    #[test]
+    fn tabulate_loop_has_header_phi_and_back_edge() {
+        let module = lower_src(": f ( -- [i64 4] ) 4 ~[ 7 ] tabulate ;\n: main ( -- ) ;\n");
+        let f = func(&module, "f");
+        // A phi in a non-entry block is the loop header's induction variable.
+        let has_phi = f
+            .blocks
+            .iter()
+            .skip(1)
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, Instr::Phi(..)));
+        assert!(
+            has_phi,
+            "tabulate should have a loop header phi: {:?}",
+            instrs(f)
+        );
+        // A `Jmp` to the header block is the back-edge.
+        let headers_with_jmps: Vec<_> = f
+            .blocks
+            .iter()
+            .filter_map(|b| match b.term {
+                Terminator::Jmp(h) => Some(h),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            headers_with_jmps.len() >= 2,
+            "tabulate should have a loop back-edge (>= 2 jmps): {:?}",
+            headers_with_jmps
+        );
+    }
+
+    /// R1: N=1 unrolls the single iteration (no loop at all).  The body is
+    /// spliced once, the result stored, and no phi/back-edge is emitted.
+    #[test]
+    fn tabulate_count_one_unrolls_without_a_loop() {
+        let module = lower_src(": f ( -- [i64 1] ) 1 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
+        let f = func(&module, "f");
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::Alloc(..))),
+            1,
+            "one alloc: {:?}",
+            instrs(f)
+        );
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::Const(_, 42))),
+            1,
+            "body spliced once: {:?}",
+            instrs(f)
+        );
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::FieldStore(..))),
+            1,
+            "one store: {:?}",
+            instrs(f)
+        );
+        let has_phi = f
+            .blocks
+            .iter()
+            .skip(1)
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, Instr::Phi(..)));
+        assert!(!has_phi, "no loop for N=1: {:?}", instrs(f));
     }
 }

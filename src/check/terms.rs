@@ -563,8 +563,21 @@ fn check_term(
             {
                 return Ok(stack);
             }
+            let granted = releasable_into(
+                scope,
+                base_depth,
+                outer_releasable,
+                &siblings[at + 1..],
+                live,
+                at,
+            );
             if let Some(stack) = (!gated)
-                .then(|| check_array_word(name, span, &mut stack, ctx, arrays, refs, slices, prov))
+                .then(|| {
+                    check_array_word(
+                        name, span, &mut stack, ctx, arrays, refs, slices, prov, env, cells, scope,
+                        poly, &granted,
+                    )
+                })
                 .transpose()?
                 .flatten()
             {

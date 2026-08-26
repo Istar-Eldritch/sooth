@@ -760,9 +760,14 @@ pub(super) fn check_array_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
-    refs: &[RefDecl],
+    refs: &mut Vec<RefDecl>,
     slices: &mut Vec<SliceDecl>,
     prov: &mut Provenance,
+    env: &HashMap<String, Vec<Overload>>,
+    cells: &mut Vec<OwnedCellDecl>,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+    granted: &HashSet<String>,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -841,6 +846,106 @@ pub(super) fn check_array_word(
             stack.push(Slot {
                 alias,
                 ..Slot::derived(recv.ty, deriv)
+            });
+        }
+        // R1: `tabulate ( usize ~[ -- T ] -- [T N] )` allocates an array and,
+        // for each index 0..N, splices the quotation to produce a fresh `T`
+        // and stores it. Unlike `fill`, the element is freshly produced each
+        // iteration (never replicated), so `check_array_element_gate` is not
+        // called (R2): the quotation's output type *is* the element type. The
+        // quotation is inline-spliced: the checker arm calls
+        // `check_literal_against_declared_effect` directly with a synthesized
+        // inline `QuotEffect { inputs: [], outputs: [] }` and `shape_changing =
+        // true`, so the body is checked (capture/borrow/spelling rules all
+        // run) and its actual output is returned unjudged — the arm then
+        // verifies the body produced exactly one value (the element type).
+        // `shape_changing = true` with an empty suffix is the mechanism that
+        // lets the arm *infer* the output type rather than check it against a
+        // pre-declared one, which `tabulate` cannot know ahead of time (the
+        // `T` is whatever the body produces). `tails_agree` makes the empty
+        // declared suffix agree with any annotation's suffix, so an annotated
+        // quotation passes `reconcile_annotation_with_parameter` here too.
+        "tabulate" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need("tabulate", 2, n));
+            }
+            // Stack: `usize` deeper, `~[ -- T ]` on top (leftmost = deepest).
+            let quot = stack[n - 1];
+            let count = stack[n - 2];
+            // The count is a plain operand (not a quotation).
+            if count.quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "tabulate"));
+            }
+            let Some(count_val) = count.int_val else {
+                return Err(fill_count_not_literal_error(ctx, span, count.ty));
+            };
+            if !(1..=i64::from(u32::MAX)).contains(&count_val) {
+                return Err(fill_count_out_of_range_error(ctx, span, count_val));
+            }
+            // The quotation must be a literal (R1: inline-spliced).
+            let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(quot) else {
+                return Err(reject_quotation_operand(ctx, span, "tabulate"));
+            };
+            // The quotation must be inline (`~[ ... ]`, not `[ ... ]`).
+            // `check_literal_against_declared_effect` checks the literal's
+            // spelling against the declared `is_inline` flag, so a
+            // non-inline literal is rejected there with the existing
+            // `ordinary_literal_at_inline_param_error` diagnostic.
+            // Synthesize `~[ -- ]` (empty inputs, empty outputs) with
+            // `shape_changing = true` so the body's actual output is
+            // returned unjudged and the arm infers the element type.
+            let eff_type = crate::ast::inline_quotation_type(vec![], vec![]);
+            let eff = crate::ast::is_quotation_type(eff_type).expect("inline_quotation_type");
+            let result = check_literal_against_declared_effect(
+                qid,
+                eff,
+                true, // is_inline
+                &[],  // row: no carried region
+                "tabulate",
+                span,
+                ctx,
+                env,
+                arrays,
+                cells,
+                refs,
+                slices,
+                prov,
+                scope,
+                poly,
+                granted,
+                LiteralBoundary {
+                    shape_changing: true,
+                    is_arm: false,
+                    caller_tail: false,
+                    finalize: false,
+                    owning: false,
+                },
+                None,
+            )?;
+            // The quotation must produce exactly one value (the element).
+            if result.len() != 1 {
+                let actual_outs: Vec<Type> = result.iter().map(|s| s.ty).collect();
+                let actual = crate::ast::inline_quotation_type(vec![], actual_outs);
+                return Err(literal_effect_mismatch_error(
+                    ctx,
+                    span,
+                    "tabulate",
+                    crate::ast::inline_quotation_type(vec![], vec![]),
+                    actual,
+                ));
+            }
+            let element_ty = result[0].ty;
+            // R2: do NOT call `check_array_element_gate` — the element is
+            // freshly produced by the quotation each iteration, never
+            // replicated. A linear `T` is safe because each slot gets a
+            // distinct, freshly-constructed value.
+            let array_ty = intern_array_type(arrays, element_ty, count_val as u32);
+            let surviving = result[0].surviving;
+            stack.truncate(n - 2);
+            stack.push(Slot {
+                surviving,
+                ..Slot::computed(array_ty)
             });
         }
         "fill" => {
@@ -2959,6 +3064,89 @@ mod tests {
         let err = check_src(": f ( Slice[i64] f64 -- i64 ) &> @ ;\n: main ( -- ) ;\n").unwrap_err();
         assert!(
             err.contains("`&>` expected `usize`, found `f64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    // --- Phase 7 slice 5: `tabulate` word family (checker arm) ---
+
+    /// R1: `tabulate` accepts an inline `~[ -- T ]` quotation and a literal
+    /// count, producing `[T N]`.  Each slot is freshly produced by the
+    /// spliced quotation body.
+    #[test]
+    fn tabulate_accepts_inline_quotation_producing_one_value() {
+        check_src(": f ( -- [i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n").unwrap();
+        // A struct element works too (aggregate store via `Blit`).
+        check_src(
+            "type: P a i64 b i64 ;\n\
+             : f ( -- [P 2] ) 2 ~[ 1 2 P ] tabulate ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap();
+    }
+
+    /// R1: a quotation that produces two values does not match the declared
+    /// `~[ -- T ]` effect.  The error surfaces through the existing
+    /// `literal_effect_mismatch_error` path.
+    #[test]
+    fn tabulate_rejects_quotation_with_wrong_output_count() {
+        let two =
+            check_src(": f ( -- [i64 3] ) 3 ~[ 1 2 ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            two.contains("the quotation passed to `tabulate`"),
+            "unexpected message: {two}"
+        );
+        // An empty body produces zero values — also a mismatch.
+        let zero =
+            check_src(": f ( -- [i64 3] ) 3 ~[ ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            zero.contains("the quotation passed to `tabulate`"),
+            "unexpected message: {zero}"
+        );
+    }
+
+    /// R2: `tabulate` does NOT call `check_array_element_gate` — the element
+    /// is freshly produced by the quotation each iteration, never replicated.
+    /// A linear element type (a struct with a `drop` overload) is admitted,
+    /// which `fill` would reject.  This is a checker-only test: the IR's
+    /// `emit_drop` for a linear array is `unreachable!` until Phase 4's
+    /// destructor lands.
+    #[test]
+    fn tabulate_admits_linear_element_type() {
+        // `Spy` is linear (it has a `drop` overload).  `fill` would reject
+        // this; `tabulate` admits it because each slot is freshly produced.
+        // The word's effect does not name `[Spy 2]` (the array is interned
+        // during body checking, after the declaration-site sweep), so
+        // `check_no_linear_array_elements` does not reject it.
+        check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             : f ( -- ) 2 ~[ 0 Spy ] tabulate drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap();
+        // `fill` on the same linear type still rejects.
+        let fill_err = check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             : f ( -- ) 0 Spy 2 fill drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            fill_err.contains("linear array elements are not supported yet"),
+            "fill should reject a linear element: {fill_err}"
+        );
+    }
+
+    /// R1: a non-inline `[ ... ]` quotation is rejected — `tabulate` requires
+    /// `~[ ... ]` (inline, spliced at the call site).
+    #[test]
+    fn tabulate_rejects_non_inline_quotation() {
+        let err =
+            check_src(": f ( -- [i64 3] ) 3 [ 42 ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("ordinary `[ ... ]` quotation"),
             "unexpected message: {err}"
         );
     }
