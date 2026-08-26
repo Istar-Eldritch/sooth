@@ -227,7 +227,42 @@ impl<'a> FuncBuilder<'a> {
     /// ordinary concrete word by its lowering symbol, shared by the
     /// builtin-overload and trait-bound-dispatch resolution paths above (both
     /// resolve to a plain user word, never a struct/enum-generated one).
+    ///
+    /// P7.S3s-follow Phase 4: a resolved trait member declared `inline` in its
+    /// `trait:` block is itself a combinator -- the synthesized member word
+    /// carries `declares_inline == true` and joins `combinator_index` keyed by
+    /// its symbol, but mints no `IrFunc` and therefore has no `env` entry. The
+    /// ordinary call path below would panic (`checked resolved call exists`),
+    /// so a combinator symbol is spliced instead: alpha-rename the body, lower
+    /// its terms, truncate `self.locals`, mirroring the ordinary combinator
+    /// splice in `lower_call`'s `_` arm.
+    ///
+    /// **The uid rule.** The checker does not splice a resolved trait member
+    /// (it checks it as an ordinary call against the member word's grounded
+    /// signature), so no splice uid was allocated for it. Minting one here
+    /// desynchronizes lowering's uid counter from the checker's, and the next
+    /// splice's `splice_records`/`splice_trait_calls` lookups miss; the
+    /// observed symptom is a downstream `checked user word exists: cmp` panic,
+    /// one comparison later. The member splice therefore reuses the enclosing
+    /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) and
+    /// pushes nothing. Two member splices under one uid alpha-rename to the
+    /// same local names, which is correct because the splice truncates
+    /// `self.locals` to its entry depth and the resolver is scope-bounded.
+    ///
+    /// `tail = false`: a trait member body is not the enclosing word's tail,
+    /// and threading the caller's `tail` would let the member's terms
+    /// back-edge into a loop they do not belong to. If a self-tail member body
+    /// ever needs the loop form, that is not this slice; `terms_tail_call_self`
+    /// is the predicate that would decide it.
     fn lower_resolved_word_call(&mut self, sym_name: &str) {
+        if let Some(entry) = self.combinators.get(sym_name) {
+            let uid = self.splice_uid_stack.last().copied().unwrap_or(0);
+            let body = crate::ast::alpha_rename_locals(&entry.terms, uid);
+            let locals_depth = self.locals.len();
+            self.lower_terms(&body, false);
+            self.locals.truncate(locals_depth);
+            return;
+        }
         let (in_arity, out_arity, ret_ty) = {
             let a = self
                 .env
@@ -1884,6 +1919,119 @@ mod tests {
             call_symbols(main).is_empty(),
             "the `while` body is spliced with a back-edge, not called; unexpected calls: {:?}",
             call_symbols(main)
+        );
+    }
+
+    /// P7.S3s-follow Phase 4: a resolved trait member declared `inline` is a
+    /// combinator -- it mints no `IrFunc` and has no `env` entry, so
+    /// `lower_resolved_word_call` must splice its body instead of calling it.
+    /// This test exercises the `splice_trait_calls` path: an `inline` word
+    /// bounded `'T: Doubler` calls `dbl` (also `inline`). The word is spliced
+    /// into `main`, the `dbl` call resolves through `splice_trait_calls`, and
+    /// `lower_resolved_word_call` splices `dbl`'s body. The result: `main`
+    /// contains the `dbl` body's `add` instruction and no `Instr::Call` to any
+    /// `dbl` symbol.
+    #[test]
+    fn lower_resolved_inline_trait_member_splices_instead_of_calling() {
+        let ir = lower_src(
+            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+             impl: Doubler for i64\n\
+               : dbl | x | x x add ;\n\
+             ;\n\
+             : apply_dbl inline ( 'T: Doubler -- 'T ) dbl ;\n\
+             : main ( -- ) 5 apply_dbl . ;\n",
+        );
+        // `apply_dbl` and `dbl` are both inline, so neither mints an IrFunc.
+        assert!(
+            ir.funcs.iter().all(|f| !f.name.contains("dbl")),
+            "an inline trait member mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = func(&ir, "main");
+        // The spliced `dbl` body (`x x add`) leaves an `add` instruction in
+        // `main`; no call to any `dbl` symbol survives.
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
+            1,
+            "the inline member's `add` is spliced into main"
+        );
+        let dbl_calls: Vec<&str> = call_symbols(main)
+            .into_iter()
+            .filter(|s| s.contains("dbl"))
+            .collect();
+        assert!(
+            dbl_calls.is_empty(),
+            "the inline trait member is spliced, not called; unexpected calls: {dbl_calls:?}"
+        );
+    }
+
+    /// P7.S3s-follow Phase 4 (section 3): two member splices under one
+    /// enclosing uid alpha-rename to the same local names, which is correct
+    /// because the splice truncates `self.locals` to its entry depth and the
+    /// resolver is scope-bounded. Both `dbl` calls inside the spliced
+    /// `apply2` body resolve through `splice_trait_calls` under the same uid,
+    /// and both are spliced. Asserting the right *value* (two doublings), not
+    /// merely that it builds, so a wrong splice is caught as a wrong answer.
+    #[test]
+    fn lower_resolved_inline_trait_member_two_splices_under_one_uid() {
+        let ir = lower_src(
+            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+             impl: Doubler for i64\n\
+               : dbl | x | x x add ;\n\
+             ;\n\
+             : apply2 inline ( 'T: Doubler -- 'T ) dbl dbl ;\n\
+             : main ( -- ) 5 apply2 . ;\n",
+        );
+        let main = func(&ir, "main");
+        // Two doublings -> two `add` instructions, no calls to `dbl`.
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
+            2,
+            "two inline member splices produce two `add` instructions"
+        );
+        let dbl_calls: Vec<&str> = call_symbols(main)
+            .into_iter()
+            .filter(|s| s.contains("dbl"))
+            .collect();
+        assert!(
+            dbl_calls.is_empty(),
+            "neither inline member splice is a call; unexpected calls: {dbl_calls:?}"
+        );
+    }
+
+    /// P7.S3s-follow Phase 4: the `trait_calls` path (a non-combinator poly
+    /// word calling an inline trait member). The poly word has its own
+    /// `IrFunc`, but inside it the member is spliced, not called. This tests
+    /// the uid = 0 (top-level default) case, where `splice_uid_stack` is empty.
+    #[test]
+    fn lower_resolved_inline_trait_member_trait_calls_path_splices() {
+        let ir = lower_src(
+            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+             impl: Doubler for i64\n\
+               : dbl | x | x x add ;\n\
+             ;\n\
+             : apply_dbl ( 'T: Doubler -- 'T ) dbl ;\n\
+             : main ( -- ) 5 apply_dbl . ;\n",
+        );
+        // `apply_dbl` is NOT inline, so it mints an IrFunc; `dbl` IS inline,
+        // so it does not.
+        let apply_dbl = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.contains("apply_dbl"))
+            .expect("the non-inline poly word mints an IrFunc");
+        assert_eq!(
+            count(apply_dbl, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
+            1,
+            "the inline member's `add` is spliced into the poly word's body"
+        );
+        let dbl_calls: Vec<&str> = call_symbols(apply_dbl)
+            .into_iter()
+            .filter(|s| s.contains("dbl"))
+            .collect();
+        assert!(
+            dbl_calls.is_empty(),
+            "the inline trait member is spliced inside the poly word, not called; unexpected calls: {dbl_calls:?}"
         );
     }
 }
