@@ -16,13 +16,13 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ground_member_type, intern_array_type, is_name_dispatched_builtin, ArrayDecl, Bound, EnumDecl,
-    ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl, Import, ImportAnchor,
-    ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line, Module, ModuleInfo, ModuleName,
-    MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
-    StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
-    TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
-    OWNING_QUOTATION_KEYWORD,
+    ground_member_poly, ground_member_type, intern_array_type, is_name_dispatched_builtin,
+    ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl,
+    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line,
+    Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
+    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
+    TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
+    VariantTagMode, WordDef, OWNING_QUOTATION_KEYWORD,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -368,6 +368,55 @@ fn trait_zero_members_error(trait_name: &str, span: Span) -> String {
     )
 }
 
+// P7.S4 (R5/R6): render a `PolyType` target shape for the synthesized member
+// word name, so two generic impls for one trait (`['T N]` and `['T 4]`)
+// produce distinct names. Unlike `poly_type_str` (which needs a `PolySig`
+// for variable name tables), this uses positional ids (`'T0`, `'N0`) since
+// the synth name is a compiler-internal spelling, never shown to the user.
+fn poly_type_shape_str(pt: &PolyType) -> String {
+    match pt {
+        PolyType::Concrete(t) => t.name().to_string(),
+        PolyType::Var(v) => format!("'T{v}"),
+        PolyType::Array(elem, len) => {
+            let l = match len {
+                Len::Concrete(n) => n.to_string(),
+                Len::Var(id) => format!("'N{id}"),
+            };
+            format!("[{} {}]", poly_type_shape_str(elem), l)
+        }
+        PolyType::Ref(referent, mutable) => {
+            format!(
+                "&{}{}",
+                if *mutable { "!" } else { "" },
+                poly_type_shape_str(referent)
+            )
+        }
+        PolyType::OwnedCell(payload) => format!("^{}", poly_type_shape_str(payload)),
+        PolyType::Generic { name, args, .. } => {
+            let a = args
+                .iter()
+                .map(poly_type_shape_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{name}[{a}]")
+        }
+        PolyType::Quotation(_, _, _, _, _) => "[quotation]".to_string(),
+        PolyType::QuotLit => "[quotlit]".to_string(),
+    }
+}
+
+/// P7.S4 (R1): an `impl:` target with a bound on one of its variables
+/// (`'T: Copy`). Bounds on impl variables are out of scope this slice.
+fn impl_target_bound_error() -> String {
+    "error: an `impl:` target variable may not carry a bound (bounds on impl variables are not yet supported)".to_string()
+}
+
+/// P7.S4 (R1): an `impl:` target with a row variable (`..s`). Row variables
+/// are not meaningful in an impl target.
+fn impl_target_row_var_error() -> String {
+    "error: an `impl:` target may not carry a row variable".to_string()
+}
+
 /// P7.S3e (R4): an `impl:` naming a trait that resolves to nothing in scope
 /// (unknown, or not imported).
 fn unknown_trait_error(name: &str, span: Span) -> String {
@@ -459,13 +508,22 @@ fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
 /// take `'T`/`&'T` as some input
 /// (`check::declarations::member_binds_trait_var`) and so every grounded
 /// signature mentions the `for` type.
+///
+/// P7.S4 (R5/R6): for a generic target the `PolyType` shape is rendered via
+/// `poly_type_shape_str` so two generic impls for one trait (e.g. `['T N]`
+/// and `['T 4]`) produce distinct synth names. A concrete target keeps the
+/// existing `target.name()` rendering.
 fn synth_member_word_name(
     member: &str,
     trait_name: &str,
     trait_module: u32,
-    target: Type,
+    target: &ImplTarget,
 ) -> String {
-    format!("{member};{trait_name};{trait_module};{}", target.name())
+    let ty_part = match &target.pattern {
+        PolyType::Concrete(t) => t.name().to_string(),
+        other => poly_type_shape_str(other),
+    };
+    format!("{member};{trait_name};{trait_module};{ty_part}")
 }
 
 /// P7.S3r (R4a): rewrite every call of `member` inside its own desugared body
@@ -1441,6 +1499,10 @@ struct PolyBuilder {
     /// checks each one once the whole signature is known, since only then can
     /// "is this the signature's own top-level row" be answered.
     pending_quotation_rows: Vec<(u32, String, Span)>,
+    /// P7.S4 (R1): when `true`, `parse_poly_ty_var` does not check for a `:`-
+    /// bound after a type variable. Set by `parse_impl_target` so the `:`
+    /// starting a member body (`: show ...`) is not consumed as a bound colon.
+    forbid_bounds: bool,
 }
 
 impl PolyBuilder {
@@ -2537,11 +2599,17 @@ impl<'t> Parser<'t> {
     /// desugared to a synthesized top-level `WordDef` returned alongside the
     /// decl; the decl itself carries only the `(member, synth-name)` pairs
     /// `check_impl_decls` resolves.
+    ///
+    /// P7.S4 (R1): the target is a `PolyType` pattern over the impl's own
+    /// variables (`['T N]`, `'T`, `Box['T]`), not a concrete `Type`. A concrete
+    /// target (`Point`, `[i64 4]`) folds to `PolyType::Concrete(t)` and keeps
+    /// the existing monomorphic path; a generic target carries variables and
+    /// the member word is polymorphic.
     fn parse_impl_decl(&mut self) -> Result<(ImplDecl, Vec<WordDef>), String> {
         let span = self.expect_word("impl:")?;
         let (trait_name, trait_span) = self.expect_word_any_spanned()?;
         self.expect_word("for")?;
-        let target_ty = self.parse_type_expr()?;
+        let target = self.parse_impl_target()?;
         let trait_id = find_trait_in_module(
             self.traits,
             &trait_name,
@@ -2565,7 +2633,7 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some(_) => {
-                    let (member_name, word) = self.parse_impl_member_body(trait_id, target_ty)?;
+                    let (member_name, word) = self.parse_impl_member_body(trait_id, &target)?;
                     bindings.push((member_name, word.name.clone()));
                     words.push(word);
                 }
@@ -2579,7 +2647,7 @@ impl<'t> Parser<'t> {
         Ok((
             ImplDecl {
                 trait_id,
-                target_ty,
+                target,
                 module: self.module,
                 span,
                 bindings,
@@ -2587,6 +2655,35 @@ impl<'t> Parser<'t> {
             },
             words,
         ))
+    }
+
+    /// P7.S4 (R1): parse the target of an `impl:` declaration as a `PolyType`
+    /// pattern over the impl's own type/length variables. Reuses the
+    /// `parse_poly_slot` machinery (which admits `'T`, `['T N]`, `&'T`,
+    /// `^'T`, `Box['T]`) but forbids the bound syntax (`'T: Copy`, the
+    /// `:`-bound arm of `parse_poly_ty_var`) and row variables (`..s`), which
+    /// are out of scope for an impl target. A concrete target (`Point`,
+    /// `[i64 4]`) folds to `PolyType::Concrete(t)`.
+    fn parse_impl_target(&mut self) -> Result<ImplTarget, String> {
+        let mut builder = PolyBuilder {
+            forbid_bounds: true,
+            ..PolyBuilder::default()
+        };
+        let raw = self.parse_poly_slot(&mut builder, false)?;
+        if !builder.bounds.is_empty() {
+            // A glued bound (`'T: Copy`) bypassed `forbid_bounds`'s standalone
+            // `:` check. Reject it explicitly.
+            return Err(impl_target_bound_error());
+        }
+        if builder.row_in.is_some() || builder.row_out.is_some() {
+            return Err(impl_target_row_var_error());
+        }
+        let pattern = self.raw_to_poly_type(raw)?;
+        Ok(ImplTarget {
+            pattern,
+            ty_var_names: builder.ty_names,
+            len_var_names: builder.len_names,
+        })
     }
 
     /// P7.S3r (R2/R4a/R5/R6): one `: member [| binders |] body ;` inside an
@@ -2597,7 +2694,7 @@ impl<'t> Parser<'t> {
     fn parse_impl_member_body(
         &mut self,
         trait_id: TraitId,
-        target_ty: Type,
+        target: &ImplTarget,
     ) -> Result<(String, WordDef), String> {
         self.expect_word(":")?;
         let (member_name, member_span) = self.expect_word_any_spanned()?;
@@ -2622,36 +2719,80 @@ impl<'t> Parser<'t> {
                 *s,
             ));
         }
-        let ground = |slots: &[PolyType], arrays: &mut Vec<ArrayDecl>, refs: &mut Vec<RefDecl>| {
-            slots
-                .iter()
-                .map(|t| TypedSlot {
-                    name: None,
-                    ty: ground_member_type(t, target_ty, arrays, refs),
-                })
-                .collect()
-        };
-        let effect = StackEffect {
-            inputs: ground(&sig.inputs, self.arrays, self.refs),
-            outputs: ground(&sig.outputs, self.arrays, self.refs),
-        };
         let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
-        let name = synth_member_word_name(&member_name, &trait_name, trait_module, target_ty);
+        let name = synth_member_word_name(&member_name, &trait_name, trait_module, target);
         let body = rewrite_member_self_calls(&body, &member_name, &name)?;
-        Ok((
-            member_name,
-            WordDef {
-                name,
-                effect,
-                body,
-                poly: None,
-                declares_inline: false,
-                module: self.module,
-                span: member_span,
-                declared_globals: None,
-            },
-        ))
+        if target.is_concrete() {
+            // R5 concrete path: the existing monomorphic member word, with
+            // the trait member's signature grounded at the concrete `Type`.
+            let target_ty = target.concrete_ty().expect("checked is_concrete");
+            let ground =
+                |slots: &[PolyType], arrays: &mut Vec<ArrayDecl>, refs: &mut Vec<RefDecl>| {
+                    slots
+                        .iter()
+                        .map(|t| TypedSlot {
+                            name: None,
+                            ty: ground_member_type(t, target_ty, arrays, refs),
+                        })
+                        .collect()
+                };
+            let effect = StackEffect {
+                inputs: ground(&sig.inputs, self.arrays, self.refs),
+                outputs: ground(&sig.outputs, self.arrays, self.refs),
+            };
+            Ok((
+                member_name,
+                WordDef {
+                    name,
+                    effect,
+                    body,
+                    poly: None,
+                    declares_inline: false,
+                    module: self.module,
+                    span: member_span,
+                    declared_globals: None,
+                },
+            ))
+        } else {
+            // P7.S4 (R5) generic path: the member word is polymorphic, its
+            // `PolySig` the trait member's signature grounded by binding the
+            // trait's self-variable (`Var(0)`) to the whole target `PolyType`,
+            // over the impl's own variable name tables with no bounds.
+            let inputs: Vec<PolyType> = sig
+                .inputs
+                .iter()
+                .map(|t| ground_member_poly(t, &target.pattern))
+                .collect();
+            let outputs: Vec<PolyType> = sig
+                .outputs
+                .iter()
+                .map(|t| ground_member_poly(t, &target.pattern))
+                .collect();
+            let poly_sig = PolySig {
+                row_in: None,
+                inputs,
+                outputs,
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: target.ty_var_names.clone(),
+                len_var_names: target.len_var_names.clone(),
+                row_var_names: Vec::new(),
+            };
+            Ok((
+                member_name,
+                WordDef {
+                    name,
+                    effect: StackEffect::default(),
+                    body,
+                    poly: Some(Box::new(poly_sig)),
+                    declares_inline: false,
+                    module: self.module,
+                    span: member_span,
+                    declared_globals: None,
+                },
+            ))
+        }
     }
 
     /// `static:` declaration (D1): a module-level place, scalar-only this
@@ -3170,8 +3311,15 @@ impl<'t> Parser<'t> {
         } else {
             word.to_string()
         };
-        let bound_follows =
-            glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":");
+        // P7.S4 (R1): when `forbid_bounds` is set (an `impl:` target), the
+        // `:` starting a member body (`: show ...`) must not be consumed as
+        // a bound colon. Only a *glued* colon (`'T:`) is still treated as a
+        // bound, since it cannot be the member body's `:`.
+        let bound_follows = if builder.forbid_bounds {
+            glued_colon
+        } else {
+            glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
+        };
         if bound_follows && !glued_colon {
             self.pos += 1; // the standalone `:`
         }
@@ -9999,5 +10147,62 @@ mod tests {
             err.contains("expected LParen") && err.contains("line 1, col 14"),
             "unexpected message: {err}"
         );
+    }
+
+    // P7.S4 (R1): generic `impl:` target parses without "unknown type `'T`".
+
+    #[test]
+    fn parse_impl_target_generic_array_var_elem_and_len_parses() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(module.impls[0].target.is_concrete() == false);
+        let word = &module.words[0];
+        assert!(
+            word.poly.is_some(),
+            "generic impl member word should be polymorphic"
+        );
+    }
+
+    #[test]
+    fn parse_impl_target_generic_var_parses() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for 'T\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_concrete());
+        assert!(module.words[0].poly.is_some());
+    }
+
+    #[test]
+    fn parse_impl_target_concrete_still_parses() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for i64\n\
+               : show | p | p drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(module.impls[0].target.is_concrete());
+        assert!(module.words[0].poly.is_none());
+    }
+
+    #[test]
+    fn parse_impl_target_bound_on_var_is_error() {
+        let err = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T: Copy 'N]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("may not carry a bound"), "{err}");
     }
 }

@@ -1791,6 +1791,51 @@ pub fn ground_member_type(
     }
 }
 
+/// P7.S4 (R5): ground a trait member's declared `PolyType` (over the trait's
+/// sole implicit type variable, id 0) against a *generic* `impl:` target —
+/// binding `PolyType::Var(0)` to the whole target `PolyType` and recursing
+/// over every other shape. Unlike `ground_member_type` (which grounds to a
+/// concrete `Type`), this returns a `PolyType` over the impl's own variables,
+/// yielding the polymorphic member word's `PolySig`.
+pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
+    match pty {
+        PolyType::Concrete(t) => PolyType::Concrete(*t),
+        PolyType::Var(_) => target.clone(),
+        PolyType::Array(elem, len) => {
+            PolyType::Array(Box::new(ground_member_poly(elem, target)), len.clone())
+        }
+        PolyType::Ref(referent, mutable) => {
+            PolyType::Ref(Box::new(ground_member_poly(referent, target)), *mutable)
+        }
+        PolyType::OwnedCell(payload) => {
+            PolyType::OwnedCell(Box::new(ground_member_poly(payload, target)))
+        }
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name,
+        } => PolyType::Generic {
+            is_enum: *is_enum,
+            idx: *idx,
+            module: *module,
+            args: args.iter().map(|a| ground_member_poly(a, target)).collect(),
+            name,
+        },
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
+            ins.iter().map(|p| ground_member_poly(p, target)).collect(),
+            outs.iter().map(|p| ground_member_poly(p, target)).collect(),
+            *is_inline,
+            *row_in,
+            *row_out,
+        ),
+        PolyType::QuotLit => {
+            unreachable!("a quotation-literal marker never reaches a signature")
+        }
+    }
+}
+
 /// The shared, lazily-built `Copy` entry (`seed_predicate_traits`), for a
 /// caller that only ever needs the reserved predicate table and no user
 /// `trait:` declarations -- the REPL's per-line word-definition path, which
@@ -1818,15 +1863,51 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
     }]
 }
 
+/// P7.S4 (R1): the target of an `impl:` declaration, carrying the pattern
+/// the registry matches against together with the impl's own variable name
+/// tables (mirroring `PolySig`'s `ty_var_names`/`len_var_names`). A concrete
+/// target (`Point`, `[i64 4]`) folds to `PolyType::Concrete(t)` and behaves
+/// exactly as before; a generic target (`['T N]`, `'T`, `Box['T]`) carries
+/// variables and the member word is polymorphic.
+#[derive(Debug, Clone)]
+pub struct ImplTarget {
+    pub pattern: PolyType,
+    pub ty_var_names: Vec<String>,
+    pub len_var_names: Vec<String>,
+}
+
+impl ImplTarget {
+    /// Whether this is a concrete target — a `PolyType::Concrete(t)` — which
+    /// keeps the existing monomorphic member-word path. Everything else
+    /// (`Var`, `Array`, `Ref`, `OwnedCell`, `Generic`, `Quotation`) is generic.
+    pub fn is_concrete(&self) -> bool {
+        matches!(self.pattern, PolyType::Concrete(_))
+    }
+
+    /// The concrete `Type` of a concrete target, or `None` for a generic one.
+    pub fn concrete_ty(&self) -> Option<Type> {
+        match self.pattern {
+            PolyType::Concrete(t) => Some(t),
+            _ => None,
+        }
+    }
+}
+
 /// One `impl: Trait for Type ... ;` declaration. `bindings` is a name map
 /// (member name -> implementing word name), populated by the parser's
 /// body-form desugar: each `: member ... ;` inside the block synthesizes a
-/// concrete top-level word carrying the trait member's signature grounded at
-/// `target_ty`, and records the (member, synth-name) pair here.
+/// top-level word carrying the trait member's signature grounded at the
+/// `impl:` target, and records the (member, synth-name) pair here.
+///
+/// P7.S4 (R1): the target is an `ImplTarget` (a `PolyType` pattern plus the
+/// impl's own variable name tables), not a bare `Type`. A concrete target
+/// (`PolyType::Concrete(t)`) keeps the existing monomorphic path; a generic
+/// target (`['T N]`, `'T`) carries variables and the member word is
+/// polymorphic (`poly: Some(..)`).
 #[derive(Debug, Clone)]
 pub struct ImplDecl {
     pub trait_id: TraitId,
-    pub target_ty: Type,
+    pub target: ImplTarget,
     pub module: u32,
     pub span: Span,
     pub bindings: Vec<(String, String)>,
