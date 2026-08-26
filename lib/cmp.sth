@@ -7,12 +7,13 @@
 \ "ordered" at all -- a user type opts in with its own `impl: Ord`, exactly as
 \ any other trait.
 \
-\ The comparisons are deliberately **not** `inline` here (P7.S3s R5): the
-\ dispatch injection for bare trait members in spliced combinators (P7.S3o
-\ Phase 3) makes `inline` with `'T: Ord` work, but the six comparisons are
-\ small enough that a real call frame is a measured ~2x tax over the old
-\ branch-and-construct body on a comparison-heavy loop, accepted here. A
-\ hot-path combinator can call `cmp` directly and splice instead.
+\ `cmp` is an `inline` trait member (P7.S3s-follow): every `impl: Ord` body
+\ is spliced at its call sites instead of costing a call frame, so the six
+\ surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) get `cmp`'s body
+\ spliced into them. The six comparisons themselves stay ordinary
+\ non-inline words -- splicing them inside a quotation-carrying combinator
+\ perturbs quotation provenance tracking (P7.S3s Phase 1), so the inline
+\ cost saving is taken at `cmp`'s body, not at the six callers of it.
 import: intrinsics i | ueq ult ugt ulte ugte une branch drop swap | ;
 import: self::bool b | Bool False True | ;
 
@@ -35,7 +36,7 @@ type: Ordering
 ;
 
 trait: Ord 'T
-  : cmp ( 'T 'T -- Ordering ) ;
+  : cmp inline ( 'T 'T -- Ordering ) ;
 ;
 
 \ The eight fixed-width integers (`INT_TYPES`, `src/ast.rs`) and

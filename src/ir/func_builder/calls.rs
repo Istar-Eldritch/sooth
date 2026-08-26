@@ -2034,4 +2034,65 @@ mod tests {
             "the inline trait member is spliced inside the poly word, not called; unexpected calls: {dbl_calls:?}"
         );
     }
+
+    /// P7.S3s-follow Phase 5: the real `Ord`/`cmp` trait member is `inline`,
+    /// so a `'T: Ord` word's `cmp` call splices the `impl:` body instead of
+    /// calling it. The impl body's `ult`/`ugt` comparisons appear in the
+    /// word's monomorph as `Instr::Cmp` (`Lt`/`Gt`), and no `Instr::Call` to
+    /// any `cmp` symbol survives. This exercises the `trait_calls` path
+    /// (uid = 0) with the real library trait, complementing the Phase 4
+    /// synthetic `Doubler` tests. The `Ordering?` tag dispatch uses
+    /// `CmpOp::Eq`, so the `Lt`/`Gt` counts isolate the spliced `cmp` body
+    /// from the eliminator's own comparisons.
+    #[test]
+    fn lower_ord_inline_cmp_splices_impl_body_into_caller() {
+        let ir = lower_src(
+            ": my_lt ( 'T: Ord 'T -- i64 )
+\
+             cmp
+\
+             ~[ ( Less ) drop -1 ]
+\
+             ~[ ( Equal ) drop 0 ]
+\
+             ~[ ( Greater ) drop 1 ]
+\
+             Ordering? ;
+\
+             : main ( -- ) 1 2 my_lt . ;
+",
+        );
+        // `cmp` is inline, so no IrFunc is minted for any `cmp.Ord.*` body.
+        assert!(
+            ir.funcs
+                .iter()
+                .all(|f| !(f.name.contains("Ord") && f.name.contains("cmp"))),
+            "the inline `cmp` impl body mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        // `my_lt` is non-inline, so it mints a monomorph. Inside it, `cmp`'s
+        // body is spliced: the `ult`/`ugt` comparisons appear as `Instr::Cmp`
+        // (`Lt`/`Gt`), and no call to any `cmp` symbol survives.
+        let my_lt = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.starts_with("sooth_mono_my_lt"))
+            .expect("the non-inline poly word mints an IrFunc");
+        assert!(
+            count(my_lt, |i| matches!(i, Instr::Cmp(_, CmpOp::Lt, ..))) >= 1,
+            "the spliced `cmp` body's `ult` (`CmpOp::Lt`) appears in the monomorph"
+        );
+        assert!(
+            count(my_lt, |i| matches!(i, Instr::Cmp(_, CmpOp::Gt, ..))) >= 1,
+            "the spliced `cmp` body's `ugt` (`CmpOp::Gt`) appears in the monomorph"
+        );
+        let cmp_calls: Vec<&str> = call_symbols(my_lt)
+            .into_iter()
+            .filter(|s| s.contains("cmp"))
+            .collect();
+        assert!(
+            cmp_calls.is_empty(),
+            "the inline `cmp` is spliced, not called; unexpected calls: {cmp_calls:?}"
+        );
+    }
 }

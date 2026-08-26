@@ -231,3 +231,74 @@ fn an_impl_ord_on_the_concrete_overloads_type_makes_the_pair_an_overlap_error() 
         "unexpected diagnostic: {err}"
     );
 }
+
+/// P7.S3s-follow Phase 5: `cmp` is an `inline` trait member, so an `inline`
+/// `'T: Ord` word that calls `cmp` has the `impl:` body spliced at the call
+/// site. This behavioural golden builds and runs the program, checking the
+/// printed output, so a wrong splice is caught as a wrong answer rather than
+/// just a shape change. The word is `inline` (spliced into `main`), so the
+/// `cmp` call resolves through the `splice_trait_calls` path (keyed by the
+/// enclosing splice's uid), the same path the two-splice test below stresses.
+const ORD_INLINE_IMPORTS: &str = "import: intrinsics * ;\n\
+     import: core::prelude | if Bool Ord lt gt | ;\n\
+     import: core::cmp | Ordering Less Equal Greater | ;\n";
+
+#[test]
+fn ord_inline_cmp_behavioural_golden() {
+    let (_t, entry) = program(
+        "ord-inline-golden",
+        &format!(
+            "{ORD_INLINE_IMPORTS}\
+             : my_cmp inline ( 'T: Ord 'T -- i64 )
+\
+               cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+\
+             : main ( -- )
+\
+               1 2 my_cmp .
+\
+               2 1 my_cmp .
+\
+               1 1 my_cmp . ;
+"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}
+
+/// P7.S3s-follow Phase 5 (section 3): two member splices under one enclosing
+/// uid alpha-rename to the same local names. This is correct because the
+/// splice truncates `self.locals` to its entry depth and the resolver is
+/// scope-bounded, but it is correct by a property that is easy to break, so
+/// it gets a dedicated test: a bounded `inline` word calling `cmp` twice,
+/// checked for the right *value*, not merely for building. Both `cmp` calls
+/// resolve through `splice_trait_calls` under the same uid; both are spliced;
+/// the two results are independent and correct.
+#[test]
+fn ord_inline_cmp_two_splices_produce_correct_value() {
+    let (_t, entry) = program(
+        "ord-inline-two-splice",
+        &format!(
+            "{ORD_INLINE_IMPORTS}\
+             : cmp_twice inline ( 'T: Ord 'T -- i64 i64 )
+\
+               | a b |
+\
+               a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering?
+\
+               b a cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+\
+             : main ( -- )
+\
+               1 2 cmp_twice . .
+\
+               2 1 cmp_twice . . ;
+"
+        ),
+    );
+    // 1 2: a b cmp = Less -> -1; b a cmp = Greater -> 1. Stack: -1 1.
+    // . . prints 1 then -1.
+    // 2 1: a b cmp = Greater -> 1; b a cmp = Less -> -1. Stack: 1 -1.
+    // . . prints -1 then 1.
+    assert_eq!(build_and_run(&entry), "1\n-1\n-1\n1\n");
+}

@@ -23,7 +23,7 @@ type: Rank
 ;
 
 trait: Order 'T
-  : cmp ( &'T &'T -- Rank ) ;
+  : cmp inline ( &'T &'T -- Rank ) ;
 ;
 
 trait: Show 'T
