@@ -2591,19 +2591,25 @@ fn three_word_chain_at_two_types_compiles_and_runs() {
 /// (`cmp` directly) now resolves at the splice site via dispatch injection.
 /// The standalone check accounts for the member's stack effect at the i64
 /// stand-in, and each real splice site resolves `cmp` against its concrete θ.
-/// This test calls `cmp` through `Ordering?` (not `if`, which expects
-/// `Bool`) to produce the correct `minof`.
+/// The body prints `cmp`'s `Ordering` discriminant (`tag .`) so a wrong-dispatch
+/// miscompile is observable: `-1 1` is `Less` (0) as i64 but `Greater` (2) when
+/// i64 bits are reinterpreted as f64 (NaN), and `-0.0 0.0` is `Equal` (1) as
+/// f64 but `Less` (0) when f64 bits are reinterpreted as i64.
 #[test]
 fn bare_member_from_bounded_combinator_compiles_and_runs() {
     let src = "import: intrinsics * ;
 \
          import: core::prelude * ;
 \
-         : cmpdrop inline ( 'T: Copy Ord 'T -- ) cmp drop ;
+         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
 \
-         : main ( -- ) 3 7 cmpdrop 3.0 7.0 cmpdrop ;
+         : main ( -- ) -1 1 cmptag -0.0 0.0 cmptag ;
 ";
-    let (_stdout, code) = run_src("bare-member", src);
+    let (stdout, code) = run_src("bare-member", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
     assert_eq!(
         code, 0,
         "a bare `cmp` call from an inline combinator at i64 and f64 should compile and run"
@@ -2617,20 +2623,27 @@ fn bare_member_from_bounded_combinator_compiles_and_runs() {
 /// handled naturally: each combinator's standalone check skips its own member
 /// calls, and the splice walk resolves them at the concrete splice θ. The
 /// `inline_uid` stack ensures the lowering reads the resolution at the correct
-/// (inner) splice site.
+/// (inner) splice site. The body prints `cmp`'s `Ordering` discriminant so a
+/// wrong-dispatch miscompile is observable (see
+/// `bare_member_from_bounded_combinator_compiles_and_runs` for the value
+/// choices).
 #[test]
 fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
     let src = "import: intrinsics * ;
 \
          import: core::prelude * ;
 \
-         : inner inline ( 'T: Copy Ord 'T -- ) cmp drop ;
+         : inner inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
 \
          : outer inline ( 'T 'T -- ) inner ;
 \
-         : main ( -- ) 3 7 outer 3.0 7.0 outer ;
+         : main ( -- ) -1 1 outer -0.0 0.0 outer ;
 ";
-    let (_stdout, code) = run_src("transitive-skip", src);
+    let (stdout, code) = run_src("transitive-skip", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
     assert_eq!(
         code, 0,
         "an unbounded combinator splicing a bounded one calling `cmp` should compile and run at i64 and f64"
@@ -2692,4 +2705,50 @@ fn materialized_quotation_without_bare_member_is_not_rejected() {
          : main ( -- ) 1 2 foo ;
 ";
     check_ok(src);
+}
+
+/// A splice-derived CallInst with out_arity >= 2 (a combinator calling a poly
+/// word that returns 2+ outputs, like `dup`) must have its bundle interned.
+/// Without the fix, the bundle-interning loop in `check` only covered `insts`,
+/// not `splice_records`, and `discover_transitive_instantiations`' early return
+/// on an empty `poly_cross_calls` table skipped the `intern_composed_bundles`
+/// pass for splice records — leaving `bundle: None` and panicking at lowering
+/// when `lower_poly_call` did not push the multi-output return value.
+#[test]
+fn splice_record_with_multi_output_poly_call_interns_bundle() {
+    let src = "import: intrinsics * ;
+\
+         : pair ( 'T: Copy -- 'T 'T ) dup ;
+\
+         : c inline ( 'T: Copy -- 'T 'T ) pair ;
+\
+         : main ( -- ) 1 c . . ;
+";
+    let (stdout, code) = run_src("splice-bundle", src);
+    assert_eq!(stdout, "1\n1\n");
+    assert_eq!(code, 0);
+}
+
+/// A poly call inside a materialized quotation within a splice must not be
+/// redirected to `splice_records`. The materialized quotation lowers to its
+/// own `IrFunc` with an empty `splice_uid_stack`, so it cannot resolve a
+/// `(uid, span)` key and would fall through to `env.get(name).expect(...)`,
+/// panicking. The fix checks `in_materialized_quot` and routes the call to
+/// the span-keyed `insts` table instead, which the materialized quotation's
+/// `FuncBuilder` reads via `self.instantiations`.
+#[test]
+fn poly_call_in_materialized_quotation_in_splice_does_not_panic() {
+    let src = "import: intrinsics * ;
+\
+         : pid ( 'T -- 'T ) |x| x ;
+\
+         type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T 'T -- ) | a b | [ 5 pid drop ] Thunk drop a drop b drop ;
+\
+         : main ( -- ) 1 2 foo 3.0 4.0 foo ;
+";
+    let (stdout, code) = run_src("mat-quot-poly", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 0);
 }

@@ -5186,26 +5186,38 @@ pub(super) fn check_poly_call(
     // collision guard below is skipped for these calls; it stays as a
     // safety net for any other path that might re-introduce the collision.
     if let Some(uid) = prov.splice_uid {
-        poly.splice_records.insert(
-            (uid, span),
-            CallInst {
-                callee: name.to_string(),
-                subst,
-                symbol,
-                out_arity: outputs.len(),
-                output_types: outputs.clone(),
-                bundle: None,
-                generation,
-                quot_inputs,
-                trait_calls,
-                poly_calls: HashMap::new(),
-            },
-        );
-        stack.truncate(base);
-        for ty in outputs {
-            stack.push(Slot::computed(ty));
+        // P7.S3o Phase 4 (R5): a poly call inside a materialized quotation
+        // within a splice must NOT redirect to `splice_records`. The
+        // materialized quotation lowers to its own `IrFunc` with an empty
+        // `splice_uid_stack`, so it cannot resolve a `(uid, span)` key and
+        // would fall through to `env.get(name).expect(...)` and panic. Let it
+        // fall through to the span-keyed `insts` table below instead, which
+        // the materialized quotation's `FuncBuilder` reads via
+        // `self.instantiations`. The collision guard below still catches two
+        // splices at different types producing different symbols for the same
+        // span, so there is no silent miscompile.
+        if !prov.in_materialized_quot {
+            poly.splice_records.insert(
+                (uid, span),
+                CallInst {
+                    callee: name.to_string(),
+                    subst,
+                    symbol,
+                    out_arity: outputs.len(),
+                    output_types: outputs.clone(),
+                    bundle: None,
+                    generation,
+                    quot_inputs,
+                    trait_calls,
+                    poly_calls: HashMap::new(),
+                },
+            );
+            stack.truncate(base);
+            for ty in outputs {
+                stack.push(Slot::computed(ty));
+            }
+            return Ok(std::mem::take(stack));
         }
-        return Ok(std::mem::take(stack));
     }
     // P7.S3o recon: a poly combinator's body terms keep their original spans
     // across every splice (alpha_rename_locals renames locals only), so two

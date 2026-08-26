@@ -1067,6 +1067,20 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             ));
         }
     }
+    // P7.S3o: a splice-derived CallInst with out_arity >= 2 needs the same
+    // bundle. This runs before `discover_transitive_instantiations`, whose
+    // early return on an empty `poly_cross_calls` table skips the
+    // `intern_composed_bundles` pass for splice records — leaving
+    // `bundle: None` and panicking at lowering when the multi-output return
+    // value is never pushed onto the stack.
+    for inst in splice_records.values_mut() {
+        if inst.out_arity >= 2 {
+            inst.bundle = Some(intern_bundle_struct(
+                &mut module.structs,
+                &inst.output_types,
+            ));
+        }
+    }
     module.poly_cross_calls = poly_cross_calls;
     // P7.S3k (R4): a generic body's call to another generic word was recorded
     // symbolically, since the caller had no θ of its own when its body was
