@@ -118,7 +118,7 @@ impl: Ord for isize
 \ via `x = x`).
 \
 \ The residual is `cmp` itself. It is not in `export:`, but `Ord` is, so any
-\ user writing their own `'T: Copy Ord` word dispatches `cmp` directly -- and
+\ user writing their own `'T: Ord` word dispatches `cmp` directly -- and
 \ over floats it is not antisymmetric, since `cmp(a,b)` and `cmp(b,a)` are
 \ both `Greater` when either operand is NaN. A `PartialOrd`/`Ordering?`-shaped
 \ split giving the unordered case its own answer is the follow-on
@@ -135,14 +135,14 @@ impl: Ord for f64
     lhs rhs ueq [ Equal ] [ lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Greater ] branch ] branch ] branch ;
 ;
 
-: eq  ( 'T: Copy Ord 'T -- Bool )
+: eq  ( 'T: Ord 'T -- Bool )
   cmp
   ~[ ( Less )    drop False ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: lt  ( 'T: Copy Ord 'T -- Bool )
+: lt  ( 'T: Ord 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]
@@ -157,28 +157,28 @@ impl: Ord for f64
 \ `Greater` for a NaN pair (review fix, so `eq`/`ne`/`lt`/`lte` stay correct
 \ for NaN, preserving D4), which would otherwise make `gt`/`gte` answer
 \ `True` for NaN if read directly off that same `Greater` arm.
-: gt  ( 'T: Copy Ord 'T -- Bool )
+: gt  ( 'T: Ord 'T -- Bool )
   swap cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: lte ( 'T: Copy Ord 'T -- Bool )
+: lte ( 'T: Ord 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: gte ( 'T: Copy Ord 'T -- Bool )
+: gte ( 'T: Ord 'T -- Bool )
   swap cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: ne  ( 'T: Copy Ord 'T -- Bool )
+: ne  ( 'T: Ord 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]
