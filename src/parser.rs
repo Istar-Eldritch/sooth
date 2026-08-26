@@ -2521,6 +2521,17 @@ impl<'t> Parser<'t> {
                             member_span,
                         ));
                     }
+                    // P7.S3s-follow: the optional `inline` keyword sits in the
+                    // one slot between the member name and its `(`, mirroring
+                    // `parse_worddef` exactly. The name is already consumed, so
+                    // `: inline ( ... ) ;` still declares a member *named*
+                    // `inline`, and a second `inline` falls through to the `(`
+                    // and fails there.
+                    let declares_inline =
+                        matches!(self.peek(), Some((Token::Word(w), _)) if w == "inline");
+                    if declares_inline {
+                        self.pos += 1;
+                    }
                     self.expect(Token::LParen)?;
                     let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
                     self.expect(Token::RParen)?;
@@ -2528,6 +2539,7 @@ impl<'t> Parser<'t> {
                     members.push(TraitMember {
                         name: member_name,
                         sig,
+                        declares_inline,
                     });
                 }
                 // P7.S3s-follow: a bare word in member position is the retired
@@ -2725,11 +2737,14 @@ impl<'t> Parser<'t> {
         let (member_name, member_span) = self.expect_word_any_spanned()?;
         let trait_name = self.traits[trait_id.index()].name.clone();
         let trait_module = self.traits[trait_id.index()].module;
-        let Some(sig) = self.traits[trait_id.index()]
+        // P7.S3s-follow: widen the member lookup to take `(sig,
+        // declares_inline)` in one pass, so both branches below inherit the
+        // member's `inline` flag instead of hardcoding `false`.
+        let Some((sig, declares_inline)) = self.traits[trait_id.index()]
             .members
             .iter()
             .find(|m| m.name == member_name)
-            .map(|m| m.sig.clone())
+            .map(|m| (m.sig.clone(), m.declares_inline))
         else {
             return Err(impl_non_member_body_error(
                 &member_name,
@@ -2773,7 +2788,7 @@ impl<'t> Parser<'t> {
                     effect,
                     body,
                     poly: None,
-                    declares_inline: false,
+                    declares_inline,
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
@@ -2811,7 +2826,7 @@ impl<'t> Parser<'t> {
                     effect: StackEffect::default(),
                     body,
                     poly: Some(Box::new(poly_sig)),
-                    declares_inline: false,
+                    declares_inline,
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
@@ -8812,6 +8827,17 @@ mod tests {
         assert!(show.members[0].sig.outputs.is_empty());
     }
 
+    /// P7.S3s-follow (R1): the optional `inline` keyword between the member
+    /// name and its `(` sets `declares_inline == true` on the member.
+    #[test]
+    fn parse_trait_decl_records_an_inline_member() {
+        let module = parse_src("trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;").unwrap();
+        let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
+        assert_eq!(ord.members.len(), 1);
+        assert_eq!(ord.members[0].name, "cmp");
+        assert!(ord.members[0].declares_inline);
+    }
+
     #[test]
     fn parse_trait_decl_zero_members_is_error() {
         let err = parse_src("trait: Show 'T ;").unwrap_err();
@@ -8926,24 +8952,26 @@ mod tests {
         assert!(err.contains("unterminated `trait:`"), "{err}");
     }
 
-    /// P7.S3s-follow: `: inline ( ... ) ;` declares a member *named* `inline`.
-    /// The `inline` keyword slot is Phase 3; without it, `inline` is just an
-    /// ordinary member name here, and the parse succeeds.
+    /// P7.S3s-follow: `: inline ( ... ) ;` declares a member *named* `inline`
+    /// with `declares_inline == false`, the member-side twin of
+    /// `parse_worddef`'s own carve-out. The name is consumed first, so the
+    /// `inline` keyword slot sees the `(` that follows, not the name.
     #[test]
     fn parse_trait_decl_member_named_inline_still_parses() {
         let module = parse_src("trait: Show 'T : inline ( &'T -- ) ; ;").unwrap();
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
         assert_eq!(show.members[0].name, "inline");
+        assert!(!show.members[0].declares_inline);
     }
 
-    /// P7.S3s-follow: a second `inline` after the member name falls through
-    /// to the `(` and fails there. Without the Phase 3 `inline` keyword slot,
-    /// the first `inline` is the member name and the second is where `(` is
-    /// expected.
+    /// P7.S3s-follow: one optional `inline` keyword only. With the keyword
+    /// slot in place, `: foo inline inline ( ... )` consumes the name `foo`,
+    /// then the first `inline` as the keyword, and the second `inline` falls
+    /// through to `expect(LParen)` and fails there, located.
     #[test]
     fn parse_trait_decl_member_double_inline_is_error() {
-        let err = parse_src("trait: Show 'T : inline inline ( &'T -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Show 'T : foo inline inline ( &'T -- ) ; ;").unwrap_err();
         assert!(err.contains("expected LParen"), "{err}");
     }
 
@@ -9026,6 +9054,56 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["i64"]
         );
+    }
+
+    /// P7.S3s-follow: the concrete-target branch of `parse_impl_member_body`
+    /// inherits the trait member's `declares_inline` flag instead of
+    /// hardcoding `false`. Each branch gets its own test because a twinned
+    /// pair covered in one half only has shipped here before.
+    #[test]
+    fn parse_impl_body_inherits_the_members_inline_flag() {
+        let module = parse_src(
+            "trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;
+\
+             impl: Ord for i64
+\
+               : cmp | a b | a b sub ;
+\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "cmp;Ord;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.declares_inline);
+        assert!(synth.poly.is_none(), "concrete target stays monomorphic");
+    }
+
+    /// P7.S3s-follow: the generic-target branch of `parse_impl_member_body`
+    /// inherits the trait member's `declares_inline` flag. Tested
+    /// independently from the concrete branch above so reverting either
+    /// branch alone is caught.
+    #[test]
+    fn parse_impl_body_generic_target_inherits_the_members_inline_flag() {
+        let module = parse_src(
+            "trait: Show 'T : show inline ( &'T -- ) ; ;
+\
+             impl: Show for ['T 4]
+\
+               : show | p | p drop ;
+\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name.contains("show;Show;"))
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.declares_inline);
+        assert!(synth.poly.is_some(), "generic target stays polymorphic");
     }
 
     /// P7.S3r (R4a): the member's own name binds to the synthesized word

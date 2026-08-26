@@ -1773,6 +1773,11 @@ pub struct TraitDecl {
 pub struct TraitMember {
     pub name: String,
     pub sig: PolySig,
+    /// P7.S3s-follow: set by the optional `inline` keyword between the member
+    /// name and its `(` in `trait: ... ;`, read by `parse_impl_member_body` so
+    /// every `impl:` body satisfying this member is spliced at its call sites
+    /// instead of costing a call frame.
+    pub declares_inline: bool,
 }
 
 /// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
