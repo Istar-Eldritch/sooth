@@ -200,3 +200,112 @@ fn generic_impl_outside_trait_module_is_rejected() {
     );
     std::fs::remove_file(entry.with_extension("")).ok();
 }
+
+// P7.S4 Phase 2 goldens: the specificity partial order and the ambiguity
+// error (R3, R8, R12).
+
+/// R12: a concrete `impl: Show for [i64 4]` overrides a generic
+/// `impl: Show for ['T 'N]` at `[i64 4]`; the generic covers `[i64 2]`.
+/// The concrete impl prints `1`, the generic prints `2`, so the output
+/// proves which target dispatched.
+#[test]
+fn concrete_impl_overrides_generic_at_shared_instantiation() {
+    let (_t, entry) = single_file(
+        "override",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for [i64 4]\n\
+           : show | a | 1 . a drop ;\n\
+         ;\n\
+         impl: Show for ['T 'N]\n\
+           : show | a | 2 . a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |a|\n\
+           &a shows\n\
+           a drop\n\
+           0 2 fill |b|\n\
+           &b shows\n\
+           b drop\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    // The concrete impl ([i64 4]) prints 1; the generic (['T 'N]) prints 2.
+    assert!(
+        out.contains("1\n"),
+        "concrete impl should win at [i64 4]: {out}"
+    );
+    assert!(
+        out.contains("2\n"),
+        "generic impl should cover [i64 2]: {out}"
+    );
+}
+
+/// R12: two incomparable matching targets (`[i64 'N]` vs `['T 4]` at
+/// `[i64 4]`) produce a located ambiguity error naming both targets and
+/// the concrete type.
+#[test]
+fn incomparable_targets_produce_ambiguity_error() {
+    let (_t, entry) = single_file(
+        "ambiguity",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for [i64 'N]\n\
+           : show | a | a drop ;\n\
+         ;\n\
+         impl: Show for ['T 4]\n\
+           : show | a | a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |a|\n\
+           &a shows\n\
+           a drop\n\
+         ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains("Show"), "{err}");
+    // The concrete type `[i64 4]` must appear in the diagnostic.
+    assert!(err.contains("[i64 4]"), "{err}");
+    // Both competing targets must be named.
+    assert!(err.contains("[i64"), "{err}");
+    assert!(err.contains("4]"), "{err}");
+}
+
+/// R12: `[['T 'N] 'N]` and `[['T 'N] 'M]` both match `[[i64 4] 4]` and
+/// the more specific `[['T 'N] 'N]` wins (its partition forces the inner and
+/// outer lengths equal, which is the more constrained match). The
+/// shared-var impl prints `1`, the distinct-var impl prints `2`. This is
+/// the shared-variable golden test (the `Map['T 'T]` vs `Map['T 'U]`
+/// scenario from the spec, exercised through arrays since the language's
+/// generic-type constructor path is out of scope for this slice).
+#[test]
+fn shared_var_target_more_specific_wins() {
+    let (_t, entry) = single_file(
+        "shared_var",
+        "trait: Show 'T show ( &'T -- ) ;\n\
+         impl: Show for [['T 'N] 'N]\n\
+           : show | a | 1 . a drop ;\n\
+         ;\n\
+         impl: Show for [['T 'N] 'M]\n\
+           : show | a | 2 . a drop ;\n\
+         ;\n\
+         : shows ( &'T: Show -- ) show ;\n\
+         : main ( -- )\n\
+           0 4 fill |inner|\n\
+           inner 4 fill |outer|\n\
+           &outer shows\n\
+           outer drop\n\
+           inner drop\n\
+         ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert!(
+        out.contains("1\n"),
+        "[['T 'N] 'N] should win at [[i64 4] 4]: {out}"
+    );
+    assert!(
+        !out.contains("2\n"),
+        "[['T 'N] 'M] should not dispatch: {out}"
+    );
+}

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::cmp::Ordering;
 
 use crate::ast::GenericTypes;
 
@@ -5408,15 +5409,79 @@ fn inline_callee_cross_call_error(caller: &str, callee: &str, span: Span) -> Str
 /// P7.S4 (R8, Phase 1): a basic diagnostic for more than one matching impl
 /// target. Phase 2 replaces this with the specificity partial order and
 /// ambiguity error.
-fn multiple_impl_targets_error(
+/// P7.S4 (R3): select the unique most-specific candidate from the matching
+/// `impl:` set, or return a located ambiguity error naming every competing
+/// target and the concrete type. A candidate is maximal (most specific) if
+/// no other candidate is strictly more specific than it. A unique maximal
+/// wins; two or more maximals are an ambiguity.
+#[allow(clippy::too_many_arguments)]
+fn select_most_specific(
+    candidates: &[(&ImplDecl, Subst)],
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    trait_name: &str,
+    span: Span,
+) -> Result<usize, String> {
+    // Find maximal candidates: those not strictly dominated by any other.
+    let maximal: Vec<usize> = (0..candidates.len())
+        .filter(|&i| {
+            (0..candidates.len()).all(|j| {
+                j == i
+                    || specificity(
+                        &candidates[j].0.target.pattern,
+                        &candidates[i].0.target.pattern,
+                        ty,
+                        arrays,
+                        cells,
+                        refs,
+                        generics,
+                    ) != Some(Ordering::Less)
+            })
+        })
+        .collect();
+
+    if maximal.len() == 1 {
+        return Ok(maximal[0]);
+    }
+
+    Err(ambiguity_error(trait_name, ty, candidates, &maximal, span))
+}
+
+/// P7.S4 (R8): a located ambiguity error at the dispatch site naming the
+/// trait, every competing target (rendered via `poly_type_str`), and the
+/// concrete instantiation.
+fn ambiguity_error(
     trait_name: &str,
     ty: Type,
-    _candidates: &[(&ImplDecl, Subst)],
+    candidates: &[(&ImplDecl, Subst)],
+    maximal: &[usize],
     span: Span,
 ) -> String {
+    let targets: Vec<String> = maximal
+        .iter()
+        .map(|&i| {
+            let target = &candidates[i].0.target;
+            let sig = crate::ast::PolySig {
+                row_in: None,
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: target.ty_var_names.clone(),
+                len_var_names: target.len_var_names.clone(),
+                row_var_names: Vec::new(),
+            };
+            format!("    `{}`", poly_type_str(&target.pattern, &sig))
+        })
+        .collect();
     format!(
-        "error: multiple `impl:` targets match `{ty}` for `{trait_name}` at line {}, col {} (ambiguous dispatch is not yet supported)",
-        span.line, span.col
+        "error: ambiguous `impl:` dispatch for `{trait_name}` at `{ty}` (line {}, col {})\n  matching targets:\n{}\n  no target is more specific than another; write a more specific `impl:` to resolve",
+        span.line,
+        span.col,
+        targets.join("\n"),
     )
 }
 
@@ -5429,10 +5494,10 @@ fn multiple_impl_targets_error(
 /// P7.S4 (R2/R6): the registry one-way-matches the concrete instantiation
 /// `Type` against each `impl:` target `PolyType` via `match_impl_target`,
 /// producing a `Subst` per match. Exactly one match → dispatch. Zero → the
-/// existing `unsatisfied_user_bound_error`. More than one → a basic
-/// "multiple `impl:` targets match" error (Phase 2 replaces this with
-/// specificity/ambiguity). For a generic winner (target not
-/// `PolyType::Concrete`), the dispatched symbol is
+/// existing `unsatisfied_user_bound_error`. More than one → the specificity
+/// partial order (Phase 2, R3) selects the unique most-specific candidate;
+/// two or more incomparable maxima are a located ambiguity error (R8). For a
+/// generic winner (target not `PolyType::Concrete`), the dispatched symbol is
 /// `instantiation_symbol(word_symbols[idx], &subst)` (not the bare
 /// `word_symbols[idx]`), and the `(member_word, subst)` pair is recorded for
 /// lowering. A concrete winner keeps the bare `word_symbols[idx]` path.
@@ -5488,15 +5553,25 @@ fn resolve_user_bound(
             refs,
         ));
     }
-    if candidates.len() > 1 {
-        return Err(multiple_impl_targets_error(
-            &trait_decl.name,
-            ty,
+    let winner = if candidates.len() > 1 {
+        // P7.S4 (R3): select the unique most-specific candidate via the
+        // equivalence-class refinement partial order. A unique maximal
+        // element wins; two or more incomparable maxima are a located
+        // ambiguity error.
+        select_most_specific(
             &candidates,
+            ty,
+            arrays,
+            cells,
+            refs,
+            generics.as_deref(),
+            &trait_decl.name,
             span,
-        ));
-    }
-    let (imp, subst) = &candidates[0];
+        )?
+    } else {
+        0
+    };
+    let (imp, subst) = &candidates[winner];
     let is_generic = !imp.target.is_concrete();
     for ob in tr
         .obligations_of(name, sig)
@@ -5785,6 +5860,305 @@ fn match_impl_target_rec(
             Some(())
         }
     }
+}
+
+// P7.S4 Phase 2 (R3): the specificity partial order — equivalence-class
+// refinement over shared variables.
+
+/// A flattened position in a specificity comparison. Each leaf in a pattern's
+/// structural walk against the matched concrete type is either a concrete
+/// value (a singleton equivalence class) or a variable (shared class with
+/// every other position holding the same variable id). Type variables and
+/// length variables are separate namespaces, so a `Position` carries the
+/// namespace tag to keep the two partitions distinct.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Position {
+    /// A type-position leaf: concrete or a type variable.
+    TyConcrete,
+    TyVar(u32),
+    /// A length-position leaf: concrete or a length variable.
+    LenConcrete,
+    LenVar(u32),
+}
+
+/// Walk a `PolyType` pattern against the concrete `Type` it matched,
+/// collecting one `Position` per leaf. `Concrete(t)` is unfolded by walking
+/// `ty`'s own structure (every leaf becomes concrete), so a concrete target
+/// produces the same positions as a structural pattern matching the same
+/// type. Returns `None` if the pattern's structure is incompatible with `ty`
+/// (should not happen for a pattern that already matched via
+/// `match_impl_target`, but handled for safety).
+#[allow(clippy::too_many_arguments)]
+fn collect_positions(
+    pattern: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    out: &mut Vec<Position>,
+) -> Option<()> {
+    match pattern {
+        PolyType::QuotLit => {
+            unreachable!("a quotation-literal marker never reaches a signature")
+        }
+        PolyType::Concrete(_) => collect_concrete_positions(ty, arrays, cells, refs, generics, out),
+        PolyType::Var(v) => {
+            out.push(Position::TyVar(*v));
+            Some(())
+        }
+        PolyType::Array(elem, len) => {
+            let Type::Array(id, _) = ty else {
+                return None;
+            };
+            let elem_ty = arrays[id.index()].element;
+            collect_positions(elem, elem_ty, arrays, cells, refs, generics, out)?;
+            match len {
+                Len::Concrete(_) => out.push(Position::LenConcrete),
+                Len::Var(ln) => out.push(Position::LenVar(*ln)),
+            }
+            Some(())
+        }
+        PolyType::Ref(referent, mutable) => {
+            let (slot_referent, slot_mutable) = ref_parts(ty, refs)?;
+            if slot_mutable != *mutable {
+                return None;
+            }
+            collect_positions(referent, slot_referent, arrays, cells, refs, generics, out)
+        }
+        PolyType::OwnedCell(payload) => {
+            let Type::OwnedCell(id, _) = ty else {
+                return None;
+            };
+            let slot_payload = cells[id.index()].payload;
+            collect_positions(payload, slot_payload, arrays, cells, refs, generics, out)
+        }
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: _,
+        } => {
+            let generics = generics?;
+            let found = if *is_enum {
+                let Type::Enum(id, _) = ty else {
+                    return None;
+                };
+                generics.enum_instantiation_of(id)
+            } else {
+                let Type::Struct(id, _) = ty else {
+                    return None;
+                };
+                generics.struct_instantiation_of(id)
+            };
+            let (found_idx, found_module, found_args) = found?;
+            if found_idx != *idx as usize
+                || found_module != *module
+                || found_args.len() != args.len()
+            {
+                return None;
+            }
+            let found_args = found_args.to_vec();
+            for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
+                collect_positions(arg_pty, *arg_ty, arrays, cells, refs, Some(generics), out)?;
+            }
+            Some(())
+        }
+        PolyType::Quotation(ins, outs, _, _, _) => {
+            let eff = crate::ast::is_quotation_type(ty)?;
+            if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
+                return None;
+            }
+            for (p, c) in ins.iter().zip(&eff.inputs) {
+                collect_positions(p, *c, arrays, cells, refs, generics, out)?;
+            }
+            for (p, c) in outs.iter().zip(&eff.outputs) {
+                collect_positions(p, *c, arrays, cells, refs, generics, out)?;
+            }
+            Some(())
+        }
+    }
+}
+
+/// Unfold a concrete `Type` into leaf positions, pushing a concrete
+/// `Position` at every leaf. This is the `Concrete(t)` arm of
+/// `collect_positions`: since the whole type is concrete, every position is
+/// a concrete singleton.
+#[allow(clippy::too_many_arguments)]
+fn collect_concrete_positions(
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    out: &mut Vec<Position>,
+) -> Option<()> {
+    match ty {
+        Type::Array(id, _) => {
+            let elem_ty = arrays[id.index()].element;
+            collect_concrete_positions(elem_ty, arrays, cells, refs, generics, out)?;
+            out.push(Position::LenConcrete);
+            Some(())
+        }
+        Type::Ref(id, _, _) => {
+            let referent = refs[id.index()].referent;
+            collect_concrete_positions(referent, arrays, cells, refs, generics, out)
+        }
+        Type::OwnedCell(id, _) => {
+            let payload = cells[id.index()].payload;
+            collect_concrete_positions(payload, arrays, cells, refs, generics, out)
+        }
+        Type::Struct(id, _) => {
+            if let Some(generics) = generics {
+                if let Some((_, _, args)) = generics.struct_instantiation_of(id) {
+                    if !args.is_empty() {
+                        for arg_ty in args {
+                            collect_concrete_positions(
+                                *arg_ty,
+                                arrays,
+                                cells,
+                                refs,
+                                Some(generics),
+                                out,
+                            )?;
+                        }
+                        return Some(());
+                    }
+                }
+            }
+            out.push(Position::TyConcrete);
+            Some(())
+        }
+        Type::Enum(id, _) => {
+            if let Some(generics) = generics {
+                if let Some((_, _, args)) = generics.enum_instantiation_of(id) {
+                    if !args.is_empty() {
+                        for arg_ty in args {
+                            collect_concrete_positions(
+                                *arg_ty,
+                                arrays,
+                                cells,
+                                refs,
+                                Some(generics),
+                                out,
+                            )?;
+                        }
+                        return Some(());
+                    }
+                }
+            }
+            out.push(Position::TyConcrete);
+            Some(())
+        }
+        Type::Quotation(eff) | Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => {
+            for c in &eff.inputs {
+                collect_concrete_positions(*c, arrays, cells, refs, generics, out)?;
+            }
+            for c in &eff.outputs {
+                collect_concrete_positions(*c, arrays, cells, refs, generics, out)?;
+            }
+            Some(())
+        }
+        _ => {
+            out.push(Position::TyConcrete);
+            Some(())
+        }
+    }
+}
+
+/// Whether two positions share the same equivalence class: both are the
+/// same variable id in the same namespace (type or length). Concrete
+/// positions are singletons — they share a class with no other position.
+fn same_class(a: &Position, b: &Position) -> bool {
+    match (a, b) {
+        (Position::TyVar(x), Position::TyVar(y)) => x == y,
+        (Position::LenVar(x), Position::LenVar(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// P7.S4 (R3): the specificity partial order over two `impl:` target
+/// patterns, both of which matched the same concrete `ty`. Collects
+/// flattened position slots for each pattern, then compares equivalence
+/// classes.
+///
+/// Returns `Some(Less)` if A is strictly more specific than B (A ≺ B),
+/// `Some(Greater)` if B is strictly more specific than A (B ≺ A), or `None`
+/// if neither is strictly more specific (equal or incomparable).
+///
+/// Pattern A ≺ B iff:
+/// (1) every position where B has a concrete value, A also has a concrete
+/// value (A doesn't relax B's concreteness);
+/// (2) B's equivalence classes refine A's — every pair sharing a class in B
+/// also shares a class in A (A is coarser/more-merged/more-constraining);
+/// (3) A is strictly more constrained somewhere — A has concrete where B has
+/// a variable, or B has a strictly finer partition (A has a coarser one).
+///
+/// Concrete positions are singletons. Type-variable and length-variable
+/// equivalence classes are separate namespaces (type var 0 and length var 0
+/// are distinct), matching `Subst`'s separate `ty`/`len` maps.
+#[allow(clippy::too_many_arguments)]
+fn specificity(
+    a: &PolyType,
+    b: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+) -> Option<Ordering> {
+    let mut a_pos = Vec::new();
+    let mut b_pos = Vec::new();
+    collect_positions(a, ty, arrays, cells, refs, generics, &mut a_pos)?;
+    collect_positions(b, ty, arrays, cells, refs, generics, &mut b_pos)?;
+    // Structures must be parallel (same number of positions).
+    if a_pos.len() != b_pos.len() {
+        return None;
+    }
+    let a_prec = is_strictly_more_specific(&a_pos, &b_pos);
+    let b_prec = is_strictly_more_specific(&b_pos, &a_pos);
+    match (a_prec, b_prec) {
+        (true, false) => Some(Ordering::Less),
+        (false, true) => Some(Ordering::Greater),
+        _ => None,
+    }
+}
+
+/// The three-condition check for A ≺ B over parallel position vectors.
+fn is_strictly_more_specific(a: &[Position], b: &[Position]) -> bool {
+    let n = a.len();
+    debug_assert_eq!(n, b.len());
+
+    // (1) A doesn't relax B's concreteness: every position where B is
+    // concrete, A is also concrete.
+    let cond1 = b.iter().zip(a).all(|(b_pos, a_pos)| {
+        !matches!(b_pos, Position::TyConcrete | Position::LenConcrete)
+            || matches!(a_pos, Position::TyConcrete | Position::LenConcrete)
+    });
+    if !cond1 {
+        return false;
+    }
+
+    // (2) B's classes refine A's: every pair sharing a class in B also
+    // shares a class in A.
+    let cond2 =
+        (0..n).all(|i| (i + 1..n).all(|j| !same_class(&b[i], &b[j]) || same_class(&a[i], &a[j])));
+    if !cond2 {
+        return false;
+    }
+
+    // (3) A is strictly more constrained somewhere: A has concrete where B
+    // has a variable, or B has a strictly finer partition (some pair in A's
+    // class is not in B's class).
+    let cond3a = a.iter().zip(b).any(|(a_pos, b_pos)| {
+        matches!(a_pos, Position::TyConcrete | Position::LenConcrete)
+            && matches!(b_pos, Position::TyVar(_) | Position::LenVar(_))
+    });
+    let cond3b =
+        (0..n).any(|i| (i + 1..n).any(|j| same_class(&a[i], &a[j]) && !same_class(&b[i], &b[j])));
+
+    cond3a || cond3b
 }
 
 /// only to tell the two conflicts apart: two operands disagreeing is a
@@ -12422,5 +12796,184 @@ mod tests {
         assert_eq!(subst.ty_of(0), Some(Type::I64));
         // Matching the same var against a different type fails
         assert!(match_impl_target(&pattern, Type::U32, &arrays, &[], &[], None).is_some());
+    }
+
+    // P7.S4 Phase 2 (R3): `specificity` / `is_strictly_more_specific` unit
+    // tests.
+    //
+    // The position-vector tests exercise the pure partial-order algorithm
+    // directly, covering the shared-variable scenarios that need
+    // `GenericTypes` to reach through `specificity`'s `collect_positions`
+    // walk. The `specificity` tests below exercise the full
+    // pattern-against-`ty` collection path for `Array` patterns (which need
+    // only an `ArrayDecl`).
+
+    #[test]
+    fn specificity_concrete_elem_more_specific_than_var_elem() {
+        // `[i64 N]` ≺ `['T N]`
+        let a = [Position::TyConcrete, Position::LenVar(0)];
+        let b = [Position::TyVar(0), Position::LenVar(0)];
+        assert!(is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_concrete_len_more_specific_than_var_len() {
+        // `['T 4]` ≺ `['T N]`
+        let a = [Position::TyVar(0), Position::LenConcrete];
+        let b = [Position::TyVar(0), Position::LenVar(0)];
+        assert!(is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_concrete_elem_vs_concrete_len_incomparable() {
+        // `[i64 N]` ⊥ `['T 4]` (neither more specific)
+        let a = [Position::TyConcrete, Position::LenVar(0)];
+        let b = [Position::TyVar(0), Position::LenConcrete];
+        assert!(!is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_equal_patterns_not_strictly_more_specific() {
+        // `['T N]` vs `['T N]` — equal, neither strictly more specific
+        let a = [Position::TyVar(0), Position::LenVar(0)];
+        assert!(!is_strictly_more_specific(&a, &a));
+    }
+
+    #[test]
+    fn specificity_box_concrete_more_specific_than_box_var() {
+        // `Box[i64]` ≺ `Box['T]`
+        let a = [Position::TyConcrete];
+        let b = [Position::TyVar(0)];
+        assert!(is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_shared_ty_var_more_specific_than_distinct() {
+        // `Map['T 'T]` ≺ `Map['T 'U]`: A's partition {{0,1}} is coarser than
+        // B's {{0},{1}}; B's classes refine A's.
+        let a = [Position::TyVar(0), Position::TyVar(0)];
+        let b = [Position::TyVar(0), Position::TyVar(1)];
+        assert!(is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_concrete_one_slot_vs_shared_var_incomparable() {
+        // `Map[i64 'T]` ⊥ `Map['T 'T]`: A more constrained at position 0
+        // (Concrete vs Var), B more constrained via sharing (positions linked
+        // vs independent) — incomparable.
+        let a = [Position::TyConcrete, Position::TyVar(0)];
+        let b = [Position::TyVar(0), Position::TyVar(0)];
+        assert!(!is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_nested_shared_len_more_specific() {
+        // `[[i64 N] N]` ≺ `[[i64 N] M]`: inner length = outer length, linked
+        // vs separate — the linked version is coarser/more-constraining, so
+        // more specific.
+        let a = [
+            Position::TyConcrete,
+            Position::LenVar(0),
+            Position::LenVar(0),
+        ];
+        let b = [
+            Position::TyConcrete,
+            Position::LenVar(0),
+            Position::LenVar(1),
+        ];
+        assert!(is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_nested_shared_len_vs_concrete_inner_incomparable() {
+        // `[['T N] N]` ⊥ `[['T 4] N]`: length variable N shared in A vs
+        // concrete in B; concrete inner length in B vs variable in A —
+        // incomparable.
+        let a = [Position::TyVar(0), Position::LenVar(0), Position::LenVar(0)];
+        let b = [
+            Position::TyVar(0),
+            Position::LenConcrete,
+            Position::LenVar(0),
+        ];
+        assert!(!is_strictly_more_specific(&a, &b));
+        assert!(!is_strictly_more_specific(&b, &a));
+    }
+
+    #[test]
+    fn specificity_array_concrete_elem_vs_var_elem() {
+        // `[i64 N]` ≺ `['T N]` via the full `specificity` function.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        assert_eq!(
+            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn specificity_array_concrete_len_vs_var_len() {
+        // `['T 4]` ≺ `['T N]` via the full `specificity` function.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        assert_eq!(
+            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn specificity_array_concrete_elem_vs_concrete_len_incomparable() {
+        // `[i64 N]` ⊥ `['T 4]` via the full `specificity` function.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(specificity(&a, &b, ty, &arrays, &[], &[], None), None);
+        assert_eq!(specificity(&b, &a, ty, &arrays, &[], &[], None), None);
+    }
+
+    #[test]
+    fn specificity_concrete_target_vs_generic_target() {
+        // `Concrete([i64 4])` ≺ `['T N]`: the concrete target unfolds to
+        // the same positions as the array pattern, all concrete.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let a = PolyType::Concrete(ty);
+        let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        assert_eq!(
+            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
     }
 }
