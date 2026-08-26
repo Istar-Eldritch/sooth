@@ -77,6 +77,16 @@ pub struct Module {
     /// one span. Symbol-deduped, so lowering emits one `IrFunc` per entry.
     /// Empty for a program whose generic words call no generic word.
     pub transitive_instantiations: Vec<CallInst>,
+    /// P7.S3o (R1/R2): per-splice instantiation records for poly calls
+    /// encountered inside a spliced combinator body, keyed by
+    /// `(inline_uid, body_span)`. Each splice mints a unique `inline_uid`,
+    /// so two splices of the same combinator at different types produce
+    /// distinct keys even though the body terms share spans. The checker
+    /// redirects `check_poly_call`'s `CallInst` here (instead of the
+    /// span-keyed `instantiations`) when inside a splice, and lowering reads
+    /// the per-splice record back through its stack of active `inline_uid`s.
+    /// Empty for a program whose combinators call no polymorphic word.
+    pub splice_records: std::collections::HashMap<(u32, Span), CallInst>,
     /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
     /// overload of a builtin-named word (e.g. `add` on two `Vec2`), keyed by the
     /// call site's `Span`, valued by the resolved callee's Sooth name. A
@@ -3220,6 +3230,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
             transitive_instantiations: Vec::new(),
+            splice_records: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -3372,6 +3383,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
             transitive_instantiations: Vec::new(),
+            splice_records: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -3448,6 +3460,7 @@ mod tests {
             instantiations: std::collections::HashMap::new(),
             poly_cross_calls: std::collections::HashMap::new(),
             transitive_instantiations: Vec::new(),
+            splice_records: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),

@@ -508,6 +508,9 @@ fn ambiguous_unqualified_member_call_is_rejected() {
 /// `Module::instantiations`, so a user bound on its own type variable has
 /// nowhere to resolve against -- an explicit, located rejection rather than a
 /// dispatch against records that do not survive.
+///
+/// P7.S3o Phase 1: the gate is removed; a bare member now produces a
+/// legible "unknown word" error from the standalone check.
 #[test]
 fn a_user_bound_on_a_poly_combinator_is_rejected() {
     let (_t, entry) = single_file(
@@ -522,10 +525,8 @@ fn a_user_bound_on_a_poly_combinator_is_rejected() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains(
-            "error: `'T: Show` on the combinator `shows` at line 7, col 3 is not supported"
-        ),
-        "{err}"
+        err.contains("error: unknown word `show` in `shows`"),
+        "after the gate removal, the bare member `show` should produce a legible 'unknown word' error from the standalone check, got: {err}"
     );
 }
 

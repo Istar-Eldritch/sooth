@@ -224,6 +224,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &poly_arities,
                 &combinator_bodies,
                 EnvPlan::None,
+                &module.splice_records,
             )
         })
         .collect();
@@ -296,6 +297,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .instantiations
         .values()
         .chain(&module.transitive_instantiations)
+        .chain(module.splice_records.values())
     {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
         if emitted.insert(symbol.clone()) {
@@ -351,6 +353,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &poly_arities,
             &combinator_bodies,
             EnvPlan::None,
+            &module.splice_records,
         ));
     }
 
@@ -692,6 +695,7 @@ pub fn lower_line(
         resolved_variant_fields,
         poly_arities,
         combinators,
+        empty_splice_records(),
     );
     (func, extra, m, out_bytes as usize)
 }
@@ -852,6 +856,7 @@ pub(crate) fn lower_word(
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
+    splice_records: &HashMap<(u32, Span), CallInst>,
 ) -> Vec<IrFunc> {
     let self_tail = crate::check::has_self_tail_call(word, combinators);
     lower_word_parts(
@@ -874,6 +879,7 @@ pub(crate) fn lower_word(
         poly_arities,
         combinators,
         EnvPlan::None,
+        splice_records,
     )
 }
 
@@ -936,6 +942,7 @@ pub(crate) fn lower_instantiation(
         empty_poly_arities(),
         combinators,
         EnvPlan::None,
+        empty_splice_records(),
     )
 }
 

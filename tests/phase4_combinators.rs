@@ -2452,25 +2452,37 @@ fn self_tail_combinator_dups_an_inline_quotation_parameter() {
     assert_eq!(stdout, "9\n9\n9\n");
 }
 
-/// P7.S3o recon: a poly combinator calling a poly word, spliced at two
-/// different concrete types, collides on the span-keyed `insts` table — last
-/// write wins, and the losing splice dispatches to the wrong monomorph. The
-/// 1a guard turns that silent miscompile into a located error.
+/// P7.S3o Phase 1: a poly combinator calling a poly word, spliced at two
+/// different concrete types, now compiles and runs correctly — each splice's
+/// inner-call instantiation is monomorphized independently via the per-splice
+/// `splice_records` mechanism. The 1a collision guard no longer fires because
+/// `check_poly_call` redirects the CallInst to `splice_records` (keyed by
+/// `(inline_uid, span)`) instead of the span-keyed `insts`.
 #[test]
-fn check_splice_collision_two_types_is_error() {
+fn check_splice_collision_two_types_compiles_correctly() {
     let src = ": pid ( 'T -- 'T ) |x| x ;
 \
                : c inline ( 'T -- 'T ) pid ;
 \
                : main ( -- ) 1 c drop 2.5 c drop ;
 ";
-    let err = check_error(&src);
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    // Two distinct splice records: one for i64, one for f64.
+    let pid_symbols: Vec<&String> = module.splice_records.values().map(|i| &i.symbol).collect();
+    assert_eq!(
+        pid_symbols.len(),
+        2,
+        "two splices at two types should produce two splice records, got: {pid_symbols:?}"
+    );
     assert!(
-        err.contains("`pid`")
-            && err.contains("instantiated at two different types")
-            && err.contains("inline combinator splice")
-            && err.contains("non-inline"),
-        "a poly combinator calling a poly word at two types should produce a splice collision error naming `pid` and suggesting non-inline, got: {err}"
+        pid_symbols.iter().any(|s| s.contains("i64")),
+        "an i64 monomorph should exist: {pid_symbols:?}"
+    );
+    assert!(
+        pid_symbols.iter().any(|s| s.contains("f64")),
+        "an f64 monomorph should exist: {pid_symbols:?}"
     );
 }
 
@@ -2506,4 +2518,94 @@ fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
         "died by signal or non-zero; stdout: {stdout}"
     );
     assert_eq!(stdout, "42");
+}
+
+// -- P7.S3o Phase 1: per-splice instantiation records ----------------------
+
+/// P7.S3o Phase 1 (R1): a poly combinator calling a poly word, spliced at
+/// i64 and f64, compiles and runs correctly — the `pid`/`c` fixture that
+/// previously hit the 1a collision guard. Two distinct monomorphs are
+/// emitted, and the program output is correct.
+#[test]
+fn splice_two_types_compiles_and_runs_correctly() {
+    let binary = build_binary(
+        "splice-two-types",
+        "import: intrinsics * ;
+\
+         : pid ( 'T -- 'T ) |x| x ;
+\
+         : c inline ( 'T -- 'T ) pid ;
+\
+         : main ( -- ) 1 c . 2.5 c . ;
+",
+    );
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2.5\n");
+}
+
+/// P7.S3o Phase 1 (R3, case a): a bounded poly word (`gt` with `'T: Copy Ord`)
+/// called from an inline combinator at two types (i64 and f64) dispatches to
+/// the correct `impl:` for each type — two distinct monomorphs, correct output.
+/// Uses the same body as `mymax` from `examples/poly_if.sth`, but `inline`.
+#[test]
+fn bounded_poly_word_from_inline_combinator_at_two_types() {
+    let src = "import: core::prelude * ;
+\
+         : maxof inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+\
+         : main ( -- ) 3 7 maxof . 2.5 9.5 maxof . ;
+";
+    let (stdout, code) = run_src("bounded-poly-from-combinator", &src);
+    assert_eq!(stdout, "7\n9.5\n");
+    assert_eq!(code, 0);
+}
+
+/// P7.S3o Phase 1 (R1, P1-2): a three-word chain (combinator → p1 → p2) at
+/// two types compiles and runs correctly — transitive discovery is preserved.
+#[test]
+fn three_word_chain_at_two_types_compiles_and_runs() {
+    let binary = build_binary(
+        "three-word-chain",
+        "import: intrinsics * ;
+\
+         : p2 ( 'T -- 'T ) |x| x ;
+\
+         : p1 ( 'T -- 'T ) p2 ;
+\
+         : c inline ( 'T -- 'T ) p1 ;
+\
+         : main ( -- ) 1 c . 2.5 c . ;
+",
+    );
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2.5\n");
+}
+
+/// P7.S3o Phase 1 (intermediate-state pin): a bounded combinator calling a
+/// bare trait member (`cmp` directly, not the `gt` wrapper) produces a
+/// legible "unknown word" error, not an ICE — Phase 3's dispatch injection
+/// will make this work.
+#[test]
+fn bare_member_from_bounded_combinator_is_legible_error() {
+    let src = "import: core::prelude * ;
+\
+         : maxof inline ( 'T: Copy Ord 'T -- 'T ) over over cmp ~[ drop ] ~[ swap drop ] if ;
+\
+         : main ( -- ) 3 7 maxof . ;
+";
+    let path = std::env::temp_dir().join(format!("sooth-bare-member-{}.sth", std::process::id()));
+    common::write_fixture(&path, &src).expect("writing temp source should succeed");
+    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .expect_err("build should fail its check");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("unknown word") && err.contains("cmp"),
+        "a bare member call from a bounded combinator should produce a legible 'unknown word' error, not an ICE, got: {err}"
+    );
 }

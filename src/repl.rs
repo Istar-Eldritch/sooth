@@ -3225,6 +3225,7 @@ impl Session {
                 &variant_fields,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
+                ir::empty_splice_records(),
             );
             funcs[0].name = symbol.clone();
             // R12: this module must carry its own struct/enum destructors

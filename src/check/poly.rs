@@ -462,6 +462,7 @@ pub(crate) fn check_poly_combinator_repl(
     combinators: &CombinatorEnv,
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut scratch_splice: HashMap<(u32, Span), CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
@@ -478,7 +479,7 @@ pub(crate) fn check_poly_combinator_repl(
         // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
         // can reach a REPL-checked combinator body.
         trait_resolve: TraitResolveCtx::scratch(),
-        impl_monos: &mut scratch_monos,
+        splice_records: &mut scratch_splice,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -4885,6 +4886,39 @@ pub(super) fn check_poly_call(
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
     let symbol = instantiation_symbol(name, &subst, generation);
+    // P7.S3o (R1/R2): when inside a combinator splice, redirect the
+    // already-minted CallInst to `splice_records` keyed by `(uid, span)`
+    // instead of the span-keyed `insts`. A poly combinator's body terms
+    // keep their original spans across every splice (alpha_rename_locals
+    // renames locals only), so two splices at two different concrete types
+    // would collide on the same span key — last write wins, and lowering
+    // reads only the surviving entry. The per-splice key `(uid, span)` is
+    // unique because each splice mints a fresh `inline_uid`, so both
+    // splices' inner-call instantiations survive independently. The 1a
+    // collision guard below is skipped for these calls; it stays as a
+    // safety net for any other path that might re-introduce the collision.
+    if let Some(uid) = prov.splice_uid {
+        poly.splice_records.insert(
+            (uid, span),
+            CallInst {
+                callee: name.to_string(),
+                subst,
+                symbol,
+                out_arity: outputs.len(),
+                output_types: outputs.clone(),
+                bundle: None,
+                generation,
+                quot_inputs,
+                trait_calls,
+                poly_calls: HashMap::new(),
+            },
+        );
+        stack.truncate(base);
+        for ty in outputs {
+            stack.push(Slot::computed(ty));
+        }
+        return Ok(std::mem::take(stack));
+    }
     // P7.S3o recon: a poly combinator's body terms keep their original spans
     // across every splice (alpha_rename_locals renames locals only), so two
     // splices at two different concrete types insert CallInsts at the *same*
@@ -4954,6 +4988,7 @@ pub(super) fn check_poly_call(
 pub(super) fn discover_transitive_instantiations(
     module: &mut Module,
     insts: &mut HashMap<Span, CallInst>,
+    splice_records: &mut HashMap<(u32, Span), CallInst>,
     word_symbols: &[String],
     trait_obligations: &[WordObligations],
     impl_monos: Vec<(String, Subst)>,
@@ -4995,27 +5030,7 @@ pub(super) fn discover_transitive_instantiations(
         records: poly_cross_calls,
         tr,
     };
-    // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
-    // The member word is polymorphic (poly: Some), so lowering finds it in
-    // `poly_words` and computes the concrete effect from the sig + subst.
-    // Shared with `fixpoint`'s own mid-composition discoveries via
-    // `impl_mono_seed`, so both routes materialize the same CallInst shape.
-    let mut extra_seeds: Vec<CallInst> = Vec::new();
-    for (word_name, subst) in &impl_monos {
-        let symbol = instantiation_symbol(word_name, subst, None);
-        // Dedup: the same (word, subst) may be discovered at multiple call sites.
-        if extra_seeds.iter().any(|s| s.symbol == symbol) {
-            continue;
-        }
-        if let Some(seed) = ground.impl_mono_seed(word_name, subst, arrays, refs, owned_cells)? {
-            extra_seeds.push(seed);
-        }
-    }
-    // N2: no records and no impl monos means nothing to compose.
-    if poly_cross_calls.is_empty() && extra_seeds.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut transitive = ground.fixpoint(insts, extra_seeds, arrays, refs, owned_cells)?;
+    let mut transitive = ground.fixpoint(insts, splice_records, arrays, refs, owned_cells)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -5026,6 +5041,9 @@ pub(super) fn discover_transitive_instantiations(
         intern_composed_bundles(structs, inst);
     }
     for inst in insts.values_mut() {
+        intern_composed_bundles(structs, inst);
+    }
+    for inst in splice_records.values_mut() {
         intern_composed_bundles(structs, inst);
     }
     Ok(transitive)
@@ -5066,7 +5084,7 @@ impl CrossGround<'_> {
     fn fixpoint(
         &self,
         insts: &mut HashMap<Span, CallInst>,
-        impl_seeds: Vec<CallInst>,
+        splice_records: &mut HashMap<(u32, Span), CallInst>,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
@@ -5086,45 +5104,21 @@ impl CrossGround<'_> {
             inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
         }
-        // P7.S4 (R6): seed the generic-impl member-word monomorphs into the
-        // fixpoint, so their bodies' poly cross-calls get composed and their
-        // own `poly_calls` routing maps are filled.
-        for mut inst in impl_seeds {
-            if !seen.insert(inst.symbol.clone()) {
-                continue;
-            }
-            inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
+        // P7.S3o (R1/R2): splice-derived CallInsts are concrete instantiations
+        // of poly words called from combinator bodies. They seed the fixpoint
+        // just like ordinary instantiations, so a poly chain (combinator →
+        // p1 → p2) discovers p2 through p1's cross-calls.
+        for inst in splice_records.values_mut() {
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
-            frontier.push(inst);
         }
         let mut transitive: Vec<CallInst> = Vec::new();
-        loop {
-            while !frontier.is_empty() {
-                let mut next = Vec::new();
-                for mut inst in frontier {
-                    inst.poly_calls =
-                        self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
-                    enqueue_new(&inst.poly_calls, &mut seen, &mut next);
-                    transitive.push(inst);
-                }
-                frontier = next;
-            }
-            // Seed anything composition discovered along the way and loop
-            // again if that introduces new work -- a generic-impl member
-            // word whose own body calls another poly word still needs its
-            // cross-calls composed, and its resolution can discover yet
-            // another impl mono in turn.
-            for (word_name, subst) in std::mem::take(&mut discovered) {
-                let symbol = instantiation_symbol(&word_name, &subst, None);
-                if !seen.insert(symbol) {
-                    continue;
-                }
-                if let Some(seed) = self.impl_mono_seed(&word_name, &subst, arrays, refs, cells)? {
-                    frontier.push(seed);
-                }
-            }
-            if frontier.is_empty() {
-                break;
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for mut inst in frontier {
+                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
+                enqueue_new(&inst.poly_calls, &mut seen, &mut next);
+                transitive.push(inst);
             }
         }
         // `insts` iterates a `HashMap`, so the discovery order is randomized;
@@ -7159,6 +7153,9 @@ fn trait_member_operand_error(
 
 /// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): reject a user trait bound on
 /// a polymorphic combinator's own type variable, before its body is checked.
+/// P7.S3o Phase 1: the call site at `check.rs` is removed; this function is
+/// retained (dead code) for documented rationale and future reuse.
+#[allow(dead_code)]
 pub(super) fn reject_user_bound_on_combinator(
     word: &WordDef,
     sig: &PolySig,
@@ -7183,6 +7180,8 @@ pub(super) fn reject_user_bound_on_combinator(
 /// they never reach `Module::instantiations`, so there is no `CallInst` for a
 /// resolved trait obligation to live on. A user bound on such a word's own
 /// type variable is rejected rather than dispatched against stale records.
+/// P7.S3o Phase 1: dead code after the call site removal above.
+#[allow(dead_code)]
 fn user_bound_on_combinator_error(word: &str, trait_name: &str, var: &str, span: Span) -> String {
     format!(
         "error: `{var}: {trait_name}` on the combinator `{word}` at line {}, col {} is not supported\n  note: a combinator is spliced at its call sites and records no instantiation a trait bound could resolve against",
@@ -8394,9 +8393,9 @@ mod tests {
     }
 
     /// R9/R17 scope cut (P7.S3o): a polymorphic combinator's instantiation
-    /// records are scratch, so there is no `CallInst` a resolved obligation
-    /// could ride -- a user bound on its own type variable is rejected rather
-    /// than dispatched against records that do not survive.
+    /// P7.S3o Phase 1: the `reject_user_bound_on_combinator` gate is removed.
+    /// A bare member call (`show`) now falls through the standalone check as an
+    /// unknown word, producing a legible error instead of the old gate rejection.
     #[test]
     fn user_bound_on_a_combinator_is_rejected() {
         let err = check_src(&format!(
@@ -8404,10 +8403,9 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            err.contains("`'T: Show` on the combinator `shows` at line 6, col 3 is not supported"),
-            "{err}"
+            err.contains("error: unknown word `show` in `shows`"),
+            "after the gate removal, the bare member `show` should produce a legible 'unknown word' error, got: {err}"
         );
-        assert!(err.contains("records no instantiation"), "{err}");
     }
 
     /// R10 barrier 1: a plain (non-builtin) member name over a *bare* type

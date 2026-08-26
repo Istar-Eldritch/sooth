@@ -184,6 +184,13 @@ pub(super) struct Provenance {
     /// caller's scope (R18: binding, not string rewriting), so without this a
     /// nested `each` inside a `map` would re-bind the outer `arr`/`f`.
     pub(super) inline_uid: u32,
+    /// P7.S3o (R1/R2): `Some(uid)` while a combinator body is being spliced,
+    /// telling `check_poly_call` to redirect the minted `CallInst` to
+    /// `splice_records` (keyed by `(uid, span)`) instead of the span-keyed
+    /// `insts`. Saved and restored around each splice so nested combinators
+    /// resolve at their own `uid`. `None` on the monomorphic and standalone
+    /// paths.
+    pub(super) splice_uid: Option<u32>,
 }
 
 impl Provenance {

@@ -365,6 +365,15 @@ pub(super) struct FuncBuilder<'a> {
     /// would rebind to an inner combinator's same-named local (dynamic, not
     /// lexical, capture).
     inline_uid: u32,
+    /// P7.S3o (R1/R2): per-splice instantiation records, keyed by
+    /// `(inline_uid, body_span)`. Read through `splice_uid_stack` when
+    /// lowering a poly call inside a spliced combinator body, instead of
+    /// the span-keyed `instantiations` (which would collide across splices).
+    splice_records: &'a HashMap<(u32, Span), CallInst>,
+    /// P7.S3o (R1/R2): the stack of active splice `inline_uid`s, pushed on
+    /// combinator-splice entry and popped on exit. `last()` is the current
+    /// splice's uid; `None` (empty stack) means we are not inside a splice.
+    splice_uid_stack: Vec<u32>,
     /// Slice 7a (R9): the quotation literals this func materialized, in mint
     /// order. Drained by the lowering driver, which lowers each into its own
     /// `IrFunc`. Deduped by `symbol` at mint (one literal materialized twice in
@@ -430,6 +439,8 @@ impl<'a> FuncBuilder<'a> {
             quot_arm_tags: Vec::new(),
             quot_bodies: HashMap::new(),
             inline_uid: 0,
+            splice_records: empty_splice_records(),
+            splice_uid_stack: Vec::new(),
             materialized: Vec::new(),
         }
     }
@@ -888,6 +899,7 @@ pub(super) fn lower_word_parts(
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
     env_plan: EnvPlan,
+    splice_records: &HashMap<(u32, Span), CallInst>,
 ) -> Vec<IrFunc> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
@@ -909,6 +921,7 @@ pub(super) fn lower_word_parts(
     b.resolved_variant_fields = resolved_variant_fields;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
+    b.splice_records = splice_records;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
     // the target quotation type for the slot it materializes.
     b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
@@ -1048,6 +1061,7 @@ pub(super) fn lower_word_parts(
         resolved_variant_fields,
         poly_arities,
         combinators,
+        splice_records,
     ));
     out
 }
@@ -1071,6 +1085,7 @@ pub(super) fn lower_materialized(
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
+    splice_records: &HashMap<(u32, Span), CallInst>,
 ) -> Vec<IrFunc> {
     let mut out = Vec::new();
     for m in mats {
@@ -1116,6 +1131,7 @@ pub(super) fn lower_materialized(
                 true => EnvPlan::OwningEnv(m.captures),
                 false => EnvPlan::Env(m.captures),
             },
+            splice_records,
         ));
     }
     out
