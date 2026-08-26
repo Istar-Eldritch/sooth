@@ -174,6 +174,11 @@ struct PolyCtx<'a> {
     /// decided and resolved against. `TraitResolveCtx::scratch()` on the REPL
     /// paths, which can carry no user bound at all.
     trait_resolve: TraitResolveCtx<'a>,
+    /// P7.S4 (R6): the `(member_word_name, subst)` pairs for generic-impl
+    /// dispatches discovered during this walk, collected so lowering can emit
+    /// the polymorphic member word's body under the instantiation symbol.
+    /// Empty on the REPL/combinator-scratch paths, which declare no `impl:`.
+    impl_monos: &'a mut Vec<(String, crate::ast::Subst)>,
     /// P7.S3o (R1/R2): per-splice instantiation records, written by
     /// `check_poly_call` when `prov.splice_uid` is `Some`. Scratch (discarded)
     /// on the standalone/REPL paths; the module-level table on the main path.
@@ -814,6 +819,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // P7.S4 (R6): the `(member_word_name, subst)` pairs for generic-impl
+    // dispatches discovered during the call-site loop, used to seed
+    // `discover_transitive_instantiations` so lowering emits the polymorphic
+    // member word's body under the instantiation symbol.
+    let mut impl_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     // P7.S3o (R1/R2): per-splice instantiation records, filled as each
     // spliced combinator body's calls to polymorphic words are unified, then
     // stored on the module for lowering.
@@ -948,6 +958,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
                 let mut scratch_splice: HashMap<(u32, Span), CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+                let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
                     HashMap::new();
@@ -961,6 +972,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     combinators: &combinators,
                     eliminators: &eliminators,
                     trait_resolve,
+                    impl_monos: &mut scratch_monos,
                     splice_records: &mut scratch_splice,
                     splice_trait_calls: &mut scratch_trait_calls,
                     combinator_sig: None,
@@ -994,6 +1006,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 resolved_variant_fields: &mut resolved_variant_fields,
                 combinators: &combinators,
                 eliminators: &eliminators,
+                impl_monos: &mut impl_monos,
                 trait_resolve,
                 splice_records: &mut splice_records,
                 splice_trait_calls: &mut splice_trait_calls,
@@ -1094,6 +1107,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         &mut splice_records,
         &symbols,
         &trait_obligations,
+        std::mem::take(&mut impl_monos),
     )?;
     module.instantiations = insts;
     module.splice_records = splice_records;
@@ -1308,6 +1322,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut splice_recs,
+        impl_monos: &mut scratch_monos,
         splice_trait_calls: &mut splice_trait_recs,
         combinator_sig: None,
         combinator_subst: None,
@@ -1400,6 +1415,7 @@ pub(crate) fn infer_line(
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut splice_recs,
+        impl_monos: &mut scratch_monos,
         splice_trait_calls: &mut splice_trait_recs,
         combinator_sig: None,
         combinator_subst: None,

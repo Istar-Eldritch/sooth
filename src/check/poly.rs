@@ -496,6 +496,7 @@ pub(crate) fn check_poly_combinator_repl(
         combinators,
         eliminators: &eliminators,
         // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
+        impl_monos: &mut scratch_monos,
         // can reach a REPL-checked combinator body.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut scratch_splice,
@@ -1135,12 +1136,10 @@ pub(super) fn resolve_splice_member_call(
     // concrete.
     if let Some(uid) = prov.splice_uid {
         let trait_decl = &poly.trait_resolve.traits[trait_id.index()];
-        let Some(imp) = poly
-            .trait_resolve
-            .impls
-            .iter()
-            .find(|i| i.trait_id == trait_id && i.target_ty == ty)
-        else {
+        let Some(imp) = poly.trait_resolve.impls.iter().find(|i| {
+            i.trait_id == trait_id
+                && match_impl_target(&i.target.pattern, ty, &[], &[], &[], None).is_some()
+        }) else {
             return Err(unsatisfied_user_bound_error(
                 ctx,
                 span,
@@ -5330,7 +5329,34 @@ pub(super) fn discover_transitive_instantiations(
         records: poly_cross_calls,
         tr,
     };
-    let mut transitive = ground.fixpoint(insts, splice_records, arrays, refs, owned_cells)?;
+    // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
+    let mut extra_seeds: Vec<CallInst> = Vec::new();
+    for (word_name, subst) in &impl_monos {
+        let symbol = instantiation_symbol(word_name, subst, None);
+        if extra_seeds.iter().any(|s| s.symbol == symbol) {
+            continue;
+        }
+        if let Some(seed) = ground.impl_mono_seed(word_name, subst, arrays, refs, owned_cells)? {
+            extra_seeds.push(seed);
+        }
+    }
+    if poly_cross_calls.is_empty() && extra_seeds.is_empty() {
+        // Still need to intern bundles for splice_records before returning.
+        for inst in splice_records.values_mut() {
+            if inst.out_arity >= 2 {
+                inst.bundle = Some(intern_bundle_struct(structs, &inst.output_types));
+            }
+        }
+        return Ok(Vec::new());
+    }
+    let mut transitive = ground.fixpoint(
+        insts,
+        splice_records,
+        extra_seeds,
+        arrays,
+        refs,
+        owned_cells,
+    )?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -5385,6 +5411,7 @@ impl CrossGround<'_> {
         &self,
         insts: &mut HashMap<Span, CallInst>,
         splice_records: &mut HashMap<(u32, Span), CallInst>,
+        extra_seeds: Vec<CallInst>,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
@@ -5409,16 +5436,45 @@ impl CrossGround<'_> {
         // just like ordinary instantiations, so a poly chain (combinator →
         // p1 → p2) discovers p2 through p1's cross-calls.
         for inst in splice_records.values_mut() {
-            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells)?;
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
         }
+        // P7.S4 (R6): seed the generic-impl member-word monomorphs into the
+        // fixpoint, so their bodies' poly cross-calls get composed and their
+        // own `poly_calls` routing maps are filled.
+        for mut inst in extra_seeds {
+            if !seen.insert(inst.symbol.clone()) {
+                continue;
+            }
+            inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
+            enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
+            frontier.push(inst);
+        }
         let mut transitive: Vec<CallInst> = Vec::new();
-        while !frontier.is_empty() {
-            let mut next = Vec::new();
-            for mut inst in frontier {
-                inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
-                enqueue_new(&inst.poly_calls, &mut seen, &mut next);
-                transitive.push(inst);
+        loop {
+            while !frontier.is_empty() {
+                let mut next = Vec::new();
+                for mut inst in frontier {
+                    inst.poly_calls =
+                        self.cross_calls_of(&inst, arrays, refs, cells, &mut discovered)?;
+                    enqueue_new(&inst.poly_calls, &mut seen, &mut next);
+                    transitive.push(inst);
+                }
+                frontier = next;
+            }
+            // Seed anything composition discovered along the way and loop
+            // again if that introduces new work.
+            for (word_name, subst) in std::mem::take(&mut discovered) {
+                let symbol = instantiation_symbol(&word_name, &subst, None);
+                if !seen.insert(symbol) {
+                    continue;
+                }
+                if let Some(seed) = self.impl_mono_seed(&word_name, &subst, arrays, refs, cells)? {
+                    frontier.push(seed);
+                }
+            }
+            if frontier.is_empty() {
+                break;
             }
         }
         // `insts` iterates a `HashMap`, so the discovery order is randomized;
