@@ -306,6 +306,15 @@ struct Slot {
     /// Moved verbatim by a shuffle (a duped literal keeps its value), cleared
     /// by any operator/conversion/word call or branch merge (D8: no folding).
     int_val: Option<i64>,
+    /// P7.S5 (R3): the variant index of a nullary enum variant constructor's
+    /// output (`None` for any other value). Load-bearing for `fill`'s element
+    /// gate: a linear element is admitted when the seed is a known nullary
+    /// variant (`Some(_)`), because a nullary variant has no payload to
+    /// replicate. Set only when a nullary variant constructor pushes its
+    /// value, cleared by any operator/conversion/word call or branch merge
+    /// (the same rule `int_val` uses: only a moved-verbatim shuffle preserves
+    /// known provenance).
+    variant_idx: Option<u32>,
     /// Which region this aggregate value denotes, and where this name for
     /// it was pushed.
     alias: Option<Alias>,
@@ -332,6 +341,7 @@ impl Slot {
             ty,
             literal: false,
             int_val: None,
+            variant_idx: None,
             alias: None,
             deriv: None,
             quot: None,
@@ -528,6 +538,12 @@ fn find_zero_unsafe_element(
 /// composes `constructed_reference_error`'s noun phrase from it the same way
 /// -- `fill` passing `"fill"` keeps both byte-identical to before this gate
 /// existed.
+///
+/// P7.S5 (R3): `seed_variant_idx` is the seed slot's `variant_idx`, set when
+/// a nullary variant constructor produced the seed. A linear element is
+/// admitted when this is `Some(_)` — a nullary variant has no payload to
+/// replicate. `None` for the array constructor (which has no seed slot) and
+/// for any non-nullary seed.
 #[allow(clippy::too_many_arguments)]
 fn check_array_element_gate(
     ctx: &Ctx,
@@ -538,6 +554,7 @@ fn check_array_element_gate(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     zero_safety: bool,
+    seed_variant_idx: Option<u32>,
 ) -> Result<(), String> {
     if contains_reference(element, structs, enums, arrays) {
         return Err(constructed_reference_error(
@@ -548,7 +565,20 @@ fn check_array_element_gate(
         ));
     }
     if !is_copy(element, structs, enums, arrays) {
-        return Err(fill_of_linear_element_error(ctx, span, element, site));
+        // R3: a nullary-variant seed admits a linear element — the variant
+        // has no payload to replicate, so `fill` stores the same discriminant
+        // into every slot without duplicating a resource.
+        if seed_variant_idx.is_some() {
+            return Ok(());
+        }
+        // R10: `fill`'s non-nullary linear seed is a located error naming
+        // `tabulate` as the construction path for distinct linear values.
+        // The array constructor (zero_safety) keeps the old diagnostic until
+        // Phase 3 deletes both it and the constructor.
+        if zero_safety {
+            return Err(fill_of_linear_element_error(ctx, span, element, site));
+        }
+        return Err(fill_linear_non_nullary_seed_error(ctx, span, element));
     }
     if zero_safety {
         if let Some((bad, path)) = find_zero_unsafe_element(element, structs, enums, arrays) {
@@ -3316,6 +3346,24 @@ fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type, site: &str) -
     }
 }
 
+/// P7.S5 (R10): `fill` given a linear, non-nullary-variant seed — the case
+/// R3's relaxation does not cover. A data-carrying linear value cannot be
+/// replicated across array slots without duplicating a resource, so the
+/// located error names the element type and points to `tabulate` as the
+/// construction path for distinct linear values. Distinct from the deleted
+/// `fill_of_linear_element_error` (Phase 3 removes that and the array
+/// constructor's call site; this replaces `fill`'s own call site).
+fn fill_linear_non_nullary_seed_error(ctx: &Ctx, span: Span, elem: Type) -> String {
+    match ctx {
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: `fill` cannot replicate a linear value in {} (line {})\n  `{}` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, elem, effect_str(effect)),
+        Ctx::Line { .. } => format!(
+            "error: `fill` cannot replicate a linear value: `{elem}` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values"
+        ),
+    }
+}
+
 /// D3 (slice 6h phase 2): the array constructor's element transitively
 /// contains `str`/`cstr`/a quotation -- all `Copy` and pointer-shaped, so an
 /// all-zero slot would be a null pointer whose first read faults. Names the
@@ -4481,30 +4529,104 @@ mod tests {
     }
     #[test]
     fn check_fill_of_linear_element_is_error() {
-        // `fill` has no per-slot `Copy` gate today (unlike `dup`/`over`), and
-        // array-element linearity isn't tracked transitively, so a linear
-        // element is rejected rather than silently replicated/leaked.
+        // P7.S5 (R10): `fill` on a linear, non-nullary-variant seed is a
+        // located error naming the element type and `tabulate` as the
+        // construction path for distinct linear values.
         let err = check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
         assert!(
-            err.contains("not supported yet"),
+            err.contains("`fill` cannot replicate a linear value"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        assert!(err.contains("tabulate"), "unexpected message: {err}");
     }
     #[test]
     fn check_fill_of_linear_struct_element_is_error() {
         // The same rejection applies transitively: a struct that is linear
-        // because one of its fields is (R7) is just as unsupported as a bare
-        // `Spy` element.
+        // because one of its fields is (R7) is just as rejected as a bare
+        // `Spy` element, with the R10 diagnostic naming `tabulate`.
         let err = check_src(&format!(
             "{SPY_DEF}type: Holder xs Spy ;\n: w ( -- ) 0 Spy Holder 3 fill drop ;"
         ))
         .unwrap_err();
         assert!(
-            err.contains("not supported yet"),
+            err.contains("`fill` cannot replicate a linear value"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`Holder`"), "unexpected message: {err}");
+        assert!(err.contains("tabulate"), "unexpected message: {err}");
+    }
+    #[test]
+    fn fill_admits_nullary_variant_seed_of_linear_enum() {
+        // P7.S5 (R3): `None` is a nullary variant of `Opt`, which is linear
+        // because `Some` carries a `Spy`. `fill` admits the linear element
+        // because `variant_idx` is set on the seed slot — a nullary variant
+        // has no payload to replicate.
+        check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             type: Opt | None | Some val Spy ;\n\
+             : w ( -- ) None 3 fill drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("None 3 fill should compile: nullary variant seed is safe to replicate");
+    }
+    #[test]
+    fn fill_rejects_non_nullary_linear_seed_with_tabulate_hint() {
+        // P7.S5 (R10): `Some` is a non-nullary variant of `Opt`. The seed
+        // value produced by `0 Spy Some` is an `Opt` (linear) but
+        // `variant_idx` is `None` (the constructor has inputs), so `fill`
+        // rejects with the R10 diagnostic naming `tabulate`.
+        let err = check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             type: Opt | None | Some val Spy ;\n\
+             : w ( -- ) 0 Spy Some 3 fill drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`fill` cannot replicate a linear value"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Opt`"), "unexpected message: {err}");
+        assert!(err.contains("tabulate"), "unexpected message: {err}");
+    }
+    #[test]
+    fn variant_idx_cleared_by_word_call_so_fill_rejects() {
+        // P7.S5 (R3): `variant_idx` is set by the nullary variant constructor
+        // `None`, but cleared by any word call (the output is
+        // `Slot::computed`). A word `( Opt -- Opt )` forwarding the value
+        // produces a fresh computed slot with `variant_idx: None`, so `fill`
+        // rejects the now-anonymous linear seed.
+        let err = check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             type: Opt | None | Some val Spy ;\n\
+             : id ( Opt -- Opt ) ;\n\
+             : w ( -- ) None id 3 fill drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`fill` cannot replicate a linear value"),
+            "a word call should clear variant_idx: {err}"
+        );
+    }
+    #[test]
+    fn variant_idx_preserved_by_swap_so_fill_admits() {
+        // P7.S5 (R3): `variant_idx` is moved verbatim by a shuffle (Slot is
+        // Copy). `swap` reorders the stack without transforming the value,
+        // so `None`'s `variant_idx` survives the shuffle and `fill` admits
+        // the linear nullary-variant seed.
+        check_src(
+            "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             type: Opt | None | Some val Spy ;\n\
+             : w ( -- ) 0 None swap drop 3 fill drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("swap should preserve variant_idx: None 0 swap drop 3 fill should compile");
     }
     #[test]
     fn fill_forwards_surviving_set_so_a_returned_array_rejects_an_escaping_capture() {

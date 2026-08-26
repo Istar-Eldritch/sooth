@@ -1805,14 +1805,15 @@ mod tests {
     }
     #[test]
     fn fill_diagnostics_unchanged_after_site_parameterization() {
-        // D2: `fill`'s rendered diagnostics must stay byte-identical to
-        // before the shared gate existed. Assert the full strings, not
-        // `contains("fill")`.
+        // D2/P7.S5: `fill`'s rendered diagnostics for a linear element now use
+        // the R10 diagnostic (naming `tabulate`), distinct from the array
+        // constructor's old `fill_of_linear_element_error` (Phase 3 deletes
+        // that). The reference-element diagnostic is unchanged.
         let linear_err =
             check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
         assert_eq!(
             linear_err,
-            "error: linear array elements are not supported yet in `w` (line 3)\n  `fill` would replicate a `Spy` across every slot, but `Spy` is linear and has no `Copy` instance\n  note: declared ( -- )"
+            "error: `fill` cannot replicate a linear value in `w` (line 3)\n  `Spy` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values\n  note: declared ( -- )"
         );
         let ref_err = check_src(": w ( &i64 -- ) 3 fill drop ;").unwrap_err();
         assert_eq!(

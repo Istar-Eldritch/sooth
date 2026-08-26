@@ -129,6 +129,7 @@ fn check_term(
                 ty: Type::I64,
                 literal: true,
                 int_val: Some(*n),
+                variant_idx: None,
                 alias: None,
                 deriv: None,
                 quot: None,
@@ -969,6 +970,25 @@ fn check_term(
             }
             let carried = (base..stack.len())
                 .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
+            // R3: detect a nullary variant constructor to set `variant_idx`
+            // on the output slot, so `fill`'s element gate can admit a linear
+            // nullary-variant seed (a nullary variant has no payload to
+            // replicate). `chosen.symbol` is the variant's own `name` from
+            // `enum_generated_sigs`, never mangled, so it matches the enum
+            // declaration's `variant.name` directly.
+            let nullary_variant_idx = if sig.inputs.is_empty() && sig.outputs.len() == 1 {
+                if let Type::Enum(id, _) = sig.outputs[0] {
+                    ctx.enums()[id.index()]
+                        .variants
+                        .iter()
+                        .position(|v| v.fields.is_empty() && v.name == chosen.symbol)
+                        .map(|vi| vi as u32)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             stack.truncate(base);
             for ty in &sig.outputs {
                 let surviving = if carried.is_some()
@@ -981,6 +1001,7 @@ fn check_term(
                 };
                 stack.push(Slot {
                     surviving,
+                    variant_idx: nullary_variant_idx,
                     ..Slot::computed(*ty)
                 });
             }
@@ -1073,6 +1094,7 @@ fn check_term(
                 ctx.enums(),
                 arrays,
                 true,
+                None,
             )?;
             stack.push(Slot::computed(*ty));
             Ok(stack)
@@ -1661,6 +1683,9 @@ fn check_branch_join(
             // A value merged from two branches is never a single
             // known literal, so it can't feed a compile-time count.
             int_val: None,
+            // R3: a merged value loses nullary-variant provenance —
+            // either arm may have transformed it.
+            variant_idx: None,
             alias,
             deriv,
             // R7: only a marker both arms agree on survives the join.

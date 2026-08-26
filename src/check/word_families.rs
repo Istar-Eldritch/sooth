@@ -985,6 +985,7 @@ pub(super) fn check_array_word(
                 ctx.enums(),
                 arrays,
                 false,
+                element.variant_idx,
             )?;
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
             // Review fix: forward the element's surviving set (R19) onto the
@@ -3125,7 +3126,7 @@ mod tests {
              : main ( -- ) ;\n",
         )
         .unwrap();
-        // `fill` on the same linear type still rejects.
+        // `fill` on the same linear type still rejects (R10).
         let fill_err = check_src(
             "type: Spy tag i64 ;\n\
              : drop ( Spy -- ) | s | s Spy> drop ;\n\
@@ -3134,7 +3135,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            fill_err.contains("linear array elements are not supported yet"),
+            fill_err.contains("`fill` cannot replicate a linear value"),
             "fill should reject a linear element: {fill_err}"
         );
     }

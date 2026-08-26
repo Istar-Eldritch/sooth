@@ -2363,14 +2363,47 @@ fn main_declaring_linear_input_is_error() {
 
 #[test]
 fn fill_of_linear_element_is_error() {
-    // Array-element linearity isn't tracked transitively by the drop-glue
-    // path yet, so `fill` rejects a linear element outright.
+    // P7.S5 (R10): `fill` on a linear, non-nullary-variant seed is a located
+    // error naming the element type and `tabulate` as the construction path
+    // for distinct linear values.
     let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  0 Spy 3 fill drop ;\n"));
     assert!(
-        err.contains("linear array elements are not supported yet"),
+        err.contains("`fill` cannot replicate a linear value"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    assert!(err.contains("tabulate"), "unexpected message: {err}");
+}
+
+#[test]
+fn fill_nullary_variant_seed_of_linear_enum_compiles() {
+    // P7.S5 (R12, construction half): `None` is a nullary variant of `Opt`,
+    // which is linear because `Some` carries a `Spy`. `fill` admits the
+    // linear element because the seed is a known nullary variant — no
+    // payload to replicate. The disposal half (dropping the array) is
+    // Phase 4's synthesized array destructor.
+    let src = format!(
+        "{SPY_DEF}type: Opt | None | Some val Spy ;\n: main ( -- )\n  None 3 fill drop ;\n"
+    );
+    let tokens = lexer::lex(&src).expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("None 3 fill should compile: nullary variant seed");
+}
+
+#[test]
+fn fill_non_nullary_linear_seed_rejected_with_tabulate_hint() {
+    // P7.S5 (R13, rejection): `Some` is a non-nullary variant of `Opt`. The
+    // seed value is an `Opt` (linear) but `variant_idx` is `None` (the
+    // constructor has inputs), so `fill` rejects with R10's diagnostic.
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Opt | None | Some val Spy ;\n: main ( -- )\n  0 Spy Some 3 fill drop ;\n"
+    ));
+    assert!(
+        err.contains("`fill` cannot replicate a linear value"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Opt`"), "unexpected message: {err}");
+    assert!(err.contains("tabulate"), "unexpected message: {err}");
 }
 
 #[test]
