@@ -400,39 +400,53 @@ fn trait_name_collision_error(decl: &TraitDecl, kind: &str) -> String {
 /// builtin-shaped type, which declares no module of its own (an `impl:`
 /// naming one satisfies the orphan rule only by living in the trait's own
 /// module).
-fn impl_target_module(ty: Type, module: &Module) -> Option<u32> {
-    match ty {
-        Type::Struct(id, _) => Some(module.structs[id.index()].module),
-        Type::Enum(id, _) => Some(module.enums[id.0].module),
+///
+/// P7.S4 (R4): a generic target (`PolyType` not `Concrete(Struct/Enum)`) is
+/// treated exactly like a scalar: `None`, so the orphan rule requires the impl
+/// to live in the trait's own module. A concrete struct/enum target keeps
+/// the existing rule (the target's module **or** the trait's module).
+fn impl_target_module(target: &crate::ast::ImplTarget, module: &Module) -> Option<u32> {
+    match target.pattern {
+        crate::ast::PolyType::Concrete(crate::ast::Type::Struct(id, _)) => {
+            Some(module.structs[id.index()].module)
+        }
+        crate::ast::PolyType::Concrete(crate::ast::Type::Enum(id, _)) => {
+            Some(module.enums[id.0].module)
+        }
         _ => None,
     }
 }
 
 /// P7.S3e (R4/R11, decision 1): every `impl:` declaration's own checks --
-/// duplicate `(TraitId, Type)`, the orphan rule, and every required member
-/// bound exactly once (no missing member, no repeat). Each member's word is
-/// the parser's synthesized body word, so there is no signature to verify
-/// here; this only resolves it to a `Module::words` index (R8).
+/// duplicate `(TraitId, PolyType)`, the orphan rule, and every required
+/// member bound exactly once (no missing member, no repeat). Each member's
+/// word is the parser's synthesized body word, so there is no signature to
+/// verify here; this only resolves it to a `Module::words` index (R8).
+///
+/// P7.S4 (R7): the duplicate check compares `target.pattern` (the `PolyType`),
+/// NOT the whole `ImplTarget` — comparing `ty_var_names`/`len_var_names` would
+/// make `['T N]` and `['U M]` unequal (different name strings) and break
+/// alpha-equivalence. `PolyType` derives `PartialEq`, so structural equality
+/// gives alpha-equivalence for free: both fold to `Array(Var(0), Var(0))`.
 pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
-    // `Type` derives no `Hash`, so the duplicate-`(TraitId, Type)` check is a
-    // linear scan rather than a `HashMap` -- `impl:` counts are small (one
-    // per trait per concrete type), so this stays cheap.
-    let mut seen: Vec<(TraitId, Type, Span)> = Vec::new();
+    // `PolyType` derives no `Hash`, so the duplicate check is a linear scan
+    // rather than a `HashMap` -- `impl:` counts are small, so this stays cheap.
+    let mut seen: Vec<(TraitId, PolyType, Span)> = Vec::new();
     for imp in &module.impls {
         if let Some((_, _, first)) = seen
             .iter()
-            .find(|(t, ty, _)| *t == imp.trait_id && *ty == imp.target_ty)
+            .find(|(t, pat, _)| *t == imp.trait_id && *pat == imp.target.pattern)
         {
             return Err(duplicate_impl_error(imp, *first));
         }
-        seen.push((imp.trait_id, imp.target_ty, imp.span));
+        seen.push((imp.trait_id, imp.target.pattern.clone(), imp.span));
     }
     for i in 0..module.impls.len() {
-        let (trait_id, target_ty, impl_module, impl_span, bindings) = {
+        let (trait_id, target, impl_module, impl_span, bindings) = {
             let imp = &module.impls[i];
             (
                 imp.trait_id,
-                imp.target_ty,
+                &imp.target,
                 imp.module,
                 imp.span,
                 imp.bindings.clone(),
@@ -440,11 +454,11 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         };
         let trait_decl_module = module.traits[trait_id.index()].module;
         let trait_name = module.traits[trait_id.index()].name.clone();
-        let target_module = impl_target_module(target_ty, module);
+        let target_module = impl_target_module(target, module);
         if impl_module != trait_decl_module && Some(impl_module) != target_module {
             return Err(impl_orphan_error(
                 &trait_name,
-                target_ty,
+                target,
                 target_module.is_some(),
                 impl_span,
             ));
@@ -455,7 +469,7 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
         // still agree) and read back at a bound-directed call site.
         //
         // P7.S3r (R2): `bindings` comes from the parser's body-form desugar,
-        // which validates each member against the trait and splices a concrete
+        // which validates each member against the trait and splices a
         // word carrying that member's grounded signature into this same
         // module. The name lookup is therefore exact and total, and the one
         // thing left to reject is a member bound twice.
@@ -493,7 +507,7 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
 fn duplicate_impl_error(imp: &ImplDecl, first: Span) -> String {
     format!(
         "error: duplicate `impl:` for `{}` (line {}, col {}); first declared at line {}, col {}",
-        imp.target_ty.name(),
+        impl_target_str(&imp.target),
         imp.span.line,
         imp.span.col,
         first.line,
@@ -505,29 +519,47 @@ fn duplicate_impl_error(imp: &ImplDecl, first: Span) -> String {
 /// that declares no module of its own (`impl_target_module` is `None`: a
 /// scalar or other builtin shape) leaves exactly one legal home, so pointing
 /// at "the module declaring `i64`" would be unactionable.
+///
+/// P7.S4 (R4): a generic target (non-concrete `PolyType`) also declares no
+/// module of its own, so the same `None` path already enforces the trait-
+/// module rule. Phase 3 updates only the diagnostic rendering; the logic is
+/// correct from Phase 1.
 fn impl_orphan_error(
     trait_name: &str,
-    target_ty: Type,
+    target: &crate::ast::ImplTarget,
     target_declares_module: bool,
     span: Span,
 ) -> String {
+    let target_str = impl_target_str(target);
     let homes = if target_declares_module {
         format!(
-            "must live in the module declaring `{trait_name}` or the module declaring `{}`",
-            target_ty.name()
+            "must live in the module declaring `{trait_name}` or the module declaring `{target_str}`"
         )
     } else {
         format!(
-            "must live in the module declaring `{trait_name}` (`{}` declares no module of its own)",
-            target_ty.name()
+            "must live in the module declaring `{trait_name}` (`{target_str}` declares no module of its own)"
         )
     };
     format!(
-        "error: `impl: {trait_name} for {}` at line {}, col {} {homes}",
-        target_ty.name(),
-        span.line,
-        span.col
+        "error: `impl: {trait_name} for {target_str}` at line {}, col {} {homes}",
+        span.line, span.col
     )
+}
+
+/// P7.S4 (R1): render an `ImplTarget` for diagnostics, using the impl's own
+/// variable name tables so `'T`/`'N` spell as the user wrote them.
+fn impl_target_str(target: &crate::ast::ImplTarget) -> String {
+    let sig = crate::ast::PolySig {
+        row_in: None,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        row_out: None,
+        bounds: Vec::new(),
+        ty_var_names: target.ty_var_names.clone(),
+        len_var_names: target.len_var_names.clone(),
+        row_var_names: Vec::new(),
+    };
+    poly_type_str(&target.pattern, &sig)
 }
 
 fn impl_duplicate_member_error(trait_name: &str, member: &str, span: Span) -> String {
@@ -1285,6 +1317,9 @@ pub(super) fn check_generic_concrete_overlap(
     words: &[WordDef],
     traits: &[TraitDecl],
     impls: &[ImplDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
 ) -> Result<(), String> {
     let builtins = builtin_table();
     let mut builtin_arity: HashMap<&str, usize> = HashMap::new();
@@ -1304,7 +1339,10 @@ pub(super) fn check_generic_concrete_overlap(
         let arity = sig.inputs.len();
         let concrete_overlaps = concrete_inputs
             .get(&(word.module, word.name.as_str()))
-            .is_some_and(|inputs| inputs.len() == arity && poly_admits(sig, inputs, impls, traits));
+            .is_some_and(|inputs| {
+                inputs.len() == arity
+                    && poly_admits(sig, inputs, impls, traits, arrays, cells, refs)
+            });
         let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity) || concrete_overlaps;
         if overlaps {
             return Err(generic_concrete_overlap_error(
@@ -1396,16 +1434,33 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
 /// longer being a reserved predicate): `Copy` needs the struct/enum
 /// registries this pass does not carry, and leaving it out only ever keeps
 /// the rule *stricter*.
-fn poly_admits(sig: &PolySig, inputs: &[Type], impls: &[ImplDecl], traits: &[TraitDecl]) -> bool {
+fn poly_admits(
+    sig: &PolySig,
+    inputs: &[Type],
+    impls: &[ImplDecl],
+    traits: &[TraitDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+) -> bool {
     inputs.iter().zip(&sig.inputs).all(|(ty, pin)| match pin {
         PolyType::Concrete(want) => want == ty,
         // `ord_trait_id` resolves *this* `sig`'s own `Ord` bound (review
         // fix: not a whole-program name search, which fails open under a
         // module-local `trait: Ord`).
         PolyType::Var(v) => match crate::check::ord_trait_id(sig, *v, traits) {
-            Some(ord) => impls
-                .iter()
-                .any(|i| i.trait_id == ord && i.target_ty == *ty),
+            Some(ord) => impls.iter().any(|i| {
+                i.trait_id == ord
+                    && crate::check::poly::match_impl_target(
+                        &i.target.pattern,
+                        *ty,
+                        arrays,
+                        cells,
+                        refs,
+                        None,
+                    )
+                    .is_some()
+            }),
             None => true,
         },
         _ => true,
@@ -2793,13 +2848,13 @@ mod tests {
         // combination was rejected even though nothing imports across the
         // two modules.
         let words = vec![concrete_word("bump", 1, 1), poly_word("bump", 0, 1)];
-        check_generic_concrete_overlap(&words, &[], &[])
+        check_generic_concrete_overlap(&words, &[], &[], &[], &[], &[])
             .expect("an unrelated same-name concrete word in a different module must not overlap");
 
         // Mutation check: the *same*-module case must still be rejected --
         // module-scoping narrows the key, it does not disable the check.
         let words = vec![concrete_word("bump", 0, 1), poly_word("bump", 0, 1)];
-        let err = check_generic_concrete_overlap(&words, &[], &[]).unwrap_err();
+        let err = check_generic_concrete_overlap(&words, &[], &[], &[], &[], &[]).unwrap_err();
         assert!(
             err.contains("generic overload")
                 && err.contains("overlaps a concrete overload of `bump`"),
@@ -3783,5 +3838,75 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");
+    }
+
+    // P7.S4 (R7): duplicate check compares `target.pattern` (the `PolyType`),
+    // so alpha-equivalent generic targets are duplicates.
+
+    #[test]
+    fn check_impl_decls_alpha_equivalent_generic_targets_are_duplicate() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             impl: Show for ['U 'M]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate `impl:`"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_overlapping_unequal_targets_accepted() {
+        // `['T N]` and `['T 4]` overlap at `[i64 4]` but are not equal, so
+        // they are accepted as declarations (the overlap is resolved by
+        // specificity at the dispatch site, not rejected here).
+        impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             impl: Show for ['T 4]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .expect("overlapping but unequal targets should be accepted");
+    }
+
+    // P7.S4 (R4): a generic `impl:` outside the trait's module is rejected
+    // (orphan rule: a generic target names no struct/enum, so the impl must
+    // live in the trait's own module). The existing orphan arm already
+    // enforces this via the `None` path.
+
+    #[test]
+    fn check_impl_decls_generic_impl_outside_trait_module_is_orphan_error() {
+        // `impl: Show for ['T 'N]` in module 0 (the default), with `Show` in
+        // module 1. A generic target names no struct/enum, so
+        // `impl_target_module` returns `None` and the orphan rule requires the
+        // impl to live in the trait's module (module 1).
+        let src = "trait: Show 'T show ( &'T -- ) ;\n\
+             type: Foo x i64 ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;\n";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        // Simulate the trait being in a different module: set the trait's
+        // module to 1 while the impl stays in module 0. The `traits` vector
+        // starts with the seeded `Copy` entry, so `Show` is at index 1.
+        module
+            .traits
+            .iter_mut()
+            .find(|t| t.name == "Show")
+            .expect("the Show trait parsed")
+            .module = 1;
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(
+            err.contains("must live in the module declaring"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("declares no module of its own"), "{err}");
     }
 }

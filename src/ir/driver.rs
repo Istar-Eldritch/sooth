@@ -245,6 +245,41 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .filter(|w| w.poly.is_some())
         .map(|w| (w.name.as_str(), w))
         .collect();
+    // P7.S4 (R6): add each monomorph's symbol to the lowering env so a
+    // `trait_calls` dispatch to a generic-impl member-word monomorph can
+    // resolve its arity. A poly word is excluded from the initial env (it
+    // is never called by its bare name), but its monomorphs are called by
+    // their instantiation symbols, which `lower_resolved_word_call` looks up.
+    for inst in module
+        .instantiations
+        .values()
+        .chain(&module.transitive_instantiations)
+    {
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
+        let word = poly_words[inst.callee.as_str()];
+        let sig = word
+            .poly
+            .as_ref()
+            .expect("a recorded callee is polymorphic");
+        let effect = concrete_effect(
+            sig,
+            &inst.subst,
+            &module.arrays,
+            &module.owned_cells,
+            &module.refs,
+            &module.generics,
+        );
+        let ret_ty = word_ret_ty(&effect.outputs, &structs);
+        env.insert(
+            symbol,
+            Arity {
+                in_arity: effect.inputs.len(),
+                out_arity: effect.outputs.len(),
+                ret_ty,
+                quot_inputs: quot_input_slots(effect.inputs.iter().map(|s| s.ty)),
+            },
+        );
+    }
     // Dedup by symbol and sort, so the monomorphized funcs emit in a fixed
     // order regardless of `instantiations`' randomized HashMap iteration --
     // the rest of the module emits deterministically from `Vec`-ordered words,

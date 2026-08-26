@@ -465,6 +465,7 @@ pub(crate) fn check_poly_combinator_repl(
     let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
     let eliminators = eliminator_registry(enums);
+    let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
@@ -476,6 +477,7 @@ pub(crate) fn check_poly_combinator_repl(
         // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
         // can reach a REPL-checked combinator body.
         trait_resolve: TraitResolveCtx::scratch(),
+        impl_monos: &mut scratch_monos,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -4461,10 +4463,19 @@ pub(super) fn poly_sig_could_match(
         // name search, which fails open under a module-local `trait: Ord`).
         if let PolyType::Var(v) = &sig.inputs[i] {
             if let Some(ord) = ord_trait_id(sig, *v, traits) {
-                if !impls
-                    .iter()
-                    .any(|imp| imp.trait_id == ord && imp.target_ty == stack[base + i].ty)
-                {
+                let generics = ctx.generics().map(|c| c.borrow());
+                if !impls.iter().any(|imp| {
+                    imp.trait_id == ord
+                        && match_impl_target(
+                            &imp.target.pattern,
+                            stack[base + i].ty,
+                            arrays,
+                            cells,
+                            refs,
+                            generics.as_deref(),
+                        )
+                        .is_some()
+                }) {
                     return false;
                 }
             }
@@ -4841,8 +4852,10 @@ pub(super) fn check_poly_call(
                     ctx,
                     &poly.trait_resolve,
                     arrays,
+                    cells,
                     refs,
                     &mut trait_calls,
+                    poly.impl_monos,
                 )?;
                 None
             }
@@ -4942,13 +4955,12 @@ pub(super) fn discover_transitive_instantiations(
     insts: &mut HashMap<Span, CallInst>,
     word_symbols: &[String],
     trait_obligations: &[WordObligations],
+    impl_monos: Vec<(String, Subst)>,
 ) -> Result<Vec<CallInst>, String> {
-    // N2: no records means nothing to compose, so every program without a
-    // generic-calls-generic call emits identical IL by construction rather
-    // than by inspection.
-    if module.poly_cross_calls.is_empty() {
-        return Ok(Vec::new());
-    }
+    // P7.S4 (R6): build CallInsts for generic-impl member-word monomorphs
+    // before the fixpoint, so their bodies' poly cross-calls get composed.
+    // Even when poly_cross_calls is empty (no generic-calls-generic), the
+    // member-word monomorphs themselves still need to be emitted by lowering.
     let Module {
         words,
         structs,
@@ -4973,14 +4985,6 @@ pub(super) fn discover_transitive_instantiations(
         word_symbols,
         recorded: trait_obligations,
     };
-    // No `generics_cell` rebase/flush bracket here (review finding 2, phase
-    // 2): the callee's declared *outputs* are the only `PolyType`s this
-    // fixpoint ever grounds, and every one already passed phase 1's
-    // `poly_cross_output` to be recorded at all, which rejects every compound
-    // shape (`Array`/`Ref`/`Generic`) outright. `apply_subst`'s `Generic` arm
-    // -- the only one that would mint through a live instantiator -- is
-    // therefore unreachable from `compose`, confirmed by mutation testing:
-    // `word_ctx`'s generics argument below is `None`.
     let ground = CrossGround {
         words,
         structs,
@@ -4990,7 +4994,54 @@ pub(super) fn discover_transitive_instantiations(
         records: poly_cross_calls,
         tr,
     };
-    let mut transitive = ground.fixpoint(insts, arrays, refs, owned_cells)?;
+    // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
+    // The member word is polymorphic (poly: Some), so lowering finds it in
+    // `poly_words` and computes the concrete effect from the sig + subst.
+    let combs = CombinatorIndex::new();
+    let mut extra_seeds: Vec<CallInst> = Vec::new();
+    for (word_name, subst) in &impl_monos {
+        let symbol = instantiation_symbol(word_name, subst, None);
+        // Dedup: the same (word, subst) may be discovered at multiple call sites.
+        if extra_seeds.iter().any(|s| s.symbol == symbol) {
+            continue;
+        }
+        let Some(word) = words.iter().find(|w| &w.name == word_name) else {
+            continue;
+        };
+        let Some(sig) = &word.poly else { continue };
+        let ctx = word_ctx(word, structs, enums, statics, Some(modules), &combs, None);
+        let mut outputs = Vec::with_capacity(sig.outputs.len());
+        for pty in &sig.outputs {
+            outputs.push(apply_subst(
+                sig,
+                pty,
+                subst,
+                word_name,
+                word.span,
+                &ctx,
+                arrays,
+                owned_cells,
+                refs,
+            )?);
+        }
+        extra_seeds.push(CallInst {
+            callee: word_name.clone(),
+            subst: subst.clone(),
+            symbol,
+            out_arity: outputs.len(),
+            output_types: outputs,
+            bundle: None,
+            generation: None,
+            quot_inputs: Vec::new(),
+            trait_calls: HashMap::new(),
+            poly_calls: HashMap::new(),
+        });
+    }
+    // N2: no records and no impl monos means nothing to compose.
+    if poly_cross_calls.is_empty() && extra_seeds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut transitive = ground.fixpoint(insts, extra_seeds, arrays, refs, owned_cells)?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -5041,6 +5092,7 @@ impl CrossGround<'_> {
     fn fixpoint(
         &self,
         insts: &mut HashMap<Span, CallInst>,
+        impl_seeds: Vec<CallInst>,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
@@ -5050,6 +5102,18 @@ impl CrossGround<'_> {
         for inst in insts.values_mut() {
             inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
+        }
+        // P7.S4 (R6): seed the generic-impl member-word monomorphs into the
+        // fixpoint, so their bodies' poly cross-calls get composed and their
+        // own `poly_calls` routing maps are filled.
+        let mut impl_frontier: Vec<CallInst> = Vec::new();
+        for mut inst in impl_seeds {
+            if !seen.insert(inst.symbol.clone()) {
+                continue;
+            }
+            inst.poly_calls = self.cross_calls_of(&inst, arrays, refs, cells)?;
+            enqueue_new(&inst.poly_calls, &mut seen, &mut impl_frontier);
+            frontier.push(inst);
         }
         let mut transitive: Vec<CallInst> = Vec::new();
         while !frontier.is_empty() {
@@ -5229,6 +5293,7 @@ impl CrossGround<'_> {
         // whole-program tables, the identical diagnostic and the identical
         // span (`record.span`) a rejection would have used either way.
         let mut trait_calls: HashMap<Span, String> = HashMap::new();
+        let mut compose_monos: Vec<(String, Subst)> = Vec::new();
         for (v, bound) in &sig.bounds {
             let Bound::User(trait_id) = bound else {
                 continue;
@@ -5247,8 +5312,10 @@ impl CrossGround<'_> {
                 ctx,
                 &self.tr,
                 arrays,
+                cells,
                 refs,
                 &mut trait_calls,
+                &mut compose_monos,
             )?;
         }
         // The caller's `generation` rides along so `instantiation_symbol`
@@ -5338,11 +5405,37 @@ fn inline_callee_cross_call_error(caller: &str, callee: &str, span: Span) -> Str
     )
 }
 
+/// P7.S4 (R8, Phase 1): a basic diagnostic for more than one matching impl
+/// target. Phase 2 replaces this with the specificity partial order and
+/// ambiguity error.
+fn multiple_impl_targets_error(
+    trait_name: &str,
+    ty: Type,
+    _candidates: &[(&ImplDecl, Subst)],
+    span: Span,
+) -> String {
+    format!(
+        "error: multiple `impl:` targets match `{ty}` for `{trait_name}` at line {}, col {} (ambiguous dispatch is not yet supported)",
+        span.line, span.col
+    )
+}
+
 /// P7.S3e (R8): one `Bound::User` at a call site whose θ is known -- the
 /// `impl:` registry lookup that decides satisfaction, then the resolution of
 /// every obligation the callee's body recorded on this variable to the
 /// implementing word's lowering symbol, keyed by the body span that dispatched
 /// it.
+///
+/// P7.S4 (R2/R6): the registry one-way-matches the concrete instantiation
+/// `Type` against each `impl:` target `PolyType` via `match_impl_target`,
+/// producing a `Subst` per match. Exactly one match → dispatch. Zero → the
+/// existing `unsatisfied_user_bound_error`. More than one → a basic
+/// "multiple `impl:` targets match" error (Phase 2 replaces this with
+/// specificity/ambiguity). For a generic winner (target not
+/// `PolyType::Concrete`), the dispatched symbol is
+/// `instantiation_symbol(word_symbols[idx], &subst)` (not the bare
+/// `word_symbols[idx]`), and the `(member_word, subst)` pair is recorded for
+/// lowering. A concrete winner keeps the bare `word_symbols[idx]` path.
 #[allow(clippy::too_many_arguments)]
 fn resolve_user_bound(
     trait_id: TraitId,
@@ -5354,19 +5447,36 @@ fn resolve_user_bound(
     ctx: &Ctx,
     tr: &TraitResolveCtx,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &[OwnedCellDecl],
     refs: &mut Vec<RefDecl>,
     trait_calls: &mut HashMap<Span, String>,
+    impl_monos: &mut Vec<(String, Subst)>,
 ) -> Result<(), String> {
     let trait_decl = tr.traits.get(trait_id.index()).expect(
         "a bound's `TraitId` indexes the whole-program trait table, so a call site resolving one must be given that table and not a scratch one",
     );
-    // `Type` derives no `Hash`, so the registry is scanned linearly, as
-    // `check_impl_decls`'s own duplicate check is.
-    let Some(imp) = tr
+    // P7.S4 (R2): one-way match the concrete type against each impl target
+    // pattern, collecting (impl, subst) candidates.
+    let generics = ctx.generics().map(|c| c.borrow());
+    let candidates: Vec<(&ImplDecl, Subst)> = tr
         .impls
         .iter()
-        .find(|i| i.trait_id == trait_id && i.target_ty == ty)
-    else {
+        .filter_map(|i| {
+            if i.trait_id != trait_id {
+                return None;
+            }
+            match_impl_target(
+                &i.target.pattern,
+                ty,
+                arrays,
+                cells,
+                refs,
+                generics.as_deref(),
+            )
+            .map(|s| (i, s))
+        })
+        .collect();
+    if candidates.is_empty() {
         return Err(unsatisfied_user_bound_error(
             ctx,
             span,
@@ -5377,18 +5487,23 @@ fn resolve_user_bound(
             arrays,
             refs,
         ));
-    };
+    }
+    if candidates.len() > 1 {
+        return Err(multiple_impl_targets_error(
+            &trait_decl.name,
+            ty,
+            &candidates,
+            span,
+        ));
+    }
+    let (imp, subst) = &candidates[0];
+    let is_generic = !imp.target.is_concrete();
     for ob in tr
         .obligations_of(name, sig)
         .iter()
         .filter(|o| o.trait_id == trait_id && o.var == v)
     {
-        let symbol = imp
-            .resolved
-            .iter()
-            .find(|(member, _)| *member == ob.member)
-            .and_then(|(_, idx)| tr.word_symbols.get(*idx));
-        let Some(symbol) = symbol else {
+        let Some((_, idx)) = imp.resolved.iter().find(|(member, _)| *member == ob.member) else {
             return Err(unresolved_trait_obligation_error(
                 ctx,
                 span,
@@ -5399,7 +5514,17 @@ fn resolve_user_bound(
                 ob.span,
             ));
         };
-        trait_calls.insert(ob.span, symbol.clone());
+        let word_sym = &tr.word_symbols[*idx];
+        let symbol = if is_generic {
+            // P7.S4 (R6): mint the dispatched symbol as the instantiation of
+            // the member word at the matched substitution.
+            let s = instantiation_symbol(word_sym, subst, None);
+            impl_monos.push((word_sym.clone(), subst.clone()));
+            s
+        } else {
+            word_sym.clone()
+        };
+        trait_calls.insert(ob.span, symbol);
     }
     Ok(())
 }
@@ -5495,6 +5620,173 @@ fn unresolved_trait_obligation_error(
 ///
 /// P7.S3t (R5): `seeded` names the variables an explicit type-argument list
 /// bound before unification began (empty at every other caller). It exists
+/// P7.S4 (R2): one-way match a concrete `Type` against an `impl:` target's
+/// `PolyType` pattern, producing a `Subst` in the impl's own variable
+/// namespace. The reverse of `apply_subst` (PolyType→Type) and structurally
+/// a sibling of `unify_poly_input` (which extends a `Subst` in place), but
+/// keyed to the impl's variable namespace (no `PolySig`/`seeded`) and
+/// returning a fresh `Subst` rather than extending one. `None` means the
+/// pattern does not match this concrete type.
+///
+/// `PolyType::Concrete(t)` matches only on `t == ty` (the existing exact
+/// path, unchanged for concrete-only impls). A `Var` or `Len::Var` already
+/// bound in a prior position must match consistently — if the subst already
+/// maps the variable to a different value, the match fails.
+///
+/// The `Generic` arm needs `GenericTypes` to reverse the instantiation
+/// (`struct_instantiation_of`/`enum_instantiation_of`); when `generics` is
+/// `None` (e.g. in `poly_admits`, which has no generic table), a `Generic`
+/// pattern simply does not match.
+pub(crate) fn match_impl_target(
+    pattern: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+) -> Option<Subst> {
+    let mut subst = Subst::default();
+    match_impl_target_rec(pattern, ty, arrays, cells, refs, generics, &mut subst)?;
+    Some(subst)
+}
+
+fn match_impl_target_rec(
+    pattern: &PolyType,
+    ty: Type,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    generics: Option<&GenericTypes>,
+    subst: &mut Subst,
+) -> Option<()> {
+    match pattern {
+        PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
+        PolyType::Concrete(t) => {
+            if *t == ty {
+                Some(())
+            } else {
+                None
+            }
+        }
+        PolyType::Var(v) => {
+            if let Some(prev) = subst.ty_of(*v) {
+                if prev == ty {
+                    Some(())
+                } else {
+                    None
+                }
+            } else {
+                let pos = subst.ty.partition_point(|(id, _)| *id < *v);
+                subst.ty.insert(pos, (*v, ty));
+                Some(())
+            }
+        }
+        PolyType::Array(elem, len) => {
+            let Type::Array(id, _) = ty else {
+                return None;
+            };
+            let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
+            match_impl_target_rec(elem, elem_ty, arrays, cells, refs, generics, subst)?;
+            match len {
+                Len::Concrete(k) => {
+                    if *k == count {
+                        Some(())
+                    } else {
+                        None
+                    }
+                }
+                Len::Var(ln) => {
+                    if let Some(prev) = subst.len_of(*ln) {
+                        if prev == count {
+                            Some(())
+                        } else {
+                            None
+                        }
+                    } else {
+                        subst.len.push((*ln, count));
+                        Some(())
+                    }
+                }
+            }
+        }
+        PolyType::Quotation(ins, outs, _, _, _) => {
+            let eff = crate::ast::is_quotation_type(ty)?;
+            if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
+                return None;
+            }
+            for (p, c) in ins.iter().zip(&eff.inputs) {
+                match_impl_target_rec(p, *c, arrays, cells, refs, generics, subst)?;
+            }
+            for (p, c) in outs.iter().zip(&eff.outputs) {
+                match_impl_target_rec(p, *c, arrays, cells, refs, generics, subst)?;
+            }
+            Some(())
+        }
+        PolyType::Ref(referent, mutable) => {
+            let (slot_referent, slot_mutable) = ref_parts(ty, refs)?;
+            if slot_mutable != *mutable {
+                return None;
+            }
+            match_impl_target_rec(
+                referent,
+                slot_referent,
+                arrays,
+                cells,
+                refs,
+                generics,
+                subst,
+            )
+        }
+        PolyType::OwnedCell(payload) => {
+            let Type::OwnedCell(id, _) = ty else {
+                return None;
+            };
+            let slot_payload = cells[id.index()].payload;
+            match_impl_target_rec(payload, slot_payload, arrays, cells, refs, generics, subst)
+        }
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            name: _,
+        } => {
+            let generics = generics?;
+            let found = if *is_enum {
+                let Type::Enum(id, _) = ty else {
+                    return None;
+                };
+                generics.enum_instantiation_of(id)
+            } else {
+                let Type::Struct(id, _) = ty else {
+                    return None;
+                };
+                generics.struct_instantiation_of(id)
+            };
+            let (found_idx, found_module, found_args) = found?;
+            if found_idx != *idx as usize
+                || found_module != *module
+                || found_args.len() != args.len()
+            {
+                return None;
+            }
+            let found_args = found_args.to_vec();
+            for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
+                match_impl_target_rec(
+                    arg_pty,
+                    *arg_ty,
+                    arrays,
+                    cells,
+                    refs,
+                    Some(generics),
+                    subst,
+                )?;
+            }
+            Some(())
+        }
+    }
+}
+
 /// only to tell the two conflicts apart: two operands disagreeing is a
 /// symmetric "resolved `'T` to both", while an operand disagreeing with an
 /// instantiation has a written end and an inferred end, and the user needs to
@@ -6904,6 +7196,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{ArrayDecl, ArrayId, OwnedCellDecl};
     use crate::lexer::lex;
 
     /// P7.S3k: the callee-side walk context for a fixture that drives
@@ -7801,7 +8094,13 @@ mod tests {
         let show_impl = module
             .impls
             .iter_mut()
-            .find(|i| i.target_ty == crate::ast::Type::Struct(StructId::from_index(0), "Point"))
+            .find(|i| {
+                i.target.pattern
+                    == crate::ast::PolyType::Concrete(crate::ast::Type::Struct(
+                        StructId::from_index(0),
+                        "Point",
+                    ))
+            })
             .expect("the fixture's `impl: Show for Point` parsed");
         assert!(
             !show_impl.resolved.is_empty(),
@@ -12024,5 +12323,104 @@ mod tests {
             err,
             "error: `run2` is not permitted on a quotation literal in `apply` (line 3)"
         );
+    }
+
+    // P7.S4 (R2): `match_impl_target` unit tests.
+
+    #[test]
+    fn match_impl_target_var_elem_and_len_matches() {
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let subst = match_impl_target(&pattern, ty, &arrays, &[], &[], None).expect("should match");
+        assert_eq!(subst.ty_of(0), Some(Type::I64));
+        assert_eq!(subst.len_of(0), Some(4));
+    }
+
+    #[test]
+    fn match_impl_target_concrete_elem_var_len_matches() {
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let subst = match_impl_target(&pattern, ty, &arrays, &[], &[], None).expect("should match");
+        assert_eq!(subst.len_of(0), Some(4));
+        assert!(subst.ty.is_empty());
+    }
+
+    #[test]
+    fn match_impl_target_concrete_elem_wrong_type_no_match() {
+        let arrays = vec![ArrayDecl {
+            element: Type::U32,
+            count: 4,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        assert!(match_impl_target(&pattern, ty, &arrays, &[], &[], None).is_none());
+    }
+
+    #[test]
+    fn match_impl_target_var_elem_concrete_len_matches() {
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let subst = match_impl_target(&pattern, ty, &arrays, &[], &[], None).expect("should match");
+        assert_eq!(subst.ty_of(0), Some(Type::I64));
+        assert!(subst.len.is_empty());
+    }
+
+    #[test]
+    fn match_impl_target_var_elem_concrete_len_wrong_no_match() {
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 2,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        assert!(match_impl_target(&pattern, ty, &arrays, &[], &[], None).is_none());
+    }
+
+    #[test]
+    fn match_impl_target_concrete_struct_matches_only_same() {
+        let pattern = PolyType::Concrete(Type::Struct(StructId::from_index(0), "Point"));
+        assert!(match_impl_target(
+            &pattern,
+            Type::Struct(StructId::from_index(0), "Point"),
+            &[],
+            &[],
+            &[],
+            None
+        )
+        .is_some());
+        assert!(match_impl_target(&pattern, Type::I64, &[], &[], &[], None).is_none());
+    }
+
+    #[test]
+    fn match_impl_target_shared_var_consistency() {
+        // `['T 'T]` (e.g. a 2-element array of the same type) against [i64 i64]
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 1,
+            name_static: "array",
+        }];
+        let pattern = PolyType::Var(0);
+        let ty = Type::I64;
+        let subst = match_impl_target(&pattern, ty, &arrays, &[], &[], None).expect("should match");
+        assert_eq!(subst.ty_of(0), Some(Type::I64));
+        // Matching the same var against a different type fails
+        assert!(match_impl_target(&pattern, Type::U32, &arrays, &[], &[], None).is_some());
     }
 }

@@ -174,6 +174,11 @@ struct PolyCtx<'a> {
     /// decided and resolved against. `TraitResolveCtx::scratch()` on the REPL
     /// paths, which can carry no user bound at all.
     trait_resolve: TraitResolveCtx<'a>,
+    /// P7.S4 (R6): the `(member_word_name, subst)` pairs for generic-impl
+    /// dispatches discovered during this walk, collected so lowering can emit
+    /// the polymorphic member word's body under the instantiation symbol.
+    /// Empty on the REPL/combinator-scratch paths, which declare no `impl:`.
+    impl_monos: &'a mut Vec<(String, crate::ast::Subst)>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -647,7 +652,14 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // arity (a builtin row or a local monomorphic word) is rejected here too,
     // before either enters `poly_env`/`env` below -- there is no ranking that
     // could otherwise pick between them.
-    check_generic_concrete_overlap(&module.words, &module.traits, &module.impls)?;
+    check_generic_concrete_overlap(
+        &module.words,
+        &module.traits,
+        &module.impls,
+        &module.arrays,
+        &module.owned_cells,
+        &module.refs,
+    )?;
     // Two poly words (or two poly combinators) declaring the exact same
     // signature under one name are rejected before either enters `poly_env`
     // below -- unresolvable ambiguity, not a legitimate second overload.
@@ -783,6 +795,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // P7.S4 (R6): the `(member_word_name, subst)` pairs for generic-impl
+    // dispatches discovered during the call-site loop, used to seed
+    // `discover_transitive_instantiations` so lowering emits the polymorphic
+    // member word's body under the instantiation symbol.
+    let mut impl_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
     // as each monomorphic body's operator calls resolve, then relayed to the
     // module for lowering (empty for the whole corpus, so its lowering is
@@ -906,6 +923,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
                     HashMap::new();
+                let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
@@ -915,6 +933,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     combinators: &combinators,
                     eliminators: &eliminators,
                     trait_resolve,
+                    impl_monos: &mut scratch_monos,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -944,6 +963,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 combinators: &combinators,
                 eliminators: &eliminators,
                 trait_resolve,
+                impl_monos: &mut impl_monos,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -1018,8 +1038,13 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // registry interning `apply_subst` performs, both of which live here and
     // neither of which lowering can redo -- so the transitive closure of
     // "which monomorphs does this program need" is computed at check time.
-    module.transitive_instantiations =
-        discover_transitive_instantiations(module, &mut insts, &symbols, &trait_obligations)?;
+    module.transitive_instantiations = discover_transitive_instantiations(
+        module,
+        &mut insts,
+        &symbols,
+        &trait_obligations,
+        std::mem::take(&mut impl_monos),
+    )?;
     module.instantiations = insts;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
@@ -1213,6 +1238,7 @@ pub(crate) fn check_def_collecting_drop_sites(
     // session's own enums, so a session-defined word eliminates a retained
     // enum exactly as a native one does.
     let eliminators = eliminator_registry(enums);
+    let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
@@ -1225,6 +1251,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         // reaches a REPL-checked body or line -- the same bypass
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
+        impl_monos: &mut scratch_monos,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -1295,6 +1322,7 @@ pub(crate) fn infer_line(
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
     let eliminators = eliminator_registry(enums);
+    let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
@@ -1307,6 +1335,7 @@ pub(crate) fn infer_line(
         // reaches a REPL-checked body or line -- the same bypass
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
+        impl_monos: &mut scratch_monos,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,
