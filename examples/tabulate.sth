@@ -1,10 +1,10 @@
 \ Phase 7 slice 5: `tabulate` — allocate an array and fill each slot by
 \ splicing an inline quotation that produces a fresh value.  Each slot gets
 \ a distinct, freshly-constructed value (never a replicated one), so a linear
-\ element type is safe once the destructor lands (Phase 4 of this slice).
+\ element type is safe — the synthesized array destructor drops each slot.
 \
-\ This example uses `i64` (a `Copy` element) so it builds and runs today; the
-\ linear-element golden is Phase 4's exit (the destructor does not exist yet).
+\ This example uses `i64` (a `Copy` element) for simplicity; the linear-element
+\ golden lives in `tests/phase7_slice5_array_drop.rs`.
 
 import: intrinsics * ;
 import: core::prelude * ;
