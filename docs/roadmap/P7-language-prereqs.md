@@ -586,7 +586,7 @@ still needs a struct-header length variable (`'N`) and the `Eq`/`Hash`/`Default`
 bounds named above.
 
 **P7.S3o -- A bound on a poly combinator's own type variable has no dispatch mechanism.**
-`[ recon complete ]` Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there.
+`[ done ]` Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there.
 `reject_user_bound_on_combinator` (`src/check/poly.rs:6129`) is a clean, located rejection, not
 a bug. Recon'd and spec'd twice; both designs (a splice-uid resolution key, then a
 source-derived `SplicePath` key) were found unsound in review. A third recon round (three
@@ -722,6 +722,31 @@ comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over 
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;
 the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
 still behaves identically (codegen regresses, behaviour does not).
+
+**P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ planned ]`
+S3s shipped `cmp` and the six surface comparisons non-inline as a named, deliberate tradeoff
+("a measured ~2x tax… accepted for this slice"), with S3o as its own named follow-on to undo
+it. S3o has since landed: bound dispatch reaches a spliced/materialized body, so an `inline`
+trait member is mechanically live. What is missing is the declaration surface. A trait member
+today is a bare `name ( sig )` inside `trait: Name 'T ... ;`, with no slot for the `inline`
+keyword `parse_worddef` already recognizes between a word's name and its `(` -- and no slot
+*could* be added without one, since `impl:` bodies inherit the trait's signature verbatim
+(restating it is a parse error) and `parse_impl_member_body` hardcodes `declares_inline:
+false` for every member regardless of impl. This slice does two things together, because the
+second has nowhere to live without the first: (1) trait members are declared
+`: name ( sig ) ;`, matching every other word-shaped declaration in the language instead of
+the bespoke bare-`name` grammar, and (2) an optional `inline` keyword in that now-familiar
+slot marks a member so every `impl:` body satisfying it is spliced at its call sites, the
+same way `eq`/`lt`/`gt`/`lte`/`gte`/`ne` already are over `cmp`. `inline` is a property of the
+member's declaration in `trait: ... ;`, not of any one `impl:` block -- a trait's contract
+should not let one conforming type opt out of a call-frame cost another pays. Two consumers
+exist in tree: `examples/traits.sth` and `lib/cmp.sth`; `docs/book/` needs checking for
+whether it teaches the old bare-member grammar (already flagged separately as teaching
+rejected `if`/`else`/`end` syntax).
+**Exit:** `trait: Ord 'T : cmp inline ( 'T 'T -- Ordering ) ; ;` parses, and each `impl: Ord for
+...` block's `cmp` is spliced at every call site reached through a bound `'T: Ord` word,
+with `lib/cmp.sth`'s stale "comparisons are deliberately not inline" header comment corrected
+to match. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
 **P7.S3u -- Trait objects (an erased owner with a reachable destructor).** `[ parked ]` Traits dispatch
 statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete
