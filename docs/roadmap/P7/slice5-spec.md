@@ -22,7 +22,7 @@ partially-initialized window during construction.
 - **R1.** A new builtin array word family `tabulate ( usize ~[ -- T ] -- [T N] )`
   allocates an array and, for each index `0..N`, splices the quotation to produce a
   fresh `T` and stores it into that slot. The quotation is inline-spliced: the
-  checker arm calls `check_literal_against_declared_effect` (`src/check.rs:2143`)
+  checker arm calls `check_literal_against_declared_effect` (`src/check.rs:2228`)
   directly with a synthesized inline `QuotEffect { inputs: [], outputs: [T] }` — the
   same function the ordinary call-check path uses for library words like `times`,
   but called directly from the word-family arm rather than reached through generic
@@ -179,7 +179,7 @@ shuffle) preserves known provenance.
 family.** `tabulate` must allocate array storage and manage the raw-to-value
 boundary crossing (`alloc_array` → store loop → `push dst`), which is IR-level work
 no library word can express — `fill` is a word family for the identical reason. The quotation splicing reuses the same checker function
-(`check_literal_against_declared_effect`, `src/check.rs:2143`) and the same IR
+(`check_literal_against_declared_effect`, `src/check.rs:2228`) and the same IR
 splice (`lower_terms`, as `call`-of-literal uses at `src/ir/func_builder/calls.rs:362`)
 that library words like `times` use through the ordinary call path — but the
 attachment point differs: `tabulate`'s word-family arm calls these directly instead
@@ -231,7 +231,7 @@ None outstanding — the four questions the brief flagged are resolved above.
 - `src/check/word_families.rs:757` (`check_array_word`) — new `"tabulate"` arm:
   accepts a quotation operand (unlike `fill` which rejects at `:859`), pops count
   and quotation from the stack, calls `check_literal_against_declared_effect`
-  (`src/check.rs:2143`) directly with a synthesized inline `QuotEffect { inputs:
+  (`src/check.rs:2228`) directly with a synthesized inline `QuotEffect { inputs:
   [], outputs: [element_ty] }` to type-check the quotation body, and does NOT call
   `check_array_element_gate` (the element is freshly produced, not replicated).
 - `src/ir/func_builder/calls.rs:580` — add `"tabulate"` to the
