@@ -19,6 +19,7 @@ pub(super) fn check_word(
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
     generics: Option<&RefCell<GenericTypes>>,
+    uid_seed: u32,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -55,7 +56,7 @@ pub(super) fn check_word(
     let terms = &word.body;
     check_terms_word(
         word, enums, terms, env, arrays, cells, refs, slices, structs, statics, modules, dropped,
-        poly, generics,
+        poly, generics, uid_seed,
     )
 }
 
@@ -195,6 +196,7 @@ fn check_terms_word(
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
     generics: Option<&RefCell<GenericTypes>>,
+    uid_seed: u32,
 ) -> Result<(), String> {
     // R3: a binding is an ordinary term, but the *entry* one keeps its own
     // diagnostic. Only there is the declared effect the frame, so only there
@@ -232,7 +234,12 @@ fn check_terms_word(
         generics,
     );
     let mut scope = Scope::default();
-    let mut prov = Provenance::default();
+    // Seeded per top-level word (`crate::check::INLINE_UID_STRIDE`), not just
+    // `Provenance::default()`: see the comment on `INLINE_UID_STRIDE`.
+    let mut prov = Provenance {
+        inline_uid: uid_seed,
+        ..Provenance::default()
+    };
     let mut final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, true, poly,
     )?;

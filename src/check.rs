@@ -11,6 +11,23 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
+/// Fix for the cmp-inline splice collision (lib/cmp.sth, commit 03f56f5):
+/// `Provenance::inline_uid` restarts at 0 for every top-level word (fresh
+/// `Provenance::default()` per `check_word` call), and `splice_trait_calls`/
+/// `splice_records` are `Module`-wide maps keyed on `(inline_uid, Span)`. Two
+/// different words each splicing the same combinator body (e.g. `signed_lt`
+/// and `unsigned_lt` both calling `lt`) reuse the same `cmp`-call span from
+/// `lt`'s one definition and the same first-splice uid (0), so the second
+/// word's entry silently overwrites the first's in the shared map -- lowering
+/// then reads back whichever impl was checked last for every splice site.
+/// Seeding each top-level word's `inline_uid` at `word_index * INLINE_UID_STRIDE`
+/// (mirrored by `ir::driver`'s matching per-word seed, both walking
+/// `module.words` in the same order) keeps every word's splice uids in a
+/// disjoint range, so the composite key is unique module-wide. A word would
+/// need over a million splices of one combinator to overflow into the next
+/// word's range.
+pub(crate) const INLINE_UID_STRIDE: u32 = 1 << 20;
+
 use crate::ast::{
     generic_surface_name, ground_member_type, instantiation_symbol, intern_array_type,
     intern_bundle_struct, intern_owned_cell_type, intern_ref_type, intern_slice_type,
@@ -881,7 +898,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         word_symbols: &symbols,
         recorded: &trait_obligations,
     };
-    for word in words.iter() {
+    for (word_idx, word) in words.iter().enumerate() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
             if is_combinator(word) {
@@ -982,6 +999,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 &mut sites,
                 &mut poly,
                 Some(&generics_cell),
+                word_idx as u32 * INLINE_UID_STRIDE,
             )?;
             let mut g = generics_cell.borrow_mut();
             g.flush_structs_into(structs);
@@ -1296,6 +1314,7 @@ pub(crate) fn check_def_collecting_drop_sites(
         &mut sites,
         &mut poly,
         None,
+        0,
     )?;
     Ok((sites, insts, overloads, fields, variant_fields))
 }

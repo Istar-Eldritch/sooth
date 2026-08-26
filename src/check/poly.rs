@@ -451,6 +451,7 @@ pub(super) fn check_poly_combinator_standalone(
         &mut dropped,
         poly,
         None,
+        0,
     );
     poly.combinator_sig = saved_comb_sig;
     poly.combinator_subst = saved_comb_subst;

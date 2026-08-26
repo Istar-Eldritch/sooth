@@ -226,6 +226,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 EnvPlan::None,
                 &module.splice_records,
                 &module.splice_trait_calls,
+                // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
+                // both walk `module.words` in the same order (this loop
+                // filters afterward, but `idx` still comes from the same
+                // full enumerate), so a splice this word's body performs
+                // resolves to the checker's own record for it, not another
+                // word's that happens to share a `(0, span)` key.
+                idx as u32 * crate::check::INLINE_UID_STRIDE,
             )
         })
         .collect();
@@ -356,6 +363,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            // A generic instantiation's own body is never checked through
+            // `check_word`'s real (non-scratch) `PolyCtx` (`check_poly_body`'s
+            // symbolic `poly_walk` pre-pass handles a poly body instead, and
+            // never writes `splice_trait_calls`/`splice_records`), so no seed
+            // here can collide with a real entry.
+            0,
         ));
     }
 
@@ -885,6 +898,9 @@ pub(crate) fn lower_word(
         EnvPlan::None,
         splice_records,
         splice_trait_calls,
+        // REPL path: `check_def_collecting_drop_sites` seeds the matching
+        // checker-side `Provenance::inline_uid` at 0 too.
+        0,
     )
 }
 
@@ -949,6 +965,7 @@ pub(crate) fn lower_instantiation(
         EnvPlan::None,
         empty_splice_records(),
         empty_splice_trait_calls(),
+        0,
     )
 }
 

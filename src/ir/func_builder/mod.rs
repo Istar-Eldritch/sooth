@@ -908,6 +908,12 @@ pub(super) fn lower_word_parts(
     env_plan: EnvPlan,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
+    // Mirrors the checker's `word_idx * crate::check::INLINE_UID_STRIDE` seed
+    // (see that const's doc comment): the two splice-uid sequences must agree
+    // for `splice_records`/`splice_trait_calls` (keyed `(inline_uid, Span)`)
+    // to resolve to the entry the checker actually recorded for this word,
+    // rather than another word's that happens to share a `(0, span)` key.
+    inline_uid_seed: u32,
 ) -> Vec<IrFunc> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
@@ -921,6 +927,7 @@ pub(super) fn lower_word_parts(
     let ret = word_ret_ty(&effect.outputs, regs.structs);
 
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
+    b.inline_uid = inline_uid_seed;
     b.instantiations = instantiations;
     b.builtin_overloads = builtin_overloads;
     b.trait_calls = trait_calls;
@@ -1144,6 +1151,11 @@ pub(super) fn lower_materialized(
             },
             splice_records,
             splice_trait_calls,
+            // A materialized quotation gets its own `IrFunc` with a fresh uid
+            // space (mirrors the checker: `in_materialized_quot` rejects a
+            // bound dispatch inside one for exactly this reason, so nothing
+            // here reads back a per-splice record seeded elsewhere).
+            0,
         ));
     }
     out

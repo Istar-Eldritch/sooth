@@ -7,15 +7,27 @@
 \ "ordered" at all -- a user type opts in with its own `impl: Ord`, exactly as
 \ any other trait.
 \
-\ The comparisons are deliberately **not** `inline` here: making them inline
-\ (commit 03f56f5) exposed a splice trait dispatch collision where two splice
-\ sites of `lt` at different concrete types (`i8` vs `u8`) both resolve the
-\ inner `cmp` call to the same impl (the last one seen), producing wrong signed
-\ comparisons. The `(uid, span)` keying in `splice_trait_calls` should
-\ distinguish the two splices but doesn't — the bug is in the checker's
-\ `resolve_splice_member_call` or the IR's `splice_uid_stack` threading, not
-\ here. Reverted to non-inline as a workaround until that bug is fixed; a
-\ hot-path combinator can call `cmp` directly and splice instead.
+\ The comparisons are deliberately **not** `inline` here. Making them inline
+\ (commit 03f56f5) exposed a splice trait dispatch collision: two different
+\ top-level words each splicing `lt` at a different concrete type reused the
+\ same `cmp`-call span and the same first-splice uid (`Provenance::inline_uid`
+\ restarted at 0 per word), so the second word's `impl:` resolution silently
+\ clobbered the first's in the shared module-level `splice_trait_calls` map.
+\ That collision is fixed (`crate::check::INLINE_UID_STRIDE` seeds each
+\ top-level word's uid range disjointly, mirrored on the lowering side).
+\ A second, distinct bug still blocks inline here: an ordinary (non-combinator)
+\ polymorphic word that calls an `inline` bounded combinator which itself bare-
+\ calls a trait member (`mymax ( 'T: Copy Ord 'T -- 'T ) ... gt ...` where `gt`
+\ is inline and calls `cmp` directly) panics at lowering ("checked user word
+\ exists", src/ir/func_builder/calls.rs). `check_poly_body`'s `poly_walk` (the
+\ real per-instantiation check path for a generic body) has no `PolyCtx` at all
+\ when it walks such a body -- only `builtin_overloads`/`TraitCtx`/`CrossCtx` --
+\ so it cannot record a `resolve_splice_member_call` resolution into
+\ `splice_trait_calls`/`splice_records` the way a monomorphic caller's real
+\ `check_word` path does; lowering's per-instantiation `FuncBuilder` never sees
+\ the resolution either way. Reverted to non-inline as a workaround until that
+\ second bug is fixed too; a hot-path combinator can call `cmp` directly and
+\ splice instead.
 import: intrinsics i | ueq ult ugt ulte ugte une branch drop swap | ;
 import: self::bool b | Bool False True | ;
 
