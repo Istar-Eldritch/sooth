@@ -3908,5 +3908,113 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("declares no module of its own"), "{err}");
+        // R9: the diagnostic must name the target shape family (e.g. `['T 'N]`),
+        // not a scalar, so the user can see *what* was orphaned.
+        assert!(
+            err.contains("['T 'N]"),
+            "should name the target shape: {err}"
+        );
+    }
+
+    #[test]
+    fn check_impl_decls_generic_impl_in_trait_module_accepted() {
+        // The same generic `impl: Show for ['T 'N]` in the trait's own module
+        // (module 0 for both) is accepted — the orphan rule's legal home.
+        impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;
+\
+             impl: Show for ['T 'N]
+\
+               : show | a | a drop ;
+\
+             ;",
+        )
+        .expect("generic impl in the trait's own module should be accepted");
+    }
+
+    // R4 (concrete parity): a concrete `impl: Show for Point` keeps the
+    // existing rule — accepted in `Point`'s module or `Show`'s module,
+    // rejected elsewhere. No regression from the `ImplTarget` change.
+
+    #[test]
+    fn check_impl_decls_concrete_impl_in_trait_module_accepted() {
+        // Trait and impl in module 0; struct also in module 0 (trait's module
+        // == impl's module → accepted).
+        impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;
+\
+             type: Point x i64 ;
+\
+             impl: Show for Point
+\
+               : show | p | p drop ;
+\
+             ;",
+        )
+        .expect("concrete impl in the trait's module should be accepted");
+    }
+
+    #[test]
+    fn check_impl_decls_concrete_impl_in_target_module_accepted() {
+        // Trait in module 1, struct and impl in module 0 (target's module
+        // == impl's module → accepted).
+        let src = "trait: Show 'T show ( &'T -- ) ;
+\
+             type: Point x i64 ;
+\
+             impl: Show for Point
+\
+               : show | p | p drop ;
+\
+             ;";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module).unwrap();
+        module
+            .traits
+            .iter_mut()
+            .find(|t| t.name == "Show")
+            .expect("the Show trait parsed")
+            .module = 1;
+        check_impl_decls(&mut module)
+            .expect("concrete impl in the target's module should be accepted");
+    }
+
+    #[test]
+    fn check_impl_decls_concrete_impl_outside_both_modules_is_orphan_error() {
+        // Trait in module 1, struct in module 2, impl in module 0 (neither
+        // the trait's nor the target's module → rejected).
+        let src = "trait: Show 'T show ( &'T -- ) ;
+\
+             type: Point x i64 ;
+\
+             impl: Show for Point
+\
+               : show | p | p drop ;
+\
+             ;";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        check_trait_decls(&module).unwrap();
+        module
+            .traits
+            .iter_mut()
+            .find(|t| t.name == "Show")
+            .expect("the Show trait parsed")
+            .module = 1;
+        // The struct is the first user struct; find it and set its module.
+        let struct_idx = module
+            .structs
+            .iter()
+            .position(|s| s.name == "Point")
+            .expect("the Point struct parsed");
+        module.structs[struct_idx].module = 2;
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(
+            err.contains(
+                "must live in the module declaring `Show` or the module declaring `Point`"
+            ),
+            "should name both legal homes: {err}"
+        );
     }
 }

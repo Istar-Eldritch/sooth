@@ -176,14 +176,10 @@ fn alpha_equivalent_generic_targets_are_duplicate_error() {
     assert!(err.contains("duplicate `impl:`"), "{err}");
 }
 
-/// R4/R9: a generic `impl:` outside the trait's module is rejected with a
-/// located error naming the trait and the target.
+/// R4: a generic `impl:` in the trait's own module (single file, both in
+/// module 0) is accepted.
 #[test]
-fn generic_impl_outside_trait_module_is_rejected() {
-    // The trait is in module 0 (this file), but we simulate the trait being
-    // in a different module by using a two-file setup. For Phase 1, we can
-    // only test the single-file case where both are in module 0, which should
-    // be accepted. The orphan check is unit-tested in declarations.rs.
+fn generic_impl_in_trait_module_accepted() {
     let (_t, entry) = single_file(
         "orphan_ok",
         "trait: Show 'T show ( &'T -- ) ;\n\
@@ -199,6 +195,40 @@ fn generic_impl_outside_trait_module_is_rejected() {
         String::from_utf8_lossy(&build.stderr)
     );
     std::fs::remove_file(entry.with_extension("")).ok();
+}
+
+/// R13: a two-module program where a generic `impl:` sits in the wrong
+/// module (not the trait's) fails to compile with the located orphan error
+/// naming the trait and the target shape.
+#[test]
+fn generic_impl_outside_trait_module_is_orphan_error() {
+    let t = Tree::new("orphan-generic");
+    t.write(
+        "trait.sth",
+        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\n\
+         import: \"trait.sth\" t | Show | ;\n\
+         impl: Show for ['T 'N]\n\
+           : show | a | a drop ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("must live in the module declaring `Show`"),
+        "should name the trait: {err}"
+    );
+    assert!(
+        err.contains("declares no module of its own"),
+        "should explain the generic target has no home module: {err}"
+    );
+    assert!(
+        err.contains("['T 'N]"),
+        "should name the target shape family: {err}"
+    );
 }
 
 // P7.S4 Phase 2 goldens: the specificity partial order and the ambiguity
