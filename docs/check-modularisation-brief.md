@@ -35,7 +35,7 @@ current file:
        ~330 lines).
   - `declarations`: `check_extern_decls`, `check_exported_signatures`,
        `check_selective_imports` (+ `SelectiveName` and its error builders), `check_types`,
-       `check_no_stored_references`, `check_no_linear_array_elements`, `check_structs` (+
+       `check_no_stored_references`, `check_slice_element_gate`, `check_structs` (+
        duplicate-name/type/word checks), `check_generic_concrete_overlap`,
        `check_duplicate_poly_signatures`, the struct/enum recursion checker
        (`VisitState`/`TypeNode`/`check_recursion`/…), `struct_generated_sigs`,

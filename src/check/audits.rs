@@ -1021,30 +1021,35 @@ mod tests {
         }
     }
 
-    /// P7.S3h: an element rejects because the owning marker makes it linear,
-    /// and `check_no_linear_array_elements`/`check_slice_element_gate` refuse
-    /// any element that is not `is_copy`. Those gates run before the audit, so
-    /// this pins which one speaks.
+    /// P7.S3h: an owning quotation element is rejected in both array and
+    /// slice position, but by different guards now that the Phase 4 array
+    /// destructor admits linear array elements.
     ///
-    /// The two positions are *not* equally protected, and the difference
-    /// matters to phase 3: an array element is also swept by the audit above,
-    /// so deleting the array gate still rejects, but
-    /// `audit_quotation_type_registries` never walks `module.slices` at all --
-    /// measured, deleting the slice gate reaches `ir_type_of` and ICEs. The
-    /// slice gate is the only thing holding that position.
+    /// The array position is swept by the audit itself
+    /// (`audit_quotation_type_registries` rejects `OwningQuotation` as an
+    /// array element because it is a quotation type, not because it is
+    /// linear), so deleting the former linear-array gate still rejects. The
+    /// slice position is rejected by `check_slice_element_gate` (the audit
+    /// never walks `module.slices`); the gate is the only thing holding that
+    /// position -- measured, deleting it reaches `ir_type_of` and ICEs.
     #[test]
-    fn owning_quotation_element_is_rejected_as_linear() {
-        for src in [
-            ": f ( [owning [ -- ] 4] -- ) drop ;\n",
-            ": f ( Slice[owning [ -- ]] -- ) drop ;\n",
-        ] {
-            let err = check_src(src).unwrap_err();
-            assert!(
-                err.contains("owning [ -- ]")
-                    && err.contains("is linear and has no `Copy` instance"),
-                "unexpected message for `{src}`: {err}"
-            );
-        }
+    fn owning_quotation_element_is_rejected() {
+        // Array: rejected by the audit as a quotation type in an illegal
+        // position.
+        let arr_err = check_src(": f ( [owning [ -- ] 4] -- ) drop ;\n").unwrap_err();
+        assert!(
+            arr_err.contains("owning [ -- ]")
+                && arr_err.contains("cannot appear as an array element"),
+            "unexpected message for array case: {arr_err}"
+        );
+
+        // Slice: rejected by `check_slice_element_gate` as a linear element.
+        let slice_err = check_src(": f ( Slice[owning [ -- ]] -- ) drop ;\n").unwrap_err();
+        assert!(
+            slice_err.contains("owning [ -- ]")
+                && slice_err.contains("is linear and has no `Copy` instance"),
+            "unexpected message for slice case: {slice_err}"
+        );
     }
 
     /// P7.S3h: the two declaration positions phase 3 made legal -- a word's

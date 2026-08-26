@@ -795,17 +795,22 @@ pub(super) fn check_array_word(
                     recv.ty,
                 ));
             };
-            // R1.2 (the `Copy`-element rule) needs no gate here: `slice`'s
-            // only source is an array reference, and no array can hold a
-            // non-`Copy` element in the first place -- a linear one is refused
-            // as `linear array elements are not supported yet`, a reference
-            // one as `a reference cannot be stored`. Pinned by
-            // `slice_element_copy_rule_is_enforced_by_the_array_gate`.
+            // R1.2 (the `Copy`-element rule): a slice is a view
+            // (pointer + length) with no destructor, so a linear element
+            // would leak when the view is dropped.  Reference elements are
+            // still rejected upstream by `check_no_stored_references` (a
+            // reference cannot be stored in an array); the linear case needs
+            // its own gate here because `slice` interns its result during
+            // body checking, after `check_types` (and hence
+            // `check_slice_element_gate`) has already run.
             //
             // R12: the view inherits the receiver's mutability, so a `&!`
             // buffer reference yields a `!Slice[T]` -- non-`Copy` (R4) and
             // exclusivity-tracked through the region it carries forward.
             let element = arrays[id.index()].element;
+            if !is_copy(element, ctx.structs(), ctx.enums(), arrays) {
+                return Err(slice_linear_element_error(ctx, span, element));
+            }
             let out = intern_slice_type(slices, element, recv_mut);
             let deriv = prov.project(recv.deriv);
             let alias = recv.alias;
@@ -1353,6 +1358,24 @@ pub(super) fn array_index_out_of_range_error(
 
 /// `fill` given a *computed* (non-literal) count (M1): the count must be a
 /// compile-time literal, since there is no comptime interpreter to fold it.
+/// `slice` on a reference to an array whose element is linear: a slice is a
+/// view (pointer + length) with no destructor, so a linear element would
+/// leak when the view is dropped.  The declaration-site `check_slice_element_gate`
+/// catches a `Slice[T]` named in a signature, but `slice` interns its result
+/// during body checking (after `check_types`), so the construction site needs
+/// its own gate.  Reference elements are still rejected upstream by
+/// `check_no_stored_references`, so only the linear case reaches here.
+fn slice_linear_element_error(ctx: &Ctx, span: Span, element: Type) -> String {
+    match ctx {
+        Ctx::Word { mangled, effect, .. } => format!(
+            "error: `slice` cannot create a slice with a linear element in {} (line {})\n  `{}` is linear and has no `Copy` instance\n  note: declared {}",
+            crate::resolve::render_word(mangled), span.line, element, effect_str(effect)),
+        Ctx::Line { .. } => format!(
+            "error: `slice` cannot create a slice with a linear element: `{element}` is linear and has no `Copy` instance"
+        ),
+    }
+}
+
 fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { mangled, effect, .. } => format!(
@@ -2884,19 +2907,20 @@ mod tests {
         assert!(err.contains("Slice[i64]"), "unexpected message: {err}");
     }
 
-    /// R1.2: `slice`'s *construction* route needs no Copy-element gate of
-    /// its own -- the array declaration rule already makes a non-`Copy`
-    /// element unreachable through it, by both routes. This test is that
-    /// narrower claim: loosen either array rule and `slice` inherits the hole,
-    /// here. It does not cover the *type-spelling* route (`Slice[T]` interned
+    /// R1.2: `slice`'s *construction* route has its own Copy-element gate
+    /// (linear elements are rejected here, not by the declaration-site
+    /// `check_no_linear_array_elements` which was removed in Phase 4 when
+    /// the array destructor made linear array elements sound).  Reference
+    /// elements are still rejected upstream by `check_no_stored_references`.
+    /// This test does not cover the *type-spelling* route (`Slice[T]` interned
     /// straight from the parser, with no array in sight); that is
     /// `check_slice_element_gate_*` in `declarations.rs`.
     #[test]
-    fn slice_element_copy_rule_is_enforced_by_the_array_gate() {
+    fn slice_element_copy_rule_is_enforced() {
         let linear =
             check_src(": f ( &[^i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap_err();
         assert!(
-            linear.contains("linear array elements are not supported yet"),
+            linear.contains("`slice` cannot create a slice with a linear element"),
             "unexpected message: {linear}"
         );
         for elem in ["&i64", "&!i64"] {
@@ -3115,9 +3139,8 @@ mod tests {
     fn tabulate_admits_linear_element_type() {
         // `Spy` is linear (it has a `drop` overload).  `fill` would reject
         // this; `tabulate` admits it because each slot is freshly produced.
-        // The word's effect does not name `[Spy 2]` (the array is interned
-        // during body checking, after the declaration-site sweep), so
-        // `check_no_linear_array_elements` does not reject it.
+        // The synthesized array destructor (Phase 4) disposes each element,
+        // so linear array elements are now admitted.
         check_src(
             "type: Spy tag i64 ;\n\
              : drop ( Spy -- ) | s | s Spy> drop ;\n\

@@ -2407,61 +2407,54 @@ fn fill_non_nullary_linear_seed_rejected_with_tabulate_hint() {
 }
 
 #[test]
-fn linear_array_element_in_word_signature_is_error() {
-    // The array-type boundary (not just `fill`) rejects a linear element: a
-    // `[Spy 2]` slot in a word's stack effect names the type directly. The
-    // parser cannot know `Spy` is linear until struct/enum fields are
-    // resolved, so this is a checker error, not a parse error.
-    let err = linear_check_error(&format!(
+fn linear_array_element_in_word_signature_is_ok() {
+    // A `[Spy 2]` slot in a word's stack effect names the type directly.
+    // The synthesized array destructor (Phase 4) disposes each element,
+    // so this now compiles.
+    let tokens = lexer::lex(&format!(
         "{SPY_DEF}: w ( [Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
-    ));
-    assert!(
-        err.contains("linear array elements are not supported yet"),
-        "unexpected message: {err}"
-    );
-    assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    ))
+    .expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
 }
 
 #[test]
-fn linear_array_element_in_struct_field_is_error() {
-    // Same boundary, reached via a `type:` field declaration instead of a
-    // word signature.
-    let err = linear_check_error(&format!(
+fn linear_array_element_in_struct_field_is_ok() {
+    // Same boundary, reached via a `type:` field declaration instead of
+    // a word signature.
+    let tokens = lexer::lex(&format!(
         "{SPY_DEF}type: Bag xs [Spy 2] ;\n: main ( -- ) 0 . ;\n"
-    ));
-    assert!(
-        err.contains("linear array elements are not supported yet"),
-        "unexpected message: {err}"
-    );
-    assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    ))
+    .expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
 }
 
 #[test]
-fn linear_array_element_via_linear_struct_in_struct_field_is_error() {
+fn linear_array_element_via_linear_struct_in_struct_field_is_ok() {
     // Indirect linearity: `Arr`'s field isn't itself `Spy`, but `Holds`
     // (its element) contains one transitively, so the array is linear too.
-    let err = linear_check_error(&format!(
+    // The array destructor calls `emit_drop` on each `Holds`, which
+    // dispatches to `Holds`'s struct destructor.
+    let tokens = lexer::lex(&format!(
         "{SPY_DEF}type: Holds s Spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n"
-    ));
-    assert!(
-        err.contains("linear array elements are not supported yet"),
-        "unexpected message: {err}"
-    );
-    assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    ))
+    .expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
 }
 
 #[test]
-fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
-    // Same indirection, reached via a word signature slot instead of a
-    // struct field.
-    let err = linear_check_error(&format!(
+fn linear_array_element_via_linear_struct_in_word_signature_is_ok() {
+    // Same indirection, reached via a word signature slot instead of
+    // a struct field.
+    let tokens = lexer::lex(&format!(
         "{SPY_DEF}type: Holds s Spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
-    ));
-    assert!(
-        err.contains("linear array elements are not supported yet"),
-        "unexpected message: {err}"
-    );
-    assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    ))
+    .expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
 }
 
 // Phase 3 Slice 2: the three owning-cell access words (`^ ^> ^|>`). A

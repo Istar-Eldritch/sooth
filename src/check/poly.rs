@@ -4423,10 +4423,10 @@ pub(super) fn poly_copy_gate(
         // rendered by the shared operand renderer below.
         PolyType::QuotLit => Err(poly_op_on_variable_error(ctx, span, op, pt, sig)),
         // A variable-bearing array is non-`Copy` exactly when its element is
-        // (a length-variable array is never interned, so the declaration-time
-        // `check_no_linear_array_elements` never sees it). Recurse so the
-        // error names the real offending element, an unbounded variable or a
-        // linear concrete type, never a fabricated one.
+        // (a length-variable array is never interned, so no declaration-site
+        // gate ever sees it). Recurse so the error names the real offending
+        // element, an unbounded variable or a linear concrete type, never a
+        // fabricated one.
         PolyType::Array(elem, _) => {
             poly_copy_gate(elem, op, sig, ctx, span, structs, enums, arrays)
         }

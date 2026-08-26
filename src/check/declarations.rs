@@ -923,7 +923,6 @@ pub fn check_types(
     check_duplicate_type_names(structs, enums, generic_structs, generic_enums)?;
     check_recursion(structs, enums, arrays)?;
     check_no_stored_references(structs, enums, arrays, cells)?;
-    check_no_linear_array_elements(structs, enums, arrays)?;
     check_slice_element_gate(structs, enums, arrays, slices)?;
     Ok(())
 }
@@ -1003,36 +1002,6 @@ fn stored_reference_error(position: &str, ty: Type, span: Option<Span>) -> Strin
     format!(
         "error: a reference cannot be stored: {position} has type `{ty}`{located}\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow"
     )
-}
-
-/// Arrays of linear elements are not supported yet: rejected here, over the
-/// module's interned array registry, rather than in the parser, because
-/// linearity (`is_copy`) is only answerable once every struct/enum field list
-/// is resolved, which happens after the whole module is parsed. Every array
-/// type named anywhere (a word signature slot, a struct field, an enum
-/// variant field) is interned into this one registry, and `is_copy` already
-/// walks an array's element transitively, so this single sweep catches a
-/// direct `[LinearStruct N]` and an indirect one alike. Runs after
-/// `check_recursion`, which rules out a self-referential struct/enum/array
-/// first, so `is_copy`'s recursion over the field graph is guaranteed to
-/// terminate. `ArrayDecl` carries no span (an array shape has no declared
-/// name a pre-pass could register), so the error names the array/element
-/// types rather than inventing a wrong line number.
-fn check_no_linear_array_elements(
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
-) -> Result<(), String> {
-    for decl in arrays {
-        if !is_copy(decl.element, structs, enums, arrays) {
-            return Err(format!(
-                "error: linear array elements are not supported yet: array type `{}` has element `{}`, which is linear and has no `Copy` instance",
-                decl.name_static,
-                decl.element.name(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// The struct-only projection of `check_types` (no enums/arrays/generics), for
@@ -3207,16 +3176,12 @@ mod tests {
         check_src("type: List | Nil | Cons v i64 next ^List ;").unwrap();
     }
     #[test]
-    fn check_recursion_array_element_cell_is_cut_then_rejected_as_linear() {
+    fn check_recursion_array_element_cell_is_cut_then_ok() {
         // The `^` edge is cut inside an array element too, so this
-        // definition survives the recursion rule and reaches the linear
-        // array-element rule instead of "recursive array definition".
-        let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`^Node`"), "unexpected message: {err}");
+        // definition survives the recursion rule.  The array destructor
+        // (Phase 4) disposes each `^Node` cell, so the linear element is now
+        // admitted rather than rejected.
+        check_src("type: Node kids [^Node 4] ;").unwrap();
     }
     #[test]
     fn check_struct_enum_mixed_recursion_is_error_not_hang() {
@@ -3228,60 +3193,41 @@ mod tests {
         assert!(err.contains('E'), "unexpected message: {err}");
     }
     #[test]
-    fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
+    fn linear_array_element_in_struct_field_is_ok() {
         // The parser cannot reject `[Spy N]` (struct fields aren't resolved
-        // until the whole module is parsed), so this is the checker's job.
-        let err = check_src(&format!(
+        // until the whole module is parsed).  The synthesized array destructor
+        // (Phase 4) disposes each linear element, so this now compiles.
+        check_src(&format!(
             "{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        .unwrap();
     }
     #[test]
-    fn check_no_linear_array_elements_direct_element_in_word_signature_is_error() {
-        let err = check_src(&format!(
+    fn linear_array_element_in_word_signature_is_ok() {
+        check_src(&format!(
             "{SPY_DEF}: w ( [Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        .unwrap();
     }
     #[test]
-    fn check_no_linear_array_elements_indirect_via_linear_struct_field_is_error() {
+    fn linear_array_element_indirect_via_linear_struct_field_is_ok() {
         // `Arr`'s element (`Holds`) is not itself `Spy`, but contains one
-        // transitively; `is_copy` already sees through that, so the sweep
-        // over `module.arrays` must too.
-        let err = check_src(&format!(
+        // transitively; the array destructor calls `emit_drop` on each
+        // element, which dispatches to `Holds`'s struct destructor.
+        check_src(&format!(
             "{SPY_DEF}type: Holds s Spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+        .unwrap();
     }
     #[test]
-    fn check_no_linear_array_elements_indirect_via_linear_struct_in_signature_is_error() {
-        let err = check_src(&format!(
+    fn linear_array_element_indirect_via_linear_struct_in_signature_is_ok() {
+        check_src(&format!(
             "{SPY_DEF}type: Holds s Spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+        .unwrap();
     }
     #[test]
-    fn check_no_linear_array_elements_copy_element_is_ok() {
+    fn copy_array_element_is_ok() {
         check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
     }
     /// P7 slice 3c (R1.2 phase 3 review fix): unlike `array_of_owned_is_error`,
@@ -3323,45 +3269,32 @@ mod tests {
         check_src(": w ( Slice[i64] -- usize ) len ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
-    fn array_of_owned_is_error() {
-        let err = check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    fn array_of_owned_is_ok() {
+        // An array of owning cells: the array destructor (Phase 4) calls
+        // `emit_drop` on each `^i64`, which dispatches to the cell destructor.
+        check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
-    fn owned_of_linear_array_is_error() {
-        let err = check_src(&format!(
+    fn owned_of_linear_array_is_ok() {
+        // An owning cell wrapping a linear array: the cell destructor drops
+        // the payload (the array), which dispatches to the array destructor.
+        check_src(&format!(
             "{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        .unwrap();
     }
     #[test]
-    fn nested_array_of_owned_is_error() {
-        let err = check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    fn nested_array_of_owned_is_ok() {
+        // A cell wrapping an array of cells: the cell destructor drops the
+        // array, whose destructor drops each `^i64` cell.
+        check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
-    fn array_of_struct_holding_owned_is_error() {
-        // Keeps `emit_drop`'s linear-array `unreachable!` guard valid now that
-        // cells are a second linear type: an array whose element only holds a
-        // cell transitively must be rejected here too, or lowering would reach
-        // that arm with an array needing drop glue.
-        let err = check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
-            .unwrap_err();
-        assert!(err.contains("linear array elements are not supported yet"));
-        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    fn array_of_struct_holding_owned_is_ok() {
+        // An array whose element only holds a cell transitively: the array
+        // destructor disposes each `Holds`, whose struct destructor disposes
+        // the `^i64` field.
+        check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
     fn check_struct_and_enum_duplicate_name_across_registries_is_error() {

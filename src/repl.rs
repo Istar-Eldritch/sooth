@@ -2693,6 +2693,7 @@ impl Session {
         &self,
         structs: &mut ir::Structs,
         enums: &mut ir::Enums,
+        arrays: &mut ir::Arrays,
         cells: &mut ir::Cells,
     ) {
         for (idx, layout) in structs.layouts.iter_mut().enumerate() {
@@ -2709,6 +2710,9 @@ impl Session {
             };
         }
         for layout in &mut enums.layouts {
+            layout.drop_generation = self.override_epoch;
+        }
+        for layout in &mut arrays.layouts {
             layout.drop_generation = self.override_epoch;
         }
         for generation in &mut cells.drop_generations {
@@ -2822,14 +2826,14 @@ impl Session {
         )?;
 
         let ir_lower_env = ir_arity_env(&env);
-        let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
+        let (mut structs, mut enums, mut arrays, mut cells, refs) = ir::build_registries(
             &self.structs,
             &self.enums,
             &self.arrays,
             &self.owned_cells,
             &self.refs,
         );
-        self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        self.apply_drop_generations(&mut structs, &mut enums, &mut arrays, &mut cells);
         let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
@@ -3189,14 +3193,14 @@ impl Session {
             }],
         );
         let ir_lower_env = ir_arity_env(&env);
-        let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
+        let (mut structs, mut enums, mut arrays, mut cells, refs) = ir::build_registries(
             &self.structs,
             &self.enums,
             &self.arrays,
             &self.owned_cells,
             &self.refs,
         );
-        self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        self.apply_drop_generations(&mut structs, &mut enums, &mut arrays, &mut cells);
         let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
@@ -3387,14 +3391,14 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
+        let (mut structs, mut enums, mut arrays, mut cells, refs) = ir::build_registries(
             &self.structs,
             &self.enums,
             &self.arrays,
             &self.owned_cells,
             &self.refs,
         );
-        self.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        self.apply_drop_generations(&mut structs, &mut enums, &mut arrays, &mut cells);
         let slices = ir::build_slices(&self.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,
@@ -4500,14 +4504,14 @@ mod tests {
     /// is the struct whose `: drop` line is being evaluated, `None` for an
     /// ordinary line (R11.3: an ordinary line emits no override body).
     fn destructor_symbols(session: &Session, declaring: Option<StructId>) -> Vec<String> {
-        let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
+        let (mut structs, mut enums, mut arrays, mut cells, refs) = ir::build_registries(
             &session.structs,
             &session.enums,
             &session.arrays,
             &session.owned_cells,
             &session.refs,
         );
-        session.apply_drop_generations(&mut structs, &mut enums, &mut cells);
+        session.apply_drop_generations(&mut structs, &mut enums, &mut arrays, &mut cells);
         let slices = ir::build_slices(&session.slices, &structs, &enums, &arrays);
         let regs = ir::Registries {
             structs: &structs,

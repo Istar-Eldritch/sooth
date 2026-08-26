@@ -268,11 +268,13 @@ fn an_owning_field_disposes_alongside_its_siblings_exactly_once() {
 
 // -- The blast-radius guards on R6's carve-outs -------------------------------
 
-/// R6 admits exactly three positions. An array element is not one of them: a
-/// linear element is P7.S5's question, and this slice touches neither the
-/// audit's array loop nor the general non-`Copy`-element gate. The message is
-/// the general gate's, byte-identical to what it was before this slice -- which
-/// is the point: widening R6 to a fourth position would change it.
+/// R6 admits exactly three positions. An array element is not one of them:
+/// the audit (`audit_quotation_type_registries`) rejects an owning
+/// quotation as an array element because it is a quotation type in an
+/// illegal position.  The former linear-array gate is gone (Phase 4
+/// admitted linear array elements), but the audit still catches an owning
+/// quotation here -- the message is the audit's, which is the point:
+/// widening R6 to a fourth position would change it.
 #[test]
 fn an_array_element_owning_closure_is_still_rejected() {
     let prog = Scratch::write(
@@ -281,7 +283,7 @@ fn an_array_element_owning_closure_is_still_rejected() {
     );
     assert_eq!(
         build_error(prog.path()),
-        "error: linear array elements are not supported yet: array type `[owning [ -- ] 2]` has element `owning [ -- ]`, which is linear and has no `Copy` instance"
+        "error: a quotation type `owning [ -- ]` cannot appear as an array element: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7"
     );
 }
 

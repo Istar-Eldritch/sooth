@@ -1431,34 +1431,54 @@ mod tests {
     /// registries. `type_arg_key` indexes them to spell a wrapped argument
     /// (`^i64`, `&i64`), so the `cells: &[]`/`refs: &[]` throwaway an earlier
     /// caller built would panic on the index rather than render `Ent[^i64
-    /// i64]`. Both programs are rejected downstream for unrelated reasons --
-    /// the rendered name inside the diagnostic is the witness, which is why
-    /// this asserts on the message rather than on a successful build.
+    /// i64]`.  The `&i64` case is rejected downstream by
+    /// `check_no_stored_references` (a reference cannot be stored in an
+    /// array), so the rendered name inside the diagnostic is the witness.
+    /// The `^i64` case compiles now that linear array elements are admitted
+    /// (Phase 4's array destructor disposes them), so the witness is a
+    /// successful `check::check` — the rendering was correct or
+    /// `assemble_module` would have panicked on the empty registry.
     #[test]
     fn map_shaped_field_instantiation_renders_through_live_cells_and_refs() {
-        for (tag, arg, want) in [
-            ("generic-map-cell-arg", "^i64", "Ent[^i64 i64]"),
-            ("generic-map-ref-arg", "&i64", "Ent[&i64 i64]"),
-        ] {
-            let s = Sandbox::new(tag);
+        // Cell case: the linear array element is now admitted, so the program
+        // compiles.  The rendering is implicitly correct — a `cells: &[]`
+        // throwaway would panic in `assemble_module` before reaching
+        // `check::check`.
+        {
+            let s = Sandbox::new("generic-map-cell-arg");
             let entry = s.write(
                 "main.sth",
-                &format!(
-                    "type: Ent 'K 'V k 'K v 'V ;\n\
-                     type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
-                     : f ( Map[{arg} i64] -- Map[{arg} i64] ) ;\n\
-                     : main ( -- ) ;\n"
-                ),
+                "type: Ent 'K 'V k 'K v 'V ;\n\
+                 type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+                 : f ( Map[^i64 i64] -- Map[^i64 i64] ) ;\n\
+                 : main ( -- ) ;\n",
+            );
+            let closure = discover_closure(&entry).expect("closure resolves");
+            let mut module =
+                assemble_module(&closure, true).expect("module assembles with live cells");
+            check::check(&mut module).expect("linear array element now compiles");
+        }
+
+        // Reference case: still rejected by `check_no_stored_references`.
+        // The rendered name inside the diagnostic is the witness.
+        {
+            let s = Sandbox::new("generic-map-ref-arg");
+            let entry = s.write(
+                "main.sth",
+                "type: Ent 'K 'V k 'K v 'V ;\n\
+                 type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+                 : f ( Map[&i64 i64] -- Map[&i64 i64] ) ;\n\
+                 : main ( -- ) ;\n",
             );
             let closure = discover_closure(&entry).expect("closure resolves");
             let err = match assemble_module(&closure, true) {
                 Err(e) => e,
                 Ok(mut module) => check::check(&mut module)
-                    .expect_err("a wrapped argument is rejected downstream"),
+                    .expect_err("a reference element is rejected downstream"),
             };
             assert!(
-                err.contains(want),
-                "{tag}: the nested instantiation must render its wrapped argument \
+                err.contains("Ent[&i64 i64]"),
+                "the nested instantiation must render its wrapped argument \
                  from the live registry, got: {err}"
             );
         }
