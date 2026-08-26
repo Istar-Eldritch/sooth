@@ -1,6 +1,6 @@
 # Sooth
 
-A small, statically-checked concatenative language, compiled to native 
+A small, statically-checked concatenative language, compiled to native
 code with no external runtime. See [DESIGN.md](./DESIGN.md) for the why and
 [ROADMAP.md](./docs/roadmap/ROADMAP.md) for the plan.
 
@@ -47,9 +47,10 @@ compile time rather than as a wrong number at runtime.
 ```
 
 The type system is deliberately small: concrete monomorphic types, ADTs,
-minimal row polymorphism for honest `dup`/`swap`/`max` signatures, and a
-`Copy` marker that distinguishes copyable data from linear resources. No full HM
-inference, no refinement types, no effect rows, no borrow checker.
+minimal row polymorphism for honest `dup`/`swap`/`max` signatures, user-declarable
+trait bounds, and a `Copy` marker that distinguishes copyable data from linear
+resources. No full HM inference, no refinement types, no effect rows, no borrow
+checker.
 
 ## Features
 
@@ -108,10 +109,39 @@ type: File fd Fd ;          \ derived glue disposes Fd through its own drop
 
 **Bounded polymorphism.** `'T`/`'N`/`..s` type, length, and row variables,
 monomorphized per instantiation, no vtables. `dup`/`swap`/`max` get honest
-generic signatures.
+generic signatures. A type variable can carry trait bounds (`'T: Order Show`),
+resolved at each call site against the caller's own `impl:` blocks.
 
-**Quotations and combinators.** `[ ... ]` literals, `call`, and an internal
-loop primitive that lowers self-tail recursion to constant stack. The
+**Traits and trait dispatch.** A `trait:` declaration lists required member
+signatures over a type variable; an `impl:` block gives a concrete type its
+own member bodies, inheriting each signature from the trait. A bounded word
+(`'T: Order`) dispatches each required member as an ordinary word call resolved
+at monomorphization — never a runtime vtable. `Copy` and `Ord` are built-in
+predicates satisfied by a type's own shape; user-declared traits are nominal,
+not structural.
+
+```factor
+trait: Show 'T
+  show ( &'T -- )
+;
+
+impl: Show for Point
+  : show | p | "(" . p &x @ . "," . p &y @ . ")" . ;
+;
+
+: print-larger ( &'T: Order Show &'T -- )
+  | a b | a b cmp
+  ~[ drop b show ]
+  ~[ drop a show ]
+  ~[ drop a show ]
+  Rank? ;
+```
+
+**Quotations and combinators.** `~[ ... ]` inline quotations splice at their
+call site (no runtime closure), `[ ... ]` literals are first-class values
+carried on the stack, and `owning [ ... ]` quotations can capture linear
+resources with a per-site disposer. `call` invokes a quotation value, and an
+internal loop primitive lowers self-tail recursion to constant stack. The
 combinator library (`each`/`map`/`fold`/`filter`/`while`/`times`) is written in
 Sooth itself, inlined at call sites by a term-splicing pass, no per-element
 call overhead. No combinator is compiler-known, not even `if`, which is a
@@ -166,7 +196,7 @@ Where a decision trades reach or peak performance for simplicity and legibility,
 simplicity wins.
 
 But it is not a toy. The target domain is embedded and real-time systems.
-This is where the linear spine has something new: 
-A DMA transfer is an ownership transfer, unsynchronised ISR/mainline sharing 
-is a set intersection the checker can compute, and "deterministic destruction 
+This is where the linear spine shows its value:
+A DMA transfer is an ownership transfer, unsynchronised ISR/mainline sharing
+is a set intersection the checker can compute, and "deterministic destruction
 at a statically-known time" is the default.
