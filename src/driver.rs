@@ -2458,7 +2458,7 @@ mod tests {
         let s = Sandbox::new("bound-cross-module");
         s.write(
             "show.sth",
-            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+            "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
         );
         let entry = s.write(
             "main.sth",
@@ -2484,7 +2484,7 @@ mod tests {
         let s = Sandbox::new("bound-qualified");
         s.write(
             "show.sth",
-            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+            "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
         );
         let entry = s.write(
             "main.sth",
@@ -2504,7 +2504,7 @@ mod tests {
     #[test]
     fn a_qualified_bound_on_an_unexported_trait_is_rejected() {
         let s = Sandbox::new("bound-unexported");
-        s.write("show.sth", "trait: Show 'T show ( &'T -- ) ;\n");
+        s.write("show.sth", "trait: Show 'T : show ( &'T -- ) ; ;\n");
         let entry = s.write(
             "main.sth",
             "import: intrinsics * ;\n\
@@ -2533,8 +2533,8 @@ mod tests {
     #[test]
     fn a_qualified_member_call_disambiguates_two_traits_in_different_modules() {
         let s = Sandbox::new("member-qualified");
-        s.write("a.sth", "trait: A 'T t1 ( &'T -- ) ;\nexport: A ;\n");
-        s.write("b.sth", "trait: B 'T t1 ( &'T -- ) ;\nexport: B ;\n");
+        s.write("a.sth", "trait: A 'T : t1 ( &'T -- ) ; ;\nexport: A ;\n");
+        s.write("b.sth", "trait: B 'T : t1 ( &'T -- ) ; ;\nexport: B ;\n");
         let entry = s.write(
             "main.sth",
             "import: intrinsics * ;\n\
@@ -2576,8 +2576,8 @@ mod tests {
     #[test]
     fn the_same_member_call_unqualified_is_ambiguous() {
         let s = Sandbox::new("member-ambiguous");
-        s.write("a.sth", "trait: A 'T t1 ( &'T -- ) ;\nexport: A ;\n");
-        s.write("b.sth", "trait: B 'T t1 ( &'T -- ) ;\nexport: B ;\n");
+        s.write("a.sth", "trait: A 'T : t1 ( &'T -- ) ; ;\nexport: A ;\n");
+        s.write("b.sth", "trait: B 'T : t1 ( &'T -- ) ; ;\nexport: B ;\n");
         let entry = s.write(
             "main.sth",
             "import: intrinsics * ;\n\
@@ -2603,8 +2603,8 @@ mod tests {
         let s = Sandbox::new("member-same-module");
         s.write(
             "ab.sth",
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
              export: A ;\nexport: B ;\n",
         );
         let entry = s.write(
@@ -2637,7 +2637,7 @@ mod tests {
         s.write(
             "a.sth",
             "import: intrinsics * ;\n\
-             trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: A 'T : t1 ( &'T -- ) ; ;\n\
              type: Blob n i64 ;\n\
              : t1 ( &Blob -- ) drop ;\n\
              export: A ;\nexport: t1 ;\n",
@@ -2678,7 +2678,7 @@ mod tests {
             "a.sth",
             "import: intrinsics * ;\n\
              import: \"dep.sth\" d | t1 | ;\n\
-             trait: A 'T t1 ( &'T -- ) ;\n\
+             trait: A 'T : t1 ( &'T -- ) ; ;\n\
              export: A ;\nexport: t1 ;\n",
         );
         let entry = s.write(
@@ -2719,7 +2719,7 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"blob.sth\" b | shout | ;\n\
              type: Point x i64 y i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for Point\n\
                : show | p | p drop ;\n\
              ;\n\
@@ -2744,7 +2744,7 @@ mod tests {
             "import: intrinsics * ;\n\
              type: Point x i64 y i64 ;\n\
              type: Blob n i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for Point\n\
                : show | p | p drop ;\n\
              ;\n\
@@ -2771,7 +2771,7 @@ mod tests {
         let s = Sandbox::new("bound-symbol");
         s.write(
             "show.sth",
-            "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+            "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
         );
         let entry = s.write(
             "main.sth",

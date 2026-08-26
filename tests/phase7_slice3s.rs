@@ -65,7 +65,7 @@ fn build_and_run(entry: &Path) -> String {
 fn base_and_hub(t: &Tree, hub_import: &str) {
     t.write(
         "base.sth",
-        "trait: Greet 'T greet ( &'T -- ) ;\nexport: Greet ;\n",
+        "trait: Greet 'T : greet ( &'T -- ) ; ;\nexport: Greet ;\n",
     );
     t.write("hub.sth", &format!("{hub_import}\nexport: Greet ;\n"));
 }

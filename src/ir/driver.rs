@@ -1729,7 +1729,7 @@ mod tests {
     #[test]
     fn bound_dispatch_lowers_each_instantiation_to_its_own_impl_member() {
         let m = lower_with_resolve(
-            "trait: Getter 'T get ( &'T -- i64 ) ;\n\
+            "trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              type: Qt n i64 ;\n\
              impl: Getter for Pt\n\
@@ -1763,7 +1763,7 @@ mod tests {
     #[test]
     fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_resolve(
-            "trait: Getter 'T get ( &'T &'T -- i64 ) ;\n\
+            "trait: Getter 'T : get ( &'T &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\
              impl: Getter for Pt\n\

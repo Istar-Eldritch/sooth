@@ -35,7 +35,7 @@ type: Ordering
 ;
 
 trait: Ord 'T
-  cmp ( 'T 'T -- Ordering )
+  : cmp ( 'T 'T -- Ordering ) ;
 ;
 
 \ The eight fixed-width integers (`INT_TYPES`, `src/ast.rs`) and

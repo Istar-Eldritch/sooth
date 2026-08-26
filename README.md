@@ -122,7 +122,7 @@ not structural.
 
 ```factor
 trait: Show 'T
-  show ( &'T -- )
+  : show ( &'T -- ) ;
 ;
 
 impl: Show for Point

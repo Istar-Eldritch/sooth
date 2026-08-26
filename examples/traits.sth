@@ -23,11 +23,11 @@ type: Rank
 ;
 
 trait: Order 'T
-  cmp ( &'T &'T -- Rank )
+  : cmp ( &'T &'T -- Rank ) ;
 ;
 
 trait: Show 'T
-  show ( &'T -- )
+  : show ( &'T -- ) ;
 ;
 
 type: Point x i64 y i64 ;
