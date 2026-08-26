@@ -1822,6 +1822,8 @@ mod tests {
             instantiations: HashMap::new(),
             poly_cross_calls: HashMap::new(),
             transitive_instantiations: Vec::new(),
+            splice_records: std::collections::HashMap::new(),
+            splice_trait_calls: std::collections::HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),

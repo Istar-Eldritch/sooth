@@ -361,13 +361,27 @@ pub(super) fn inline_combinator(
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
-    // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
-    // quotation-taking word) keeps its signature in `word.poly`, not
-    // `word.effect` (which is empty), so the monomorphic argument loop below
-    // would run zero checks and skip R11/R12 entirely (item 3). Route it
-    // through the poly-argument check, which resolves the parameter's declared
-    // effect against the live stack and runs the *same* directional + D3
-    // check, so the two paths agree.
+    // P7.S3o (R1/R2): `check_poly_combinator_args` and the monomorphic
+    // argument loop both walk quotation-parameter bodies via
+    // `check_literal_against_declared_effect`, which splices any nested
+    // combinators and increments `inline_uid`. But the current combinator's
+    // uid is minted *after* this argument check, and lowering does not walk
+    // the quotation body during argument checking (it fuses it later during
+    // the body's `call`/`times` fusion), so the extra increments would
+    // diverge the checker's uid sequence from the lowering's. Save and
+    // restore `inline_uid` around the argument check so the quotation body's
+    // combinator splices are invisible to the uid counter.
+    //
+    // P7.S3o Phase 2: the parent's `splice_uid` is kept (not cleared to
+    // `None`) during the argument check. When inside a splice (e.g. `if`
+    // spliced inside `mymax3`), poly calls in the quotation-parameter bodies
+    // (e.g. `gt` inside `if`'s `~[ ... ]` arms) go to `splice_records` at the
+    // parent's uid instead of the span-keyed `insts`, which would collide when
+    // the enclosing combinator is spliced at two types. The body walk
+    // re-records them at the current combinator's uid (via `branch` →
+    // `check_branch_join`), which is what lowering reads; the arg-check entries
+    // at the parent's uid are harmless duplicates.
+    let saved_inline_uid = prov.inline_uid;
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
             sig, span, &stack, name, ctx, env, arrays, cells, refs, slices, prov, scope, poly,
@@ -461,6 +475,7 @@ pub(super) fn inline_combinator(
         }
         None
     };
+    prov.inline_uid = saved_inline_uid;
     // R6: a self-tail combinator opens a splice-time loop. Its body is spliced
     // with `tail = true` so its own tail-position self-call is recognized as
     // the back-edge (above). 6d/R6: the nested-loop rejection is retired --
@@ -505,6 +520,23 @@ pub(super) fn inline_combinator(
     // (`ir`), so a passed-down literal's captured name stays lexical.
     let uid = prov.inline_uid;
     prov.inline_uid += 1;
+    // P7.S3o (R1/R2): mark that we are inside a splice so `check_poly_call`
+    // redirects inner poly-call CallInsts to `splice_records` (keyed by
+    // `(uid, span)`) instead of the span-keyed `insts`. Saved and restored
+    // so nested combinators resolve at their own `uid`.
+    let saved_splice_uid = prov.splice_uid;
+    prov.splice_uid = Some(uid);
+    // P7.S3o Phase 3: thread the combinator's own `PolySig` (carrying its
+    // `Bound::User` bounds) and the concrete θ from `check_poly_combinator_args`
+    // into the splice walk, so a bare trait member call in the body resolves
+    // against this θ at the splice site. Saved and restored so nested
+    // combinators resolve at their own θ.
+    let saved_comb_sig = poly.combinator_sig.take();
+    let saved_comb_subst = poly.combinator_subst.take();
+    let saved_comb_name = poly.combinator_name.take();
+    poly.combinator_sig = comb.word.poly.as_deref().cloned();
+    poly.combinator_subst = poly_subst.clone();
+    poly.combinator_name = Some(name.to_string());
     let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
     let depth = scope.depth();
     let saved_marker = if self_tail {
@@ -545,6 +577,10 @@ pub(super) fn inline_combinator(
     if let Some(saved) = saved_marker {
         prov.self_tail_combinator = saved;
     }
+    prov.splice_uid = saved_splice_uid;
+    poly.combinator_sig = saved_comb_sig;
+    poly.combinator_subst = saved_comb_subst;
+    poly.combinator_name = saved_comb_name;
     stack = result?;
     leave_block(
         ctx,

@@ -179,6 +179,28 @@ struct PolyCtx<'a> {
     /// the polymorphic member word's body under the instantiation symbol.
     /// Empty on the REPL/combinator-scratch paths, which declare no `impl:`.
     impl_monos: &'a mut Vec<(String, crate::ast::Subst)>,
+    /// P7.S3o (R1/R2): per-splice instantiation records, written by
+    /// `check_poly_call` when `prov.splice_uid` is `Some`. Scratch (discarded)
+    /// on the standalone/REPL paths; the module-level table on the main path.
+    splice_records: &'a mut HashMap<(u32, Span), CallInst>,
+    /// P7.S3o Phase 3: per-splice trait-member-call resolutions, written by
+    /// the dispatch injection in `check_term` when a bare trait member is
+    /// resolved at a splice site. Scratch (discarded) on the standalone/REPL
+    /// paths; the module-level table on the main path.
+    splice_trait_calls: &'a mut HashMap<(u32, Span), String>,
+    /// P7.S3o Phase 3: the combinator's own `PolySig` and concrete θ, set
+    /// during both the standalone check (i64 stand-in) and the splice walk
+    /// (concrete θ from `check_poly_combinator_args`). When set, a bare trait
+    /// member call in the body resolves against this θ instead of falling
+    /// through to `env.get` as an unknown word. Owned (cloned) because the
+    /// sig/subst are local to the caller and `PolyCtx` outlives them.
+    combinator_sig: Option<PolySig>,
+    combinator_subst: Option<Subst>,
+    /// P7.S3o Phase 4 (R5): the combinator's own name, set alongside
+    /// `combinator_sig`/`combinator_subst` during the splice walk and the
+    /// standalone check. Used by the materialized-quotation bound-dispatch
+    /// rejection to name the combinator in the error message.
+    combinator_name: Option<String>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -745,6 +767,8 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         instantiations: _,
         poly_cross_calls: _,
         transitive_instantiations: _,
+        splice_records: _,
+        splice_trait_calls: _,
         builtin_overloads: _,
         resolved_fields: _,
         resolved_variant_fields: _,
@@ -800,6 +824,15 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // `discover_transitive_instantiations` so lowering emits the polymorphic
     // member word's body under the instantiation symbol.
     let mut impl_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
+    // P7.S3o (R1/R2): per-splice instantiation records, filled as each
+    // spliced combinator body's calls to polymorphic words are unified, then
+    // stored on the module for lowering.
+    let mut splice_records: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: per-splice trait-member-call resolutions (bare member →
+    // resolved `impl:` symbol), filled as each spliced combinator body's
+    // bare member calls resolve against the concrete splice θ, then relayed
+    // to the module for lowering.
+    let mut splice_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
     // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
     // as each monomorphic body's operator calls resolve, then relayed to the
     // module for lowering (empty for the whole corpus, so its lowering is
@@ -905,11 +938,15 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
             if is_combinator(word) {
-                // P7.S3e (R9/R17 scope cut, tracked as P7.S3o): the scratch
-                // records below are exactly why a user trait bound cannot ride
-                // a combinator's own type variable -- nothing here survives to
-                // carry a resolved obligation.
-                reject_user_bound_on_combinator(word, sig, traits)?;
+                // P7.S3o: the `reject_user_bound_on_combinator` gate is
+                // removed — bounded combinators now proceed to the standalone
+                // check. A bounded poly word (like `gt` with `'T: Ord`) is
+                // handled by the per-splice mechanism: `check_poly_call`
+                // redirects the inner CallInst to `splice_records`, carrying
+                // the seeded `trait_calls` map. A bare member call (like
+                // `cmp` directly) falls through the standalone check's
+                // `env.get` as an unknown word until Phase 3's dispatch
+                // injection lands.
                 // R14-R17: a polymorphic combinator (`each`/`map`/`fold`) is
                 // checked standalone by instantiating its signature at
                 // concrete stand-in types and running the ordinary checker on
@@ -919,11 +956,13 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 // by term-splice at its concrete call sites, so the
                 // instantiation records it produces here are scratch.
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+                let mut scratch_splice: HashMap<(u32, Span), CallInst> = HashMap::new();
                 let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+                let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
                     HashMap::new();
-                let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
+                let mut scratch_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
@@ -934,6 +973,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     eliminators: &eliminators,
                     trait_resolve,
                     impl_monos: &mut scratch_monos,
+                    splice_records: &mut scratch_splice,
+                    splice_trait_calls: &mut scratch_trait_calls,
+                    combinator_sig: None,
+                    combinator_subst: None,
+                    combinator_name: None,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -962,8 +1006,13 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 resolved_variant_fields: &mut resolved_variant_fields,
                 combinators: &combinators,
                 eliminators: &eliminators,
-                trait_resolve,
                 impl_monos: &mut impl_monos,
+                trait_resolve,
+                splice_records: &mut splice_records,
+                splice_trait_calls: &mut splice_trait_calls,
+                combinator_sig: None,
+                combinator_subst: None,
+                combinator_name: None,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -1031,6 +1080,20 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             ));
         }
     }
+    // P7.S3o: a splice-derived CallInst with out_arity >= 2 needs the same
+    // bundle. This runs before `discover_transitive_instantiations`, whose
+    // early return on an empty `poly_cross_calls` table skips the
+    // `intern_composed_bundles` pass for splice records — leaving
+    // `bundle: None` and panicking at lowering when the multi-output return
+    // value is never pushed onto the stack.
+    for inst in splice_records.values_mut() {
+        if inst.out_arity >= 2 {
+            inst.bundle = Some(intern_bundle_struct(
+                &mut module.structs,
+                &inst.output_types,
+            ));
+        }
+    }
     module.poly_cross_calls = poly_cross_calls;
     // P7.S3k (R4): a generic body's call to another generic word was recorded
     // symbolically, since the caller had no θ of its own when its body was
@@ -1041,11 +1104,14 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     module.transitive_instantiations = discover_transitive_instantiations(
         module,
         &mut insts,
+        &mut splice_records,
         &symbols,
         &trait_obligations,
         std::mem::take(&mut impl_monos),
     )?;
     module.instantiations = insts;
+    module.splice_records = splice_records;
+    module.splice_trait_calls = splice_trait_calls;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;
@@ -1219,6 +1285,10 @@ pub(crate) fn check_def_collecting_drop_sites(
     // collector passes the empty map (a `drop` overload is never polymorphic),
     // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // P7.S3o: scratch splice records (REPL path, never lowered).
+    let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
+    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
     // Item 3: this body's resolved-overload call sites, relayed to the
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
@@ -1251,7 +1321,12 @@ pub(crate) fn check_def_collecting_drop_sites(
         // reaches a REPL-checked body or line -- the same bypass
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
+        splice_records: &mut splice_recs,
         impl_monos: &mut scratch_monos,
+        splice_trait_calls: &mut splice_trait_recs,
+        combinator_sig: None,
+        combinator_subst: None,
+        combinator_name: None,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -1307,6 +1382,10 @@ pub(crate) fn infer_line(
     // relayed to the caller for lowering. A `build`-path caller passes the
     // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // P7.S3o: scratch splice records (REPL path, never lowered).
+    let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
+    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
     // Item 3: this line's resolved-overload call sites, relayed to the
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
@@ -1335,7 +1414,12 @@ pub(crate) fn infer_line(
         // reaches a REPL-checked body or line -- the same bypass
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
+        splice_records: &mut splice_recs,
         impl_monos: &mut scratch_monos,
+        splice_trait_calls: &mut splice_trait_recs,
+        combinator_sig: None,
+        combinator_subst: None,
+        combinator_name: None,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,

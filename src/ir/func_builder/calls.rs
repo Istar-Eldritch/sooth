@@ -279,6 +279,20 @@ impl<'a> FuncBuilder<'a> {
             self.lower_resolved_word_call(&sym_name);
             return;
         }
+        // P7.S3o Phase 3: a bare trait member call resolved at a combinator
+        // splice site (e.g. `cmp` called directly inside an inline
+        // combinator with `'T: Ord`). Mirrors the per-instantiation
+        // `trait_calls` above, but keyed by `(uid, span)` so two splices at
+        // different concrete types dispatch independently. The resolved
+        // symbol is an ordinary concrete word (the `impl:` body), so it
+        // dispatches through `lower_resolved_word_call` exactly as a
+        // per-instantiation trait call does.
+        if let Some(&uid) = self.splice_uid_stack.last() {
+            if let Some(sym_name) = self.splice_trait_calls.get(&(uid, span)).cloned() {
+                self.lower_resolved_word_call(&sym_name);
+                return;
+            }
+        }
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
             // D7/R5: two generic-type instantiations sharing a bare surface
             // name (`Box`'s constructor/accessor) resolve here too -- the
@@ -340,6 +354,16 @@ impl<'a> FuncBuilder<'a> {
         if let Some(inst) = self.poly_calls.get(&span).cloned() {
             self.lower_poly_call(&inst);
             return;
+        }
+        // P7.S3o (R1/R2): inside a combinator splice, read the per-splice
+        // instantiation record instead of the span-keyed `instantiations`
+        // table (which would collide across splices at different types).
+        // The current splice's `inline_uid` is the top of `splice_uid_stack`.
+        if let Some(&uid) = self.splice_uid_stack.last() {
+            if let Some(inst) = self.splice_records.get(&(uid, span)).cloned() {
+                self.lower_poly_call(&inst);
+                return;
+            }
         }
         if let Some(inst) = self.instantiations.get(&span).cloned() {
             self.lower_poly_call(&inst);
@@ -637,6 +661,12 @@ impl<'a> FuncBuilder<'a> {
                     // transitive inlining.
                     let uid = self.inline_uid;
                     self.inline_uid += 1;
+                    // P7.S3o (R1/R2): push the splice's uid so inner poly
+                    // calls resolve through `splice_records` (keyed by
+                    // `(uid, span)`) instead of the colliding span-keyed
+                    // `instantiations`. Popped after the splice body lowers,
+                    // so nested combinators resolve at their own uid.
+                    self.splice_uid_stack.push(uid);
                     let body = crate::ast::alpha_rename_locals(body, uid);
                     if self_tail {
                         self.lower_self_tail_combinator(name, &body);
@@ -645,6 +675,7 @@ impl<'a> FuncBuilder<'a> {
                         self.lower_terms(&body, tail);
                         self.locals.truncate(locals_depth);
                     }
+                    self.splice_uid_stack.pop();
                     return;
                 }
                 // Every `&`-led word: the two prefix borrow operators and the

@@ -184,6 +184,23 @@ pub(super) struct Provenance {
     /// caller's scope (R18: binding, not string rewriting), so without this a
     /// nested `each` inside a `map` would re-bind the outer `arr`/`f`.
     pub(super) inline_uid: u32,
+    /// P7.S3o (R1/R2): `Some(uid)` while a combinator body is being spliced,
+    /// telling `check_poly_call` to redirect the minted `CallInst` to
+    /// `splice_records` (keyed by `(uid, span)`) instead of the span-keyed
+    /// `insts`. Saved and restored around each splice so nested combinators
+    /// resolve at their own `uid`. `None` on the monomorphic and standalone
+    /// paths.
+    pub(super) splice_uid: Option<u32>,
+    /// P7.S3o Phase 4 (R5): `true` while the body of a *materialized*
+    /// quotation is being checked (inside `check_literal_against_declared_
+    /// effect` called from `materialize_quotation_at_boundary` or a branch
+    /// join). When set alongside `splice_uid` (a real splice), a bare trait
+    /// member call inside the materialized quotation is rejected: the
+    /// materialized quotation gets its own `IrFunc` with `inline_uid: 0`, so
+    /// two splices at different types would collide on the per-splice
+    /// `splice_trait_calls` key. Saved and restored so nested materializations
+    /// and the enclosing context are unaffected.
+    pub(super) in_materialized_quot: bool,
 }
 
 impl Provenance {

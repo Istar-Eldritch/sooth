@@ -508,8 +508,16 @@ fn ambiguous_unqualified_member_call_is_rejected() {
 /// `Module::instantiations`, so a user bound on its own type variable has
 /// nowhere to resolve against -- an explicit, located rejection rather than a
 /// dispatch against records that do not survive.
+///
+/// P7.S3o Phase 3: a bare member call (`show`) inside a bounded inline
+/// combinator now resolves at the splice site via dispatch injection into
+/// `check_terms_relaxed`. The standalone check (i64 stand-in) accounts for
+/// the member's stack effect without requiring an `impl: Show for i64`, and
+/// the actual dispatch happens at each real splice site where θ is concrete.
+/// This test now compiles successfully — the gate rejection is gone, and the
+/// bare member is no longer an "unknown word".
 #[test]
-fn a_user_bound_on_a_poly_combinator_is_rejected() {
+fn a_user_bound_on_a_poly_combinator_compiles() {
     let (_t, entry) = single_file(
         "combinator-bound",
         "type: Point x i64 y i64 ;\n\
@@ -520,13 +528,7 @@ fn a_user_bound_on_a_poly_combinator_is_rejected() {
          : shows inline ( &'T: Show -- ) show ;\n\
          : main ( -- ) ;\n",
     );
-    let err = build_error(&entry);
-    assert!(
-        err.contains(
-            "error: `'T: Show` on the combinator `shows` at line 7, col 3 is not supported"
-        ),
-        "{err}"
-    );
+    build_ok(&entry);
 }
 
 /// R18(a): a bound naming a qualified trait whose qualifier is not one of this

@@ -2452,25 +2452,37 @@ fn self_tail_combinator_dups_an_inline_quotation_parameter() {
     assert_eq!(stdout, "9\n9\n9\n");
 }
 
-/// P7.S3o recon: a poly combinator calling a poly word, spliced at two
-/// different concrete types, collides on the span-keyed `insts` table — last
-/// write wins, and the losing splice dispatches to the wrong monomorph. The
-/// 1a guard turns that silent miscompile into a located error.
+/// P7.S3o Phase 1: a poly combinator calling a poly word, spliced at two
+/// different concrete types, now compiles and runs correctly — each splice's
+/// inner-call instantiation is monomorphized independently via the per-splice
+/// `splice_records` mechanism. The 1a collision guard no longer fires because
+/// `check_poly_call` redirects the CallInst to `splice_records` (keyed by
+/// `(inline_uid, span)`) instead of the span-keyed `insts`.
 #[test]
-fn check_splice_collision_two_types_is_error() {
+fn check_splice_collision_two_types_compiles_correctly() {
     let src = ": pid ( 'T -- 'T ) |x| x ;
 \
                : c inline ( 'T -- 'T ) pid ;
 \
                : main ( -- ) 1 c drop 2.5 c drop ;
 ";
-    let err = check_error(&src);
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    // Two distinct splice records: one for i64, one for f64.
+    let pid_symbols: Vec<&String> = module.splice_records.values().map(|i| &i.symbol).collect();
+    assert_eq!(
+        pid_symbols.len(),
+        2,
+        "two splices at two types should produce two splice records, got: {pid_symbols:?}"
+    );
     assert!(
-        err.contains("`pid`")
-            && err.contains("instantiated at two different types")
-            && err.contains("inline combinator splice")
-            && err.contains("non-inline"),
-        "a poly combinator calling a poly word at two types should produce a splice collision error naming `pid` and suggesting non-inline, got: {err}"
+        pid_symbols.iter().any(|s| s.contains("i64")),
+        "an i64 monomorph should exist: {pid_symbols:?}"
+    );
+    assert!(
+        pid_symbols.iter().any(|s| s.contains("f64")),
+        "an f64 monomorph should exist: {pid_symbols:?}"
     );
 }
 
@@ -2506,4 +2518,237 @@ fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
         "died by signal or non-zero; stdout: {stdout}"
     );
     assert_eq!(stdout, "42");
+}
+
+// -- P7.S3o Phase 1: per-splice instantiation records ----------------------
+
+/// P7.S3o Phase 1 (R1): a poly combinator calling a poly word, spliced at
+/// i64 and f64, compiles and runs correctly — the `pid`/`c` fixture that
+/// previously hit the 1a collision guard. Two distinct monomorphs are
+/// emitted, and the program output is correct.
+#[test]
+fn splice_two_types_compiles_and_runs_correctly() {
+    let binary = build_binary(
+        "splice-two-types",
+        "import: intrinsics * ;
+\
+         : pid ( 'T -- 'T ) |x| x ;
+\
+         : c inline ( 'T -- 'T ) pid ;
+\
+         : main ( -- ) 1 c . 2.5 c . ;
+",
+    );
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2.5\n");
+}
+
+/// P7.S3o Phase 1 (R3, case a): a bounded poly word (`gt` with `'T: Copy Ord`)
+/// called from an inline combinator at two types (i64 and f64) dispatches to
+/// the correct `impl:` for each type — two distinct monomorphs, correct output.
+/// Uses the same body as `mymax` from `examples/poly_if.sth`, but `inline`.
+#[test]
+fn bounded_poly_word_from_inline_combinator_at_two_types() {
+    let src = "import: core::prelude * ;
+\
+         : maxof inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+\
+         : main ( -- ) 3 7 maxof . 2.5 9.5 maxof . ;
+";
+    let (stdout, code) = run_src("bounded-poly-from-combinator", &src);
+    assert_eq!(stdout, "7\n9.5\n");
+    assert_eq!(code, 0);
+}
+
+/// P7.S3o Phase 1 (R1, P1-2): a three-word chain (combinator → p1 → p2) at
+/// two types compiles and runs correctly — transitive discovery is preserved.
+#[test]
+fn three_word_chain_at_two_types_compiles_and_runs() {
+    let binary = build_binary(
+        "three-word-chain",
+        "import: intrinsics * ;
+\
+         : p2 ( 'T -- 'T ) |x| x ;
+\
+         : p1 ( 'T -- 'T ) p2 ;
+\
+         : c inline ( 'T -- 'T ) p1 ;
+\
+         : main ( -- ) 1 c . 2.5 c . ;
+",
+    );
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2.5\n");
+}
+
+/// P7.S3o Phase 3: a bounded inline combinator calling a bare trait member
+/// (`cmp` directly) now resolves at the splice site via dispatch injection.
+/// The standalone check accounts for the member's stack effect at the i64
+/// stand-in, and each real splice site resolves `cmp` against its concrete θ.
+/// The body prints `cmp`'s `Ordering` discriminant (`tag .`) so a wrong-dispatch
+/// miscompile is observable: `-1 1` is `Less` (0) as i64 but `Greater` (2) when
+/// i64 bits are reinterpreted as f64 (NaN), and `-0.0 0.0` is `Equal` (1) as
+/// f64 but `Less` (0) when f64 bits are reinterpreted as i64.
+#[test]
+fn bare_member_from_bounded_combinator_compiles_and_runs() {
+    let src = "import: intrinsics * ;
+\
+         import: core::prelude * ;
+\
+         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+\
+         : main ( -- ) -1 1 cmptag -0.0 0.0 cmptag ;
+";
+    let (stdout, code) = run_src("bare-member", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
+    assert_eq!(
+        code, 0,
+        "a bare `cmp` call from an inline combinator at i64 and f64 should compile and run"
+    );
+}
+
+/// P7.S3o Phase 3 (R4): transitive skip — an unbounded inline combinator
+/// (`outer`) that splices a bounded one (`inner`) calling `cmp` directly does
+/// not trigger a rejection. The inner combinator's bound member call resolves
+/// at the inner splice's concrete θ, not the outer's. Nested combinators are
+/// handled naturally: each combinator's standalone check skips its own member
+/// calls, and the splice walk resolves them at the concrete splice θ. The
+/// `inline_uid` stack ensures the lowering reads the resolution at the correct
+/// (inner) splice site. The body prints `cmp`'s `Ordering` discriminant so a
+/// wrong-dispatch miscompile is observable (see
+/// `bare_member_from_bounded_combinator_compiles_and_runs` for the value
+/// choices).
+#[test]
+fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
+    let src = "import: intrinsics * ;
+\
+         import: core::prelude * ;
+\
+         : inner inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+\
+         : outer inline ( 'T 'T -- ) inner ;
+\
+         : main ( -- ) -1 1 outer -0.0 0.0 outer ;
+";
+    let (stdout, code) = run_src("transitive-skip", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
+    assert_eq!(
+        code, 0,
+        "an unbounded combinator splicing a bounded one calling `cmp` should compile and run at i64 and f64"
+    );
+}
+
+/// P7.S3o Phase 4 (R5): bound dispatch inside a materialized quotation from a
+/// bounded combinator is rejected with a located error. The materialized
+/// quotation gets its own `IrFunc` with `inline_uid: 0` during lowering, so
+/// the per-splice `splice_trait_calls` key would not be found — two splices at
+/// different types would silently miscompile. The quotation `[ a b cmp drop ]`
+/// captures `a` and `b` from the bounded combinator `foo` and dispatches `cmp`
+/// (a bare `Ord` member) inside the materialized body. The rejection fires at
+/// the materialization boundary (`materialize_quotation_at_boundary`), where
+/// `in_materialized_quot` is set, and `resolve_splice_member_call` detects that
+/// a bound member is being dispatched inside a materialized quotation during a
+/// real splice.
+#[test]
+fn bound_dispatch_in_materialized_quotation_is_rejected() {
+    let src = "type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T: Copy Ord 'T -- )
+\
+         | a b |
+\
+         [ a b cmp drop ] Thunk drop ;
+\
+         : main ( -- ) 1 2 foo ;
+";
+    let err = check_error(src);
+    assert!(
+        err.contains("bound dispatch in materialized quotations is unsupported"),
+        "should reject bound dispatch in a materialized quotation, got: {err}"
+    );
+    assert!(
+        err.contains("`cmp`"),
+        "the error should name the member `cmp`, got: {err}"
+    );
+    assert!(
+        err.contains("`foo`"),
+        "the error should name the combinator `foo`, got: {err}"
+    );
+}
+
+/// P7.S3o Phase 4 (R5): a bounded combinator whose body contains a quotation
+/// without a bare member call materializes without triggering the rejection.
+/// The `in_materialized_quot` flag is set, but no bound member is
+/// dispatched inside the materialized body, so the rejection does not fire.
+/// This confirms the rejection is targeted at bound dispatch, not at
+/// materialization itself.
+#[test]
+fn materialized_quotation_without_bare_member_is_not_rejected() {
+    let src = "type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T: Copy Ord 'T -- )
+\
+         | a b | a b cmp drop [ ] Thunk drop ;
+\
+         : main ( -- ) 1 2 foo ;
+";
+    check_ok(src);
+}
+
+/// A splice-derived CallInst with out_arity >= 2 (a combinator calling a poly
+/// word that returns 2+ outputs, like `dup`) must have its bundle interned.
+/// Without the fix, the bundle-interning loop in `check` only covered `insts`,
+/// not `splice_records`, and `discover_transitive_instantiations`' early return
+/// on an empty `poly_cross_calls` table skipped the `intern_composed_bundles`
+/// pass for splice records — leaving `bundle: None` and panicking at lowering
+/// when `lower_poly_call` did not push the multi-output return value.
+#[test]
+fn splice_record_with_multi_output_poly_call_interns_bundle() {
+    let src = "import: intrinsics * ;
+\
+         : pair ( 'T: Copy -- 'T 'T ) dup ;
+\
+         : c inline ( 'T: Copy -- 'T 'T ) pair ;
+\
+         : main ( -- ) 1 c . . ;
+";
+    let (stdout, code) = run_src("splice-bundle", src);
+    assert_eq!(stdout, "1\n1\n");
+    assert_eq!(code, 0);
+}
+
+/// A poly call inside a materialized quotation within a splice must not be
+/// redirected to `splice_records`. The materialized quotation lowers to its
+/// own `IrFunc` with an empty `splice_uid_stack`, so it cannot resolve a
+/// `(uid, span)` key and would fall through to `env.get(name).expect(...)`,
+/// panicking. The fix checks `in_materialized_quot` and routes the call to
+/// the span-keyed `insts` table instead, which the materialized quotation's
+/// `FuncBuilder` reads via `self.instantiations`.
+#[test]
+fn poly_call_in_materialized_quotation_in_splice_does_not_panic() {
+    let src = "import: intrinsics * ;
+\
+         : pid ( 'T -- 'T ) |x| x ;
+\
+         type: Thunk q [ -- ] ;
+\
+         : foo inline ( 'T 'T -- ) | a b | [ 5 pid drop ] Thunk drop a drop b drop ;
+\
+         : main ( -- ) 1 2 foo 3.0 4.0 foo ;
+";
+    let (stdout, code) = run_src("mat-quot-poly", src);
+    assert_eq!(stdout, "");
+    assert_eq!(code, 0);
 }

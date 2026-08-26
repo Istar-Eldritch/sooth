@@ -423,7 +423,21 @@ pub(super) fn check_poly_combinator_standalone(
         declared_globals: word.declared_globals.clone(),
     };
     let mut dropped = Vec::new();
-    check_word(
+    // P7.S3o Phase 3: thread the combinator's own `PolySig` and the i64
+    // stand-in θ into the standalone body walk, so a bare trait member call
+    // in the body resolves against the i64 stand-in (the same dispatch
+    // injection `check_term` uses at real splice sites). The resolved symbol
+    // is scratch (the standalone check never lowers); only the stack-effect
+    // accounting matters here — the member call is re-checked at each real
+    // splice site where θ is concrete. Saved and restored so the enclosing
+    // context is unaffected.
+    let saved_comb_sig = poly.combinator_sig.take();
+    let saved_comb_subst = poly.combinator_subst.take();
+    let saved_comb_name = poly.combinator_name.take();
+    poly.combinator_sig = Some(sig.clone());
+    poly.combinator_subst = Some(subst.clone());
+    poly.combinator_name = Some(word.name.clone());
+    let result = check_word(
         &concrete,
         enums,
         env,
@@ -437,7 +451,11 @@ pub(super) fn check_poly_combinator_standalone(
         &mut dropped,
         poly,
         None,
-    )
+    );
+    poly.combinator_sig = saved_comb_sig;
+    poly.combinator_subst = saved_comb_subst;
+    poly.combinator_name = saved_comb_name;
+    result
 }
 
 /// R9 (Slice 6c): the REPL's entry to the standalone poly-combinator check.
@@ -462,9 +480,11 @@ pub(crate) fn check_poly_combinator_repl(
     combinators: &CombinatorEnv,
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut scratch_splice: HashMap<(u32, Span), CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
+    let mut scratch_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
     let eliminators = eliminator_registry(enums);
     let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     let mut poly = PolyCtx {
@@ -476,9 +496,14 @@ pub(crate) fn check_poly_combinator_repl(
         combinators,
         eliminators: &eliminators,
         // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
+        impl_monos: &mut scratch_monos,
         // can reach a REPL-checked combinator body.
         trait_resolve: TraitResolveCtx::scratch(),
-        impl_monos: &mut scratch_monos,
+        splice_records: &mut scratch_splice,
+        splice_trait_calls: &mut scratch_trait_calls,
+        combinator_sig: None,
+        combinator_subst: None,
+        combinator_name: None,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -888,6 +913,269 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
     }
 }
 
+/// P7.S3o Phase 3: resolve a bare trait member call at a combinator splice
+/// site, where θ is concrete. Mirrors `poly_trait_member_call`'s matching
+/// logic (find the member in the sig's `Bound::User` bounds), but operates on
+/// the concrete `Slot` stack and resolves the `impl:` symbol immediately
+/// (rather than recording an abstract obligation) because θ is known here.
+///
+/// Returns `Ok(Some(stack))` if `name` matched a bare member and was
+/// dispatched; `Ok(None)` if it did not match (and ordinary dispatch should
+/// proceed). The resolved `impl:` symbol is recorded in
+/// `poly.splice_trait_calls` keyed by `(uid, span)` when `prov.splice_uid` is
+/// `Some` (a real splice); during the standalone check (`splice_uid` is
+/// `None`) the symbol is resolved for stack-effect accounting only and not
+/// recorded.
+/// P7.S3o Phase 3: resolve a bare trait member call at a combinator splice
+/// site, where θ is concrete. Mirrors `poly_trait_member_call`'s matching
+/// logic (find the member in the sig's `Bound::User` bounds), but operates on
+/// the concrete `Slot` stack and resolves the `impl:` symbol immediately
+/// (rather than recording an abstract obligation) because θ is known here.
+///
+/// Returns `Ok(Some(stack))` if `name` matched a bare member and was
+/// dispatched; `Ok(None)` if it did not match (and ordinary dispatch should
+/// proceed). The resolved `impl:` symbol is recorded in
+/// `poly.splice_trait_calls` keyed by `(uid, span)` when `prov.splice_uid` is
+/// `Some` (a real splice); during the standalone check (`splice_uid` is
+/// `None`) the symbol is resolved for stack-effect accounting only and not
+/// recorded.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_splice_member_call(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+    poly: &mut PolyCtx,
+    prov: &mut Provenance,
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some(sig) = poly.combinator_sig.clone() else {
+        return Ok(None);
+    };
+    let Some(subst) = poly.combinator_subst.clone() else {
+        return Ok(None);
+    };
+    let traits = poly.trait_resolve.traits;
+    // R12/decision 6: a qualified call names a *module* alias, never a trait
+    // namespace. Same split as `poly_trait_member_call`.
+    let (qualifier, member) = match name.split_once("::") {
+        Some((q, m)) => (Some(q), m),
+        None => (None, name),
+    };
+    let qualified_target = match qualifier {
+        Some(q) => match ctx
+            .modules()
+            .and_then(|ms| ms.get(ctx.module() as usize))
+            .and_then(|m| m.imports.get(q))
+        {
+            Some(&target) => Some(target),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    // Find the matching (var, trait_id, member_decl) from the sig's bounds.
+    // Same dedup and ambiguity logic as `poly_trait_member_call`.
+    let mut seen: Vec<(u32, TraitId)> = Vec::new();
+    let mut matched: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
+    for (v, bound) in &sig.bounds {
+        let Bound::User(tid) = bound else { continue };
+        if qualified_target.is_some_and(|t| traits[tid.index()].module != t)
+            || seen.contains(&(*v, *tid))
+        {
+            continue;
+        }
+        seen.push((*v, *tid));
+        if let Some(m) = traits[tid.index()]
+            .members
+            .iter()
+            .find(|m| m.name == member)
+        {
+            matched.push((*v, *tid, m));
+        }
+    }
+    let (var, trait_id, member_decl) = match matched.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        many => {
+            // Disambiguate by concrete operand shape: ground each
+            // candidate's input types against the concrete θ and check
+            // which match the live stack.
+            let mut fitting: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
+            for (v, tid, m) in many {
+                let Some(ty) = subst.ty_of(*v) else { continue };
+                let inputs: Vec<Type> = m
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+                    .collect();
+                if stack.len() >= inputs.len() {
+                    let base = stack.len() - inputs.len();
+                    if inputs.iter().enumerate().all(|(i, want)| {
+                        matches!(
+                            match_slot(stack[base + i], *want),
+                            SlotMatch::Exact | SlotMatch::LiteralSizeType
+                        )
+                    }) {
+                        fitting.push((*v, *tid, *m));
+                    }
+                }
+            }
+            match fitting.as_slice() {
+                [] => {
+                    let shapes: Vec<(&str, &str, String)> = matched
+                        .iter()
+                        .map(|(v, tid, m)| {
+                            let inputs: Vec<String> = m
+                                .sig
+                                .inputs
+                                .iter()
+                                .map(|t| poly_type_str(&substitute_member_var(t, *v), &sig))
+                                .collect();
+                            (
+                                traits[tid.index()].name.as_str(),
+                                sig.ty_var_names[*v as usize].as_str(),
+                                inputs.join(" "),
+                            )
+                        })
+                        .collect();
+                    return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
+                }
+                [one] => *one,
+                _ => {
+                    let named: Vec<(&str, &str)> = matched
+                        .iter()
+                        .map(|(v, tid, _)| {
+                            (
+                                traits[tid.index()].name.as_str(),
+                                sig.ty_var_names[*v as usize].as_str(),
+                            )
+                        })
+                        .collect();
+                    return Err(ambiguous_trait_member_error(span, member, &named));
+                }
+            }
+        }
+    };
+    // P7.S3o Phase 4 (R5): reject bound dispatch inside a materialized
+    // quotation from a bounded combinator. The materialized quotation gets
+    // its own `IrFunc` with `inline_uid: 0` during lowering, so the per-splice
+    // `splice_trait_calls` key `(uid, span)` recorded here would not be found
+    // — two splices at different types would silently miscompile. The flag
+    // is set by `materialize_quotation_at_boundary` (and the branch join)
+    // around the quotation body check; `splice_uid` being `Some` means this
+    // is a real splice, not the standalone check.
+    if prov.in_materialized_quot && prov.splice_uid.is_some() {
+        let comb_name = poly
+            .combinator_name
+            .as_deref()
+            .map(|n| crate::resolve::render_word(n).into_owned())
+            .unwrap_or_else(|| "a bounded combinator".to_string());
+        return Err(format!(
+            "error: bound trait member `{member}` (line {}) is called inside a materialized quotation within the combinator {comb_name}, but bound dispatch in materialized quotations is unsupported\n\
+             note: a materialized quotation is lowered to its own function with no splice-site prefix, so two splices at different concrete types would collide on the dispatch key",
+            span.line
+        ));
+    }
+    // Ground the member's input/output types against the concrete θ.
+    let Some(ty) = subst.ty_of(var) else {
+        return Ok(None);
+    };
+    let input_types: Vec<Type> = member_decl
+        .sig
+        .inputs
+        .iter()
+        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+        .collect();
+    let output_types: Vec<Type> = member_decl
+        .sig
+        .outputs
+        .iter()
+        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+        .collect();
+    // Check operands against the grounded input types.
+    let n_in = input_types.len();
+    if stack.len() < n_in {
+        return Err(underflow_error(ctx, span, member, n_in, stack.len()));
+    }
+    let base = stack.len() - n_in;
+    for (i, want) in input_types.iter().enumerate() {
+        let found = stack[base + i];
+        if found.quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            SlotMatch::NeedsSizeConversion => {
+                return Err(size_conversion_needed_error(ctx, span, name, *want));
+            }
+            SlotMatch::NeedsStrToCstrConversion => {
+                return Err(str_needs_cstr_conversion_error(ctx, span, name));
+            }
+            SlotMatch::Mismatch => {
+                return Err(trait_member_operand_error(
+                    ctx,
+                    span,
+                    member,
+                    &traits[trait_id.index()].name,
+                    &PolyType::Concrete(*want),
+                    &PolyType::Concrete(found.ty),
+                    &sig,
+                ));
+            }
+        }
+    }
+    // Resolve the `impl:` symbol for this concrete type. At a real splice
+    // (`splice_uid` is `Some`), the bound must be satisfied by the concrete
+    // type and the resolved symbol is recorded for lowering. During the
+    // standalone check (`splice_uid` is `None`), the i64 stand-in may not
+    // satisfy the bound (there is no `impl: Show for i64`), so the impl
+    // resolution is skipped — only the stack-effect accounting matters
+    // here; the member call is re-checked at each real splice site where θ is
+    // concrete.
+    if let Some(uid) = prov.splice_uid {
+        let trait_decl = &poly.trait_resolve.traits[trait_id.index()];
+        let Some(imp) = poly.trait_resolve.impls.iter().find(|i| {
+            i.trait_id == trait_id
+                && match_impl_target(&i.target.pattern, ty, &[], &[], &[], None).is_some()
+        }) else {
+            return Err(unsatisfied_user_bound_error(
+                ctx,
+                span,
+                name,
+                &sig.ty_var_names[var as usize],
+                trait_decl,
+                ty,
+                arrays,
+                refs,
+            ));
+        };
+        let symbol = imp
+            .resolved
+            .iter()
+            .find(|(mname, _)| mname == member)
+            .and_then(|(_, idx)| poly.trait_resolve.word_symbols.get(*idx));
+        let Some(symbol) = symbol else {
+            return Err(unresolved_trait_obligation_error(
+                ctx,
+                span,
+                name,
+                &trait_decl.name,
+                member,
+                ty,
+                span,
+            ));
+        };
+        poly.splice_trait_calls.insert((uid, span), symbol.clone());
+    }
+    // Consume operands, produce outputs.
+    stack.truncate(base);
+    for ty in &output_types {
+        stack.push(Slot::computed(*ty));
+    }
+    Ok(Some(std::mem::take(stack)))
+}
 /// P7.S3e (R7/R12): the bound-directed dispatch branch. `Ok(None)` means this
 /// is no trait-member obligation and ordinary dispatch proceeds: no
 /// `Bound::User` on any of this word's type variables declares a member of
@@ -4885,6 +5173,51 @@ pub(super) fn check_poly_call(
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
     let symbol = instantiation_symbol(name, &subst, generation);
+    // P7.S3o (R1/R2): when inside a combinator splice, redirect the
+    // already-minted CallInst to `splice_records` keyed by `(uid, span)`
+    // instead of the span-keyed `insts`. A poly combinator's body terms
+    // keep their original spans across every splice (alpha_rename_locals
+    // renames locals only), so two splices at two different concrete types
+    // would collide on the same span key — last write wins, and lowering
+    // reads only the surviving entry. The per-splice key `(uid, span)` is
+    // unique because each splice mints a fresh `inline_uid`, so both
+    // splices' inner-call instantiations survive independently. The 1a
+    // collision guard below is skipped for these calls; it stays as a
+    // safety net for any other path that might re-introduce the collision.
+    if let Some(uid) = prov.splice_uid {
+        // P7.S3o Phase 4 (R5): a poly call inside a materialized quotation
+        // within a splice must NOT redirect to `splice_records`. The
+        // materialized quotation lowers to its own `IrFunc` with an empty
+        // `splice_uid_stack`, so it cannot resolve a `(uid, span)` key and
+        // would fall through to `env.get(name).expect(...)` and panic. Let it
+        // fall through to the span-keyed `insts` table below instead, which
+        // the materialized quotation's `FuncBuilder` reads via
+        // `self.instantiations`. The collision guard below still catches two
+        // splices at different types producing different symbols for the same
+        // span, so there is no silent miscompile.
+        if !prov.in_materialized_quot {
+            poly.splice_records.insert(
+                (uid, span),
+                CallInst {
+                    callee: name.to_string(),
+                    subst,
+                    symbol,
+                    out_arity: outputs.len(),
+                    output_types: outputs.clone(),
+                    bundle: None,
+                    generation,
+                    quot_inputs,
+                    trait_calls,
+                    poly_calls: HashMap::new(),
+                },
+            );
+            stack.truncate(base);
+            for ty in outputs {
+                stack.push(Slot::computed(ty));
+            }
+            return Ok(std::mem::take(stack));
+        }
+    }
     // P7.S3o recon: a poly combinator's body terms keep their original spans
     // across every splice (alpha_rename_locals renames locals only), so two
     // splices at two different concrete types insert CallInsts at the *same*
@@ -4954,6 +5287,7 @@ pub(super) fn check_poly_call(
 pub(super) fn discover_transitive_instantiations(
     module: &mut Module,
     insts: &mut HashMap<Span, CallInst>,
+    splice_records: &mut HashMap<(u32, Span), CallInst>,
     word_symbols: &[String],
     trait_obligations: &[WordObligations],
     impl_monos: Vec<(String, Subst)>,
@@ -4996,14 +5330,9 @@ pub(super) fn discover_transitive_instantiations(
         tr,
     };
     // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
-    // The member word is polymorphic (poly: Some), so lowering finds it in
-    // `poly_words` and computes the concrete effect from the sig + subst.
-    // Shared with `fixpoint`'s own mid-composition discoveries via
-    // `impl_mono_seed`, so both routes materialize the same CallInst shape.
     let mut extra_seeds: Vec<CallInst> = Vec::new();
     for (word_name, subst) in &impl_monos {
         let symbol = instantiation_symbol(word_name, subst, None);
-        // Dedup: the same (word, subst) may be discovered at multiple call sites.
         if extra_seeds.iter().any(|s| s.symbol == symbol) {
             continue;
         }
@@ -5011,11 +5340,23 @@ pub(super) fn discover_transitive_instantiations(
             extra_seeds.push(seed);
         }
     }
-    // N2: no records and no impl monos means nothing to compose.
     if poly_cross_calls.is_empty() && extra_seeds.is_empty() {
+        // Still need to intern bundles for splice_records before returning.
+        for inst in splice_records.values_mut() {
+            if inst.out_arity >= 2 {
+                inst.bundle = Some(intern_bundle_struct(structs, &inst.output_types));
+            }
+        }
         return Ok(Vec::new());
     }
-    let mut transitive = ground.fixpoint(insts, extra_seeds, arrays, refs, owned_cells)?;
+    let mut transitive = ground.fixpoint(
+        insts,
+        splice_records,
+        extra_seeds,
+        arrays,
+        refs,
+        owned_cells,
+    )?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
     // post-pass because interning needs `&mut structs`, which the grounding
@@ -5026,6 +5367,9 @@ pub(super) fn discover_transitive_instantiations(
         intern_composed_bundles(structs, inst);
     }
     for inst in insts.values_mut() {
+        intern_composed_bundles(structs, inst);
+    }
+    for inst in splice_records.values_mut() {
         intern_composed_bundles(structs, inst);
     }
     Ok(transitive)
@@ -5066,7 +5410,8 @@ impl CrossGround<'_> {
     fn fixpoint(
         &self,
         insts: &mut HashMap<Span, CallInst>,
-        impl_seeds: Vec<CallInst>,
+        splice_records: &mut HashMap<(u32, Span), CallInst>,
+        extra_seeds: Vec<CallInst>,
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
@@ -5086,10 +5431,18 @@ impl CrossGround<'_> {
             inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
         }
+        // P7.S3o (R1/R2): splice-derived CallInsts are concrete instantiations
+        // of poly words called from combinator bodies. They seed the fixpoint
+        // just like ordinary instantiations, so a poly chain (combinator →
+        // p1 → p2) discovers p2 through p1's cross-calls.
+        for inst in splice_records.values_mut() {
+            inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
+            enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
+        }
         // P7.S4 (R6): seed the generic-impl member-word monomorphs into the
         // fixpoint, so their bodies' poly cross-calls get composed and their
         // own `poly_calls` routing maps are filled.
-        for mut inst in impl_seeds {
+        for mut inst in extra_seeds {
             if !seen.insert(inst.symbol.clone()) {
                 continue;
             }
@@ -5110,10 +5463,7 @@ impl CrossGround<'_> {
                 frontier = next;
             }
             // Seed anything composition discovered along the way and loop
-            // again if that introduces new work -- a generic-impl member
-            // word whose own body calls another poly word still needs its
-            // cross-calls composed, and its resolution can discover yet
-            // another impl mono in turn.
+            // again if that introduces new work.
             for (word_name, subst) in std::mem::take(&mut discovered) {
                 let symbol = instantiation_symbol(&word_name, &subst, None);
                 if !seen.insert(symbol) {
@@ -7159,6 +7509,9 @@ fn trait_member_operand_error(
 
 /// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): reject a user trait bound on
 /// a polymorphic combinator's own type variable, before its body is checked.
+/// P7.S3o Phase 1: the call site at `check.rs` is removed; this function is
+/// retained (dead code) for documented rationale and future reuse.
+#[allow(dead_code)]
 pub(super) fn reject_user_bound_on_combinator(
     word: &WordDef,
     sig: &PolySig,
@@ -7183,6 +7536,8 @@ pub(super) fn reject_user_bound_on_combinator(
 /// they never reach `Module::instantiations`, so there is no `CallInst` for a
 /// resolved trait obligation to live on. A user bound on such a word's own
 /// type variable is rejected rather than dispatched against stale records.
+/// P7.S3o Phase 1: dead code after the call site removal above.
+#[allow(dead_code)]
 fn user_bound_on_combinator_error(word: &str, trait_name: &str, var: &str, span: Span) -> String {
     format!(
         "error: `{var}: {trait_name}` on the combinator `{word}` at line {}, col {} is not supported\n  note: a combinator is spliced at its call sites and records no instantiation a trait bound could resolve against",
@@ -8393,21 +8748,19 @@ mod tests {
         assert_eq!(recorded["f"][0].member, "t1");
     }
 
-    /// R9/R17 scope cut (P7.S3o): a polymorphic combinator's instantiation
-    /// records are scratch, so there is no `CallInst` a resolved obligation
-    /// could ride -- a user bound on its own type variable is rejected rather
-    /// than dispatched against records that do not survive.
+    /// P7.S3o Phase 3: a bare member call (`show`) inside a bounded inline
+    /// combinator now resolves at the splice site via dispatch injection into
+    /// `check_terms_relaxed`. The standalone check (i64 stand-in) accounts for
+    /// the member's stack effect without requiring an `impl: Show for i64`, and
+    /// the actual dispatch happens at each real splice site where θ is
+    /// concrete. This test now compiles successfully — the gate rejection is
+    /// gone, and the bare member is no longer an "unknown word".
     #[test]
-    fn user_bound_on_a_combinator_is_rejected() {
-        let err = check_src(&format!(
+    fn user_bound_on_a_combinator_compiles() {
+        check_src(&format!(
             "{SHOW}: shows inline ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("`'T: Show` on the combinator `shows` at line 6, col 3 is not supported"),
-            "{err}"
-        );
-        assert!(err.contains("records no instantiation"), "{err}");
+        .expect("a bounded inline combinator calling a bare member compiles");
     }
 
     /// R10 barrier 1: a plain (non-builtin) member name over a *bare* type

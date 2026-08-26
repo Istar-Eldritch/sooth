@@ -383,7 +383,14 @@ pub(super) fn materialize_quotation_at_boundary(
     };
     // Slice 10a (R9): an `eff` reaching an erasure boundary is a `QuotEffect`
     // with no row, so the row grounds to the empty region.
-    check_literal_against_declared_effect(
+    // P7.S3o Phase 4 (R5): set `in_materialized_quot` so a bare trait member
+    // call inside the materialized body is rejected (the materialized
+    // quotation gets its own `IrFunc` with `inline_uid: 0`, so two splices
+    // at different types would collide on the per-splice `splice_trait_
+    // calls` key). Saved and restored so the enclosing context is unaffected.
+    let saved_in_materialized = prov.in_materialized_quot;
+    prov.in_materialized_quot = true;
+    let body_result = check_literal_against_declared_effect(
         id,
         eff,
         false,
@@ -408,7 +415,9 @@ pub(super) fn materialize_quotation_at_boundary(
             owning,
         },
         None,
-    )?;
+    );
+    prov.in_materialized_quot = saved_in_materialized;
+    body_result?;
     // P7.S3h: an owning literal *must* consume every linear value it captures.
     // The boundary lifted the R12 blanket ban on consuming an enclosing linear
     // local (that consumption is the ownership transfer), which leaves the
