@@ -2452,6 +2452,41 @@ fn self_tail_combinator_dups_an_inline_quotation_parameter() {
     assert_eq!(stdout, "9\n9\n9\n");
 }
 
+/// P7.S3o recon: a poly combinator calling a poly word, spliced at two
+/// different concrete types, collides on the span-keyed `insts` table — last
+/// write wins, and the losing splice dispatches to the wrong monomorph. The
+/// 1a guard turns that silent miscompile into a located error.
+#[test]
+fn check_splice_collision_two_types_is_error() {
+    let src = ": pid ( 'T -- 'T ) |x| x ;
+\
+               : c inline ( 'T -- 'T ) pid ;
+\
+               : main ( -- ) 1 c drop 2.5 c drop ;
+";
+    let err = check_error(&src);
+    assert!(
+        err.contains("`pid`")
+            && err.contains("instantiated at two different types")
+            && err.contains("inline combinator splice")
+            && err.contains("non-inline"),
+        "a poly combinator calling a poly word at two types should produce a splice collision error naming `pid` and suggesting non-inline, got: {err}"
+    );
+}
+
+/// P7.S3o recon: two splices at the *same* type produce the same symbol and
+/// dedup harmlessly — the guard must not reject this.
+#[test]
+fn check_splice_collision_same_type_dedup_is_ok() {
+    let src = ": pid ( 'T -- 'T ) |x| x ;
+\
+               : c inline ( 'T -- 'T ) pid ;
+\
+               : main ( -- ) 1 c drop 2 c drop ;
+";
+    check_ok(&src);
+}
+
 /// The hoisted parameter must leave a real loop behind, not recursion: 1M
 /// iterations at a 1 MB stack would die by `SIGSEGV` if the self-call still
 /// grew a frame.

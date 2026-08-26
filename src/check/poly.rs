@@ -4351,6 +4351,26 @@ pub(super) fn no_poly_overload_matches_error(
     }
 }
 
+/// P7.S3o recon: two splices of the same poly combinator at two different
+/// concrete types insert `CallInst`s for the same inner poly call at the
+/// *same* body span — last write wins, and lowering reads only the survivor,
+/// so the losing splice dispatches to the wrong monomorph. This turns that
+/// collision into a located error, suggesting the enclosing combinator be
+/// made non-inline as a workaround (the shape S3s ships `mymax`/`mymax3` in
+/// precisely to avoid this hole).
+pub(super) fn splice_collision_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    match ctx {
+        Ctx::Word { mangled, .. } => format!(
+            "error: `{demangled}` in {} (line {}) is instantiated at two different types from the same source span inside an inline combinator splice; make the enclosing combinator non-inline to avoid the collision",
+            crate::resolve::render_word(mangled), span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `{demangled}` is instantiated at two different types from the same source span inside an inline combinator splice; make the enclosing combinator non-inline to avoid the collision"
+        ),
+    }
+}
+
 /// Whether `sig`'s declared inputs unify against the tail of `stack`,
 /// without committing any successful bindings past this call: a fresh
 /// `Subst` per attempt, discarded either way. The shared predicate behind
@@ -4851,6 +4871,20 @@ pub(super) fn check_poly_call(
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
     let symbol = instantiation_symbol(name, &subst, generation);
+    // P7.S3o recon: a poly combinator's body terms keep their original spans
+    // across every splice (alpha_rename_locals renames locals only), so two
+    // splices at two different concrete types insert CallInsts at the *same*
+    // span — last write wins, and lowering reads only the surviving entry.
+    // The losing splice dispatches to the wrong monomorph and the other type's
+    // is never emitted: a silent miscompile. This guard turns that collision
+    // into a located error. Two splices at the *same* type produce the same
+    // symbol and dedup harmlessly; ordinary (non-combinator) call sites have
+    // unique spans and never collide.
+    if let Some(existing) = poly.insts.get(&span) {
+        if existing.symbol != symbol {
+            return Err(splice_collision_error(ctx, span, name));
+        }
+    }
     poly.insts.insert(
         span,
         CallInst {

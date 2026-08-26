@@ -586,26 +586,37 @@ still needs a struct-header length variable (`'N`) and the `Eq`/`Hash`/`Default`
 bounds named above.
 
 **P7.S3o -- A bound on a poly combinator's own type variable has no dispatch mechanism.**
-`[ parked ]` Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there.
-`reject_user_bound_on_combinator` (`src/check/poly.rs:5919`) is a clean, located rejection, not
+`[ recon complete ]` Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there.
+`reject_user_bound_on_combinator` (`src/check/poly.rs:6129`) is a clean, located rejection, not
 a bug. Recon'd and spec'd twice; both designs (a splice-uid resolution key, then a
-source-derived `SplicePath` key) were found unsound in review -- see
-[slice3o-brief.md](./P7/slice3o-brief.md) for the full recon, the two failure modes, and what
-would need to be true before this is worth trying a third time. No spec currently exists for
-this slice. **P7.S3s supplies the motivating program** it was parked waiting for: a bounded
-`inline` comparison over a library `Ord`. S3s ships those comparisons non-inline precisely so
-this slice inherits a differential oracle -- flip `inline` on the same source and diff the
-resolved `impl:` symbols at two and three splices -- which is the entry condition for a third
-attempt, alongside the three open items in its brief. The harness skeleton is already in
-tree (`tests/phase7_slice3s_oracle.rs`): it builds `examples/poly_if.sth` twice and diffs
-stdout plus, per `mymax*` entry point, the dispatch targets its own call graph reaches (the
-`impl: Ord` body, and the monomorphized comparison on the way to it), against itself for now
-since there is no second variant to diff against until this slice flips `mymax`/`mymax3` back
-to `inline`. Besides that flip, the oracle side needs one more thing: `examples/poly_if.sth`'s
-`main` calls `mymax3` only, so `mymax` mints no monomorph and the harness never sees it. A
-source calling both words is what makes the "at two splices, at three" diff exist at all, and
-`tests/corpus_stdout/poly_if.txt` must stay byte-identical, so it belongs in a new fixture
-rather than in the example.
+source-derived `SplicePath` key) were found unsound in review. A third recon round (three
+parallel probes) corrected the brief's central latency claim, found a more fundamental
+blocker both prior rounds missed, and settled one open item -- see
+[slice3o-brief.md](./P7/slice3o-brief.md) for the full recon record and the revised open items.
+No spec currently exists for this slice. This is a **hot-path optimization**: a combinator
+calling a bare trait member (`cmp` directly, not the `gt` wrapper) cannot dispatch today, so
+the fallback is a non-inline word paying a real call frame per instantiation (the shape S3s
+chose for `mymax`/`mymax3` precisely to avoid this slice). Bare trait member calls in
+combinators will be in the hot path of many programs. The round-3 probes found the primary
+blocker is an `i64` stand-in collision: `check_poly_combinator_standalone`'s `i64` scratch
+instantiations clobber real `i64` instantiations, silently miscompiling the motivating
+program when instantiated at both `i64` and another type. Option (b) -- reject bound
+dispatch inside materialized quotations rather than prefixing the resolution key -- is
+settled as sound (the motivating program's `~[ ]` arms are spliced, never materialized). The
+transitive skip is cheap (a `Provenance` flag) but the hard part is injecting
+`poly_trait_member_call` into `check_terms_relaxed` (the splice path has zero bound-dispatch
+calls today). **P7.S3s supplies the motivating program and the oracle**: a bounded `inline`
+comparison over a library `Ord`, shipped non-inline so this slice inherits a differential
+oracle -- flip `inline` on the same source and diff the resolved `impl:` symbols at two and
+three splices. The harness skeleton is already in tree (`tests/phase7_slice3s_oracle.rs`):
+it builds `examples/poly_if.sth` twice and diffs stdout plus, per `mymax*` entry point, the
+dispatch targets its own call graph reaches (the `impl: Ord` body, and the monomorphized
+comparison on the way to it), against itself for now since there is no second variant to diff
+against until this slice flips `mymax`/`mymax3` back to `inline`. Besides that flip, the oracle
+side needs one more thing: `examples/poly_if.sth`'s `main` calls `mymax3` only, so `mymax`
+mints no monomorph and the harness never sees it. A source calling both words is what makes the
+"at two splices, at three" diff exist at all, and `tests/corpus_stdout/poly_if.txt` must stay
+byte-identical, so it belongs in a new fixture rather than in the example.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -791,39 +802,30 @@ disposed transitively through the container exactly once; and every S3h golden t
 rejection has been migrated to assert the new behaviour rather than deleted.
 
 **P7.S4 -- Generic `impl:` targets, with a specificity chain.** An `impl:` target must name one
-concrete type: the whole-program registry S3e built keys on `(TraitId, Type)` and discharges a
-bound per concrete instantiation, so a trait with N conforming shapes needs N hand-written
-`impl:` blocks with identical bodies. S3e listed blanket impls as out of scope with no consumer
-forcing them; `Show` and `Eq` over a shape family are that consumer. Both ends reject a
-non-concrete target today, at different layers: `impl: Show for 'T` resolves no type ("unknown
-type `'T`"), and `impl: Show for [i64 2]` does not parse (`parse_impl_decl` takes the target
-through `parse_type_expr`, which does not admit an array form here).
-
-An `impl:` target may name type variables and shape constructors over them
-(`impl: Show for ['T N]`), and where several targets match a concrete type the most specific
-wins. Sooth is unusually well placed for this: specialization's soundness holes in other
-languages come from lifetimes and associated types, and Sooth has neither, while dispatch is
-whole-program and monomorphizing, so the winning `impl:` is chosen statically per instantiation
-with no cross-unit coherence question and no runtime cost.
-
-**Specificity is a partial order, and this slice rules that ambiguity is an error.** Targets
-`['T N]`, `[i64 N]` and `['T 4]` all match `[i64 4]`, and the last two are incomparable: neither
-matches a strict subset of what the other does. Selecting one requires a tiebreak (declaration
-order, arity, leftmost-concrete) and every such rule is invisible at the use site. So an
-unordered candidate set is a located error naming the competing targets, and the user resolves
-it by writing the more specific `impl:` (here `[i64 4]`). No tiebreak rule is introduced.
+concrete type today; this slice lets it name type variables and shape constructors over them
+(`impl: Show for ['T N]`), with the most specific match winning and an unordered candidate set
+being a located error (no tiebreak rule). See [slice4-brief.md](./P7/slice4-brief.md) for the
+full brief, the two-layer rejection confirmed live, and the exit criteria.
 
 Out of scope: `drop`, which is not a trait and is not becoming one -- its blanket behaviour is
 synthesized field-wise glue, not a writable default body, and an owning closure's disposer keys
 on the construction site rather than the type (**P7.S3v**); trait objects (**P7.S3u**, parked);
 default member bodies and supertraits, still unforced. Sequence after **P7.S3s**, which is the
 first slice to give the impl registry a real multi-`impl:` consumer in `core`.
-**Exit:** an `impl:` target may name type variables and shape constructors over them; a bound is
-discharged against it for every matching concrete instantiation with no per-shape `impl:`
-written; a more specific target overrides a more general one at the instantiations they share;
-an unordered candidate set is a located error naming the competing targets; and a trait with one
-generic `impl:` behaves identically to the same trait with the hand-written concrete `impl:`
-blocks it replaces.
+
+**P7.S4b -- Bounds on impl variables.** S4 shipped generic `impl:` targets but left
+bounds on an impl's own type variables out of scope: a generic impl's member word carries
+`PolySig { bounds: vec![], .. }`, so a body that calls a trait member on an impl variable
+(e.g. `impl: Show for ['T N]` whose `show` iterates and calls `show` on each element,
+requiring `'T: Show`) falls through to ordinary word lookup and fails to resolve. This slice
+closes that gap: new grammar for impl-bound declarations, threading bounds into the member
+word's `PolySig`, and recursive per-instantiation bound discharge. See
+[slice4b-brief.md](./P7/slice4b-brief.md) for the full brief and exit criteria.
+
+Out of scope: `drop` (not a trait); trait objects (**P7.S3u**, parked); default member bodies
+and supertraits, still unforced. Sequence after **P7.S4**, which landed the generic target
+pattern matching, specificity chain, and polymorphic member word that this slice populates
+with bounds.
 
 **P7.S5 -- Linear array elements.** `[T N]` rejects a linear element for every linear type:
 `type: Arr xs [Spy 2] ;` and `type: Arr xs [owning [ -- ] 2] ;` both fail with `linear array
