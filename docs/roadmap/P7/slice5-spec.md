@@ -21,18 +21,29 @@ partially-initialized window during construction.
 
 - **R1.** A new builtin array word family `tabulate ( usize ~[ -- T ] -- [T N] )`
   allocates an array and, for each index `0..N`, splices the quotation to produce a
-  fresh `T` and stores it into that slot. The quotation is `inline`-spliced the same
-  way `times`'s body is (D5/D8), so no value persists across iterations and a linear
-  `T` is safe: each slot gets a distinct, freshly-constructed value, never a
-  replicated one. `tabulate` is a word family (like `fill`/`len`), not a library word,
-  because it must allocate the array and manage the raw-storage boundary, which is
-  IR-level work `times`-as-library-code does not do.
-- **R2.** `check_array_element_gate` (`src/check.rs:510`) admits a linear element for
-  `tabulate` unconditionally (no `is_copy` check applies — the value is always fresh,
-  never replicated), and continues to reject a linear element for `fill` **unless**
-  R3's nullary-variant relaxation applies. `tabulate`'s quotation output type must
-  equal the declared element type; a mismatch is the existing quotation-effect
-  diagnostic path, not a new one.
+  fresh `T` and stores it into that slot. The quotation is inline-spliced: the
+  checker arm calls `check_literal_against_declared_effect` (`src/check.rs:2143`)
+  directly with a synthesized inline `QuotEffect { inputs: [], outputs: [T] }` — the
+  same function the ordinary call-check path uses for library words like `times`,
+  but called directly from the word-family arm rather than reached through generic
+  call resolution (word families bypass that path; `check_array_word`,
+  `src/check/word_families.rs:757`, intercepts by name before the call checker).
+  The IR lowering splices the quotation body inside the loop via `lower_terms`
+  (the same function `call`-of-literal uses at `src/ir/func_builder/calls.rs:362` to
+  inline a quotation body in place), so no value persists across iterations and a
+  linear `T` is safe: each slot gets a distinct, freshly-constructed value, never
+  a replicated one. `tabulate` is a word family (like `fill`/`len`), not a library
+  word, because it must allocate the array and manage the raw-storage boundary,
+  which is IR-level work `times`-as-library-code does not do.
+- **R2.** `tabulate`'s checker arm does **not** call `check_array_element_gate`
+  (`src/check.rs:510`) at all — the gate's `is_copy` check is irrelevant because
+  the element is freshly produced by the quotation each iteration, never
+  replicated. The quotation's output type (checked by
+  `check_literal_against_declared_effect` against the declared `~[ -- T ]` effect)
+  *is* the element type; a type mismatch surfaces through the existing
+  `literal_effect_mismatch_error` diagnostic path, not a new one. `fill`'s call
+  site continues to call `check_array_element_gate` and rejects a linear element
+  **unless** R3's nullary-variant relaxation applies.
 - **R3.** `fill` admits a linear element when the seed value is statically known to be
   a nullary enum variant (a variant with no payload). The checker tracks this via a
   new `Slot.variant_idx: Option<u32>` field (`src/check.rs:278`), set when a nullary
@@ -54,9 +65,10 @@ partially-initialized window during construction.
   admit path (`fill`, R3) with its own rejection message for the remaining
   non-nullary-linear case.
 - **R5.** `examples/array_ctor.sth`'s 6 `[Type; Count]` usages migrate to `fill`
-  mechanically: `[i64; 10]` → `0 10 fill`, `[Bool; 4]` → `False 4 fill`, `[i8; 10]` →
-  `0 >i8 10 fill`, preserving the example's existing purpose (the store loop
-  overwriting dirty stack residue).
+  mechanically: `[i64; 10]` → `0 10 fill` (line 26), `[i8; 10]` → `0 >i8 10 fill`
+  (line 33), `[Bool; 4]` → `False 4 fill` (line 40), and three `[i64; 4]` usages →
+  `0 4 fill` (lines 50, 57, 64), preserving the example's existing purpose (the
+  store loop overwriting dirty stack residue).
 - **R6.** A `synthesize_array_destructor` (mirroring `synthesize_struct_destructor`,
   `src/ir/destructors.rs:310`) is added to `synthesize_aggregate_destructors`
   (`src/ir/destructors.rs:37`) for every linear array shape reachable from the
@@ -66,15 +78,15 @@ partially-initialized window during construction.
   `struct_drop_symbol`/`enum_drop_symbol`, `src/ir/layout.rs:130-148`) names the
   synthesized function, keyed on `(ArrayId, drop_generation)` the same way the
   existing symbols are.
-- **R7.** `emit_drop`'s `IrType::Array` arm (`src/ir/func_builder/quotation.rs:411`)
+- **R7.** `emit_drop`'s `IrType::Array` arm (`src/ir/func_builder/quotation.rs:412`,
   calls the synthesized destructor via its `array_drop_symbol` when
   `self.arrays.layouts[id.index()].is_linear`, replacing the `unreachable!`. The
   non-linear arm (`_ => {}`, no-op) is unchanged.
 - **R8.** The quotation passed to `tabulate` has effect `~[ -- T ]` — it may only
-  produce, never consume the slot it is filling. This is enforced by the existing
-  quotation-effect check (the input stack window is empty), so a quotation body
-  cannot call `drop` on the element under construction; there is no new diagnostic to
-  write. If the quotation traps or aborts mid-loop, the process exits before the
+  produce, never consume the slot it is filling. This is enforced by
+  `check_literal_against_declared_effect` with an empty `eff.inputs` list (the
+  quotation gets no inputs from the caller), so a quotation body cannot call `drop`
+  on the element under construction; there is no new diagnostic to write. If the quotation traps or aborts mid-loop, the process exits before the
   partially-built array is ever observed as a value — the same behavior `fill`
   already has today for a trapping seed construction. No new type-system concept
   models the partially-initialized window; it exists only in the IR (raw
@@ -166,11 +178,13 @@ shuffle) preserves known provenance.
 **Ruling on open question 2 (`tabulate`: word family vs. library word): word
 family.** `tabulate` must allocate array storage and manage the raw-to-value
 boundary crossing (`alloc_array` → store loop → `push dst`), which is IR-level work
-no library word can express — `fill` is a word family for the identical reason. The
-quotation splicing itself reuses the D5/D8 mechanism `times` already uses as library
-code, but splicing is only half of `tabulate`; the allocation half forces the word
-family path. `times`'s library-word status is not evidence against this: `times`
-never allocates, it only loops.
+no library word can express — `fill` is a word family for the identical reason. The quotation splicing reuses the same checker function
+(`check_literal_against_declared_effect`, `src/check.rs:2143`) and the same IR
+splice (`lower_terms`, as `call`-of-literal uses at `src/ir/func_builder/calls.rs:362`)
+that library words like `times` use through the ordinary call path — but the
+attachment point differs: `tabulate`'s word-family arm calls these directly instead
+of being reached through generic call resolution. `times`'s library-word status is
+not evidence against this: `times` never allocates, it only loops.
 
 **Ruling on open question 3 (destructor: loop vs. unroll): a constant-trip-count IR
 loop.** It matches `fill`'s existing loop pattern exactly (same `begin_loop`/
@@ -190,38 +204,69 @@ optimization into a slice whose exit is about admitting linear elements. Tracked
 a follow-up once a concrete performance need is demonstrated (the same "defer until
 a real consumer" discipline the brief applies to zero-cost reservation).
 
+**Difficulty justification: Phases 1 and 2 are `hard`; Phases 3 and 4 are
+`standard`.** Phase 1 is `hard` because no existing word family consumes a
+quotation — every `check_array_word` arm actively rejects quotations (`:859`,
+`:862`, `:902`). `tabulate`'s checker arm calling
+`check_literal_against_declared_effect` directly is an ambiguous integration point
+with no precedent to copy. Phase 2 is `hard` because `Slot.variant_idx` has a
+silent-soundness risk: a missed clear-site (any operator or word call that
+transforms the seed but doesn't clear `variant_idx`) would falsely admit a linear
+non-nullary seed, replicating a linear value. The ~41 `Slot` construction sites all
+need the new field, and a single miss is a soundness hole, not a compile error.
+Phase 3 (deleting dead code paths) and Phase 4 (mirroring an existing destructor
+pattern) are `standard` — they follow established patterns with no ambiguous
+integration.
+
 ## Open Questions
 
 None outstanding — the four questions the brief flagged are resolved above.
 
 ## Implementation
 
-### Phase 1 — `tabulate` word family (R1, R2, R8, R11)
+### Phase 1 — `tabulate` word family (R1, R2, R8)
 
-**Scope.** `src/check.rs` / `src/check/word_families.rs` (checker signature and
-dispatch for `tabulate`, alongside `fill`'s existing `check_array_word`),
-`src/ir/func_builder/word_families.rs` and `src/ir/func_builder/calls.rs` (IR
-lowering, reusing `alloc_array`/`elem_addr`/`begin_loop`/`finalize_loop` with the
-store swapped for a spliced quotation call), `src/check.rs:510`
-(`check_array_element_gate` — unconditional admit for `tabulate`).
+**Scope.**
 
-**Out of bounds.** `fill`'s own gate/lowering (phase 2), the `[Type; Count]` deletion
-(phase 3), the array destructor (phase 4).
+- `src/check/word_families.rs:757` (`check_array_word`) — new `"tabulate"` arm:
+  accepts a quotation operand (unlike `fill` which rejects at `:859`), pops count
+  and quotation from the stack, calls `check_literal_against_declared_effect`
+  (`src/check.rs:2143`) directly with a synthesized inline `QuotEffect { inputs:
+  [], outputs: [element_ty] }` to type-check the quotation body, and does NOT call
+  `check_array_element_gate` (the element is freshly produced, not replicated).
+- `src/ir/func_builder/calls.rs:580` — add `"tabulate"` to the
+  `"fill" | "slice" | "subslice"` dispatch arm.
+- `src/ir/func_builder/word_families.rs:386` (`lower_array_word`) — new `"tabulate"`
+  arm: pop count and quotation, `alloc_array`, `begin_loop`, splice quotation body
+  via `lower_terms` (same pattern as `call`-of-literal at `calls.rs:362`),
+  `store_elem` the result, back-edge, `finalize_loop`, `push dst`. Update the
+  fallback `unreachable!` at `:529` to include `tabulate`.
+
+**Out of bounds.** `fill`'s own gate/lowering (phase 2), the `[Type; Count]`
+deletion (phase 3), the array destructor (phase 4).
 
 **Entry.** None; current `main` is green.
 
-**Exit.** `tabulate` builds a linear array of distinct values end to end; R11's
-golden passes (construction and element-wise consumption only — the golden's
-whole-array drop half is added in phase 4 once R6/R7 land, or the golden is split
-so this phase's slice of it is self-contained); unit tests for the checker
-signature and the IR lowering; `cargo fmt --check && cargo clippy -- -D warnings &&
-cargo test` green.
+**Exit.** `tabulate` type-checks and IR-lowers for a linear element type
+(verified by a compilation test: a `.sth` file using `tabulate` to build a linear
+  array compiles successfully); unit tests for the checker arm (accepts a
+  `~[ -- T ]` quotation, rejects a mismatched effect, admits linear `T`) and the
+  IR lowering (allocates, loops, splices per iteration, stores); `cargo fmt
+  --check && cargo clippy -- -D warnings && cargo test` green. The R11 golden is
+  deferred to Phase 4 — a linear array cannot be dropped or consumed element-wise
+  until the destructor (R6/R7) and a by-value linear-element-read exist, neither of
+  which Phase 1 provides.
 
 ### Phase 2 — nullary-variant `fill` relaxation (R3, R10, R12, R13 partial)
 
-**Scope.** `src/check.rs:278` (`Slot.variant_idx` field and its
-set/clear/shuffle-preserve rules, mirroring `int_val`), the nullary-variant
-constructor call site that sets it, `check_array_element_gate`'s `fill` call site
+**Scope.** `src/check.rs:278` (`Slot.variant_idx: Option<u32>` field and its
+set/clear/shuffle-preserve rules, mirroring `int_val`). The `Slot` struct is
+constructed by explicit field literal at ~41 sites across `src/check.rs` and
+`src/check/*.rs` (not `..Default`); every site needs the new field added.
+Representative sites: the `fill` arm's output slot (`word_families.rs:898`), the
+`len` arm's output (`:935`), `Slot::computed`/`Slot::derived` constructors used
+throughout. The nullary-variant constructor call site that sets `variant_idx`,
+`check_array_element_gate`'s `fill` call site at `src/check/word_families.rs:893`
 (reads `variant_idx` on the seed slot), a new located diagnostic for the
 non-nullary-linear-seed rejection (R10).
 
@@ -259,7 +304,7 @@ runs identically post-migration; full green.
 **Scope.** `src/ir/destructors.rs` (`synthesize_array_destructor`, wired into
 `synthesize_aggregate_destructors` at `:37`), `src/ir/layout.rs`
 (`array_drop_symbol`, mirroring `struct_drop_symbol`/`enum_drop_symbol` at
-`:130-148`), `src/ir/func_builder/quotation.rs:411` (`emit_drop`'s `IrType::Array`
+`:130-148`), `src/ir/func_builder/quotation.rs:412` (`emit_drop`'s `IrType::Array`
 arm).
 
 **Out of bounds.** Anything in `src/check.rs` or the parser — if phase 4 needs a
@@ -276,16 +321,6 @@ disposal); a mutation test deleting the new destructor-dispatch arm (reverting t
 `unreachable!`) makes R11's golden panic, proving the golden actually exercises the
 new path; full green (`cargo fmt --check && cargo clippy -- -D warnings && cargo
 test`).
-
-## Out of scope
-
-- A dynamically-sized or growable array (library `Vec`, needs P7.S3n's undelivered
-  struct-header length variable).
-- A linear element reached through a `Slice[T]` view.
-- Zero-cost reservation without a sentinel (P11).
-- A `Default` trait.
-- The `fill` all-zero-seed memset lowering optimization (deferred follow-up; not
-  required for this slice's correctness exit).
 
 ## Phases (JSON)
 
