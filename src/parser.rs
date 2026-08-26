@@ -408,7 +408,7 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
 /// P7.S4 (R1): an `impl:` target with a bound on one of its variables
 /// (`'T: Copy`). Bounds on impl variables are out of scope this slice.
 fn impl_target_bound_error() -> String {
-    "error: an `impl:` target variable may not carry a bound (bounds on impl variables are not yet supported)".to_string()
+    "error: an `impl:` target variable may not carry an inline bound; use a `where`-clause instead (e.g. `impl: Show for ['T N] where 'T: Show`)".to_string()
 }
 
 /// P7.S4 (R1): an `impl:` target with a row variable (`..s`). Row variables
@@ -519,11 +519,34 @@ fn synth_member_word_name(
     trait_module: u32,
     target: &ImplTarget,
 ) -> String {
-    let ty_part = match &target.pattern {
+    let mut ty_part = match &target.pattern {
         PolyType::Concrete(t) => t.name().to_string(),
         other => poly_type_shape_str(other),
     };
+    if !target.bounds.is_empty() {
+        ty_part.push_str(&bound_set_suffix(&target.bounds));
+    }
     format!("{member};{trait_name};{trait_module};{ty_part}")
+}
+
+/// P7.S4b (R2): a deterministic rendering of an impl's `where`-clause bound
+/// set, appended to the synthesized member word name so two impls sharing a
+/// pattern but differing only in bounds (e.g. `for ['T N]` with and without
+/// `where 'T: Print`) don't collide (src/parser.rs:516's `synth_member_word_name`).
+/// Sorted by `var_idx` so the rendering doesn't depend on `where`-clause
+/// source order.
+fn bound_set_suffix(bounds: &[(u32, Bound)]) -> String {
+    let mut sorted: Vec<&(u32, Bound)> = bounds.iter().collect();
+    sorted.sort_by_key(|(idx, _)| *idx);
+    let mut out = String::from(";where");
+    for (idx, bound) in sorted {
+        let bound_part = match bound {
+            Bound::Copy => "Copy".to_string(),
+            Bound::User(trait_id) => format!("User{}", trait_id.index()),
+        };
+        out.push_str(&format!(",{idx}:{bound_part}"));
+    }
+    out
 }
 
 /// P7.S3r (R4a): rewrite every call of `member` inside its own desugared body
@@ -2611,7 +2634,8 @@ impl<'t> Parser<'t> {
         let span = self.expect_word("impl:")?;
         let (trait_name, trait_span) = self.expect_word_any_spanned()?;
         self.expect_word("for")?;
-        let target = self.parse_impl_target()?;
+        let mut target = self.parse_impl_target()?;
+        target.bounds = self.parse_impl_bounds(&target)?;
         let trait_id = find_trait_in_module(
             self.traits,
             &trait_name,
@@ -2685,7 +2709,101 @@ impl<'t> Parser<'t> {
             pattern,
             ty_var_names: builder.ty_names,
             len_var_names: builder.len_names,
+            bounds: Vec::new(),
         })
+    }
+
+    /// P7.S4b (R1): parse an optional `where`-clause on an `impl:` target,
+    /// declaring bounds on the impl's own type variables. The clause reads
+    /// `where 'T: Show 'V: Eq` — each variable name is resolved against the
+    /// target's already-parsed `ty_var_names` table (erroring on an unknown
+    /// name), then `:` and the bound list reuse `parse_capabilities` (the
+    /// existing bound-list parser). This deliberately does NOT reuse
+    /// `parse_poly_ty_var`: that function interns the variable via
+    /// `intern_ty_var` and rejects bounds on a non-binding (already-interned)
+    /// occurrence (`bound_on_use_error`), but `parse_impl_target` has already
+    /// interned every target variable, so a `where`-clause re-mention is a
+    /// *use*, not a binding. A target with no `where`-clause behaves exactly
+    /// as today (`bounds: vec![]`).
+    fn parse_impl_bounds(&mut self, target: &ImplTarget) -> Result<Vec<(u32, Bound)>, String> {
+        if !matches!(self.peek(), Some((Token::Word(w), _)) if w == "where") {
+            return Ok(Vec::new());
+        }
+        self.pos += 1; // consume `where`
+        let mut bounds = Vec::new();
+        loop {
+            // Each entry: `'T: Cap1 Cap2`. The `:` may be glued to the
+            // variable name (`'T:`) or a separate token (`'T :`), exactly as
+            // `parse_poly_ty_var` handles the bound colon — the lexer does
+            // not split on `:`, so `'T:` is one `Token::Word`.
+            let (name, span, glued_colon) = match self.peek() {
+                Some((Token::Word(w), s)) if w.starts_with('\'') => {
+                    let glued = w.ends_with(':') && w.len() > 1;
+                    let name = if glued {
+                        w[..w.len() - 1].to_string()
+                    } else {
+                        w.clone()
+                    };
+                    (name, *s, glued)
+                }
+                Some((tok, span)) => {
+                    return Err(format!(
+                        "error: expected a type variable after `where` at line {}, col {}, found `{}`",
+                        span.line,
+                        span.col,
+                        describe_token(tok)
+                    ));
+                }
+                None => return Err(self.eof_error("a type variable after `where`")),
+            };
+            self.pos += 1; // consume the variable name (and glued `:` if any)
+                           // Resolve against the target's `ty_var_names` (bounds apply to
+                           // type variables only; a length variable name is an error here).
+            let id = target
+                .ty_var_names
+                .iter()
+                .position(|n| n == &name)
+                .ok_or_else(|| {
+                    format!(
+                        "error: unknown type variable `{name}` in `where` clause at line {}, col {}",
+                        span.line, span.col
+                    )
+                })? as u32;
+            // Expect `:` then the bound list. A glued colon was already
+            // consumed with the variable name; a standalone `:` is a separate
+            // token.
+            let colon_span = if glued_colon {
+                span
+            } else {
+                match self.peek() {
+                    Some((Token::Word(w), s)) if w == ":" => *s,
+                    Some((tok, span)) => {
+                        return Err(format!(
+                            "error: expected `:` after `{name}` in `where` clause at line {}, col {}, found `{}`",
+                            span.line,
+                            span.col,
+                            describe_token(tok)
+                        ));
+                    }
+                    None => {
+                        return Err(self.eof_error("`:` after a type variable in `where` clause"))
+                    }
+                }
+            };
+            if !glued_colon {
+                self.pos += 1; // consume standalone `:`
+            }
+            let caps = self.parse_capabilities(colon_span)?;
+            for b in caps {
+                bounds.push((id, b));
+            }
+            // Continue if another variable name follows; otherwise the
+            // `where`-clause is done and the next token starts the member body.
+            if !matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
+                break;
+            }
+        }
+        Ok(bounds)
     }
 
     /// P7.S3r (R2/R4a/R5/R6): one `: member [| binders |] body ;` inside an
@@ -2760,7 +2878,9 @@ impl<'t> Parser<'t> {
             // P7.S4 (R5) generic path: the member word is polymorphic, its
             // `PolySig` the trait member's signature grounded by binding the
             // trait's self-variable (`Var(0)`) to the whole target `PolyType`,
-            // over the impl's own variable name tables with no bounds.
+            // over the impl's own variable name tables. P7.S4b (R3): the
+            // `PolySig`'s `bounds` are populated from the target's declared
+            // `where`-clause bounds (empty when no `where`-clause is present).
             let inputs: Vec<PolyType> = sig
                 .inputs
                 .iter()
@@ -2776,7 +2896,7 @@ impl<'t> Parser<'t> {
                 inputs,
                 outputs,
                 row_out: None,
-                bounds: Vec::new(),
+                bounds: target.bounds.clone(),
                 ty_var_names: target.ty_var_names.clone(),
                 len_var_names: target.len_var_names.clone(),
                 row_var_names: Vec::new(),
@@ -10083,6 +10203,126 @@ mod tests {
              ;",
         )
         .unwrap_err();
-        assert!(err.contains("may not carry a bound"), "{err}");
+        assert!(err.contains("may not carry an inline bound"), "{err}");
+    }
+
+    // P7.S4b (R1): `where`-clause on an impl target parses and threads
+    // bounds into the member word's PolySig.
+
+    #[test]
+    fn parse_impl_where_clause_single_bound_threads_into_poly_sig() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        assert_eq!(target.bounds.len(), 1);
+        assert_eq!(target.bounds[0].0, 0, "'T is ty_var_names[0]");
+        // The member word's PolySig carries the same bound.
+        let sig = module.words[0]
+            .poly
+            .as_ref()
+            .expect("generic impl member word is polymorphic");
+        assert_eq!(sig.bounds, target.bounds);
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+    }
+
+    #[test]
+    fn parse_impl_where_clause_multiple_bounds_on_one_var() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Eq 'T eq ( &'T &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'T: Show Eq\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        assert_eq!(target.bounds.len(), 2, "'T: Show Eq → two bounds on var 0");
+        assert_eq!(target.bounds[0].0, 0);
+        assert_eq!(target.bounds[1].0, 0);
+        let sig = module.words[0].poly.as_ref().expect("poly sig");
+        assert_eq!(sig.bounds.len(), 2);
+    }
+
+    #[test]
+    fn parse_impl_where_clause_multiple_variables() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Eq 'T eq ( &'T &'T -- ) ;\n\
+             type: Pair 'A 'B a 'A b 'B ;\n\
+             impl: Show for Pair['T 'V] where 'T: Show 'V: Eq\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        assert_eq!(
+            target.ty_var_names,
+            vec!["'T".to_string(), "'V".to_string()]
+        );
+        // 'T: Show → (0, Show), 'V: Eq → (1, Eq)
+        assert_eq!(target.bounds.len(), 2);
+        assert_eq!(target.bounds[0].0, 0, "'T is index 0");
+        assert_eq!(target.bounds[1].0, 1, "'V is index 1");
+        let sig = module.words[0].poly.as_ref().expect("poly sig");
+        assert_eq!(sig.bounds, target.bounds);
+    }
+
+    #[test]
+    fn parse_impl_where_clause_length_var_is_error() {
+        // 'N in ['T 'N] is a length variable, not in ty_var_names, so a
+        // `where`-clause bound on it is an unknown-type-variable error.
+        let err = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'N: Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown type variable"), "{err}");
+        assert!(err.contains("'N"), "{err}");
+    }
+
+    #[test]
+    fn parse_impl_where_clause_no_where_keeps_bounds_empty() {
+        let module = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(module.impls[0].target.bounds.is_empty());
+        let sig = module.words[0].poly.as_ref().expect("poly sig");
+        assert!(sig.bounds.is_empty());
+    }
+
+    #[test]
+    fn parse_impl_where_clause_unknown_variable_is_error() {
+        let err = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'X: Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown type variable"), "{err}");
+        assert!(err.contains("'X"), "{err}");
+    }
+
+    #[test]
+    fn parse_impl_where_clause_missing_colon_is_error() {
+        let err = parse_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'T Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("expected `:` after"), "{err}");
     }
 }

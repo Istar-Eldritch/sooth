@@ -1713,7 +1713,7 @@ pub enum GlobalMode {
 /// of a predicate. P7.S3s: `Ord` used to be a third, reserved predicate
 /// variant (numeric-tower membership); it is now an ordinary library trait
 /// declared in `core::cmp` and satisfied through `User` like any other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Bound {
     Copy,
     User(TraitId),
@@ -1894,6 +1894,11 @@ pub struct ImplTarget {
     pub pattern: PolyType,
     pub ty_var_names: Vec<String>,
     pub len_var_names: Vec<String>,
+    /// P7.S4b (R2): bounds declared on the impl's own type variables via a
+    /// `where`-clause (`impl: Show for ['T N] where 'T: Show`). Each pair's
+    /// `u32` is an index into `ty_var_names`, mirroring `PolySig::bounds`.
+    /// Empty when no `where`-clause is present (today's behaviour).
+    pub bounds: Vec<(u32, Bound)>,
 }
 
 impl ImplTarget {

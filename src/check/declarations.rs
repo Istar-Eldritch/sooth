@@ -417,6 +417,23 @@ fn impl_target_module(target: &crate::ast::ImplTarget, module: &Module) -> Optio
     }
 }
 
+/// P7.S4b (R4): compare two bound sets for equality as unordered sets of
+/// `(u32, Bound)` pairs. Since `PolyType` structural equality already
+/// normalises variable indices across alpha-equivalent targets, the indices
+/// are positionally consistent and compared directly.
+fn bounds_eq(a: &[(u32, Bound)], b: &[(u32, Bound)]) -> bool {
+    a.len() == b.len() && a.iter().all(|p| b.contains(p))
+}
+
+/// Entry in the duplicate-impl scan: `(TraitId, PolyType)` plus the bound
+/// set and span, kept as a struct to satisfy clippy's type-complexity lint.
+struct SeenImpl {
+    trait_id: TraitId,
+    pattern: PolyType,
+    bounds: Vec<(u32, Bound)>,
+    span: Span,
+}
+
 /// P7.S3e (R4/R11, decision 1): every `impl:` declaration's own checks --
 /// duplicate `(TraitId, PolyType)`, the orphan rule, and every required
 /// member bound exactly once (no missing member, no repeat). Each member's
@@ -431,15 +448,32 @@ fn impl_target_module(target: &crate::ast::ImplTarget, module: &Module) -> Optio
 pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
     // `PolyType` derives no `Hash`, so the duplicate check is a linear scan
     // rather than a `HashMap` -- `impl:` counts are small, so this stays cheap.
-    let mut seen: Vec<(TraitId, PolyType, Span)> = Vec::new();
+    //
+    // P7.S4b (R4): the key widens to `(TraitId, PolyType, BoundSet)` so a
+    // bounded and unbounded impl at the same pattern are distinct (not a
+    // duplicate). The bound set is compared by `(u32, Bound)` index pairs —
+    // since `PolyType` structural equality already normalises variable
+    // indices across alpha-equivalent targets (`['T N]` == `['U M]`), the
+    // indices are positionally consistent and need no name-table lookup.
+    let mut seen: Vec<SeenImpl> = Vec::new();
     for imp in &module.impls {
-        if let Some((_, _, first)) = seen
+        if let Some(first) = seen
             .iter()
-            .find(|(t, pat, _)| *t == imp.trait_id && *pat == imp.target.pattern)
+            .find(|s| {
+                s.trait_id == imp.trait_id
+                    && s.pattern == imp.target.pattern
+                    && bounds_eq(&s.bounds, &imp.target.bounds)
+            })
+            .map(|s| s.span)
         {
-            return Err(duplicate_impl_error(imp, *first));
+            return Err(duplicate_impl_error(imp, first));
         }
-        seen.push((imp.trait_id, imp.target.pattern.clone(), imp.span));
+        seen.push(SeenImpl {
+            trait_id: imp.trait_id,
+            pattern: imp.target.pattern.clone(),
+            bounds: imp.target.bounds.clone(),
+            span: imp.span,
+        });
     }
     for i in 0..module.impls.len() {
         let (trait_id, target, impl_module, impl_span, bindings) = {
@@ -3692,6 +3726,56 @@ mod tests {
                : show | a | a drop ;\n\
              ;\n\
              impl: Show for ['U 'M]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate `impl:`"), "{err}");
+    }
+
+    // P7.S4b (R4): a bounded and unbounded impl at the same pattern are
+    // distinct declarations (not a duplicate), but two impls with the same
+    // pattern and the same bound set are still a duplicate.
+
+    #[test]
+    fn check_impl_decls_bounded_and_unbounded_at_same_pattern_are_distinct() {
+        impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             impl: Show for ['T 'N] where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .expect("bounded and unbounded impls at the same pattern are distinct");
+    }
+
+    #[test]
+    fn check_impl_decls_same_pattern_same_bounds_is_duplicate() {
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             impl: Show for ['T 'N] where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("duplicate `impl:`"), "{err}");
+    }
+
+    #[test]
+    fn check_impl_decls_alpha_equivalent_bounded_targets_are_duplicate() {
+        // Alpha-equivalent targets with the same bound set are duplicates,
+        // even though the variable names differ ('T vs 'U).
+        let err = impl_check_src(
+            "trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for ['T 'N] where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             impl: Show for ['U 'M] where 'U: Show\n\
                : show | a | a drop ;\n\
              ;",
         )

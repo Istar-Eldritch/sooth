@@ -5318,12 +5318,20 @@ pub(super) fn discover_transitive_instantiations(
     };
     // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
     let mut extra_seeds: Vec<CallInst> = Vec::new();
+    let mut seed_discovered: Vec<(String, Subst)> = Vec::new();
     for (word_name, subst) in &impl_monos {
         let symbol = instantiation_symbol(word_name, subst, None);
         if extra_seeds.iter().any(|s| s.symbol == symbol) {
             continue;
         }
-        if let Some(seed) = ground.impl_mono_seed(word_name, subst, arrays, refs, owned_cells)? {
+        if let Some(seed) = ground.impl_mono_seed(
+            word_name,
+            subst,
+            arrays,
+            refs,
+            owned_cells,
+            &mut seed_discovered,
+        )? {
             extra_seeds.push(seed);
         }
     }
@@ -5343,6 +5351,7 @@ pub(super) fn discover_transitive_instantiations(
         arrays,
         refs,
         owned_cells,
+        seed_discovered,
     )?;
     // R8/R14, the composed twin of `check`'s own `out_arity >= 2` loop: a
     // composed callee returning a bundle is laid out like any other. Run as a
@@ -5394,6 +5403,7 @@ impl CrossGround<'_> {
     /// `(word, θ)` appears. Each taken instantiation's routing map is written
     /// back onto it, so a seed learns what its own body calls and a composed
     /// entry carries the map its body will be lowered against.
+    #[allow(clippy::too_many_arguments)]
     fn fixpoint(
         &self,
         insts: &mut HashMap<Span, CallInst>,
@@ -5402,6 +5412,7 @@ impl CrossGround<'_> {
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
+        initial_discovered: Vec<(String, Subst)>,
     ) -> Result<Vec<CallInst>, String> {
         let mut seen: HashSet<String> = insts.values().map(|i| i.symbol.clone()).collect();
         let mut frontier: Vec<CallInst> = Vec::new();
@@ -5413,7 +5424,7 @@ impl CrossGround<'_> {
         // such discovery into this accumulator so the loop below can seed it
         // too -- otherwise the member word's body is never emitted and
         // lowering panics on the dangling symbol.
-        let mut discovered: Vec<(String, Subst)> = Vec::new();
+        let mut discovered: Vec<(String, Subst)> = initial_discovered;
         for inst in insts.values_mut() {
             inst.poly_calls = self.cross_calls_of(inst, arrays, refs, cells, &mut discovered)?;
             enqueue_new(&inst.poly_calls, &mut seen, &mut frontier);
@@ -5456,7 +5467,9 @@ impl CrossGround<'_> {
                 if !seen.insert(symbol) {
                     continue;
                 }
-                if let Some(seed) = self.impl_mono_seed(&word_name, &subst, arrays, refs, cells)? {
+                if let Some(seed) =
+                    self.impl_mono_seed(&word_name, &subst, arrays, refs, cells, &mut discovered)?
+                {
                     frontier.push(seed);
                 }
             }
@@ -5485,6 +5498,7 @@ impl CrossGround<'_> {
         arrays: &mut Vec<ArrayDecl>,
         refs: &mut Vec<RefDecl>,
         cells: &mut Vec<OwnedCellDecl>,
+        impl_monos: &mut Vec<(String, Subst)>,
     ) -> Result<Option<CallInst>, String> {
         let Some(word) = self.words.iter().find(|w| w.name == word_name) else {
             return Ok(None);
@@ -5508,6 +5522,39 @@ impl CrossGround<'_> {
                 sig, pty, subst, word_name, word.span, &ctx, arrays, cells, refs,
             )?);
         }
+        // P7.S4b (R6): resolve the member word's own `where`-clause bounds
+        // at this concrete instantiation, filling `trait_calls` the same
+        // way `compose` does for cross-calls. A member word whose body calls
+        // a trait member on its own bounded variable (e.g. `print` on `'T`
+        // where `'T: Print`) records an obligation during `check_poly_body`;
+        // that obligation is resolved here against the concrete θ, and the
+        // dispatched symbol rides the `CallInst` so lowering finds it. Without
+        // this step, the seed's `trait_calls` stays empty and lowering panics
+        // on the unresolved trait-member call.
+        let mut trait_calls: HashMap<Span, String> = HashMap::new();
+        for (v, bound) in &sig.bounds {
+            let Bound::User(trait_id) = bound else {
+                continue;
+            };
+            let Some(ty) = subst.ty_of(*v) else {
+                continue;
+            };
+            resolve_user_bound(
+                *trait_id,
+                *v,
+                ty,
+                sig,
+                word_name,
+                word.span,
+                &ctx,
+                &self.tr,
+                arrays,
+                cells,
+                refs,
+                &mut trait_calls,
+                impl_monos,
+            )?;
+        }
         let symbol = instantiation_symbol(word_name, subst, None);
         Ok(Some(CallInst {
             callee: word_name.to_string(),
@@ -5518,7 +5565,7 @@ impl CrossGround<'_> {
             bundle: None,
             generation: None,
             quot_inputs: Vec::new(),
-            trait_calls: HashMap::new(),
+            trait_calls,
             poly_calls: HashMap::new(),
         }))
     }
@@ -5823,6 +5870,8 @@ fn select_most_specific(
                     || specificity(
                         &candidates[j].0.target.pattern,
                         &candidates[i].0.target.pattern,
+                        &candidates[j].0.target.bounds,
+                        &candidates[i].0.target.bounds,
                         ty,
                         arrays,
                         cells,
@@ -5862,6 +5911,195 @@ fn ambiguity_error(
     )
 }
 
+/// P7.S4b (R7): a located cycle error for a bound-discharge cycle — an impl
+/// whose `where`-clause bound requires its own `(TraitId, Type)` pair, directly
+/// or transitively. Reported at the `ImplDecl.span` of the impl whose bound
+/// creates the back-edge (`source_impl_idx`). Mirrors the path-scoped DFS shape
+/// in `check_combinator_cycles` (`src/check/combinators.rs:207`): a pair
+/// already in the path-scoped visited-set on entry is a back-edge = cycle.
+fn bound_cycle_error(
+    tr: &TraitResolveCtx,
+    trait_id: TraitId,
+    ty: Type,
+    source_impl_idx: Option<usize>,
+) -> String {
+    let trait_name = tr
+        .traits
+        .get(trait_id.index())
+        .map(|t| t.name.as_str())
+        .unwrap_or("<unknown>");
+    let (target_str, span) = source_impl_idx
+        .and_then(|idx| tr.impls.get(idx))
+        .map(|imp| (crate::check::impl_target_str(&imp.target), imp.span))
+        .unwrap_or_else(|| (ty.name().to_string(), Span::default()));
+    format!(
+        "error: bound-discharge cycle: `impl: {trait_name} for {target_str}` requires `{trait_name} for {ty}` which is already being resolved (line {}, col {})",
+        span.line,
+        span.col,
+    )
+}
+
+/// P7.S4b (R6): check whether every bound on a candidate impl's own type
+/// variables discharges at the concrete instantiation. A `Bound::User` is
+/// discharged by a recursive `find_bound_impl` call — side-effect-free, so
+/// non-winning candidates need no rollback. A `Bound::Copy` is checked by
+/// `is_copy`. Returns `Ok(true)` if all discharge, `Ok(false)` if any fails
+/// (the caller excludes the candidate), or `Err` for a cycle (propagates).
+#[allow(clippy::too_many_arguments)]
+fn candidate_bounds_discharge(
+    impl_idx: usize,
+    imp: &ImplDecl,
+    subst: &Subst,
+    ctx: &Ctx,
+    tr: &TraitResolveCtx,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    visited: &mut Vec<(TraitId, Type)>,
+) -> Result<bool, String> {
+    for (var, bound) in &imp.target.bounds {
+        // An ungrounded variable (no input mentions it) skips bound checking
+        // for the same reason the top-level bound loop does: no obligation
+        // could name a variable the body could not have dispatched on.
+        let Some(ty) = subst.ty_of(*var) else {
+            continue;
+        };
+        match bound {
+            Bound::Copy => {
+                if !is_copy(ty, ctx.structs(), ctx.enums(), arrays) {
+                    return Ok(false);
+                }
+            }
+            Bound::User(tid) => {
+                match find_bound_impl(
+                    *tid,
+                    ty,
+                    Some(impl_idx),
+                    imp.span,
+                    ctx,
+                    tr,
+                    arrays,
+                    cells,
+                    refs,
+                    visited,
+                )? {
+                    Some(_) => {}
+                    None => return Ok(false),
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// P7.S4b (R6/R7): side-effect-free candidate-finding + selection, factored
+/// out of `resolve_user_bound`. Returns `Ok(Some((idx, subst)))` when a
+/// winning impl is found, `Ok(None)` when no candidate matches (or every
+/// matching candidate's own declared bounds fail to discharge at this
+/// instantiation), or `Err` for a bound-discharge cycle or an ambiguity.
+///
+/// R6: a candidate whose own `where`-clause bounds fail to discharge at the
+/// concrete instantiation is excluded from the match set — the recursive
+/// discharge calls this helper directly to check existence without side
+/// effects (no `trait_calls`/`impl_monos` mutation), so non-winning
+/// candidates need no rollback. The recursion happens through the existing
+/// `impl_monos` → `cross_calls_of` → `compose` → `resolve_user_bound` chain:
+/// the winning impl's member word is monomorphized, `compose` iterates its
+/// `sig.bounds`, and `resolve_user_bound` discharges each.
+///
+/// R7: a path-scoped `(TraitId, Type)` visited-set is inserted on entry and
+/// removed on back-track (return), so the set tracks only the current DFS
+/// path, not all visited nodes. A pair already in the set on entry is a
+/// back-edge = cycle, reported at `ImplDecl.span` of the impl whose bound
+/// creates the edge (`source_impl_idx`). This prevents false-positives on
+/// diamond-shaped shared resolutions while catching true cycles.
+#[allow(clippy::too_many_arguments)]
+fn find_bound_impl(
+    trait_id: TraitId,
+    ty: Type,
+    source_impl_idx: Option<usize>,
+    span: Span,
+    ctx: &Ctx,
+    tr: &TraitResolveCtx,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    visited: &mut Vec<(TraitId, Type)>,
+) -> Result<Option<(usize, Subst)>, String> {
+    // R7: cycle detection — (trait_id, ty) already on the current DFS path
+    // is a back-edge = cycle.
+    if visited.contains(&(trait_id, ty)) {
+        return Err(bound_cycle_error(tr, trait_id, ty, source_impl_idx));
+    }
+    visited.push((trait_id, ty));
+
+    let trait_decl = tr.traits.get(trait_id.index()).expect(
+        "a bound's `TraitId` indexes the whole-program trait table, so a call site resolving one must be given that table and not a scratch one",
+    );
+    let generics = ctx.generics().map(|c| c.borrow());
+
+    // P7.S4 (R2): one-way match the concrete type against each impl target
+    // pattern, collecting (impl, subst) candidates.
+    let candidates: Vec<(usize, &ImplDecl, Subst)> = tr
+        .impls
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, i)| {
+            if i.trait_id != trait_id {
+                return None;
+            }
+            match_impl_target(
+                &i.target.pattern,
+                ty,
+                arrays,
+                cells,
+                refs,
+                generics.as_deref(),
+            )
+            .map(|s| (idx, i, s))
+        })
+        .collect();
+
+    // R6: filter out candidates whose own declared bounds fail to discharge
+    // at this concrete instantiation. A candidate with no `where`-clause
+    // bounds is always kept.
+    let mut discharging: Vec<(usize, &ImplDecl, Subst)> = Vec::new();
+    for (idx, imp, subst) in candidates {
+        if candidate_bounds_discharge(idx, imp, &subst, ctx, tr, arrays, cells, refs, visited)? {
+            discharging.push((idx, imp, subst));
+        }
+    }
+
+    let result = if discharging.is_empty() {
+        Ok(None)
+    } else {
+        let candidates_ref: Vec<(&ImplDecl, Subst)> = discharging
+            .iter()
+            .map(|(_, imp, s)| (*imp, s.clone()))
+            .collect();
+        let winner = if candidates_ref.len() > 1 {
+            // P7.S4 (R3): select the unique most-specific candidate via the
+            // equivalence-class refinement partial order.
+            select_most_specific(
+                &candidates_ref,
+                ty,
+                arrays,
+                cells,
+                refs,
+                generics.as_deref(),
+                &trait_decl.name,
+                span,
+            )?
+        } else {
+            0
+        };
+        Ok(Some((discharging[winner].0, discharging[winner].2.clone())))
+    };
+
+    visited.pop();
+    result
+}
+
 /// P7.S3e (R8): one `Bound::User` at a call site whose θ is known -- the
 /// `impl:` registry lookup that decides satisfaction, then the resolution of
 /// every obligation the callee's body recorded on this variable to the
@@ -5878,6 +6116,13 @@ fn ambiguity_error(
 /// `instantiation_symbol(word_symbols[idx], &subst)` (not the bare
 /// `word_symbols[idx]`), and the `(member_word, subst)` pair is recorded for
 /// lowering. A concrete winner keeps the bare `word_symbols[idx]` path.
+///
+/// P7.S4b (R6/R7): the candidate-finding + selection is factored into
+/// `find_bound_impl` (side-effect-free, with recursive bound discharge and
+/// cycle detection); this function calls it, then does the obligation
+/// routing. A candidate whose own `where`-clause bounds fail to discharge at
+/// the concrete instantiation is excluded before selection; if that leaves
+/// no candidate, the existing `unsatisfied_user_bound_error` fires.
 #[allow(clippy::too_many_arguments)]
 fn resolve_user_bound(
     trait_id: TraitId,
@@ -5897,58 +6142,38 @@ fn resolve_user_bound(
     let trait_decl = tr.traits.get(trait_id.index()).expect(
         "a bound's `TraitId` indexes the whole-program trait table, so a call site resolving one must be given that table and not a scratch one",
     );
-    // P7.S4 (R2): one-way match the concrete type against each impl target
-    // pattern, collecting (impl, subst) candidates.
-    let generics = ctx.generics().map(|c| c.borrow());
-    let candidates: Vec<(&ImplDecl, Subst)> = tr
-        .impls
-        .iter()
-        .filter_map(|i| {
-            if i.trait_id != trait_id {
-                return None;
-            }
-            match_impl_target(
-                &i.target.pattern,
+    // P7.S4b (R6/R7): find the winning impl via the factored helper, which
+    // also discharges each candidate's own bounds recursively and detects
+    // cycles via a path-scoped visited-set.
+    let mut visited: Vec<(TraitId, Type)> = Vec::new();
+    let winner = find_bound_impl(
+        trait_id,
+        ty,
+        None,
+        span,
+        ctx,
+        tr,
+        arrays,
+        cells,
+        refs,
+        &mut visited,
+    )?;
+    let (imp_idx, subst) = match winner {
+        Some((idx, subst)) => (idx, subst),
+        None => {
+            return Err(unsatisfied_user_bound_error(
+                ctx,
+                span,
+                name,
+                &sig.ty_var_names[v as usize],
+                trait_decl,
                 ty,
                 arrays,
-                cells,
                 refs,
-                generics.as_deref(),
-            )
-            .map(|s| (i, s))
-        })
-        .collect();
-    if candidates.is_empty() {
-        return Err(unsatisfied_user_bound_error(
-            ctx,
-            span,
-            name,
-            &sig.ty_var_names[v as usize],
-            trait_decl,
-            ty,
-            arrays,
-            refs,
-        ));
-    }
-    let winner = if candidates.len() > 1 {
-        // P7.S4 (R3): select the unique most-specific candidate via the
-        // equivalence-class refinement partial order. A unique maximal
-        // element wins; two or more incomparable maxima are a located
-        // ambiguity error.
-        select_most_specific(
-            &candidates,
-            ty,
-            arrays,
-            cells,
-            refs,
-            generics.as_deref(),
-            &trait_decl.name,
-            span,
-        )?
-    } else {
-        0
+            ));
+        }
     };
-    let (imp, subst) = &candidates[winner];
+    let imp = &tr.impls[imp_idx];
     let is_generic = !imp.target.is_concrete();
     for ob in tr
         .obligations_of(name, sig)
@@ -5970,7 +6195,7 @@ fn resolve_user_bound(
         let symbol = if is_generic {
             // P7.S4 (R6): mint the dispatched symbol as the instantiation of
             // the member word at the matched substitution.
-            let s = instantiation_symbol(word_sym, subst, None);
+            let s = instantiation_symbol(word_sym, &subst, None);
             impl_monos.push((word_sym.clone(), subst.clone()));
             s
         } else {
@@ -6729,6 +6954,15 @@ fn collect_paired_positions(
 /// `Some(Greater)` if B is strictly more specific than A (B ≺ A), or `None`
 /// if neither is strictly more specific (equal or incomparable).
 ///
+/// P7.S4b (R5): when patterns are equal (neither strictly dominates the
+/// other and they are structurally identical), the bound-set tiebreak
+/// applies: a strictly more constrained bound set (proper superset) wins.
+/// `impl: Eq for ['T N] where 'T: Eq` is more specific than `impl: Eq for
+/// ['T N]` with no bounds. Variable identity is normalized across
+/// alpha-equivalent targets via `PolyType` structural equality (both
+/// `['T N]` and `['U M]` fold to `Array(Var(0), Var(0))`), so `(u32, Bound)`
+/// index pairs are positionally consistent and need no name-table lookup.
+///
 /// Over the aligned leaves, pattern A ≺ B iff:
 /// (1) every position where B has a concrete value, A also has a concrete
 /// value (A doesn't relax B's concreteness);
@@ -6751,6 +6985,8 @@ fn collect_paired_positions(
 fn specificity(
     a: &PolyType,
     b: &PolyType,
+    a_bounds: &[(u32, Bound)],
+    b_bounds: &[(u32, Bound)],
     ty: Type,
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
@@ -6788,7 +7024,34 @@ fn specificity(
             Some(Ordering::Greater)
         };
     }
-    match (a_over_b, b_over_a) {
+    let pattern_result = match (a_over_b, b_over_a) {
+        (true, false) => Some(Ordering::Less),
+        (false, true) => Some(Ordering::Greater),
+        _ => None,
+    };
+    // P7.S4b (R5): bound-set tiebreak. When patterns are structurally equal
+    // (neither dominates), a strictly more constrained bound set is a
+    // specificity tiebreak. Incomparable patterns (which also produce
+    // `None`) are not equal, so `a == b` distinguishes the two cases.
+    if pattern_result.is_none() && a == b {
+        return bound_set_tiebreak(a_bounds, b_bounds);
+    }
+    pattern_result
+}
+
+/// P7.S4b (R5): the bound-set tiebreak for two candidates with equal
+/// patterns. Returns `Some(Less)` if `a_bounds` is a strict superset of
+/// `b_bounds` (A is more constrained → more specific), `Some(Greater)` if
+/// `b_bounds` is a strict superset of `a_bounds`, or `None` if neither
+/// dominates. Compared as unordered sets of `(u32, Bound)` pairs, mirroring
+/// the duplicate-check's `bounds_eq` (variable indices are positionally
+/// consistent across alpha-equivalent targets via `PolyType` equality).
+fn bound_set_tiebreak(a_bounds: &[(u32, Bound)], b_bounds: &[(u32, Bound)]) -> Option<Ordering> {
+    let a_sup_b = b_bounds.iter().all(|p| a_bounds.contains(p))
+        && a_bounds.iter().any(|p| !b_bounds.contains(p));
+    let b_sup_a = a_bounds.iter().all(|p| b_bounds.contains(p))
+        && b_bounds.iter().any(|p| !a_bounds.contains(p));
+    match (a_sup_b, b_sup_a) {
         (true, false) => Some(Ordering::Less),
         (false, true) => Some(Ordering::Greater),
         _ => None,
@@ -9159,6 +9422,162 @@ mod tests {
             err,
             "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 6, col 26 in the body of `shows` (instantiated at line 7, col 32 in `main`)"
         );
+    }
+
+    // P7.S4b (R12): unit tests for the factored `find_bound_impl`, the
+    // `candidate_bounds_discharge` filter, and the `bound_cycle_error`
+    // cycle detector.
+
+    /// R6: a bounded generic impl's `where`-clause bound discharges at a
+    /// concrete instantiation via recursive `find_bound_impl` — the element
+    /// type has its own concrete impl, so the candidate is kept and the program
+    /// compiles.
+    #[test]
+    fn find_bound_impl_recursive_discharge_succeeds() {
+        let src = "type: Point x i64 y i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Print 'T print ( &'T -- ) ;\n\
+             impl: Print for Point\n\
+               : print | p | p drop ;\n\
+             ;\n\
+             impl: Show for ['T 4] where 'T: Print\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- )\n\
+               1 2 Point |p|\n\
+               p 4 fill |arr|\n\
+               &arr shows\n\
+               arr drop\n\
+               p drop\n\
+             ;\n";
+        check_src(src).expect("bounded generic impl should compile when the bound discharges");
+    }
+
+    /// R6 edge: a bounded generic impl whose `where`-clause bound fails to
+    /// discharge (no matching impl for the concrete element type) is excluded
+    /// from the candidate set, leaving no candidate and producing the
+    /// unsatisfied-bound error.
+    #[test]
+    fn find_bound_impl_recursive_discharge_fails_when_bound_unmet() {
+        let src = "type: Point x i64 y i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Print 'T print ( &'T -- ) ;\n\
+             impl: Show for ['T 4] where 'T: Print\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- )\n\
+               1 2 Point |p|\n\
+               p 4 fill |arr|\n\
+               &arr shows\n\
+               arr drop\n\
+               p drop\n\
+             ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("cannot instantiate `'T` of `shows` with `[Point 4]`"),
+            "{err}"
+        );
+        assert!(err.contains("`[Point 4]` does not satisfy `Show`"), "{err}");
+    }
+
+    /// R7: a self-referential bound cycle — `impl: Show for 'T where 'T: Show`
+    /// — is a located error at the impl declaration, not a stack overflow or
+    /// hang.
+    #[test]
+    fn bound_cycle_error_self_referential_impl_is_located_error() {
+        let src = "type: Point x i64 y i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for 'T where 'T: Show\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- )\n\
+               1 2 Point |p|\n\
+               &p shows\n\
+               p drop\n\
+             ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("bound-discharge cycle"), "{err}");
+        assert!(
+            err.contains("`impl: Show for 'T` requires `Show for Point`"),
+            "{err}"
+        );
+    }
+
+    /// R7: a transitive cycle — `impl: A for 'T where 'T: B` and `impl: B for
+    /// 'T where 'T: A` — is a located error, not a hang.
+    #[test]
+    fn bound_cycle_error_transitive_cycle_is_located_error() {
+        let src = "type: Point x i64 y i64 ;\n\
+             trait: A 'T a ( &'T -- ) ;\n\
+             trait: B 'T b ( &'T -- ) ;\n\
+             impl: A for 'T where 'T: B\n\
+               : a | x | x drop ;\n\
+             ;\n\
+             impl: B for 'T where 'T: A\n\
+               : b | x | x drop ;\n\
+             ;\n\
+             : calls_a ( &'T: A -- ) a ;\n\
+             : main ( -- )\n\
+               1 2 Point |p|\n\
+               &p calls_a\n\
+               p drop\n\
+             ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("bound-discharge cycle"), "{err}");
+    }
+
+    /// R6: a `Copy` bound on a candidate's own variable is checked during
+    /// candidate filtering — a linear element type fails the `Copy` bound,
+    /// excluding the candidate.
+    #[test]
+    fn candidate_bounds_discharge_copy_bound_excludes_linear_type() {
+        let src = "type: Spy tag i64 ;\n\
+             : drop ( Spy -- ) | s | s Spy> drop ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             impl: Show for 'T where 'T: Copy\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- )\n\
+               0 Spy |s|\n\
+               &s shows\n\
+               s drop\n\
+             ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("cannot instantiate `'T` of `shows` with `Spy`"),
+            "{err}"
+        );
+    }
+
+    /// R7: two independent calls to a bounded word both resolve the same
+    /// `(TraitId, Type)` via `find_bound_impl`, and neither interferes with
+    /// the other — the path-scoped visited-set is fresh for each top-level
+    /// `resolve_user_bound` call, so no false-positive cycle.
+    #[test]
+    fn bound_cycle_no_false_positive_on_independent_resolutions() {
+        let src = "type: Point x i64 y i64 ;\n\
+             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Print 'T print ( &'T -- ) ;\n\
+             impl: Print for Point\n\
+               : print | p | p drop ;\n\
+             ;\n\
+             impl: Show for ['T 4] where 'T: Print\n\
+               : show | a | a drop ;\n\
+             ;\n\
+             : shows ( &'T: Show -- ) show ;\n\
+             : main ( -- )\n\
+               1 2 Point |p|\n\
+               p 4 fill |arr|\n\
+               &arr shows\n\
+               &arr shows\n\
+               arr drop\n\
+               p drop\n\
+             ;\n";
+        check_src(src).expect("two independent resolutions should not be a cycle");
     }
 
     // A one-field struct with a `drop` overload: linear for the same reason any
@@ -13621,11 +14040,11 @@ mod tests {
         let a = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
-            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
         assert_eq!(
-            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            specificity(&b, &a, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Greater)
         );
     }
@@ -13642,7 +14061,7 @@ mod tests {
         let a = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
-            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
     }
@@ -13658,8 +14077,14 @@ mod tests {
         let ty = Type::Array(ArrayId::from_index(0), "array");
         let a = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
-        assert_eq!(specificity(&a, &b, ty, &arrays, &[], &[], None), None);
-        assert_eq!(specificity(&b, &a, ty, &arrays, &[], &[], None), None);
+        assert_eq!(
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
+            None
+        );
+        assert_eq!(
+            specificity(&b, &a, &[], &[], ty, &arrays, &[], &[], None),
+            None
+        );
     }
 
     #[test]
@@ -13675,7 +14100,7 @@ mod tests {
         let a = PolyType::Concrete(ty);
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
-            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
     }
@@ -13702,11 +14127,11 @@ mod tests {
         let a = PolyType::Var(0);
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
-            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            specificity(&b, &a, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
     }
@@ -13724,11 +14149,11 @@ mod tests {
         let a = PolyType::Var(0);
         let b = PolyType::Concrete(ty);
         assert_eq!(
-            specificity(&a, &b, ty, &arrays, &[], &[], None),
+            specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            specificity(&b, &a, ty, &arrays, &[], &[], None),
+            specificity(&b, &a, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
         );
     }
@@ -13762,12 +14187,200 @@ mod tests {
             Len::Var(1),
         );
         assert_eq!(
-            specificity(&shallow, &nested, ty, &arrays, &[], &[], None),
+            specificity(&shallow, &nested, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Greater)
         );
         assert_eq!(
-            specificity(&nested, &shallow, ty, &arrays, &[], &[], None),
+            specificity(&nested, &shallow, &[], &[], ty, &arrays, &[], &[], None),
             Some(Ordering::Less)
+        );
+    }
+
+    // P7.S4b Phase 3 (R5/R12): bound-set tiebreak unit tests.
+
+    #[test]
+    fn specificity_bounded_beats_unbounded_at_equal_pattern() {
+        // `impl: Eq for ['T N] where 'T: Eq` is more specific than
+        // `impl: Eq for ['T N]` (no bounds) at equal pattern — the bounded
+        // candidate's bound set is a strict superset of the unbounded one's.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let pat = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let bounded = vec![(0u32, Bound::User(TraitId::from_index(1)))];
+        let unbounded: Vec<(u32, Bound)> = vec![];
+        // Bounded (A) vs unbounded (B): A ⊃ B → A is more specific → Less.
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &bounded,
+                &unbounded,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            Some(Ordering::Less)
+        );
+        // Unbounded (A) vs bounded (B): B ⊃ A → B is more specific → Greater.
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &unbounded,
+                &bounded,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn specificity_incomparable_bound_sets_stay_incomparable() {
+        // Two bound sets where neither is a superset of the other: 'T: Eq
+        // vs 'T: Show — incomparable, so `specificity` returns `None`.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let pat = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let a_bounds = vec![(0u32, Bound::User(TraitId::from_index(1)))];
+        let b_bounds = vec![(0u32, Bound::User(TraitId::from_index(2)))];
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &a_bounds,
+                &b_bounds,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &b_bounds,
+                &a_bounds,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn specificity_equal_bound_sets_not_strictly_more_specific() {
+        // Same pattern, same bounds — neither strictly more constrained.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let pat = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let bounds = vec![(0u32, Bound::User(TraitId::from_index(1)))];
+        assert_eq!(
+            specificity(&pat, &pat, &bounds, &bounds, ty, &arrays, &[], &[], None),
+            None
+        );
+    }
+
+    #[test]
+    fn specificity_pattern_domination_ignores_bounds() {
+        // When one pattern is strictly more specific, bounds don't matter:
+        // `[i64 N]` (concrete elem) beats `['T N]` (var elem) even if the
+        // less-specific pattern has a bound and the more-specific one
+        // doesn't.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let concrete = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let var = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let no_bounds: Vec<(u32, Bound)> = vec![];
+        let with_bound = vec![(0u32, Bound::User(TraitId::from_index(1)))];
+        // Concrete pattern (A, no bounds) is still more specific than var
+        // pattern (B, with bound) — pattern dominates.
+        assert_eq!(
+            specificity(
+                &concrete,
+                &var,
+                &no_bounds,
+                &with_bound,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn specificity_bound_tiebreak_with_two_bounds_vs_one() {
+        // `where 'T: Eq 'T: Show` (two bounds) is strictly more constrained
+        // than `where 'T: Eq` (one bound) at equal pattern.
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 4,
+            name_static: "array",
+        }];
+        let ty = Type::Array(ArrayId::from_index(0), "array");
+        let pat = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let two_bounds = vec![
+            (0u32, Bound::User(TraitId::from_index(1))),
+            (0u32, Bound::User(TraitId::from_index(2))),
+        ];
+        let one_bound = vec![(0u32, Bound::User(TraitId::from_index(1)))];
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &two_bounds,
+                &one_bound,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            specificity(
+                &pat,
+                &pat,
+                &one_bound,
+                &two_bounds,
+                ty,
+                &arrays,
+                &[],
+                &[],
+                None
+            ),
+            Some(Ordering::Greater)
         );
     }
 }
