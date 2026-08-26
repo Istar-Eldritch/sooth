@@ -3107,9 +3107,10 @@ mod tests {
     /// R2: `tabulate` does NOT call `check_array_element_gate` — the element
     /// is freshly produced by the quotation each iteration, never replicated.
     /// A linear element type (a struct with a `drop` overload) is admitted,
-    /// which `fill` would reject.  This is a checker-only test: the IR's
-    /// `emit_drop` for a linear array is `unreachable!` until Phase 4's
-    /// destructor lands.
+    /// which `fill` would reject.  This is a checker-only test; the IR's
+    /// `emit_drop` for a linear array now calls the synthesized array
+    /// destructor (Phase 4), covered by the golden tests in
+    /// `tests/phase7_slice5_array_drop.rs`.
     #[test]
     fn tabulate_admits_linear_element_type() {
         // `Spy` is linear (it has a `drop` overload).  `fill` would reject

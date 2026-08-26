@@ -152,6 +152,16 @@ pub(super) fn cell_drop_symbol(id: OwnedCellId, epoch: Option<u64>) -> String {
     }
 }
 
+/// Mirrors `struct_drop_symbol`/`enum_drop_symbol`/`cell_drop_symbol`, one
+/// uniform naming scheme across all four aggregate kinds. Keyed on
+/// `(ArrayId, drop_generation)` the same way the existing symbols are.
+pub(super) fn array_drop_symbol(id: ArrayId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_array_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_array_drop_{}", id.index()),
+    }
+}
+
 /// One field's placement within its owning struct: its byte offset and its own
 /// `IrType`/size/align (a nested struct contributes its whole size/align).
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +256,12 @@ pub struct ArrayLayout {
     pub size: u32,
     pub align: u32,
     pub is_linear: bool,
+    /// Mirrors `StructLayout::drop_generation`/`EnumLayout::drop_generation`:
+    /// the session-wide override epoch, `None` on the build path. An array's
+    /// synthesized destructor symbol carries it so a re-compiled array shape
+    /// gets a fresh symbol per override event, the same reason every other
+    /// aggregate's does.
+    pub drop_generation: Option<u64>,
 }
 
 /// The IR's view of a program's arrays: the per-`ArrayId` layout registry.
@@ -953,6 +969,9 @@ impl LayoutBuilder<'_> {
             size: stride * count,
             align: elem_align.max(1),
             is_linear,
+            // The build path never suffixes; the REPL sets this from its own
+            // override epoch after the build, mirroring the struct/enum fields.
+            drop_generation: None,
         });
     }
 }

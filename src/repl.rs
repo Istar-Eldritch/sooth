@@ -4326,6 +4326,7 @@ mod tests {
             size: 24,
             align: 8,
             is_linear: false,
+            drop_generation: None,
         }];
         let arr = Type::Array(ArrayId::from_index(0), "[i64 3]");
         assert_eq!(

@@ -48,8 +48,8 @@ pub(crate) use self::layout::{
 pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
 pub use self::driver::{lower, lower_line};
 use self::layout::{
-    cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align, struct_drop_symbol,
-    EnumWord, StructWord,
+    array_drop_symbol, cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align,
+    struct_drop_symbol, EnumWord, StructWord,
 };
 #[cfg(test)]
 pub(crate) use self::layout::{empty_slices, Refs, VariantLayout};

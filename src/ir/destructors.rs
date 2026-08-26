@@ -46,6 +46,7 @@ pub fn synthesize_aggregate_destructors(
     let Registries {
         structs,
         enums,
+        arrays,
         cells,
         ..
     } = regs;
@@ -90,10 +91,20 @@ pub fn synthesize_aggregate_destructors(
     let cell_destructors = cells.payload.iter().enumerate().map(|(idx, _)| {
         synthesize_cell_destructor(OwnedCellId::from_index(idx), env, resolve, regs)
     });
+    // R6 (Phase 4): every linear array shape reachable from the program gets
+    // a synthesized destructor that loops over `0..N`, loading and dropping
+    // each element. No allocation to free, since arrays are stack-allocated.
+    let array_destructors = arrays
+        .layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.is_linear)
+        .map(|(idx, _)| synthesize_array_destructor(ArrayId::from_index(idx), env, resolve, regs));
     struct_destructors
         .into_iter()
         .chain(enum_destructors)
         .chain(cell_destructors)
+        .chain(array_destructors)
         .collect()
 }
 
@@ -485,6 +496,44 @@ fn synthesize_cell_destructor(
     IrFunc {
         name: cell_drop_symbol(id, cells.drop_generations[id.index()]),
         params: vec![IrType::OwnedCell(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
+}
+
+/// R6 (Phase 4): synthesize array `id`'s destructor, called by `drop` on any
+/// value of that type. Emits a constant-trip-count IR loop over `0..N` that
+/// loads each element and calls `emit_drop` on it. No allocation to free,
+/// since arrays are stack-allocated (`Instr::Alloc`). Mirrors
+/// `synthesize_struct_destructor`'s use of `FuncBuilder`'s loop primitives
+/// and `emit_drop`, but the loop shape follows `fill`'s existing
+/// `begin_loop`/`elem_addr`/back-edge pattern rather than the fused
+/// disposal-cycle walk (an array can never be on a disposal cycle: `[^T N]`
+/// is rejected outright, so no `recursive_disposal_path` check is needed).
+pub(super) fn synthesize_array_destructor(
+    id: ArrayId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+) -> IrFunc {
+    let arrays = regs.arrays;
+    let self_ty = IrType::Array(id);
+    let (elem, stride, count) = {
+        let l = &arrays.layouts[id.index()];
+        (l.elem, l.stride, l.count)
+    };
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
+    let param = b.fresh_value(self_ty);
+    if count > 0 {
+        b.emit_array_drop_loop(param, elem, stride, count);
+    }
+    if !b.terminated {
+        b.seal_block(Terminator::Ret(None));
+    }
+    IrFunc {
+        name: array_drop_symbol(id, arrays.layouts[id.index()].drop_generation),
+        params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
@@ -1157,6 +1206,174 @@ mod tests {
                     ]),
                 ],
             }])
+        );
+    }
+
+    // --- Phase 7 Slice 5 Phase 4: array destructor synthesis (R6/R7) ---
+
+    /// R6: a linear array gets a synthesized destructor, a non-linear one
+    /// does not — mirroring the struct filter (`is_linear && !bundle`).
+    #[test]
+    fn lower_appends_one_destructor_func_per_linear_array_only() {
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
+        assert!(
+            ir.funcs.iter().any(|f| f.name == "sooth_array_drop_0"),
+            "a linear [Spy 2] array gets a synthesized destructor"
+        );
+        // A non-linear array gets none.
+        let ir2 = lower_src(": w ( -- ) 0 4 fill drop ;");
+        assert!(
+            !ir2.funcs
+                .iter()
+                .any(|f| f.name.starts_with("sooth_array_drop")),
+            "a non-linear [i64 4] array gets no destructor"
+        );
+    }
+
+    /// R7: `emit_drop` on a linear array calls the synthesized destructor
+    /// symbol, replacing the former `unreachable!`.
+    #[test]
+    fn emit_drop_of_linear_array_calls_its_destructor_symbol() {
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        assert_eq!(
+            calls,
+            vec![array_drop.as_str()],
+            "expected one array destructor call"
+        );
+    }
+
+    /// R6: the synthesized array destructor loops over elements and calls
+    /// `emit_drop` on each — the element's own destructor (here `Spy`'s)
+    /// is called once per element, in order.
+    #[test]
+    fn synthesized_array_destructor_drops_each_element_once() {
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
+        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == array_drop)
+            .expect("a destructor was synthesized for the linear array");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(
+            calls,
+            vec![spy_drop.as_str()],
+            "the array destructor calls Spy's destructor (once per iteration of the loop)"
+        );
+    }
+
+    /// R6: the array destructor is a constant-trip-count loop (a header phi
+    /// and a back-edge), not N unrolled drops.
+    #[test]
+    fn synthesized_array_destructor_is_a_loop_not_unrolled() {
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 4 ~[ 0 Spy ] tabulate drop ;"));
+        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == array_drop)
+            .expect("a destructor was synthesized");
+        // A header phi (the induction variable) in a non-entry block.
+        let has_phi = dtor
+            .blocks
+            .iter()
+            .skip(1)
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, Instr::Phi(..)));
+        assert!(has_phi, "the array destructor has a loop header phi");
+        // Exactly one `emit_drop` call in the body (the loop body calls Spy's
+        // destructor once per iteration, not 4 times unrolled).
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let drop_calls = count(
+            dtor,
+            |i| matches!(i, Instr::Call(None, sym, _) if sym == &spy_drop),
+        );
+        assert_eq!(drop_calls, 1, "one drop call in the loop body, not N");
+    }
+
+    /// R6: a zero-count array (N=0) produces a destructor that just returns —
+    /// no loop, no drop calls. (This is an edge case: `fill` and `tabulate`
+    /// reject count 0, but the synthesized destructor must handle it.)
+    #[test]
+    fn synthesized_array_destructor_zero_count_just_returns() {
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let regs = Registries {
+            structs: &Structs::default(),
+            enums: &Enums::default(),
+            arrays: &Arrays {
+                layouts: vec![ArrayLayout {
+                    name: "[i64 0]",
+                    elem: IrType::I64,
+                    count: 0,
+                    stride: 8,
+                    size: 0,
+                    align: 8,
+                    is_linear: false,
+                    drop_generation: None,
+                }],
+            },
+            cells: &Cells::default(),
+            refs: &Refs::default(),
+            slices: empty_slices(),
+            statics: empty_statics(),
+        };
+        let dtor = synthesize_array_destructor(ArrayId::from_index(0), &env, &resolve, regs);
+        assert_eq!(
+            dtor.blocks.len(),
+            1,
+            "a zero-count array destructor is one block"
+        );
+        assert!(count(&dtor, |_| true) == 0, "no instructions");
+    }
+
+    /// R6: an array of a linear enum (built via `fill` with a nullary variant
+    /// seed) gets a destructor that calls the enum's destructor per element.
+    #[test]
+    fn fill_nullary_variant_array_gets_destructor_calling_enum_drop() {
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Opt | None | Some val Spy ; : w ( -- ) None 3 fill drop ;"
+        ));
+        // The array is linear (its element `Opt` is linear).
+        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        assert!(
+            ir.funcs.iter().any(|f| f.name == array_drop),
+            "a nullary-variant [Opt 3] array gets a synthesized destructor"
+        );
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == array_drop)
+            .expect("the array destructor");
+        // The enum's destructor is called per iteration.
+        let enum_drop = enum_drop_symbol(EnumId::from_index(0), None);
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![enum_drop.as_str()],
+            "the array destructor calls Opt's enum destructor per element"
         );
     }
 }

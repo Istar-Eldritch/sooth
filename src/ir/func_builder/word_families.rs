@@ -1092,6 +1092,95 @@ impl<'a> FuncBuilder<'a> {
         let v = self.slot_value(base, field.offset, field.ty);
         self.stack.push(v);
     }
+
+    /// R6 (Phase 4): the synthesized array destructor's loop body — for each
+    /// index `0..count`, compute the element address, load the element, and
+    /// call `emit_drop` on it. Mirrors `fill`'s `begin_loop`/`elem_addr`/
+    /// back-edge loop shape, but loads and drops instead of storing. No
+    /// allocation to free, since arrays are stack-allocated (`Instr::Alloc`).
+    /// Called by `synthesize_array_destructor`.
+    pub(in crate::ir) fn emit_array_drop_loop(
+        &mut self,
+        array: Value,
+        elem: IrType,
+        stride: u32,
+        count: u32,
+    ) {
+        // The loop shape follows `fill`'s existing pattern exactly: a scalar
+        // index carried through a header phi, a `Cmp(Lt)` guard, a body block,
+        // and a back-edge. `stage_aggregates = false` (the array is read-only,
+        // not carried through the loop).
+        let seed = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(seed, 0));
+        self.const_vals.insert(seed, 0);
+        let outs = self.begin_loop(&[seed], false);
+        let index_phi = outs[0];
+
+        let bound = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(bound, count as i64));
+        self.const_vals.insert(bound, count as i64);
+        let cmp = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, bound));
+        let body_block = self.fresh_block();
+        let exit_block = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+
+        // Body: load the element at `array + index * stride` and drop it.
+        self.start_block(body_block);
+        self.terminated = false;
+        let addr = self.elem_addr(array, index_phi, stride);
+        let elem_val = self.slot_value_at_addr(addr, elem);
+        self.emit_drop(elem_val);
+
+        // Back-edge: index + 1.
+        let one = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(one, 1));
+        self.const_vals.insert(one, 1);
+        let index_next = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+        self.back_edges.push((self.cur_id, vec![index_next]));
+        self.seal_block(Terminator::Jmp(
+            self.header.expect("array drop loop header"),
+        ));
+
+        self.finalize_loop();
+
+        self.start_block(exit_block);
+        self.terminated = false;
+    }
+
+    /// R6 (Phase 4): load the value at a pre-computed element address `addr`
+    /// of type `ty`, for disposal. Mirrors `slot_value` but takes an address
+    /// from `elem_addr` (a runtime index) instead of `(base, offset)` (a
+    /// compile-time offset). An aggregate's interior pointer is retyped as the
+    /// aggregate (no copy, `PtrOffset 0`); a scalar or cell is loaded out via
+    /// `FieldLoad`.
+    fn slot_value_at_addr(&mut self, addr: Value, ty: IrType) -> Value {
+        match ty {
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                let v = self.fresh_value(ty);
+                self.push_instr(Instr::FieldLoad(v, addr));
+                v
+            }
+            IrType::Struct(_)
+            | IrType::Enum(_)
+            | IrType::Array(_)
+            | IrType::Quotation(_)
+            | IrType::OwningQuotation(_) => {
+                // The address IS the aggregate value (an interior pointer);
+                // `PtrOffset 0` retypes it so `emit_drop` dispatches on the
+                // right `IrType`.
+                let v = self.fresh_value(ty);
+                self.push_instr(Instr::PtrOffset(v, addr, 0));
+                v
+            }
+            _ => {
+                let v = self.fresh_value(ty);
+                self.push_instr(Instr::FieldLoad(v, addr));
+                v
+            }
+        }
+    }
 }
 
 #[cfg(test)]

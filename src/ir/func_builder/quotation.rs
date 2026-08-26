@@ -409,9 +409,10 @@ impl<'a> FuncBuilder<'a> {
                 let symbol = enum_drop_symbol(id, self.enums.layouts[id.index()].drop_generation);
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
-            IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
-                "checked: a linear array element is rejected wherever an array type is named"
-            ),
+            IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => {
+                let symbol = array_drop_symbol(id, self.arrays.layouts[id.index()].drop_generation);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
+            }
             // P7.S3v (R3): dropping an owning closure runs its per-
             // construction-site disposer (R2) on its env block -- disposing
             // its captures without running its body, the one thing `call`
