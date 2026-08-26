@@ -7,12 +7,12 @@
 \ "ordered" at all -- a user type opts in with its own `impl: Ord`, exactly as
 \ any other trait.
 \
-\ The comparisons are deliberately **not** `inline` here (P7.S3s R5): an
-\ `inline` word may declare no `Bound::User` variable at all
-\ (`reject_user_bound_on_combinator`), and `Ord` is now one. Each comparison
-\ is therefore a real call with a frame, a measured ~2x tax over the old
-\ branch-and-construct body on a comparison-heavy loop, accepted for this
-\ slice (P7.S3o names the follow-on that could restore the splice).
+\ The comparisons are deliberately **not** `inline` here (P7.S3s R5): the
+\ dispatch injection for bare trait members in spliced combinators (P7.S3o
+\ Phase 3) makes `inline` with `'T: Ord` work, but the six comparisons are
+\ small enough that a real call frame is a measured ~2x tax over the old
+\ branch-and-construct body on a comparison-heavy loop, accepted here. A
+\ hot-path combinator can call `cmp` directly and splice instead.
 import: intrinsics i | ueq ult ugt ulte ugte une branch drop swap | ;
 import: self::bool b | Bool False True | ;
 

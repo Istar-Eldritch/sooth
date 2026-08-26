@@ -772,6 +772,22 @@ fn check_term(
                     slices, prov, live, at, poly,
                 );
             }
+            // P7.S3o Phase 3: a bare trait member call (like `cmp` directly)
+            // inside a spliced combinator body resolves against the concrete θ
+            // at the splice site, where the bound's `impl:` is knowable. This
+            // is the splice-path dispatch injection: `check_terms_relaxed`
+            // currently has zero bound-dispatch calls, so without this a bare
+            // member falls through to `env.get` as an unknown word. The
+            // `combinator_sig`/`combinator_subst` on `PolyCtx` are set by
+            // `inline_combinator` (real splice) and
+            // `check_poly_combinator_standalone` (i64 stand-in); when unset,
+            // `resolve_splice_member_call` returns `Ok(None)` and ordinary
+            // dispatch proceeds unchanged.
+            if let Some(stack) =
+                resolve_splice_member_call(name, span, &mut stack, ctx, arrays, refs, poly, prov)?
+            {
+                return Ok(stack);
+            }
             // R1/R2: one name can carry several candidates. A single one is
             // the ordinary case and resolves by name at lowering exactly as
             // before; an overload set resolves by exact operand match here and

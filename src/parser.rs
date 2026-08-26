@@ -1022,6 +1022,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         poly_cross_calls: HashMap::new(),
         transitive_instantiations: Vec::new(),
         splice_records: HashMap::new(),
+        splice_trait_calls: HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,

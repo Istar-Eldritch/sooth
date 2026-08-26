@@ -279,6 +279,20 @@ impl<'a> FuncBuilder<'a> {
             self.lower_resolved_word_call(&sym_name);
             return;
         }
+        // P7.S3o Phase 3: a bare trait member call resolved at a combinator
+        // splice site (e.g. `cmp` called directly inside an inline
+        // combinator with `'T: Ord`). Mirrors the per-instantiation
+        // `trait_calls` above, but keyed by `(uid, span)` so two splices at
+        // different concrete types dispatch independently. The resolved
+        // symbol is an ordinary concrete word (the `impl:` body), so it
+        // dispatches through `lower_resolved_word_call` exactly as a
+        // per-instantiation trait call does.
+        if let Some(&uid) = self.splice_uid_stack.last() {
+            if let Some(sym_name) = self.splice_trait_calls.get(&(uid, span)).cloned() {
+                self.lower_resolved_word_call(&sym_name);
+                return;
+            }
+        }
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
             // D7/R5: two generic-type instantiations sharing a bare surface
             // name (`Box`'s constructor/accessor) resolve here too -- the

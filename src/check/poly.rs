@@ -423,7 +423,19 @@ pub(super) fn check_poly_combinator_standalone(
         declared_globals: word.declared_globals.clone(),
     };
     let mut dropped = Vec::new();
-    check_word(
+    // P7.S3o Phase 3: thread the combinator's own `PolySig` and the i64
+    // stand-in θ into the standalone body walk, so a bare trait member call
+    // in the body resolves against the i64 stand-in (the same dispatch
+    // injection `check_term` uses at real splice sites). The resolved symbol
+    // is scratch (the standalone check never lowers); only the stack-effect
+    // accounting matters here — the member call is re-checked at each real
+    // splice site where θ is concrete. Saved and restored so the enclosing
+    // context is unaffected.
+    let saved_comb_sig = poly.combinator_sig.take();
+    let saved_comb_subst = poly.combinator_subst.take();
+    poly.combinator_sig = Some(sig.clone());
+    poly.combinator_subst = Some(subst.clone());
+    let result = check_word(
         &concrete,
         enums,
         env,
@@ -437,7 +449,10 @@ pub(super) fn check_poly_combinator_standalone(
         &mut dropped,
         poly,
         None,
-    )
+    );
+    poly.combinator_sig = saved_comb_sig;
+    poly.combinator_subst = saved_comb_subst;
+    result
 }
 
 /// R9 (Slice 6c): the REPL's entry to the standalone poly-combinator check.
@@ -466,6 +481,7 @@ pub(crate) fn check_poly_combinator_repl(
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
     let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
+    let mut scratch_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
     let eliminators = eliminator_registry(enums);
     let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
     let mut poly = PolyCtx {
@@ -480,6 +496,9 @@ pub(crate) fn check_poly_combinator_repl(
         // can reach a REPL-checked combinator body.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut scratch_splice,
+        splice_trait_calls: &mut scratch_trait_calls,
+        combinator_sig: None,
+        combinator_subst: None,
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
@@ -889,6 +908,251 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
     }
 }
 
+/// P7.S3o Phase 3: resolve a bare trait member call at a combinator splice
+/// site, where θ is concrete. Mirrors `poly_trait_member_call`'s matching
+/// logic (find the member in the sig's `Bound::User` bounds), but operates on
+/// the concrete `Slot` stack and resolves the `impl:` symbol immediately
+/// (rather than recording an abstract obligation) because θ is known here.
+///
+/// Returns `Ok(Some(stack))` if `name` matched a bare member and was
+/// dispatched; `Ok(None)` if it did not match (and ordinary dispatch should
+/// proceed). The resolved `impl:` symbol is recorded in
+/// `poly.splice_trait_calls` keyed by `(uid, span)` when `prov.splice_uid` is
+/// `Some` (a real splice); during the standalone check (`splice_uid` is
+/// `None`) the symbol is resolved for stack-effect accounting only and not
+/// recorded.
+/// P7.S3o Phase 3: resolve a bare trait member call at a combinator splice
+/// site, where θ is concrete. Mirrors `poly_trait_member_call`'s matching
+/// logic (find the member in the sig's `Bound::User` bounds), but operates on
+/// the concrete `Slot` stack and resolves the `impl:` symbol immediately
+/// (rather than recording an abstract obligation) because θ is known here.
+///
+/// Returns `Ok(Some(stack))` if `name` matched a bare member and was
+/// dispatched; `Ok(None)` if it did not match (and ordinary dispatch should
+/// proceed). The resolved `impl:` symbol is recorded in
+/// `poly.splice_trait_calls` keyed by `(uid, span)` when `prov.splice_uid` is
+/// `Some` (a real splice); during the standalone check (`splice_uid` is
+/// `None`) the symbol is resolved for stack-effect accounting only and not
+/// recorded.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_splice_member_call(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+    poly: &mut PolyCtx,
+    prov: &mut Provenance,
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some(sig) = poly.combinator_sig.clone() else {
+        return Ok(None);
+    };
+    let Some(subst) = poly.combinator_subst.clone() else {
+        return Ok(None);
+    };
+    let traits = poly.trait_resolve.traits;
+    // R12/decision 6: a qualified call names a *module* alias, never a trait
+    // namespace. Same split as `poly_trait_member_call`.
+    let (qualifier, member) = match name.split_once("::") {
+        Some((q, m)) => (Some(q), m),
+        None => (None, name),
+    };
+    let qualified_target = match qualifier {
+        Some(q) => match ctx
+            .modules()
+            .and_then(|ms| ms.get(ctx.module() as usize))
+            .and_then(|m| m.imports.get(q))
+        {
+            Some(&target) => Some(target),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    // Find the matching (var, trait_id, member_decl) from the sig's bounds.
+    // Same dedup and ambiguity logic as `poly_trait_member_call`.
+    let mut seen: Vec<(u32, TraitId)> = Vec::new();
+    let mut matched: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
+    for (v, bound) in &sig.bounds {
+        let Bound::User(tid) = bound else { continue };
+        if qualified_target.is_some_and(|t| traits[tid.index()].module != t)
+            || seen.contains(&(*v, *tid))
+        {
+            continue;
+        }
+        seen.push((*v, *tid));
+        if let Some(m) = traits[tid.index()]
+            .members
+            .iter()
+            .find(|m| m.name == member)
+        {
+            matched.push((*v, *tid, m));
+        }
+    }
+    let (var, trait_id, member_decl) = match matched.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        many => {
+            // Disambiguate by concrete operand shape: ground each
+            // candidate's input types against the concrete θ and check
+            // which match the live stack.
+            let mut fitting: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
+            for (v, tid, m) in many {
+                let Some(ty) = subst.ty_of(*v) else { continue };
+                let inputs: Vec<Type> = m
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+                    .collect();
+                if stack.len() >= inputs.len() {
+                    let base = stack.len() - inputs.len();
+                    if inputs.iter().enumerate().all(|(i, want)| {
+                        matches!(
+                            match_slot(stack[base + i], *want),
+                            SlotMatch::Exact | SlotMatch::LiteralSizeType
+                        )
+                    }) {
+                        fitting.push((*v, *tid, *m));
+                    }
+                }
+            }
+            match fitting.as_slice() {
+                [] => {
+                    let shapes: Vec<(&str, &str, String)> = matched
+                        .iter()
+                        .map(|(v, tid, m)| {
+                            let inputs: Vec<String> = m
+                                .sig
+                                .inputs
+                                .iter()
+                                .map(|t| poly_type_str(&substitute_member_var(t, *v), &sig))
+                                .collect();
+                            (
+                                traits[tid.index()].name.as_str(),
+                                sig.ty_var_names[*v as usize].as_str(),
+                                inputs.join(" "),
+                            )
+                        })
+                        .collect();
+                    return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
+                }
+                [one] => *one,
+                _ => {
+                    let named: Vec<(&str, &str)> = matched
+                        .iter()
+                        .map(|(v, tid, _)| {
+                            (
+                                traits[tid.index()].name.as_str(),
+                                sig.ty_var_names[*v as usize].as_str(),
+                            )
+                        })
+                        .collect();
+                    return Err(ambiguous_trait_member_error(span, member, &named));
+                }
+            }
+        }
+    };
+    // Ground the member's input/output types against the concrete θ.
+    let Some(ty) = subst.ty_of(var) else {
+        return Ok(None);
+    };
+    let input_types: Vec<Type> = member_decl
+        .sig
+        .inputs
+        .iter()
+        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+        .collect();
+    let output_types: Vec<Type> = member_decl
+        .sig
+        .outputs
+        .iter()
+        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
+        .collect();
+    // Check operands against the grounded input types.
+    let n_in = input_types.len();
+    if stack.len() < n_in {
+        return Err(underflow_error(ctx, span, member, n_in, stack.len()));
+    }
+    let base = stack.len() - n_in;
+    for (i, want) in input_types.iter().enumerate() {
+        let found = stack[base + i];
+        if found.quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            SlotMatch::NeedsSizeConversion => {
+                return Err(size_conversion_needed_error(ctx, span, name, *want));
+            }
+            SlotMatch::NeedsStrToCstrConversion => {
+                return Err(str_needs_cstr_conversion_error(ctx, span, name));
+            }
+            SlotMatch::Mismatch => {
+                return Err(trait_member_operand_error(
+                    ctx,
+                    span,
+                    member,
+                    &traits[trait_id.index()].name,
+                    &PolyType::Concrete(*want),
+                    &PolyType::Concrete(found.ty),
+                    &sig,
+                ));
+            }
+        }
+    }
+    // Resolve the `impl:` symbol for this concrete type. At a real splice
+    // (`splice_uid` is `Some`), the bound must be satisfied by the concrete
+    // type and the resolved symbol is recorded for lowering. During the
+    // standalone check (`splice_uid` is `None`), the i64 stand-in may not
+    // satisfy the bound (there is no `impl: Show for i64`), so the impl
+    // resolution is skipped — only the stack-effect accounting matters
+    // here; the member call is re-checked at each real splice site where θ is
+    // concrete.
+    if let Some(uid) = prov.splice_uid {
+        let trait_decl = &poly.trait_resolve.traits[trait_id.index()];
+        let Some(imp) = poly
+            .trait_resolve
+            .impls
+            .iter()
+            .find(|i| i.trait_id == trait_id && i.target_ty == ty)
+        else {
+            return Err(unsatisfied_user_bound_error(
+                ctx,
+                span,
+                name,
+                &sig.ty_var_names[var as usize],
+                trait_decl,
+                ty,
+                arrays,
+                refs,
+            ));
+        };
+        let symbol = imp
+            .resolved
+            .iter()
+            .find(|(mname, _)| mname == member)
+            .and_then(|(_, idx)| poly.trait_resolve.word_symbols.get(*idx));
+        let Some(symbol) = symbol else {
+            return Err(unresolved_trait_obligation_error(
+                ctx,
+                span,
+                name,
+                &trait_decl.name,
+                member,
+                ty,
+                span,
+            ));
+        };
+        poly.splice_trait_calls.insert((uid, span), symbol.clone());
+    }
+    // Consume operands, produce outputs.
+    stack.truncate(base);
+    for ty in &output_types {
+        stack.push(Slot::computed(*ty));
+    }
+    Ok(Some(std::mem::take(stack)))
+}
 /// P7.S3e (R7/R12): the bound-directed dispatch branch. `Ok(None)` means this
 /// is no trait-member obligation and ordinary dispatch proceeds: no
 /// `Bound::User` on any of this word's type variables declares a member of
@@ -8392,20 +8656,19 @@ mod tests {
         assert_eq!(recorded["f"][0].member, "t1");
     }
 
-    /// R9/R17 scope cut (P7.S3o): a polymorphic combinator's instantiation
-    /// P7.S3o Phase 1: the `reject_user_bound_on_combinator` gate is removed.
-    /// A bare member call (`show`) now falls through the standalone check as an
-    /// unknown word, producing a legible error instead of the old gate rejection.
+    /// P7.S3o Phase 3: a bare member call (`show`) inside a bounded inline
+    /// combinator now resolves at the splice site via dispatch injection into
+    /// `check_terms_relaxed`. The standalone check (i64 stand-in) accounts for
+    /// the member's stack effect without requiring an `impl: Show for i64`, and
+    /// the actual dispatch happens at each real splice site where θ is
+    /// concrete. This test now compiles successfully — the gate rejection is
+    /// gone, and the bare member is no longer an "unknown word".
     #[test]
-    fn user_bound_on_a_combinator_is_rejected() {
-        let err = check_src(&format!(
+    fn user_bound_on_a_combinator_compiles() {
+        check_src(&format!(
             "{SHOW}: shows inline ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
         ))
-        .unwrap_err();
-        assert!(
-            err.contains("error: unknown word `show` in `shows`"),
-            "after the gate removal, the bare member `show` should produce a legible 'unknown word' error, got: {err}"
-        );
+        .expect("a bounded inline combinator calling a bare member compiles");
     }
 
     /// R10 barrier 1: a plain (non-builtin) member name over a *bare* type

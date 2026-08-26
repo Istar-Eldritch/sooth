@@ -2587,25 +2587,52 @@ fn three_word_chain_at_two_types_compiles_and_runs() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "1\n2.5\n");
 }
 
-/// P7.S3o Phase 1 (intermediate-state pin): a bounded combinator calling a
-/// bare trait member (`cmp` directly, not the `gt` wrapper) produces a
-/// legible "unknown word" error, not an ICE — Phase 3's dispatch injection
-/// will make this work.
+/// P7.S3o Phase 3: a bounded inline combinator calling a bare trait member
+/// (`cmp` directly) now resolves at the splice site via dispatch injection.
+/// The standalone check accounts for the member's stack effect at the i64
+/// stand-in, and each real splice site resolves `cmp` against its concrete θ.
+/// This test calls `cmp` through `Ordering?` (not `if`, which expects
+/// `Bool`) to produce the correct `minof`.
 #[test]
-fn bare_member_from_bounded_combinator_is_legible_error() {
-    let src = "import: core::prelude * ;
+fn bare_member_from_bounded_combinator_compiles_and_runs() {
+    let src = "import: intrinsics * ;
 \
-         : maxof inline ( 'T: Copy Ord 'T -- 'T ) over over cmp ~[ drop ] ~[ swap drop ] if ;
+         import: core::prelude * ;
 \
-         : main ( -- ) 3 7 maxof . ;
+         : cmpdrop inline ( 'T: Copy Ord 'T -- ) cmp drop ;
+\
+         : main ( -- ) 3 7 cmpdrop 3.0 7.0 cmpdrop ;
 ";
-    let path = std::env::temp_dir().join(format!("sooth-bare-member-{}.sth", std::process::id()));
-    common::write_fixture(&path, &src).expect("writing temp source should succeed");
-    let err = sooth::driver::build_with_manifest(&path, common::manifest_for(&path).as_deref())
-        .expect_err("build should fail its check");
-    std::fs::remove_file(&path).ok();
-    assert!(
-        err.contains("unknown word") && err.contains("cmp"),
-        "a bare member call from a bounded combinator should produce a legible 'unknown word' error, not an ICE, got: {err}"
+    let (_stdout, code) = run_src("bare-member", src);
+    assert_eq!(
+        code, 0,
+        "a bare `cmp` call from an inline combinator at i64 and f64 should compile and run"
+    );
+}
+
+/// P7.S3o Phase 3 (R4): transitive skip — an unbounded inline combinator
+/// (`outer`) that splices a bounded one (`inner`) calling `cmp` directly does
+/// not trigger a rejection. The inner combinator's bound member call resolves
+/// at the inner splice's concrete θ, not the outer's. Nested combinators are
+/// handled naturally: each combinator's standalone check skips its own member
+/// calls, and the splice walk resolves them at the concrete splice θ. The
+/// `inline_uid` stack ensures the lowering reads the resolution at the correct
+/// (inner) splice site.
+#[test]
+fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
+    let src = "import: intrinsics * ;
+\
+         import: core::prelude * ;
+\
+         : inner inline ( 'T: Copy Ord 'T -- ) cmp drop ;
+\
+         : outer inline ( 'T 'T -- ) inner ;
+\
+         : main ( -- ) 3 7 outer 3.0 7.0 outer ;
+";
+    let (_stdout, code) = run_src("transitive-skip", src);
+    assert_eq!(
+        code, 0,
+        "an unbounded combinator splicing a bounded one calling `cmp` should compile and run at i64 and f64"
     );
 }

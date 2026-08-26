@@ -178,6 +178,19 @@ struct PolyCtx<'a> {
     /// `check_poly_call` when `prov.splice_uid` is `Some`. Scratch (discarded)
     /// on the standalone/REPL paths; the module-level table on the main path.
     splice_records: &'a mut HashMap<(u32, Span), CallInst>,
+    /// P7.S3o Phase 3: per-splice trait-member-call resolutions, written by
+    /// the dispatch injection in `check_term` when a bare trait member is
+    /// resolved at a splice site. Scratch (discarded) on the standalone/REPL
+    /// paths; the module-level table on the main path.
+    splice_trait_calls: &'a mut HashMap<(u32, Span), String>,
+    /// P7.S3o Phase 3: the combinator's own `PolySig` and concrete θ, set
+    /// during both the standalone check (i64 stand-in) and the splice walk
+    /// (concrete θ from `check_poly_combinator_args`). When set, a bare trait
+    /// member call in the body resolves against this θ instead of falling
+    /// through to `env.get` as an unknown word. Owned (cloned) because the
+    /// sig/subst are local to the caller and `PolyCtx` outlives them.
+    combinator_sig: Option<PolySig>,
+    combinator_subst: Option<Subst>,
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -745,6 +758,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         poly_cross_calls: _,
         transitive_instantiations: _,
         splice_records: _,
+        splice_trait_calls: _,
         builtin_overloads: _,
         resolved_fields: _,
         resolved_variant_fields: _,
@@ -799,6 +813,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // spliced combinator body's calls to polymorphic words are unified, then
     // stored on the module for lowering.
     let mut splice_records: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: per-splice trait-member-call resolutions (bare member →
+    // resolved `impl:` symbol), filled as each spliced combinator body's
+    // bare member calls resolve against the concrete splice θ, then relayed
+    // to the module for lowering.
+    let mut splice_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
     // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
     // as each monomorphic body's operator calls resolve, then relayed to the
     // module for lowering (empty for the whole corpus, so its lowering is
@@ -927,7 +946,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 let mut scratch_fields: HashMap<Span, (StructId, usize)> = HashMap::new();
                 let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
                     HashMap::new();
-                let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
+                let mut scratch_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
@@ -938,6 +957,9 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     eliminators: &eliminators,
                     trait_resolve,
                     splice_records: &mut scratch_splice,
+                    splice_trait_calls: &mut scratch_trait_calls,
+                    combinator_sig: None,
+                    combinator_subst: None,
                 };
                 check_poly_combinator_standalone(
                     word,
@@ -968,6 +990,9 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                 eliminators: &eliminators,
                 trait_resolve,
                 splice_records: &mut splice_records,
+                splice_trait_calls: &mut splice_trait_calls,
+                combinator_sig: None,
+                combinator_subst: None,
             };
             // P7 slice 3a phase 2 (R2): a monomorphic caller instantiating a
             // poly word can ground a variable-bearing generic for the first
@@ -1051,6 +1076,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     )?;
     module.instantiations = insts;
     module.splice_records = splice_records;
+    module.splice_trait_calls = splice_trait_calls;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;
@@ -1226,6 +1252,8 @@ pub(crate) fn check_def_collecting_drop_sites(
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     // P7.S3o: scratch splice records (REPL path, never lowered).
     let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
+    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
     // Item 3: this body's resolved-overload call sites, relayed to the
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
@@ -1259,6 +1287,9 @@ pub(crate) fn check_def_collecting_drop_sites(
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut splice_recs,
+        splice_trait_calls: &mut splice_trait_recs,
+        combinator_sig: None,
+        combinator_subst: None,
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
@@ -1316,6 +1347,8 @@ pub(crate) fn infer_line(
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     // P7.S3o: scratch splice records (REPL path, never lowered).
     let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
+    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
+    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
     // Item 3: this line's resolved-overload call sites, relayed to the
     // caller so lowering can dispatch through them instead of
     // `empty_builtin_overloads()`.
@@ -1345,6 +1378,9 @@ pub(crate) fn infer_line(
         // `structs`/`enums` already follow here.
         trait_resolve: TraitResolveCtx::scratch(),
         splice_records: &mut splice_recs,
+        splice_trait_calls: &mut splice_trait_recs,
+        combinator_sig: None,
+        combinator_subst: None,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,

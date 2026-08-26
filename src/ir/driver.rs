@@ -225,6 +225,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &combinator_bodies,
                 EnvPlan::None,
                 &module.splice_records,
+                &module.splice_trait_calls,
             )
         })
         .collect();
@@ -354,6 +355,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &combinator_bodies,
             EnvPlan::None,
             &module.splice_records,
+            &module.splice_trait_calls,
         ));
     }
 
@@ -696,6 +698,7 @@ pub fn lower_line(
         poly_arities,
         combinators,
         empty_splice_records(),
+        empty_splice_trait_calls(),
     );
     (func, extra, m, out_bytes as usize)
 }
@@ -857,6 +860,7 @@ pub(crate) fn lower_word(
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
     splice_records: &HashMap<(u32, Span), CallInst>,
+    splice_trait_calls: &HashMap<(u32, Span), String>,
 ) -> Vec<IrFunc> {
     let self_tail = crate::check::has_self_tail_call(word, combinators);
     lower_word_parts(
@@ -880,6 +884,7 @@ pub(crate) fn lower_word(
         combinators,
         EnvPlan::None,
         splice_records,
+        splice_trait_calls,
     )
 }
 
@@ -943,6 +948,7 @@ pub(crate) fn lower_instantiation(
         combinators,
         EnvPlan::None,
         empty_splice_records(),
+        empty_splice_trait_calls(),
     )
 }
 

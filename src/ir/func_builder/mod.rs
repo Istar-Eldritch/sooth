@@ -370,6 +370,12 @@ pub(super) struct FuncBuilder<'a> {
     /// lowering a poly call inside a spliced combinator body, instead of
     /// the span-keyed `instantiations` (which would collide across splices).
     splice_records: &'a HashMap<(u32, Span), CallInst>,
+    /// P7.S3o Phase 3: per-splice trait-member-call resolutions, keyed by
+    /// `(inline_uid, body_span)` → the resolved `impl:` word's lowering
+    /// symbol. Read through `splice_uid_stack` when lowering a bare trait
+    /// member call inside a spliced combinator body, mirroring how
+    /// `trait_calls` is read for non-combinator poly words.
+    splice_trait_calls: &'a HashMap<(u32, Span), String>,
     /// P7.S3o (R1/R2): the stack of active splice `inline_uid`s, pushed on
     /// combinator-splice entry and popped on exit. `last()` is the current
     /// splice's uid; `None` (empty stack) means we are not inside a splice.
@@ -440,6 +446,7 @@ impl<'a> FuncBuilder<'a> {
             quot_bodies: HashMap::new(),
             inline_uid: 0,
             splice_records: empty_splice_records(),
+            splice_trait_calls: empty_splice_trait_calls(),
             splice_uid_stack: Vec::new(),
             materialized: Vec::new(),
         }
@@ -900,6 +907,7 @@ pub(super) fn lower_word_parts(
     combinators: &crate::check::CombinatorIndex,
     env_plan: EnvPlan,
     splice_records: &HashMap<(u32, Span), CallInst>,
+    splice_trait_calls: &HashMap<(u32, Span), String>,
 ) -> Vec<IrFunc> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
@@ -922,6 +930,7 @@ pub(super) fn lower_word_parts(
     b.poly_arities = poly_arities;
     b.combinators = combinators;
     b.splice_records = splice_records;
+    b.splice_trait_calls = splice_trait_calls;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
     // the target quotation type for the slot it materializes.
     b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
@@ -1062,6 +1071,7 @@ pub(super) fn lower_word_parts(
         poly_arities,
         combinators,
         splice_records,
+        splice_trait_calls,
     ));
     out
 }
@@ -1086,6 +1096,7 @@ pub(super) fn lower_materialized(
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
     splice_records: &HashMap<(u32, Span), CallInst>,
+    splice_trait_calls: &HashMap<(u32, Span), String>,
 ) -> Vec<IrFunc> {
     let mut out = Vec::new();
     for m in mats {
@@ -1132,6 +1143,7 @@ pub(super) fn lower_materialized(
                 false => EnvPlan::Env(m.captures),
             },
             splice_records,
+            splice_trait_calls,
         ));
     }
     out

@@ -526,6 +526,15 @@ pub(super) fn inline_combinator(
     // so nested combinators resolve at their own `uid`.
     let saved_splice_uid = prov.splice_uid;
     prov.splice_uid = Some(uid);
+    // P7.S3o Phase 3: thread the combinator's own `PolySig` (carrying its
+    // `Bound::User` bounds) and the concrete θ from `check_poly_combinator_args`
+    // into the splice walk, so a bare trait member call in the body resolves
+    // against this θ at the splice site. Saved and restored so nested
+    // combinators resolve at their own θ.
+    let saved_comb_sig = poly.combinator_sig.take();
+    let saved_comb_subst = poly.combinator_subst.take();
+    poly.combinator_sig = comb.word.poly.as_deref().cloned();
+    poly.combinator_subst = poly_subst.clone();
     let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
     let depth = scope.depth();
     let saved_marker = if self_tail {
@@ -567,6 +576,8 @@ pub(super) fn inline_combinator(
         prov.self_tail_combinator = saved;
     }
     prov.splice_uid = saved_splice_uid;
+    poly.combinator_sig = saved_comb_sig;
+    poly.combinator_subst = saved_comb_subst;
     stack = result?;
     leave_block(
         ctx,
