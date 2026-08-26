@@ -932,4 +932,98 @@ postfix type variables (`type: Box 'T`, `trait: Ord 'T`) to bracketed parameter 
 to a bracket before it (`: word['T: Ord] ( 'T -- )`), separating variable-and-bound
 declaration from the stack effect. The `'` prefix on type variables is retained; `^'T` (owning
 cell) and `&'T` (reference) stay sigiled. Parser-and-test change only: the AST and every
-downstream checker/lowering/IR consumer are unchanged. Detail: [slice6-brief](./P7/slice6-brief.md).
+downstream checker/lowering/IR consumer are unchanged. The bracket binding site this slice
+introduces is the foundation for the kind-annotation syntax `: Len` that **S6a** adds for
+length parameters, and that **P7b** extends to `: * -> *` for higher-kinded type
+variables. Detail: [slice6-brief](./P7/slice6-brief.md).
+
+**P7.S6a -- Length parameters in `type:` headers and the `Kind` type.** `[ planned ]` Sequenced
+after S6 (which lands the bracket binding site), this subslice makes a user-defined type
+carry a length parameter — opening the `Len::Var` door that the N3 comment at
+`src/ast.rs:805` has held shut since Phase 5. A length variable `'N` is not a type: it is a
+`u32` for array counts, physically present in `ArrayDecl::count`, and its kind is `Len`, a
+different sort from `*` or `* -> *`. No variable is polymorphic over kinds (P7b's out-of-scope
+list keeps that); each has a fixed kind. This is the minimal kind system: `Star` (the default,
+replacing `VarKind::Ty`) and `Len`, with `Arrow` added later by P7b.
+
+**Syntax.** The bracket that S6 introduces for `type:`/`trait:`/`:` binding sites carries a
+kind annotation for length variables: `'N: Len`. A type variable needs no annotation (kind
+`*` is the default), so `type: Buffer['T 'N: Len]` declares one type variable and one length
+variable. At use sites, context disambiguates and no annotation is needed: `array['T 'N]` in
+an effect or field is unambiguous because count position is count position. This is the same
+split as bounds: `'T: Copy` lives in the bracket, bare `'T` at use sites.
+
+```forth
+type: Buffer['T 'N: Len]
+  data  ^array['T 'N]
+  len   usize
+;
+
+: capacity['T 'N: Len] ( &Buffer['T 'N] -- &Buffer['T 'N] usize )
+  | b | b &data &^ len ;
+```
+
+**What changes.** `VarKind { Ty, Len }` (`src/parser.rs:1470`) becomes a `Kind` enum with `Star`
+and `Len` (P7b adds `Arrow`). `GenericStructDecl`/`GenericEnumDecl` (`src/ast.rs:523`, `:537`)
+gain `len_var_names: Vec<String>`, parallel to `ty_var_names`. `PolyType::Generic`
+(`src/ast.rs:1992`) gains `len_args: Vec<Len>`, parallel to `args: Vec<PolyType>`. The S6
+bracket parser calls `intern_len_var` for a `'`-prefixed name with a `: Len` annotation,
+`intern_ty_var` otherwise. `substitute_generic_field` (`src/ast.rs:795`) — the N3
+`unreachable!()` arm for `Len::Var` — becomes real, looking up the concrete length from the
+instantiation's argument list exactly as `PolyType::Var` looks up the concrete type. The
+`GenericTypes` instantiation machinery (`instantiate_struct`/`instantiate_enum`,
+`src/ast.rs:1108`) accepts length args alongside type args; the dedup keys (`struct_keys`/
+`enum_keys`, `src/ast.rs:583`) include lengths so `Buffer[u8 256]` and `Buffer[u8 512]` mint
+distinct monomorphs; `type_instantiation_name` (`src/ast.rs:758`) renders length args in the
+mangled symbol.
+
+**What already works and needs no change.** `unify_poly_input` already binds `Len::Var` from
+concrete array counts at call sites (`src/check/poly.rs:6562`). `match_impl_target_rec`
+already matches `Len::Var` patterns (`src/check/poly.rs:5813`). `apply_subst` already
+resolves `Len::Var` from `Subst` (`src/check/poly.rs:6842`). `len` on a generic-length array
+already folds to `usize` in a poly body (`src/check/poly.rs:1263`). The infrastructure is
+~70% built; the remaining 30% is the `type:` header path and the `Kind` type.
+
+**Out of scope.** Generic-length array indexing — `poly_generic_length_index_error`
+(`src/check/poly.rs:7646`) still rejects `&>` on an `array['T 'N]` in a non-inline body
+because the checker cannot statically prove `i < 'N`. The workaround is `inline` (the body
+splices into the caller where `'N` is concrete, which is how every combinator in
+`lib/combinators.sth` already works). Relaxing this requires tracking loop-variable provenance
+or inserting a runtime bounds check, a different kind of work than this subslice. Non-length
+const kinds (boolean, string) — these are phantom parameters with no physical layout
+significance, and generalizing `Len` to a broader `Const` crosses the dependent-types line
+DESIGN.md draws ("Dependent types: never"). `Len` stays `Len`: a `u32` for array counts,
+nothing more.
+
+**Exit:** a user can write `type: Buffer['T 'N: Len] data array['T 'N] ;`, instantiate it as
+`Buffer[u8 256]`, and a word declaring `Buffer['T 'N]` in its signature unifies correctly
+against a concrete caller. `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+is green. The `Kind` enum has `Star` and `Len` variants; the `: Len` annotation syntax is
+live at `type:`, `trait:`, and `:` binding sites.
+
+**P7.S6b -- Explicit length arguments at call sites.** `[ planned ]` The instantiation-side
+companion to S6a. Today, `check_poly_call` seeds `subst.ty` from explicit type arguments
+(`sum[i64]`, `src/check/poly.rs:4662`) but has no path to seed `subst.len`. A caller wanting
+`sum[i64 4]` has no syntax for the `4`.
+
+**What changes.** `parse_type_arguments` (`src/parser.rs:5006`) currently parses only types
+inside `[...]`. It extends to accept a mix: positions `0..ty_arity` are type arguments (as
+today), positions `ty_arity..ty_arity+len_arity` are length literals (parsed as `u32`, the
+same `1..=u32::MAX` range check `parse_array_count` uses at `src/parser.rs:4295`). The callee's
+`PolySig` already carries `ty_var_names` and `len_var_names`, so the arity split is known at
+the call site. `check_poly_call` (`src/check/poly.rs:4662`) extends its seeding loop: after
+seeding `subst.ty` for type variables, it seeds `subst.len` for length variables. The
+`seeded` vector (`src/check/poly.rs:4661`) extends to cover length variables — the
+conflict-check logic in `unify_poly_input`'s `Len::Var` arm (`src/check/poly.rs:6563`) is
+already identical in shape to the `Var` arm's conflict check.
+
+**What already works.** Inferred length binding (no explicit args) already works:
+`unify_poly_input` binds `'N` from the concrete array's count when an `array[i64 4]` fills an
+`array['T 'N]` parameter. The `Subst` type already carries `len: Vec<(u32, u32)>`
+(`src/ast.rs:2033`). The standalone combinator check already substitutes a concrete length
+for each `'N` (`src/check/poly.rs:395`).
+
+**Exit:** a caller can write `sum[i64 4]` to explicitly bind both `'T = i64` and `'N = 4`, and
+a conflicting operand produces the same "explicit instantiation conflict" diagnostic a
+conflicting type argument already produces. `cargo fmt --check && cargo clippy -- -D warnings
+&& cargo test` is green.

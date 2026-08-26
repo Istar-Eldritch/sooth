@@ -123,6 +123,15 @@ arrive through a `where`-clause, not through the target pattern's slots.
   identity (which is `ArrayId` into the interned `arrays` registry).
 - **The REPL.** The REPL's `type:`-line path (`src/parser.rs:1329`) and word-def path
   (`src/parser.rs:1252`) adopt the new syntax in lockstep with the build path.
+- **Kind annotations and length parameters.** The bracket binding site this slice
+  introduces is the foundation for the `: Kind` annotation syntax that **S6a** adds for
+  length parameters (`'N: Len`) and that **P7b** extends to higher kinds (`'F: * -> *`).
+  This slice does not parse `:` after a bound type variable inside the bracket beyond
+  what bounds already use (`'T: Copy`); the `: Len` and `: * -> *` annotations are S6a
+  and P7b respectively. The bracket grammar should be structured so that extending it
+  to accept a kind after a bound (or in place of a bound) is a local change, not a
+  redesign — the `:` is already the bound separator, and a kind annotation is a
+  natural right-hand side alongside `Copy`/`Ord`.
 
 ## Scope and risk
 

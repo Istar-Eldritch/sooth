@@ -28,7 +28,11 @@ and HKT hard in Rust. That makes the implementation tractable, not the design sm
 
 **Prerequisites:** P7.S4 (polymorphic impl targets — the constructor-keyed dispatch builds on
 its machinery for matching a polymorphic target against a concrete type), P7.S3o (bound on a
-poly combinator's own type variable — parked, needed for inline HKT in S3 only).
+poly combinator's own type variable — parked, needed for inline HKT in S3 only), and
+P7.S6a (length parameters in `type:` headers and the `Kind` type — S6a introduces the
+`Kind` enum replacing `VarKind`, the `: Kind` annotation syntax at binding sites, and the
+`Len` kind. P7b extends this foundation with `Arrow` for higher kinds; it does not
+re-introduce a separate kind mechanism).
 
 **Sequencing:** independent of P8 (packages) and P9 (stdlib layers). May be taken up any time
 after P7.S4 lands, by the craft principle of reordering by what you want to play with first.
@@ -36,10 +40,13 @@ after P7.S4 lands, by the craft principle of reordering by what you want to play
 ## The five pieces
 
 1. **Kinds** — every `Type` and every type variable carries a kind (`*`, `* -> *`,
-   `* -> * -> *`). The parser annotates type-variable declarations with kinds (inferred from
-   usage context: if `'F` appears in `'F['T]`, its kind is `* -> *`, with explicit annotation
-   as fallback), the checker validates kind-correctness at every type application site, and
-   the IR's monomorphization resolves constructor applications to concrete types.
+   `* -> * -> *`, and `Len`). The parser annotates type-variable declarations with kinds
+   (inferred from usage context: if `'F` appears in `'F['T]`, its kind is `* -> *`, with
+   explicit annotation as fallback), the checker validates kind-correctness at every type
+   application site, and the IR's monomorphization resolves constructor applications to
+   concrete types. The `Kind` enum and the `: Kind` binding-site annotation are introduced by
+   **P7.S6a** with `Star` and `Len` variants; P7b.S1 adds `Arrow` for higher kinds. No new
+   annotation syntax — the same `'N: Len` shape extends to `'F: * -> *`.
 
 2. **Type-level application** — a new `Type` variant or resolution step that lets `'F['T]`
    appear in signatures and survive checking. Today `Type` is always concrete after binding
@@ -72,7 +79,9 @@ after P7.S4 lands, by the craft principle of reordering by what you want to play
 **P7b.S1 — Kinds and type-level application.**
 The type-system foundation. Type variables may carry higher kinds; `'F['T]` is a type-level
 application that type-checks and monomorphizes. Kind inference from usage context, with
-explicit annotation as fallback. Kind-incorrect application is a located error.
+explicit annotation as fallback. Kind-incorrect application is a located error. Builds on
+the `Kind` enum and `: Kind` annotation syntax that **P7.S6a** introduces — S6a plants
+`Star` and `Len`; P7b.S1 adds `Arrow` for higher kinds (`* -> *`, `* -> * -> *`).
 **Exit:** a type variable may have a higher kind; `'F['T]` type-checks and monomorphizes to
 a concrete type; kind-incorrect application is a located error; a signature may mention
 `'F['T]` where `'F` is a type variable of kind `* -> *`.
