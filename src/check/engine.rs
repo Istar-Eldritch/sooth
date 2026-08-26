@@ -1805,10 +1805,9 @@ mod tests {
     }
     #[test]
     fn fill_diagnostics_unchanged_after_site_parameterization() {
-        // D2/P7.S5: `fill`'s rendered diagnostics for a linear element now use
-        // the R10 diagnostic (naming `tabulate`), distinct from the array
-        // constructor's old `fill_of_linear_element_error` (Phase 3 deletes
-        // that). The reference-element diagnostic is unchanged.
+        // D2/P7.S5: `fill`'s rendered diagnostics for a linear element use
+        // the R10 diagnostic (naming `tabulate`). The reference-element
+        // diagnostic is unchanged.
         let linear_err =
             check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
         assert_eq!(

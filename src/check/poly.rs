@@ -827,20 +827,6 @@ pub(super) fn poly_term(
             });
             stack.push(PolySlot::quotation(quot));
         }
-        // Slice 6h: no interning route exists for a body-internal array
-        // shape absent from a poly signature (`subst_polytype`/`array_id_of`
-        // both look up an already-interned shape and panic otherwise), so
-        // this is rejected eagerly. The quotation rejection this once
-        // mirrored is gone (P7 slice 3b, R5): a quotation *does* have a hang
-        // point now, `PolySlot::quot`; an array constructor still has no
-        // interning route, which is a separate gap of its own.
-        TermKind::ArrayCtor(_) => {
-            return Err(format!(
-                "error: an array constructor in the polymorphic body of {} (line {}) is not yet supported",
-                ctx.rendered_word_or("`<line>`"),
-                span.line
-            ));
-        }
     }
     Ok(stack)
 }
@@ -10067,22 +10053,6 @@ mod tests {
         );
     }
     #[test]
-    fn poly_term_rejects_an_array_constructor() {
-        // Slice 6h: an array constructor in a polymorphic body is rejected
-        // eagerly (no interning route exists for a body-internal shape absent
-        // from the signature).
-        let err = check_src(
-            ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
-             : main ( -- ) 1 bad . ;\n",
-        )
-        .expect_err("an array constructor in a polymorphic body should be rejected");
-        assert!(
-            err.contains("an array constructor in the polymorphic body of `bad`")
-                && err.contains("not yet supported"),
-            "poly_term should name `bad`, got: {err}"
-        );
-    }
-    #[test]
     fn polyslot_int_val_folds_lits() {
         // R1: `int_val` carries what the deleted `lits` shadow did -- set on
         // `IntLit`, `None` elsewhere, truncated on `Bind`. Round-tripped
@@ -10269,7 +10239,7 @@ mod tests {
     fn a_deferred_quotation_input_leaves_the_length_substitution_sorted() {
         let module = checked_module(
             ": r ( [ ['T 'N] -- ] ['U 'M] ['T 'N] -- ) drop drop drop ;\n\
-             : main ( -- ) [ drop ] [ i64 ; 2 ] [ i64 ; 3 ] r ;",
+             : main ( -- ) [ drop ] 0 2 fill 0 3 fill r ;",
         );
         let inst = module
             .instantiations
@@ -11047,12 +11017,12 @@ mod tests {
     /// the image of the callee's bare `'U` is a compound over a caller
     /// variable -- the growing case, rejected at the call site.
     ///
-    /// The wrapper is a generic **enum**, deliberately. An array wrapper would
-    /// be a placebo: array *construction* inside any polymorphic body is
-    /// rejected outright by a pre-existing guard (`poly_term`'s `ArrayCtor`
-    /// arm), so the growth rule would never be consulted. Sooth has no generic
-    /// structs, so a single-variant generic enum is the only constructible
-    /// wrapper. Do not add an array-based "second witness".
+    /// The wrapper is a generic **enum**, deliberately. An array wrapper
+    /// would be a placebo: the `[Type; Count]` array constructor is deleted
+    /// (P7.S5), so array construction in a polymorphic body has no surface
+    /// syntax and the growth rule would never be consulted. Sooth has no
+    /// generic structs, so a single-variant generic enum is the only
+    /// constructible wrapper. Do not add an array-based "second witness".
     #[test]
     fn check_growing_cross_call_is_error() {
         let err = check_src(

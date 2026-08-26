@@ -120,7 +120,7 @@ fn a_spaced_bracket_after_a_word_is_still_a_quotation() {
         "import: intrinsics * ;\n\
          : main ( -- )\n\
            1 dup [ 2 add ] call add .\n\
-           9 dup [ i64 ; 3 ] drop drop drop ;\n",
+           9 dup drop drop ;\n",
     );
     assert_eq!(out, "4\n");
 }

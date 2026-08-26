@@ -3980,59 +3980,6 @@ impl<'t> Parser<'t> {
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
 
-    /// Slice 6h (D1): whether the `[` just consumed by `parse_term` opens a
-    /// **raw array constructor** (`[ Type ; Count ]`) rather than a
-    /// quotation literal, decided by scanning to the matching `]` for a
-    /// **top-depth `;`**. Mirrors `quotation_type_ahead`'s depth scan, but
-    /// `self.pos` already points *past* the leading `[` (`parse_term`
-    /// advances unconditionally before dispatching on the token), so the
-    /// scan starts at depth `1` rather than `0`. EOF returns `false`, so an
-    /// unterminated quotation with no `;` keeps today's "unterminated
-    /// quotation" message.
-    fn array_ctor_ahead(&self) -> bool {
-        let mut depth = 1i32;
-        let mut i = self.pos;
-        while let Some((tok, _)) = self.tokens.get(i) {
-            match tok {
-                Token::LBracket => depth += 1,
-                Token::RBracket => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return false;
-                    }
-                }
-                Token::Semicolon if depth == 1 => return true,
-                _ => {}
-            }
-            i += 1;
-        }
-        false
-    }
-
-    /// Slice 6h (D1): parse the body of a `[ Type ; Count ]` array
-    /// constructor once `array_ctor_ahead` has committed to it. The element
-    /// is a single word token (a compound element type is therefore a
-    /// located parse error at `expect_word_any_spanned`, not a new check),
-    /// resolved via `resolve_type` exactly as a declared field type is;
-    /// `Count` is validated as a literal in `1..=u32::MAX` by
-    /// `parse_array_count` before interning, since interning takes a `u32`.
-    /// The shape is interned through the parser's own `arrays` registry
-    /// (`intern_array_type`), so the term carries a finished `Type::Array`
-    /// and lowering never needs a structural `array_id_of` search. `span` is
-    /// the already-consumed leading `[`'s span.
-    fn parse_array_ctor_term(&mut self, span: Span) -> Result<Term, String> {
-        let (name, name_span) = self.expect_word_any_spanned()?;
-        let element = self.resolve_type_or_apply(&name, name_span)?;
-        self.expect(Token::Semicolon)?;
-        let count = self.parse_array_count(element.name())?;
-        self.expect(Token::RBracket)?;
-        let ty = crate::ast::intern_array_type(self.arrays, element, count);
-        Ok(Term {
-            kind: TermKind::ArrayCtor(ty),
-            span,
-        })
-    }
-
     /// Slice 6a (R1): whether the `[` the parser is positioned on opens a
     /// **quotation effect** rather than an array type, decided by scanning to
     /// its matching `]` for a **top-depth `--`**. An array type can never
@@ -5633,15 +5580,9 @@ impl<'t> Parser<'t> {
             }
             // R2: the term-level `[` is unambiguous against the type-level
             // `[` since every type-position bracket reader is reached only
-            // from signature/type parsing, never from `parse_term`.
-            //
-            // Slice 6h (D1): a top-depth `;` before the matching `]` means an
-            // array constructor rather than a quotation literal, mirroring
-            // `quotation_type_ahead`'s depth scan. Once seen, the parse
-            // commits to the constructor, so a malformed element/count is a
-            // located, constructor-specific error rather than the generic
-            // quotation-body one.
-            Token::LBracket if self.array_ctor_ahead() => self.parse_array_ctor_term(span),
+            // from signature/type parsing, never from `parse_term`. A `[`
+            // at term position is always a quotation literal (the
+            // `[Type; Count]` array constructor is deleted, P7.S5).
             Token::LBracket => {
                 let annotation = self.parse_optional_quot_annotation()?;
                 let body = self.parse_terms("`]` (unterminated quotation)", |tok| {
@@ -9992,102 +9933,39 @@ mod tests {
         assert!(err.contains("capability"), "unexpected message: {err}");
     }
 
-    // Slice 6h phase 1: the raw array constructor `[ Type ; Count ]`.
+    // P7.S5 (R13): the `[Type; Count]` array constructor is deleted. A
+    // body-level `[ ... ; ... ]` falls through to the quotation-literal arm,
+    // where the `;` is an unexpected token (not a silent fallthrough to
+    // quotation parsing: the `;` stops the parse with a located error).
 
     #[test]
-    fn array_constructor_with_concrete_type_parses() {
-        let module = parse_src(": w ( -- ) [ i64 ; 4 ] drop ;").unwrap();
-        let body = terms_body(&module.words[0]);
-        assert_eq!(module.arrays.len(), 1);
-        match &body[0].kind {
-            TermKind::ArrayCtor(Type::Array(id, name)) => {
-                assert_eq!(id.index(), 0);
-                assert_eq!(*name, "[i64 4]");
-            }
-            other => panic!("expected ArrayCtor(Type::Array), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn array_constructor_interns_the_array_shape_once() {
-        let module = parse_src(": w ( -- ) [ i64 ; 4 ] drop [ i64 ; 4 ] drop ;").unwrap();
-        assert_eq!(module.arrays.len(), 1);
-        let body = terms_body(&module.words[0]);
-        let ty = |t: &Term| match &t.kind {
-            TermKind::ArrayCtor(ty) => *ty,
-            other => panic!("expected ArrayCtor, got {other:?}"),
-        };
-        assert_eq!(ty(&body[0]), ty(&body[2]));
-    }
-
-    #[test]
-    fn array_constructor_type_declared_later_in_file_resolves() {
-        // The type pre-pass registers every struct/enum name before any body
-        // parses (driver.rs), so a constructor referring to a type declared
-        // later in the same file resolves fine.
-        let module = parse_src(
-            ": w ( -- ) [ Later ; 4 ] drop ;\n\
-             type: Later tag i64 ;\n",
-        )
-        .unwrap();
-        let body = terms_body(&module.words[0]);
-        assert!(matches!(
-            &body[0].kind,
-            TermKind::ArrayCtor(Type::Array(..))
-        ));
-    }
-
-    #[test]
-    fn array_constructor_missing_count_is_parse_error() {
-        let err = parse_src(": w ( -- ) [ i64 ; ] drop ;").unwrap_err();
-        assert!(err.contains("decimal literal"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn array_constructor_extra_token_after_count_is_parse_error() {
-        let err = parse_src(": w ( -- ) [ i64 ; 4 5 ] drop ;").unwrap_err();
+    fn array_constructor_syntax_no_longer_parses() {
+        let err = parse_src(": w ( -- ) [ i64 ; 4 ] drop ;").unwrap_err();
         assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
     #[test]
-    fn array_constructor_non_literal_count_is_parse_error() {
-        let err = parse_src(": w ( -- ) [ i64 ; n ] drop ;").unwrap_err();
-        assert!(err.contains("decimal literal"), "unexpected message: {err}");
+    fn array_constructor_missing_count_no_longer_parses() {
+        let err = parse_src(": w ( -- ) [ i64 ; ] drop ;").unwrap_err();
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
     #[test]
-    fn array_constructor_zero_count_is_parse_error() {
+    fn array_constructor_zero_count_no_longer_parses() {
         let err = parse_src(": w ( -- ) [ i64 ; 0 ] drop ;").unwrap_err();
-        assert!(err.contains(">= 1"), "unexpected message: {err}");
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
     #[test]
-    fn array_constructor_over_u32_max_count_is_parse_error() {
-        let err = parse_src(": w ( -- ) [ i64 ; 4294967297 ] drop ;").unwrap_err();
-        assert!(err.contains("invalid length"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn array_constructor_compound_element_type_is_parse_error() {
-        // D1: the element read expects one word token, so a compound type
-        // (`[i64 3]`) fails there rather than needing new logic.
+    fn array_constructor_compound_element_no_longer_parses() {
         let err = parse_src(": w ( -- ) [ [i64 3] ; 4 ] drop ;").unwrap_err();
-        assert!(err.contains("expected a word"), "unexpected message: {err}");
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
     #[test]
-    fn array_constructor_bare_reference_element_is_rejected() {
-        // Phase 2's exit criteria: a bare-reference element is a located
-        // rejection naming the constructor's site, not `fill`'s. Unlike a
-        // linear element (a plain word, resolved via `resolve_type` and
-        // rejected by check.rs's shared gate), `&i64` is a single lexed word
-        // that never reaches a registered type name -- `resolve_type_name_in_module`
-        // has no `&`-prefix case (only `parse_type_expr`'s own dedicated arm
-        // does), so this is caught here at parse time as an unknown type,
-        // never reaching check.rs at all.
+    fn array_constructor_reference_element_no_longer_parses() {
         let err = parse_src(": w ( -- ) [ &i64 ; 4 ] drop ;").unwrap_err();
-        assert!(err.contains("unknown type"), "unexpected message: {err}");
-        assert!(err.contains("&i64"), "unexpected message: {err}");
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
     #[test]

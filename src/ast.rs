@@ -2764,11 +2764,6 @@ pub enum TermKind {
     /// effect the literal declares inside its own brackets, `None` for every
     /// unannotated literal.
     Quotation(Vec<Term>, bool, Option<QuotAnnot>),
-    /// Slice 6h (D1): a body-level `[ Type ; Count ]` raw array constructor,
-    /// carrying the parse-time-interned `Type::Array(id)` for the shape.
-    /// Concrete-path only: `poly_term` rejects it eagerly (there is nowhere
-    /// to intern a body-internal shape absent from a poly signature).
-    ArrayCtor(Type),
 }
 
 /// R18/R21: clone a combinator body, appending a unique per-inline suffix to

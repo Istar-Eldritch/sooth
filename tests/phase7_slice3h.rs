@@ -445,7 +445,7 @@ fn an_owning_closure_binds_a_borrow_capture_with_its_reference_record() {
         "owning-borrow-capture",
         ": use ( owning [ -- ] -- ) call ;\n\
          : main ( -- )\n  \
-           [ i64 ; 3 ] | b |\n  \
+           0 3 fill | b |\n  \
            &!b | r |\n  \
            [ r slice | v | v 0 >usize &!> | e | e 7 ! ] use\n  \
            &b 0 >usize &> @ .\n\

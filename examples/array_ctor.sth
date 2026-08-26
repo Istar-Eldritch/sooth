@@ -1,12 +1,13 @@
-\ Dogfood: Phase 4 slice 6h. The raw array constructor `[ Type ; Count ]`
-\ allocs one array slot and zero-inits its contents with a counted loop. Every
+\ Dogfood: Phase 4 slice 6h, migrated to `fill` (P7.S5). The `[Type; Count]`
+\ array constructor is deleted; every zero-init probe now uses `fill` with a
+\ zero seed, which stores that seed into every slot in a counted loop. Every
 \ probe runs *after* a dirtier that fills a nonzero seed into the same stack
-\ region and returns, so the constructor reuses stack full of nonzero bytes: a
-\ zero read then proves the zero-init loop ran, not that fresh stack happened
-\ to be zero. Without the preamble these are placebos (`Alloc` never zeroes).
-\ Each dirtier is sized to the probe's own element width, since an [i64;10]
+\ region and returns, so `fill` reuses stack full of nonzero bytes: a zero
+\ read then proves the zero-seed loop ran, not that fresh stack happened to
+\ be zero. Without the preamble these are placebos (`Alloc` never zeroes).
+\ Each dirtier is sized to the probe's own element width, since an `0 10 fill`
 \ dirtier's residue lands on 8-byte-strided offsets only and never overlaps
-\ the [i8;10]/[bool;4] probes' own byte-granular slots.
+\ the `0 >i8 10 fill`/`False 4 fill` probes' own byte-granular slots.
 
 import: intrinsics * ;
 import: core::prelude * ;
@@ -21,47 +22,47 @@ import: core::combinators c | times | ;
 : dirty_i8 ( -- ) 99 >i8 200 fill drop ;
 : dirty_bool ( -- ) True 200 fill drop ;
 
-\ `[ i64 ; 10 ]`: index 9 reads 0 after the dirty preamble.
+\ `0 10 fill`: index 9 reads 0 after the dirty preamble.
 : probe10 ( -- i64 )
-  [ i64 ; 10 ] | a | &a 9 >usize &> @ | v | a drop v ;
+  0 10 fill | a | &a 9 >usize &> @ | v | a drop v ;
 
-\ `[ i8 ; 10 ]` (size 10 / align 1): index 9 reads 0 and a live neighbour
-\ (`guard`, a `[i64 3]` of 5s) stays intact, so a word-granular overrun of the
+\ `0 >i8 10 fill` (size 10 / align 1): index 9 reads 0 and a live neighbour
+\ (`guard`, a `0 3 fill` of 5s) stays intact, so a word-granular overrun of the
 \ unpadded array would show up as a clobbered neighbour.
 : probe_i8 ( -- i8 i64 )
   5 3 fill | guard |
-  [ i8 ; 10 ] | a | &a 9 >usize &> @ | v | a drop
+  0 >i8 10 fill | a | &a 9 >usize &> @ | v | a drop
   &guard 0 >usize &> @ | g | guard drop
   v g ;
 
-\ `[ Bool ; 4 ]`: every slot is variant 0 (`False`), not a garbage byte (which
-\ prints `True`), so a `False`x4 output can only come from the zero-init.
+\ `False 4 fill`: every slot is variant 0 (`False`), not a garbage byte (which
+\ prints `True`), so a `False`x4 output can only come from the zero-seed.
 : probe_bool ( -- )
-  [ Bool ; 4 ] | a |
+  False 4 fill | a |
   &a 0 >usize &> @ .
   &a 1 >usize &> @ .
   &a 2 >usize &> @ .
   &a 3 >usize &> @ .
   a drop ;
 
-\ Terms after the constructor's own loop are not dropped (the `terminated`
+\ Terms after the fill's own loop are not dropped (the `terminated`
 \ reset), and a `times` after it composes (loop-state hygiene).
 : probe_after ( -- )
-  [ i64 ; 4 ] | a | a drop
+  0 4 fill | a | a drop
   100 .
   3 ~[ | i | i . ] times
   200 . ;
 
-\ D5: a concrete `[ i64 ; 4 ]` inside a combinator body works for free.
+\ D5: a concrete `0 4 fill` inside a combinator body works for free.
 : withbuf inline ( [ -- i64 ] -- i64 )
-  | f | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop f call z add ;
+  | f | 0 4 fill | a | &a 0 >usize &> @ | z | a drop f call z add ;
 
 \ A self-tail-recursive word that constructs an array each iteration: the
-\ constructor's loop opens *inside* the word's own self-tail loop, so without
+\ fill's loop opens *inside* the word's own self-tail loop, so without
 \ the save/restore loop-state hygiene the enclosing loop's back-edge is sealed
 \ against the wrong header (a compiler panic). `z` is the zero-init index 0.
 : recur ( i64 -- )
-  | n | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop
+  | n | 0 4 fill | a | &a 0 >usize &> @ | z | a drop
   n z add .
   n 0 gt ~[ n 1 sub recur ] ~[ ] if ;
 

@@ -974,8 +974,7 @@ pub(super) fn check_array_word(
             }
             // A construction site the declaration-site rule cannot reach: `fill` accepts
             // any `Copy` element, and `&T` is `Copy`, so the declaration-site
-            // sweep never sees this shape. D2's shared gate owns this check
-            // (no zero-safety: `fill` replicates a real seed, D4).
+            // sweep never sees this shape. D2's shared gate owns this check.
             check_array_element_gate(
                 ctx,
                 span,
@@ -984,7 +983,6 @@ pub(super) fn check_array_word(
                 ctx.structs(),
                 ctx.enums(),
                 arrays,
-                false,
                 element.variant_idx,
             )?;
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);

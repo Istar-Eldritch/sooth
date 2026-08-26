@@ -460,90 +460,20 @@ pub(crate) fn variant_field_projection(
         .collect()
 }
 
-/// D3 (slice 6h phase 2): whether `ty` transitively contains a pointer-shaped
-/// `Copy` type the array constructor cannot safely zero-initialize --
-/// `Type::Str`, `Type::Cstr`, `Type::Quotation` -- recursing through struct
-/// fields, ALL enum variant fields (conservative: only variant 0's payload is
-/// readable in an all-zero value, but any variant's pointer-shaped payload is
-/// rejected rather than argue a subtle tag-gating case with no known use),
-/// and array elements. Returns the offending inner type and the path to it
-/// (outermost first) on a hit. `fill` never calls this: it replicates a real
-/// seed and never mints one from zeroed memory, so it keeps accepting these
-/// types (D4).
-fn find_zero_unsafe_element(
-    ty: Type,
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
-) -> Option<(Type, Vec<String>)> {
-    match ty {
-        // P7 slice 3c (R6): a slice is pointer-shaped like the three above, so
-        // an all-zero one is a null element pointer with a zero length, not an
-        // empty view of anything. Named explicitly because the wildcard below
-        // treats what it does not name as zero-*safe*.
-        Type::Str | Type::Cstr | Type::Quotation(_) | Type::Slice(..) => Some((ty, Vec::new())),
-        Type::Struct(id, _) => {
-            for (fname, fty) in &structs[id.index()].fields {
-                if let Some((bad, mut path)) =
-                    find_zero_unsafe_element(*fty, structs, enums, arrays)
-                {
-                    path.insert(0, format!("field `{fname}`"));
-                    return Some((bad, path));
-                }
-            }
-            None
-        }
-        Type::Enum(id, _) => {
-            for variant in &enums[id.index()].variants {
-                for (idx, (fname, fty)) in variant.fields.iter().enumerate() {
-                    if let Some((bad, mut path)) =
-                        find_zero_unsafe_element(*fty, structs, enums, arrays)
-                    {
-                        path.insert(
-                            0,
-                            format!(
-                                "variant `{}` {}",
-                                variant.name,
-                                variant_field_desc(fname, idx)
-                            ),
-                        );
-                        return Some((bad, path));
-                    }
-                }
-            }
-            None
-        }
-        Type::Array(id, _) => {
-            find_zero_unsafe_element(arrays[id.index()].element, structs, enums, arrays).map(
-                |(bad, mut path)| {
-                    path.insert(0, "array element".to_string());
-                    (bad, path)
-                },
-            )
-        }
-        _ => None,
-    }
-}
-
 /// D2 (slice 6h phase 2): the shared type-directed gate for a construction
 /// site that accepts a bare `Type` with no declaration for
-/// `check_no_stored_references` to have caught -- `fill`'s element and the
-/// array constructor's element. Owns exactly the checks that read a `Type`
-/// (never a `Slot`): no stored reference, `Copy`, and (when `zero_safety` is
-/// set, the constructor only) D3's zero-validity predicate. It does not own
-/// the quotation or literal-count checks (`Slot` fields) or the count range
-/// check, which stay at `fill`'s own call site. `site` names the
-/// construction site and drives both diagnostics that need one:
-/// `fill_of_linear_element_error` renders it as a bare code span, and this
-/// composes `constructed_reference_error`'s noun phrase from it the same way
-/// -- `fill` passing `"fill"` keeps both byte-identical to before this gate
-/// existed.
+/// `check_no_stored_references` to have caught -- `fill`'s element. Owns
+/// exactly the checks that read a `Type` (never a `Slot`): no stored
+/// reference and `Copy`. It does not own the quotation or literal-count checks
+/// (`Slot` fields) or the count range check, which stay at `fill`'s own call
+/// site. `site` names the construction site and drives
+/// `constructed_reference_error`'s noun phrase -- `fill` passing `"fill"`
+/// keeps it byte-identical to before this gate existed.
 ///
 /// P7.S5 (R3): `seed_variant_idx` is the seed slot's `variant_idx`, set when
 /// a nullary variant constructor produced the seed. A linear element is
 /// admitted when this is `Some(_)` — a nullary variant has no payload to
-/// replicate. `None` for the array constructor (which has no seed slot) and
-/// for any non-nullary seed.
+/// replicate. `None` for any non-nullary seed.
 #[allow(clippy::too_many_arguments)]
 fn check_array_element_gate(
     ctx: &Ctx,
@@ -553,7 +483,6 @@ fn check_array_element_gate(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
-    zero_safety: bool,
     seed_variant_idx: Option<u32>,
 ) -> Result<(), String> {
     if contains_reference(element, structs, enums, arrays) {
@@ -573,19 +502,7 @@ fn check_array_element_gate(
         }
         // R10: `fill`'s non-nullary linear seed is a located error naming
         // `tabulate` as the construction path for distinct linear values.
-        // The array constructor (zero_safety) keeps the old diagnostic until
-        // Phase 3 deletes both it and the constructor.
-        if zero_safety {
-            return Err(fill_of_linear_element_error(ctx, span, element, site));
-        }
         return Err(fill_linear_non_nullary_seed_error(ctx, span, element));
-    }
-    if zero_safety {
-        if let Some((bad, path)) = find_zero_unsafe_element(element, structs, enums, arrays) {
-            return Err(array_constructor_zero_unsafe_element_error(
-                ctx, span, element, bad, &path,
-            ));
-        }
     }
     Ok(())
 }
@@ -3326,33 +3243,11 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
     }
 }
 
-/// `fill` given a linear element type: unlike `dup`/`over`, `fill` has no
-/// per-slot `Copy` gate today, so it would silently replicate a linear value
-/// (and array-element linearity is not tracked transitively yet, so neither
-/// `drop` nor a nested struct's `dup` check would ever see the array's real
-/// element count). Reject rather than accept a value the rest of the linear
-/// checker can't reason about; array-of-linear support is future work.
-/// D2 (phase 2): `site` names the construction site (`"fill"`, or the array
-/// constructor's own site), rendered as a bare code span, so `fill`'s call
-/// passing `"fill"` keeps this byte-identical.
-fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type, site: &str) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
-            "error: linear array elements are not supported yet in {} (line {})\n  `{}` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, site, elem, elem, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: linear array elements are not supported yet: `{site}` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
-        ),
-    }
-}
-
 /// P7.S5 (R10): `fill` given a linear, non-nullary-variant seed — the case
 /// R3's relaxation does not cover. A data-carrying linear value cannot be
 /// replicated across array slots without duplicating a resource, so the
 /// located error names the element type and points to `tabulate` as the
-/// construction path for distinct linear values. Distinct from the deleted
-/// `fill_of_linear_element_error` (Phase 3 removes that and the array
-/// constructor's call site; this replaces `fill`'s own call site).
+/// construction path for distinct linear values.
 fn fill_linear_non_nullary_seed_error(ctx: &Ctx, span: Span, elem: Type) -> String {
     match ctx {
         Ctx::Word { mangled, effect, .. } => format!(
@@ -3360,34 +3255,6 @@ fn fill_linear_non_nullary_seed_error(ctx: &Ctx, span: Span, elem: Type) -> Stri
             crate::resolve::render_word(mangled), span.line, elem, effect_str(effect)),
         Ctx::Line { .. } => format!(
             "error: `fill` cannot replicate a linear value: `{elem}` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values"
-        ),
-    }
-}
-
-/// D3 (slice 6h phase 2): the array constructor's element transitively
-/// contains `str`/`cstr`/a quotation -- all `Copy` and pointer-shaped, so an
-/// all-zero slot would be a null pointer whose first read faults. Names the
-/// offending inner type and the field/variant/array-element path to it
-/// (outermost first); an empty path means the element itself is the
-/// offending type.
-fn array_constructor_zero_unsafe_element_error(
-    ctx: &Ctx,
-    span: Span,
-    outer: Type,
-    bad: Type,
-    path: &[String],
-) -> String {
-    let where_ = if path.is_empty() {
-        "directly".to_string()
-    } else {
-        format!("via {}", path.join(" -> "))
-    };
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
-            "error: cannot zero-initialize a `{}` in {} (line {})\n  `{}` transitively contains `{}` ({}), which is pointer-shaped and would zero to a null pointer\n  note: declared {}",
-            outer, crate::resolve::render_word(mangled), span.line, outer, bad, where_, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: cannot zero-initialize a `{outer}`: it transitively contains `{bad}` ({where_}), which is pointer-shaped and would zero to a null pointer"
         ),
     }
 }
@@ -3889,82 +3756,30 @@ mod tests {
         assert_eq!(borrow_mutability(Type::I64, &refs), None);
     }
 
-    /// P7 slice 3c (R6): a slice is in the *explicit* zero-unsafe set, since
-    /// the wildcard below it treats what it does not name as zero-**safe** --
-    /// an all-zero slice is a null element pointer with a zero length, not an
-    /// empty view. Asserted through the located diagnostic the array
-    /// constructor renders, both directly and one level down a struct field so
-    /// the path is built.
-    ///
-    /// Second line of defence, deliberately: in `check_array_element_gate`
-    /// today, R5's `contains_reference` rejects a slice-bearing element before
-    /// this predicate is consulted at all. The arm is not redundant -- a
-    /// future zero-safety caller that has no reference check to run in front of
-    /// it would otherwise admit an all-zero view.
+    /// P7.S5 (R13): the `[Type; Count]` array constructor is deleted. A
+    /// body-level `[ i64 ; 4 ]` no longer parses: the `[` falls through to
+    /// the quotation-literal arm, and the `;` is an unexpected token inside
+    /// a quotation body (not a silent fallthrough to quotation parsing).
     #[test]
-    fn find_zero_unsafe_element_names_slice() {
-        let mut slices = Vec::new();
-        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
-        let structs = vec![StructDecl {
-            name: "View".to_string(),
-            name_static: "View",
-            fields: vec![("s".to_string(), slice)],
-            span: Span::default(),
-            has_drop_overload: false,
-            is_bundle: false,
-            module: 0,
-        }];
-        let view = Type::Struct(StructId::from_index(0), "View");
-        let (bad, path) =
-            find_zero_unsafe_element(slice, &structs, &[], &[]).expect("a slice is zero-unsafe");
-        assert_eq!(bad, slice);
-        assert!(path.is_empty());
-        assert_eq!(
-            array_constructor_zero_unsafe_element_error(
-                &Ctx::Line {
-                    structs: &structs,
-                    enums: &[],
-                },
-                Span::default(),
-                slice,
-                bad,
-                &path
-            ),
-            "error: cannot zero-initialize a `Slice[i64]`: it transitively contains `Slice[i64]` (directly), which is pointer-shaped and would zero to a null pointer"
-        );
-        let (bad, path) = find_zero_unsafe_element(view, &structs, &[], &[])
-            .expect("a struct reaching a slice is zero-unsafe");
-        assert_eq!(
-            array_constructor_zero_unsafe_element_error(
-                &Ctx::Line {
-                    structs: &structs,
-                    enums: &[],
-                },
-                Span::default(),
-                view,
-                bad,
-                &path
-            ),
-            "error: cannot zero-initialize a `View`: it transitively contains `Slice[i64]` (via field `s`), which is pointer-shaped and would zero to a null pointer"
+    fn array_constructor_syntax_no_longer_parses() {
+        let tokens = crate::lexer::lex(": w ( -- ) [ i64 ; 4 ] drop ;").unwrap();
+        let err = crate::test_support::parse_with_core(&tokens).unwrap_err();
+        assert!(
+            err.contains("parse error"),
+            "expected a parse error for `[Type; Count]`, got: {err}"
         );
     }
 
+    /// P7.S5 (R13): the deleted array constructor's compound-element and
+    /// reference-element cases also no longer parse, each as a located parse
+    /// error rather than the old checker-level rejection.
     #[test]
-    fn zero_unsafe_positional_variant_field_is_named_by_index() {
-        // OQ4/Phase 1: `find_zero_unsafe_element` builds a path out of variant
-        // field names, so an attributeless field must appear as its position
-        // rather than as the internal placeholder.
-        let err = check_src(
-            "type: Option 'T | None | Some 'T ;\n: main ( -- ) [ Option[str] ; 4 ] drop ;\n",
-        )
-        .unwrap_err();
+    fn array_constructor_compound_element_no_longer_parses() {
+        let tokens = crate::lexer::lex(": w ( -- ) [ Option[str] ; 4 ] drop ;").unwrap();
+        let err = crate::test_support::parse_with_core(&tokens).unwrap_err();
         assert!(
-            err.contains("variant `Some[str]` field 0"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            !err.contains(crate::parser::POSITIONAL_FIELD_NAME),
-            "the internal placeholder leaked into a diagnostic: {err}"
+            err.contains("parse error"),
+            "expected a parse error for `[Option[str]; 4]`, got: {err}"
         );
     }
 

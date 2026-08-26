@@ -1077,28 +1077,6 @@ fn check_term(
             });
             Ok(stack)
         }
-        // D2/D3 (slice 6h phase 2): the shared gate, with the zero-validity
-        // predicate turned on -- unlike `fill`, an all-zero slot here is
-        // never a replicated real seed.
-        TermKind::ArrayCtor(ty) => {
-            let Type::Array(id, _) = *ty else {
-                unreachable!("the parser only ever interns a Type::Array for an ArrayCtor term")
-            };
-            let element = arrays[id.index()].element;
-            check_array_element_gate(
-                ctx,
-                span,
-                "the array constructor",
-                element,
-                ctx.structs(),
-                ctx.enums(),
-                arrays,
-                true,
-                None,
-            )?;
-            stack.push(Slot::computed(*ty));
-            Ok(stack)
-        }
     }
 }
 

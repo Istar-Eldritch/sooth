@@ -3041,114 +3041,34 @@ mod tests {
             "unexpected message: {err}"
         );
     }
-    // Slice 6h phase 2: D2's shared gate plus the constructor's own D3
-    // zero-validity predicate.
+    // P7.S5 (R13): the `[Type; Count]` array constructor is deleted. These
+    // tests verify the old body-level syntax no longer parses (the `[`
+    // falls through to the quotation-literal arm, where `;` is an
+    // unexpected token).
 
     #[test]
-    fn array_constructor_i64_ten_yields_slot() {
-        check_src(": w ( -- ) [ i64 ; 10 ] drop ;").unwrap();
+    fn array_constructor_i64_no_longer_parses() {
+        let tokens = lex(": w ( -- ) [ i64 ; 10 ] drop ;").unwrap();
+        let err = crate::test_support::parse_with_core(&tokens).unwrap_err();
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
     #[test]
-    fn array_constructor_str_element_is_rejected() {
-        let err = check_src(": w ( -- ) [ str ; 4 ] drop ;").unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `str` (directly)"),
-            "unexpected message: {err}"
-        );
+    fn array_constructor_str_element_no_longer_parses() {
+        let tokens = lex(": w ( -- ) [ str ; 4 ] drop ;").unwrap();
+        let err = crate::test_support::parse_with_core(&tokens).unwrap_err();
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
     #[test]
-    fn array_constructor_struct_containing_str_element_is_rejected() {
-        let err = check_src("type: HasStr s str ; : w ( -- ) [ HasStr ; 4 ] drop ;").unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize a `HasStr`"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `str` (via field `s`)"),
-            "unexpected message: {err}"
-        );
-    }
-    #[test]
-    fn array_constructor_depth_two_struct_containing_str_is_rejected() {
-        // Proves recursion, not one-level field iteration: `str` is two
-        // struct fields deep (`Outer.i.s`), so deleting the struct-field
-        // recursion arm (keeping only a one-level check) must fail this.
-        let err =
-            check_src("type: Inner s str ; type: Outer i Inner ; : w ( -- ) [ Outer ; 4 ] drop ;")
-                .unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize a `Outer`"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `str` (via field `i` -> field `s`)"),
-            "unexpected message: {err}"
-        );
-    }
-    #[test]
-    fn array_constructor_struct_with_array_of_str_field_is_rejected() {
-        // The predicate's array arm: the offending `str` is reached only
-        // through a struct field that is itself an array. Deleting the
-        // array-element recursion arm must fail this test.
-        let err = check_src("type: Wrap arr [str 4] ; : w ( -- ) [ Wrap ; 4 ] drop ;").unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize a `Wrap`"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `str` (via field `arr` -> array element)"),
-            "unexpected message: {err}"
-        );
-    }
-    #[test]
-    fn array_constructor_enum_with_str_on_a_nonzero_variant_is_rejected() {
-        // Pins the conservative all-variant recursion: `str` lives on `B`,
-        // not the zero-tag `A`, so a variant-0-only walk would miss it.
-        let err = check_src("type: E | A | B s str ; : w ( -- ) [ E ; 4 ] drop ;").unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize a `E`"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `str` (via variant `B` field `s`)"),
-            "unexpected message: {err}"
-        );
-    }
-    #[test]
-    fn array_constructor_struct_containing_quotation_element_is_rejected() {
-        let err = check_src("type: Boxed f [ i64 -- i64 ] ; : w ( -- ) [ Boxed ; 4 ] drop ;")
-            .unwrap_err();
-        assert!(
-            err.contains("cannot zero-initialize a `Boxed`"),
-            "unexpected message: {err}"
-        );
-        assert!(
-            err.contains("transitively contains `[ i64 -- i64 ]` (via field `f`)"),
-            "unexpected message: {err}"
-        );
-    }
-    #[test]
-    fn array_constructor_linear_element_is_rejected() {
-        // Preempted by the module-wide `check_no_linear_array_elements` sweep
-        // (D1 interns the shape unconditionally at parse time, before any
-        // body is checked), rather than by the new per-site gate -- but
-        // still a located rejection, not a silent accept.
-        let err = check_src(&format!("{SPY_DEF}: w ( -- ) [ Spy ; 4 ] drop ;")).unwrap_err();
-        assert!(
-            err.contains("linear array elements are not supported yet"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    fn array_constructor_linear_element_no_longer_parses() {
+        let src = format!("{SPY_DEF}: w ( -- ) [ Spy ; 4 ] drop ;");
+        let tokens = lex(&src).unwrap();
+        let err = crate::test_support::parse_with_core(&tokens).unwrap_err();
+        assert!(err.contains("parse error"), "unexpected message: {err}");
     }
     #[test]
     fn fill_still_accepts_a_str_element() {
-        // D4: `fill` replicates a real seed and never mints one from zeroed
-        // memory, so it keeps accepting `str`/`cstr`/a quotation -- the
-        // shared gate's zero-safety branch is off for `fill`.
+        // D4: `fill` replicates a real seed, so it keeps accepting `str`/
+        // `cstr`/a quotation.
         check_src(": main ( -- ) \"hi\" 3 fill drop ;").unwrap();
     }
     #[test]
