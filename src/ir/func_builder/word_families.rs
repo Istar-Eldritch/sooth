@@ -383,7 +383,7 @@ impl<'a> FuncBuilder<'a> {
     /// (slice 6h; was N unrolled stores, which was QBE-quadratic on one large
     /// straight-line block); `len` = a constant `usize` from the layout,
     /// non-consuming.
-    pub(super) fn lower_array_word(&mut self, name: &str, span: Span) {
+    pub(super) fn lower_array_word(&mut self, name: &str, span: Span) -> Result<(), String> {
         match name {
             // Slice 6h (D4): one `Instr::Alloc` plus a `begin_loop`/
             // `finalize_loop`-bounded loop storing the `Copy` seed `n` times
@@ -489,7 +489,7 @@ impl<'a> FuncBuilder<'a> {
                 // Lower the body once: determine the element type and produce
                 // the value for slot 0.
                 let locals_depth = self.locals.len();
-                self.lower_terms(&body, false);
+                self.lower_terms(&body, false)?;
                 let first_val = self.stack.pop().expect("tabulate: body produces one value");
                 self.locals.truncate(locals_depth);
                 let elem = self.value_type(first_val);
@@ -524,7 +524,7 @@ impl<'a> FuncBuilder<'a> {
                     self.start_block(body_block);
                     self.terminated = false;
                     let locals_depth2 = self.locals.len();
-                    self.lower_terms(&body, false);
+                    self.lower_terms(&body, false)?;
                     let val = self.stack.pop().expect("tabulate: body produces one value");
                     self.locals.truncate(locals_depth2);
                     let fptr = self.elem_addr(dst, index_phi, stride);
@@ -602,7 +602,7 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.pop();
                     let (_, len) = self.load_slice_parts(top);
                     self.stack.push(len);
-                    return;
+                    return Ok(());
                 }
                 // Non-consuming (R10): the array stays; the constant folds in.
                 let array = top;
@@ -617,6 +617,7 @@ impl<'a> FuncBuilder<'a> {
             }
             _ => unreachable!("lower_array_word only handles fill/tabulate/len/slice/subslice"),
         }
+        Ok(())
     }
 
     /// The `OwnedCellId` whose payload shape is `payload`: `^`'s target shape,

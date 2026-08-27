@@ -1505,7 +1505,8 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-        );
+        )
+        .unwrap();
         emit(&IrModule {
             funcs: vec![func],
             ..Default::default()
@@ -1926,7 +1927,8 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
-        );
+        )
+        .unwrap();
         let il = emit(&IrModule {
             funcs: vec![func],
             ..Default::default()

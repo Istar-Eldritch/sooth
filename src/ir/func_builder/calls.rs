@@ -4,18 +4,19 @@
 use super::*;
 
 impl<'a> FuncBuilder<'a> {
-    pub(in crate::ir) fn lower_terms(&mut self, terms: &[Term], tail: bool) {
+    pub(in crate::ir) fn lower_terms(&mut self, terms: &[Term], tail: bool) -> Result<(), String> {
         // Only the final term of a body can be in tail position (R1); a term
         // followed by any further term is not. This positional `tail` threading
         // is the same syntactic rule as the checker's `tail_position_calls`
         // (src/check.rs); the two must stay in lockstep if the rule changes.
         let last = terms.len().wrapping_sub(1);
         for (i, term) in terms.iter().enumerate() {
-            self.lower_term(term, tail && i == last);
+            self.lower_term(term, tail && i == last)?;
         }
+        Ok(())
     }
 
-    pub(in crate::ir) fn lower_term(&mut self, term: &Term, tail: bool) {
+    pub(in crate::ir) fn lower_term(&mut self, term: &Term, tail: bool) -> Result<(), String> {
         match &term.kind {
             TermKind::IntLit(n) => {
                 let v = self.fresh_value(IrType::I64);
@@ -33,7 +34,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::StrLit(v, s.clone()));
                 self.stack.push(v);
             }
-            TermKind::Call(name, _) => self.lower_call(name, term.span, tail),
+            TermKind::Call(name, _) => return self.lower_call(name, term.span, tail),
             TermKind::Bind(names) => {
                 // R10: a binding is a compile-time rebinding of SSA values, so
                 // it emits nothing. Leftmost name takes the deepest value.
@@ -66,6 +67,7 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(v);
             }
         }
+        Ok(())
     }
 
     /// R10: lower a self-tail combinator (`while`, `times-helper`) as a
@@ -80,7 +82,11 @@ impl<'a> FuncBuilder<'a> {
     /// `save_loop_state`). A tail-position self-call inside the body is
     /// emitted as a back-edge (`lower_call`, keyed on `cur_combinator`),
     /// never a re-splice.
-    pub(in crate::ir) fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
+    pub(in crate::ir) fn lower_self_tail_combinator(
+        &mut self,
+        name: &str,
+        body: &[Term],
+    ) -> Result<(), String> {
         let saved_loop_state = self.save_loop_state();
         let saved_combinator = self.cur_combinator.take();
         let locals_depth = self.locals.len();
@@ -97,7 +103,7 @@ impl<'a> FuncBuilder<'a> {
                     .iter()
                     .any(|v| self.quot_bodies.contains_key(v));
                 if binds_quot {
-                    self.lower_term(&body[split], false);
+                    self.lower_term(&body[split], false)?;
                     split += 1;
                     continue;
                 }
@@ -140,12 +146,13 @@ impl<'a> FuncBuilder<'a> {
         // Lower the loop body with `tail = true`, so its tail-position
         // self-call is recognized as the back-edge. The base-case arm falls
         // through, leaving the state on the stack as the loop's result.
-        self.lower_terms(&body[split..], true);
+        self.lower_terms(&body[split..], true)?;
         self.finalize_loop();
 
         self.locals.truncate(locals_depth);
         self.cur_combinator = saved_combinator;
         self.restore_loop_state(saved_loop_state);
+        Ok(())
     }
 
     /// Slice 8a phase 4 (R7), extended P7.S3e (R9): call an already-resolved
@@ -211,7 +218,7 @@ impl<'a> FuncBuilder<'a> {
     /// back-edge into a loop they do not belong to. If a self-tail member body
     /// ever needs the loop form, that is not this slice; `terms_tail_call_self`
     /// is the predicate that would decide it.
-    fn lower_resolved_word_call(&mut self, sym_name: &str) {
+    fn lower_resolved_word_call(&mut self, sym_name: &str) -> Result<(), String> {
         if let Some(entry) = self.combinators.get(sym_name) {
             let uid = match self.member_uid_seeds.get(sym_name) {
                 Some(&seed) => seed,
@@ -223,12 +230,12 @@ impl<'a> FuncBuilder<'a> {
             self.inline_uid = uid;
             self.splice_uid_stack.push(uid);
             self.member_splice_depth += 1;
-            self.lower_terms(&body, false);
+            self.lower_terms(&body, false)?;
             self.member_splice_depth -= 1;
             self.splice_uid_stack.pop();
             self.inline_uid = caller_inline_uid;
             self.locals.truncate(locals_depth);
-            return;
+            return Ok(());
         }
         let (in_arity, out_arity, ret_ty) = {
             let a = self
@@ -256,12 +263,18 @@ impl<'a> FuncBuilder<'a> {
         if let Some(id) = bundle {
             self.unpack_bundle(id);
         }
+        Ok(())
     }
 
-    pub(in crate::ir) fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
+    pub(in crate::ir) fn lower_call(
+        &mut self,
+        name: &str,
+        span: Span,
+        tail: bool,
+    ) -> Result<(), String> {
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
-            return;
+            return Ok(());
         }
         // Slice 8a phase 4 (R7): a call site the checker resolved to a user
         // overload of a builtin-named word must dispatch to that word, not
@@ -291,8 +304,7 @@ impl<'a> FuncBuilder<'a> {
         // `splice_trait_calls` entry to fall through to.
         if self.member_splice_depth == 0 {
             if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
-                self.lower_resolved_word_call(&sym_name);
-                return;
+                return self.lower_resolved_word_call(&sym_name);
             }
         }
         // P7.S3o Phase 3: a bare trait member call resolved at a combinator
@@ -305,8 +317,7 @@ impl<'a> FuncBuilder<'a> {
         // per-instantiation trait call does.
         if let Some(&uid) = self.splice_uid_stack.last() {
             if let Some(sym_name) = self.splice_trait_calls.get(&(uid, span)).cloned() {
-                self.lower_resolved_word_call(&sym_name);
-                return;
+                return self.lower_resolved_word_call(&sym_name);
             }
         }
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
@@ -323,14 +334,12 @@ impl<'a> FuncBuilder<'a> {
             // enum word ever registers.
             if let Some(&sw) = self.structs.words.get(&sym_name) {
                 self.lower_struct_word(sw);
-                return;
+                return Ok(());
             }
             if let Some(&ew) = self.enums.words.get(&sym_name) {
-                self.lower_enum_call(ew, span, tail);
-                return;
+                return self.lower_enum_call(ew, span, tail);
             }
-            self.lower_resolved_word_call(&sym_name);
-            return;
+            return self.lower_resolved_word_call(&sym_name);
         }
         // R10: a tail-position self-call inside a self-tail combinator splice
         // is the loop back-edge. The loop carries only the state row (length
@@ -349,7 +358,7 @@ impl<'a> FuncBuilder<'a> {
                     let header = self.header.expect("combinator loop header");
                     self.seal_block(Terminator::Jmp(header));
                     self.terminated = true;
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -369,7 +378,7 @@ impl<'a> FuncBuilder<'a> {
         // no name-keyed `env` entry.
         if let Some(inst) = self.poly_calls.get(&span).cloned() {
             self.lower_poly_call(&inst);
-            return;
+            return Ok(());
         }
         // P7.S3o (R1/R2): inside a combinator splice, read the per-splice
         // instantiation record instead of the span-keyed `instantiations`
@@ -378,12 +387,12 @@ impl<'a> FuncBuilder<'a> {
         if let Some(&uid) = self.splice_uid_stack.last() {
             if let Some(inst) = self.splice_records.get(&(uid, span)).cloned() {
                 self.lower_poly_call(&inst);
-                return;
+                return Ok(());
             }
         }
         if let Some(inst) = self.instantiations.get(&span).cloned() {
             self.lower_poly_call(&inst);
-            return;
+            return Ok(());
         }
         match name {
             // R13: `call`-of-literal fusion. Pop the phantom quotation `Value`,
@@ -410,7 +419,7 @@ impl<'a> FuncBuilder<'a> {
                         // would else read a stale entry on a later same-named
                         // bind. Mirror the `if` arm's save-and-truncate.
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, tail);
+                        self.lower_terms(&body, tail)?;
                         self.locals.truncate(locals_depth);
                     }
                     None => self.lower_indirect_call(v),
@@ -599,7 +608,7 @@ impl<'a> FuncBuilder<'a> {
                 let else_id = self.quot_bodies[&else_q];
                 let then_body = self.quot_defs[then_id.0].clone();
                 let else_body = self.quot_defs[else_id.0].clone();
-                self.lower_if(&then_body, &else_body, tail);
+                self.lower_if(&then_body, &else_body, tail)?;
             }
             // Slice 10c (R-P3-2): `tag` reads a scalar enum's discriminant.
             // The checker has already restricted the operand to an enum every
@@ -617,7 +626,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Tag(dst, v));
                 self.stack.push(dst);
             }
-            "fill" | "slice" | "subslice" | "tabulate" => self.lower_array_word(name, span),
+            "fill" | "slice" | "subslice" | "tabulate" => self.lower_array_word(name, span)?,
             "len" => {
                 let top = *self.stack.last().expect("len: operand");
                 if self.value_type(top) == IrType::Str {
@@ -629,7 +638,7 @@ impl<'a> FuncBuilder<'a> {
                     self.push_instr(Instr::StrLen(v, top));
                     self.stack.push(v);
                 } else {
-                    self.lower_array_word(name, span);
+                    self.lower_array_word(name, span)?;
                 }
             }
             "cstr" => {
@@ -685,20 +694,20 @@ impl<'a> FuncBuilder<'a> {
                     self.splice_uid_stack.push(uid);
                     let body = crate::ast::alpha_rename_locals(body, uid);
                     if self_tail {
-                        self.lower_self_tail_combinator(name, &body);
+                        self.lower_self_tail_combinator(name, &body)?;
                     } else {
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, tail);
+                        self.lower_terms(&body, tail)?;
                         self.locals.truncate(locals_depth);
                     }
                     self.splice_uid_stack.pop();
-                    return;
+                    return Ok(());
                 }
                 // Every `&`-led word: the two prefix borrow operators and the
                 // reference-mode accessor family.
                 if name.starts_with('&') {
                     self.lower_reference_word(name, span);
-                    return;
+                    return Ok(());
                 }
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -714,19 +723,18 @@ impl<'a> FuncBuilder<'a> {
                     let dst = self.fresh_value(ir_type_of(target));
                     self.push_instr(Instr::Conv(dst, src));
                     self.stack.push(dst);
-                    return;
+                    return Ok(());
                 }
                 // A generated struct word (`S`/`S>`) lowers to alloc/blit/
                 // field-load inline, not a normal call.
                 if let Some(&sw) = self.structs.words.get(name) {
                     self.lower_struct_word(sw);
-                    return;
+                    return Ok(());
                 }
                 // A variant constructor lowers to alloc + tag store + field
                 // stores inline, parallel to a struct constructor (R14/R15).
                 if let Some(&ew) = self.enums.words.get(name) {
-                    self.lower_enum_call(ew, span, tail);
-                    return;
+                    return self.lower_enum_call(ew, span, tail);
                 }
                 // P7 slice 3g (R2): a self-call inside a monomorphized
                 // polymorphic body. The checker records no `CallInst` for it
@@ -750,11 +758,11 @@ impl<'a> FuncBuilder<'a> {
                         let arity = arity.clone();
                         if tail && self.header.is_some() {
                             self.emit_back_edge(arity.in_arity, &arity.quot_inputs);
-                            return;
+                            return Ok(());
                         }
                         let symbol = self.cur_word_name.clone();
                         self.emit_user_call(&arity, symbol);
-                        return;
+                        return Ok(());
                     }
                 }
                 // R7: a tail-position self-call is a back-edge to the loop
@@ -776,7 +784,7 @@ impl<'a> FuncBuilder<'a> {
                         (a.in_arity, a.quot_inputs.clone())
                     };
                     self.emit_back_edge(in_arity, &quot_inputs);
-                    return;
+                    return Ok(());
                 }
                 let arity = self
                     .env
@@ -787,6 +795,7 @@ impl<'a> FuncBuilder<'a> {
                 self.emit_user_call(&arity, sym);
             }
         }
+        Ok(())
     }
 
     /// Pop `in_arity` operands as this iteration's back-edge phi operands and
@@ -845,10 +854,13 @@ impl<'a> FuncBuilder<'a> {
     /// operands rather than to the inline alloc/tag/field shapes that function
     /// covers; that ordering is what makes its `lower_enum_word` arm
     /// unreachable.
-    fn lower_enum_call(&mut self, ew: EnumWord, span: Span, tail: bool) {
+    fn lower_enum_call(&mut self, ew: EnumWord, span: Span, tail: bool) -> Result<(), String> {
         match ew {
             EnumWord::Eliminate(id) => self.lower_eliminator(id, span, tail),
-            EnumWord::Construct(..) | EnumWord::Destructure(..) => self.lower_enum_word(ew),
+            EnumWord::Construct(..) | EnumWord::Destructure(..) => {
+                self.lower_enum_word(ew);
+                Ok(())
+            }
         }
     }
 
@@ -857,7 +869,7 @@ impl<'a> FuncBuilder<'a> {
     /// annotation's variant tag, and run the N-way tag dispatch over them.
     /// Each arm receives the whole narrowed value and reads fields through
     /// `&field` projections.
-    fn lower_eliminator(&mut self, id: EnumId, span: Span, tail: bool) {
+    fn lower_eliminator(&mut self, id: EnumId, span: Span, tail: bool) -> Result<(), String> {
         let n = self.enums.layouts[id.index()].variants.len();
         let split = self.stack.len() - n;
         let arm_values = self.stack.split_off(split);
@@ -886,7 +898,7 @@ impl<'a> FuncBuilder<'a> {
             Some(VariantTagMode::Owning) | None => None,
         };
         let params = mem::take(&mut self.stack);
-        self.lower_clauses(&clauses, &params, (id, ref_mutable), tail);
+        self.lower_clauses(&clauses, &params, (id, ref_mutable), tail)
     }
 }
 
@@ -922,7 +934,7 @@ mod tests {
         );
         let term = &line_terms("[ add ]")[0];
         assert!(matches!(term.kind, TermKind::Quotation(_, _, _)));
-        b.lower_term(term, false);
+        b.lower_term(term, false).unwrap();
         assert!(
             b.cur_instrs.is_empty(),
             "a quotation literal emits no instruction: {:?}",
@@ -994,7 +1006,8 @@ mod tests {
         let saved_header = b.header;
         let saved_entry = b.entry_block;
         let saved_alloca_home = b.alloca_home;
-        b.lower_self_tail_combinator("foo", &line_terms("foo"));
+        b.lower_self_tail_combinator("foo", &line_terms("foo"))
+            .unwrap();
 
         assert_eq!(b.header, saved_header, "header restored");
         assert_eq!(b.entry_block, saved_entry, "entry_block restored");
@@ -1446,7 +1459,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("add", Span::default(), false);
+        b.lower_call("add", Span::default(), false).unwrap();
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }

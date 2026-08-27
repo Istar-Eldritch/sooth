@@ -934,7 +934,7 @@ pub(super) fn lower_word_parts(
     // to resolve to the entry the checker actually recorded for this word,
     // rather than another word's that happens to share a `(0, span)` key.
     inline_uid_seed: u32,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
     // parameter after its declared inputs (even when it captures nothing, so
@@ -1042,7 +1042,7 @@ pub(super) fn lower_word_parts(
     // looping); an entry `| ... |` binding pops from it like any other
     // binding term.
     b.stack = stack_inputs;
-    b.lower_terms(body, self_tail);
+    b.lower_terms(body, self_tail)?;
 
     // R8: back-patch the header phis with the collected back-edge operands.
     if self_tail {
@@ -1101,8 +1101,8 @@ pub(super) fn lower_word_parts(
         splice_records,
         splice_trait_calls,
         member_uid_seeds,
-    ));
-    out
+    )?);
+    Ok(out)
 }
 
 /// Slice 7a (R9): lower a batch of materialized quotations into standalone
@@ -1127,7 +1127,7 @@ pub(super) fn lower_materialized(
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
     member_uid_seeds: &HashMap<String, u32>,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let mut out = Vec::new();
     for m in mats {
         // P7.S3v (R2): a capture-free owning literal allocates no block and
@@ -1180,9 +1180,9 @@ pub(super) fn lower_materialized(
             // bound dispatch inside one for exactly this reason, so nothing
             // here reads back a per-splice record seeded elsewhere).
             0,
-        ));
+        )?);
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]

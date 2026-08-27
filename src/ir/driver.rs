@@ -190,64 +190,59 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // module would collide with it under the identical symbol. The override's
     // body is instead compiled by `synthesize_aggregate_destructors` (R2)
     // into the struct's own destructor symbol.
-    let mut funcs: Vec<IrFunc> = module
-        .words
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| {
-            !drop_overload_indices.contains(idx)
-                && !poly_indices.contains(idx)
-                && !combinator_indices.contains(idx)
-                && !uncalled_operator_overloads.contains(idx)
-        })
-        .flat_map(|(idx, w)| {
-            // A word sharing its name with another candidate is not self-tail
-            // recursive on a bare name match: the same name in its body may
-            // resolve to the other candidate, the same reasoning that excludes
-            // builtin-named words in `has_self_tail_call`.
-            let self_tail =
-                crate::check::has_self_tail_call(w, &combinator_bodies) && symbols[idx] == w.name;
-            // R9: a word plus every quotation literal it materialized (element
-            // 0 is the word itself).
-            lower_word_parts(
-                &symbols[idx],
-                &w.effect,
-                &w.body,
-                self_tail,
-                None,
-                &env,
-                &resolve,
-                regs,
-                &module.instantiations,
-                &module.builtin_overloads,
-                // A monomorphic word declares no bounds (only a polymorphic
-                // word's signature can), so it can never call through a
-                // resolved trait obligation -- empty here, unlike the
-                // per-instantiation loop below.
-                empty_trait_calls(),
-                // A monomorphic word is walked once, so its own polymorphic
-                // call sites are all in the global `instantiations` table;
-                // only a *generic* body's cross-call needs per-instantiation
-                // routing.
-                empty_poly_calls(),
-                &module.resolved_fields,
-                &module.resolved_variant_fields,
-                &poly_arities,
-                &combinator_bodies,
-                EnvPlan::None,
-                &module.splice_records,
-                &module.splice_trait_calls,
-                &member_uid_seeds,
-                // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
-                // both walk `module.words` in the same order (this loop
-                // filters afterward, but `idx` still comes from the same
-                // full enumerate), so a splice this word's body performs
-                // resolves to the checker's own record for it, not another
-                // word's that happens to share a `(0, span)` key.
-                idx as u32 * crate::check::INLINE_UID_STRIDE,
-            )
-        })
-        .collect();
+    let mut funcs: Vec<IrFunc> = Vec::new();
+    for (idx, w) in module.words.iter().enumerate().filter(|(idx, _)| {
+        !drop_overload_indices.contains(idx)
+            && !poly_indices.contains(idx)
+            && !combinator_indices.contains(idx)
+            && !uncalled_operator_overloads.contains(idx)
+    }) {
+        // A word sharing its name with another candidate is not self-tail
+        // recursive on a bare name match: the same name in its body may
+        // resolve to the other candidate, the same reasoning that excludes
+        // builtin-named words in `has_self_tail_call`.
+        let self_tail =
+            crate::check::has_self_tail_call(w, &combinator_bodies) && symbols[idx] == w.name;
+        // R9: a word plus every quotation literal it materialized (element
+        // 0 is the word itself).
+        funcs.extend(lower_word_parts(
+            &symbols[idx],
+            &w.effect,
+            &w.body,
+            self_tail,
+            None,
+            &env,
+            &resolve,
+            regs,
+            &module.instantiations,
+            &module.builtin_overloads,
+            // A monomorphic word declares no bounds (only a polymorphic
+            // word's signature can), so it can never call through a
+            // resolved trait obligation -- empty here, unlike the
+            // per-instantiation loop below.
+            empty_trait_calls(),
+            // A monomorphic word is walked once, so its own polymorphic
+            // call sites are all in the global `instantiations` table;
+            // only a *generic* body's cross-call needs per-instantiation
+            // routing.
+            empty_poly_calls(),
+            &module.resolved_fields,
+            &module.resolved_variant_fields,
+            &poly_arities,
+            &combinator_bodies,
+            EnvPlan::None,
+            &module.splice_records,
+            &module.splice_trait_calls,
+            &member_uid_seeds,
+            // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
+            // both walk `module.words` in the same order (this loop
+            // filters afterward, but `idx` still comes from the same
+            // full enumerate), so a splice this word's body performs
+            // resolves to the checker's own record for it, not another
+            // word's that happens to share a `(0, span)` key.
+            idx as u32 * crate::check::INLINE_UID_STRIDE,
+        )?);
+    }
 
     // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
     // Every call site of a polymorphic word wrote a `CallInst` keyed by its
@@ -389,7 +384,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // duration of its splice, so the transitive collision that made
             // this `0` questionable cannot happen through that path.
             0,
-        ));
+        )?);
     }
 
     // R2: the override's body, by reference, keyed the way synthesis is keyed.
@@ -411,7 +406,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &module.resolved_fields,
         &module.resolved_variant_fields,
         &combinator_bodies,
-    ));
+    )?);
 
     // Slice 7a (R1/Q2): the module's distinct quotation signatures, scanned
     // out of every function and every aggregate layout once all funcs (words,
@@ -524,7 +519,7 @@ pub fn lower_line(
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
     combinators: &crate::check::CombinatorIndex,
-) -> (IrFunc, Vec<IrFunc>, usize, usize) {
+) -> Result<(IrFunc, Vec<IrFunc>, usize, usize), String> {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
@@ -652,7 +647,7 @@ pub fn lower_line(
     b.stack = stack;
 
     // A REPL expr line is not a word body, so nothing is in self-tail position.
-    b.lower_terms(terms, false);
+    b.lower_terms(terms, false)?;
 
     // Epilogue: store each result slot back to the buffer at its cumulative
     // byte offset. A scalar 8-byte cell is written at the value's own width: a
@@ -733,8 +728,8 @@ pub fn lower_line(
         empty_splice_records(),
         empty_splice_trait_calls(),
         empty_member_uid_seeds(),
-    );
-    (func, extra, m, out_bytes as usize)
+    )?;
+    Ok((func, extra, m, out_bytes as usize))
 }
 
 /// R9: build the concrete `StackEffect` of one instantiation `(word, θ)`,
@@ -895,7 +890,7 @@ pub(crate) fn lower_word(
     combinators: &crate::check::CombinatorIndex,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let self_tail = crate::check::has_self_tail_call(word, combinators);
     lower_word_parts(
         &word.name,
@@ -966,7 +961,7 @@ pub(crate) fn lower_instantiation(
     refs: &[RefDecl],
     generics: &GenericTypes,
     combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let effect = concrete_effect(sig, subst, arrays, owned_cells, refs, generics);
     lower_word_parts(
         symbol,
@@ -1405,7 +1400,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
         assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 1);
@@ -1438,7 +1434,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
         let ret = match last.term {
@@ -1520,7 +1517,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
         assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
@@ -1560,7 +1558,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
         let loaded = instrs(&func)
@@ -1603,7 +1602,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
         assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 0);
@@ -1652,7 +1652,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         let conv_dst = instrs(&func)
             .iter()
             .find_map(|i| match i {
@@ -1704,7 +1705,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         let calls: Vec<&str> = instrs(&func)
             .iter()
             .filter_map(|i| match i {
@@ -1746,7 +1748,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         let loaded = func
             .blocks
             .iter()
@@ -1808,7 +1811,8 @@ mod tests {
             empty_resolved_variant_fields(),
             empty_poly_arities(),
             empty_combinators(),
-        );
+        )
+        .unwrap();
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);
         assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);

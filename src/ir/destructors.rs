@@ -42,7 +42,7 @@ pub fn synthesize_aggregate_destructors(
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let Registries {
         structs,
         enums,
@@ -53,7 +53,8 @@ pub fn synthesize_aggregate_destructors(
     // R9: an override's body is lowered by `lower_word_parts`, so it can carry
     // materialized quotations of its own (element 0 is the destructor itself);
     // the glue-only cases stay single-func, wrapped so the `flatten` is uniform.
-    let struct_destructors: Vec<IrFunc> = structs
+    let mut struct_destructors: Vec<IrFunc> = Vec::new();
+    for (idx, _) in structs
         .layouts
         .iter()
         .enumerate()
@@ -61,10 +62,11 @@ pub fn synthesize_aggregate_destructors(
         // outputs, moved out by the unpack the instant the call returns, so a
         // destructor for the shell would free a linear one a second time.
         .filter(|(_, layout)| layout.is_linear && !layout.bundle)
-        .filter_map(|(idx, _)| {
-            let id = StructId::from_index(idx);
-            match overrides.get(&id) {
-                Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
+    {
+        let id = StructId::from_index(idx);
+        match overrides.get(&id) {
+            Some(DropOverride::Body(word)) => {
+                struct_destructors.extend(synthesize_struct_destructor_override(
                     id,
                     word,
                     env,
@@ -73,13 +75,12 @@ pub fn synthesize_aggregate_destructors(
                     resolved_fields,
                     resolved_variant_fields,
                     combinators,
-                )),
-                Some(DropOverride::AlreadyLoaded) => None,
-                None => Some(vec![synthesize_struct_destructor(id, env, resolve, regs)]),
+                )?)
             }
-        })
-        .flatten()
-        .collect();
+            Some(DropOverride::AlreadyLoaded) => {}
+            None => struct_destructors.push(synthesize_struct_destructor(id, env, resolve, regs)),
+        }
+    }
     let enum_destructors = enums
         .layouts
         .iter()
@@ -100,12 +101,12 @@ pub fn synthesize_aggregate_destructors(
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
         .map(|(idx, _)| synthesize_array_destructor(ArrayId::from_index(idx), env, resolve, regs));
-    struct_destructors
+    Ok(struct_destructors
         .into_iter()
         .chain(enum_destructors)
         .chain(cell_destructors)
         .chain(array_destructors)
-        .collect()
+        .collect())
 }
 
 /// One step of the route a fused destructor loop walks from a type back to
@@ -378,7 +379,7 @@ fn synthesize_struct_destructor_override(
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     // R9: element 0 is the override body itself, renamed to the destructor
     // symbol every call site already targets; any materialized quotations it
     // produced follow, lowered under their own symbols.
@@ -404,9 +405,9 @@ fn synthesize_struct_destructor_override(
         empty_splice_trait_calls(),
         empty_member_uid_seeds(),
         0,
-    );
+    )?;
     funcs[0].name = struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation);
-    funcs
+    Ok(funcs)
 }
 
 /// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
