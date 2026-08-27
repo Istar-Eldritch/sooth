@@ -62,11 +62,21 @@ fn self_calls(f: &IrFunc) -> usize {
         .count()
 }
 
-/// Jumps to an already-emitted block: a loop back-edge.
+/// Jumps to *the loop's own header*, the target `begin_loop` seals block 0's
+/// `Jmp` into (`opens_a_loop_header`, below, locates the fact a header was
+/// opened at all; this locates which block it is and counts real back-edges
+/// to it). Not "any block whose `Jmp` target id is <= its own": a spliced
+/// eliminator's join block is also reached by an earlier-numbered arm's jump
+/// (an ordinary forward-branch-then-merge shape, no loop involved), which the
+/// old id-comparison heuristic miscounted as a back-edge the moment a
+/// comparison's `Ordering?` splices inside a self-tail loop's body.
 fn back_edges(f: &IrFunc) -> usize {
-    f.blocks
+    let Terminator::Jmp(header) = f.blocks[0].term else {
+        return 0;
+    };
+    f.blocks[1..]
         .iter()
-        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target == header))
         .count()
 }
 
@@ -309,5 +319,58 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
         (code, out.as_str()),
         (Some(0), "drop 0\n0"),
         "the resource is disposed once, at the base case"
+    );
+}
+
+// -- Phase 1 (test-harness soundness): back_edges repaired ------------------
+
+/// `cmp` is already `inline` today (`lib/cmp.sth:39`), so a self-tail loop
+/// whose body splices an `Ordering?` eliminator already produces the
+/// false-positive join-block shape the old id-comparison heuristic
+/// miscounted -- before the six comparisons themselves are flipped (P7.S8).
+/// Built by hand over the raw `ult`/`ugt`/`branch` primitives (not `cmp`,
+/// which needs a generic `'T: Ord` body to dispatch bare) so the witness
+/// needs no flip: `Ordering?`'s eliminator allocates its join block before
+/// its arm blocks, and the `Greater` arm's self-tail-spliced jump to that
+/// join is a second, earlier-numbered-target `Jmp` the old helper counted as
+/// a back-edge alongside the real one to the loop header.
+#[test]
+fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
+    let src = "\
+: countdown ( i64 -- i64 )\n\
+  | n |\n\
+  n 0 ult [ Less ] [ n 0 ugt [ Greater ] [ Equal ] branch ] branch\n\
+  ~[ ( Less )    drop n ]\n\
+  ~[ ( Equal )   drop n ]\n\
+  ~[ ( Greater ) drop n 1 sub countdown ]\n\
+  Ordering? ;\n\
+: main ( -- ) 5 countdown . ;\n";
+    let funcs = lowered(src);
+    let countdown = func(&funcs, "countdown");
+    assert_eq!(
+        self_calls(countdown),
+        0,
+        "the recursion is a loop, not a call"
+    );
+    assert!(
+        opens_a_loop_header(countdown),
+        "the loop must actually open"
+    );
+
+    fn old_back_edges(f: &IrFunc) -> usize {
+        f.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+            .count()
+    }
+    assert_eq!(
+        old_back_edges(countdown),
+        2,
+        "the old any-backwards-jump heuristic double-counts the eliminator's join block"
+    );
+    assert_eq!(
+        back_edges(countdown),
+        1,
+        "the repaired helper counts only the jump to the loop's own header"
     );
 }
