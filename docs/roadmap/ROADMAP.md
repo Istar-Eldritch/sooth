@@ -50,7 +50,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | Code | Phase | Weight |
 | --- | --- | --- |
 | **P0** | [Codegen spine](./P0-codegen-spine.md) | `[L]`  ✅ done |
-| **P1** | [REPL and liveness](./P1-repl-and-liveness.md) | `[M]`  ✅ done |
+| **P1** | [REPL and liveness](./P1-repl-and-liveness.md) | `[M]`  ✅ done; interactive criteria retired with the REPL |
 | **P2** | [Typed core (monomorphic)](./P2-typed-core.md) | `[L]`  ✅ done |
 | **P3** | [The linear spine](./P3-linear-spine.md) | `[XL]`  ✅ done — the point of the language |
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
