@@ -327,10 +327,13 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
 /// `cmp` is already `inline` today (`lib/cmp.sth:39`), so a self-tail loop
 /// whose body splices an `Ordering?` eliminator already produces the
 /// false-positive join-block shape the old id-comparison heuristic
-/// miscounted -- before the six comparisons themselves are flipped (P7.S8).
-/// Built by hand over the raw `ult`/`ugt`/`branch` primitives (not `cmp`,
-/// which needs a generic `'T: Ord` body to dispatch bare) so the witness
-/// needs no flip: the outer `branch`'s merge block (where `Ordering?`
+/// miscounted -- before the six comparisons themselves are flipped (P7.S8
+/// phase 2), which is what makes this witness runnable unflipped. `cmp` is
+/// reached through a `'T: Ord`-bounded `inline` wrapper because a trait
+/// member does not resolve bare in this harness ("unknown word `cmp`");
+/// both the wrapper and the `impl: Ord for i64` body it dispatches to
+/// splice, so `countdown` ends up calling nothing at all. Inside that
+/// spliced body the outer `branch`'s merge block (where `Ordering?`
 /// dispatches) is allocated before the inner `branch`'s join block, so the
 /// inner join's jump back to that earlier merge block is a second,
 /// earlier-numbered-target `Jmp` the old helper counted as a back-edge
@@ -338,9 +341,10 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
 #[test]
 fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
     let src = "\
+: mycmp inline ( 'T: Ord 'T -- Ordering ) cmp ;\n\
 : countdown ( i64 -- i64 )\n\
   | n |\n\
-  n 0 ult [ Less ] [ n 0 ugt [ Greater ] [ Equal ] branch ] branch\n\
+  n 0 mycmp\n\
   ~[ ( Less )    drop n ]\n\
   ~[ ( Equal )   drop n ]\n\
   ~[ ( Greater ) drop n 1 sub countdown ]\n\
@@ -352,6 +356,16 @@ fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
         self_calls(countdown),
         0,
         "the recursion is a loop, not a call"
+    );
+    assert_eq!(
+        countdown
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter(|i| matches!(i, Instr::Call(..)))
+            .count(),
+        0,
+        "the eliminator reaches the body by splicing, not by a call"
     );
     assert!(
         opens_a_loop_header(countdown),
