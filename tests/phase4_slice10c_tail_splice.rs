@@ -374,3 +374,32 @@ fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
         "the repaired helper counts only the jump to the loop's own header"
     );
 }
+
+/// A single-variant enum eliminator's block 0 also ends in a `Jmp`
+/// (`dispatch_on_tag`'s `n == 1` case, `func_builder/quotation.rs:355`,
+/// unconditional dispatch to the lone variant block -- no comparison
+/// needed), so `opens_a_loop_header` reads `true` here despite no loop ever
+/// being built. `back_edges` must not ride on `opens_a_loop_header` (e.g. by
+/// returning it as `0`/`1`): the true count is `0`, since nothing jumps back
+/// to block 1, and this is the fixture that would catch a repair that
+/// silently collapsed to that shortcut.
+#[test]
+fn back_edges_is_zero_for_a_single_variant_eliminators_unconditional_jump() {
+    let src = "\
+type: Uno\n\
+| Solo\n\
+;\n\
+: pick ( -- Uno ) Solo ;\n\
+: main ( -- ) pick ~[ ( Solo ) drop 1 . ] Uno? ;\n";
+    let funcs = lowered(src);
+    let main = func(&funcs, "main");
+    assert!(
+        opens_a_loop_header(main),
+        "block 0 ends in an unconditional `Jmp`, same shape as a real loop header"
+    );
+    assert_eq!(
+        back_edges(main),
+        0,
+        "no loop was built, so there is no back-edge to count"
+    );
+}
