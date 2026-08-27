@@ -1622,7 +1622,8 @@ mod tests {
     }
     #[test]
     fn check_shuffle_with_no_modules_is_ungated() {
-        // R8's contract: with `modules: None` (the REPL path) an override is
+        // R8's contract: with `modules: None` (now only unit-test harnesses,
+        // since the REPL's `None` caller died in phase 7) an override is
         // never gated -- disposing it is byte-for-byte what it was before 8b.
         let structs = vec![res_struct(0, true)];
         assert!(drop_res(&structs, None, 1).is_ok());

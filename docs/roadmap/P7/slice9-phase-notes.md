@@ -989,8 +989,9 @@ The labelled exception was applied, and extended to every comment naming an item
 phase deleted (not only the six the spec listed): `check/word_families.rs` ×2 (`Ctx::Line`
 prose on `intrinsic_is_gated_out` and `drop_import_visibility_error`),
 `check/engine.rs` ×3 (the `modules`/`generics`/`mangled` field docs, `infer_probe_body`'s
-`Ctx::Word` mention, `drop_res`'s), `check/poly.rs` ×2 (`Ctx::Word.effect`, and the
-`repl.rs`-sourced `None` note), `check.rs` ×2 and `test_support.rs` ×1 (`infer_line`),
+`Ctx::Word` mention, `drop_res`'s), `check/poly.rs` ×1 (`Ctx::Word.effect`; the
+`repl.rs`-sourced `None` note at `poly.rs:489` names a fact this phase did not change --
+it stays, per the E5 table below), `check.rs` ×2 and `test_support.rs` ×1 (`infer_line`),
 `ir/destructors.rs`, `ir/driver.rs` and `ir/func_builder/mod.rs` ×2 (`lower_word`),
 `check/word_entry.rs` (`word_declares_quotation_parameter`), plus the two test-side
 mentions above. The test `ctx_word_carries_owning_module` was renamed
@@ -1070,7 +1071,10 @@ design.
   removes them. `grep -rn 'parse_line\|ast::Line\|Line::Expr\|line_terms\|lower_line' src/`
   is phase 8's precondition and this phase did not change its answer for the test tree.
 - Phase 10's E2 sweep inherits six `repl.rs`/`session` comment mentions in `src/` and the
-  three test-side retirement notes listed above.
+  three test-side retirement notes listed above. That six counts only that literal
+  spelling; the bare word `REPL` appears in prose across 154 sites in 23 files. Most of
+  those die with phases 8/9's own deletions, but phase 10 must derive its own list from
+  a fresh grep rather than scope from this six.
 - Phase 11's split-signal re-run inherits four files that shrank here: `src/check.rs`
   (−236 lines), `src/check/engine.rs`, `src/check/poly.rs`, `src/parser.rs` (unchanged
   this phase; phase 8 shrinks it).

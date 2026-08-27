@@ -1766,8 +1766,8 @@ fn self_tail_back_edge_check_still_fires_under_an_import() {
 fn combinator_called_from_drop_override_body_lowers_correctly() {
     // Regression (pre-6c bug, still present natively when this landed):
     // `synthesize_struct_destructor_override` lowered a drop override's body
-    // through a wrapper that hardcoded an *empty* combinators map. A native build's own module-level combinators
-    // exist by this point, so calling one (`twice`) from a `drop` override's
+    // through a wrapper that hardcoded an *empty* combinators map. A native
+    // build's own module-level combinators exist by this point, so calling one (`twice`) from a `drop` override's
     // body panicked at lowering ("checked user word exists") instead of
     // splicing the call, exactly like any other word body.
     let (stdout, code) = run_src(
