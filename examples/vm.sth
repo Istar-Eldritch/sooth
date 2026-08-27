@@ -38,11 +38,11 @@ type: Op
 ;
 
 type: Vm
-  prog  [Op 13]
+  prog  array[Op 13]
   pc    usize
-  stack [i64 8]
+  stack array[i64 8]
   sp    usize
-  mem   [i64 4]
+  mem   array[i64 4]
 ;
 
 type: Fetched vm Vm op Op ;
@@ -168,7 +168,7 @@ type: VmPop vm Vm val i64 ;
 \   10 Jmp   0          backward branch to L
 \   11 Load  1    (E)   push acc
 \   12 Halt             result = acc on top of stack (seeded by fill)
-: build ( -- [Op 13] )
+: build ( -- array[Op 13] )
   Halt 13 fill | prog |
   &!prog 0  >usize &!> 0  >usize Load  !
   &!prog 1  >usize &!> 11 >usize Jz    !

@@ -22,11 +22,11 @@ type: Rank
 | Over
 ;
 
-trait: Order 'T
+trait: Order['T]
   : cmp inline ( &'T &'T -- Rank ) ;
 ;
 
-trait: Show 'T
+trait: Show['T]
   : show ( &'T -- ) ;
 ;
 
@@ -69,7 +69,7 @@ impl: Show for Point
 \ required members, resolved against the caller's own `impl:` at
 \ monomorphization -- an ordinary word call, never a quotation value or a
 \ runtime vtable.
-: show_larger ( &'T: Order Show &'T -- )
+: show_larger['T: Order Show] ( &'T &'T -- )
   | b | | a |
   a b cmp
   ~[ ( Under ) drop b show ]

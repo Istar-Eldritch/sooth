@@ -61,7 +61,7 @@ fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
 /// The declarations shared by every test here: a generic `Result` over its
 /// own two type variables, and `reorder`, the brief's own probe word --
 /// consuming `Result['T 'E]`, producing `Result['T 'E] 'T`.
-const RESULT_AND_REORDER: &str = "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+const RESULT_AND_REORDER: &str = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
      : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;\n";
 
 /// T1: `reorder` is instantiated at two **asymmetric** concrete pairs
@@ -173,7 +173,7 @@ fn poly_body_constructor_off_tail_position_unifies_at_exit() {
 /// enforced, not merely assumed.
 #[test]
 fn generic_nested_depth_two_is_error() {
-    let src = "type: Box 'T | Box 'T ;\n\
+    let src = "type: Box['T] | Box 'T ;\n\
                : wrap ( 'T -- Box[Box['T]] ) Box ;\n\
                : main ( -- ) 1 wrap drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
@@ -189,7 +189,7 @@ fn generic_nested_depth_two_is_error() {
 /// located error naming the constructor and the undetermined variable.
 #[test]
 fn generic_constructor_undetermined_argument_is_error() {
-    let src = "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+    let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
                : bad ( 'T i64 -- 'T ) Err drop ;\n\
                : main ( -- ) 1 2 bad drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
@@ -206,7 +206,7 @@ fn generic_constructor_undetermined_argument_is_error() {
 /// never deferred into synthesis.
 #[test]
 fn generic_constructor_operand_mismatch_is_error() {
-    let src = "type: Pair 'T val1 'T val2 'T ;\n\
+    let src = "type: Pair['T] val1 'T val2 'T ;\n\
                : mk ( 'T -- Pair['T] ) 1 swap Pair ;\n\
                : main ( -- ) \"oops\" mk drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();
@@ -220,7 +220,7 @@ fn generic_constructor_operand_mismatch_is_error() {
 /// `Copy`), consistent with the linear spine.
 #[test]
 fn dup_on_variable_bearing_generic_slot_is_error() {
-    let src = "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+    let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
                : dupit ( 'T Result['T 'E] -- Result['T 'E] Result['T 'E] 'T ) dup ;\n\
                : main ( -- ) 1 2 Err dupit drop drop drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();

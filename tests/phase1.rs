@@ -497,7 +497,10 @@ fn shapes_dogfood_runs_full_program_in_repl() {
 fn array_and_usize_cross_repl_line_boundary_and_render() {
     let out = run_session(&["0 4 fill", "5 >usize"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["stack: <[i64 4]>", "stack: <[i64 4]> 5"]);
+    assert_eq!(
+        lines,
+        vec!["stack: <array[i64 4]>", "stack: <array[i64 4]> 5"]
+    );
 }
 
 /// Criterion 8: a REPL-scope stack exercise — array-as-struct-field, a
@@ -510,7 +513,7 @@ fn array_and_usize_cross_repl_line_boundary_and_render() {
 #[test]
 fn stack_dogfood_runs_in_repl() {
     let out = run_session(&[
-        "type: Stack items [i64 16] top usize ;",
+        "type: Stack items array[i64 16] top usize ;",
         "type: Popped rest Stack item i64 ;",
         ": empty ( -- Stack ) 0 16 fill 0 >usize Stack ;",
         ": push ( Stack i64 -- Stack ) | s x | s &top @ swap drop | i | &!s &!items i &!> x ! s &top @ swap drop 1 add | newtop | s &!top newtop ! ;",
@@ -544,7 +547,7 @@ fn stack_dogfood_runs_in_repl() {
             "1",
             "stack: <Stack>",
             "16",
-            "stack: <[i64 16]>",
+            "stack: <array[i64 16]>",
             "stack: (empty)",
         ]
     );
@@ -639,7 +642,7 @@ fn vm_dogfood_runs_in_repl() {
         &cmp,
         &boolean,
         "type: Op | Push v i64 | Add | Sub | Mul | Load addr usize | Store addr usize | Jz target usize | Jmp target usize | Halt ;",
-        "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
+        "type: Vm prog array[Op 13] pc usize stack array[i64 8] sp usize mem array[i64 4] ;",
         "type: Fetched vm Vm op Op ;",
         "type: VmPop vm Vm val i64 ;",
         ": vm-push ( Vm i64 -- Vm ) | vm x | vm &sp @ swap drop | i | &!vm &!stack i &!> x ! vm &sp @ swap drop 1 add | newsp | vm &!sp newsp ! ;",
@@ -647,7 +650,7 @@ fn vm_dogfood_runs_in_repl() {
         ": bump-pc ( Vm -- Vm ) &pc @ 1 add | newpc | &!pc newpc ! ;",
         ": fetch ( Vm -- Fetched ) | vm | vm &pc @ swap drop | i | &vm &prog i &> @ | op | vm op Fetched ;",
         ": run ( Vm Op -- i64 ) ~[ ( Push ) Push> | vm v | vm v vm-push bump-pc fetch Fetched> run ] ~[ ( Add ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b add vm-push bump-pc fetch Fetched> run ] ~[ ( Sub ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b sub vm-push bump-pc fetch Fetched> run ] ~[ ( Mul ) drop | vm | vm vm-pop VmPop> | b | vm-pop VmPop> b mul vm-push bump-pc fetch Fetched> run ] ~[ ( Load ) Load> | vm addr | &vm &mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run ] ~[ ( Store ) Store> | vm addr | vm vm-pop VmPop> | v x | &!v &!mem addr &!> x ! v bump-pc fetch Fetched> run ] ~[ ( Jz ) Jz> | vm target | vm vm-pop VmPop> 0 eq ~[ &!pc target ! ] ~[ bump-pc ] if fetch Fetched> run ] ~[ ( Jmp ) Jmp> | vm target | vm &!pc target ! fetch Fetched> run ] ~[ ( Halt ) drop | vm | vm vm-pop VmPop> swap drop ] Op? ;",
-        ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
+        ": build ( -- array[Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
         "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -1070,7 +1073,7 @@ fn poly_instantiation_freezes_callee_value_across_a_same_arity_redefinition() {
 #[test]
 fn polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2() {
     let out = run_session(&[
-        ": id ( 'T: Copy -- 'T ) ;",
+        ": id ['T: Copy] ( 'T -- 'T ) ;",
         SPY_TYPE_LINE,
         SPY_DROP_LINE,
         "0 Spy id drop",
@@ -1093,7 +1096,7 @@ fn polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2() 
 // truncation, never `defined pair`.
 #[test]
 fn polymorphic_repl_definition_resolving_to_two_outputs_is_a_located_x3() {
-    let out = run_session(&[": pair ( 'T: Copy -- 'T 'T ) dup ;"]);
+    let out = run_session(&[": pair ['T: Copy] ( 'T -- 'T 'T ) dup ;"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 2, "unexpected output:\n{out}");
     assert!(
@@ -1130,7 +1133,7 @@ fn redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds() {
         ": id ( 'T -- 'T ) ;",
         ": g ( -- ) 7 Spy id drop ;",
         "g",
-        ": id ( 'T: Copy -- 'T ) ;",
+        ": id ['T: Copy] ( 'T -- 'T ) ;",
         "g",
         "7 Spy id drop",
     ]);
@@ -1227,7 +1230,7 @@ fn consolidated_exit_session_covers_define_instantiate_dedup_and_redefine() {
         // Redefine `id`, adding a `Copy` bound: gen1. `g`'s already-compiled
         // call stays frozen to gen0 (D3/D4); only a *new* instantiation
         // sees gen1.
-        ": id ( 'T: Copy -- 'T ) ;",
+        ": id ['T: Copy] ( 'T -- 'T ) ;",
         "g",
         "7 Spy id drop",
     ]);

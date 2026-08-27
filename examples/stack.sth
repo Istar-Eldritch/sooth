@@ -12,7 +12,7 @@
 import: intrinsics * ;
 
 type: Stack 
-  items [i64 16] 
+  items array[i64 16] 
   top usize ;
 
 : empty ( -- Stack )

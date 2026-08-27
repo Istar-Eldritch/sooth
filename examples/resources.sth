@@ -1,7 +1,7 @@
 import: intrinsics * ;
 
 extern: open     ( cstr i64 -- i64 )              "open" ;
-extern: read     ( i64 &![u8 64] usize -- isize ) "read" ;
+extern: read     ( i64 &!array[u8 64] usize -- isize ) "read" ;
 extern: close-fd ( i64 -- i64 )                   "close" ;
 
 \ The resource enters the language as a one-field leaf wrapper: `Fd` owns the

@@ -1786,7 +1786,7 @@ mod tests {
         // `lib/combinators.sth`, so the unit needs no import closure.
         let ir = lower_src(&format!(
             "{TIMES_DEF}\
-             : each inline ( ['T 'N] [ 'T -- ] -- )\n\
+             : each inline ( array['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
              count ~[ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
@@ -1922,11 +1922,11 @@ mod tests {
     #[test]
     fn lower_resolved_inline_trait_member_splices_instead_of_calling() {
         let ir = lower_src(
-            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+            "trait: Doubler['T] : dbl inline ( 'T -- 'T ) ; ;\n\
              impl: Doubler for i64\n\
                : dbl | x | x x add ;\n\
              ;\n\
-             : apply_dbl inline ( 'T: Doubler -- 'T ) dbl ;\n\
+             : apply_dbl inline ['T: Doubler] ( 'T -- 'T ) dbl ;\n\
              : main ( -- ) 5 apply_dbl . ;\n",
         );
         // `apply_dbl` and `dbl` are both inline, so neither mints an IrFunc.
@@ -1963,11 +1963,11 @@ mod tests {
     #[test]
     fn lower_resolved_inline_trait_member_two_splices_share_the_members_seed() {
         let ir = lower_src(
-            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+            "trait: Doubler['T] : dbl inline ( 'T -- 'T ) ; ;\n\
              impl: Doubler for i64\n\
                : dbl | x | x x add ;\n\
              ;\n\
-             : apply2 inline ( 'T: Doubler -- 'T ) dbl dbl ;\n\
+             : apply2 inline ['T: Doubler] ( 'T -- 'T ) dbl dbl ;\n\
              : main ( -- ) 5 apply2 . ;\n",
         );
         let main = func(&ir, "main");
@@ -1995,11 +1995,11 @@ mod tests {
     #[test]
     fn lower_resolved_inline_trait_member_trait_calls_path_splices() {
         let ir = lower_src(
-            "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
+            "trait: Doubler['T] : dbl inline ( 'T -- 'T ) ; ;\n\
              impl: Doubler for i64\n\
                : dbl | x | x x add ;\n\
              ;\n\
-             : apply_dbl ( 'T: Doubler -- 'T ) dbl ;\n\
+             : apply_dbl ['T: Doubler] ( 'T -- 'T ) dbl ;\n\
              : main ( -- ) 5 apply_dbl . ;\n",
         );
         // `apply_dbl` is NOT inline, so it mints an IrFunc; `dbl` IS inline,
@@ -2036,7 +2036,7 @@ mod tests {
     #[test]
     fn lower_ord_inline_cmp_splices_impl_body_into_caller() {
         let ir = lower_src(
-            ": my_lt ( 'T: Ord 'T -- i64 )
+            ": my_lt ['T: Ord] ( 'T 'T -- i64 )
 \
              cmp
 \

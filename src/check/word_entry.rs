@@ -72,7 +72,7 @@ pub(super) fn check_word(
 /// rule that excluded it was a policy one, not a soundness one -- the splice
 /// already handles a variable-bearing body, so lifting it needed no lowering
 /// work -- and slice 10c ships its first consumers: the six comparison words
-/// (`: eq inline ( 'T: Copy Ord 'T -- bool ) ueq [ true ] [ false ] branch ;`),
+/// (`: eq inline ['T: Copy Ord] ( 'T 'T -- bool ) ueq [ true ] [ false ] branch ;`),
 /// which must be both `'T: Copy Ord`-polymorphic, to keep covering the whole
 /// numeric tower, and `inline`, or every comparison in the language becomes a
 /// real call with a frame. The builtin-name rule below is a *soundness* rule
@@ -387,7 +387,7 @@ mod tests {
         .expect("the identical shape with `inline` declared is accepted");
 
         let poly_err = check_src(
-            ": each ( ['T 'N] ~[ 'T -- ] -- )\n\
+            ": each ( array['T 'N] ~[ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr | count [ | i | drop f call ] times\n\
              arr drop ;\n\
              : main ( -- ) ;\n",
@@ -436,7 +436,8 @@ mod tests {
         // a word named `eq`, and `Ord`'s presence was incidental, not
         // load-bearing (it is now a `Bound::User`, unaffected by the
         // `inline` gate this test actually exercises).
-        const EQ: &str = ": eq inline ( 'T: Copy 'T -- Bool ) ueq [ True ] [ False ] branch ;\n";
+        const EQ: &str =
+            ": eq inline ['T: Copy] ( 'T 'T -- Bool ) ueq [ True ] [ False ] branch ;\n";
         let tokens = lex(EQ).unwrap();
         let eq = crate::test_support::parse_with_core(&tokens)
             .unwrap()

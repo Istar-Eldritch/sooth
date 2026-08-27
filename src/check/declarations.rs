@@ -1414,7 +1414,7 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
 /// bound the concrete type fails means no call site can reach both, so there
 /// is nothing to disambiguate.
 ///
-/// Slice 10c: this is what lets `core::cmp`'s `: < ( 'T: Copy Ord 'T --
+/// Slice 10c: this is what lets `core::cmp`'s `: <['T: Copy Ord] ( 'T 'T --
 /// bool )` coexist with a user's `: < ( Vec2 Vec2 -- bool )`, which slice 8a
 /// shipped and an arity-only test would now reject outright. Only the `Ord`
 /// bound is consulted (P7.S3s: an `impl: Ord` registry lookup, `Ord` no
@@ -1627,7 +1627,7 @@ fn node_edges(
             .filter_map(|(_, ty)| type_node(ty))
             .collect(),
         // An array's single containment edge is to its element type (M3): a
-        // `[T N]` contains a `T` by value, so a cycle through an array element
+        // `array[T N]` contains a `T` by value, so a cycle through an array element
         // is caught exactly as a struct/enum one, and a nested array bottoms
         // out at a scalar so the DFS terminates.
         TypeNode::Array(i) => type_node(&arrays[i].element).into_iter().collect(),
@@ -2159,7 +2159,7 @@ mod tests {
         // placeholder, so every diagnostic that prints a variant field name
         // must identify it by position instead of leaking the placeholder.
         let err = check_src(
-            "type: Option 'T | None | Some 'T ;\n: w ( Option[&i64] -- ) drop ;\n: main ( -- ) ;\n",
+            "type: Option['T] | None | Some 'T ;\n: w ( Option[&i64] -- ) drop ;\n: main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
@@ -2580,12 +2580,12 @@ mod tests {
     /// can't see that, since it builds both `GenericStructDecl`s by hand.
     #[test]
     fn duplicate_generic_struct_header_through_real_source_is_error() {
-        let err = check_src("type: Box 'T val 'T ;\ntype: Box 'T val 'T ;\n").unwrap_err();
+        let err = check_src("type: Box['T] val 'T ;\ntype: Box['T] val 'T ;\n").unwrap_err();
         assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
     }
     #[test]
     fn duplicate_generic_enum_header_through_real_source_is_error() {
-        let err = check_src("type: E 'T | V a 'T ;\ntype: E 'T | V a 'T ;\n").unwrap_err();
+        let err = check_src("type: E['T] | V a 'T ;\ntype: E['T] | V a 'T ;\n").unwrap_err();
         assert!(err.contains("duplicate type `E`"), "unexpected: {err}");
     }
     /// Two words of the same name in one module are rejected; the same pair
@@ -2983,7 +2983,7 @@ mod tests {
     }
     #[test]
     fn check_extern_with_array_parameter_is_error() {
-        let src = "extern: foo ( [i64 4] -- i64 ) \"foo\" ;";
+        let src = "extern: foo ( array[i64 4] -- i64 ) \"foo\" ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("owned aggregate"), "unexpected message: {err}");
     }
@@ -3078,7 +3078,7 @@ mod tests {
     fn check_value_recursion_through_array_element_is_error() {
         // X5/R14/M3: a struct containing itself via an array element is a
         // recursive definition (infinite size), caught by the DFS.
-        let err = check_src("type: Node kids [Node 4] ;").unwrap_err();
+        let err = check_src("type: Node kids array[Node 4] ;").unwrap_err();
         assert!(err.contains("recursive"), "unexpected message: {err}");
         assert!(err.contains("Node"), "should name the cycle: {err}");
     }
@@ -3215,7 +3215,7 @@ mod tests {
         // definition survives the recursion rule.  The array destructor
         // (Phase 4) disposes each `^Node` cell, so the linear element is now
         // admitted rather than rejected.
-        check_src("type: Node kids [^Node 4] ;").unwrap();
+        check_src("type: Node kids array[^Node 4] ;").unwrap();
     }
     #[test]
     fn check_struct_enum_mixed_recursion_is_error_not_hang() {
@@ -3232,14 +3232,14 @@ mod tests {
         // until the whole module is parsed).  The synthesized array destructor
         // (Phase 4) disposes each linear element, so this now compiles.
         check_src(&format!(
-            "{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Bag xs array[Spy 2] ; : main ( -- ) 0 . ;"
         ))
         .unwrap();
     }
     #[test]
     fn linear_array_element_in_word_signature_is_ok() {
         check_src(&format!(
-            "{SPY_DEF}: w ( [Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}: w ( array[Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
         ))
         .unwrap();
     }
@@ -3249,20 +3249,20 @@ mod tests {
         // transitively; the array destructor calls `emit_drop` on each
         // element, which dispatches to `Holds`'s struct destructor.
         check_src(&format!(
-            "{SPY_DEF}type: Holds s Spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Holds s Spy ; type: Arr a array[Holds 2] ; : main ( -- ) 0 . ;"
         ))
         .unwrap();
     }
     #[test]
     fn linear_array_element_indirect_via_linear_struct_in_signature_is_ok() {
         check_src(&format!(
-            "{SPY_DEF}type: Holds s Spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Holds s Spy ; : w ( array[Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
         ))
         .unwrap();
     }
     #[test]
     fn copy_array_element_is_ok() {
-        check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
+        check_src("type: V xs array[i64 4] ; : main ( -- ) 0 . ;").unwrap();
     }
     /// P7 slice 3c (R1.2 phase 3 review fix): unlike `array_of_owned_is_error`,
     /// this element reaches `module.slices` through the *type spelling*
@@ -3306,14 +3306,14 @@ mod tests {
     fn array_of_owned_is_ok() {
         // An array of owning cells: the array destructor (Phase 4) calls
         // `emit_drop` on each `^i64`, which dispatches to the cell destructor.
-        check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
+        check_src(": w ( array[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
     fn owned_of_linear_array_is_ok() {
         // An owning cell wrapping a linear array: the cell destructor drops
         // the payload (the array), which dispatches to the array destructor.
         check_src(&format!(
-            "{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}: w ( ^array[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
         ))
         .unwrap();
     }
@@ -3321,14 +3321,14 @@ mod tests {
     fn nested_array_of_owned_is_ok() {
         // A cell wrapping an array of cells: the cell destructor drops the
         // array, whose destructor drops each `^i64` cell.
-        check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
+        check_src(": w ( ^array[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
     fn array_of_struct_holding_owned_is_ok() {
         // An array whose element only holds a cell transitively: the array
         // destructor disposes each `Holds`, whose struct destructor disposes
         // the `^i64` field.
-        check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;").unwrap();
+        check_src("type: Holds c ^i64 ; type: Arr a array[Holds 2] ; : main ( -- ) 0 . ;").unwrap();
     }
     #[test]
     fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
@@ -3555,7 +3555,7 @@ mod tests {
     #[test]
     fn check_trait_decls_duplicate_same_module_is_error() {
         let err = trait_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\ntrait: Show 'T : show ( &'T -- ) ; ;",
+            "trait: Show['T] : show ( &'T -- ) ; ;\ntrait: Show['T] : show ( &'T -- ) ; ;",
         )
         .unwrap_err();
         assert!(err.contains("duplicate trait `Show`"), "{err}");
@@ -3566,7 +3566,7 @@ mod tests {
         // R1: the cross-kind collision `colliding_name_kind` was generalized
         // to catch (`trait: Point` alongside `type: Point`), via the new
         // `check_trait_decls` call site, not a bare `traits` arm.
-        let err = trait_check_src("type: Point x i64 ;\ntrait: Point 'T : foo ( &'T -- ) ; ;")
+        let err = trait_check_src("type: Point x i64 ;\ntrait: Point['T] : foo ( &'T -- ) ; ;")
             .unwrap_err();
         assert!(
             err.contains("already the name of a type"),
@@ -3576,7 +3576,7 @@ mod tests {
 
     #[test]
     fn check_trait_decls_ok_for_a_clean_declaration() {
-        trait_check_src("trait: Show 'T : show ( &'T -- ) ; ;").unwrap();
+        trait_check_src("trait: Show['T] : show ( &'T -- ) ; ;").unwrap();
     }
 
     /// P7.S3p (ruling 5) + P7.S3t: the gate is "takes the trait variable
@@ -3588,7 +3588,7 @@ mod tests {
     #[test]
     fn member_binds_trait_var_accepts_any_receiver_position() {
         let tokens = lex(
-            "trait: T 'T : at ( &'T i64 -- i64 ) ; : sink ( i64 'T -- ) ; : fresh ( -- i64 ) ; ;",
+            "trait: T['T] : at ( &'T i64 -- i64 ) ; : sink ( i64 'T -- ) ; : fresh ( -- i64 ) ; ;",
         )
         .unwrap();
         let module = crate::parser::parse(&tokens).unwrap();
@@ -3607,7 +3607,7 @@ mod tests {
 
     #[test]
     fn check_trait_decls_accepts_a_member_binding_no_receiver() {
-        trait_check_src("trait: Show 'T : fresh ( -- i64 ) ; ;").unwrap();
+        trait_check_src("trait: Show['T] : fresh ( -- i64 ) ; ;").unwrap();
     }
 
     /// The gate is syntactic, so a receiver mentioned only *nested* inside a
@@ -3617,7 +3617,8 @@ mod tests {
     /// and must not conflate this shape with the (now-legal) nullary case.
     #[test]
     fn check_trait_decls_rejects_a_receiver_nested_in_an_array_input() {
-        let err = trait_check_src("trait: Show 'T : sum ( [ 'T 4 ] -- i64 ) ; ;").unwrap_err();
+        let err =
+            trait_check_src("trait: Show['T] : sum ( array[ 'T 4 ] -- i64 ) ; ;").unwrap_err();
         assert!(
             err.contains("`sum` of `Show`")
                 && err.contains("never takes `'T` (or `&'T`) directly as an input"),
@@ -3632,7 +3633,7 @@ mod tests {
     #[test]
     fn check_impl_decls_ok_for_a_matching_member_body() {
         impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;",
@@ -3644,7 +3645,7 @@ mod tests {
     fn check_impl_decls_orphan_scalar_target_names_only_the_trait_module() {
         // A scalar declares no module of its own, so "or the module declaring
         // `i64`" would name a home that cannot exist.
-        let tokens = lex("trait: Show 'T : show ( &'T -- ) ; ;\n\
+        let tokens = lex("trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;")
@@ -3668,7 +3669,7 @@ mod tests {
         // `statics` arm: `check_static_decls` runs first (driver.rs), so the
         // clash is caught from the static's own call site via the `traits`
         // arm, whichever order the two are declared in.
-        let tokens = lex("trait: Show 'T : show ( &'T -- ) ; ;\nstatic: Show i64 = 0 ;").unwrap();
+        let tokens = lex("trait: Show['T] : show ( &'T -- ) ; ;\nstatic: Show i64 = 0 ;").unwrap();
         let module = crate::parser::parse(&tokens).unwrap();
         let err = check_static_decls(&module).unwrap_err();
         assert!(err.contains("already the name of a trait"), "{err}");
@@ -3677,7 +3678,7 @@ mod tests {
     #[test]
     fn check_impl_decls_missing_member_is_error() {
         let err = impl_check_src(
-            "trait: Eq 'T : eq ( &'T &'T -- ) ; : hash ( &'T -- ) ; ;\n\
+            "trait: Eq['T] : eq ( &'T &'T -- ) ; : hash ( &'T -- ) ; ;\n\
              impl: Eq for i64\n\
                : eq | a b | a drop b drop ;\n\
              ;",
@@ -3692,7 +3693,7 @@ mod tests {
     #[test]
     fn check_impl_decls_duplicate_member_is_error() {
         let err = impl_check_src(
-            "trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+            "trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
              type: Point n i64 ;\n\
              impl: Getter for Point\n\
                : get | p | p &n @ ;\n\
@@ -3706,7 +3707,7 @@ mod tests {
     #[test]
     fn check_impl_decls_duplicate_impl_is_error() {
         let err = impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;\n\
@@ -3724,11 +3725,11 @@ mod tests {
     #[test]
     fn check_impl_decls_alpha_equivalent_generic_targets_are_duplicate() {
         let err = impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
-             impl: Show for ['U 'M]\n\
+             impl: Show for array['U 'M]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -3743,11 +3744,11 @@ mod tests {
     #[test]
     fn check_impl_decls_bounded_and_unbounded_at_same_pattern_are_distinct() {
         impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
-             impl: Show for ['T 'N] where 'T: Show\n\
+             impl: Show for array['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -3757,11 +3758,11 @@ mod tests {
     #[test]
     fn check_impl_decls_same_pattern_same_bounds_is_duplicate() {
         let err = impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'T: Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\
-             impl: Show for ['T 'N] where 'T: Show\n\
+             impl: Show for array['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -3774,11 +3775,11 @@ mod tests {
         // Alpha-equivalent targets with the same bound set are duplicates,
         // even though the variable names differ ('T vs 'U).
         let err = impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'T: Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\
-             impl: Show for ['U 'M] where 'U: Show\n\
+             impl: Show for array['U 'M] where 'U: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -3788,15 +3789,15 @@ mod tests {
 
     #[test]
     fn check_impl_decls_overlapping_unequal_targets_accepted() {
-        // `['T N]` and `['T 4]` overlap at `[i64 4]` but are not equal, so
+        // `['T N]` and `array['T 4]` overlap at `array[i64 4]` but are not equal, so
         // they are accepted as declarations (the overlap is resolved by
         // specificity at the dispatch site, not rejected here).
         impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
-             impl: Show for ['T 4]\n\
+             impl: Show for array['T 4]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -3810,13 +3811,13 @@ mod tests {
 
     #[test]
     fn check_impl_decls_generic_impl_outside_trait_module_is_orphan_error() {
-        // `impl: Show for ['T 'N]` in module 0 (the default), with `Show` in
+        // `impl: Show for array['T 'N]` in module 0 (the default), with `Show` in
         // module 1. A generic target names no struct/enum, so
         // `impl_target_module` returns `None` and the orphan rule requires the
         // impl to live in the trait's module (module 1).
-        let src = "trait: Show 'T : show ( &'T -- ) ; ;\n\
+        let src = "trait: Show['T] : show ( &'T -- ) ; ;\n\
              type: Foo x i64 ;\n\
-             impl: Show for ['T 'N]\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n";
         let tokens = crate::lexer::lex(src).unwrap();
@@ -3836,22 +3837,22 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("declares no module of its own"), "{err}");
-        // R9: the diagnostic must name the target shape family (e.g. `['T 'N]`),
+        // R9: the diagnostic must name the target shape family (e.g. `array['T 'N]`),
         // not a scalar, so the user can see *what* was orphaned.
         assert!(
-            err.contains("['T 'N]"),
+            err.contains("array['T 'N]"),
             "should name the target shape: {err}"
         );
     }
 
     #[test]
     fn check_impl_decls_generic_impl_in_trait_module_accepted() {
-        // The same generic `impl: Show for ['T 'N]` in the trait's own module
+        // The same generic `impl: Show for array['T 'N]` in the trait's own module
         // (module 0 for both) is accepted — the orphan rule's legal home.
         impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;
+            "trait: Show['T] : show ( &'T -- ) ; ;
 \
-             impl: Show for ['T 'N]
+             impl: Show for array['T 'N]
 \
                : show | a | a drop ;
 \
@@ -3869,7 +3870,7 @@ mod tests {
         // Trait and impl in module 0; struct also in module 0 (trait's module
         // == impl's module → accepted).
         impl_check_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;
+            "trait: Show['T] : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \
@@ -3886,7 +3887,7 @@ mod tests {
     fn check_impl_decls_concrete_impl_in_target_module_accepted() {
         // Trait in module 1, struct and impl in module 0 (target's module
         // == impl's module → accepted).
-        let src = "trait: Show 'T : show ( &'T -- ) ; ;
+        let src = "trait: Show['T] : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \
@@ -3912,7 +3913,7 @@ mod tests {
     fn check_impl_decls_concrete_impl_outside_both_modules_is_orphan_error() {
         // Trait in module 1, struct in module 2, impl in module 0 (neither
         // the trait's nor the target's module → rejected).
-        let src = "trait: Show 'T : show ( &'T -- ) ; ;
+        let src = "trait: Show['T] : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \

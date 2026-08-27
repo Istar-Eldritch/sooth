@@ -276,13 +276,13 @@ fn module_has_slice(ir: &IrModule) -> bool {
     })
 }
 
-/// The QBE aggregate symbol for array `idx`: the `[T N]` spelling is not a
+/// The QBE aggregate symbol for array `idx`: the `array[T N]` spelling is not a
 /// valid QBE identifier (it contains `[`, spaces, `]`), so an array's `:A`
 /// name is derived from its `ArrayId` index instead, which is unique per
 /// compilation unit. A struct/enum aggregate keeps its declared spelling but
 /// goes through `qbe_name` (injectively) at every emission site, since a
 /// hyphenated user type name -- and a monomorphized generic instantiation's
-/// `Box[i64]` registry name -- are no more valid QBE identifiers than `[T N]`.
+/// `Box[i64]` registry name -- are no more valid QBE identifiers than `array[T N]`.
 fn array_type_symbol(idx: usize) -> String {
     format!("arr_{idx}")
 }
@@ -1952,7 +1952,7 @@ mod tests {
         // The module always emits the OOB trap helper, which writes the
         // located message to stderr (`dprintf` fd 2 + `$oobfmt`) and `exit`s
         // nonzero, ending in `hlt` so it aborts rather than falls through.
-        let il = emit_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
+        let il = emit_src(": w ( array[i64 4] usize -- i64 ) | a i | &a i &> @ ;");
         assert!(il.contains("$sooth_oob_trap("), "missing trap helper: {il}");
         assert!(
             il.contains("data $oobfmt"),
@@ -1998,7 +1998,7 @@ mod tests {
             "the range trap aborts like the index trap: {il}"
         );
 
-        let no_slice = emit_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
+        let no_slice = emit_src(": w ( array[i64 4] usize -- i64 ) | a i | &a i &> @ ;");
         assert!(
             !no_slice.contains("sooth_subslice_trap") && !no_slice.contains("subslicefmt"),
             "a slice-free module emits neither the range helper nor its data: {no_slice}"
@@ -2884,7 +2884,7 @@ mod tests {
     /// The buffer dogfood plus a struct-copy control word in the same
     /// module, so the two structural criteria read the same emitted IL.
     const MUTATION_PROBE: &str = "\
-type: Buf  data ^[u8 64]  len usize ;
+type: Buf  data ^array[u8 64]  len usize ;
 type: Counter n i64 ;
 
 : new ( -- Buf )

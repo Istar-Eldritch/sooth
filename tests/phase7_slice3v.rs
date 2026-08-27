@@ -107,7 +107,7 @@ fn dropping_an_owning_closure_in_a_generic_body_disposes_its_capture_once() {
         "drop-owning-poly",
         &format!(
             "{SPY_DEF}{MK_DEF}\
-             : g ( 'T: Copy -- 'T ) | x | 7 Spy mk drop x ;\n\
+             : g ['T: Copy] ( 'T -- 'T ) | x | 7 Spy mk drop x ;\n\
              : main ( -- ) 5 g . ;\n"
         ),
     );
@@ -279,7 +279,7 @@ fn an_owning_field_disposes_alongside_its_siblings_exactly_once() {
 fn an_array_element_owning_closure_is_still_rejected() {
     let prog = Scratch::write(
         "array-elem",
-        "type: Arr xs [owning [ -- ] 2] ;\n: main ( -- ) ;\n",
+        "type: Arr xs array[owning [ -- ] 2] ;\n: main ( -- ) ;\n",
     );
     assert_eq!(
         build_error(prog.path()),

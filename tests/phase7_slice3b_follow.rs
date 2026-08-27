@@ -108,7 +108,7 @@ fn times_in_a_non_inline_generic_body_compiles_and_runs() {
     // exit-row join changes the printed value rather than the build.
     let src = format!(
         "{}\
-         : lower ( 'T: Copy Ord 'T i64 -- 'T ) ~[ | i | swap ] times drop ;\n\
+         : lower ['T: Copy Ord] ( 'T 'T i64 -- 'T ) ~[ | i | swap ] times drop ;\n\
          : main ( -- )\n\
            5 7 3 lower .\n\
            5 7 2 lower .\n\
@@ -131,8 +131,8 @@ fn user_row_combinator_in_a_non_inline_generic_body_compiles_and_runs() {
     // own body, once or twice, rather than checked and discarded.
     let src = format!(
         "{ONCE_AND_TWICE}\
-         : odd  ( 'T: Copy Ord 'T -- 'T ) ~[ swap ] once  drop ;\n\
-         : even ( 'T: Copy Ord 'T -- 'T ) ~[ swap ] twice drop ;\n\
+         : odd  ['T: Copy Ord] ( 'T 'T -- 'T ) ~[ swap ] once  drop ;\n\
+         : even ['T: Copy Ord] ( 'T 'T -- 'T ) ~[ swap ] twice drop ;\n\
          : main ( -- ) 5 7 odd . 5 7 even . 2.5 3.5 odd . 2.5 3.5 even . ;\n"
     );
     let scratch = Scratch::write("user-row", &src);
@@ -154,7 +154,7 @@ fn single_arm_times_arm_deepening_the_row_is_error() {
         "times-deepens",
         &format!(
             "{}\
-             : bad ( 'T: Copy Ord 'T i64 -- 'T ) ~[ dup ] times drop ;\n\
+             : bad ['T: Copy Ord] ( 'T 'T i64 -- 'T ) ~[ dup ] times drop ;\n\
              : main ( -- ) 5 7 3 bad . ;\n",
             import_lib("combinators.sth", "times")
         ),
@@ -176,7 +176,7 @@ fn single_arm_times_arm_consuming_the_row_is_error() {
         "times-consumes",
         &format!(
             "{}\
-             : bad ( 'T: Copy Ord 'T i64 -- 'T ) ~[ | i | drop ] times ;\n\
+             : bad ['T: Copy Ord] ( 'T 'T i64 -- 'T ) ~[ | i | drop ] times ;\n\
              : main ( -- ) 5 7 3 bad . ;\n",
             import_lib("combinators.sth", "times")
         ),
@@ -197,7 +197,7 @@ fn times_arm_leaving_a_rigid_variable_as_a_concrete_type_is_error() {
         "times-rigid",
         &format!(
             "{}\
-             : bad ( 'T: Copy Ord 'T i64 -- 'T ) ~[ | i | drop 1 ] times drop ;\n\
+             : bad ['T: Copy Ord] ( 'T 'T i64 -- 'T ) ~[ | i | drop 1 ] times drop ;\n\
              : main ( -- ) 5 7 3 bad . ;\n",
             import_lib("combinators.sth", "times")
         ),
@@ -240,7 +240,7 @@ fn narrowed_guard_keeps_branch_and_tag_located() {
     ] {
         let err = build_err(
             name,
-            &format!(": bad ( 'T: Copy Ord 'T -- 'T ) {body} ;\n: main ( -- ) 5 7 bad . ;\n"),
+            &format!(": bad ['T: Copy Ord] ( 'T 'T -- 'T ) {body} ;\n: main ( -- ) 5 7 bad . ;\n"),
         );
         assert!(
             err.contains(&format!(
@@ -326,7 +326,7 @@ fn shape_changing_arms_disagreeing_on_a_rigid_variable_is_error() {
     // checked) is what the rejection refuses.
     let err = build_err(
         "if-rigid",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop ] ~[ drop drop 1 ] if ;\n\
+        ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop ] ~[ drop drop 1 ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -344,7 +344,7 @@ fn shape_changing_arms_disagreeing_on_depth_is_error() {
     // shorter arm's slots all agree with the longer arm's prefix.
     let err = build_err(
         "if-depth",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop ] ~[ swap ] if ;\n\
+        ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop ] ~[ swap ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -368,7 +368,7 @@ fn non_literal_arm_operand_is_located_and_does_not_panic() {
     // tell the two apart.
     let not_a_quotation = build_err(
         "oq4-value",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) True 1 ~[ swap drop ] if ;\n\
+        ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) True 1 ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -379,7 +379,7 @@ fn non_literal_arm_operand_is_located_and_does_not_panic() {
     );
     let through_a_local = build_err(
         "oq4-local",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) ~[ drop ] | f | True f ~[ swap drop ] if ;\n\
+        ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) ~[ drop ] | f | True f ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -398,7 +398,7 @@ fn ordinary_bracket_arm_is_the_inline_parameter_diagnostic() {
     // mistake, so the two paths do not disagree about one spelling.
     let err = build_err(
         "ordinary-bracket",
-        ": bad ( 'T: Copy Ord 'T -- 'T ) True [ drop ] ~[ swap drop ] if ;\n\
+        ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) True [ drop ] ~[ swap drop ] if ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -420,7 +420,7 @@ fn arm_borrows_are_unioned_not_picked() {
     let program = |later: &str| {
         format!(
             "type: P a i64 ;\n\
-             : bad ( 'T: Copy P P -- 'T )\n\
+             : bad ['T: Copy] ( 'T P P -- 'T )\n\
                | x y | True ~[ &!x ] ~[ &!y ] if\n\
                {later} drop drop ;\n\
              : main ( -- ) ;\n"
@@ -446,7 +446,7 @@ fn cross_arm_borrow_mutability_disagreement_is_error() {
     let err = build_err(
         "mutability",
         "type: P a i64 ;\n\
-         : bad ( 'T: Copy P -- 'T ) | x | True ~[ &!x @ drop ] ~[ &x @ drop ] if ;\n\
+         : bad ['T: Copy] ( 'T P -- 'T ) | x | True ~[ &!x @ drop ] ~[ &x @ drop ] if ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
@@ -514,7 +514,7 @@ fn a_slot_declared_above_a_produced_row_is_located() {
         "above-the-row",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T i64 ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T i64 ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
          : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
@@ -534,7 +534,7 @@ fn a_slot_declared_above_a_produced_row_is_stripped_and_grounds() {
     // alone.
     let src = ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 ] pick ;\n\
          : main ( -- ) 5 7 bad . ;\n";
     let scratch = Scratch::write("above-the-row-stripped", src);
     let (stdout, code) = build_and_run(scratch.path());
@@ -555,7 +555,7 @@ fn a_suffix_slot_disagreeing_with_the_declared_type_is_error() {
         "suffix-type-mismatch",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T i64 ) True ~[ drop 1 ] ~[ drop True ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T i64 ) True ~[ drop 1 ] ~[ drop True ] pick ;\n\
          : main ( -- ) 5 7 bad . . ;\n",
     );
     assert!(
@@ -582,7 +582,7 @@ fn a_suffix_shorter_than_the_declared_row_is_error() {
         "suffix-too-short",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- ) True ~[ drop drop ] ~[ drop drop ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- ) True ~[ drop drop ] ~[ drop drop ] pick ;\n\
          : main ( -- ) 5 7 bad ;\n",
     );
     assert!(
@@ -607,7 +607,7 @@ fn arms_sharing_a_row_with_different_declared_suffix_types_is_error() {
         "divergent-suffix-type",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b Bool ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop False ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop False ] pick ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -630,7 +630,7 @@ fn arms_sharing_a_row_with_different_declared_suffix_lengths_is_error() {
         "divergent-suffix-length",
         ": pick inline ( ..a Bool ~[ ..a -- ..b i64 ] ~[ ..a -- ..b i64 i64 ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 2 ] pick ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop 1 ] ~[ swap drop 1 2 ] pick ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -656,7 +656,7 @@ fn an_abstract_declared_suffix_is_still_the_cannot_ground_rejection() {
         "abstract-suffix",
         ": pick inline ( ..a Bool ~[ ..a -- ..b 'X ] ~[ ..a -- ..b 'X ] -- ..b )\n\
            | pick--e | | pick--t | | pick--c | pick--c tag pick--t pick--e branch drop ;\n\
-         : bad ( 'T: Copy Ord 'T -- 'T ) True ~[ drop 1 ] ~[ drop 1 ] pick drop ;\n\
+         : bad ['T: Copy Ord] ( 'T 'T -- 'T ) True ~[ drop 1 ] ~[ drop 1 ] pick drop ;\n\
          : main ( -- ) 5 7 bad . ;\n",
     );
     assert!(
@@ -684,7 +684,7 @@ fn inline_generic_body_still_splices_a_row_combinator() {
     // retires from the `inline` surface. See P7.S3s R5/S3o for why the
     // comparisons themselves cannot stay `inline`.
     let src =
-        ": mymax inline ( 'T: Copy 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
+        ": mymax inline ['T: Copy] ( 'T 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
                : main ( -- ) 2 9 mymax . 9.5 2.5 mymax . ;\n";
     let scratch = Scratch::write("inline-splice", src);
     let (stdout, code) = build_and_run(scratch.path());
@@ -699,7 +699,7 @@ fn inline_generic_body_still_splices_a_row_combinator() {
 /// self-recursion (`P7.S3g`'s standing limit).
 ///
 /// `clampsum` takes three `'T` parameters (`hi`, `lo`, `val`) plus the
-/// iteration count: `( 'T: Copy Ord 'T 'T i64 -- 'T )` is the spec's own
+/// iteration count: `['T: Copy Ord] ( 'T 'T 'T i64 -- 'T )` is the spec's own
 /// literal header, and the bound-declaring first `'T` is itself an input, so
 /// three `'T` values enter, not two. Each iteration clamps `val` into
 /// `[lo, hi]` in two comparisons, each its own `if`: `over over gt` peeks the
@@ -723,7 +723,7 @@ fn inline_generic_body_still_splices_a_row_combinator() {
 /// `gt`, so `clampsum` -- the exit-criterion program this spec's own text
 /// names -- now runs as written, never reworked into an algorithm that dodged
 /// the gap.
-const CLAMPSUM: &str = ": clampsum ( 'T: Copy Ord 'T 'T i64 -- 'T )
+const CLAMPSUM: &str = ": clampsum ['T: Copy Ord] ( 'T 'T 'T i64 -- 'T )
   ~[ | i |
      over over gt ~[ drop dup ] ~[ ] if
      rot

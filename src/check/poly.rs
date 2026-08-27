@@ -151,7 +151,7 @@ pub(super) fn poly_is_copy(
         // exclusivity rule has nothing to protect), a mutable one is not
         // (duplicating it would let two names observe or mutate through one
         // exclusive borrow). The referent's own `Copy`-ness is irrelevant: a
-        // `&['T 4]` is `Copy` even where `['T 4]` is linear.
+        // `&array['T 4]` is `Copy` even where `array['T 4]` is linear.
         PolyType::Ref(_, mutable) => !*mutable,
         // P7.S3n (R3): mirrors `is_copy` on `Type::OwnedCell` -- always
         // linear regardless of payload, so the payload is not consulted.
@@ -318,8 +318,8 @@ impl PolyScope {
     }
 }
 
-/// Whether a `PolyType` slot holds a reference: a poly one (`&['T 4]`, from a
-/// body borrow) or a fully concrete one (`&[i64 4]`, from a declared input).
+/// Whether a `PolyType` slot holds a reference: a poly one (`&array['T 4]`, from a
+/// body borrow) or a fully concrete one (`&array[i64 4]`, from a declared input).
 /// Both keep a borrow observable, so both count for `prune_dead_borrows`.
 ///
 /// P7 slice 3c (R8.3): a slice counts too, and needs no arm of its own -- it
@@ -1558,8 +1558,8 @@ pub(super) fn poly_call_term(
             }
             return Ok(stack);
         }
-        // P7 slice 3c (R10.1, phase 4): `slice ( &[T N] -- Slice[T] )` in a
-        // generic body. The buffer's *length* may be a variable (`&[i64 'N]`)
+        // P7 slice 3c (R10.1, phase 4): `slice ( &array[T N] -- Slice[T] )` in a
+        // generic body. The buffer's *length* may be a variable (`&array[i64 'N]`)
         // -- erasing it into a runtime length is what a view is for -- but its
         // element may not: a generic element is a locked non-goal (R1.2), so a
         // non-concrete one is a located rejection here rather than a shape no
@@ -1643,7 +1643,7 @@ pub(super) fn poly_call_term(
     // never fired outside the unmangled `parse_with_core` test harness. Their
     // one real capability -- a comparison on the body's own `'T`, gated on its
     // bounds -- is now a special case of the generic-callee arm below, driven
-    // by `gt`'s declared `( 'T: Copy Ord 'T -- Bool )` rather than by name.
+    // by `gt`'s declared `['T: Copy Ord] ( 'T 'T -- Bool )` rather than by name.
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
     // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
@@ -2039,7 +2039,7 @@ pub(super) fn poly_call_term(
     // walked. `sig` already *is* the callee's signature, with the same rigid
     // type-variable ids the walk is using, so this is a pure structural
     // pointwise match against `sig.inputs`/`sig.outputs`, never a fresh
-    // unification or `Subst` (D1): an operand shaped `['T 2]` does not
+    // unification or `Subst` (D1): an operand shaped `array['T 2]` does not
     // structurally equal `'T`, so recursing at a different type argument is
     // an ordinary mismatch here, not a request for a new instantiation --
     // this is what keeps the roadmap's termination hazard unreachable
@@ -4235,7 +4235,7 @@ pub(super) fn poly_reference_word(
             if recv_mut != mutable {
                 // A mutability mismatch is a *type* mismatch, not "this op
                 // rejects references" -- the monomorphic twin says
-                // `` `&>` expected `&[i64 4]`, found `&![i64 4]` ``, and the
+                // `` `&>` expected `&array[i64 4]`, found `&!array[i64 4]` ``, and the
                 // two sides here are the same array shape under the two
                 // sigils, so both render off one normalized referent.
                 let referent = PolyType::Array(Box::new(elem), len);
@@ -4764,7 +4764,7 @@ pub(super) fn poly_sig_could_match(
         // Slice 10c: an `Ord`-bounded variable admits only a type with its own
         // `impl: Ord` (P7.S3s: an ordinary `impl:` registry lookup, `Ord` no
         // longer being a reserved numeric-only predicate), and the bound is
-        // what keeps `core::cmp`'s `: lt ( 'T: Copy Ord 'T -- bool )` from
+        // what keeps `core::cmp`'s `: lt ['T: Copy Ord] ( 'T 'T -- bool )` from
         // claiming a call site meant for a user's `: lt ( Vec2 Vec2 -- bool )`.
         // Unification alone binds `'T` to anything at all, so without this the
         // library word swallows every operand type. `ord_trait_id` resolves
@@ -5119,7 +5119,7 @@ pub(super) fn check_poly_call(
     // mint two symbols and monomorphize the same specialization twice -- the
     // divergence R6 makes reachable by allowing a redundant instantiation.
     // `len` reorders the same way -- pass 1 skips the quotation input of
-    // `( [ ['T 'N] -- ] ['U 'M] ['T 'N] -- )`, so `'M` (id 1) binds before
+    // `( [ array['T 'N] -- ] array['U 'M] array['T 'N] -- )`, so `'M` (id 1) binds before
     // `'N` (id 0) -- but not *divergently*: R4 gives it no seed path, so its
     // order is a function of the callee's signature and every minting path
     // agrees. Sorted anyway because `Subst`'s derived `Eq`, which
@@ -6736,7 +6736,7 @@ fn same_class(a: &Position, b: &Position) -> bool {
 /// over the whole region -- however unconstrained *its own* internals may
 /// be. Independently flattening each pattern into same-length position
 /// vectors (the pre-fix approach) can't express this: a bare `'T` and a
-/// compound `['T 'N]` flatten to different lengths and were reported
+/// compound `array['T 'N]` flatten to different lengths and were reported
 /// incomparable no matter how the rest of the patterns compared.
 enum PairedLeaf {
     Aligned(Position, Position),
@@ -7819,7 +7819,7 @@ pub(super) fn poly_var_to_concrete_error(
 
 /// Slice 13 (E4/R-B6): an accessor with no poly-body support -- ever
 /// (`&^`, a retired fused-accessor spelling), or not yet (e.g. a fully
-/// concrete `&![T N]`
+/// concrete `&!array[T N]`
 /// parameter's accessors, folded to `PolyType::Concrete` and unmatched by
 /// any `PolyType::Ref` arm) -- located, never a silent fallthrough to an
 /// unknown-word error.
@@ -8253,12 +8253,12 @@ pub(super) fn poly_arm_local_not_consumed_error(
     )
 }
 
-/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
+/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`array['T 'N]`) -- the
 /// element cannot be statically bounds-checked without a known count.
 pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
     let where_ = ctx.rendered_word_or("`<line>`");
     format!(
-        "error: cannot index a generic-length array in {where_} (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature",
+        "error: cannot index a generic-length array in {where_} (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`array['T 4]`), or use a fixed length in this word's signature",
         span.line, span.col
     )
 }
@@ -8469,7 +8469,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
                 Len::Concrete(n) => n.to_string(),
                 Len::Var(id) => sig.len_var_names[*id as usize].clone(),
             };
-            format!("[{} {}]", poly_type_str(elem, sig), l)
+            format!("array[{} {}]", poly_type_str(elem, sig), l)
         }
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => {
             // Slice 10a (R10): the row is a separate field, not a slot in
@@ -8590,7 +8590,7 @@ mod tests {
     /// the preamble every bound-dispatch fixture below needs. `Point` rather
     /// than `i64` because a scalar local has no address to borrow.
     const SHOW: &str = "type: Point x i64 y i64 ;\n\
-         trait: Show 'T : show ( &'T -- ) ; ;\n\
+         trait: Show['T] : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n";
@@ -8601,7 +8601,7 @@ mod tests {
     #[test]
     fn trait_member_call_records_an_obligation() {
         let recorded = obligations_of(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n: main ( -- ) ;\n"
         ));
         let obs = recorded
             .get("shows")
@@ -8626,7 +8626,7 @@ mod tests {
     #[test]
     fn the_prepass_keys_every_noncombinator_poly_word() {
         let recorded = obligations_of(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : ident ( 'U -- 'U ) ;\n\
              : main ( -- ) ;\n"
         ));
@@ -8648,10 +8648,10 @@ mod tests {
     fn the_obligation_is_recorded_in_either_declaration_order() {
         let caller_first = format!(
             "{SHOW}: main ( -- ) 1 2 Point |p| &p shows p drop ;\n\
-             : shows ( &'T: Show -- ) show ;\n"
+             : shows ['T: Show] ( &'T -- ) show ;\n"
         );
         let callee_first = format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
         );
         assert_eq!(obligations_of(&caller_first)["shows"].len(), 1);
@@ -8672,8 +8672,8 @@ mod tests {
     #[test]
     fn a_generic_struct_referenced_by_a_bounded_body_mints_exactly_once() {
         let src = format!(
-            "{SHOW}type: Box 'T val 'T ;\n\
-             : shows ( &'T: Show -- ) show 7 Box drop ;\n\
+            "{SHOW}type: Box['T] val 'T ;\n\
+             : shows ['T: Show] ( &'T -- ) show 7 Box drop ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
         );
         let (module, _) = checked_like_a_build(&src).expect("the fixture checks");
@@ -8693,11 +8693,11 @@ mod tests {
     fn trait_member_call_pushes_the_declared_outputs() {
         check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Clone 'T : clone ( &'T -- 'T ) ; ;\n\
+             trait: Clone['T] : clone ( &'T -- 'T ) ; ;\n\
              impl: Clone for Point\n\
                : clone | p | p drop 1 2 Point ;\n\
              ;\n\
-             : cloned ( &'T: Clone -- 'T ) clone ;\n\
+             : cloned ['T: Clone] ( &'T -- 'T ) clone ;\n\
              : main ( -- ) ;\n",
         )
         .expect("the member's `'T` output grounds to the caller's own variable");
@@ -8711,11 +8711,11 @@ mod tests {
     fn trait_member_output_is_the_declared_one() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Clone 'T : clone ( &'T -- 'T ) ; ;\n\
+             trait: Clone['T] : clone ( &'T -- 'T ) ; ;\n\
              impl: Clone for Point\n\
                : clone | p | p drop 1 2 Point ;\n\
              ;\n\
-             : cloned ( &'T: Clone -- ) clone ;\n\
+             : cloned ['T: Clone] ( &'T -- ) clone ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
@@ -8730,11 +8730,11 @@ mod tests {
     #[test]
     fn trait_member_operand_mismatch_is_located() {
         let err = check_src(&format!(
-            "{SHOW}: shows ( 'T: Show -- ) show ;\n: main ( -- ) ;\n"
+            "{SHOW}: shows ['T: Show] ( 'T -- ) show ;\n: main ( -- ) ;\n"
         ))
         .unwrap_err();
         assert!(
-            err.contains("`show` of `Show` in `shows` (line 6, col 25) expects `&'T`, found `'T`"),
+            err.contains("`show` of `Show` in `shows` (line 6, col 30) expects `&'T`, found `'T`"),
             "{err}"
         );
     }
@@ -8749,12 +8749,12 @@ mod tests {
     fn a_member_call_beats_a_concrete_word_of_the_same_name() {
         let recorded = obligations_of(
             "type: Point x i64 y i64 ;\n\
-             trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
+             trait: Indexable['T] : at ( &'T i64 -- i64 ) ; ;\n\
              impl: Indexable for Point\n\
                : at | p n | n drop p &x @ ;\n\
              ;\n\
              : at ( i64 -- i64 ) 900 add ;\n\
-             : uses ( &'T: Indexable -- i64 ) 0 at ;\n\
+             : uses ['T: Indexable] ( &'T -- i64 ) 0 at ;\n\
              : main ( -- ) ;\n",
         );
         let obs = &recorded["uses"];
@@ -8772,11 +8772,11 @@ mod tests {
     fn a_non_trailing_receiver_dispatches_on_the_bound_variable() {
         let recorded = obligations_of(
             "type: Point x i64 y i64 ;\n\
-             trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
+             trait: Indexable['T] : at ( &'T i64 -- i64 ) ; ;\n\
              impl: Indexable for Point\n\
                : at | p n | n drop p &x @ ;\n\
              ;\n\
-             : uses ( 'U &'T: Indexable -- 'U i64 ) 0 at ;\n\
+             : uses ['T: Indexable] ( 'U &'T -- 'U i64 ) 0 at ;\n\
              : main ( -- ) ;\n",
         );
         let obs = &recorded["uses"];
@@ -8794,14 +8794,14 @@ mod tests {
     #[test]
     fn a_non_trailing_receiver_mismatch_is_located_not_unknown() {
         let err = check_src(
-            "trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
-             : uses ( 'T: Indexable -- i64 ) 0 at ;\n\
+            "trait: Indexable['T] : at ( &'T i64 -- i64 ) ; ;\n\
+             : uses ['T: Indexable] ( 'T -- i64 ) 0 at ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
             err.contains(
-                "`at` of `Indexable` in `uses` (line 2, col 35) expects `&'T`, found `'T`"
+                "`at` of `Indexable` in `uses` (line 2, col 40) expects `&'T`, found `'T`"
             ),
             "{err}"
         );
@@ -8818,7 +8818,7 @@ mod tests {
     #[test]
     fn trait_member_dispatch_rewrites_a_non_first_bound_variable() {
         check_src(&format!(
-            "{SHOW}: shows ( 'U &'T: Show -- 'U ) show ;\n: main ( -- ) ;\n"
+            "{SHOW}: shows ['T: Show] ( 'U &'T -- 'U ) show ;\n: main ( -- ) ;\n"
         ))
         .expect("show's receiver rewrites to 'T (id 1), not 'U (id 0)");
     }
@@ -8829,9 +8829,9 @@ mod tests {
     #[test]
     fn two_bounds_sharing_a_member_name_are_legal_to_declare() {
         check_src(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'T: A B -- ) drop ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['T: A B] ( &'T -- ) drop ;\n\
              : main ( -- ) ;\n",
         )
         .expect("declaring both bounds is legal without calling the shared member");
@@ -8842,14 +8842,14 @@ mod tests {
     #[test]
     fn ambiguous_trait_member_call_is_rejected() {
         let err = check_src(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'T: A B -- ) t1 ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['T: A B] ( &'T -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
-            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 21)"),
+            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 26)"),
             "{err}"
         );
         assert!(
@@ -8868,9 +8868,9 @@ mod tests {
     #[test]
     fn cross_variable_candidates_are_separated_by_the_operands() {
         let recorded = obligations_of(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'T: A &'U: B -- ) t1 t1 ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['T: A 'U: B] ( &'T &'U -- ) t1 t1 ;\n\
              : main ( -- ) ;\n",
         );
         let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
@@ -8886,9 +8886,9 @@ mod tests {
     #[test]
     fn a_candidate_wider_than_the_stack_does_not_fit() {
         let recorded = obligations_of(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T i64 i64 -- ) ; ;\n\
-             : f ( &'U: B &'T: A -- ) t1 drop ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T i64 i64 -- ) ; ;\n\
+             : f ['U: B 'T: A] ( &'U &'T -- ) t1 drop ;\n\
              : main ( -- ) ;\n",
         );
         let vars: Vec<u32> = recorded["f"].iter().map(|o| o.var).collect();
@@ -8903,10 +8903,10 @@ mod tests {
     #[test]
     fn a_same_variable_ambiguity_survives_a_bound_on_another_variable() {
         let err = check_src(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T -- ) ; ;\n\
-             trait: C 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'U: C &'T: A B -- ) t1 drop ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             trait: C['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['U: C 'T: A B] ( &'U &'T -- ) t1 drop ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
@@ -8925,14 +8925,14 @@ mod tests {
     #[test]
     fn a_cross_variable_member_call_fitting_no_candidate_names_the_operand_mismatch() {
         let err = check_src(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'T: A &'U: B i64 -- ) t1 ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['T: A 'U: B] ( &'T &'U i64 -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
-            err.contains("`t1` is required by `A` on 'T and `B` on 'U in `f` (line 3, col 30)"),
+            err.contains("`t1` is required by `A` on 'T and `B` on 'U in `f` (line 3, col 38)"),
             "{err}"
         );
         assert!(
@@ -8954,13 +8954,13 @@ mod tests {
     #[test]
     fn a_no_fit_call_on_a_trailing_receiver_member_names_every_declared_shape() {
         let err = check_src(
-            "trait: A 'T : t1 ( i64 &'T -- ) ; ;\n\
-             : f ( &'T: A &'U: A -- ) t1 ;\n\
+            "trait: A['T] : t1 ( i64 &'T -- ) ; ;\n\
+             : f ['T: A 'U: A] ( &'T &'U -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
-            err.contains("`t1` is required by `A` on 'T and `A` on 'U in `f` (line 2, col 26)"),
+            err.contains("`t1` is required by `A` on 'T and `A` on 'U in `f` (line 2, col 34)"),
             "{err}"
         );
         assert!(
@@ -8979,14 +8979,14 @@ mod tests {
     #[test]
     fn a_multi_position_duplicate_member_is_the_single_variable_ambiguity() {
         let err = check_src(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             trait: B 'T : t1 ( &'T i64 -- ) ; ;\n\
-             : f ( &'T: A B -- ) t1 ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T i64 -- ) ; ;\n\
+             : f ['T: A B] ( &'T -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
-            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 21)"),
+            err.contains("`t1` is required by both `A` and `B` on 'T (line 3, col 26)"),
             "{err}"
         );
     }
@@ -8997,8 +8997,8 @@ mod tests {
     #[test]
     fn a_repeated_bound_is_not_ambiguous_with_itself() {
         let recorded = obligations_of(
-            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
-             : f ( &'T: A A -- ) t1 ;\n\
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             : f ['T: A A] ( &'T -- ) t1 ;\n\
              : main ( -- ) ;\n",
         );
         assert_eq!(recorded["f"].len(), 1);
@@ -9015,7 +9015,7 @@ mod tests {
     #[test]
     fn user_bound_on_a_combinator_compiles() {
         check_src(&format!(
-            "{SHOW}: shows inline ( &'T: Show -- ) show ;\n: main ( -- ) ;\n"
+            "{SHOW}: shows inline ['T: Show] ( &'T -- ) show ;\n: main ( -- ) ;\n"
         ))
         .expect("a bounded inline combinator calling a bare member compiles");
     }
@@ -9030,8 +9030,8 @@ mod tests {
     #[test]
     fn bound_dispatch_on_a_bare_variable_receiver() {
         let recorded = obligations_of(
-            "trait: Eat 'T : eat ( 'T -- ) ; ;\n\
-             : eats ( 'T: Eat -- ) eat ;\n\
+            "trait: Eat['T] : eat ( 'T -- ) ; ;\n\
+             : eats ['T: Eat] ( 'T -- ) eat ;\n\
              : main ( -- ) ;\n",
         );
         assert_eq!(recorded["eats"].len(), 1);
@@ -9055,8 +9055,8 @@ mod tests {
     #[test]
     fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
         let recorded = obligations_of(
-            "trait: Eq 'T : eq ( 'T 'T -- i64 ) ; ;\n\
-             : eqs ( 'T: Eq 'T -- i64 ) eq ;\n\
+            "trait: Eq['T] : eq ( 'T 'T -- i64 ) ; ;\n\
+             : eqs ['T: Eq] ( 'T 'T -- i64 ) eq ;\n\
              : main ( -- ) 1 2 eq drop ;\n",
         );
         assert_eq!(recorded["eqs"].len(), 1);
@@ -9069,7 +9069,7 @@ mod tests {
     /// span.
     const TWO_SHOWS: &str = "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
-         trait: Show 'T : show ( &'T -- ) ; ;\n\
+         trait: Show['T] : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -9086,7 +9086,7 @@ mod tests {
     #[test]
     fn a_satisfied_bound_resolves_to_the_implementing_words_symbol() {
         let (module, _) = checked_like_a_build(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
         ))
         .expect("the fixture checks");
@@ -9109,7 +9109,7 @@ mod tests {
     #[test]
     fn two_instantiations_resolve_to_two_distinct_symbols() {
         let (module, _) = checked_like_a_build(&format!(
-            "{TWO_SHOWS}: shows ( &'T: Show -- ) show ;\n\
+            "{TWO_SHOWS}: shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop 7 Blip |b| &b shows b drop ;\n"
         ))
         .expect("the fixture checks");
@@ -9142,12 +9142,12 @@ mod tests {
     fn the_obligations_member_name_selects_the_binding() {
         let (module, _) = checked_like_a_build(
             "type: Point x i64 y i64 ;\n\
-             trait: Eq 'T : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
+             trait: Eq['T] : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
              impl: Eq for Point\n\
                : eq | a b | a drop b drop 1 ;\n\
                : hash | p | p drop 7 ;\n\
              ;\n\
-             : hashes ( &'T: Eq -- i64 ) hash ;\n\
+             : hashes ['T: Eq] ( &'T -- i64 ) hash ;\n\
              : main ( -- ) 1 2 Point |p| &p hashes drop p drop ;\n",
         )
         .expect("the fixture checks");
@@ -9169,8 +9169,8 @@ mod tests {
     #[test]
     fn each_overload_of_one_name_resolves_its_own_bodys_obligation() {
         let (module, _) = checked_like_a_build(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
-             : shows ( &'T: Show i64 -- ) drop show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
+             : shows ['T: Show] ( &'T i64 -- ) drop show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows &p 3 shows p drop ;\n"
         ))
         .expect("the fixture checks");
@@ -9205,15 +9205,15 @@ mod tests {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
-             trait: A 'T : ta ( &'T -- ) ; ;\n\
-             trait: B 'T : tb ( &'T -- ) ; ;\n\
+             trait: A['T] : ta ( &'T -- ) ; ;\n\
+             trait: B['T] : tb ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
              impl: B for PB\n\
                : tb | p | p drop ;\n\
              ;\n\
-             : f ( &'T: A &'U: B -- ) tb ta ;\n\
+             : f ['T: A 'U: B] ( &'T &'U -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
         .expect("the fixture checks");
@@ -9237,14 +9237,14 @@ mod tests {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
-             trait: A 'T : ta ( &'T -- ) ; ;\n\
+             trait: A['T] : ta ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
              impl: A for PB\n\
                : ta | p | p drop ;\n\
              ;\n\
-             : f ( &'T: A &'U: A -- ) ta ta ;\n\
+             : f ['T: A 'U: A] ( &'T &'U -- ) ta ta ;\n\
              : main ( -- ) 1 PA |a| 1 PB |b| &a &b f a drop b drop ;\n",
         )
         .expect("the fixture checks");
@@ -9261,7 +9261,7 @@ mod tests {
         resolved.sort();
         // The body's first `ta` (col 26) consumes the top input, `'U` = `PB`;
         // the second (col 29) consumes `'T` = `PA`.
-        assert_eq!(resolved, vec![(26, "ta;A;0;PB"), (29, "ta;A;0;PA")]);
+        assert_eq!(resolved, vec![(34, "ta;A;0;PB"), (37, "ta;A;0;PA")]);
     }
 
     /// R8: two traits bounding *one* variable, both implemented for the type
@@ -9275,15 +9275,15 @@ mod tests {
     fn two_traits_on_one_variable_resolve_against_their_own_impl() {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
-             trait: A 'T : ta ( &'T -- ) ; ;\n\
-             trait: B 'T : tb ( &'T -- ) ; ;\n\
+             trait: A['T] : ta ( &'T -- ) ; ;\n\
+             trait: B['T] : tb ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
              impl: B for PA\n\
                : tb | p | p drop ;\n\
              ;\n\
-             : f ( &'T: A B &'T -- ) tb ta ;\n\
+             : f ['T: A B] ( &'T &'T -- ) tb ta ;\n\
              : main ( -- ) 1 PA |a| &a &a f a drop ;\n",
         )
         .expect("the fixture checks");
@@ -9298,7 +9298,7 @@ mod tests {
             .map(|(span, symbol)| (span.col, symbol.as_str()))
             .collect();
         resolved.sort();
-        assert_eq!(resolved, vec![(25, "tb;B;0;PA"), (28, "ta;A;0;PA")]);
+        assert_eq!(resolved, vec![(30, "tb;B;0;PA"), (33, "ta;A;0;PA")]);
     }
 
     /// R8: a polymorphic combinator's body calling a bounded poly word. The
@@ -9309,7 +9309,7 @@ mod tests {
     #[test]
     fn a_bounded_call_inside_a_combinator_body_resolves() {
         checked_like_a_build(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : appq inline ( &Point ~[ -- ] -- ) | f | f call shows ;\n\
              : main ( -- ) 1 2 Point |p| &p ~[ ] appq p drop ;\n"
         ))
@@ -9324,7 +9324,7 @@ mod tests {
     #[test]
     fn two_call_sites_at_one_instantiation_record_identical_maps() {
         let (module, _) = checked_like_a_build(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows &p shows p drop ;\n"
         ))
         .expect("the fixture checks");
@@ -9348,7 +9348,7 @@ mod tests {
     fn an_unsatisfied_user_bound_names_the_missing_member_signature() {
         let err = check_src(&format!(
             "{SHOW}type: Blip n i64 ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 Blip |b| &b shows b drop ;\n"
         ))
         .unwrap_err();
@@ -9371,8 +9371,8 @@ mod tests {
     fn an_unsatisfied_multi_member_bound_lists_every_member_signature() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Eq 'T : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
-             : eqs ( &'T: Eq &'T -- i64 ) eq ;\n\
+             trait: Eq['T] : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
+             : eqs ['T: Eq] ( &'T &'T -- i64 ) eq ;\n\
              : main ( -- ) 1 2 Point |p| &p &p eqs drop p drop ;\n",
         )
         .unwrap_err();
@@ -9403,7 +9403,7 @@ mod tests {
     #[test]
     fn an_unresolvable_obligation_on_a_satisfied_bound_is_a_located_error() {
         let src = format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- ) 1 2 Point |p| &p shows p drop ;\n"
         );
         let tokens = lex(&src).unwrap();
@@ -9427,7 +9427,7 @@ mod tests {
         let err = check(&mut module).unwrap_err();
         assert_eq!(
             err,
-            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 6, col 26 in the body of `shows` (instantiated at line 7, col 32 in `main`)"
+            "error: `impl: Show for Point` binds no word for member `show`, dispatched at line 6, col 31 in the body of `shows` (instantiated at line 7, col 32 in `main`)"
         );
     }
 
@@ -9442,15 +9442,15 @@ mod tests {
     #[test]
     fn find_bound_impl_recursive_discharge_succeeds() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T : show ( &'T -- ) ; ;\n\
-             trait: Print 'T : print ( &'T -- ) ; ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             trait: Print['T] : print ( &'T -- ) ; ;\n\
              impl: Print for Point\n\
                : print | p | p drop ;\n\
              ;\n\
-             impl: Show for ['T 4] where 'T: Print\n\
+             impl: Show for array['T 4] where 'T: Print\n\
                : show | a | a drop ;\n\
              ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- )\n\
                1 2 Point |p|\n\
                p 4 fill |arr|\n\
@@ -9468,12 +9468,12 @@ mod tests {
     #[test]
     fn find_bound_impl_recursive_discharge_fails_when_bound_unmet() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T : show ( &'T -- ) ; ;\n\
-             trait: Print 'T : print ( &'T -- ) ; ;\n\
-             impl: Show for ['T 4] where 'T: Print\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             trait: Print['T] : print ( &'T -- ) ; ;\n\
+             impl: Show for array['T 4] where 'T: Print\n\
                : show | a | a drop ;\n\
              ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- )\n\
                1 2 Point |p|\n\
                p 4 fill |arr|\n\
@@ -9483,10 +9483,13 @@ mod tests {
              ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("cannot instantiate `'T` of `shows` with `[Point 4]`"),
+            err.contains("cannot instantiate `'T` of `shows` with `array[Point 4]`"),
             "{err}"
         );
-        assert!(err.contains("`[Point 4]` does not satisfy `Show`"), "{err}");
+        assert!(
+            err.contains("`array[Point 4]` does not satisfy `Show`"),
+            "{err}"
+        );
     }
 
     /// R7: a self-referential bound cycle — `impl: Show for 'T where 'T: Show`
@@ -9495,11 +9498,11 @@ mod tests {
     #[test]
     fn bound_cycle_error_self_referential_impl_is_located_error() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for 'T where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- )\n\
                1 2 Point |p|\n\
                &p shows\n\
@@ -9518,15 +9521,15 @@ mod tests {
     #[test]
     fn bound_cycle_error_transitive_cycle_is_located_error() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: A 'T : a ( &'T -- ) ; ;\n\
-             trait: B 'T : b ( &'T -- ) ; ;\n\
+             trait: A['T] : a ( &'T -- ) ; ;\n\
+             trait: B['T] : b ( &'T -- ) ; ;\n\
              impl: A for 'T where 'T: B\n\
                : a | x | x drop ;\n\
              ;\n\
              impl: B for 'T where 'T: A\n\
                : b | x | x drop ;\n\
              ;\n\
-             : calls_a ( &'T: A -- ) a ;\n\
+             : calls_a ['T: A] ( &'T -- ) a ;\n\
              : main ( -- )\n\
                1 2 Point |p|\n\
                &p calls_a\n\
@@ -9543,11 +9546,11 @@ mod tests {
     fn candidate_bounds_discharge_copy_bound_excludes_linear_type() {
         let src = "type: Spy tag i64 ;\n\
              : drop ( Spy -- ) | s | s Spy> drop ;\n\
-             trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for 'T where 'T: Copy\n\
                : show | a | a drop ;\n\
              ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- )\n\
                0 Spy |s|\n\
                &s shows\n\
@@ -9567,15 +9570,15 @@ mod tests {
     #[test]
     fn bound_cycle_no_false_positive_on_independent_resolutions() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T : show ( &'T -- ) ; ;\n\
-             trait: Print 'T : print ( &'T -- ) ; ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             trait: Print['T] : print ( &'T -- ) ; ;\n\
              impl: Print for Point\n\
                : print | p | p drop ;\n\
              ;\n\
-             impl: Show for ['T 4] where 'T: Print\n\
+             impl: Show for array['T 4] where 'T: Print\n\
                : show | a | a drop ;\n\
              ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : main ( -- )\n\
                1 2 Point |p|\n\
                p 4 fill |arr|\n\
@@ -9636,7 +9639,7 @@ mod tests {
         // arm binding each swapped instantiation's arguments correctly, not
         // about R3 construction.
         let module = checked_module(
-            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;\n\
              : show_is ( Result[i64 str] -- ) drop ;\n\
              : show_si ( Result[str i64] -- ) drop ;\n\
@@ -9658,7 +9661,7 @@ mod tests {
     #[test]
     fn poly_body_constructor_resolves_arguments_from_the_declared_output() {
         check_src(
-            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : wrap ( 'T -- Result['T i64] ) Ok ;\n\
              : main ( -- ) True wrap drop ;\n",
         )
@@ -9672,7 +9675,7 @@ mod tests {
     #[test]
     fn poly_body_constructor_undetermined_argument_is_error() {
         let err = check_src(
-            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : bad ( 'T i64 -- 'T ) Err drop ;\n\
              : main ( -- ) 1 2 bad drop ;\n",
         )
@@ -9689,7 +9692,7 @@ mod tests {
     #[test]
     fn poly_body_constructor_operand_mismatch_is_error() {
         let err = check_src(
-            "type: Pair 'T val1 'T val2 'T ;\n\
+            "type: Pair['T] val1 'T val2 'T ;\n\
              : mk ( 'T -- Pair['T] ) 1 swap Pair ;\n\
              : main ( -- ) \"oops\" mk drop ;\n",
         )
@@ -9731,7 +9734,7 @@ mod tests {
         // placeholder and monomorphizes a real call over a phantom. The guard
         // before `unify_poly_input` is what makes the R9 rejection reachable.
         let err = check_src(
-            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+            ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
              : main ( -- ) [ add ] dupit drop drop ;\n",
         )
         .expect_err("a quotation passed to a polymorphic word should be rejected");
@@ -9746,7 +9749,7 @@ mod tests {
     #[test]
     fn reject_quotation_argument_wording_at_poly_var_position() {
         let err = check_src(
-            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+            ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
              : main ( -- ) [ add ] dupit drop drop ;\n",
         )
         .expect_err("a quotation passed to a polymorphic word should be rejected");
@@ -9761,7 +9764,7 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_ground_quotation_first_position() {
         check_src(
-            ": run_it_first ( [ i64 -- i64 ] 'T: Copy -- 'T ) swap drop ;\n\
+            ": run_it_first ['T: Copy] ( [ i64 -- i64 ] 'T -- 'T ) swap drop ;\n\
              : main ( -- ) [ 1 add ] 7 run_it_first drop ;\n",
         )
         .expect("a ground quotation argument in the first position should materialize");
@@ -9769,7 +9772,7 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_ground_quotation_middle_position() {
         check_src(
-            ": run_it_mid ( 'T: Copy [ i64 -- i64 ] Bool -- 'T ) drop drop ;\n\
+            ": run_it_mid ['T: Copy] ( 'T [ i64 -- i64 ] Bool -- 'T ) drop drop ;\n\
              : main ( -- ) 7 [ 1 add ] True run_it_mid drop ;\n",
         )
         .expect("a ground quotation argument in the middle position should materialize");
@@ -9777,7 +9780,7 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_ground_quotation_last_position() {
         check_src(
-            ": run_it_last ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+            ": run_it_last ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T ) drop ;\n\
              : main ( -- ) 7 [ 1 add ] run_it_last drop ;\n",
         )
         .expect("a ground quotation argument in the last position should materialize");
@@ -9792,7 +9795,7 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_an_abstract_quotation_argument() {
         check_src(
-            ": run_abstract ( 'T: Copy [ 'T -- 'T ] -- 'T ) drop ;\n\
+            ": run_abstract ['T: Copy] ( 'T [ 'T -- 'T ] -- 'T ) drop ;\n\
              : main ( -- ) 7 [ ] run_abstract drop ;\n",
         )
         .expect("a literal argument at an abstract quotation position should materialize");
@@ -9804,7 +9807,7 @@ mod tests {
     #[test]
     fn check_poly_call_materializes_an_abstract_quotation_argument_declared_first() {
         check_src(
-            ": run_abstract_first ( [ 'T: Copy -- 'T ] 'T -- 'T ) swap drop ;\n\
+            ": run_abstract_first ['T: Copy] ( [ 'T -- 'T ] 'T -- 'T ) swap drop ;\n\
              : main ( -- ) [ ] 7 run_abstract_first drop ;\n",
         )
         .expect("grounding a quotation slot declared before its binding input should succeed");
@@ -9817,7 +9820,7 @@ mod tests {
     #[test]
     fn check_poly_call_admits_a_capturing_literal_argument() {
         check_src(
-            ": run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+            ": run_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T ) drop ;\n\
              : main ( -- ) 3 | n | 7 [ n add ] run_it drop ;\n",
         )
         .expect("an in-frame capturing literal should be admitted at the argument boundary");
@@ -9828,7 +9831,7 @@ mod tests {
     #[test]
     fn check_poly_call_rejects_an_escaping_capturing_literal_argument() {
         let err = check_src(
-            ": run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+            ": run_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T ) drop ;\n\
              : main ( -- ) [ 1 add ] | q | 7 [ q call ] run_it drop ;\n",
         )
         .expect_err("an escaping capturing literal must be rejected at the argument boundary");
@@ -9843,7 +9846,7 @@ mod tests {
     #[test]
     fn poly_call_term_calls_a_ground_quotation_param() {
         check_src(
-            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) 1 swap call ;\n\
+            ": call_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T i64 ) 1 swap call ;\n\
              : main ( -- ) 7 [ 1 add ] call_it drop drop ;\n",
         )
         .expect("`call` on a ground quotation parameter should honour its declared effect");
@@ -9856,7 +9859,7 @@ mod tests {
     /// `intern_output_bundles`); the input side gets the golden instead.
     #[test]
     fn poly_call_on_a_ground_quotation_param_pushes_outputs_in_order() {
-        check_src(": call_it ( 'T: Copy [ -- i64 Bool ] -- 'T i64 Bool ) call ;\n")
+        check_src(": call_it ['T: Copy] ( 'T [ -- i64 Bool ] -- 'T i64 Bool ) call ;\n")
             .expect("the first declared output must land deepest");
     }
     /// R3's negative, the `PolyType::Concrete` renderer arm: a ground operand
@@ -9865,7 +9868,7 @@ mod tests {
     #[test]
     fn poly_call_on_a_ground_quotation_param_ground_mismatch_is_error() {
         let err = check_src(
-            ": call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 ) True swap call ;\n\
+            ": call_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T i64 ) True swap call ;\n\
              : main ( -- ) 7 [ 1 add ] call_it drop drop ;\n",
         )
         .expect_err("a wrong operand type at a declared input must be rejected");
@@ -9881,7 +9884,7 @@ mod tests {
     /// which is why the two arms exist.
     #[test]
     fn poly_call_on_a_ground_quotation_param_variable_operand_is_error() {
-        let err = check_src(": call_it ( 'T: Copy [ i64 -- i64 ] -- i64 ) call ;\n")
+        let err = check_src(": call_it ['T: Copy] ( 'T [ i64 -- i64 ] -- i64 ) call ;\n")
             .expect_err("a type variable at a declared input must be rejected");
         assert_eq!(
             err,
@@ -9894,7 +9897,7 @@ mod tests {
     /// effect demands are not.
     #[test]
     fn poly_call_on_a_ground_quotation_param_underflow_is_error() {
-        let err = check_src(": call_it ( 'T: Copy [ i64 -- i64 ] -- i64 ) swap drop call ;\n")
+        let err = check_src(": call_it ['T: Copy] ( 'T [ i64 -- i64 ] -- i64 ) swap drop call ;\n")
             .expect_err("a declared input with nothing beneath the quotation must be rejected");
         assert!(
             err.contains("`call` needs 1 values, but the stack holds 0"),
@@ -9915,7 +9918,7 @@ mod tests {
     /// single `i64`) would wrongly claim this one.
     #[test]
     fn poly_call_on_an_abstract_quotation_param_is_accepted() {
-        check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop 1 swap call ;\n")
+        check_src(": call_it ['T: Copy] ( 'T [ i64 -- 'T ] -- 'T ) swap drop 1 swap call ;\n")
             .expect("an abstract quotation parameter is now call-able");
     }
     /// R3's underflow arm, the abstract twin of
@@ -9923,7 +9926,7 @@ mod tests {
     /// quotation is there, the operand its declared input demands is not.
     #[test]
     fn poly_call_on_an_abstract_quotation_param_underflow_is_error() {
-        let err = check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop call ;\n")
+        let err = check_src(": call_it ['T: Copy] ( 'T [ i64 -- 'T ] -- 'T ) swap drop call ;\n")
             .expect_err("a declared input with nothing beneath the quotation must be rejected");
         assert!(
             err.contains("`call` needs 1 values, but the stack holds 0"),
@@ -9937,7 +9940,7 @@ mod tests {
     #[test]
     fn poly_call_on_an_abstract_quotation_param_pops_declared_inputs_deepest_first() {
         check_src(
-            ": call_it ( 'T: Copy [ i64 Bool -- 'T ] -- 'T )\n\
+            ": call_it ['T: Copy] ( 'T [ i64 Bool -- 'T ] -- 'T )\n\
                swap drop 1 True rot call\n\
              ;\n",
         )
@@ -9951,7 +9954,7 @@ mod tests {
     #[test]
     fn poly_call_on_an_abstract_quotation_param_pushes_outputs_in_order() {
         check_src(
-            ": call_it ( 'T: Copy [ -- 'T Bool ] -- 'T Bool )\n\
+            ": call_it ['T: Copy] ( 'T [ -- 'T Bool ] -- 'T Bool )\n\
                swap drop call\n\
              ;\n",
         )
@@ -9961,11 +9964,10 @@ mod tests {
     /// equal to the declared input.
     #[test]
     fn poly_call_on_an_abstract_quotation_param_mismatch_is_error() {
-        let err =
-            check_src(": call_it ( 'T: Copy [ i64 -- 'T ] -- 'T ) swap drop True swap call ;\n")
-                .expect_err(
-                    "an operand not structurally equal to the declared input must be rejected",
-                );
+        let err = check_src(
+            ": call_it ['T: Copy] ( 'T [ i64 -- 'T ] -- 'T ) swap drop True swap call ;\n",
+        )
+        .expect_err("an operand not structurally equal to the declared input must be rejected");
         assert_eq!(
             err,
             "error: type mismatch in `call_it` (line 1)\n  \
@@ -9977,7 +9979,7 @@ mod tests {
     /// body local bound to a bare `'T` keeps its own rejection.
     #[test]
     fn poly_call_on_a_variable_local_is_still_error() {
-        let err = check_src(": call_it ( 'T: Copy -- ) | a | a call ;\n")
+        let err = check_src(": call_it ['T: Copy] ( 'T -- ) | a | a call ;\n")
             .expect_err("`call` on a type variable stays rejected");
         assert_eq!(
             err,
@@ -10136,7 +10138,7 @@ mod tests {
         // mid-body bind of `'T := i64`.
         let err = check_src(&format!(
             "{SHAPE}\
-             : bad ( 'T: Copy Shape -- 'T )\n\
+             : bad ['T: Copy] ( 'T Shape -- 'T )\n\
                ~[ ( Rect )   Rect> drop drop dup ]\n\
                ~[ ( Circle ) Circle> ]\n\
                Shape? drop ;\n\
@@ -10159,7 +10161,7 @@ mod tests {
             format!(
                 "type: P a i64 ;\n\
                  {SHAPE}\
-                 : bad ( 'T: Copy P P Shape -- 'T )\n\
+                 : bad ['T: Copy] ( 'T P P Shape -- 'T )\n\
                    | x y s | s\n\
                    ~[ ( Rect )   Rect> drop drop &!x ]\n\
                    ~[ ( Circle ) Circle> drop &!y ]\n\
@@ -10323,7 +10325,7 @@ mod tests {
         // in `combinators` at all.
         let src = "type: Bool | False | True ;\n\
                    : rowed inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call ;\n\
-                   : rowless inline ( ['T 4] ~[ 'T -- 'T ] -- ['T 4] ) | f | f call ;\n\
+                   : rowless inline ( array['T 4] ~[ 'T -- 'T ] -- array['T 4] ) | f | f call ;\n\
                    : plain ( i64 -- i64 ) 1 add ;\n\
                    : if inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n\
                      | e | | t | | c | c tag t e branch ;\n";
@@ -10354,14 +10356,14 @@ mod tests {
         // below that window makes this body fail again.
         let body = "over over gt ~[ drop ] ~[ swap drop ] unless";
         check_src(&format!(
-            ": mymin ( 'T: Copy Ord 'T -- 'T ) {body} ;\n: main ( -- ) 2 9 mymin . ;\n"
+            ": mymin ['T: Copy Ord] ( 'T 'T -- 'T ) {body} ;\n: main ( -- ) 2 9 mymin . ;\n"
         ))
         .expect("`unless` reaches the dispatch");
         // The accept alone would also be satisfied by an implementation that
         // stopped checking the arms, so the arm rule is asserted to still
         // report through *this* dispatch rather than the operand window.
         let err = check_src(
-            ": bad ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap ] unless ;\n",
+            ": bad ['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ drop ] ~[ swap ] unless ;\n",
         )
         .expect_err("the arms leave different shapes");
         assert!(
@@ -10387,11 +10389,11 @@ mod tests {
         // same on both sides.
         let body = "over over gt ~[ drop ] ~[ swap drop ]";
         check_src(&format!(
-            "{BOTH}: g ( 'T: Copy Ord 'T -- 'T ) {body} differ ;\n"
+            "{BOTH}: g ['T: Copy Ord] ( 'T 'T -- 'T ) {body} differ ;\n"
         ))
         .expect("the shape-changing route holds the arms to each other");
         let err = check_src(&format!(
-            "{BOTH}: g ( 'T: Copy Ord 'T -- 'T 'T ) {body} same ;\n"
+            "{BOTH}: g ['T: Copy Ord] ( 'T 'T -- 'T 'T ) {body} same ;\n"
         ))
         .expect_err("a row declared the same on both sides fixes the exit");
         assert!(
@@ -10408,7 +10410,8 @@ mod tests {
         // declared outputs: this body's arms each consume one slot of the two
         // they enter with, so an exit taken from the entry row would leave `'T
         // 'T` and disagree with the signature.
-        let body = ": g ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n";
+        let body =
+            ": g ['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;\n";
         check_src(body).expect("the exit row is the arms' own");
         let err = check_src(&body.replace("-- 'T )", "-- 'T 'T )"))
             .expect_err("the entry row is not handed back");
@@ -10426,7 +10429,7 @@ mod tests {
         // explicitly differs from.
         let err = check_src(
             ": weird inline ( ..a Bool ~[ ..a -- ..a ] -- ..b ) | weird--f | | weird--c | weird--c tag weird--f weird--f branch ;\n\
-             : g ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ ] weird ;\n",
+             : g ['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ ] weird ;\n",
         )
         .expect_err("the declared output row is ungroundable");
         assert!(
@@ -10446,11 +10449,11 @@ mod tests {
         // slot deeper underflows inside the arm.
         const TWICE: &str = ": twice inline ( ..s ~[ ..s -- ..s ] -- ..s ) | f | f call f call ;\n";
         check_src(&format!(
-            "{TWICE}: g ( 'T: Copy Ord 'T -- 'T 'T ) ~[ swap ] twice ;\n"
+            "{TWICE}: g ['T: Copy Ord] ( 'T 'T -- 'T 'T ) ~[ swap ] twice ;\n"
         ))
         .expect("the arm walks over the grounded row");
         let err = check_src(&format!(
-            "{TWICE}: g ( 'T: Copy Ord 'T -- 'T 'T ) ~[ drop drop drop ] twice ;\n"
+            "{TWICE}: g ['T: Copy Ord] ( 'T 'T -- 'T 'T ) ~[ drop drop drop ] twice ;\n"
         ))
         .expect_err("the region is the caller row, not the whole stack");
         assert!(
@@ -10470,7 +10473,7 @@ mod tests {
         let err = check_src(&format!(
             "{SPY}\
              type: One | A p Spy ;\n\
-             : bad ( 'T: Copy One -- 'T ) ~[ ( A ) ] One? ;\n\
+             : bad ['T: Copy] ( 'T One -- 'T ) ~[ ( A ) ] One? ;\n\
              : main ( -- ) 1 9 Spy A bad drop ;\n"
         ))
         .expect_err("an arm leaving its own narrowed variant unconsumed is an escape");
@@ -10555,14 +10558,14 @@ mod tests {
     fn check_poly_copy_word_accepts_and_instantiates() {
         // R1/R4–R7: a `'T: Copy` word `dup`s its variable and is called at a
         // concrete `Copy` type; the body and the instantiation both check.
-        check_src(": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) 5 dupit drop drop ;")
+        check_src(": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n: main ( -- ) 5 dupit drop drop ;")
             .unwrap();
     }
     #[test]
     fn check_poly_word_records_one_instantiation_per_concrete_shape() {
         // R8/R14: each distinct ground θ is recorded once, keyed by call span.
         let module = checked_module(
-            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+            ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
              : main ( -- ) 5 dupit drop drop True dupit drop drop ;",
         );
         // Two call sites, two distinct θ (i64 and Bool): two instantiations.
@@ -10665,7 +10668,7 @@ mod tests {
     #[test]
     fn a_deferred_quotation_input_leaves_the_length_substitution_sorted() {
         let module = checked_module(
-            ": r ( [ ['T 'N] -- ] ['U 'M] ['T 'N] -- ) drop drop drop ;\n\
+            ": r ( [ array['T 'N] -- ] array['U 'M] array['T 'N] -- ) drop drop drop ;\n\
              : main ( -- ) [ drop ] 0 2 fill 0 3 fill r ;",
         );
         let inst = module
@@ -10706,7 +10709,7 @@ mod tests {
     #[test]
     fn an_instantiation_of_a_length_variable_is_rejected() {
         let err = check_src(
-            ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+            ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
              : main ( -- ) 5 4 fill alen[i64] . drop ;",
         )
         .expect_err("a length variable cannot be given explicitly");
@@ -10770,21 +10773,23 @@ mod tests {
         // P7.S3k (R1/R3/R7): re-expresses the retired
         // `check_poly_ord_word_accepts_comparison_body`. A generic body may
         // compare its own `'T` -- but through `lib/cmp.sth`'s real
-        // `: gt ( 'T: Copy Ord 'T -- Bool )`, reached as a generic callee like
+        // `: gt ['T: Copy Ord] ( 'T 'T -- Bool )`, reached as a generic callee like
         // any other, not through a name-matched carve-out. Checked *mangled*,
         // so the callee arrives as `gt__mN` exactly as it does in a real
         // build; that is the shape the deleted carve-out could never see, and
         // the reason it was dead code.
-        check_src_mangled(": less ( 'T: Copy Ord 'T -- Bool ) gt ;\n: main ( -- ) 3 4 less drop ;")
-            .unwrap();
+        check_src_mangled(
+            ": less ['T: Copy Ord] ( 'T 'T -- Bool ) gt ;\n: main ( -- ) 3 4 less drop ;",
+        )
+        .unwrap();
     }
     #[test]
     fn check_generic_comparison_body_without_ord_is_error() {
         // P7.S3k (R3): the same body without the bound is a located call-site
         // error naming the missing `Ord`, not a deferred failure at whatever
         // type `less` is later instantiated at.
-        let err =
-            check_src_mangled(": less ( 'T: Copy 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
+        let err = check_src_mangled(": less ['T: Copy] ( 'T 'T -- Bool ) gt ;\n: main ( -- ) ;")
+            .unwrap_err();
         assert!(
             err.contains("requires `Ord`") && err.contains("`less`"),
             "unexpected message: {err}"
@@ -10815,7 +10820,7 @@ mod tests {
         // "`Vec2` does not satisfy `Ord`" from inside its instantiated body.
         check_src_mangled(
             "type: Vec2 x i64 y i64 ;\n\
-             : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+             : mylt ['T: Copy Ord] ( 'T 'T -- Bool ) lt ;\n\
              : mylt ( Vec2 Vec2 -- Bool )\n\
                | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
              : main ( -- ) 1 1 Vec2 2 2 Vec2 mylt drop ;\n",
@@ -10825,9 +10830,9 @@ mod tests {
     #[test]
     fn check_poly_length_word_accepts_and_monomorphizes_len() {
         // R1/R5/R9: a length variable is opaque through `len`; the same word
-        // instantiates at `[i64 4]` and `[i64 8]`.
+        // instantiates at `array[i64 4]` and `array[i64 8]`.
         check_src(
-            ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+            ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
              : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;",
         )
         .unwrap();
@@ -10838,7 +10843,7 @@ mod tests {
         // untouched and duplicates the two `Copy` variables; the resolved
         // instantiation has four concrete outputs, so it interns a bundle.
         let module = checked_module(
-            ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+            ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
              : main ( -- ) 1 2 dup2 . . . . ;",
         );
         assert_eq!(module.instantiations.len(), 1);
@@ -10860,7 +10865,7 @@ mod tests {
     fn check_x5_copy_bound_on_linear_type_names_variable_type_and_reason() {
         // X5: instantiating a `'T: Copy` word with a linear type is a located
         // call-site error naming the variable, the type, and the linear reason.
-        let src = format!("{SPY}: idc ( 'T: Copy -- 'T ) ;\n: main ( -- ) 0 Spy idc drop ;");
+        let src = format!("{SPY}: idc ['T: Copy] ( 'T -- 'T ) ;\n: main ( -- ) 0 Spy idc drop ;");
         let err = check_src(&src).unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Spy"), "unexpected message: {err}");
@@ -10871,13 +10876,13 @@ mod tests {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
         // P7.S3k (R7): `Copy` joins the declaration. `gt` is `lib/cmp.sth`'s
-        // `( 'T: Copy Ord 'T -- Bool )`, and the body's comparison now
+        // `['T: Copy Ord] ( 'T 'T -- Bool )`, and the body's comparison now
         // discharges that whole bound set across the call (R3) instead of
         // being special-cased by name against `Ord` alone. The subject is
         // unchanged: `Bool` is `Copy` but not `Ord`, so it is `less`'s own
         // instantiation that fails, at `main`'s call site.
         let err = check_src(
-            ": less ( 'T: Copy Ord 'T -- Bool ) gt ;\n: main ( -- ) True False less drop ;",
+            ": less ['T: Copy Ord] ( 'T 'T -- Bool ) gt ;\n: main ( -- ) True False less drop ;",
         )
         .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
@@ -10899,7 +10904,8 @@ mod tests {
         // missing. The rule is now `gt`'s own declared bound set discharged
         // against this word's (R3), so an entirely unbounded `'T` names
         // whichever of the two comes first and would not pin `Ord`.
-        let err = check_src(": bad ( 'T: Copy 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
+        let err =
+            check_src(": bad ['T: Copy] ( 'T 'T -- Bool ) gt ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
     }
@@ -10998,7 +11004,7 @@ mod tests {
     }
     /// P7.S3g-follow (1c): the one shape that can put a *body-derived*
     /// reference in a poly self-call's argument window, so every back-edge
-    /// reference test is built from it. A declared `&!['T 4]` is the only
+    /// reference test is built from it. A declared `&!array['T 4]` is the only
     /// reference type a poly-body borrow can ever match: a body borrow is
     /// always `PolyType::Ref`, while a fully concrete `&!Cell` parameter folds
     /// to `Concrete(Type::Ref(..))` at parse time and the two never compare
@@ -11015,7 +11021,7 @@ mod tests {
     fn self_tail_ref_loop(name: &str, recursive_arm: &str) -> String {
         format!(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : {name} ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : {name} ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero ~[ drop r drop 0 ] ~[ {recursive_arm} ] if ;\n\
              : main ( -- ) ;\n"
@@ -11054,7 +11060,7 @@ mod tests {
         // never gives its arms.
         let err = check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero\n\
              ~[ ( False ) drop r drop &!a b dup n 1 sub loopg ]\n\
@@ -11079,7 +11085,7 @@ mod tests {
         // `PolyBorrow::static_rooted` instead of looking the place up.
         let err = check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero ~[ drop r drop 0 ] ~[ r drop a ~[ | x | &!x ] call b dup n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n",
@@ -11100,7 +11106,7 @@ mod tests {
         let err = check_src(
             "static: A i64 = 0 ;\n\
              : iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r A b n |\n\
              n iszero ~[ drop r drop 0 ] ~[ r drop &!A b dup n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n",
@@ -11127,7 +11133,7 @@ mod tests {
         // -- crossing.
         let err = check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero ~[ drop r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n",
@@ -11139,7 +11145,7 @@ mod tests {
         );
         check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( &![i64 4] [i64 4] [i64 4] i64 -- i64 )\n\
+             : loopg ( &!array[i64 4] array[i64 4] array[i64 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero ~[ r drop 0 ] ~[ &!a drop r b dup n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n",
@@ -11167,7 +11173,7 @@ mod tests {
         // and `tail` is the only thing telling the two calls apart.
         check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy &!['T 4] ['T 4] ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T &!array['T 4] array['T 4] array['T 4] i64 -- i64 )\n\
              | r a b n |\n\
              n iszero ~[ r drop &!a b dup n 1 sub loopg drop 0 ]\n\
              ~[ r b dup n 1 sub loopg ] if ;\n\
@@ -11207,7 +11213,7 @@ mod tests {
         // while the call's own window carries no reference at all.
         check_src(
             ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy ['T 4] i64 -- i64 )\n\
+             : loopg ['T: Copy] ( 'T array['T 4] i64 -- i64 )\n\
              | a n |\n\
              n iszero ~[ drop 0 ] ~[ &a | p | a n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n",
@@ -11223,7 +11229,7 @@ mod tests {
         // self-tail call -- see the two tests below.
         check_src(&format!(
             "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( Spy 'T: Copy i64 -- Spy 'T )\n\
+             : loopg ['T: Copy] ( Spy 'T i64 -- Spy 'T )\n\
                dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n"
         ))
@@ -11241,7 +11247,7 @@ mod tests {
         // the hole silently.
         let err = check_src(&format!(
             "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( Spy 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( Spy 'T i64 -- 'T )\n\
                | s t n |\n\
                n iszero ~[ s drop t ] ~[ 9 Spy t n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n"
@@ -11267,7 +11273,7 @@ mod tests {
         // rule loosens, the stranded clause has to be written.
         let err = check_src(&format!(
             "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- Spy 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- Spy 'T )\n\
                | t n |\n\
                n iszero ~[ 9 Spy t ] ~[ 9 Spy t n 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n"
@@ -11348,7 +11354,7 @@ mod tests {
     #[test]
     fn check_generic_cross_call_bound_mismatch_is_error() {
         let err = check_src(
-            ": biggest ( 'U: Ord -- 'U ) ;\n: g ( 'T -- 'T ) biggest ;\n: main ( -- ) ;\n",
+            ": biggest ['U: Ord] ( 'U -- 'U ) ;\n: g ( 'T -- 'T ) biggest ;\n: main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
@@ -11368,7 +11374,7 @@ mod tests {
     #[test]
     fn check_generic_cross_call_forwarded_user_bound_mismatch_is_error() {
         let err = check_src(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
              : g ( &'T -- ) shows ;\n\
              : main ( -- ) ;\n"
         ))
@@ -11394,7 +11400,7 @@ mod tests {
     #[test]
     fn check_generic_cross_call_concrete_operand_failing_a_bound_is_error() {
         let err = check_src(
-            ": biggest ( 'U: Ord -- 'U ) ;\n\
+            ": biggest ['U: Ord] ( 'U -- 'U ) ;\n\
              : g ( 'T -- 'T ) True biggest drop ;\n\
              : main ( -- ) 1 g drop ;\n",
         )
@@ -11421,12 +11427,12 @@ mod tests {
     #[test]
     fn check_cross_call_copy_bound_on_a_body_local_instantiation_is_unsupported() {
         for (wrapper, ctor, rendered) in [
-            ("type: Box 'T | Box 'T ;\n", "Box", "Box[i64]"),
-            ("type: Cell 'T val 'T ;\n", "Cell", "Cell[i64]"),
+            ("type: Box['T] | Box 'T ;\n", "Box", "Box[i64]"),
+            ("type: Cell['T] val 'T ;\n", "Cell", "Cell[i64]"),
         ] {
             let src = format!(
                 "{wrapper}\
-                 : h ( 'U: Copy -- ) drop ;\n\
+                 : h ['U: Copy] ( 'U -- ) drop ;\n\
                  : g ( 'T -- 'T ) 1 {ctor} h ;\n\
                  : main ( -- ) ;\n"
             );
@@ -11453,7 +11459,7 @@ mod tests {
     #[test]
     fn check_growing_cross_call_is_error() {
         let err = check_src(
-            "type: Box 'T | Box 'T ;\n\
+            "type: Box['T] | Box 'T ;\n\
              : h ( 'U -- 'U ) ;\n\
              : g ( 'T -- ) Box h drop ;\n\
              : main ( -- ) ;\n",
@@ -11499,8 +11505,8 @@ mod tests {
     #[test]
     fn check_generic_cross_call_same_arity_different_header_is_type_mismatch() {
         let err = check_src(
-            "type: Box 'T | Box 'T ;\n\
-             type: Wrap 'U | Wrap 'U ;\n\
+            "type: Box['T] | Box 'T ;\n\
+             type: Wrap['U] | Wrap 'U ;\n\
              : unwrap ( Wrap['A] -- Wrap['A] ) ;\n\
              : g ( 'T -- ) Box unwrap drop ;\n\
              : main ( -- ) ;\n",
@@ -11517,7 +11523,7 @@ mod tests {
     /// deletable with the whole suite green, and each fails *open* -- the
     /// operand-count guard into a subtract-overflow panic, the other three into
     /// an accepted call: a `Bool` filling an `i64` parameter, a shared borrow
-    /// filling a mutable one, and a `['T 4]` filling a `['U 3]`. Table-driven
+    /// filling a mutable one, and a `array['T 4]` filling a `array['U 3]`. Table-driven
     /// because the four share one shape (a callee the caller's operands cannot
     /// fill) and differ only in which conjunct rejects them.
     #[test]
@@ -11539,9 +11545,9 @@ mod tests {
                 "`h` expected `&!'U`, found `&'T`",
             ),
             (
-                ": h ( &['U 3] -- ) drop ;\n\
-                 : g ( &['T 4] -- ) h ;\n: main ( -- ) ;\n",
-                "`h` expected `['U 3]`, found `['T 4]`",
+                ": h ( &array['U 3] -- ) drop ;\n\
+                 : g ( &array['T 4] -- ) h ;\n: main ( -- ) ;\n",
+                "`h` expected `array['U 3]`, found `array['T 4]`",
             ),
         ] {
             let err = check_src(fixture).unwrap_err();
@@ -11585,19 +11591,19 @@ mod tests {
     fn check_cross_call_unsupported_callee_shapes_name_themselves() {
         for (fixture, what) in [
             (
-                ": alen ( ['E 'N] -- ['E 'N] usize ) len ;\n\
-                 : g ( ['T 4] -- ['T 4] ) alen drop ;\n: main ( -- ) ;\n",
+                ": alen ( array['E 'N] -- array['E 'N] usize ) len ;\n\
+                 : g ( array['T 4] -- array['T 4] ) alen drop ;\n: main ( -- ) ;\n",
                 "a length variable in the callee's signature",
             ),
             (
-                "type: Box 'T | Box 'T ;\n\
+                "type: Box['T] | Box 'T ;\n\
                  : box ( 'U -- Box['U] ) Box ;\n\
                  : g ( 'T -- ) box drop ;\n: main ( -- ) ;\n",
                 "returning the compound type `Box['U]` from a polymorphic word",
             ),
             (
-                ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
-                 : g ( 'T: Copy -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
+                ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
+                 : g ['T: Copy] ( 'T -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
                 "calling a row-polymorphic word",
             ),
         ] {
@@ -11620,8 +11626,8 @@ mod tests {
     #[test]
     fn check_generic_cross_call_discharges_a_forwarded_user_bound() {
         let (module, _) = checked_like_a_build(&format!(
-            "{SHOW}: shows ( &'T: Show -- ) show ;\n\
-             : g ( &'T: Show -- ) shows ;\n\
+            "{SHOW}: shows ['T: Show] ( &'T -- ) show ;\n\
+             : g ['T: Show] ( &'T -- ) shows ;\n\
              : main ( -- ) 1 2 Point |p| &p g p drop ;\n"
         ))
         .expect("the fixture checks");
@@ -11645,7 +11651,7 @@ mod tests {
     fn check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error() {
         let err = check_src(&format!(
             "{SHOW}type: Other n i64 ;\n\
-             : shows ( &'T: Show -- ) show ;\n\
+             : shows ['T: Show] ( &'T -- ) show ;\n\
              : g ( 'T -- ) drop 7 Other |o| &o shows o drop ;\n\
              : main ( -- ) 1 g ;\n"
         ))
@@ -12033,7 +12039,7 @@ mod tests {
         // carries a `Copy` bound so the repeated reads are not use-after-move,
         // leaving the depth mismatch as the sole failure this test proves.
         let err = check_src(
-            ": bad inline ( 'T: Copy Bool -- 'T ) | x flag | flag ~[ x ] ~[ x x ] if ;\n: main ( -- ) ;",
+            ": bad inline ['T: Copy] ( 'T Bool -- 'T ) | x flag | flag ~[ x ] ~[ x x ] if ;\n: main ( -- ) ;",
         )
         .unwrap_err();
         assert!(
@@ -12058,7 +12064,8 @@ mod tests {
         // unbounded `'T` recurses to the element and names the variable, not a
         // fabricated `i64`.
         let err =
-            check_src(": bad ( ['T 'N] -- ['T 'N] ['T 'N] ) dup ;\n: main ( -- ) ;").unwrap_err();
+            check_src(": bad ( array['T 'N] -- array['T 'N] array['T 'N] ) dup ;\n: main ( -- ) ;")
+                .unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Copy"), "unexpected message: {err}");
     }
@@ -12067,7 +12074,7 @@ mod tests {
         // `poly_copy_gate` array arm: `dup` of a length-variable array whose
         // element is a concrete linear struct names that struct, never `i64`.
         let err = check_src(&format!(
-            "{SPY}: bad ( [Spy 'N] -- [Spy 'N] [Spy 'N] ) dup ;\n: main ( -- ) ;"
+            "{SPY}: bad ( array[Spy 'N] -- array[Spy 'N] array[Spy 'N] ) dup ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains("Spy"), "unexpected message: {err}");
@@ -12093,7 +12100,7 @@ mod tests {
         // (`"a reference"`) is reachable from source -- `len` rejects a
         // reference the same way it rejects a bare type variable -- but had
         // no test asserting the exact wording.
-        let err = check_src(": f ( &['T 4] -- usize ) len ;\n").unwrap_err();
+        let err = check_src(": f ( &array['T 4] -- usize ) len ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: `len` is not permitted on a reference in `f` (line 1)"
@@ -12264,7 +12271,7 @@ mod tests {
             "&!'T"
         );
         let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
-        assert_eq!(poly_type_str(&poly_ref(arr, false), &sig), "&['T 4]");
+        assert_eq!(poly_type_str(&poly_ref(arr, false), &sig), "&array['T 4]");
     }
 
     #[test]
@@ -12313,7 +12320,7 @@ mod tests {
         // conservatively linear -- `dup`/`over` on it is rejected outright,
         // never derived per-argument.
         let err =
-            check_src("type: Box 'T val 'T ;\n: dup-box ( Box['T] -- Box['T] Box['T] ) dup ;\n")
+            check_src("type: Box['T] val 'T ;\n: dup-box ( Box['T] -- Box['T] Box['T] ) dup ;\n")
                 .unwrap_err();
         assert_eq!(
             err,
@@ -12326,10 +12333,10 @@ mod tests {
         // Slice 13 (R-A10, the Part A exit criterion): a poly word may
         // *declare* a borrow, and the declaration survives parse + fold +
         // rendering unchanged. Producing one is Part B.
-        let tokens = lex(": peek ( ['T 4] -- &['T 4] ) ;").unwrap();
+        let tokens = lex(": peek ( array['T 4] -- &array['T 4] ) ;").unwrap();
         let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert_eq!(poly_type_str(&sig.outputs[0], sig), "&['T 4]");
+        assert_eq!(poly_type_str(&sig.outputs[0], sig), "&array['T 4]");
     }
 
     /// P7 slice 3c (R8.3): a slice inside a polymorphic body is the point of
@@ -12483,14 +12490,16 @@ mod tests {
             .unwrap();
         // `slice` off a borrow taken in the body: the length may be generic
         // (a view erases it into a runtime length), the element may not.
-        check_src(": f ( [i64 3] 'T -- [i64 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
+        check_src(": f ( array[i64 3] 'T -- array[i64 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
             .unwrap();
-        check_src(": f ( ['T 3] 'T -- ['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
-            .unwrap_err();
+        check_src(
+            ": f ( array['T 3] 'T -- array['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n",
+        )
+        .unwrap_err();
         // ...and the view it builds inherits the borrow's mutability: a
         // shared one could not be written through here.
         check_src(
-            ": f ( [i64 3] i64 'T -- [i64 3] 'T ) | x | | v | | a | \
+            ": f ( array[i64 3] i64 'T -- array[i64 3] 'T ) | x | | v | | a | \
              &!a slice 0 >usize &!> v ! a x ;\n",
         )
         .unwrap();
@@ -12501,9 +12510,10 @@ mod tests {
     /// generic *length* is fine, which is the whole point of a view.
     #[test]
     fn poly_slice_over_a_generic_element_is_a_located_error() {
-        let err =
-            check_src(": f ( ['T 3] 'T -- ['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n")
-                .unwrap_err();
+        let err = check_src(
+            ": f ( array['T 3] 'T -- array['T 3] usize 'T ) | x | | a | &a slice len a swap x ;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: `slice` over an array of `'T` in `f` (line 1) is not supported\n  \
@@ -12699,7 +12709,7 @@ mod tests {
 
     #[test]
     fn unify_poly_input_matches_a_declared_reference_slot() {
-        // Slice 13 (R-A6): a declared `&['T 4]` binds `'T` through the
+        // Slice 13 (R-A6): a declared `&array['T 4]` binds `'T` through the
         // registry's referent; a mutability mismatch and a non-reference slot
         // are located mismatches, never a silent bind.
         let sig = ref_sig();
@@ -12732,7 +12742,7 @@ mod tests {
             &mut subst,
             &[],
         )
-        .expect("`&['T 4]` should unify against `&[i64 4]`");
+        .expect("`&array['T 4]` should unify against `&array[i64 4]`");
         assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
 
         let mut subst2 = Subst::default();
@@ -12752,7 +12762,7 @@ mod tests {
         .expect_err("a mutability mismatch must be a located type mismatch");
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `&['T 4]`, found `&![i64 4]`",
+            "error: type mismatch: `f` expected `&array['T 4]`, found `&!array[i64 4]`",
         );
         assert!(
             subst2.ty_of(0).is_none(),
@@ -12776,7 +12786,7 @@ mod tests {
         .expect_err("a non-reference slot must be a located type mismatch");
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `&['T 4]`, found `[i64 4]`",
+            "error: type mismatch: `f` expected `&array['T 4]`, found `array[i64 4]`",
         );
         assert!(
             subst3.ty_of(0).is_none(),
@@ -12825,7 +12835,7 @@ mod tests {
         // the aggregate local, `0` is a literal index bounds-checked against
         // the concrete length 4, and `@` fetches the `Copy` element.
         check_src(
-            ": first ( ['T: Copy 4] -- 'T ) | a | &a 0 &> @ ;\n\
+            ": first['T: Copy] ( array['T 4] -- 'T ) | a | &a 0 &> @ ;\n\
              : main ( -- ) 10 4 fill first drop ;\n",
         )
         .expect("a shared prefix borrow, array-element ref, and fetch should check");
@@ -12835,7 +12845,7 @@ mod tests {
     fn poly_reference_word_rejects_borrowing_a_bare_variable_local() {
         // E2/D5: a bare `'T` local might instantiate to a scalar, which has
         // no address, so it is refused uniformly rather than deferred.
-        let err = check_src(": badvar ( 'T: Copy -- 'T )\n  | t |\n  &t\n;\n").unwrap_err();
+        let err = check_src(": badvar ['T: Copy] ( 'T -- 'T )\n  | t |\n  &t\n;\n").unwrap_err();
         assert_eq!(
             err,
             "error: cannot borrow the local `t` of type `'T` in `badvar` (line 3, col 3)\n  `'T` might instantiate to a scalar, which has no address; borrow an aggregate (a struct, enum, array, or owning cell) instead"
@@ -12847,10 +12857,11 @@ mod tests {
         // Phase 2 review: D5's aggregate gate has two arms and only the
         // bare-variable one was covered. A concrete scalar local is not an
         // aggregate either, and takes the non-variable arm.
-        let err = check_src(": g ( i64 'T: Copy -- 'T ) | n t | &n drop n drop t ;\n").unwrap_err();
+        let err =
+            check_src(": g ['T: Copy] ( i64 'T -- 'T ) | n t | &n drop n drop t ;\n").unwrap_err();
         assert_eq!(
             err,
-            "error: cannot borrow the local `n` of type `i64` in `g` (line 1, col 36)\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `i64` is not"
+            "error: cannot borrow the local `n` of type `i64` in `g` (line 1, col 41)\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `i64` is not"
         );
     }
 
@@ -12903,14 +12914,14 @@ mod tests {
 
     #[test]
     fn poly_reference_word_rejects_indexing_a_generic_length_array() {
-        // E3/D6: `['T 'N]` has no known count, so its element cannot be
+        // E3/D6: `array['T 'N]` has no known count, so its element cannot be
         // statically bounds-checked; only a concrete-length array's element
         // is accessible this slice.
-        let err =
-            check_src(": badidx ( ['T 'N] -- 'T )\n  | a |\n  &a 0\n  &>\n  @\n;\n").unwrap_err();
+        let err = check_src(": badidx ( array['T 'N] -- 'T )\n  | a |\n  &a 0\n  &>\n  @\n;\n")
+            .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot index a generic-length array in `badidx` (line 4, col 3)\n  the array's length is the type variable `'N`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature"
+            "error: cannot index a generic-length array in `badidx` (line 4, col 3)\n  the array's length is the type variable `'N`, so its element cannot be statically bounds-checked; index a concrete-length array (`array['T 4]`), or use a fixed length in this word's signature"
         );
     }
 
@@ -12918,7 +12929,7 @@ mod tests {
     fn poly_reference_word_rejects_borrowing_a_moved_local() {
         // E5: borrowing is not a move, but the referent still has to be
         // there -- a local already consumed holds nothing.
-        let err = check_src(": badmove ( ['T 4] -- 'T )\n  | a |\n  a drop\n  &a 0 &> @\n;\n")
+        let err = check_src(": badmove ( array['T 4] -- 'T )\n  | a |\n  a drop\n  &a 0 &> @\n;\n")
             .unwrap_err();
         assert_eq!(
             err,
@@ -12962,10 +12973,25 @@ mod tests {
     }
 
     #[test]
+    fn array_index_out_of_bounds_error_names_the_new_spelling() {
+        // R9/R8: the array index out-of-bounds diagnostic names the new
+        // `array[T N]` spelling in its effect annotation, per CLAUDE.md's
+        // "diagnostics are behaviour".
+        let err =
+            check_src(": oob ( array[i64 4] -- i64 )\n  | a |\n  &a 9 &> @\n;\n").unwrap_err();
+        assert!(err.contains("array index out of range"), "{err}");
+        assert!(
+            err.contains("array[i64 4]"),
+            "error should name the new array spelling: {err}"
+        );
+    }
+
+    #[test]
     fn poly_reference_word_rejects_out_of_range_literal_index() {
         // R-B3: the literal `9` is statically bounds-checked against the
         // array's known length 4, mirroring the monomorphic `check_array_index`.
-        let err = check_src(": oob ( ['T: Copy 4] -- 'T )\n  | a |\n  &a 9 &> @\n;\n").unwrap_err();
+        let err = check_src(": oob['T: Copy] ( array['T 4] -- 'T )\n  | a |\n  &a 9 &> @\n;\n")
+            .unwrap_err();
         assert!(err.contains("array index out of range"), "{err}");
         assert!(err.contains("index 9"), "{err}");
         assert!(err.contains("length 4"), "{err}");
@@ -12981,7 +13007,7 @@ mod tests {
         // dead by then, so naming `a` again is not a second name for
         // borrowed storage.
         check_src(
-            ": setat ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 2 &!> v ! a ;\n\
+            ": setat['T: Copy] ( array['T 4] 'T -- array['T 4] ) | a v | &!a 2 &!> v ! a ;\n\
              : main ( -- ) 0 4 fill 99 setat drop ;\n",
         )
         .expect("a mutable prefix borrow, element ref, and store should check");
@@ -12993,9 +13019,10 @@ mod tests {
         // plain generic word is checked once and never re-checked at its
         // instantiations. Rejected *at the second borrow site* (line 3, col
         // 7), naming the first (line 3, col 3).
-        let err =
-            check_src(": twomut ( ['T: Copy 4] -- ['T 4] )\n  | a |\n  &!a &!a drop drop a\n;\n")
-                .unwrap_err();
+        let err = check_src(
+            ": twomut['T: Copy] ( array['T 4] -- array['T 4] )\n  | a |\n  &!a &!a drop drop a\n;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: `&!a` conflicts with a live borrow of `a` in `twomut` (line 3, col 7)\n  the mutable borrow taken at line 3, col 3 is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
@@ -13006,9 +13033,10 @@ mod tests {
     fn poly_reference_word_rejects_a_shared_borrow_beside_a_live_mutable_one() {
         // E6, the other symmetric direction: a new *shared* borrow conflicts
         // with a live mutable one (never with another shared one).
-        let err =
-            check_src(": mixed ( ['T: Copy 4] -- ['T 4] )\n  | a |\n  &!a &a drop drop a\n;\n")
-                .unwrap_err();
+        let err = check_src(
+            ": mixed['T: Copy] ( array['T 4] -- array['T 4] )\n  | a |\n  &!a &a drop drop a\n;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: `&a` conflicts with a live borrow of `a` in `mixed` (line 3, col 7)\n  the mutable borrow taken at line 3, col 3 is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
@@ -13021,8 +13049,10 @@ mod tests {
         // borrow in play there is nothing for exclusivity to protect, so two
         // live `&a` are fine. Without this, a rule that rejected *every*
         // second borrow would pass both negatives.
-        check_src(": twoshared ( ['T: Copy 4] -- ['T 4] ) | a | &a &a drop drop a ;\n")
-            .expect("two shared borrows of one place do not conflict");
+        check_src(
+            ": twoshared['T: Copy] ( array['T 4] -- array['T 4] ) | a | &a &a drop drop a ;\n",
+        )
+        .expect("two shared borrows of one place do not conflict");
     }
 
     #[test]
@@ -13033,7 +13063,7 @@ mod tests {
         // write is accepted. A word that can write only one element would be
         // a much weaker capability than the slice claims.
         check_src(
-            ": settwo ( ['T: Copy 4] 'T -- ['T 4] )\n  | a v |\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  a\n;\n",
+            ": settwo['T: Copy] ( array['T 4] 'T -- array['T 4] )\n  | a v |\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  a\n;\n",
         )
         .expect("a borrow whose reference is consumed is dead");
     }
@@ -13047,7 +13077,7 @@ mod tests {
         // `a` -- two live `&!` to one place, the exact hazard R-B5 exists to
         // stop. Every other liveness case parks its reference on the stack.
         let err = check_src(
-            ": hidden ( ['T: Copy 4] 'T -- ['T 4] )\n  | a v |\n  &!a | r |\n  &!a 0 &!> v !\n  r 1 &!> v !\n  a\n;\n",
+            ": hidden['T: Copy] ( array['T 4] 'T -- array['T 4] )\n  | a v |\n  &!a | r |\n  &!a 0 &!> v !\n  r 1 &!> v !\n  a\n;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -13065,7 +13095,7 @@ mod tests {
         // *mutable* borrow conflicts here. Without this, a naming check that
         // ignored the direction bit would pass both negatives.
         check_src(
-            ": sharedname ( ['T: Copy 4] -- ['T 4] 'T )\n  | a |\n  &a 0 &> @ | e |\n  &a a swap drop\n  e\n;\n",
+            ": sharedname['T: Copy] ( array['T 4] -- array['T 4] 'T )\n  | a |\n  &a 0 &> @ | e |\n  &a a swap drop\n  e\n;\n",
         )
         .expect("a shared borrow does not stop a non-consuming name of its place");
     }
@@ -13080,7 +13110,7 @@ mod tests {
         // `live_deriv` is per place), so this is an over-rejection, never a
         // missed hazard -- and it is legible as such from the note.
         let err = check_src(
-            ": coarse ( ['T: Copy 4] ['T 4] 'T -- ['T 4] ['T 4] )\n  | a b v |\n  &b\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  drop a b\n;\n",
+            ": coarse['T: Copy] ( array['T 4] array['T 4] 'T -- array['T 4] array['T 4] )\n  | a b v |\n  &b\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  drop a b\n;\n",
         )
         .unwrap_err();
         assert!(
@@ -13098,11 +13128,12 @@ mod tests {
         // reference derived from it would be left aimed at storage its owner
         // gave away. Checking only at the borrow catches `a ... &!a` and
         // misses this, the same hazard with the terms swapped.
-        let err = check_src(": consume ( ['T 4] -- ['T 4] )\n  | a |\n  &a a swap drop\n;\n")
-            .unwrap_err();
+        let err =
+            check_src(": consume ( array['T 4] -- array['T 4] )\n  | a |\n  &a a swap drop\n;\n")
+                .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot consume the borrowed local `a` of type `['T 4]` in `consume` (line 3, col 6)\n  the shared borrow taken at line 3, col 3 is still live\n  a place stays borrowed until every reference derived from it is consumed\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+            "error: cannot consume the borrowed local `a` of type `array['T 4]` in `consume` (line 3, col 6)\n  the shared borrow taken at line 3, col 3 is still live\n  a place stays borrowed until every reference derived from it is consumed\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
         );
     }
 
@@ -13111,9 +13142,10 @@ mod tests {
         // R-B5, the naming side for a `Copy` aggregate: the read does not
         // consume it, but the name still denotes the storage the live `&!`
         // mutates.
-        let err =
-            check_src(": alias ( ['T: Copy 4] -- ['T 4] 'T )\n  | a |\n  &!a a swap 0 &!> @\n;\n")
-                .unwrap_err();
+        let err = check_src(
+            ": alias['T: Copy] ( array['T 4] -- array['T 4] 'T )\n  | a |\n  &!a a swap 0 &!> @\n;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: cannot name `a` in `alias` (line 3, col 7): a mutable borrow of it is still live (line 3, col 3)\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
@@ -13128,15 +13160,15 @@ mod tests {
         // half is the positive control -- a `&x` *is* `Copy`, so a rule that
         // rejected every `dup` of a reference would pass the negative alone.
         let err = check_src(
-            ": dupmut ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a dup 0 &!> v ! drop a ;\n",
+            ": dupmut['T: Copy] ( array['T 4] 'T -- array['T 4] ) | a v | &!a dup 0 &!> v ! drop a ;\n",
         )
         .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot `dup` a mutable reference in `dupmut` (line 1)\n  `&!['T 4]` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow"
+            "error: cannot `dup` a mutable reference in `dupmut` (line 1)\n  `&!array['T 4]` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow"
         );
         check_src(
-            ": dupshared ( ['T: Copy 4] -- ['T 4] 'T ) | a | &a dup drop 0 &> @ | e | a e ;\n",
+            ": dupshared['T: Copy] ( array['T 4] -- array['T 4] 'T ) | a | &a dup drop 0 &> @ | e | a e ;\n",
         )
         .expect("a shared reference is `Copy` and may be duplicated");
     }
@@ -13146,8 +13178,10 @@ mod tests {
         // R-B4: `!` is `( &!T T -- )`. A shared receiver is a mutability
         // mismatch rendered off the receiver's own referent, the same shape
         // `&>` uses for the mirror-image mismatch.
-        let err = check_src(": rdstore ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &a 0 &> v ! a ;\n")
-            .unwrap_err();
+        let err = check_src(
+            ": rdstore['T: Copy] ( array['T 4] 'T -- array['T 4] ) | a v | &a 0 &> v ! a ;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: type mismatch in `rdstore` (line 1)\n  `!` expected `&!'T`, found `&'T`\n  note: declared ( -- )"
@@ -13159,7 +13193,7 @@ mod tests {
         // R-B4: the stored value must unify with the referent -- an `i64`
         // literal is not a `'T`, at any instantiation but one.
         let err = check_src(
-            ": wrongval ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 0 &!> 5 ! v drop a ;\n",
+            ": wrongval['T: Copy] ( array['T 4] 'T -- array['T 4] ) | a v | &!a 0 &!> 5 ! v drop a ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -13172,8 +13206,9 @@ mod tests {
     fn poly_body_store_rejects_a_non_copy_referent() {
         // R-B4: storing overwrites the old value, so a linear referent would
         // lose its drop obligation silently. Same X7 gate `@` already uses.
-        let err = check_src(": linstore ( ['T 4] 'T -- ['T 4] ) | a v | &!a 0 &!> v ! a ;\n")
-            .unwrap_err();
+        let err =
+            check_src(": linstore ( array['T 4] 'T -- array['T 4] ) | a v | &!a 0 &!> v ! a ;\n")
+                .unwrap_err();
         assert_eq!(
             err,
             "error: cannot `!` the type variable `'T` in `linstore` (line 1)\n  `'T` has no `Copy` bound, and a linear value cannot be duplicated; declare `'T: Copy` if every instantiation is `Copy`"
@@ -13186,9 +13221,10 @@ mod tests {
         // untested -- deleting it broke no test. A bare `'T` (no `Copy`
         // bound) fetched through a reference must still be rejected, the
         // same X7 reason `dup`/`over` already cover for a bare variable.
-        let err =
-            check_src(": g ( ['T 4] -- 'T ) | a | &a 0 &> @ ;\n: main ( -- ) 10 4 fill g drop ;\n")
-                .unwrap_err();
+        let err = check_src(
+            ": g ( array['T 4] -- 'T ) | a | &a 0 &> @ ;\n: main ( -- ) 10 4 fill g drop ;\n",
+        )
+        .unwrap_err();
         assert_eq!(
             err,
             "error: cannot `@` the type variable `'T` in `g` (line 1)\n  `'T` has no `Copy` bound, and a linear value cannot be duplicated; declare `'T: Copy` if every instantiation is `Copy`"
@@ -13203,7 +13239,7 @@ mod tests {
     fn poly_body_can_borrow_a_module_static() {
         check_src(
             "static: COUNT i64 = 0 ;\n\
-             : bump ( 'T: Copy -- 'T ) | v | &!COUNT @ 1 add &!COUNT swap ! v ;\n\
+             : bump ['T: Copy] ( 'T -- 'T ) | v | &!COUNT @ 1 add &!COUNT swap ! v ;\n\
              : main ( -- ) 5 bump drop ;",
         )
         .unwrap();
@@ -13215,7 +13251,7 @@ mod tests {
     fn poly_body_two_live_mutable_static_borrows_conflict() {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
-             : bump ( 'T: Copy -- 'T ) &!COUNT &!COUNT drop drop ;\n\
+             : bump ['T: Copy] ( 'T -- 'T ) &!COUNT &!COUNT drop drop ;\n\
              : main ( -- ) 5 bump drop ;",
         )
         .unwrap_err();
@@ -13231,13 +13267,13 @@ mod tests {
         // reachable (a declared `&![...]` input) but untested -- deleting it
         // broke no test. `&>` on a mutable reference must still be rejected
         // rather than silently reading through it, and it names both sides
-        // the way the monomorphic twin does (`&>` expected `&[i64 4]`, found
-        // `&![i64 4]`) rather than the operand-family text, which reads as
+        // the way the monomorphic twin does (`&>` expected `&array[i64 4]`, found
+        // `&!array[i64 4]`) rather than the operand-family text, which reads as
         // if `&>` never accepts a reference at all.
-        let err = check_src(": rd ( &!['T: Copy 4] -- 'T )\n  0 &> @\n;\n").unwrap_err();
+        let err = check_src(": rd['T: Copy] ( &!array['T 4] -- 'T )\n  0 &> @\n;\n").unwrap_err();
         assert_eq!(
             err,
-            "error: type mismatch in `rd` (line 2)\n  `&>` expected `&['T 4]`, found `&!['T 4]`\n  note: declared ( -- )"
+            "error: type mismatch in `rd` (line 2)\n  `&>` expected `&array['T 4]`, found `&!array['T 4]`\n  note: declared ( -- )"
         );
     }
 
@@ -13324,7 +13360,7 @@ mod tests {
     #[test]
     fn poly_call_on_literal_splices_body_in_place_ok() {
         check_src(
-            ": bump ( 'T: Copy -- 'T 'T ) | x | [ x x ] call ;\n\
+            ": bump ['T: Copy] ( 'T -- 'T 'T ) | x | [ x x ] call ;\n\
              : main ( -- ) 5 bump drop drop ;\n",
         )
         .expect("a literal's body should splice in place against the live stack");
@@ -13338,7 +13374,7 @@ mod tests {
     #[test]
     fn poly_call_on_inline_literal_splices_body_in_place_ok() {
         check_src(
-            ": bump ( 'T: Copy -- 'T 'T ) | x | ~[ x x ] call ;\n\
+            ": bump ['T: Copy] ( 'T -- 'T 'T ) | x | ~[ x x ] call ;\n\
              : main ( -- ) 5 bump drop drop ;\n",
         )
         .expect("an inline literal's body should splice in place too");
@@ -13365,7 +13401,7 @@ mod tests {
     #[test]
     fn poly_call_on_empty_stack_is_underflow_error() {
         let err = check_src(
-            ": uf ( 'T: Copy -- 'T )\n\
+            ": uf ['T: Copy] ( 'T -- 'T )\n\
                | x | call x\n\
              ;\n\
              : main ( -- ) 1 uf drop ;\n",
@@ -13410,7 +13446,7 @@ mod tests {
     #[test]
     fn poly_call_on_literal_leaked_local_is_error() {
         let err = check_src(&format!(
-            "{SPY}: bad ( 'T: Copy Spy -- 'T )\n\
+            "{SPY}: bad ['T: Copy] ( 'T Spy -- 'T )\n\
                [ | s | ] call\n\
              ;\n\
              : main ( -- ) 7 Spy 1 swap bad drop ;\n"
@@ -13433,7 +13469,7 @@ mod tests {
     #[test]
     fn poly_call_on_literal_retains_locals_past_splice() {
         let err = check_src(
-            ": leaks ( 'T: Copy -- 'T i64 )\n\
+            ": leaks ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | 3 [ | y | ] call x y\n\
              ;\n\
              : main ( -- ) 7 leaks drop drop ;\n",
@@ -13448,7 +13484,7 @@ mod tests {
     #[test]
     fn poly_quotlit_grounds_against_concrete_quotation_param_ok() {
         check_src(
-            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+            ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect("a literal grounding against a concrete quotation parameter should be accepted");
     }
@@ -13466,7 +13502,7 @@ mod tests {
     #[test]
     fn poly_quotlit_against_declared_inline_quotation_param_rejects_at_declaration() {
         let err = check_src(
-            ": run1 ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+            ": run1 ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err("a non-inline word may not declare a `~[ ]` parameter");
         assert!(
@@ -13491,7 +13527,7 @@ mod tests {
         // first line, which both the old whole-feature narrowing and this
         // gate would satisfy.
         let err = check_src(
-            ": run1 inline ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
+            ": run1 inline ( ~[ i64 -- i64 ] i64 -- i64 ) swap call ;\n : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x [ 1 add ] 2 run1 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err("a quotation cannot be passed across a polymorphic call");
         assert!(
@@ -13512,7 +13548,7 @@ mod tests {
     #[test]
     fn poly_quotlit_grounds_when_it_is_the_top_of_window_operand_ok() {
         check_src(
-            ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x 2 [ 1 add ] run0 ;\n : main ( -- ) 5 apply drop drop ;\n",
+            ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x 2 [ 1 add ] run0 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect("a top-of-window literal must ground against a concrete quotation parameter");
     }
@@ -13531,7 +13567,7 @@ mod tests {
     fn poly_quotlit_bound_and_reread_is_located_error_not_panic() {
         let err = check_src(
             ": run0 ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-             : apply ( 'T: Copy -- 'T i64 )\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 )\n\
                | x |\n\
                [ 1 add ] | q |\n\
                x 2 q run0\n\
@@ -13557,7 +13593,7 @@ mod tests {
     fn poly_quotlit_inline_literal_at_ordinary_param_is_error() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 ) | x | x ~[ 1 add ] 2 run1 ;\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x ~[ 1 add ] 2 run1 ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err("an inline literal at an ordinary quotation parameter must be rejected");
@@ -13577,7 +13613,7 @@ mod tests {
     fn poly_quotlit_disagreeing_annotation_is_error() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 ) | x | x [ ( Bool -- Bool ) dup drop ] 2 run1 ;\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x [ ( Bool -- Bool ) dup drop ] 2 run1 ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err(
@@ -13597,7 +13633,7 @@ mod tests {
     fn poly_ground_quotation_literal_leaked_local_is_error() {
         let err = check_src(&format!(
             "{SPY}: run1 ( [ Spy -- i64 ] Spy -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 )\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | x [ | s | 1 ] 1 Spy run1\n\
              ;\n\
              : main ( -- ) 5 apply drop drop ;\n"
@@ -13620,7 +13656,7 @@ mod tests {
     fn poly_ground_quotation_literal_consuming_enclosing_linear_local_is_error() {
         let err = check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
-             : ap ( 'T: Copy ^i64 -- 'T i64 ) | x c | x [ c drop 1 add ] 2 twice ;\n\
+             : ap ['T: Copy] ( 'T ^i64 -- 'T i64 ) | x c | x [ c drop 1 add ] 2 twice ;\n\
              : main ( -- ) 5 7 ^ ap . . ;\n",
         )
         .expect_err("a grounded literal consuming an enclosing linear local must be rejected");
@@ -13640,7 +13676,7 @@ mod tests {
     fn poly_ground_quotation_literal_reading_enclosing_copy_local_ok() {
         check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
-             : ap ( 'T: Copy i64 -- 'T i64 ) | x c | x [ c add ] 2 twice ;\n\
+             : ap ['T: Copy] ( 'T i64 -- 'T i64 ) | x c | x [ c add ] 2 twice ;\n\
              : main ( -- ) 5 7 ap . . ;\n",
         )
         .expect("a grounded literal may read an enclosing `Copy` local by value");
@@ -13655,7 +13691,7 @@ mod tests {
     fn poly_ground_quotation_literal_local_consumed_before_the_literal_ok() {
         check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
-             : ap ( 'T: Copy ^i64 -- 'T i64 ) | x c | c drop x [ 1 add ] 2 twice ;\n\
+             : ap ['T: Copy] ( 'T ^i64 -- 'T i64 ) | x c | c drop x [ 1 add ] 2 twice ;\n\
              : main ( -- ) 5 7 ^ ap . . ;\n",
         )
         .expect("a local consumed before the literal is not captured by it");
@@ -13673,7 +13709,7 @@ mod tests {
         let err = check_src(
             "type: Pair a i64 b i64 ;\n\
              : takes ( [ -- &Pair ] -- ) drop ;\n\
-             : ap ( 'T: Copy Pair -- 'T ) | x p | x [ &p ] takes ;\n\
+             : ap ['T: Copy] ( 'T Pair -- 'T ) | x p | x [ &p ] takes ;\n\
              : main ( -- ) 5 1 2 Pair ap drop ;\n",
         )
         .expect_err("a grounded literal may not leave a borrow of an enclosing place on its row");
@@ -13690,7 +13726,7 @@ mod tests {
     fn poly_ground_quotation_literal_retains_locals_after_grounding() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : leaks ( 'T: Copy -- 'T i64 )\n\
+             : leaks ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | x [ | y | 3 ] 2 run1 y\n\
              ;\n\
              : main ( -- ) 7 leaks drop drop ;\n",
@@ -13707,7 +13743,7 @@ mod tests {
     fn poly_ground_quotation_literal_output_mismatch_is_error() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 )\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | x [ True ] 2 run1\n\
              ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
@@ -13729,7 +13765,7 @@ mod tests {
     fn poly_ground_quotation_literal_output_type_mismatch_same_arity_is_error() {
         let err = check_src(
             ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-             : apply ( 'T: Copy -- 'T i64 )\n\
+             : apply ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | x [ drop True ] 2 run1\n\
              ;\n\
              : main ( -- ) 5 apply drop drop ;\n",
@@ -13757,7 +13793,7 @@ mod tests {
         // compiler-known primitive, never a `CombinatorEnv` entry, so it
         // still reaches this guard regardless of what the harness loads.
         let err = check_src(
-            ": apply ( 'T: Copy -- 'T ) | x | True [ ] [ ] branch drop ;\n : main ( -- ) 5 apply drop ;\n",
+            ": apply ['T: Copy] ( 'T -- 'T ) | x | True [ ] [ ] branch drop ;\n : main ( -- ) 5 apply drop ;\n",
         )
         .expect_err("`branch` on a quotation should stay rejected");
         assert!(
@@ -13773,7 +13809,7 @@ mod tests {
     #[test]
     fn poly_quotlit_to_overloaded_concrete_name_is_located_rejection() {
         let err = check_src(
-            ": run2 ( [ i64 -- i64 ] -- i64 ) 1 swap call ;\n : run2 ( i64 -- i64 ) 1 add ;\n : apply ( 'T: Copy -- 'T i64 ) | x | x [ 1 add ] run2 ;\n : main ( -- ) 5 apply drop drop ;\n",
+            ": run2 ( [ i64 -- i64 ] -- i64 ) 1 swap call ;\n : run2 ( i64 -- i64 ) 1 add ;\n : apply ['T: Copy] ( 'T -- 'T i64 ) | x | x [ 1 add ] run2 ;\n : main ( -- ) 5 apply drop drop ;\n",
         )
         .expect_err("an overloaded concrete name must not ground a quotation literal");
         assert_eq!(
@@ -13892,9 +13928,9 @@ mod tests {
 
     #[test]
     fn match_impl_target_shared_len_var_consistency() {
-        // The `Len::Var` twin: `[[i64 'N] 'N]` (outer length shares the
-        // inner array's length variable) matches `[[i64 4] 4]` but not
-        // `[[i64 4] 2]`, exercising `Len::Var`'s own `prev == count` branch.
+        // The `Len::Var` twin: `array[array[i64 'N] 'N]` (outer length shares the
+        // inner array's length variable) matches `array[array[i64 4] 4]` but not
+        // `array[array[i64 4] 2]`, exercising `Len::Var`'s own `prev == count` branch.
         let arrays = vec![
             ArrayDecl {
                 element: Type::I64,
@@ -13948,7 +13984,7 @@ mod tests {
 
     #[test]
     fn specificity_concrete_len_more_specific_than_var_len() {
-        // `['T 4]` ≺ `['T N]`
+        // `array['T 4]` ≺ `['T N]`
         let a = [Position::TyVar(0), Position::LenConcrete];
         let b = [Position::TyVar(0), Position::LenVar(0)];
         assert!(is_strictly_more_specific(&a, &b));
@@ -13957,7 +13993,7 @@ mod tests {
 
     #[test]
     fn specificity_concrete_elem_vs_concrete_len_incomparable() {
-        // `[i64 N]` ⊥ `['T 4]` (neither more specific)
+        // `[i64 N]` ⊥ `array['T 4]` (neither more specific)
         let a = [Position::TyConcrete, Position::LenVar(0)];
         let b = [Position::TyVar(0), Position::LenConcrete];
         assert!(!is_strictly_more_specific(&a, &b));
@@ -14022,7 +14058,7 @@ mod tests {
 
     #[test]
     fn specificity_nested_shared_len_vs_concrete_inner_incomparable() {
-        // `[['T N] N]` ⊥ `[['T 4] N]`: length variable N shared in A vs
+        // `[['T N] N]` ⊥ `[array['T 4] N]`: length variable N shared in A vs
         // concrete in B; concrete inner length in B vs variable in A —
         // incomparable.
         let a = [Position::TyVar(0), Position::LenVar(0), Position::LenVar(0)];
@@ -14058,7 +14094,7 @@ mod tests {
 
     #[test]
     fn specificity_array_concrete_len_vs_var_len() {
-        // `['T 4]` ≺ `['T N]` via the full `specificity` function.
+        // `array['T 4]` ≺ `['T N]` via the full `specificity` function.
         let arrays = vec![ArrayDecl {
             element: Type::I64,
             count: 4,
@@ -14075,7 +14111,7 @@ mod tests {
 
     #[test]
     fn specificity_array_concrete_elem_vs_concrete_len_incomparable() {
-        // `[i64 N]` ⊥ `['T 4]` via the full `specificity` function.
+        // `[i64 N]` ⊥ `array['T 4]` via the full `specificity` function.
         let arrays = vec![ArrayDecl {
             element: Type::I64,
             count: 4,
@@ -14096,7 +14132,7 @@ mod tests {
 
     #[test]
     fn specificity_concrete_target_vs_generic_target() {
-        // `Concrete([i64 4])` ≺ `['T N]`: the concrete target unfolds to
+        // `Concrete(array[i64 4])` ≺ `['T N]`: the concrete target unfolds to
         // the same positions as the array pattern, all concrete.
         let arrays = vec![ArrayDecl {
             element: Type::I64,
@@ -14122,7 +14158,7 @@ mod tests {
 
     #[test]
     fn specificity_bare_var_vs_array_pattern_depth_mismatch() {
-        // `'T` (1 position) vs `['T 'N]` (2 positions): `['T 'N]` wins --
+        // `'T` (1 position) vs `array['T 'N]` (2 positions): `array['T 'N]` wins --
         // a bare variable is unconditionally less specific than any
         // structural pattern, regardless of the depth mismatch.
         let arrays = vec![ArrayDecl {
@@ -14145,7 +14181,7 @@ mod tests {
 
     #[test]
     fn specificity_bare_var_vs_fully_concrete_array_depth_mismatch() {
-        // `'T` (1 position) vs the folded `Concrete([i64 4])` (2 positions
+        // `'T` (1 position) vs the folded `Concrete(array[i64 4])` (2 positions
         // once unfolded): the fully concrete impl wins.
         let arrays = vec![ArrayDecl {
             element: Type::I64,
@@ -14167,7 +14203,7 @@ mod tests {
 
     #[test]
     fn specificity_nested_array_more_specific_than_shallow_at_mismatched_depth() {
-        // `['T 'N]` vs `[['T 'N] 'M]` at `[[i64 4] 2]`: the nested pattern's
+        // `array['T 'N]` vs `array[array['T 'N] 'M]` at `array[array[i64 4] 2]`: the nested pattern's
         // element position is itself an array pattern where the shallow
         // pattern only has a bare variable -- a depth mismatch one level
         // in, not just at the top. The nested pattern wins.
@@ -14186,9 +14222,9 @@ mod tests {
             },
         ];
         let ty = Type::Array(outer_arr, "outer");
-        // `['T 'N]`
+        // `array['T 'N]`
         let shallow = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
-        // `[['T 'N] 'M]`
+        // `array[array['T 'N] 'M]`
         let nested = PolyType::Array(
             Box::new(PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0))),
             Len::Var(1),

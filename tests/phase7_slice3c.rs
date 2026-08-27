@@ -82,7 +82,7 @@ fn sum_over_a_slice_noninline_prints_twentyfive() {
            | s |\n  \
            0 s len >i64 ~[ | i | s i >usize &> @ add ] times\n\
          ;\n\
-         : sum_len ( &[i64 5] usize -- i64 )\n  \
+         : sum_len ( &array[i64 5] usize -- i64 )\n  \
            | n | | a |\n  \
            0 n >i64 ~[ | i | a i >usize &> @ add ] times\n\
          ;\n\
@@ -303,7 +303,7 @@ fn declaring_a_type_named_slice_is_rejected() {
 /// takes one mutable half at a time, so the coarse borrow table never sees two
 /// live `&!` views of the same buffer, and the mutation each leaf performs is
 /// visible through the buffer afterwards. The view is built one frame up, in
-/// `dbl_all`, off a declared `&![i64 5]` *parameter*: the mutability of a
+/// `dbl_all`, off a declared `&!array[i64 5]` *parameter*: the mutability of a
 /// reference that arrives as a parameter comes from its declared type, not
 /// from the borrow that produced it.
 #[test]
@@ -324,7 +324,7 @@ fn recursive_divide_and_conquer_over_mutable_subslices_runs() {
   ] if
 ;
 
-: dbl_all ( &![i64 5] -- ) slice dbl ;
+: dbl_all ( &!array[i64 5] -- ) slice dbl ;
 
 : main ( -- )
   3 5 fill | buf |
@@ -535,7 +535,7 @@ fn a_materialized_quotation_slices_a_captured_mutable_reference() {
 #[test]
 fn a_view_built_from_a_joined_mutable_reference_writes_through() {
     let src = "\
-type: W a [i64 4] b [i64 4] ;
+type: W a array[i64 4] b array[i64 4] ;
 : main ( -- )
   0 4 fill 0 4 fill W | w |
   1 1 eq ~[ &!w &!a ] ~[ &!w &!b ] if slice | s |
@@ -589,7 +589,7 @@ fn a_view_built_from_each_projection_route_writes_through() {
     assert_eq!(code, 0);
 
     let src = "\
-type: Buf data ^[i64 4] ;
+type: Buf data ^array[i64 4] ;
 : main ( -- )
   0 4 fill ^ Buf | b |
   &!b &!data &!^ slice 0 >usize &!> 9 !
@@ -612,7 +612,7 @@ type: Buf data ^[i64 4] ;
     // give a mis-recorded mutability a shape to resolve to instead of failing.
     let src = "\
 type: Box
-| Arr  a [i64 4]
+| Arr  a array[i64 4]
 | Pair x i64 y i64
 ;
 : poke ( &!Box -- )

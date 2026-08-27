@@ -756,7 +756,7 @@ pub fn format_stack(
                 cell += size.div_ceil(8);
             }
             Type::Array(id, name) => {
-                // An array slot renders as its `<[T N]>` placeholder,
+                // An array slot renders as its `<array[T N]>` placeholder,
                 // reusing the aggregate-placeholder path, and advances the
                 // buffer by its inline aggregate's cell span.
                 vals.push(format!("<{name}>"));
@@ -4320,10 +4320,10 @@ mod tests {
 
     #[test]
     fn format_rich_array_shows_elements() {
-        // D2/R14: every element, not the `<[T N]>` placeholder.
+        // D2/R14: every element, not the `<array[T N]>` placeholder.
         use crate::ast::ArrayId;
         let array_layouts = vec![ArrayLayout {
-            name: "[i64 3]",
+            name: "array[i64 3]",
             elem: ir::IrType::I64,
             count: 3,
             stride: 8,
@@ -4332,10 +4332,10 @@ mod tests {
             is_linear: false,
             drop_generation: None,
         }];
-        let arr = Type::Array(ArrayId::from_index(0), "[i64 3]");
+        let arr = Type::Array(ArrayId::from_index(0), "array[i64 3]");
         assert_eq!(
             format_stack_rich(&[10, 20, 30], &[arr], &[], &[], &array_layouts, &[]),
-            "stack: <[i64 3] 10i64 20i64 30i64>"
+            "stack: <array[i64 3] 10i64 20i64 30i64>"
         );
     }
 
@@ -4848,7 +4848,7 @@ mod tests {
             .eval_line(&import_line("m", &lib), &mut out)
             .unwrap();
         session
-            .eval_line(": alen ( ['T 'N] -- ) drop ;", &mut out)
+            .eval_line(": alen ( array['T 'N] -- ) drop ;", &mut out)
             .unwrap();
 
         let names = session.word_names();
@@ -4997,7 +4997,7 @@ mod tests {
         let mut out = Vec::new();
         let err = session
             .eval_line(
-                "trait: Order 'T : cmp ( &'T &'T -- Ordering ) ; ;",
+                "trait: Order['T] : cmp ( &'T &'T -- Ordering ) ; ;",
                 &mut out,
             )
             .unwrap_err();
@@ -5018,7 +5018,7 @@ mod tests {
         let mut session = Session::new();
         let mut out = Vec::new();
         let err = session
-            .eval_line("type: Box 'T val 'T ;", &mut out)
+            .eval_line("type: Box['T] val 'T ;", &mut out)
             .unwrap_err();
         assert!(
             err.contains("not supported in the REPL yet"),
@@ -5028,7 +5028,7 @@ mod tests {
         assert!(session.structs.is_empty());
 
         let err = session
-            .eval_line("type: Result 'T | Ok val 'T ;", &mut out)
+            .eval_line("type: Result['T] | Ok val 'T ;", &mut out)
             .unwrap_err();
         assert!(
             err.contains("not supported in the REPL yet"),

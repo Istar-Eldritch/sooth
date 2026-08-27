@@ -2,9 +2,9 @@
 //! cycle detection.
 //!
 //! A generic `impl:` whose `where`-clause bounds its own type variable (e.g.
-//! `impl: Show for ['T 4] where 'T: Print`) dispatches the member body's
+//! `impl: Show for array['T 4] where 'T: Print`) dispatches the member body's
 //! trait-member calls on that variable through recursive `find_bound_impl`
-//! discharge: at `[Point 4]` the bound becomes `Point: Print`, and the helper
+//! discharge: at `array[Point 4]` the bound becomes `Point: Print`, and the helper
 //! finds `impl: Print for Point` in the registry. Omitting that concrete impl
 //! produces the located unsatisfied-bound error. A self-referential bound
 //! cycle (`impl: Show for 'T where 'T: Show`) is a located error, not a hang.
@@ -76,8 +76,8 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
     (t, entry)
 }
 
-/// R9: a bounded generic `impl: Show for ['T 4] where 'T: Print` instantiated
-/// at `[Point 4]` (where `Point` has `impl: Print`) compiles, runs, and
+/// R9: a bounded generic `impl: Show for array['T 4] where 'T: Print` instantiated
+/// at `array[Point 4]` (where `Point` has `impl: Print`) compiles, runs, and
 /// produces output identical to a hand-written per-element concrete
 /// counterpart.
 ///
@@ -91,18 +91,18 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
 fn bounded_generic_impl_runs_identically_to_concrete_counterpart() {
     let trait_decls = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-trait: Print 'T : print ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+trait: Print['T] : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n";
 
     let generic_src = format!(
         "{trait_decls}\
-         impl: Show for ['T 4] where 'T: Print\n\
+         impl: Show for array['T 4] where 'T: Print\n\
            : show | a | a 0 >usize &> print a 1 >usize &> print a 2 >usize &> print a 3 >usize &> print a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            1 2 Point |p|\n\
            p 4 fill |arr|\n\
@@ -114,7 +114,7 @@ impl: Print for Point\n\
 
     let counterpart_src = format!(
         "{trait_decls}\
-         : show_arr ( &[Point 4] -- )\n\
+         : show_arr ( &array[Point 4] -- )\n\
            | a | 42 . 42 . 42 . 42 . a drop ;\n\
          : main ( -- )\n\
            1 2 Point |p|\n\
@@ -144,13 +144,13 @@ impl: Print for Point\n\
 fn omitting_element_impl_produces_unsatisfied_bound_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-trait: Print 'T : print ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+trait: Print['T] : print ( &'T -- ) ; ;\n\
 \\ No impl: Print for Point — the bound 'T: Print won't discharge\n\
-impl: Show for ['T 4] where 'T: Print\n\
+impl: Show for array['T 4] where 'T: Print\n\
   : show | a | a 0 >usize &> print a 1 >usize &> print a 2 >usize &> print a 3 >usize &> print a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   p 4 fill |arr|\n\
@@ -161,10 +161,13 @@ impl: Show for ['T 4] where 'T: Print\n\
     let (_t, entry) = single_file("neg", src);
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `shows` with `[Point 4]`"),
+        err.contains("cannot instantiate `'T` of `shows` with `array[Point 4]`"),
         "{err}"
     );
-    assert!(err.contains("`[Point 4]` does not satisfy `Show`"), "{err}");
+    assert!(
+        err.contains("`array[Point 4]` does not satisfy `Show`"),
+        "{err}"
+    );
 }
 
 /// R10: a self-referential bound cycle — `impl: Show for 'T where 'T: Show`
@@ -174,11 +177,11 @@ impl: Show for ['T 4] where 'T: Print\n\
 fn self_referential_bound_cycle_is_located_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
 impl: Show for 'T where 'T: Show\n\
   : show | a | a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   &p shows\n\
@@ -203,11 +206,11 @@ impl: Show for 'T where 'T: Show\n\
 fn unbounded_generic_impl_still_dispatches() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-impl: Show for ['T 4]\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+impl: Show for array['T 4]\n\
   : show | a | a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   p 4 fill |arr|\n\
@@ -230,26 +233,26 @@ impl: Show for ['T 4]\n\
 // excluded and the unbounded one dispatches.
 
 /// R11: a bounded generic impl overrides an unbounded generic impl with the
-/// same pattern at instantiations where the bound is satisfied. At `[Point 4]`
+/// same pattern at instantiations where the bound is satisfied. At `array[Point 4]`
 /// (where `Point` has `impl: Print`), the bounded impl wins (prints `1`). At
-/// `[i64 4]` (where `i64` has no `impl: Print`), the bounded candidate is
+/// `array[i64 4]` (where `i64` has no `impl: Print`), the bounded candidate is
 /// excluded and the unbounded impl wins (prints `2`).
 #[test]
 fn bounded_impl_overrides_unbounded_at_satisfied_instantiation() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-trait: Print 'T : print ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+trait: Print['T] : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n\
-impl: Show for ['T 'N] where 'T: Print\n\
+impl: Show for array['T 'N] where 'T: Print\n\
   : show | a | 1 . a drop ;\n\
 ;\n\
-impl: Show for ['T 'N]\n\
+impl: Show for array['T 'N]\n\
   : show | a | 2 . a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   p 4 fill |arr|\n\
@@ -264,11 +267,11 @@ impl: Show for ['T 'N]\n\
     let out = build_and_run(&entry);
     assert!(
         out.contains("1\n"),
-        "bounded impl should win at [Point 4]: {out}"
+        "bounded impl should win at array[Point 4]: {out}"
     );
     assert!(
         out.contains("2\n"),
-        "unbounded impl should win at [i64 4]: {out}"
+        "unbounded impl should win at array[i64 4]: {out}"
     );
 }
 
@@ -279,18 +282,18 @@ impl: Show for ['T 'N]\n\
 fn bounded_impl_overrides_unbounded_reversed_declaration_order() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-trait: Print 'T : print ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+trait: Print['T] : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n\
-impl: Show for ['T 'N]\n\
+impl: Show for array['T 'N]\n\
   : show | a | 2 . a drop ;\n\
 ;\n\
-impl: Show for ['T 'N] where 'T: Print\n\
+impl: Show for array['T 'N] where 'T: Print\n\
   : show | a | 1 . a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   p 4 fill |arr|\n\
@@ -305,11 +308,11 @@ impl: Show for ['T 'N] where 'T: Print\n\
     let out = build_and_run(&entry);
     assert!(
         out.contains("1\n"),
-        "bounded impl should win at [Point 4] regardless of declaration order: {out}"
+        "bounded impl should win at array[Point 4] regardless of declaration order: {out}"
     );
     assert!(
         out.contains("2\n"),
-        "unbounded impl should win at [i64 4]: {out}"
+        "unbounded impl should win at array[i64 4]: {out}"
     );
 }
 
@@ -320,22 +323,22 @@ impl: Show for ['T 'N] where 'T: Print\n\
 fn incomparable_bound_sets_produce_ambiguity_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-trait: Print 'T : print ( &'T -- ) ; ;\n\
-trait: Display 'T : display ( &'T -- ) ; ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+trait: Print['T] : print ( &'T -- ) ; ;\n\
+trait: Display['T] : display ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | p drop ;\n\
 ;\n\
 impl: Display for Point\n\
   : display | p | p drop ;\n\
 ;\n\
-impl: Show for ['T 'N] where 'T: Print\n\
+impl: Show for array['T 'N] where 'T: Print\n\
   : show | a | 1 . a drop ;\n\
 ;\n\
-impl: Show for ['T 'N] where 'T: Display\n\
+impl: Show for array['T 'N] where 'T: Display\n\
   : show | a | 2 . a drop ;\n\
 ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   1 2 Point |p|\n\
   p 4 fill |arr|\n\

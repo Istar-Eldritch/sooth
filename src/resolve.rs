@@ -1077,7 +1077,7 @@ mod tests {
     #[test]
     fn sigiled_plain_word_or_bare_type_is_left_unmangled() {
         let mut module = assemble_two_modules(
-            "type: Acc arr [i64 4] ;\n\
+            "type: Acc arr array[i64 4] ;\n\
              : dst ( -- i64 ) 5 ;\n\
              : main ( -- ) &!dst drop ;",
             ": noop ( -- ) ;",

@@ -43,7 +43,7 @@ fn build_err(name: &str, src: &str) -> String {
 fn generic_enum_eliminator_runs_both_arms() {
     let (stdout, code) = build_and_run(
         "s3b-generic-eliminator",
-        "type: Option 'T | None | Some val 'T ;\n\
+        "type: Option['T] | None | Some val 'T ;\n\
          : to-int ( Option[i64] -- i64 )\n  \
            ~[ ( Some ) Some> ]\n  \
            ~[ ( None ) None> 0 ]\n  \
@@ -66,7 +66,7 @@ fn generic_enum_eliminator_runs_both_arms() {
 fn generic_enum_eliminator_by_reference_reads_and_mutates_in_place() {
     let (stdout, code) = build_and_run(
         "s3b-generic-eliminator-ref",
-        "type: Cell 'T | Pair a 'T b 'T | One v 'T ;\n\
+        "type: Cell['T] | Pair a 'T b 'T | One v 'T ;\n\
          : total ( &Cell[i64] -- i64 )\n  \
            ~[ ( &One )  &v @ ]\n  \
            ~[ ( &Pair ) dup &a @ swap &b @ add ]\n  \
@@ -102,7 +102,7 @@ fn generic_enum_eliminator_by_reference_reads_and_mutates_in_place() {
 fn stray_generic_arm_tag_outside_an_eliminator_call_is_error() {
     let err = build_err(
         "s3b-stray-generic-tag",
-        "type: Option 'T | None | Some val 'T ;\n\
+        "type: Option['T] | None | Some val 'T ;\n\
          : stray ( Option[i64] -- Option[i64] i64 ) ~[ ( Some ) 0 ] drop 1 ;\n\
          : main ( -- ) 42 Some stray . drop ;\n",
     );
@@ -121,7 +121,7 @@ fn stray_generic_arm_tag_outside_an_eliminator_call_is_error() {
 fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
     let err = build_err(
         "s3b-nonexhaustive-generic",
-        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+        "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n\
          : to-int ( Result[i64 Bool] -- i64 ) ~[ ( Ok ) Ok> ] Result? ;\n\
          : main ( -- ) 42 Ok to-int . ;\n",
     );
@@ -147,7 +147,7 @@ fn non_exhaustive_generic_eliminator_names_the_surface_variant() {
 fn wrong_family_scrutinee_names_the_generic_surface_family() {
     let err = build_err(
         "s3b-wrong-family-generic",
-        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+        "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n\
          type: Abc | A a i64 | B b i64 | C c i64 ;\n\
          : to-int ( Result[i64 Bool] -- i64 )\n  \
            ~[ ( Ok ) Ok> ]\n  \
@@ -181,7 +181,7 @@ fn forward_declared_generic_type_eliminates_after_the_matching_word() {
            ~[ ( Err ) Err> 100 add ]
   \
            Result? ;\n\
-         type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+         type: Result['T 'E] | Ok val 'T | Err val 'E ;\n\
          : main ( -- )\n  \
            42 Ok  to-int .\n  \
            7  Err to-int . ;\n",
@@ -208,7 +208,7 @@ fn forward_declared_generic_type_eliminates_after_the_matching_word() {
 fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
     let (stdout, code) = build_and_run(
         "s3b-two-asymmetric-instantiations",
-        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n\
+        "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n\
          : elim-both ( Result[i64 Bool] Result[Bool i64] -- i64 i64 )\n  \
            ~[ ( Ok ) Ok> ~[ 10 ] ~[ 20 ] if ]\n  \
            ~[ ( Err ) Err> ]\n  \

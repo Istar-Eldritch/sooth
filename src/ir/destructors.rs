@@ -1220,7 +1220,7 @@ mod tests {
         let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
         assert!(
             ir.funcs.iter().any(|f| f.name == "sooth_array_drop_0"),
-            "a linear [Spy 2] array gets a synthesized destructor"
+            "a linear array[Spy 2] array gets a synthesized destructor"
         );
         // A non-linear array gets none.
         let ir2 = lower_src(": w ( -- ) 0 4 fill drop ;");
@@ -1228,7 +1228,7 @@ mod tests {
             !ir2.funcs
                 .iter()
                 .any(|f| f.name.starts_with("sooth_array_drop")),
-            "a non-linear [i64 4] array gets no destructor"
+            "a non-linear array[i64 4] array gets no destructor"
         );
     }
 
@@ -1321,7 +1321,7 @@ mod tests {
             enums: &Enums::default(),
             arrays: &Arrays {
                 layouts: vec![ArrayLayout {
-                    name: "[i64 0]",
+                    name: "array[i64 0]",
                     elem: IrType::I64,
                     count: 0,
                     stride: 8,
@@ -1356,7 +1356,7 @@ mod tests {
         let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
         assert!(
             ir.funcs.iter().any(|f| f.name == array_drop),
-            "a nullary-variant [Opt 3] array gets a synthesized destructor"
+            "a nullary-variant array[Opt 3] array gets a synthesized destructor"
         );
         let dtor = ir
             .funcs

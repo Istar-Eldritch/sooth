@@ -46,7 +46,7 @@ fn build_err(name: &str, src: &str) -> String {
 fn generic_header_colliding_with_a_concrete_type_is_a_duplicate() {
     let err = build_err(
         "phase5-slice1-dup-struct",
-        "type: Box x i64 ;\ntype: Box 'T val 'T ;\n: main ( -- ) 1 . ;\n",
+        "type: Box x i64 ;\ntype: Box['T] val 'T ;\n: main ( -- ) 1 . ;\n",
     );
     assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
     assert!(err.contains("line 2, col 1"), "unlocated: {err}");
@@ -58,7 +58,7 @@ fn generic_header_colliding_with_a_concrete_type_is_a_duplicate() {
 fn generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate() {
     let err = build_err(
         "phase5-slice1-dup-enum",
-        "type: Opt | None | Some v i64 ;\ntype: Opt 'T | Nothing | Just v 'T ;\n: main ( -- ) 1 . ;\n",
+        "type: Opt | None | Some v i64 ;\ntype: Opt['T] | Nothing | Just v 'T ;\n: main ( -- ) 1 . ;\n",
     );
     assert!(err.contains("duplicate type `Opt`"), "unexpected: {err}");
     assert!(err.contains("line 2, col 1"), "unlocated: {err}");
@@ -68,7 +68,7 @@ fn generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate() {
 fn generic_type_declared_but_never_used_builds_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-unused-generic",
-        "type: Box 'T val 'T ;\n: main ( -- ) 42 . ;\n",
+        "type: Box['T] val 'T ;\n: main ( -- ) 42 . ;\n",
     );
     assert_eq!(stdout, "42\n");
     assert_eq!(code, 0);
@@ -82,7 +82,7 @@ fn generic_type_declared_but_never_used_builds_and_runs() {
 fn generic_instantiations_reach_the_backend_and_run() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-instantiations",
-        "type: Box 'T val 'T ;\ntype: Wrap i Box[i64] b Box[Bool] ;\n: f ( Box[i64] -- Box[i64] ) ;\n: main ( -- ) 42 . ;\n",
+        "type: Box['T] val 'T ;\ntype: Wrap i Box[i64] b Box[Bool] ;\n: f ( Box[i64] -- Box[i64] ) ;\n: main ( -- ) 42 . ;\n",
     );
     assert_eq!(stdout, "42\n");
     assert_eq!(code, 0);
@@ -94,7 +94,7 @@ fn generic_instantiations_reach_the_backend_and_run() {
 fn generic_enum_instantiation_reaches_the_backend_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-enum-instantiation",
-        "type: Res 'T 'E | Ok val 'T | Err val 'E ;\n: f ( Res[i64 Bool] -- Res[i64 Bool] ) ;\n: main ( -- ) 9 . ;\n",
+        "type: Res['T 'E] | Ok val 'T | Err val 'E ;\n: f ( Res[i64 Bool] -- Res[i64 Bool] ) ;\n: main ( -- ) 9 . ;\n",
     );
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
@@ -106,7 +106,7 @@ fn generic_enum_instantiation_reaches_the_backend_and_runs() {
 fn generic_application_with_the_wrong_argument_count_is_a_build_error() {
     let err = build_err(
         "phase5-slice1-arity",
-        "type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64] ;\n: main ( -- ) 1 . ;\n",
+        "type: Pair['A 'B] a 'A b 'B ;\ntype: W x Pair[i64] ;\n: main ( -- ) 1 . ;\n",
     );
     assert!(
         err.contains("generic type `Pair` declares 2 type variables"),
@@ -120,7 +120,7 @@ fn generic_application_with_the_wrong_argument_count_is_a_build_error() {
 fn generic_enum_declared_but_never_used_builds_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-unused-generic-enum",
-        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n: main ( -- ) 7 . ;\n",
+        "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n: main ( -- ) 7 . ;\n",
     );
     assert_eq!(stdout, "7\n");
     assert_eq!(code, 0);
@@ -140,7 +140,7 @@ fn generic_enum_declared_but_never_used_builds_and_runs() {
 fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-shared-surface-dispatch",
-        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[Bool] ;\n\
+        "type: Box['T] val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[Bool] ;\n\
          : main ( -- )\n  7 Box &val @ . drop\n  True Box &val @ . drop\n;\n",
     );
     assert_eq!(stdout, "7\nTrue\n");
@@ -157,7 +157,7 @@ fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
 fn generic_instantiation_destructor_runs_like_a_concrete_types() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-destructor",
-        "type: Box 'T val 'T ;\ntype: WrapI x Box[i64] ;\n\
+        "type: Box['T] val 'T ;\ntype: WrapI x Box[i64] ;\n\
          : drop ( Box[i64] -- ) Box> . ;\n\
          : main ( -- ) 42 Box drop ;\n",
     );
@@ -174,7 +174,7 @@ fn generic_instantiation_destructor_runs_like_a_concrete_types() {
 fn generic_application_at_a_word_signature_slot_resolves_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-signature-slot",
-        "type: Box 'T val 'T ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
+        "type: Box['T] val 'T ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
          : main ( -- ) 7 Box unwrap . ;\n",
     );
     assert_eq!(stdout, "7\n");
