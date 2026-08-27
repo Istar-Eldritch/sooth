@@ -23,4 +23,3 @@ discipline (`tests/phase0.rs`, `explicit_drop_runs_destructor_once`,
 form. Its language facts, a `| n |`-bound local, `sq`/`neg` definition and
 call, `mul`/`sub`/`add` and `.`, are covered by the goldens above and by
 `tests/phase0.rs`'s `countdown_dogfood_runs_in_constant_stack`.
-
