@@ -245,9 +245,14 @@ impl<'a> FuncBuilder<'a> {
     /// observed symptom is a downstream `checked user word exists: cmp` panic,
     /// one comparison later. The member splice therefore reuses the enclosing
     /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) and
-    /// pushes nothing. Two member splices under one uid alpha-rename to the
-    /// same local names, which is correct because the splice truncates
-    /// `self.locals` to its entry depth and the resolver is scope-bounded.
+    /// pushes nothing.
+    ///
+    /// That reused uid is not unique, so the member body is renamed through
+    /// `alpha_rename_member_locals`, whose suffix is disjoint from the
+    /// ordinary splice suffix. Sharing the suffix would rename an enclosing
+    /// `| x |` and a member `| x |` to one name, and the name-keyed local
+    /// lookups here and in `word_families` would resolve a member read to the
+    /// enclosing value -- a wrong answer, not a panic.
     ///
     /// `tail = false`: a trait member body is not the enclosing word's tail,
     /// and threading the caller's `tail` would let the member's terms
@@ -257,7 +262,7 @@ impl<'a> FuncBuilder<'a> {
     fn lower_resolved_word_call(&mut self, sym_name: &str) {
         if let Some(entry) = self.combinators.get(sym_name) {
             let uid = self.splice_uid_stack.last().copied().unwrap_or(0);
-            let body = crate::ast::alpha_rename_locals(&entry.terms, uid);
+            let body = crate::ast::alpha_rename_member_locals(&entry.terms, uid);
             let locals_depth = self.locals.len();
             self.lower_terms(&body, false);
             self.locals.truncate(locals_depth);
