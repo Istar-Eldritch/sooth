@@ -314,24 +314,50 @@ fn ord_inline_cmp_two_splices_produce_correct_value() {
     assert_eq!(build_and_run(&entry), "1\n-1\n-1\n1\n");
 }
 
-/// P7.S3s-follow (review round 1, P0): the spliced member body's locals must
-/// not collide with the enclosing splice's. A member splice reuses the
-/// enclosing splice's uid (it cannot mint a fresh `inline_uid` without
-/// desynchronizing from the checker), so the uid alone does not make the
-/// member's names fresh; `alpha_rename_member_locals`'s disjoint suffix does.
-/// Sharing the suffix renamed the enclosing `| lhs rhs |` and `lib/cmp.sth`'s
-/// own `| lhs rhs |` to one name, and the name-keyed local lookups in
-/// `func_builder` resolved the member's read to the *enclosing* value: this
-/// program printed the comparison of `9 9` (the enclosing pair) instead of
-/// `1 2`. The fixture names its locals `lhs`/`rhs` deliberately, matching the
-/// shipped `impl: Ord` bodies, so the collision is the real one and not a
-/// synthetic rename.
+/// A spliced member body's locals must not collide with those of a combinator
+/// the body itself splices. `alpha_rename_member_locals`'s suffix is what
+/// keeps them apart, because the *uid* does not: a member body is spliced
+/// under the member word's own check-time seed (P7.S8's R1), and that seed is
+/// also the uid minted for the first combinator splice nested inside it, so a
+/// shared suffix renames both `| lhs |`s to one name. `self.locals` is scanned
+/// front-to-back, so `bump`'s read of its own `lhs` then finds the member
+/// body's `lhs` -- the `Point` -- and the comparison silently answers off the
+/// wrong values rather than panicking.
+///
+/// Measured, not assumed: with `MEMBER_SPLICE_SUFFIX` set to `INLINE_SUFFIX`
+/// this program prints `1`/`1`/`1` instead of `-1`/`1`/`0`. `bump` must be the
+/// member body's *first* nested splice for the uids to meet, which is why it
+/// is called before any other combinator in `cmp`.
+///
+/// The enclosing `cmp_shadowed` binds `lhs`/`rhs` too. That pairing can no
+/// longer collide (a caller's splice uid and a member's seed differ), so it is
+/// here as the ordinary shadowing control, not as the witness.
 #[test]
-fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
+fn ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own() {
     let (_t, entry) = program(
         "ord-inline-collide",
         &format!(
             "{ORD_INLINE_IMPORTS}\
+             type: Point x i64 ;
+\
+             : bump inline ( i64 -- i64 ) | lhs | lhs 100 add ;
+\
+             impl: Ord for Point
+\
+               : cmp
+\
+                 | lhs rhs |
+\
+                 &lhs &x @ | a | &rhs &x @ | b |
+\
+                 lhs drop rhs drop
+\
+                 a bump | ab | b bump | bb |
+\
+                 ab bb ult [ Less ] [ ab bb ugt [ Greater ] [ Equal ] branch ] branch ;
+\
+             ;
+\
              : cmp_shadowed inline ( 'T: Ord 'T 'T 'T -- i64 )
 \
                | lhs rhs a b |
@@ -342,17 +368,16 @@ fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
 \
              : main ( -- )
 \
-               9 9 1 2 cmp_shadowed .
+               9 Point 9 Point 1 Point 2 Point cmp_shadowed .
 \
-               9 9 2 1 cmp_shadowed .
+               9 Point 9 Point 2 Point 1 Point cmp_shadowed .
 \
-               9 9 1 1 cmp_shadowed . ;
+               9 Point 9 Point 1 Point 1 Point cmp_shadowed . ;
 "
         ),
     );
-    // The compared pair is `a b`, never the `lhs rhs` the member body's own
-    // locals share a name with: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
-    // Under the collision all three printed 0 (comparing 9 with 9).
+    // The compared pair is `a b`, and `bump` adds 100 to each side, so the
+    // ordering is theirs: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
     assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
 }
 

@@ -1079,14 +1079,6 @@ mod tests {
             Some(seed),
             "the first uid minted inside the member body is its seed itself, not `seed + k`"
         );
-
-        let seeds: HashMap<String, u32> = module
-            .words
-            .iter()
-            .enumerate()
-            .map(|(i, w)| (w.name.clone(), i as u32 * crate::check::INLINE_UID_STRIDE))
-            .collect();
-        assert_eq!(seeds.get(&name), Some(&seed), "`lower`'s map agrees");
     }
 
     /// P7.S8 (R1): the shape the fix exists for -- a spliced member body that

@@ -182,6 +182,12 @@ impl<'a> FuncBuilder<'a> {
     /// which the re-splice bracket raises so `lower_call`'s span-keyed
     /// `trait_calls` lookup stands aside for the duration (R1b).
     ///
+    /// The rule is written for the member case it exists for, but the bracket
+    /// covers every combinator this function splices, including an `inline`
+    /// builtin overload arriving through the `builtin_overloads` path above.
+    /// That is correct for the same reason: those are top-level words too, so
+    /// the checker seeded them the same way.
+    ///
     /// A member absent from `member_uid_seeds` falls back to the enclosing
     /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) for the
     /// `inline_uid` reset and the alpha-rename suffix; the push/pop of
@@ -190,12 +196,15 @@ impl<'a> FuncBuilder<'a> {
     /// it hands out empty splice tables, so no member splice there has an
     /// entry to miss in the first place.
     ///
-    /// That reused uid is not unique, so the member body is renamed through
-    /// `alpha_rename_member_locals`, whose suffix is disjoint from the
-    /// ordinary splice suffix. Sharing the suffix would rename an enclosing
-    /// `| x |` and a member `| x |` to one name, and the name-keyed local
-    /// lookups here and in `word_families` would resolve a member read to the
-    /// enclosing value -- a wrong answer, not a panic.
+    /// Entering the member's namespace does not make the uid unique: the
+    /// member's seed is also the uid the first combinator splice *inside* this
+    /// body will mint. So the body is renamed through
+    /// `alpha_rename_member_locals`, whose suffix is disjoint from the ordinary
+    /// splice suffix (`MEMBER_SPLICE_SUFFIX`, `src/ast.rs`). Sharing the suffix
+    /// would rename a member `| x |` and that nested splice's `| x |` to one
+    /// name, and the name-keyed local lookups here and in `word_families`
+    /// would resolve the nested read to the member's value -- a wrong answer,
+    /// not a panic.
     ///
     /// `tail = false`: a trait member body is not the enclosing word's tail,
     /// and threading the caller's `tail` would let the member's terms
@@ -1474,10 +1483,12 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5:
-        // `gt` is a real call now, which would inflate the call count this
-        // test measures; the raw primitive keeps the same stack effect at
-        // zero cost, exactly as `gt`'s own old inline body did).
+        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt`, to keep the
+        // block graph minimal: `gt` is `inline`, so writing it splices `cmp`'s
+        // `impl: Ord` body and an `Ordering?` diamond into this same function,
+        // and the header/phi assertions below would have to be read through
+        // those extra blocks instead of measuring the loop transform alone.
+        // The raw primitive has the same stack effect at zero cost.
         let ir =
             lower_src(": go ( i64 i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
@@ -1526,9 +1537,9 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact mul`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        // `dup 0 ueq [ True ] [ False ] branch` in place of `eq` (P7.S3s R5:
-        // `eq` is a real call now, which would inflate the call count this
-        // test measures).
+        // `dup 0 ueq [ True ] [ False ] branch` in place of `eq`: `eq` is
+        // `inline`, so it would splice a whole `Ordering?` diamond into the
+        // body whose single surviving call this test counts.
         let ir = lower_src(
             ": fact ( i64 -- i64 ) dup 0 ueq [ True ] [ False ] branch ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;",
         );
@@ -1865,10 +1876,10 @@ mod tests {
         // `lower_call` would leave an `Instr::Call` to `while` (or splice the
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
-        // `dup 5 ult [ True ] [ False ] branch` in place of `lt` (P7.S3s R5:
-        // `lt` is a real call now, which would leave an unrelated call in
-        // `main`'s spliced body that this test's own `call_symbols` assertion
-        // must otherwise special-case).
+        // `dup 5 ult [ True ] [ False ] branch` in place of `lt`: `lt` is
+        // `inline`, so it would splice `cmp`'s body and an `Ordering?` diamond
+        // into `main` alongside `while`'s own splice, and `call_symbols` below
+        // is asserting about *this* splice's block graph.
         let ir = lower_src(
             ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
              : main ( -- ) 0 [ dup 5 ult [ True ] [ False ] branch ~[ 1 add True ] ~[ False ] if ] while . ;\n",

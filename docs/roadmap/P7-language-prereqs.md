@@ -705,23 +705,20 @@ surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are derived from `cmp`. `'
 a struct or enum like any other bound, and a user type opts in with its own `impl: Ord for
 Point`; there is no compiler-hardcoded notion of "ordered" left to reject it.
 
-The six comparisons ship **non-inline**, and regress to a real call frame each, because an
-`inline` word may declare no `Bound::User` variable at all
-(`reject_user_bound_on_combinator`) and `Ord` is now one -- a measured ~2x tax over the old
-branch-and-construct body on a comparison-heavy loop, accepted for this slice. **P7.S3o**
-(parked) is the named follow-on that could restore the splice, using the differential oracle
-this slice's non-inline landing set up (flip `inline`, diff resolved `impl:` symbols at two
-and three splices). The REPL carries no whole-program trait/`impl:` registry, so a bound
-naming `Ord` at REPL scope gets a located, REPL-specific diagnostic pointing at that gap
-rather than claiming the name is wrong (`repl_unknown_capability_error`), in first position
-and after a folded `Copy` alike. Closing the gap itself -- a session carrying its imported
+The six comparisons are `inline`, so a comparison and its `Ordering?` eliminator fold into
+the caller and a library comparison costs no call frame (**P7.S8**, which supplied the uid
+rule that makes a spliced `impl:` body lower correctly). The REPL carries no whole-program
+trait/`impl:` registry, so a bound naming `Ord` at REPL scope gets a located, REPL-specific
+diagnostic pointing at that gap rather than claiming the name is wrong
+(`repl_unknown_capability_error`), in first position and after a folded `Copy` alike.
+Closing the gap itself -- a session carrying its imported
 modules' trait and `impl:` registries, so `'T: Ord` resolves at REPL scope the way it does in
 a file -- has no owning slice.
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;
 the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
-still behaves identically (codegen regresses, behaviour does not).
+still behaves identically.
 
 **P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ planned ]`
 S3s shipped `cmp` and the six surface comparisons non-inline as a named, deliberate tradeoff
@@ -1087,13 +1084,24 @@ grounding and the recorded answer is then the wrong one. With both rules in plac
 a user `impl: Ord` delegating to a primitive comparison builds and a library comparison
 costs no call frame. Detail: [slice8-spec](./P7/slice8-spec.md).
 
-Phase 2's eight section-6 mutations (the uid-stack push, the `inline_uid` reset, the
-`member_splice_depth` gate and its blanket-gate regression against the R1c counter-example,
-the seed formula, the `back_edges` repair, both swap controls, and the composed-
-instantiation seed) all reproduced their predicted failures. CLAUDE.md's five split
-signals were re-run against `src/ir/func_builder/calls.rs` post-change: 0 of 5 fire (one
-`use super::*`, six functions in a single call chain, no import divergence, no mixed
-high/low-level code) -- no split.
+Phase 2's section-6 mutations each reproduced their predicted failure: the uid-stack push,
+the `inline_uid` reset alone, the `member_splice_depth` gate, its blanket-gate regression
+against the R1c counter-example, both wrong seed formulas (`0` and `seed + 1`), the
+`back_edges` repair and both swap controls. The one exception is the composed-instantiation
+seed, which had nothing to revert: per R3 no third stride was added, and the two tests that
+prove `0` is still safe are `an_ord_bounded_generic_word_instantiates_over_a_user_struct`
+(`tests/phase7_slice3s_flip.rs`) and `inline_mymax_mymax3_matches_noninline_baseline`
+(`tests/phase7_slice3s_oracle.rs`).
+
+The uid rule moved which two renames can meet at one uid, so `MEMBER_SPLICE_SUFFIX`'s
+disjointness from `INLINE_SUFFIX` is load-bearing for a new reason: a member body is
+spliced at the member's seed, and so is the first combinator splice nested *inside* that
+body. Sharing the suffix is a silent wrong answer rather than a panic, and is witnessed by
+`ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own`.
+
+CLAUDE.md's five split signals were re-run against `src/ir/func_builder/calls.rs`
+post-change: 0 of 5 fire (one `use super::*`, six functions in a single call chain, no
+import divergence, no mixed high/low-level code) -- no split.
 
 Two follow-ups the slice deliberately did not fix:
 

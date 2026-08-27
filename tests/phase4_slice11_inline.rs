@@ -328,10 +328,10 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     // a splice-forever cycle, because the loop transform lowers it to a
     // back-edge. `5 down` counts to 0.
     //
-    // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5: `gt`
-    // is a real call now, which would leave an unrelated `Instr::Call` in
-    // `main`'s lowered body that this test's own call-count assertion must
-    // otherwise special-case).
+    // `dup 0 ugt [ True ] [ False ] branch` in place of `gt`: `gt` is
+    // `inline`, so writing it splices `cmp`'s `impl: Ord` body and an
+    // `Ordering?` diamond into `main` beside `down`'s own splice, and the
+    // call-count assertion below is about `down`'s loop, not that.
     let src = ": down inline ( i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub down ] ~[ ] if ;\n\
                : main ( -- ) 5 down . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-self-tail", src);
