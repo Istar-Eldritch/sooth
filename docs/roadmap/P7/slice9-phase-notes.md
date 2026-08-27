@@ -872,7 +872,7 @@ out of `src/lib.rs`; `Some("repl") => driver::repl()` and the `usage()` subcomma
 out of `src/main.rs`; `driver::repl` out of `src/driver.rs`. E1 witness, run against the
 rebuilt binary:
 
-```
+```text
 $ ./target/debug/sooth repl
 unknown command: repl
 
@@ -968,8 +968,8 @@ The four `mangled_name` consumers that compared against `Some(..)` shed the wrap
 `check/terms.rs`'s `unwrap_or("the branch")` whose fallback is now dead, and
 `check/poly.rs`'s self-call guard), as did `effect`'s and `declared_outputs`' one each.
 `rendered_word_or`'s `fallback` died across **41** call sites, re-derived with
-`grep -rn 'rendered_word_or(' src/`: `check/poly.rs` 39 (all `"`<line>`"`),
-`check/captures.rs` 1 (`"`<line>`"`), `check/word_families.rs` 1 (`"`this line`"`).
+`grep -rn 'rendered_word_or(' src/`: `check/poly.rs` 39 (all `"<line>"`),
+`check/captures.rs` 1 (`"<line>"`), `check/word_families.rs` 1 (`"this line"`).
 
 **No diagnostic text on the surviving path changed.** Proved by diffing every changed
 string literal: each `+ "error: …"` line in the diff has a byte-identical `- "error: …"`
