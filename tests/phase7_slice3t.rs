@@ -169,11 +169,11 @@ fn a_glued_bracket_after_a_concrete_word_is_rejected() {
 /// nowhere to put a list either. Review fix: this clause of the guard had no
 /// witness -- deleting it let `while[i64]` build to exit 0.
 ///
-/// P7.S3s: `lt`, this test's original witness, is no longer a `lib/`
-/// combinator (`core::cmp`'s six comparisons are non-inline poly words after
-/// the flip) and reaches the ordinary polymorphic-call route instead, which
-/// legitimately accepts a type-argument list -- it can no longer witness this
-/// clause. `while` (`core::combinators`) is still spliced, unaffected by S3s.
+/// `lt`, this test's original witness, is a `lib/` combinator again (P7.S8
+/// made `core::cmp`'s six comparisons `inline`), so `lt[i64]` is once more
+/// rejected by this very clause. `while` (`core::combinators`) is kept as the
+/// fixture because it is spliced regardless of what flavour the comparisons
+/// ship in, so this test does not move with them again.
 #[test]
 fn a_glued_bracket_after_a_combinator_is_rejected() {
     let err = build_error(

@@ -380,6 +380,23 @@ pub(super) struct FuncBuilder<'a> {
     /// combinator-splice entry and popped on exit. `last()` is the current
     /// splice's uid; `None` (empty stack) means we are not inside a splice.
     splice_uid_stack: Vec<u32>,
+    /// P7.S8 (R2): each word's check-time `inline_uid` seed, by word name --
+    /// `word_idx * crate::check::INLINE_UID_STRIDE` over the same
+    /// `module.words` enumeration `check.rs` and `ir::driver` both walk. Read
+    /// when splicing a resolved trait member body, whose splice uids belong to
+    /// the *member's* namespace rather than the enclosing caller's. Keyed by
+    /// name, matching `combinators`' own keying, so one key serves both
+    /// lookups. Empty on the REPL paths, which also hand out
+    /// `empty_splice_trait_calls` and so have no member-splice entry to miss.
+    member_uid_seeds: &'a HashMap<String, u32>,
+    /// P7.S8 (R1b): nesting depth of an active *member re-splice* (the bracket
+    /// in `lower_resolved_word_call`'s combinator branch) specifically -- not
+    /// `splice_uid_stack.is_empty()`, which also counts an ordinary combinator
+    /// splice unrelated to any re-grounding. `trait_calls` (span-keyed, one
+    /// grounding per `FuncBuilder` session) stays valid at any depth of
+    /// ordinary splice nesting; it only goes stale once a member re-splice
+    /// reintroduces a second grounding within the same session.
+    member_splice_depth: u32,
     /// Slice 7a (R9): the quotation literals this func materialized, in mint
     /// order. Drained by the lowering driver, which lowers each into its own
     /// `IrFunc`. Deduped by `symbol` at mint (one literal materialized twice in
@@ -448,6 +465,8 @@ impl<'a> FuncBuilder<'a> {
             splice_records: empty_splice_records(),
             splice_trait_calls: empty_splice_trait_calls(),
             splice_uid_stack: Vec::new(),
+            member_uid_seeds: empty_member_uid_seeds(),
+            member_splice_depth: 0,
             materialized: Vec::new(),
         }
     }
@@ -908,6 +927,7 @@ pub(super) fn lower_word_parts(
     env_plan: EnvPlan,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
+    member_uid_seeds: &HashMap<String, u32>,
     // Mirrors the checker's `word_idx * crate::check::INLINE_UID_STRIDE` seed
     // (see that const's doc comment): the two splice-uid sequences must agree
     // for `splice_records`/`splice_trait_calls` (keyed `(inline_uid, Span)`)
@@ -938,6 +958,7 @@ pub(super) fn lower_word_parts(
     b.combinators = combinators;
     b.splice_records = splice_records;
     b.splice_trait_calls = splice_trait_calls;
+    b.member_uid_seeds = member_uid_seeds;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
     // the target quotation type for the slot it materializes.
     b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
@@ -1079,6 +1100,7 @@ pub(super) fn lower_word_parts(
         combinators,
         splice_records,
         splice_trait_calls,
+        member_uid_seeds,
     ));
     out
 }
@@ -1104,6 +1126,7 @@ pub(super) fn lower_materialized(
     combinators: &crate::check::CombinatorIndex,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
+    member_uid_seeds: &HashMap<String, u32>,
 ) -> Vec<IrFunc> {
     let mut out = Vec::new();
     for m in mats {
@@ -1151,6 +1174,7 @@ pub(super) fn lower_materialized(
             },
             splice_records,
             splice_trait_calls,
+            member_uid_seeds,
             // A materialized quotation gets its own `IrFunc` with a fresh uid
             // space (mirrors the checker: `in_materialized_quot` rejects a
             // bound dispatch inside one for exactly this reason, so nothing

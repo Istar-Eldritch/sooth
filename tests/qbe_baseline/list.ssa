@@ -35,21 +35,57 @@ export function :List $build__m0(l %v0, :List %v1) {
 	blit %v1, %v3, 24
 	jmp @blk1
 @blk1
-	%v2 =l phi @start %v0, @blk3 %v11
+	%v2 =l phi @start %v0, @blk14 %v32
 	%v5 =l copy 0
-	%v6 =w call $sooth_mono_eq__m3__t0_i64(l %v2, l %v5)
-	%v9 =w copy %v6
-	jnz %v9, @blk2, @blk3
+	%v6 =w csltl %v2, %v5
+	jnz %v6, @blk2, @blk3
 @blk2
+	%v9 =w copy 0
 	jmp @blk4
 @blk3
-	%v10 =l copy 1
-	%v11 =l sub %v2, %v10
-	%v12 =:List call $push.2d.front__m0(:List %v3, l %v2)
-	blit %v12, %v4, 24
+	%v10 =w csgtl %v2, %v5
+	jnz %v10, @blk5, @blk6
+@blk5
+	%v13 =w copy 2
+	jmp @blk7
+@blk6
+	%v14 =w copy 1
+	jmp @blk7
+@blk7
+	%v15 =w phi @blk5 %v13, @blk6 %v14
+	jmp @blk4
+@blk4
+	%v16 =w phi @blk2 %v9, @blk7 %v15
+	%v20 =w copy 0
+	%v21 =w ceqw %v16, %v20
+	jnz %v21, @blk8, @blk11
+@blk11
+	%v22 =w copy 1
+	%v23 =w ceqw %v16, %v22
+	jnz %v23, @blk9, @blk10
+@blk8
+	%v24 =w copy 0
+	jmp @blk12
+@blk9
+	%v25 =w copy 1
+	jmp @blk12
+@blk10
+	%v26 =w copy 0
+	jmp @blk12
+@blk12
+	%v27 =w phi @blk8 %v24, @blk9 %v25, @blk10 %v26
+	%v30 =w copy %v27
+	jnz %v30, @blk13, @blk14
+@blk13
+	jmp @blk15
+@blk14
+	%v31 =l copy 1
+	%v32 =l sub %v2, %v31
+	%v33 =:List call $push.2d.front__m0(:List %v3, l %v2)
+	blit %v33, %v4, 24
 	blit %v4, %v3, 24
 	jmp @blk1
-@blk4
+@blk15
 	ret %v3
 }
 
@@ -98,34 +134,70 @@ export function :Summed $sum.2d.first__m0(:List %v0, l %v1, l %v2) {
 	%v3 =l alloc8 24
 	%v4 =l alloc8 24
 	blit %v0, %v3, 24
-	%v12 =l alloc8 32
+	%v33 =l alloc8 32
 	jmp @blk1
 @blk1
-	%v5 =l phi @start %v1, @blk3 %v21
-	%v6 =l phi @start %v2, @blk3 %v19
+	%v5 =l phi @start %v1, @blk14 %v42
+	%v6 =l phi @start %v2, @blk14 %v40
 	%v7 =l copy 0
-	%v8 =w call $sooth_mono_eq__m3__t0_i64(l %v5, l %v7)
-	%v11 =w copy %v8
-	jnz %v11, @blk2, @blk3
+	%v8 =w csltl %v5, %v7
+	jnz %v8, @blk2, @blk3
 @blk2
-	%v13 =l add %v12, 0
-	blit %v3, %v13, 24
-	%v14 =l add %v12, 24
-	storel %v6, %v14
+	%v11 =w copy 0
 	jmp @blk4
 @blk3
-	%v15 =:Popped call $pop__m0(:List %v3)
-	%v16 =l add %v15, 0
-	%v17 =l add %v15, 24
-	%v18 =l loadl %v17
-	%v19 =l add %v18, %v6
-	%v20 =l copy 1
-	%v21 =l sub %v5, %v20
-	blit %v16, %v4, 24
+	%v12 =w csgtl %v5, %v7
+	jnz %v12, @blk5, @blk6
+@blk5
+	%v15 =w copy 2
+	jmp @blk7
+@blk6
+	%v16 =w copy 1
+	jmp @blk7
+@blk7
+	%v17 =w phi @blk5 %v15, @blk6 %v16
+	jmp @blk4
+@blk4
+	%v18 =w phi @blk2 %v11, @blk7 %v17
+	%v22 =w copy 0
+	%v23 =w ceqw %v18, %v22
+	jnz %v23, @blk8, @blk11
+@blk11
+	%v24 =w copy 1
+	%v25 =w ceqw %v18, %v24
+	jnz %v25, @blk9, @blk10
+@blk8
+	%v26 =w copy 0
+	jmp @blk12
+@blk9
+	%v27 =w copy 1
+	jmp @blk12
+@blk10
+	%v28 =w copy 0
+	jmp @blk12
+@blk12
+	%v29 =w phi @blk8 %v26, @blk9 %v27, @blk10 %v28
+	%v32 =w copy %v29
+	jnz %v32, @blk13, @blk14
+@blk13
+	%v34 =l add %v33, 0
+	blit %v3, %v34, 24
+	%v35 =l add %v33, 24
+	storel %v6, %v35
+	jmp @blk15
+@blk14
+	%v36 =:Popped call $pop__m0(:List %v3)
+	%v37 =l add %v36, 0
+	%v38 =l add %v36, 24
+	%v39 =l loadl %v38
+	%v40 =l add %v39, %v6
+	%v41 =l copy 1
+	%v42 =l sub %v5, %v41
+	blit %v37, %v4, 24
 	blit %v4, %v3, 24
 	jmp @blk1
-@blk4
-	ret %v12
+@blk15
+	ret %v33
 }
 
 export function $sooth_main() {
@@ -145,48 +217,6 @@ export function $sooth_main() {
 	call $printf(l $fmt, l %v10, ...)
 	call $sooth_enum_drop_0(:List %v8)
 	ret
-}
-
-export function w $sooth_mono_eq__m3__t0_i64(l %v0, l %v1) {
-@start
-	%v2 =w csltl %v0, %v1
-	jnz %v2, @blk1, @blk2
-@blk1
-	%v5 =w copy 0
-	jmp @blk3
-@blk2
-	%v6 =w csgtl %v0, %v1
-	jnz %v6, @blk4, @blk5
-@blk4
-	%v9 =w copy 2
-	jmp @blk6
-@blk5
-	%v10 =w copy 1
-	jmp @blk6
-@blk6
-	%v11 =w phi @blk4 %v9, @blk5 %v10
-	jmp @blk3
-@blk3
-	%v12 =w phi @blk1 %v5, @blk6 %v11
-	%v16 =w copy 0
-	%v17 =w ceqw %v12, %v16
-	jnz %v17, @blk7, @blk10
-@blk10
-	%v18 =w copy 1
-	%v19 =w ceqw %v12, %v18
-	jnz %v19, @blk8, @blk9
-@blk7
-	%v20 =w copy 0
-	jmp @blk11
-@blk8
-	%v21 =w copy 1
-	jmp @blk11
-@blk9
-	%v22 =w copy 0
-	jmp @blk11
-@blk11
-	%v23 =w phi @blk7 %v20, @blk8 %v21, @blk9 %v22
-	ret %v23
 }
 
 export function $sooth_struct_drop_0(:Popped %v0) {

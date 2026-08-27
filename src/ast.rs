@@ -2818,8 +2818,16 @@ fn rename_local(name: &str, uid: u32, suffix: &str) -> String {
 /// collision-free lookup during the splice and its lowering.
 const INLINE_SUFFIX: &str = "__inl";
 
-/// `alpha_rename_member_locals`'s separator. Disjoint from `INLINE_SUFFIX` so
-/// a member splice sharing the enclosing splice's uid cannot collide with it.
+/// `alpha_rename_member_locals`'s separator. Disjoint from `INLINE_SUFFIX`
+/// because a member splice and an inline splice genuinely share one uid: a
+/// member body is spliced under the member word's own check-time seed
+/// (`word_idx * crate::check::INLINE_UID_STRIDE`), and that seed is also the
+/// uid the *first* combinator splice nested inside that body mints, so both
+/// renames would land on the same `{name}{suffix}{uid}`. `FuncBuilder`'s
+/// `locals` is scanned front-to-back, so the nested body's read of its own
+/// local would find the member body's instead: a silent wrong answer, not a
+/// panic. Witnessed by
+/// `ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own`.
 const MEMBER_SPLICE_SUFFIX: &str = "__mem";
 
 /// Rename a `Call` naming a body-bound local. A borrow reads its local through

@@ -10,10 +10,9 @@
 \ `cmp` is an `inline` trait member (P7.S3s-follow): every `impl: Ord` body
 \ is spliced at its call sites instead of costing a call frame, so the six
 \ surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) get `cmp`'s body
-\ spliced into them. The six comparisons themselves stay ordinary
-\ non-inline words -- splicing them inside a quotation-carrying combinator
-\ perturbs quotation provenance tracking (P7.S3s Phase 1), so the inline
-\ cost saving is taken at `cmp`'s body, not at the six callers of it.
+\ spliced into them. The six comparisons are `inline` in turn, so a
+\ comparison and its `Ordering?` eliminator fold into the caller and a
+\ library comparison costs no call frame at all.
 import: intrinsics i | ueq ult ugt ulte ugte une branch drop swap | ;
 import: self::bool b | Bool False True | ;
 
@@ -136,14 +135,14 @@ impl: Ord for f64
     lhs rhs ueq [ Equal ] [ lhs rhs ult [ Less ] [ lhs rhs ugt [ Greater ] [ Greater ] branch ] branch ] branch ;
 ;
 
-: eq['T: Ord] ( 'T 'T -- Bool )
+: eq inline ['T: Ord] ( 'T 'T -- Bool )
   cmp
   ~[ ( Less )    drop False ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: lt['T: Ord] ( 'T 'T -- Bool )
+: lt inline ['T: Ord] ( 'T 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]
@@ -158,28 +157,28 @@ impl: Ord for f64
 \ `Greater` for a NaN pair (review fix, so `eq`/`ne`/`lt`/`lte` stay correct
 \ for NaN, preserving D4), which would otherwise make `gt`/`gte` answer
 \ `True` for NaN if read directly off that same `Greater` arm.
-: gt['T: Ord] ( 'T 'T -- Bool )
+: gt inline ['T: Ord] ( 'T 'T -- Bool )
   swap cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: lte['T: Ord] ( 'T 'T -- Bool )
+: lte inline ['T: Ord] ( 'T 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: gte['T: Ord] ( 'T 'T -- Bool )
+: gte inline ['T: Ord] ( 'T 'T -- Bool )
   swap cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop True ]
   ~[ ( Greater ) drop False ]
   Ordering? ;
 
-: ne['T: Ord] ( 'T 'T -- Bool )
+: ne inline ['T: Ord] ( 'T 'T -- Bool )
   cmp
   ~[ ( Less )    drop True ]
   ~[ ( Equal )   drop False ]

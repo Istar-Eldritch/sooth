@@ -62,11 +62,21 @@ fn self_calls(f: &IrFunc) -> usize {
         .count()
 }
 
-/// Jumps to an already-emitted block: a loop back-edge.
+/// Jumps to *the loop's own header*, the target `begin_loop` seals block 0's
+/// `Jmp` into (`opens_a_loop_header`, below, locates the fact a header was
+/// opened at all; this locates which block it is and counts real back-edges
+/// to it). Not "any block whose `Jmp` target id is <= its own": a jump to an
+/// earlier-allocated merge block (an ordinary forward-branch-then-merge
+/// shape, no loop involved) is also target-id-<= its source, which the old
+/// id-comparison heuristic miscounted as a back-edge the moment a
+/// comparison's `Ordering?` splices inside a self-tail loop's body.
 fn back_edges(f: &IrFunc) -> usize {
-    f.blocks
+    let Terminator::Jmp(header) = f.blocks[0].term else {
+        return 0;
+    };
+    f.blocks[1..]
         .iter()
-        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target == header))
         .count()
 }
 
@@ -219,14 +229,14 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
 
 // -- E-P1-4: the REPL lowering path shares the predicate --------------------
 
-#[ignore = "P7.S3s review finding: the REPL's `splice_import` binds a \
-    concrete word (`w.poly.is_none()`) or retains a combinator \
-    (`declares_inline`); it has no case for an imported non-inline poly \
-    word, a category R5 creates for the first time (the six comparisons \
-    all lost `inline`). Every comparison is unusable from the REPL now, \
-    not just a session's own `'T: Copy Ord` declaration (R8's narrower, \
-    already-accepted scope) -- fixing this needs the REPL to support \
-    calling/monomorphizing a non-inline generic word, a separate slice."]
+#[ignore = "REPL trait/impl checking is unimplemented: `check.rs`'s two \
+    REPL check sites (`:1293`/`:1387`) hardcode `TraitResolveCtx::scratch()`, \
+    whose premise (a session declares no `trait:`, so no `Bound::User` \
+    reaches a REPL body) is false once a session imports `core::cmp`. A \
+    comparison call then indexes past the scratch trait table and ICEs at \
+    `check/poly.rs:976`. Fixing it needs a `Session`-level traits/impls \
+    accumulation table (Session has none, unlike its `structs`/`enums`) \
+    threaded through both sites: tracked as the REPL trait/impl slice."]
 #[test]
 fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
     // R-P1-5 names `ir::lower_word` (the REPL's per-line entry) as one of the
@@ -309,5 +319,102 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
         (code, out.as_str()),
         (Some(0), "drop 0\n0"),
         "the resource is disposed once, at the base case"
+    );
+}
+
+// -- Phase 1 (test-harness soundness): back_edges repaired ------------------
+
+/// `cmp` is already `inline` today (`lib/cmp.sth:39`), so a self-tail loop
+/// whose body splices an `Ordering?` eliminator already produces the
+/// false-positive join-block shape the old id-comparison heuristic
+/// miscounted -- before the six comparisons themselves are flipped (P7.S8
+/// phase 2), which is what makes this witness runnable unflipped. `cmp` is
+/// reached through a `'T: Ord`-bounded `inline` wrapper because a trait
+/// member does not resolve bare in this harness ("unknown word `cmp`");
+/// both the wrapper and the `impl: Ord for i64` body it dispatches to
+/// splice, so `countdown` ends up calling nothing at all. Inside that
+/// spliced body the outer `branch`'s merge block (where `Ordering?`
+/// dispatches) is allocated before the inner `branch`'s join block, so the
+/// inner join's jump back to that earlier merge block is a second,
+/// earlier-numbered-target `Jmp` the old helper counted as a back-edge
+/// alongside the real one to the loop header.
+#[test]
+fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
+    let src = "\
+: mycmp inline ( 'T: Ord 'T -- Ordering ) cmp ;\n\
+: countdown ( i64 -- i64 )\n\
+  | n |\n\
+  n 0 mycmp\n\
+  ~[ ( Less )    drop n ]\n\
+  ~[ ( Equal )   drop n ]\n\
+  ~[ ( Greater ) drop n 1 sub countdown ]\n\
+  Ordering? ;\n\
+: main ( -- ) 5 countdown . ;\n";
+    let funcs = lowered(src);
+    let countdown = func(&funcs, "countdown");
+    assert_eq!(
+        self_calls(countdown),
+        0,
+        "the recursion is a loop, not a call"
+    );
+    assert_eq!(
+        countdown
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter(|i| matches!(i, Instr::Call(..)))
+            .count(),
+        0,
+        "the eliminator reaches the body by splicing, not by a call"
+    );
+    assert!(
+        opens_a_loop_header(countdown),
+        "the loop must actually open"
+    );
+
+    fn old_back_edges(f: &IrFunc) -> usize {
+        f.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+            .count()
+    }
+    assert_eq!(
+        old_back_edges(countdown),
+        2,
+        "the old any-backwards-jump heuristic double-counts the eliminator's join block"
+    );
+    assert_eq!(
+        back_edges(countdown),
+        1,
+        "the repaired helper counts only the jump to the loop's own header"
+    );
+}
+
+/// A single-variant enum eliminator's block 0 also ends in a `Jmp`
+/// (`dispatch_on_tag`'s `n == 1` case, `func_builder/quotation.rs:355`,
+/// unconditional dispatch to the lone variant block -- no comparison
+/// needed), so `opens_a_loop_header` reads `true` here despite no loop ever
+/// being built. `back_edges` must not ride on `opens_a_loop_header` (e.g. by
+/// returning it as `0`/`1`): the true count is `0`, since nothing jumps back
+/// to block 1, and this is the fixture that would catch a repair that
+/// silently collapsed to that shortcut.
+#[test]
+fn back_edges_is_zero_for_a_single_variant_eliminators_unconditional_jump() {
+    let src = "\
+type: Uno\n\
+| Solo\n\
+;\n\
+: pick ( -- Uno ) Solo ;\n\
+: main ( -- ) pick ~[ ( Solo ) drop 1 . ] Uno? ;\n";
+    let funcs = lowered(src);
+    let main = func(&funcs, "main");
+    assert!(
+        opens_a_loop_header(main),
+        "block 0 ends in an unconditional `Jmp`, same shape as a real loop header"
+    );
+    assert_eq!(
+        back_edges(main),
+        0,
+        "no loop was built, so there is no back-edge to count"
     );
 }

@@ -247,12 +247,9 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 /// Part 1: the six surface names resolve to `lib/` definitions and no
 /// comparison builtin row remains.
 ///
-/// Revised under P7.S3s R5: `Ord` became a nominal trait. The six
-/// comparisons carry a `'T: Ord` bound but are ordinary non-inline words:
-/// splicing them inside a quotation-carrying combinator perturbs quotation
-/// provenance tracking (P7.S3s Phase 1), so the inline cost saving is taken
-/// at `cmp`'s trait member body instead (P7.S3s-follow), not at the six
-/// callers of it.
+/// `Ord` is a nominal trait, so the six carry a `'T: Ord` bound; they are
+/// `inline`, so a comparison and the `Ordering?` eliminator it drives fold
+/// into the caller and cost no call frame.
 #[test]
 fn the_six_comparisons_are_library_words() {
     let core = test_support::core_lib_words();
@@ -263,8 +260,8 @@ fn the_six_comparisons_are_library_words() {
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
-            !word.declares_inline,
-            "`{name}` is a real call, not spliced (P7.S3s Phase 1): splicing inside a quotation-carrying combinator perturbs provenance tracking, so the inline saving is taken at `cmp`'s member body instead"
+            word.declares_inline,
+            "`{name}` is spliced at its call sites, so a library comparison costs no call frame"
         );
         let sig = word
             .poly
@@ -352,27 +349,26 @@ fn check_ueq_family_lowers_to_cmpop() {
     }
 }
 
-/// Part 3: the canonical `a b eq if ... ...` pattern. `if` is still spliced
-/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is a real call
-/// through `cmp` (P7.S3s R5): the six comparisons are non-inline words so
-/// the comparison itself is the accepted ~2x tax, not a free abstraction.
+/// Part 3: the canonical `a b eq if ... ...` pattern costs no call at all.
+/// `eq`, `cmp`'s `impl:` body and `if` are all spliced, so no comparison
+/// monomorph is minted and `w`'s body is call-free -- the whole pattern is
+/// arithmetic and branches.
 ///
-/// Measured mutation: restore `inline` on `eq` and the program stops
-/// building -- splicing inside a quotation-carrying combinator perturbs
-/// quotation provenance tracking (P7.S3s Phase 1 triage).
+/// Mutation: drop `inline` from `eq` in `lib/cmp.sth` and a
+/// `sooth_mono_eq__*` `IrFunc` reappears with an `Instr::Call` in `w`.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
     let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
-        funcs
+        !funcs
             .iter()
             .any(|f| f.name.starts_with("sooth_mono_eq") || f.name.starts_with("sooth_mono_cmp")),
-        "an `IrFunc` is minted for the library `eq`/`cmp` monomorphization"
+        "no comparison monomorph is minted: `eq` and `cmp` are both spliced"
     );
     let w = func(&funcs, "w");
     assert!(
-        instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
-        "`eq` is a real call now, unlike the spliced `if`"
+        !instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
+        "the spliced comparison leaves `w` call-free, like the spliced `if`"
     );
 }
 
@@ -416,32 +412,33 @@ fn word_w_assembly(src: &str) -> String {
     s[start..end].trim_end().to_string()
 }
 
-/// Part 3, at the machine-code level. `if` still folds to the same
-/// branchless machine code as raw `branch` (it stays `inline`); `eq` no
-/// longer does (P7.S3s R5): a real `call` to the library `eq`/`cmp`
-/// monomorphization appears where the raw `ueq` primitive has none. This
-/// pins the accepted ~2x tax as a real machine-code difference, not merely
-/// an IR-level `Instr::Call`, replacing the pre-P7.S3s claim that the two
-/// forms were machine-code identical.
+/// Part 3, at the machine-code level: both the library `eq`+`if` form and the
+/// raw `ueq`+`branch` form emit call-free machine code.
 ///
-/// Mutation: if the library `eq` starts splicing again (`inline` restored,
-/// which needs `Ord` to stop being a `Bound::User`), the two blocks converge
-/// and this assertion inverts.
+/// They are *not* identical, measured: the library form still carries the
+/// three-way `Ordering` diamond (a second `cmpq`, then a tag dispatch over
+/// `Less`/`Equal`/`Greater`) that `ueq`'s single boolean answer skips. Splicing
+/// removes the call frame; it does not collapse a three-valued comparison into
+/// a two-valued one, and QBE does not fold the diamond away. The residual is
+/// asserted as a difference rather than a count so a codegen improvement that
+/// shrinks it is not a failure -- what is pinned is "no call on either side".
+///
+/// Mutation: drop `inline` from `eq` and the library block grows a `call`.
 #[test]
-fn the_library_eq_costs_a_call_the_branch_primitive_does_not() {
+fn the_library_eq_and_the_branch_primitive_are_both_call_free() {
     let library = word_w_assembly(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;");
     let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;");
-    assert_ne!(
-        library, primitive,
-        "the library `eq` is a real call now; it should no longer fold to the same machine code as raw `ueq`/`branch`"
-    );
     assert!(
-        library.contains("call"),
-        "the library form should still show a real call: {library}"
+        !library.contains("call"),
+        "the spliced library form should be call-free: {library}"
     );
     assert!(
         !primitive.contains("call"),
         "the raw primitive form should still be call-free: {primitive}"
+    );
+    assert_ne!(
+        library, primitive,
+        "the library form keeps its `Ordering` diamond; identical blocks would mean the eliminator folded away and this test's stated residual is stale"
     );
 }
 
