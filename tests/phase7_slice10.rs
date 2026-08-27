@@ -71,9 +71,7 @@ fn wrap_source(n: u32) -> String {
         "import: core::cmp | Ordering Less Equal Greater | ;",
         "type: Wrap v i64 ;",
     ];
-    for _ in 0..n {
-        lines.push("");
-    }
+    lines.extend(std::iter::repeat_n("", n as usize));
     lines.extend([
         "impl: Ord for Wrap",
         "  : cmp",

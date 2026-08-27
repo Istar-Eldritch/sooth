@@ -2248,4 +2248,52 @@ mod tests {
             "a `member_spans` miss omits the location clause entirely, not a zero span"
         );
     }
+
+    /// R3.2: the guard names the *outermost* member, so it needs a fixture
+    /// where the outermost and the frame that trips the budget differ. The
+    /// cycle length must not divide `SPLICE_BUDGET`, or the two coincide by
+    /// parity and the test is a placebo whatever the code does -- a 2-member
+    /// ping-pong is exactly that (64 is even), and `Ord`'s single member
+    /// cannot separate them either, hence a 3-member trait cycle.
+    ///
+    /// `main` enters at `a` (the 0->1 transition, so `a` is the outermost);
+    /// the frame at depth 64 is `b`, since `64 % 3 == 1`. The generic `'T:
+    /// Cyc` wrappers are inlined away by the checker (as `core::cmp`'s `lt`
+    /// wraps `cmp`), leaving the three member calls to resolve through
+    /// `splice_trait_calls` at lowering.
+    #[test]
+    fn splice_depth_guard_names_the_outermost_member_of_a_three_cycle() {
+        let src = "import: intrinsics * ;\n\
+             trait: Cyc 'T\n\
+             \x20 : a inline ( 'T 'T -- 'T ) ;\n\
+             \x20 : b inline ( 'T 'T -- 'T ) ;\n\
+             \x20 : c inline ( 'T 'T -- 'T ) ;\n\
+             ;\n\
+             : ra inline ( 'T: Cyc 'T -- 'T ) a ;\n\
+             : rb inline ( 'T: Cyc 'T -- 'T ) b ;\n\
+             : rc inline ( 'T: Cyc 'T -- 'T ) c ;\n\
+             impl: Cyc for i64\n\
+             \x20 : a\n\
+             \x20\x20 | x y |\n\
+             \x20\x20 x y rb ;\n\
+             \x20 : b\n\
+             \x20\x20 | x y |\n\
+             \x20\x20 x y rc ;\n\
+             \x20 : c\n\
+             \x20\x20 | x y |\n\
+             \x20\x20 x y ra ;\n\
+             ;\n\
+             : main ( -- )\n\
+             \x20 1 2 ra . ;\n";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::check::check(&mut module).unwrap();
+        let err = crate::ir::driver::lower(&module).expect_err("the 3-cycle exceeds the budget");
+        assert_eq!(
+            err,
+            "a trait member cannot dispatch back to itself (lowering would splice it forever): \
+             `a` (member of trait `Cyc` for `i64`) exceeded the splice budget of 64 (line 11, col 5)",
+            "the outermost member (`a`, the 0->1 transition) is named, not the firing frame (`b`)"
+        );
+    }
 }
