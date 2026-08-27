@@ -4841,9 +4841,12 @@ pub(super) fn resolve_combinator_overload<'a>(
                 arrays,
                 cells,
                 refs,
-                // A combinator's own type variable can carry no `Bound::User`
-                // at all (`reject_user_bound_on_combinator`), so there is
-                // nothing for an `impl:` registry lookup to filter here.
+                // A combinator's own type variable may carry a `Bound::User`
+                // (an `inline` trait member like `cmp`), but
+                // `resolve_combinator_overload` only matches the stack shape
+                // against the signature here; the bound is resolved later at
+                // the call site via the per-splice trait-call map, so there
+                // is nothing for an `impl:` registry lookup to filter here.
                 &[],
                 &[],
             ),
@@ -7799,44 +7802,6 @@ fn trait_member_operand_error(
     )
 }
 
-/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): reject a user trait bound on
-/// a polymorphic combinator's own type variable, before its body is checked.
-/// P7.S3o Phase 1: the call site at `check.rs` is removed; this function is
-/// retained (dead code) for documented rationale and future reuse.
-#[allow(dead_code)]
-pub(super) fn reject_user_bound_on_combinator(
-    word: &WordDef,
-    sig: &PolySig,
-    traits: &[TraitDecl],
-) -> Result<(), String> {
-    let Some((v, tid)) = sig.bounds.iter().find_map(|(v, bound)| match bound {
-        Bound::User(tid) => Some((*v, *tid)),
-        _ => None,
-    }) else {
-        return Ok(());
-    };
-    Err(user_bound_on_combinator_error(
-        crate::resolve::demangle_word(&word.name),
-        &traits[tid.index()].name,
-        &sig.ty_var_names[v as usize],
-        word.span,
-    ))
-}
-
-/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): a polymorphic *combinator*'s
-/// body is checked standalone and its instantiation records are scratch --
-/// they never reach `Module::instantiations`, so there is no `CallInst` for a
-/// resolved trait obligation to live on. A user bound on such a word's own
-/// type variable is rejected rather than dispatched against stale records.
-/// P7.S3o Phase 1: dead code after the call site removal above.
-#[allow(dead_code)]
-fn user_bound_on_combinator_error(word: &str, trait_name: &str, var: &str, span: Span) -> String {
-    format!(
-        "error: `{var}: {trait_name}` on the combinator `{word}` at line {}, col {} is not supported\n  note: a combinator is spliced at its call sites and records no instantiation a trait bound could resolve against",
-        span.line, span.col
-    )
-}
-
 pub(super) fn poly_var_to_concrete_error(
     ctx: &Ctx,
     span: Span,
@@ -8625,7 +8590,7 @@ mod tests {
     /// the preamble every bound-dispatch fixture below needs. `Point` rather
     /// than `i64` because a scalar local has no address to borrow.
     const SHOW: &str = "type: Point x i64 y i64 ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n";
@@ -8728,7 +8693,7 @@ mod tests {
     fn trait_member_call_pushes_the_declared_outputs() {
         check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Clone 'T clone ( &'T -- 'T ) ;\n\
+             trait: Clone 'T : clone ( &'T -- 'T ) ; ;\n\
              impl: Clone for Point\n\
                : clone | p | p drop 1 2 Point ;\n\
              ;\n\
@@ -8746,7 +8711,7 @@ mod tests {
     fn trait_member_output_is_the_declared_one() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Clone 'T clone ( &'T -- 'T ) ;\n\
+             trait: Clone 'T : clone ( &'T -- 'T ) ; ;\n\
              impl: Clone for Point\n\
                : clone | p | p drop 1 2 Point ;\n\
              ;\n\
@@ -8784,7 +8749,7 @@ mod tests {
     fn a_member_call_beats_a_concrete_word_of_the_same_name() {
         let recorded = obligations_of(
             "type: Point x i64 y i64 ;\n\
-             trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+             trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
              impl: Indexable for Point\n\
                : at | p n | n drop p &x @ ;\n\
              ;\n\
@@ -8807,7 +8772,7 @@ mod tests {
     fn a_non_trailing_receiver_dispatches_on_the_bound_variable() {
         let recorded = obligations_of(
             "type: Point x i64 y i64 ;\n\
-             trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+             trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
              impl: Indexable for Point\n\
                : at | p n | n drop p &x @ ;\n\
              ;\n\
@@ -8829,7 +8794,7 @@ mod tests {
     #[test]
     fn a_non_trailing_receiver_mismatch_is_located_not_unknown() {
         let err = check_src(
-            "trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+            "trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
              : uses ( 'T: Indexable -- i64 ) 0 at ;\n\
              : main ( -- ) ;\n",
         )
@@ -8864,8 +8829,8 @@ mod tests {
     #[test]
     fn two_bounds_sharing_a_member_name_are_legal_to_declare() {
         check_src(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'T: A B -- ) drop ;\n\
              : main ( -- ) ;\n",
         )
@@ -8877,8 +8842,8 @@ mod tests {
     #[test]
     fn ambiguous_trait_member_call_is_rejected() {
         let err = check_src(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'T: A B -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
@@ -8903,8 +8868,8 @@ mod tests {
     #[test]
     fn cross_variable_candidates_are_separated_by_the_operands() {
         let recorded = obligations_of(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'T: A &'U: B -- ) t1 t1 ;\n\
              : main ( -- ) ;\n",
         );
@@ -8921,8 +8886,8 @@ mod tests {
     #[test]
     fn a_candidate_wider_than_the_stack_does_not_fit() {
         let recorded = obligations_of(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T i64 i64 -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T i64 i64 -- ) ; ;\n\
              : f ( &'U: B &'T: A -- ) t1 drop ;\n\
              : main ( -- ) ;\n",
         );
@@ -8938,9 +8903,9 @@ mod tests {
     #[test]
     fn a_same_variable_ambiguity_survives_a_bound_on_another_variable() {
         let err = check_src(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
-             trait: C 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
+             trait: C 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'U: C &'T: A B -- ) t1 drop ;\n\
              : main ( -- ) ;\n",
         )
@@ -8960,8 +8925,8 @@ mod tests {
     #[test]
     fn a_cross_variable_member_call_fitting_no_candidate_names_the_operand_mismatch() {
         let err = check_src(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'T: A &'U: B i64 -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
@@ -8989,7 +8954,7 @@ mod tests {
     #[test]
     fn a_no_fit_call_on_a_trailing_receiver_member_names_every_declared_shape() {
         let err = check_src(
-            "trait: A 'T t1 ( i64 &'T -- ) ;\n\
+            "trait: A 'T : t1 ( i64 &'T -- ) ; ;\n\
              : f ( &'T: A &'U: A -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
@@ -9014,8 +8979,8 @@ mod tests {
     #[test]
     fn a_multi_position_duplicate_member_is_the_single_variable_ambiguity() {
         let err = check_src(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
-             trait: B 'T t1 ( &'T i64 -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+             trait: B 'T : t1 ( &'T i64 -- ) ; ;\n\
              : f ( &'T: A B -- ) t1 ;\n\
              : main ( -- ) ;\n",
         )
@@ -9032,7 +8997,7 @@ mod tests {
     #[test]
     fn a_repeated_bound_is_not_ambiguous_with_itself() {
         let recorded = obligations_of(
-            "trait: A 'T t1 ( &'T -- ) ;\n\
+            "trait: A 'T : t1 ( &'T -- ) ; ;\n\
              : f ( &'T: A A -- ) t1 ;\n\
              : main ( -- ) ;\n",
         );
@@ -9065,7 +9030,7 @@ mod tests {
     #[test]
     fn bound_dispatch_on_a_bare_variable_receiver() {
         let recorded = obligations_of(
-            "trait: Eat 'T eat ( 'T -- ) ;\n\
+            "trait: Eat 'T : eat ( 'T -- ) ; ;\n\
              : eats ( 'T: Eat -- ) eat ;\n\
              : main ( -- ) ;\n",
         );
@@ -9090,7 +9055,7 @@ mod tests {
     #[test]
     fn bound_dispatch_reaches_a_member_named_after_an_intercepting_builtin() {
         let recorded = obligations_of(
-            "trait: Eq 'T eq ( 'T 'T -- i64 ) ;\n\
+            "trait: Eq 'T : eq ( 'T 'T -- i64 ) ; ;\n\
              : eqs ( 'T: Eq 'T -- i64 ) eq ;\n\
              : main ( -- ) 1 2 eq drop ;\n",
         );
@@ -9104,7 +9069,7 @@ mod tests {
     /// span.
     const TWO_SHOWS: &str = "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -9177,7 +9142,7 @@ mod tests {
     fn the_obligations_member_name_selects_the_binding() {
         let (module, _) = checked_like_a_build(
             "type: Point x i64 y i64 ;\n\
-             trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
+             trait: Eq 'T : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
              impl: Eq for Point\n\
                : eq | a b | a drop b drop 1 ;\n\
                : hash | p | p drop 7 ;\n\
@@ -9240,8 +9205,8 @@ mod tests {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
-             trait: A 'T ta ( &'T -- ) ;\n\
-             trait: B 'T tb ( &'T -- ) ;\n\
+             trait: A 'T : ta ( &'T -- ) ; ;\n\
+             trait: B 'T : tb ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
@@ -9272,7 +9237,7 @@ mod tests {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
              type: PB n i64 ;\n\
-             trait: A 'T ta ( &'T -- ) ;\n\
+             trait: A 'T : ta ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
@@ -9310,8 +9275,8 @@ mod tests {
     fn two_traits_on_one_variable_resolve_against_their_own_impl() {
         let (module, _) = checked_like_a_build(
             "type: PA n i64 ;\n\
-             trait: A 'T ta ( &'T -- ) ;\n\
-             trait: B 'T tb ( &'T -- ) ;\n\
+             trait: A 'T : ta ( &'T -- ) ; ;\n\
+             trait: B 'T : tb ( &'T -- ) ; ;\n\
              impl: A for PA\n\
                : ta | p | p drop ;\n\
              ;\n\
@@ -9406,7 +9371,7 @@ mod tests {
     fn an_unsatisfied_multi_member_bound_lists_every_member_signature() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             trait: Eq 'T eq ( &'T &'T -- i64 ) hash ( &'T -- i64 ) ;\n\
+             trait: Eq 'T : eq ( &'T &'T -- i64 ) ; : hash ( &'T -- i64 ) ; ;\n\
              : eqs ( &'T: Eq &'T -- i64 ) eq ;\n\
              : main ( -- ) 1 2 Point |p| &p &p eqs drop p drop ;\n",
         )

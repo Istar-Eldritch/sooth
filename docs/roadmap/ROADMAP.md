@@ -12,10 +12,14 @@ and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-
 eliminator word) are done and merged; see [P6](./P6-enum-elimination.md) for the full
 slice breakdown. **Phase 7 (language prerequisites for the
 stdlib) is in progress**: Slices 1-2 (accessors as receiver-directed projections; static
-storage and global sets) and Slices 3a-3d, 3f-3g (incl. 3g-follow), and 3i (generic
-instantiation, quotations and slicing, self-recursion and its loop transform, and `bool`
-as an ordinary enum) are done and merged; see [P7](./P7-language-prereqs.md) for the
-full slice breakdown. Per-phase completion history
+storage and global sets), 3a-3d, 3f-3g (incl. 3g-follow), 3i (generic instantiation,
+quotations and slicing, self-recursion and its loop transform, and `bool` as an ordinary
+enum), 3s and 3s-follow (`Ord` as a library trait, plus its `inline` trait member),
+3v (dropping and storing a linear-capturing quotation), S4 and S4b (generic `impl:`
+targets with a specificity chain, and bounds on impl variables), and S5 (linear array
+elements, via the `tabulate` combinator) are done and merged; 3u (trait objects) is
+parked for want of a consumer; see [P7](./P7-language-prereqs.md) for the full slice
+breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
 `docs/roadmap/P{N}/` briefs/specs, not here.

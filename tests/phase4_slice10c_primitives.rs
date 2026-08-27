@@ -247,12 +247,12 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 /// Part 1: the six surface names resolve to `lib/` definitions and no
 /// comparison builtin row remains.
 ///
-/// The six comparisons are `inline` library words over `Ord` (a nominal
-/// trait, a `Bound::User`): each splices its `cmp` + `Ordering?` body at
-/// every call site, so a comparison in a tight loop is a splice, not a
-/// real call with a frame. The three checker-side bugs that blocked inline
-/// (uid collision, poly-to-poly dispatch, eliminator quot drop) and the
-/// lowering-side bug (eliminator phi on a quotation phantom) are all fixed.
+/// Revised under P7.S3s R5: `Ord` became a nominal trait. The six
+/// comparisons carry a `'T: Ord` bound but are ordinary non-inline words:
+/// splicing them inside a quotation-carrying combinator perturbs quotation
+/// provenance tracking (P7.S3s Phase 1), so the inline cost saving is taken
+/// at `cmp`'s trait member body instead (P7.S3s-follow), not at the six
+/// callers of it.
 #[test]
 fn the_six_comparisons_are_library_words() {
     let core = test_support::core_lib_words();
@@ -263,8 +263,8 @@ fn the_six_comparisons_are_library_words() {
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
-            word.declares_inline,
-            "`{name}` is `inline`: its `cmp` + `Ordering?` body splices at every call site"
+            !word.declares_inline,
+            "`{name}` is a real call, not spliced (P7.S3s Phase 1): splicing inside a quotation-carrying combinator perturbs provenance tracking, so the inline saving is taken at `cmp`'s member body instead"
         );
         let sig = word
             .poly
@@ -352,28 +352,27 @@ fn check_ueq_family_lowers_to_cmpop() {
     }
 }
 
-/// Part 3: the canonical `a b eq if ... ...` pattern. Both `eq` and `if` are
-/// spliced (no `IrFunc` minted for either), so `w`'s body contains the
-/// spliced `cmp` call and `Ordering?` eliminator directly. The `cmp` trait
-/// impl monomorphization is still minted as an `IrFunc` (it is a real call),
-/// and `w`'s body contains an `Instr::Call` to it.
+/// Part 3: the canonical `a b eq if ... ...` pattern. `if` is still spliced
+/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is a real call
+/// through `cmp` (P7.S3s R5): the six comparisons are non-inline words so
+/// the comparison itself is the accepted ~2x tax, not a free abstraction.
+///
+/// Measured mutation: restore `inline` on `eq` and the program stops
+/// building -- splicing inside a quotation-carrying combinator perturbs
+/// quotation provenance tracking (P7.S3s Phase 1 triage).
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
     let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
         funcs
             .iter()
-            .any(|f| f.name.contains("Ord") && f.name.contains("cmp")),
-        "an `IrFunc` is minted for the `cmp` trait-impl monomorphization"
+            .any(|f| f.name.starts_with("sooth_mono_eq") || f.name.starts_with("sooth_mono_cmp")),
+        "an `IrFunc` is minted for the library `eq`/`cmp` monomorphization"
     );
     let w = func(&funcs, "w");
     assert!(
         instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
-        "`w` calls the `cmp` impl directly (eq is spliced, not a real call)"
-    );
-    assert!(
-        !funcs.iter().any(|f| f.name.contains("sooth_mono_eq")),
-        "`eq` is `inline` (spliced): no `IrFunc` minted for it"
+        "`eq` is a real call now, unlike the spliced `if`"
     );
 }
 

@@ -368,6 +368,16 @@ fn trait_zero_members_error(trait_name: &str, span: Span) -> String {
     )
 }
 
+/// P7.S3s-follow: the retired bare `name ( sig )` trait member form. A word
+/// where `:` or `;` is expected is almost always the old grammar, so the
+/// error names the replacement rather than reporting a token mismatch.
+fn bare_trait_member_error(trait_name: &str, member: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}` declares member `{member}` without a leading `:` at line {}, col {}\n  note: a trait member is declared `: {member} ( ... ) ;`, the same form as a word definition",
+        span.line, span.col
+    )
+}
+
 // P7.S4 (R5/R6): render a `PolyType` target shape for the synthesized member
 // word name, so two generic impls for one trait (`['T N]` and `['T 4]`)
 // produce distinct names. Unlike `poly_type_str` (which needs a `PolySig`
@@ -2471,8 +2481,8 @@ impl<'t> Parser<'t> {
         })
     }
 
-    /// P7.S3e (R1/R3, decision 1): `trait: TraitName 'T member ( &'T ... --
-    /// ... ) member2 ( ... ) ... ;` -- a trait name, its single (implicit)
+    /// P7.S3e (R1/R3, decision 1): `trait: TraitName 'T : member ( &'T ... --
+    /// ... ) ; : member2 ( ... ) ; ... ;` -- a trait name, its single (implicit)
     /// type variable header, then one or more member signatures over that
     /// variable. Single-type-variable traits only (R16): a second header
     /// variable is a located error here; a member signature introducing a
@@ -2503,7 +2513,12 @@ impl<'t> Parser<'t> {
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
-                Some((Token::Word(_), _)) => {
+                // P7.S3s-follow: a trait member is declared `: name ( sig ) ;`,
+                // the same form `parse_worddef` uses. `:` is an ordinary word
+                // token, so the guard distinguishes it from the retired bare
+                // `name ( sig )` form below.
+                Some((Token::Word(w), _)) if w == ":" => {
+                    self.pos += 1;
                     let (member_name, member_span) = self.expect_word_any_spanned()?;
                     // P7.S3r (R4): a member becomes a word when implemented, so
                     // it inherits `parse_worddef`'s reserved-name policy, plus a
@@ -2529,17 +2544,37 @@ impl<'t> Parser<'t> {
                             member_span,
                         ));
                     }
+                    // P7.S3s-follow: the optional `inline` keyword sits in the
+                    // one slot between the member name and its `(`, mirroring
+                    // `parse_worddef` exactly. The name is already consumed, so
+                    // `: inline ( ... ) ;` still declares a member *named*
+                    // `inline`, and a second `inline` falls through to the `(`
+                    // and fails there.
+                    let declares_inline =
+                        matches!(self.peek(), Some((Token::Word(w), _)) if w == "inline");
+                    if declares_inline {
+                        self.pos += 1;
+                    }
                     self.expect(Token::LParen)?;
                     let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
                     self.expect(Token::RParen)?;
+                    self.expect(Token::Semicolon)?;
                     members.push(TraitMember {
                         name: member_name,
                         sig,
+                        declares_inline,
                     });
+                }
+                // P7.S3s-follow: a bare word in member position is the retired
+                // `name ( sig )` form -- name the replacement, not a token
+                // mismatch.
+                Some((Token::Word(_), _)) => {
+                    let (member_name, member_span) = self.expect_word_any_spanned()?;
+                    return Err(bare_trait_member_error(&name, &member_name, member_span));
                 }
                 Some((tok, s)) => {
                     return Err(format!(
-                        "parse error: expected a member name or `;`, found {tok:?} at line {}, col {}",
+                        "parse error: expected `:` or `;`, found {tok:?} at line {}, col {}",
                         s.line, s.col
                     ));
                 }
@@ -2820,11 +2855,14 @@ impl<'t> Parser<'t> {
         let (member_name, member_span) = self.expect_word_any_spanned()?;
         let trait_name = self.traits[trait_id.index()].name.clone();
         let trait_module = self.traits[trait_id.index()].module;
-        let Some(sig) = self.traits[trait_id.index()]
+        // P7.S3s-follow: widen the member lookup to take `(sig,
+        // declares_inline)` in one pass, so both branches below inherit the
+        // member's `inline` flag instead of hardcoding `false`.
+        let Some((sig, declares_inline)) = self.traits[trait_id.index()]
             .members
             .iter()
             .find(|m| m.name == member_name)
-            .map(|m| m.sig.clone())
+            .map(|m| (m.sig.clone(), m.declares_inline))
         else {
             return Err(impl_non_member_body_error(
                 &member_name,
@@ -2868,7 +2906,7 @@ impl<'t> Parser<'t> {
                     effect,
                     body,
                     poly: None,
-                    declares_inline: false,
+                    declares_inline,
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
@@ -2908,7 +2946,7 @@ impl<'t> Parser<'t> {
                     effect: StackEffect::default(),
                     body,
                     poly: Some(Box::new(poly_sig)),
-                    declares_inline: false,
+                    declares_inline,
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
@@ -4926,11 +4964,46 @@ impl<'t> Parser<'t> {
     /// pending, and comes from stage (b) revisiting the recorded position and
     /// parsing that list for real.
     fn skip_typedef(&mut self) {
-        while let Some((tok, _)) = self.tokens.get(self.pos) {
-            let terminator = matches!(tok, Token::Semicolon);
-            self.pos += 1;
-            if terminator {
-                break;
+        // P7.S3s-follow: a `trait:` declaration's members each carry their own
+        // `;` terminator, so the first `;` at depth 0 is a member's, not the
+        // trait's. The trait's terminating `;` is the one at depth 0 that is
+        // NOT preceded by `)` (every member `;` is). A `type:` declaration
+        // still has a single `;`, so the original fast scan applies.
+        if matches!(self.tokens.get(self.pos), Some((Token::Word(w), _)) if w == "trait:") {
+            let mut depth = 0i32;
+            let mut prev_was_rparen = false;
+            while let Some((tok, _)) = self.tokens.get(self.pos) {
+                match tok {
+                    Token::LParen => {
+                        depth += 1;
+                        prev_was_rparen = false;
+                        self.pos += 1;
+                    }
+                    Token::RParen => {
+                        depth -= 1;
+                        prev_was_rparen = depth == 0;
+                        self.pos += 1;
+                    }
+                    Token::Semicolon if depth == 0 => {
+                        self.pos += 1;
+                        if !prev_was_rparen {
+                            break;
+                        }
+                        prev_was_rparen = false;
+                    }
+                    _ => {
+                        prev_was_rparen = false;
+                        self.pos += 1;
+                    }
+                }
+            }
+        } else {
+            while let Some((tok, _)) = self.tokens.get(self.pos) {
+                let terminator = matches!(tok, Token::Semicolon);
+                self.pos += 1;
+                if terminator {
+                    break;
+                }
             }
         }
     }
@@ -8803,7 +8876,7 @@ mod tests {
     fn parse_trait_decl_records_its_members() {
         // P7.S3e (R1/R3): a trait declaration parses into `Module::traits`,
         // its members sharing one implicit type variable (id 0).
-        let module = parse_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
+        let module = parse_src("trait: Show 'T : show ( &'T -- ) ; ;").unwrap();
         assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Show");
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
@@ -8815,6 +8888,17 @@ mod tests {
         assert!(show.members[0].sig.outputs.is_empty());
     }
 
+    /// P7.S3s-follow (R1): the optional `inline` keyword between the member
+    /// name and its `(` sets `declares_inline == true` on the member.
+    #[test]
+    fn parse_trait_decl_records_an_inline_member() {
+        let module = parse_src("trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;").unwrap();
+        let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
+        assert_eq!(ord.members.len(), 1);
+        assert_eq!(ord.members[0].name, "cmp");
+        assert!(ord.members[0].declares_inline);
+    }
+
     #[test]
     fn parse_trait_decl_zero_members_is_error() {
         let err = parse_src("trait: Show 'T ;").unwrap_err();
@@ -8824,13 +8908,13 @@ mod tests {
     #[test]
     fn parse_trait_decl_second_header_variable_is_error() {
         // R16: single-type-variable traits only.
-        let err = parse_src("trait: Rel 'T 'U cmp ( &'T &'U -- ) ;").unwrap_err();
+        let err = parse_src("trait: Rel 'T 'U : cmp ( &'T &'U -- ) ; ;").unwrap_err();
         assert!(err.contains("more than one type variable"), "{err}");
     }
 
     #[test]
     fn parse_trait_decl_member_introducing_a_second_variable_is_error() {
-        let err = parse_src("trait: Rel 'T cmp ( &'T &'U -- ) ;").unwrap_err();
+        let err = parse_src("trait: Rel 'T : cmp ( &'T &'U -- ) ; ;").unwrap_err();
         assert!(err.contains("more than one type variable"), "{err}");
     }
 
@@ -8842,7 +8926,7 @@ mod tests {
         // panic later. (A fully-concrete quotation, with no `'T` inside it,
         // folds to `PolyType::Concrete` at parse time and needs no grounding
         // at all -- not this case.)
-        let err = parse_src("trait: Apply 'T run ( &'T [ 'T -- 'T ] -- ) ;").unwrap_err();
+        let err = parse_src("trait: Apply 'T : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
@@ -8853,7 +8937,7 @@ mod tests {
         // `^'T` member would ground to nothing. Adding it to the supported
         // list is the mutation this catches, and it is a located rejection
         // rather than a wildcard fall-through.
-        let err = parse_src("trait: Sink 'T sink ( ^'T -- ) ;").unwrap_err();
+        let err = parse_src("trait: Sink 'T : sink ( ^'T -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
@@ -8867,7 +8951,7 @@ mod tests {
         // ordinary library trait now), so this still fires for `Copy` alone
         // -- confirmed by asserting `check_trait_decls` still runs the
         // reserved-module branch and not some other collision arm.
-        let module = parse_src("trait: Copy 'T foo ( &'T -- ) ;").unwrap();
+        let module = parse_src("trait: Copy 'T : foo ( &'T -- ) ; ;").unwrap();
         assert_eq!(
             module.traits.len(),
             2,
@@ -8886,11 +8970,11 @@ mod tests {
         // `member_shape_is_supported` never sees it and the body-form desugar
         // grounds `inputs`/`outputs` alone -- unrejected, the row would be
         // dropped from the synthesized word's effect.
-        let err = parse_src("trait: F 'T go ( ..a &'T -- ..a ) ;").unwrap_err();
+        let err = parse_src("trait: F 'T : go ( ..a &'T -- ..a ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..a`"), "{err}");
         // Input-side only, so the `row_in` arm is what rejects it (the case
         // above sets `row_out` too, and would still be caught by that alone).
-        let err = parse_src("trait: F 'T go ( ..a &'T -- ) ;").unwrap_err();
+        let err = parse_src("trait: F 'T : go ( ..a &'T -- ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..a`"), "{err}");
     }
 
@@ -8898,8 +8982,58 @@ mod tests {
     fn parse_trait_decl_member_with_an_output_only_row_variable_is_error() {
         // The output side carries its own `row_out`, reached only when the
         // input side declares none.
-        let err = parse_src("trait: F 'T go ( &'T -- ..b ) ;").unwrap_err();
+        let err = parse_src("trait: F 'T : go ( &'T -- ..b ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..b`"), "{err}");
+    }
+
+    /// P7.S3s-follow: the retired bare `name ( sig )` trait member form
+    /// produces a located diagnostic naming the `: name ( ... ) ;`
+    /// replacement, not a generic token mismatch.
+    #[test]
+    fn parse_trait_decl_bare_member_names_the_colon_form() {
+        let err = parse_src("trait: Ord 'T cmp ( 'T 'T -- Ordering ) ;").unwrap_err();
+        assert!(
+            err.contains("trait `Ord` declares member `cmp` without a leading `:`"),
+            "{err}"
+        );
+        assert!(
+            err.contains("a trait member is declared `: cmp ( ... ) ;`"),
+            "{err}"
+        );
+    }
+
+    /// P7.S3s-follow: a member's terminating `;` is required before the
+    /// trait's own `;`.
+    #[test]
+    fn parse_trait_decl_member_missing_terminating_semicolon_is_error() {
+        // The member's `;` is required before the trait's own `;`. With only
+        // one `;`, the member consumes it and the trait terminator is left
+        // missing, so the error is the unterminated-trait EOF path.
+        let err = parse_src("trait: Ord 'T : cmp ( 'T 'T -- i64 ) ;").unwrap_err();
+        assert!(err.contains("unterminated `trait:`"), "{err}");
+    }
+
+    /// P7.S3s-follow: `: inline ( ... ) ;` declares a member *named* `inline`
+    /// with `declares_inline == false`, the member-side twin of
+    /// `parse_worddef`'s own carve-out. The name is consumed first, so the
+    /// `inline` keyword slot sees the `(` that follows, not the name.
+    #[test]
+    fn parse_trait_decl_member_named_inline_still_parses() {
+        let module = parse_src("trait: Show 'T : inline ( &'T -- ) ; ;").unwrap();
+        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
+        assert_eq!(show.members.len(), 1);
+        assert_eq!(show.members[0].name, "inline");
+        assert!(!show.members[0].declares_inline);
+    }
+
+    /// P7.S3s-follow: one optional `inline` keyword only. With the keyword
+    /// slot in place, `: foo inline inline ( ... )` consumes the name `foo`,
+    /// then the first `inline` as the keyword, and the second `inline` falls
+    /// through to `expect(LParen)` and fails there, located.
+    #[test]
+    fn parse_trait_decl_member_double_inline_is_error() {
+        let err = parse_src("trait: Show 'T : foo inline inline ( &'T -- ) ; ;").unwrap_err();
+        assert!(err.contains("expected LParen"), "{err}");
     }
 
     #[test]
@@ -8922,7 +9056,7 @@ mod tests {
         // shape: `ground_member_type` only grounds `Len::Concrete`, so it must
         // be rejected here at the trait decl -- otherwise the body-form desugar
         // panics grounding it.
-        let err = parse_src("trait: Foo 'T bar ( &['T 'N] -- ) ;").unwrap_err();
+        let err = parse_src("trait: Foo 'T : bar ( &['T 'N] -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
@@ -8932,7 +9066,7 @@ mod tests {
         // empty `traits` slice, so a bound (`'T: Copy`) inside a member
         // signature saw no predicate-trait table and reported "unknown
         // capability `Copy`" instead of the located bound-on-use error.
-        let err = parse_src("trait: Show 'T show ( 'T: Copy -- ) ;").unwrap_err();
+        let err = parse_src("trait: Show 'T : show ( 'T: Copy -- ) ; ;").unwrap_err();
         assert!(
             err.contains("must be written at its binding"),
             "unexpected message: {err}"
@@ -8946,7 +9080,7 @@ mod tests {
     #[test]
     fn parse_impl_body_synthesizes_a_word_with_the_inherited_effect() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop 7 ;\n\
              ;",
@@ -8983,6 +9117,56 @@ mod tests {
         );
     }
 
+    /// P7.S3s-follow: the concrete-target branch of `parse_impl_member_body`
+    /// inherits the trait member's `declares_inline` flag instead of
+    /// hardcoding `false`. Each branch gets its own test because a twinned
+    /// pair covered in one half only has shipped here before.
+    #[test]
+    fn parse_impl_body_inherits_the_members_inline_flag() {
+        let module = parse_src(
+            "trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;
+\
+             impl: Ord for i64
+\
+               : cmp | a b | a b sub ;
+\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "cmp;Ord;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.declares_inline);
+        assert!(synth.poly.is_none(), "concrete target stays monomorphic");
+    }
+
+    /// P7.S3s-follow: the generic-target branch of `parse_impl_member_body`
+    /// inherits the trait member's `declares_inline` flag. Tested
+    /// independently from the concrete branch above so reverting either
+    /// branch alone is caught.
+    #[test]
+    fn parse_impl_body_generic_target_inherits_the_members_inline_flag() {
+        let module = parse_src(
+            "trait: Show 'T : show inline ( &'T -- ) ; ;
+\
+             impl: Show for ['T 4]
+\
+               : show | p | p drop ;
+\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name.contains("show;Show;"))
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.declares_inline);
+        assert!(synth.poly.is_some(), "generic target stays polymorphic");
+    }
+
     /// P7.S3r (R4a): the member's own name binds to the synthesized word
     /// throughout its body, nested quotations included -- otherwise a recursive
     /// call would resolve against module scope, where the member name is not a
@@ -8990,7 +9174,7 @@ mod tests {
     #[test]
     fn parse_impl_body_rewrites_the_members_own_name_inside_a_quotation() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | p | ~[ p show ] drop ;\n\
              ;",
@@ -9025,7 +9209,7 @@ mod tests {
     #[test]
     fn parse_impl_body_binder_named_after_the_member_is_error() {
         let err = parse_src(
-            "trait: Show 'T show ( &'T -- i64 ) ;\n\
+            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | show | show drop 7 ;\n\
              ;",
@@ -9045,7 +9229,8 @@ mod tests {
 
     #[test]
     fn parse_impl_decl_zero_bindings_is_error() {
-        let err = parse_src("trait: Show 'T show ( &'T -- ) ;\nimpl: Show for i64 ;").unwrap_err();
+        let err =
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\nimpl: Show for i64 ;").unwrap_err();
         assert!(err.contains("binds no members"), "{err}");
     }
 
@@ -9521,7 +9706,7 @@ mod tests {
         // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 1
         // because the one pre-seeded predicate entry (`Copy`) occupies 0.
         let module =
-            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
     }
@@ -9530,9 +9715,10 @@ mod tests {
     fn parse_capabilities_composes_a_predicate_and_a_user_trait() {
         // R5: the capability list stays greedy across the two kinds, in
         // source order.
-        let module =
-            parse_src("trait: Order 'T cmp ( &'T &'T -- i64 ) ;\n: f ( 'T: Copy Order -- 'T ) ;")
-                .unwrap();
+        let module = parse_src(
+            "trait: Order 'T : cmp ( &'T &'T -- i64 ) ; ;\n: f ( 'T: Copy Order -- 'T ) ;",
+        )
+        .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(
             sig.bounds,
@@ -9546,7 +9732,8 @@ mod tests {
         // know, which is then the enclosing signature's next input slot --
         // not a capability, and not an error.
         let module =
-            parse_src("trait: Show 'T show ( &'T -- ) ;\n: f ( 'T: Show i64 -- 'T ) ;").unwrap();
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f ( 'T: Show i64 -- 'T ) ;")
+                .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
         assert_eq!(
@@ -9571,9 +9758,10 @@ mod tests {
         // unbound-qualifier error unconditionally, even past the first bound
         // -- so a legal signature whose next input happens to be a qualified
         // type (unrelated to any bound) was misdiagnosed as a bad bound.
-        let err =
-            parse_src("trait: Copy2 'T dummy ( 'T -- ) ;\n: f ( 'T: Copy2 q::Point -- 'T ) drop ;")
-                .unwrap_err();
+        let err = parse_src(
+            "trait: Copy2 'T : dummy ( 'T -- ) ; ;\n: f ( 'T: Copy2 q::Point -- 'T ) drop ;",
+        )
+        .unwrap_err();
         // `q::Point` is not itself resolvable to anything here (no `q`
         // import exists), so this must fail as an ordinary unknown-type
         // error on the next slot, never as an unbound-bound-qualifier one.
@@ -10154,7 +10342,7 @@ mod tests {
     #[test]
     fn parse_impl_target_generic_array_var_elem_and_len_parses() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
              ;",
@@ -10171,7 +10359,7 @@ mod tests {
     #[test]
     fn parse_impl_target_generic_var_parses() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for 'T\n\
                : show | a | a drop ;\n\
              ;",
@@ -10184,7 +10372,7 @@ mod tests {
     #[test]
     fn parse_impl_target_concrete_still_parses() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;",
@@ -10197,7 +10385,7 @@ mod tests {
     #[test]
     fn parse_impl_target_bound_on_var_is_error() {
         let err = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T: Copy 'N]\n\
                : show | a | a drop ;\n\
              ;",

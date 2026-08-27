@@ -852,7 +852,7 @@ and supertraits, still unforced. Sequence after **P7.S4**, which landed the gene
 pattern matching, specificity chain, and polymorphic member word that this slice populates
 with bounds.
 
-**P7.S5 -- Linear array elements.** `[T N]` rejects a linear element for every linear type:
+**P7.S5 -- Linear array elements.** `[ done ]` `[T N]` rejects a linear element for every linear type:
 `type: Arr xs [Spy 2] ;` and `type: Arr xs [owning [ -- ] 2] ;` both fail with `linear array
 elements are not supported yet` (`src/check.rs:3227`), while the same type as a struct field
 (`type: Box s Spy ;`) builds. So a linear struct is storable but a *collection* of them is not,

@@ -4996,7 +4996,10 @@ mod tests {
         let mut session = Session::new();
         let mut out = Vec::new();
         let err = session
-            .eval_line("trait: Order 'T cmp ( &'T &'T -- Ordering ) ;", &mut out)
+            .eval_line(
+                "trait: Order 'T : cmp ( &'T &'T -- Ordering ) ; ;",
+                &mut out,
+            )
             .unwrap_err();
         assert!(
             err.contains("`trait:` has no meaning at the REPL")

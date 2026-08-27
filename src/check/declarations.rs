@@ -3554,9 +3554,10 @@ mod tests {
 
     #[test]
     fn check_trait_decls_duplicate_same_module_is_error() {
-        let err =
-            trait_check_src("trait: Show 'T show ( &'T -- ) ;\ntrait: Show 'T show ( &'T -- ) ;")
-                .unwrap_err();
+        let err = trait_check_src(
+            "trait: Show 'T : show ( &'T -- ) ; ;\ntrait: Show 'T : show ( &'T -- ) ; ;",
+        )
+        .unwrap_err();
         assert!(err.contains("duplicate trait `Show`"), "{err}");
     }
 
@@ -3565,8 +3566,8 @@ mod tests {
         // R1: the cross-kind collision `colliding_name_kind` was generalized
         // to catch (`trait: Point` alongside `type: Point`), via the new
         // `check_trait_decls` call site, not a bare `traits` arm.
-        let err =
-            trait_check_src("type: Point x i64 ;\ntrait: Point 'T foo ( &'T -- ) ;").unwrap_err();
+        let err = trait_check_src("type: Point x i64 ;\ntrait: Point 'T : foo ( &'T -- ) ; ;")
+            .unwrap_err();
         assert!(
             err.contains("already the name of a type"),
             "unexpected message: {err}"
@@ -3575,7 +3576,7 @@ mod tests {
 
     #[test]
     fn check_trait_decls_ok_for_a_clean_declaration() {
-        trait_check_src("trait: Show 'T show ( &'T -- ) ;").unwrap();
+        trait_check_src("trait: Show 'T : show ( &'T -- ) ; ;").unwrap();
     }
 
     /// P7.S3p (ruling 5) + P7.S3t: the gate is "takes the trait variable
@@ -3586,8 +3587,10 @@ mod tests {
     /// `check_trait_decls_rejects_a_receiver_nested_in_an_array_input`).
     #[test]
     fn member_binds_trait_var_accepts_any_receiver_position() {
-        let tokens =
-            lex("trait: T 'T at ( &'T i64 -- i64 ) sink ( i64 'T -- ) fresh ( -- i64 ) ;").unwrap();
+        let tokens = lex(
+            "trait: T 'T : at ( &'T i64 -- i64 ) ; : sink ( i64 'T -- ) ; : fresh ( -- i64 ) ; ;",
+        )
+        .unwrap();
         let module = crate::parser::parse(&tokens).unwrap();
         let members = &module
             .traits
@@ -3604,7 +3607,7 @@ mod tests {
 
     #[test]
     fn check_trait_decls_accepts_a_member_binding_no_receiver() {
-        trait_check_src("trait: Show 'T fresh ( -- i64 ) ;").unwrap();
+        trait_check_src("trait: Show 'T : fresh ( -- i64 ) ; ;").unwrap();
     }
 
     /// The gate is syntactic, so a receiver mentioned only *nested* inside a
@@ -3614,7 +3617,7 @@ mod tests {
     /// and must not conflate this shape with the (now-legal) nullary case.
     #[test]
     fn check_trait_decls_rejects_a_receiver_nested_in_an_array_input() {
-        let err = trait_check_src("trait: Show 'T sum ( [ 'T 4 ] -- i64 ) ;").unwrap_err();
+        let err = trait_check_src("trait: Show 'T : sum ( [ 'T 4 ] -- i64 ) ; ;").unwrap_err();
         assert!(
             err.contains("`sum` of `Show`")
                 && err.contains("never takes `'T` (or `&'T`) directly as an input"),
@@ -3629,7 +3632,7 @@ mod tests {
     #[test]
     fn check_impl_decls_ok_for_a_matching_member_body() {
         impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;",
@@ -3641,7 +3644,7 @@ mod tests {
     fn check_impl_decls_orphan_scalar_target_names_only_the_trait_module() {
         // A scalar declares no module of its own, so "or the module declaring
         // `i64`" would name a home that cannot exist.
-        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\n\
+        let tokens = lex("trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;")
@@ -3665,7 +3668,7 @@ mod tests {
         // `statics` arm: `check_static_decls` runs first (driver.rs), so the
         // clash is caught from the static's own call site via the `traits`
         // arm, whichever order the two are declared in.
-        let tokens = lex("trait: Show 'T show ( &'T -- ) ;\nstatic: Show i64 = 0 ;").unwrap();
+        let tokens = lex("trait: Show 'T : show ( &'T -- ) ; ;\nstatic: Show i64 = 0 ;").unwrap();
         let module = crate::parser::parse(&tokens).unwrap();
         let err = check_static_decls(&module).unwrap_err();
         assert!(err.contains("already the name of a trait"), "{err}");
@@ -3674,7 +3677,7 @@ mod tests {
     #[test]
     fn check_impl_decls_missing_member_is_error() {
         let err = impl_check_src(
-            "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
+            "trait: Eq 'T : eq ( &'T &'T -- ) ; : hash ( &'T -- ) ; ;\n\
              impl: Eq for i64\n\
                : eq | a b | a drop b drop ;\n\
              ;",
@@ -3689,7 +3692,7 @@ mod tests {
     #[test]
     fn check_impl_decls_duplicate_member_is_error() {
         let err = impl_check_src(
-            "trait: Getter 'T get ( &'T -- i64 ) ;\n\
+            "trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
              type: Point n i64 ;\n\
              impl: Getter for Point\n\
                : get | p | p &n @ ;\n\
@@ -3703,7 +3706,7 @@ mod tests {
     #[test]
     fn check_impl_decls_duplicate_impl_is_error() {
         let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;\n\
@@ -3721,7 +3724,7 @@ mod tests {
     #[test]
     fn check_impl_decls_alpha_equivalent_generic_targets_are_duplicate() {
         let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -3789,7 +3792,7 @@ mod tests {
         // they are accepted as declarations (the overlap is resolved by
         // specificity at the dispatch site, not rejected here).
         impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -3811,7 +3814,7 @@ mod tests {
         // module 1. A generic target names no struct/enum, so
         // `impl_target_module` returns `None` and the orphan rule requires the
         // impl to live in the trait's module (module 1).
-        let src = "trait: Show 'T show ( &'T -- ) ;\n\
+        let src = "trait: Show 'T : show ( &'T -- ) ; ;\n\
              type: Foo x i64 ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
@@ -3846,7 +3849,7 @@ mod tests {
         // The same generic `impl: Show for ['T 'N]` in the trait's own module
         // (module 0 for both) is accepted — the orphan rule's legal home.
         impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;
+            "trait: Show 'T : show ( &'T -- ) ; ;
 \
              impl: Show for ['T 'N]
 \
@@ -3866,7 +3869,7 @@ mod tests {
         // Trait and impl in module 0; struct also in module 0 (trait's module
         // == impl's module → accepted).
         impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;
+            "trait: Show 'T : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \
@@ -3883,7 +3886,7 @@ mod tests {
     fn check_impl_decls_concrete_impl_in_target_module_accepted() {
         // Trait in module 1, struct and impl in module 0 (target's module
         // == impl's module → accepted).
-        let src = "trait: Show 'T show ( &'T -- ) ;
+        let src = "trait: Show 'T : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \
@@ -3909,7 +3912,7 @@ mod tests {
     fn check_impl_decls_concrete_impl_outside_both_modules_is_orphan_error() {
         // Trait in module 1, struct in module 2, impl in module 0 (neither
         // the trait's nor the target's module → rejected).
-        let src = "trait: Show 'T show ( &'T -- ) ;
+        let src = "trait: Show 'T : show ( &'T -- ) ; ;
 \
              type: Point x i64 ;
 \

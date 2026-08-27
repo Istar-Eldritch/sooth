@@ -1773,6 +1773,11 @@ pub struct TraitDecl {
 pub struct TraitMember {
     pub name: String,
     pub sig: PolySig,
+    /// P7.S3s-follow: set by the optional `inline` keyword between the member
+    /// name and its `(` in `trait: ... ;`, read by `parse_impl_member_body` so
+    /// every `impl:` body satisfying this member is spliced at its call sites
+    /// instead of costing a call frame.
+    pub declares_inline: bool,
 }
 
 /// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
@@ -2783,11 +2788,26 @@ pub enum TermKind {
 /// so a body they both splice is renamed identically.
 pub fn alpha_rename_locals(terms: &[Term], uid: u32) -> Vec<Term> {
     let mut bound: Vec<String> = Vec::new();
-    rename_terms(terms, uid, &mut bound)
+    rename_terms(terms, uid, INLINE_SUFFIX, &mut bound)
 }
 
-fn rename_local(name: &str, uid: u32) -> String {
-    format!("{name}{INLINE_SUFFIX}{uid}")
+/// P7.S3s-follow: rename an `inline` trait member's body for a splice that
+/// reuses the *enclosing* splice's uid. A member splice cannot mint a fresh
+/// `inline_uid` (that would desynchronize lowering's counter from the
+/// checker's and make the next splice's `splice_records`/`splice_trait_calls`
+/// lookups miss), so its uid is not unique on its own. A separate suffix makes
+/// the member body's locals disjoint from the enclosing body's by
+/// construction: without it, an enclosing `| x |` and a member `| x |` both
+/// rename to `x__inl{uid}` and the name-keyed local lookups in
+/// `func_builder` resolve a member read to the enclosing value, silently
+/// producing a wrong result.
+pub fn alpha_rename_member_locals(terms: &[Term], uid: u32) -> Vec<Term> {
+    let mut bound: Vec<String> = Vec::new();
+    rename_terms(terms, uid, MEMBER_SPLICE_SUFFIX, &mut bound)
+}
+
+fn rename_local(name: &str, uid: u32, suffix: &str) -> String {
+    format!("{name}{suffix}{uid}")
 }
 
 /// The private separator `alpha_rename_locals` appends to an inlined local's
@@ -2798,27 +2818,31 @@ fn rename_local(name: &str, uid: u32) -> String {
 /// collision-free lookup during the splice and its lowering.
 const INLINE_SUFFIX: &str = "__inl";
 
+/// `alpha_rename_member_locals`'s separator. Disjoint from `INLINE_SUFFIX` so
+/// a member splice sharing the enclosing splice's uid cannot collide with it.
+const MEMBER_SPLICE_SUFFIX: &str = "__mem";
+
 /// Rename a `Call` naming a body-bound local. A borrow reads its local through
 /// a `&`/`&!` sigil (`&arr`, `&!arr`), so the sigil is split off, the local
 /// part renamed if bound, and the sigil re-attached; a `Call` that is not a
 /// bound local (a word, `&>`, a cast) is returned unchanged.
-fn rename_call(name: &str, uid: u32, bound: &[String]) -> String {
+fn rename_call(name: &str, uid: u32, suffix: &str, bound: &[String]) -> String {
     let is_bound = |n: &str| bound.iter().any(|b| b == n);
     if let Some(inner) = name.strip_prefix("&!") {
         if is_bound(inner) {
-            return format!("&!{}", rename_local(inner, uid));
+            return format!("&!{}", rename_local(inner, uid, suffix));
         }
     } else if let Some(inner) = name.strip_prefix('&') {
         if is_bound(inner) {
-            return format!("&{}", rename_local(inner, uid));
+            return format!("&{}", rename_local(inner, uid, suffix));
         }
     } else if is_bound(name) {
-        return rename_local(name, uid);
+        return rename_local(name, uid, suffix);
     }
     name.to_string()
 }
 
-fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> {
+fn rename_terms(terms: &[Term], uid: u32, suffix: &str, bound: &mut Vec<String>) -> Vec<Term> {
     let start = bound.len();
     let mut out = Vec::with_capacity(terms.len());
     for term in terms {
@@ -2828,18 +2852,18 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
                     .iter()
                     .map(|n| {
                         bound.push(n.clone());
-                        rename_local(n, uid)
+                        rename_local(n, uid, suffix)
                     })
                     .collect();
                 TermKind::Bind(renamed)
             }
             TermKind::Call(name, type_args) => {
-                TermKind::Call(rename_call(name, uid, bound), type_args.clone())
+                TermKind::Call(rename_call(name, uid, suffix, bound), type_args.clone())
             }
             TermKind::Quotation(inner, is_inline, annot) => {
                 let mut inner_bound = bound.clone();
                 TermKind::Quotation(
-                    rename_terms(inner, uid, &mut inner_bound),
+                    rename_terms(inner, uid, suffix, &mut inner_bound),
                     *is_inline,
                     annot.clone(),
                 )

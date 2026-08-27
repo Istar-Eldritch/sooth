@@ -82,15 +82,19 @@ fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
 }
 
 /// The dispatch targets transitively reachable from `entry` by following
-/// `graph`'s call edges (BFS, cycle-safe via `seen`): the `impl: Ord` bodies
-/// resolved to, plus the monomorphized words reached on the way there.
-/// Mangled `impl:` names carry `Ord` and `cmp` (the trait's sole member)
-/// verbatim (`cmp.<mangled Ord>.<width>`) and a monomorph carries the
+/// `graph`'s call edges (BFS, cycle-safe via `seen`): the monomorphized
+/// comparison words reached on the way there. A monomorph carries the
 /// `sooth_mono_` prefix, so a substring filter needs no knowledge of the
 /// mangling scheme itself -- only the walk needs to start from the entry
 /// point under test rather than the whole binary. The monomorphs are what
-/// distinguish *which* comparison a site calls; the `impl:` symbols are what
-/// distinguish which type's implementation it lands in.
+/// distinguish *which* comparison a site calls (`sooth_mono_gt__*` vs
+/// `sooth_mono_lt__*`).
+///
+/// P7.S3s-follow: `cmp` is an `inline` trait member, so the `impl: Ord`
+/// bodies are spliced into the comparison monomorphs and mint no symbol of
+/// their own. The walk therefore no longer collects `impl: Ord` symbols
+/// (they are unreachable in the call graph); the comparison monomorphs,
+/// which carry `cmp`'s body inlined, are the dispatch targets that remain.
 ///
 /// `sooth_mono_mymax*` symbols are excluded: they are the call frames the
 /// non-inline baseline emits and the inline candidate eliminates by splicing.
@@ -104,15 +108,8 @@ fn reached_dispatch_targets(graph: &HashMap<String, Vec<String>>, entry: &str) -
         if !seen.insert(name.clone()) {
             continue;
         }
-        let is_impl = name.contains("Ord") && name.contains("cmp");
-        // `gt`/`lt`/etc are `inline` in `lib/cmp.sth`, so a `sooth_mono_gt`
-        // monomorph is dead code: the monomorphization system mints it inside
-        // a non-inline poly caller, but the splice means it is never called.
-        // Filter it out so the comparison is between live dispatch targets only.
-        let is_mono = name.starts_with("sooth_mono_")
-            && !name.starts_with("sooth_mono_mymax")
-            && !name.starts_with("sooth_mono_gt");
-        if is_impl || is_mono {
+        let is_mono = name.starts_with("sooth_mono_") && !name.starts_with("sooth_mono_mymax");
+        if is_mono {
             hits.push(name.clone());
         }
         if let Some(callees) = graph.get(&name) {
@@ -124,8 +121,8 @@ fn reached_dispatch_targets(graph: &HashMap<String, Vec<String>>, entry: &str) -
 }
 
 /// Walk `binary`'s call graph from `sooth_main` and return the sorted set of
-/// dispatch targets reached (gt monomorphs + `impl: Ord` bodies, excluding
-/// `mymax*` call frames).
+/// dispatch targets reached (comparison monomorphs, excluding `mymax*`
+/// call frames).
 fn main_dispatch_targets(binary: &Path) -> Vec<String> {
     let graph = call_graph(binary);
     reached_dispatch_targets(&graph, "sooth_main")
@@ -253,25 +250,24 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
          nothing: baseline stdout was {baseline_stdout:?}"
     );
 
-    // Both versions must reach at least one `impl: Ord` symbol through
-    // `cmp`. Since `gt` is now `inline` in `lib/cmp.sth`, neither version
-    // mints a `sooth_mono_gt` monomorph -- `gt`'s body (the `cmp` call +
-    // `Ordering?` eliminator) splices directly into `mymax`/`mymax3` and then
-    // into `main`, so both reach the same `cmp;Ord;0;{i64,f64}` symbols.
+    // Both versions must reach the monomorphized `gt` — the comparison
+    // monomorph is what distinguishes a `gt` -> `lt` swap in the source.
+    // P7.S3s-follow: `cmp` is `inline`, so the `impl: Ord` bodies are spliced
+    // into the `gt` monomorphs and mint no symbol of their own; the
+    // monomorphs carry `cmp`'s body inlined and are the dispatch targets that
+    // remain.
     for (label, targets) in [
         ("baseline", &baseline_targets),
         ("candidate", &candidate_targets),
     ] {
         assert!(
-            targets
-                .iter()
-                .any(|t| t.contains("Ord") && t.contains("cmp")),
-            "{label} must resolve to at least one `impl: Ord` symbol through its own call \
-             graph, not just link one somewhere in the binary"
+            targets.iter().any(|t| t.starts_with("sooth_mono_gt")),
+            "{label} must reach the monomorphized `gt`, or a `gt` -> `lt` swap in the source \
+             is invisible to this diff"
         );
     }
 
-    // R7: the resolved dispatch targets (`cmp` impl monomorphs) match
+    // R7: the resolved dispatch targets (comparison monomorphs) match
     // between inline and non-inline. The `mymax*` call frames are filtered
     // out — they exist only in the non-inline version by design.
     assert_eq!(
@@ -279,7 +275,7 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
         "inline and non-inline must resolve the same dispatch targets from `sooth_main`"
     );
 
-    // R10: two types — both i64 and f64 monomorphs and impls are reached.
+    // R10: two types — both i64 and f64 comparison monomorphs are reached.
     assert!(
         baseline_targets.iter().any(|t| t.contains("i64")),
         "the dispatch targets must include an i64 monomorph: {baseline_targets:?}"

@@ -235,3 +235,114 @@ fn an_impl_ord_on_the_concrete_overloads_type_makes_the_pair_an_overlap_error() 
         "unexpected diagnostic: {err}"
     );
 }
+
+/// P7.S3s-follow Phase 5: `cmp` is an `inline` trait member, so an `inline`
+/// `'T: Ord` word that calls `cmp` has the `impl:` body spliced at the call
+/// site. This behavioural golden builds and runs the program, checking the
+/// printed output, so a wrong splice is caught as a wrong answer rather than
+/// just a shape change. The word is `inline` (spliced into `main`), so the
+/// `cmp` call resolves through the `splice_trait_calls` path (keyed by the
+/// enclosing splice's uid), the same path the two-splice test below stresses.
+const ORD_INLINE_IMPORTS: &str = "import: intrinsics * ;\n\
+     import: core::prelude | if Bool Ord lt gt | ;\n\
+     import: core::cmp | Ordering Less Equal Greater | ;\n";
+
+#[test]
+fn ord_inline_cmp_behavioural_golden() {
+    let (_t, entry) = program(
+        "ord-inline-golden",
+        &format!(
+            "{ORD_INLINE_IMPORTS}\
+             : my_cmp inline ( 'T: Ord 'T -- i64 )
+\
+               cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+\
+             : main ( -- )
+\
+               1 2 my_cmp .
+\
+               2 1 my_cmp .
+\
+               1 1 my_cmp . ;
+"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}
+
+/// P7.S3s-follow Phase 5 (section 3): two member splices under one enclosing
+/// uid, checked for the right *value*, not merely for building. Both `cmp`
+/// calls resolve through `splice_trait_calls` under the same uid; both are
+/// spliced; the two results are independent and correct. They do not collide
+/// because a member splice renames through `alpha_rename_member_locals`,
+/// whose suffix is disjoint from the enclosing splice's.
+#[test]
+fn ord_inline_cmp_two_splices_produce_correct_value() {
+    let (_t, entry) = program(
+        "ord-inline-two-splice",
+        &format!(
+            "{ORD_INLINE_IMPORTS}\
+             : cmp_twice inline ( 'T: Ord 'T -- i64 i64 )
+\
+               | a b |
+\
+               a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering?
+\
+               b a cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+\
+             : main ( -- )
+\
+               1 2 cmp_twice . .
+\
+               2 1 cmp_twice . . ;
+"
+        ),
+    );
+    // 1 2: a b cmp = Less -> -1; b a cmp = Greater -> 1. Stack: -1 1.
+    // . . prints 1 then -1.
+    // 2 1: a b cmp = Greater -> 1; b a cmp = Less -> -1. Stack: 1 -1.
+    // . . prints -1 then 1.
+    assert_eq!(build_and_run(&entry), "1\n-1\n-1\n1\n");
+}
+
+/// P7.S3s-follow (review round 1, P0): the spliced member body's locals must
+/// not collide with the enclosing splice's. A member splice reuses the
+/// enclosing splice's uid (it cannot mint a fresh `inline_uid` without
+/// desynchronizing from the checker), so the uid alone does not make the
+/// member's names fresh; `alpha_rename_member_locals`'s disjoint suffix does.
+/// Sharing the suffix renamed the enclosing `| lhs rhs |` and `lib/cmp.sth`'s
+/// own `| lhs rhs |` to one name, and the name-keyed local lookups in
+/// `func_builder` resolved the member's read to the *enclosing* value: this
+/// program printed the comparison of `9 9` (the enclosing pair) instead of
+/// `1 2`. The fixture names its locals `lhs`/`rhs` deliberately, matching the
+/// shipped `impl: Ord` bodies, so the collision is the real one and not a
+/// synthetic rename.
+#[test]
+fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
+    let (_t, entry) = program(
+        "ord-inline-collide",
+        &format!(
+            "{ORD_INLINE_IMPORTS}\
+             : cmp_shadowed inline ( 'T: Ord 'T 'T 'T -- i64 )
+\
+               | lhs rhs a b |
+\
+               lhs drop rhs drop
+\
+               a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+\
+             : main ( -- )
+\
+               9 9 1 2 cmp_shadowed .
+\
+               9 9 2 1 cmp_shadowed .
+\
+               9 9 1 1 cmp_shadowed . ;
+"
+        ),
+    );
+    // The compared pair is `a b`, never the `lhs rhs` the member body's own
+    // locals share a name with: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
+    // Under the collision all three printed 0 (comparing 9 with 9).
+    assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}

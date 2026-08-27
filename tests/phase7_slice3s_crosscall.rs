@@ -82,7 +82,7 @@ fn a_generic_body_forwards_a_user_bound_to_another_generic_word() {
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          type: Point x i64 y i64 ;\n\
          impl: Show for Point\n\
            : show | p | p drop 42 . ;\n\
@@ -106,7 +106,7 @@ fn a_concrete_image_cross_call_with_no_impl_is_a_located_build_error() {
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          type: Other n i64 ;\n\
          : shows ( &'T: Show -- ) show ;\n\
          : g ( 'T -- ) drop 7 Other |o| &o shows o drop ;\n\

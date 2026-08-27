@@ -34,20 +34,43 @@ module.exports = grammar({
 				$.static_definition,
 			),
 
-		word_definition: ($) => seq(":", field("name", $.word), repeat($._atom), ";"),
+		word_definition: ($) =>
+			seq($._colon, field("name", $.word), repeat($._atom), ";"),
 		type_definition: ($) =>
 			seq("type:", field("name", $.word), repeat($._atom), ";"),
 		extern_definition: ($) =>
 			seq("extern:", field("name", $.word), repeat($._atom), ";"),
-		// `trait:` has no nested `;` — member signatures are `( ... )` groups,
-		// each a single atom, so the simple `repeat($._atom)` body works.
+		// `trait:` members are `: name ( sig ) ;` (P7.S3s-follow), the same form
+		// as a word definition, so the block does contain nested `;`. Each one is
+		// an explicit rule rather than a bare `;` admitted as an atom: a bare `;`
+		// lets the greedy `repeat` swallow the block's own terminator and absorb
+		// the following declaration. The header (`'T`) still matches `$._atom`.
 		trait_definition: ($) =>
-			seq("trait:", field("name", $.word), repeat($._atom), ";"),
-		// `impl:` contains member bodies (`: word ... ;`), each ending in `;`,
-		// so `;` must be an admissible atom inside the block. The greedy `repeat`
-		// backtracks one step so the final `;` terminates the declaration.
+			seq(
+				"trait:",
+				field("name", $.word),
+				repeat(choice($.trait_member, $._atom)),
+				";",
+			),
+		trait_member: ($) =>
+			prec(1, seq($._colon, field("name", $.word), repeat($._atom), ";")),
+		// A standalone `:` must out-lex `word` (which also matches ":"), or the
+		// member form below can never be recognised inside a `trait:`/`impl:`
+		// block. Anonymous, so `":" @keyword` in highlights.scm still matches.
+		_colon: (_) => token(prec(2, ":")),
+		// `impl:` member bodies take the same `: name ... ;` form as a trait
+		// member, so they get the same explicit rule. Admitting a bare `;` as an
+		// atom instead (the older form here) let the greedy `repeat` swallow the
+		// block's own terminator and absorb the following declaration.
 		impl_definition: ($) =>
-			seq("impl:", field("trait", $.word), repeat(choice($._atom, ";")), ";"),
+			seq(
+				"impl:",
+				field("trait", $.word),
+				repeat(choice($.impl_member, $._atom)),
+				";",
+			),
+		impl_member: ($) =>
+			prec(1, seq($._colon, field("name", $.word), repeat($._atom), ";")),
 		import_definition: ($) =>
 			seq(
 				"import:",
@@ -69,6 +92,7 @@ module.exports = grammar({
 		_atom: ($) =>
 			choice(
 				$.word,
+				$._colon,
 				$.int,
 				$.float,
 				$.string,

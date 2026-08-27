@@ -1110,14 +1110,15 @@ fn poly_mymax_runs_at_i64_and_f64() {
     // rejects a quotation outright (S3o); the branch runs through the
     // ordinary splice now.
     //
-    // P7.S3s (R7): `inline` still declares no `Bound::User` variable
-    // (`reject_user_bound_on_combinator`), and `Ord` is one now, so this
+    // P7.S3s (R7): `inline` words can now declare a `Bound::User` variable
+    // (the gate that formerly rejected it is gone, replaced by the
+    // per-splice trait-call resolution path), and `Ord` is one now. This
     // fixture keeps its own point -- an `inline` generic body splicing `if`
-    // correctly -- by dropping the `Ord` bound and the library `gt` call it
-    // would need, and comparing through the raw `ugt` intrinsic wrapped in
-    // the same `[ True ] [ False ] branch` construction `gt` itself is built
-    // over, so the body stays genuinely `Bound::User`-free while still
-    // producing the `Bool` its own `if` consumes.
+    // correctly -- by not exercising that path: it drops the `Ord` bound
+    // and the library `gt` call it would need, comparing through the raw
+    // `ugt` intrinsic wrapped in the same `[ True ] [ False ] branch`
+    // construction `gt` itself is built over, so the body stays free of
+    // trait dispatch while still producing the `Bool` its own `if` consumes.
     let (stdout, code) = run_src(
         "poly-mymax",
         ": mymax inline ( 'T: Copy 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\

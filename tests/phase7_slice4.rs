@@ -79,7 +79,7 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
 #[test]
 fn generic_impl_runs_identically_to_concrete_impl() {
     let trait_and_words = "\
-trait: Show 'T show ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
 : shows ( &'T: Show -- ) show ;\n\
 : main ( -- )\n\
   42 .\n\
@@ -117,7 +117,7 @@ trait: Show 'T show ( &'T -- ) ;\n\
 fn generic_impl_dispatch_via_composed_cross_call_runs() {
     let (_t, entry) = single_file(
         "composed_dispatch",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for ['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -142,7 +142,7 @@ fn generic_impl_dispatch_via_composed_cross_call_runs() {
 fn generic_impl_target_var_parses_and_runs() {
     let (_t, entry) = single_file(
         "var_target",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for 'T\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -167,7 +167,7 @@ fn generic_impl_target_var_parses_and_runs() {
 fn overlapping_unequal_targets_accepted_as_declarations() {
     let (_t, entry) = single_file(
         "overlap",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for ['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -191,7 +191,7 @@ fn overlapping_unequal_targets_accepted_as_declarations() {
 fn alpha_equivalent_generic_targets_are_duplicate_error() {
     let (_t, entry) = single_file(
         "dup",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for ['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -210,7 +210,7 @@ fn alpha_equivalent_generic_targets_are_duplicate_error() {
 fn generic_impl_in_trait_module_accepted() {
     let (_t, entry) = single_file(
         "orphan_ok",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for ['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -233,7 +233,7 @@ fn generic_impl_outside_trait_module_is_orphan_error() {
     let t = Tree::new("orphan-generic");
     t.write(
         "trait.sth",
-        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     let entry = t.write(
         "main.sth",
@@ -270,7 +270,7 @@ fn generic_impl_outside_trait_module_is_orphan_error() {
 fn concrete_impl_overrides_generic_at_shared_instantiation() {
     let (_t, entry) = single_file(
         "override",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for [i64 4]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
@@ -310,7 +310,7 @@ fn concrete_impl_overrides_generic_at_shared_instantiation() {
 fn concrete_impl_overrides_generic_reversed_declaration_order() {
     let (_t, entry) = single_file(
         "override_reversed",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for ['T 'N]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
@@ -348,7 +348,7 @@ fn concrete_impl_overrides_generic_reversed_declaration_order() {
 fn array_impl_overrides_bare_var_impl_depth_mismatch() {
     let (_t, entry) = single_file(
         "depth_mismatch",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for 'T\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
@@ -376,7 +376,7 @@ fn array_impl_overrides_bare_var_impl_depth_mismatch() {
 fn incomparable_targets_produce_ambiguity_error() {
     let (_t, entry) = single_file(
         "ambiguity",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for [i64 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
@@ -414,7 +414,7 @@ fn incomparable_targets_produce_ambiguity_error() {
 fn shared_var_target_more_specific_wins() {
     let (_t, entry) = single_file(
         "shared_var",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for [['T 'N] 'N]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
@@ -450,7 +450,7 @@ fn shared_var_target_more_specific_wins() {
 fn shared_var_target_more_specific_reversed_declaration_order() {
     let (_t, entry) = single_file(
         "shared_var_reversed",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for [['T 'N] 'M]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\

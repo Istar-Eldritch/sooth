@@ -118,8 +118,8 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
 fn trait_declares_and_duplicate_is_rejected() {
     let (_t, entry) = single_file(
         "duplicate",
-        "trait: Show 'T show ( &'T -- ) ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -134,7 +134,7 @@ fn trait_collides_with_a_type_of_the_same_name() {
     let (_t, entry) = single_file(
         "cross-kind",
         "type: Point x i64 y i64 ;\n\
-         trait: Point 'T foo ( &'T -- ) ;\n\
+         trait: Point 'T : foo ( &'T -- ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -147,7 +147,7 @@ fn trait_collides_with_a_type_of_the_same_name() {
 fn user_trait_named_copy_collides_with_the_reserved_entry() {
     let (_t, entry) = single_file(
         "reserved-copy",
-        "trait: Copy 'T foo ( &'T -- ) ;\n: main ( -- ) ;\n",
+        "trait: Copy 'T : foo ( &'T -- ) ; ;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(err.contains("already the name of a trait"), "{err}");
@@ -162,7 +162,7 @@ fn trait_member_with_a_non_trailing_receiver_dispatches() {
     let (_t, entry) = single_file(
         "non-trailing-receiver",
         "type: Point x i64 y i64 ;\n\
-         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
          impl: Indexable for Point\n\
            : at | p n | n drop p &x @ ;\n\
          ;\n\
@@ -182,7 +182,7 @@ fn trait_member_with_a_non_trailing_receiver_dispatches() {
 fn trait_member_with_a_zero_input_receiver_is_accepted() {
     let (_t, entry) = single_file(
         "zero-input-receiver",
-        "trait: Show 'T fresh ( -- i64 ) ;\n\
+        "trait: Show 'T : fresh ( -- i64 ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let build = sooth_build(&entry);
@@ -210,13 +210,13 @@ fn trait_member_with_a_zero_input_receiver_is_accepted() {
 fn trait_member_named_call_is_rejected() {
     let (_t, entry) = single_file(
         "call-named-member",
-        "trait: C 'T call ( &'T -- i64 ) ;\n\
+        "trait: C 'T : call ( &'T -- i64 ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "trait `C` declares a member named `call`, which is a builtin word (line 2, col 13)"
+            "trait `C` declares a member named `call`, which is a builtin word (line 2, col 15)"
         ),
         "{err}"
     );
@@ -229,13 +229,13 @@ fn trait_member_named_call_is_rejected() {
 fn trait_member_named_slice_is_rejected() {
     let (_t, entry) = single_file(
         "slice-named-member",
-        "trait: C 'T slice ( &'T -- i64 ) ;\n\
+        "trait: C 'T : slice ( &'T -- i64 ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "trait `C` declares a member named `slice`, which is a builtin word (line 2, col 13)"
+            "trait `C` declares a member named `slice`, which is a builtin word (line 2, col 15)"
         ),
         "{err}"
     );
@@ -248,13 +248,13 @@ fn trait_member_named_slice_is_rejected() {
 fn trait_member_named_subslice_is_rejected() {
     let (_t, entry) = single_file(
         "subslice-named-member",
-        "trait: C 'T subslice ( &'T -- i64 ) ;\n\
+        "trait: C 'T : subslice ( &'T -- i64 ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "trait `C` declares a member named `subslice`, which is a builtin word (line 2, col 13)"
+            "trait `C` declares a member named `subslice`, which is a builtin word (line 2, col 15)"
         ),
         "{err}"
     );
@@ -270,7 +270,7 @@ fn trait_member_named_after_a_surface_comparison_dispatches() {
     let (_t, entry) = single_file(
         "eq-named-member",
         "type: Tag v i64 ;\n\
-         trait: C 'T eq ( &'T -- i64 ) ;\n\
+         trait: C 'T : eq ( &'T -- i64 ) ; ;\n\
          impl: C for Tag\n\
            : eq | t | t &v @ ;\n\
          ;\n\
@@ -295,7 +295,7 @@ fn a_concrete_word_of_the_members_name_captures_the_call() {
     let (_t, entry) = single_file(
         "member-name-collision",
         "type: Point x i64 y i64 ;\n\
-         trait: Indexable 'T at ( &'T i64 -- i64 ) ;\n\
+         trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
          impl: Indexable for Point\n\
            : at | p n | n drop p &x @ ;\n\
          ;\n\
@@ -315,7 +315,7 @@ fn a_concrete_word_of_the_members_name_captures_the_call() {
 #[test]
 fn trait_requires_export_to_cross_a_module_boundary() {
     let t = Tree::new("no-export");
-    t.write("lib.sth", "trait: Show 'T show ( &'T -- ) ;\n");
+    t.write("lib.sth", "trait: Show 'T : show ( &'T -- ) ; ;\n");
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
@@ -338,7 +338,7 @@ fn trait_export_and_selective_import_resolve_across_modules() {
     let t = Tree::new("cross-module-ok");
     t.write(
         "lib.sth",
-        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     let entry = t.write(
         "main.sth",
@@ -360,12 +360,12 @@ fn local_trait_collides_with_a_selectively_imported_one() {
     let t = Tree::new("local-vs-selective");
     t.write(
         "lib.sth",
-        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     let entry = t.write(
         "main.sth",
         "import: \"lib.sth\" l | Show | ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -381,7 +381,7 @@ fn local_trait_collides_with_a_selectively_imported_one() {
 fn impl_body_validates_and_builds() {
     let (_t, entry) = single_file(
         "impl-ok",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for i64\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -395,7 +395,7 @@ fn impl_body_validates_and_builds() {
 fn impl_missing_a_required_member_is_rejected() {
     let (_t, entry) = single_file(
         "impl-missing-member",
-        "trait: Eq 'T eq ( &'T &'T -- ) hash ( &'T -- ) ;\n\
+        "trait: Eq 'T : eq ( &'T &'T -- ) ; : hash ( &'T -- ) ; ;\n\
          impl: Eq for i64\n\
            : eq | a b | a drop b drop ;\n\
          ;\n\
@@ -413,7 +413,7 @@ fn impl_missing_a_required_member_is_rejected() {
 fn duplicate_impl_for_the_same_trait_and_type_is_rejected() {
     let (_t, entry) = single_file(
         "impl-duplicate",
-        "trait: Show 'T show ( &'T -- ) ;\n\
+        "trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for i64\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -433,7 +433,7 @@ fn impl_outside_trait_and_type_module_is_an_orphan_rejection() {
     let t = Tree::new("orphan");
     t.write(
         "trait.sth",
-        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     t.write("point.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
     let entry = t.write(
@@ -460,7 +460,7 @@ fn impl_inside_the_target_types_own_module_satisfies_the_orphan_rule() {
     let t = Tree::new("orphan-ok");
     t.write(
         "trait.sth",
-        "trait: Show 'T show ( &'T -- ) ;\nexport: Show ;\n",
+        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     t.write(
         "point.sth",
@@ -485,8 +485,8 @@ fn impl_inside_the_target_types_own_module_satisfies_the_orphan_rule() {
 fn ambiguous_unqualified_member_call_is_rejected() {
     let (_t, entry) = single_file(
         "ambiguous-member",
-        "trait: A 'T t1 ( &'T -- ) ;\n\
-         trait: B 'T t1 ( &'T -- ) ;\n\
+        "trait: A 'T : t1 ( &'T -- ) ; ;\n\
+         trait: B 'T : t1 ( &'T -- ) ; ;\n\
          : f ( &'T: A B -- ) t1 ;\n\
          : main ( -- ) ;\n",
     );
@@ -521,7 +521,7 @@ fn a_user_bound_on_a_poly_combinator_compiles() {
     let (_t, entry) = single_file(
         "combinator-bound",
         "type: Point x i64 y i64 ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -559,7 +559,7 @@ fn a_bound_unsatisfied_at_the_call_site_is_rejected() {
         "bound-unsatisfied",
         "type: Point x i64 y i64 ;\n\
          type: Blip n i64 ;\n\
-         trait: Show 'T show ( &'T -- ) ;\n\
+         trait: Show 'T : show ( &'T -- ) ; ;\n\
          impl: Show for Point\n\
            : show | p | p drop ;\n\
          ;\n\
@@ -605,7 +605,7 @@ fn the_array_sort_consumer_runs_at_two_concrete_instantiations() {
     let t = tree_with_core("sort");
     let entry = t.write(
         "main.sth",
-"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Rank | Under | Same | Over ;\ntrait: Order 'T cmp ( &'T &'T -- Rank ) ;\ntype: Pair n i64 ;\nimpl: Order for i64\n  : cmp\n    | b | | a |\n    a @ b @ lt ~[ Under ] ~[\n      a @ b @ gt ~[ Over ] ~[ Same ] if\n    ] if ;\n;\nimpl: Order for Pair\n  : cmp\n    | b | | a |\n    a &n @ | an | b &n @ | bn |\n    an bn lt ~[ Over ] ~[\n      an bn gt ~[ Under ] ~[ Same ] if\n    ] if ;\n;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Under ) drop a0 ]\n  ~[ ( Same ) drop a0 ]\n  ~[ ( Over )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Rank? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Under ) drop a1 ]\n  ~[ ( Same ) drop a1 ]\n  ~[ ( Over )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Rank? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Under ) drop a2 ]\n  ~[ ( Same ) drop a2 ]\n  ~[ ( Over )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Rank? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
+"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Rank | Under | Same | Over ;\ntrait: Order 'T : cmp ( &'T &'T -- Rank ) ; ;\ntype: Pair n i64 ;\nimpl: Order for i64\n  : cmp\n    | b | | a |\n    a @ b @ lt ~[ Under ] ~[\n      a @ b @ gt ~[ Over ] ~[ Same ] if\n    ] if ;\n;\nimpl: Order for Pair\n  : cmp\n    | b | | a |\n    a &n @ | an | b &n @ | bn |\n    an bn lt ~[ Over ] ~[\n      an bn gt ~[ Under ] ~[ Same ] if\n    ] if ;\n;\n: sort3 ( ['T: Copy Order 3] -- ['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Under ) drop a0 ]\n  ~[ ( Same ) drop a0 ]\n  ~[ ( Over )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Rank? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Under ) drop a1 ]\n  ~[ ( Same ) drop a1 ]\n  ~[ ( Over )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Rank? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Under ) drop a2 ]\n  ~[ ( Same ) drop a2 ]\n  ~[ ( Over )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Rank? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
     );
     let stdout = build_and_run(&entry);
     assert_eq!(stdout, "1\n2\n3\n3\n2\n1\n");
@@ -621,7 +621,7 @@ fn the_array_sort_consumer_runs_at_two_concrete_instantiations() {
 fn an_impl_body_member_returning_a_field_builds_and_runs() {
     let (_t, entry) = single_file(
         "impl-body-field-getter",
-"trait: Getter 'T show ( &'T -- i64 ) ;\ntype: Pt n i64 ;\nimpl: Getter for Pt\n  : show | p | p &n @ ;\n;\n: getval ( &'T: Getter -- i64 ) show ;\n: main ( -- ) 7 Pt |p| &p getval . p drop ;\n"
+"trait: Getter 'T : show ( &'T -- i64 ) ; ;\ntype: Pt n i64 ;\nimpl: Getter for Pt\n  : show | p | p &n @ ;\n;\n: getval ( &'T: Getter -- i64 ) show ;\n: main ( -- ) 7 Pt |p| &p getval . p drop ;\n"
     );
     let stdout = build_and_run(&entry);
     assert_eq!(stdout, "7\n");
