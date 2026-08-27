@@ -100,11 +100,25 @@ Two parts, and the second is the larger one:
   above anything legitimate and fires well before the stack dies even in the tighter
   test-thread case. The gap is wide in both directions; this is not a finely balanced
   number.
-- **Span: capture the outermost one only.** `alpha_rename_member_locals` copies
-  `term.span` verbatim (`src/ast.rs`, `rename_terms`), so spans *mix by depth*: the
-  outermost frame is the user's real call site, but deeper frames point into
-  `lib/cmp.sth`'s own bodies -- library source the user did not write and cannot fix. The
-  diagnostic must point at the user's call site, always.
+- **Span: the impl member's own declaration, not a call site.** No call-site span reaches
+  the guard as user source. `rename_terms` copies `term.span` verbatim (`src/ast.rs`), and
+  a surface comparison like `lt` is itself an `inline` combinator spliced at
+  `calls.rs:665` *before* any member splice, so by the first entry to
+  `lower_resolved_word_call` every frame -- the outermost included -- already points into
+  `lib/cmp.sth`. Measured on the witness: `Span { line: 146, col: 3, module: 2 }` at every
+  depth, no frame in `main.sth`.
+
+  The diagnostic therefore locates the offending `impl:` block's own member declaration,
+  which is user source by construction and stable however the recursion was reached.
+  `WordDef.span` for an impl member is the real span of the member's own name token, the
+  `cmp` immediately following the declaring colon, captured at
+  `expect_word_any_spanned()` (`src/parser.rs:2855`) -- the same field
+  `word_span()` already feeds to `combinator_cycle_error`. It is not reachable from
+  `FuncBuilder` today; it needs a name-keyed `member_spans: HashMap<String, Span>` built in
+  `src/ir/driver.rs` from `module.words`, mirroring the existing `member_uid_seeds` and
+  threaded through the same sites. Measured on the witness:
+  `declared_span=Some(Span { line: 6, col: 5, module: 0 })` -- `main.sth`, at the `cmp`
+  name token itself (col 5), not at the enclosing declaration.
 - **Rendering: `render_word` (`src/resolve.rs:158`, `pub(crate)`).** It turns
   `cmp;Ord;0;Wrap` into ``` `cmp` (member of trait `Ord` for `Wrap`) ```. Already called
   cross-module from `src/check.rs`, and `src/ir/driver.rs` already calls into
@@ -158,7 +172,8 @@ leaving a new convention for the next lowering-time diagnostic to inherit.
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green. A recursive-type
 `impl: Ord` whose `cmp` compares its own type produces a located diagnostic and a non-zero
 exit, never SIGABRT, as a golden test pinning the exact message text. The diagnostic points
-at the user's call site, not into `lib/cmp.sth`. The field-delegating `impl: Ord for Point`
+at the offending `impl:` block's own member declaration, in the user's source, never into
+`lib/cmp.sth`. The field-delegating `impl: Ord for Point`
 above still builds and runs, and P7.S8's
 `a_concrete_impl_ord_delegating_to_lt_builds_and_runs` still passes -- the explicit
 no-false-rejection guard. No `.expect()`/panic remains on the path the budget guards, and
