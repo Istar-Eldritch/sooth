@@ -247,12 +247,12 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 /// Part 1: the six surface names resolve to `lib/` definitions and no
 /// comparison builtin row remains.
 ///
-/// Revised under P7.S3s R5: `Ord` became a nominal trait, and
-/// `reject_user_bound_on_combinator` refuses any `Bound::User` on an
-/// `inline` word's own type variable -- so the six comparisons, once `Ord`
-/// stopped being a reserved predicate, could no longer stay `inline` (they
-/// are ordinary non-inline calls now, a measured ~2x tax accepted for this
-/// slice, P7.S3o names the follow-on that could restore the splice).
+/// The six comparisons are `inline` library words over `Ord` (a nominal
+/// trait, a `Bound::User`): each splices its `cmp` + `Ordering?` body at
+/// every call site, so a comparison in a tight loop is a splice, not a
+/// real call with a frame. The three checker-side bugs that blocked inline
+/// (uid collision, poly-to-poly dispatch, eliminator quot drop) and the
+/// lowering-side bug (eliminator phi on a quotation phantom) are all fixed.
 #[test]
 fn the_six_comparisons_are_library_words() {
     let core = test_support::core_lib_words();
@@ -263,8 +263,8 @@ fn the_six_comparisons_are_library_words() {
             .find(|w| w.name == name)
             .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
-            !word.declares_inline,
-            "`{name}` is a real call now (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline` word may not declare"
+            word.declares_inline,
+            "`{name}` is `inline`: its `cmp` + `Ordering?` body splices at every call site"
         );
         let sig = word
             .poly
@@ -352,28 +352,28 @@ fn check_ueq_family_lowers_to_cmpop() {
     }
 }
 
-/// Part 3: the canonical `a b eq if ... ...` pattern. `if` is still spliced
-/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is now a real call
-/// through `cmp` (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline`
-/// word cannot declare, so the comparison itself is the accepted ~2x tax,
-/// not a free abstraction any more.
-///
-/// Measured mutation: restore `inline` on `eq` (with its `Ord` bound still in
-/// place) and the program stops building -- `reject_user_bound_on_combinator`
-/// refuses a `Bound::User` on a combinator's own type variable.
+/// Part 3: the canonical `a b eq if ... ...` pattern. Both `eq` and `if` are
+/// spliced (no `IrFunc` minted for either), so `w`'s body contains the
+/// spliced `cmp` call and `Ordering?` eliminator directly. The `cmp` trait
+/// impl monomorphization is still minted as an `IrFunc` (it is a real call),
+/// and `w`'s body contains an `Instr::Call` to it.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
     let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
         funcs
             .iter()
-            .any(|f| f.name.starts_with("sooth_mono_eq") || f.name.starts_with("sooth_mono_cmp")),
-        "an `IrFunc` is minted for the library `eq`/`cmp` monomorphization"
+            .any(|f| f.name.contains("Ord") && f.name.contains("cmp")),
+        "an `IrFunc` is minted for the `cmp` trait-impl monomorphization"
     );
     let w = func(&funcs, "w");
     assert!(
         instrs(w).iter().any(|i| matches!(i, Instr::Call(..))),
-        "`eq` is a real call now, unlike the spliced `if`"
+        "`w` calls the `cmp` impl directly (eq is spliced, not a real call)"
+    );
+    assert!(
+        !funcs.iter().any(|f| f.name.contains("sooth_mono_eq")),
+        "`eq` is `inline` (spliced): no `IrFunc` minted for it"
     );
 }
 

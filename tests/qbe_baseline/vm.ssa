@@ -296,48 +296,65 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v118 =l add %v116, 320
 	%v119 =l loadl %v118
 	%v120 =l copy 0
-	%v121 =w call $sooth_mono_eq__m3__t0_i64(l %v119, l %v120)
-	%v124 =w copy %v121
-	jnz %v124, @blk23, @blk24
+	%v121 =w call $cmp.3b.Ord.3b.3.3b.i64__m3(l %v119, l %v120)
+	%v125 =w copy 0
+	%v126 =w ceqw %v121, %v125
+	jnz %v126, @blk23, @blk26
+@blk26
+	%v127 =w copy 1
+	%v128 =w ceqw %v121, %v127
+	jnz %v128, @blk24, @blk25
 @blk23
-	%v125 =l add %v117, 208
-	storel %v115, %v125
-	jmp @blk25
+	%v129 =w copy 0
+	jmp @blk27
 @blk24
-	%v126 =:Vm call $bump.2d.pc__m0(:Vm %v117)
-	jmp @blk25
+	%v130 =w copy 1
+	jmp @blk27
 @blk25
-	%v127 =l phi @blk23 %v117, @blk24 %v126
-	%v128 =:Fetched call $fetch__m0(:Vm %v127)
-	%v129 =l add %v128, 0
-	%v130 =l add %v128, 320
-	blit %v129, %v3, 320
-	blit %v130, %v5, 16
+	%v131 =w copy 0
+	jmp @blk27
+@blk27
+	%v132 =w phi @blk23 %v129, @blk24 %v130, @blk25 %v131
+	%v135 =w copy %v132
+	jnz %v135, @blk28, @blk29
+@blk28
+	%v136 =l add %v117, 208
+	storel %v115, %v136
+	jmp @blk30
+@blk29
+	%v137 =:Vm call $bump.2d.pc__m0(:Vm %v117)
+	jmp @blk30
+@blk30
+	%v138 =l phi @blk28 %v117, @blk29 %v137
+	%v139 =:Fetched call $fetch__m0(:Vm %v138)
+	%v140 =l add %v139, 0
+	%v141 =l add %v139, 320
+	blit %v140, %v3, 320
+	blit %v141, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk9
-	%v131 =l add %v4, 8
-	%v132 =l loadl %v131
-	%v133 =l add %v2, 208
-	storel %v132, %v133
-	%v134 =:Fetched call $fetch__m0(:Vm %v2)
-	%v135 =l add %v134, 0
-	%v136 =l add %v134, 320
-	blit %v135, %v3, 320
-	blit %v136, %v5, 16
+	%v142 =l add %v4, 8
+	%v143 =l loadl %v142
+	%v144 =l add %v2, 208
+	storel %v143, %v144
+	%v145 =:Fetched call $fetch__m0(:Vm %v2)
+	%v146 =l add %v145, 0
+	%v147 =l add %v145, 320
+	blit %v146, %v3, 320
+	blit %v147, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk10
-	%v137 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
-	%v138 =l add %v137, 0
-	%v139 =l add %v137, 320
-	%v140 =l loadl %v139
+	%v148 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
+	%v149 =l add %v148, 0
+	%v150 =l add %v148, 320
+	%v151 =l loadl %v150
 	jmp @blk18
 @blk18
-	%v141 =l phi @blk10 %v140
-	ret %v141
+	ret %v151
 }
 
 export function :arr_0 $build__m0() {
@@ -1019,30 +1036,6 @@ export function w $cmp.3b.Ord.3b.3.3b.f64__m3(d %v0, d %v1) {
 @blk3
 	%v17 =w phi @blk1 %v5, @blk6 %v16
 	ret %v17
-}
-
-export function w $sooth_mono_eq__m3__t0_i64(l %v0, l %v1) {
-@start
-	%v2 =w call $cmp.3b.Ord.3b.3.3b.i64__m3(l %v0, l %v1)
-	%v6 =w copy 0
-	%v7 =w ceqw %v2, %v6
-	jnz %v7, @blk1, @blk4
-@blk4
-	%v8 =w copy 1
-	%v9 =w ceqw %v2, %v8
-	jnz %v9, @blk2, @blk3
-@blk1
-	%v10 =w copy 0
-	jmp @blk5
-@blk2
-	%v11 =w copy 1
-	jmp @blk5
-@blk3
-	%v12 =w copy 0
-	jmp @blk5
-@blk5
-	%v13 =w phi @blk1 %v10, @blk2 %v11, @blk3 %v12
-	ret %v13
 }
 
 function $sooth_oob_trap(l %line, l %idx, l %len) {

@@ -289,7 +289,14 @@ impl<'a> FuncBuilder<'a> {
         }
 
         // Single join block: one phi per declared output, merging the
-        // fall-through arm predecessors.
+        // fall-through arm predecessors. A slot that is the same `Value` in
+        // every arm — a quotation phantom forwarded untouched, or any
+        // compile-time-fixed value — needs no phi: the phantom has no
+        // defining `Instr` (a phi referencing it is an undefined operand QBE
+        // rejects), and a fresh phi value would lose the `quot_bodies` entry
+        // `call`'s literal-fusion path needs (a later `call` panics in
+        // `lower_indirect_call`). This mirrors `lower_if`'s `if t == e`
+        // short-circuit, generalised to N arms.
         self.start_block(join_id);
         self.terminated = false;
         let m = clause_ends[0].1.len();
@@ -299,10 +306,14 @@ impl<'a> FuncBuilder<'a> {
                 .iter()
                 .map(|(pred, st)| (*pred, st[out_i]))
                 .collect();
-            let ty = self.value_type(arms[0].1);
-            let v = self.fresh_value(ty);
-            self.push_instr(Instr::Phi(v, arms));
-            join_stack.push(v);
+            if arms.iter().all(|(_, v)| *v == arms[0].1) {
+                join_stack.push(arms[0].1);
+            } else {
+                let ty = self.value_type(arms[0].1);
+                let v = self.fresh_value(ty);
+                self.push_instr(Instr::Phi(v, arms));
+                join_stack.push(v);
+            }
         }
         self.stack = join_stack;
     }

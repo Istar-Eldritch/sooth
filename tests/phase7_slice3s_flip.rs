@@ -133,6 +133,10 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
 /// `poly_ord_bound_error`'s "not a numeric type" wording (step 8). Asserted by
 /// exact text, minus the line/column, which is the fixture's layout rather
 /// than the diagnostic's content.
+///
+/// Now that `lt` is `inline`, its `cmp` call is spliced into the caller, so
+/// the unsatisfied-bound error names `cmp` (the trait member the splice
+/// resolves) rather than `lt` (the inline wrapper the caller wrote).
 #[test]
 fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     let (_t, entry) = program(
@@ -144,7 +148,7 @@ fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
+        err.contains("cannot instantiate `'T` of `cmp` with `Vec2` in `main`"),
         "unexpected diagnostic: {err}"
     );
     assert!(
