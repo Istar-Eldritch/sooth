@@ -162,22 +162,49 @@ impl<'a> FuncBuilder<'a> {
     /// its terms, truncate `self.locals`, mirroring the ordinary combinator
     /// splice in `lower_call`'s `_` arm.
     ///
-    /// **The uid rule.** The checker does not splice a resolved trait member
-    /// (it checks it as an ordinary call against the member word's grounded
-    /// signature), so no splice uid was allocated for it. Minting one here
-    /// desynchronizes lowering's uid counter from the checker's, and the next
-    /// splice's `splice_records`/`splice_trait_calls` lookups miss; the
-    /// observed symptom is a downstream `checked user word exists: cmp` panic,
-    /// one comparison later. The member splice therefore reuses the enclosing
-    /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) and
-    /// pushes nothing.
+    /// **The uid rule (P7.S8, R1).** The checker checks each `impl:` member as
+    /// an ordinary top-level word, with `inline_uid` seeded at
+    /// `word_idx * INLINE_UID_STRIDE` (`check.rs`), so every splice uid inside
+    /// that body lives in the *member's* namespace, not the caller's. Splicing
+    /// the body here therefore enters that namespace for the duration:
     ///
-    /// That reused uid is not unique, so the member body is renamed through
-    /// `alpha_rename_member_locals`, whose suffix is disjoint from the
-    /// ordinary splice suffix. Sharing the suffix would rename an enclosing
-    /// `| x |` and a member `| x |` to one name, and the name-keyed local
-    /// lookups here and in `word_families` would resolve a member read to the
-    /// enclosing value -- a wrong answer, not a panic.
+    /// - the member's own seed (`member_uid_seeds`, keyed by the same name as
+    ///   `combinators`) is pushed onto `splice_uid_stack`, so a nested bare
+    ///   member call or poly call in the body finds its
+    ///   `splice_trait_calls`/`splice_records` entry, and
+    /// - `self.inline_uid` -- the minting counter, shared across the whole
+    ///   func's lowering -- is *reset* to that seed, so a combinator splice
+    ///   nested inside the body mints the uid the checker minted for it.
+    ///   Pushing the seed alone is not enough: the nested mint reads this
+    ///   counter, not the stack.
+    ///
+    /// Both are restored on the way out, along with `member_splice_depth`,
+    /// which the re-splice bracket raises so `lower_call`'s span-keyed
+    /// `trait_calls` lookup stands aside for the duration (R1b).
+    ///
+    /// The rule is written for the member case it exists for, but the bracket
+    /// covers every combinator this function splices, including an `inline`
+    /// builtin overload arriving through the `builtin_overloads` path above.
+    /// That is correct for the same reason: those are top-level words too, so
+    /// the checker seeded them the same way.
+    ///
+    /// A member absent from `member_uid_seeds` falls back to the enclosing
+    /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) for the
+    /// `inline_uid` reset and the alpha-rename suffix; the push/pop of
+    /// `splice_uid_stack` and `member_splice_depth` still happen, so R1b's
+    /// gate still stands aside for this splice. That is the REPL's state, and
+    /// it hands out empty splice tables, so no member splice there has an
+    /// entry to miss in the first place.
+    ///
+    /// Entering the member's namespace does not make the uid unique: the
+    /// member's seed is also the uid the first combinator splice *inside* this
+    /// body will mint. So the body is renamed through
+    /// `alpha_rename_member_locals`, whose suffix is disjoint from the ordinary
+    /// splice suffix (`MEMBER_SPLICE_SUFFIX`, `src/ast.rs`). Sharing the suffix
+    /// would rename a member `| x |` and that nested splice's `| x |` to one
+    /// name, and the name-keyed local lookups here and in `word_families`
+    /// would resolve the nested read to the member's value -- a wrong answer,
+    /// not a panic.
     ///
     /// `tail = false`: a trait member body is not the enclosing word's tail,
     /// and threading the caller's `tail` would let the member's terms
@@ -186,10 +213,20 @@ impl<'a> FuncBuilder<'a> {
     /// is the predicate that would decide it.
     fn lower_resolved_word_call(&mut self, sym_name: &str) {
         if let Some(entry) = self.combinators.get(sym_name) {
-            let uid = self.splice_uid_stack.last().copied().unwrap_or(0);
+            let uid = match self.member_uid_seeds.get(sym_name) {
+                Some(&seed) => seed,
+                None => self.splice_uid_stack.last().copied().unwrap_or(0),
+            };
             let body = crate::ast::alpha_rename_member_locals(&entry.terms, uid);
             let locals_depth = self.locals.len();
+            let caller_inline_uid = self.inline_uid;
+            self.inline_uid = uid;
+            self.splice_uid_stack.push(uid);
+            self.member_splice_depth += 1;
             self.lower_terms(&body, false);
+            self.member_splice_depth -= 1;
+            self.splice_uid_stack.pop();
+            self.inline_uid = caller_inline_uid;
             self.locals.truncate(locals_depth);
             return;
         }
@@ -240,9 +277,23 @@ impl<'a> FuncBuilder<'a> {
         // to the implementing word's own lowering symbol -- an ordinary concrete
         // word (decision 1/2), never a struct/enum-generated one, so it skips
         // the struct/enum special-casing below and calls it directly.
-        if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
-            self.lower_resolved_word_call(&sym_name);
-            return;
+        //
+        // P7.S8 (R1b): valid except during an active *member re-splice*. This
+        // table is span-keyed and holds one grounding per `FuncBuilder`
+        // session; a member body spliced by `lower_resolved_word_call` can
+        // reach the same source span under a second grounding (the member's
+        // fields' types), where the recorded answer is the wrong one and
+        // re-dispatching to it recurses without bound. Inside that bracket the
+        // uid-scoped `splice_trait_calls` below is the correct table. The gate
+        // is `member_splice_depth`, not `splice_uid_stack.is_empty()`: an
+        // ordinary combinator splice introduces no second grounding, and a
+        // bound member call inside a combinator's quotation argument has no
+        // `splice_trait_calls` entry to fall through to.
+        if self.member_splice_depth == 0 {
+            if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
+                self.lower_resolved_word_call(&sym_name);
+                return;
+            }
         }
         // P7.S3o Phase 3: a bare trait member call resolved at a combinator
         // splice site (e.g. `cmp` called directly inside an inline
@@ -1432,10 +1483,12 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt` (P7.S3s R5:
-        // `gt` is a real call now, which would inflate the call count this
-        // test measures; the raw primitive keeps the same stack effect at
-        // zero cost, exactly as `gt`'s own old inline body did).
+        // `dup 0 ugt [ True ] [ False ] branch` in place of `gt`, to keep the
+        // block graph minimal: `gt` is `inline`, so writing it splices `cmp`'s
+        // `impl: Ord` body and an `Ordering?` diamond into this same function,
+        // and the header/phi assertions below would have to be read through
+        // those extra blocks instead of measuring the loop transform alone.
+        // The raw primitive has the same stack effect at zero cost.
         let ir =
             lower_src(": go ( i64 i64 -- i64 ) dup 0 ugt [ True ] [ False ] branch ~[ 1 sub go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
@@ -1484,9 +1537,9 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact mul`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        // `dup 0 ueq [ True ] [ False ] branch` in place of `eq` (P7.S3s R5:
-        // `eq` is a real call now, which would inflate the call count this
-        // test measures).
+        // `dup 0 ueq [ True ] [ False ] branch` in place of `eq`: `eq` is
+        // `inline`, so it would splice a whole `Ordering?` diamond into the
+        // body whose single surviving call this test counts.
         let ir = lower_src(
             ": fact ( i64 -- i64 ) dup 0 ueq [ True ] [ False ] branch ~[ drop 1 ] ~[ dup 1 sub fact mul ] if ;",
         );
@@ -1823,10 +1876,10 @@ mod tests {
         // `lower_call` would leave an `Instr::Call` to `while` (or splice the
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
-        // `dup 5 ult [ True ] [ False ] branch` in place of `lt` (P7.S3s R5:
-        // `lt` is a real call now, which would leave an unrelated call in
-        // `main`'s spliced body that this test's own `call_symbols` assertion
-        // must otherwise special-case).
+        // `dup 5 ult [ True ] [ False ] branch` in place of `lt`: `lt` is
+        // `inline`, so it would splice `cmp`'s body and an `Ordering?` diamond
+        // into `main` alongside `while`'s own splice, and `call_symbols` below
+        // is asserting about *this* splice's block graph.
         let ir = lower_src(
             ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
              : main ( -- ) 0 [ dup 5 ult [ True ] [ False ] branch ~[ 1 add True ] ~[ False ] if ] while . ;\n",
@@ -1900,15 +1953,15 @@ mod tests {
         );
     }
 
-    /// P7.S3s-follow Phase 4 (section 3): two member splices under one
-    /// enclosing uid alpha-rename to the same local names, which is correct
-    /// because the splice truncates `self.locals` to its entry depth and the
-    /// resolver is scope-bounded. Both `dbl` calls inside the spliced
-    /// `apply2` body resolve through `splice_trait_calls` under the same uid,
+    /// P7.S3s-follow Phase 4 (section 3): two splices of the same member share
+    /// that member's own uid seed, so they alpha-rename to the same local
+    /// names. That is correct because each splice truncates `self.locals` to
+    /// its entry depth and the resolver is scope-bounded. Both `dbl` calls
+    /// inside the spliced `apply2` body resolve through `splice_trait_calls`,
     /// and both are spliced. Asserting the right *value* (two doublings), not
     /// merely that it builds, so a wrong splice is caught as a wrong answer.
     #[test]
-    fn lower_resolved_inline_trait_member_two_splices_under_one_uid() {
+    fn lower_resolved_inline_trait_member_two_splices_share_the_members_seed() {
         let ir = lower_src(
             "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
              impl: Doubler for i64\n\
@@ -1936,8 +1989,9 @@ mod tests {
 
     /// P7.S3s-follow Phase 4: the `trait_calls` path (a non-combinator poly
     /// word calling an inline trait member). The poly word has its own
-    /// `IrFunc`, but inside it the member is spliced, not called. This tests
-    /// the uid = 0 (top-level default) case, where `splice_uid_stack` is empty.
+    /// `IrFunc`, but inside it the member is spliced, not called -- reached
+    /// from an empty `splice_uid_stack`, so the member's own seed is the only
+    /// thing that decides its body's uid namespace.
     #[test]
     fn lower_resolved_inline_trait_member_trait_calls_path_splices() {
         let ir = lower_src(
@@ -1974,9 +2028,9 @@ mod tests {
     /// so a `'T: Ord` word's `cmp` call splices the `impl:` body instead of
     /// calling it. The impl body's `ult`/`ugt` comparisons appear in the
     /// word's monomorph as `Instr::Cmp` (`Lt`/`Gt`), and no `Instr::Call` to
-    /// any `cmp` symbol survives. This exercises the `trait_calls` path
-    /// (uid = 0) with the real library trait, complementing the Phase 4
-    /// synthetic `Doubler` tests. The `Ordering?` tag dispatch uses
+    /// any `cmp` symbol survives. This exercises the `trait_calls` path with
+    /// the real library trait, complementing the Phase 4 synthetic `Doubler`
+    /// tests. The `Ordering?` tag dispatch uses
     /// `CmpOp::Eq`, so the `Lt`/`Gt` counts isolate the spliced `cmp` body
     /// from the eliminator's own comparisons.
     #[test]

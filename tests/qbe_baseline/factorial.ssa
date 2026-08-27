@@ -12,33 +12,6 @@ data $strfmt = { b "%.*s", b 0 }
 export function l $factorial__m0(l %v0) {
 @start
 	%v1 =l copy 0
-	%v2 =w call $sooth_mono_eq__m3__t0_i64(l %v0, l %v1)
-	%v5 =w copy %v2
-	jnz %v5, @blk1, @blk2
-@blk1
-	%v6 =l copy 1
-	jmp @blk3
-@blk2
-	%v7 =l copy 1
-	%v8 =l sub %v0, %v7
-	%v9 =l call $factorial__m0(l %v8)
-	%v10 =l mul %v0, %v9
-	jmp @blk3
-@blk3
-	%v11 =l phi @blk1 %v6, @blk2 %v10
-	ret %v11
-}
-
-export function $sooth_main() {
-@start
-	%v0 =l copy 5
-	%v1 =l call $factorial__m0(l %v0)
-	call $printf(l $fmt, l %v1, ...)
-	ret
-}
-
-export function w $sooth_mono_eq__m3__t0_i64(l %v0, l %v1) {
-@start
 	%v2 =w csltl %v0, %v1
 	jnz %v2, @blk1, @blk2
 @blk1
@@ -76,7 +49,28 @@ export function w $sooth_mono_eq__m3__t0_i64(l %v0, l %v1) {
 	jmp @blk11
 @blk11
 	%v23 =w phi @blk7 %v20, @blk8 %v21, @blk9 %v22
-	ret %v23
+	%v26 =w copy %v23
+	jnz %v26, @blk12, @blk13
+@blk12
+	%v27 =l copy 1
+	jmp @blk14
+@blk13
+	%v28 =l copy 1
+	%v29 =l sub %v0, %v28
+	%v30 =l call $factorial__m0(l %v29)
+	%v31 =l mul %v0, %v30
+	jmp @blk14
+@blk14
+	%v32 =l phi @blk12 %v27, @blk13 %v31
+	ret %v32
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 5
+	%v1 =l call $factorial__m0(l %v0)
+	call $printf(l $fmt, l %v1, ...)
+	ret
 }
 
 function $sooth_oob_trap(l %line, l %idx, l %len) {

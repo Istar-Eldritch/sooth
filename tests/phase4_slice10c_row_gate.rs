@@ -41,10 +41,16 @@ fn self_calls(f: &IrFunc) -> usize {
         .count()
 }
 
+/// Jumps to *the loop's own header* -- see the sibling copy in
+/// `tests/phase4_slice10c_tail_splice.rs` for why this is not "any block
+/// whose `Jmp` target id is <= its own".
 fn back_edges(f: &IrFunc) -> usize {
-    f.blocks
+    let Terminator::Jmp(header) = f.blocks[0].term else {
+        return 0;
+    };
+    f.blocks[1..]
         .iter()
-        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target == header))
         .count()
 }
 

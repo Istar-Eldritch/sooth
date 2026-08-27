@@ -134,9 +134,13 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
 /// exact text, minus the line/column, which is the fixture's layout rather
 /// than the diagnostic's content.
 ///
-/// `lt` is non-inline (the six surface comparisons are ordinary words), so
-/// the unsatisfied-bound error names `lt` directly — the word the caller
-/// wrote — rather than `cmp` (the trait member `lt` calls internally).
+/// The error names `cmp`, the trait member, not `lt`, the word the caller
+/// wrote: the six surface comparisons are `inline`, so `lt`'s body is spliced
+/// and the failing instantiation is `cmp`'s, reported at `lib/cmp.sth`'s own
+/// line. The second line -- the useful one, naming the missing `impl:`
+/// signature -- is unaffected. Restoring the caller's own attribution needs a
+/// splice-origin span carried through unsatisfied-bound reporting, which is a
+/// diagnostics feature of its own (recorded as a P7 follow-up).
 #[test]
 fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     let (_t, entry) = program(
@@ -148,7 +152,7 @@ fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
+        err.contains("cannot instantiate `'T` of `cmp` with `Vec2` in `main`"),
         "unexpected diagnostic: {err}"
     );
     assert!(
@@ -310,24 +314,50 @@ fn ord_inline_cmp_two_splices_produce_correct_value() {
     assert_eq!(build_and_run(&entry), "1\n-1\n-1\n1\n");
 }
 
-/// P7.S3s-follow (review round 1, P0): the spliced member body's locals must
-/// not collide with the enclosing splice's. A member splice reuses the
-/// enclosing splice's uid (it cannot mint a fresh `inline_uid` without
-/// desynchronizing from the checker), so the uid alone does not make the
-/// member's names fresh; `alpha_rename_member_locals`'s disjoint suffix does.
-/// Sharing the suffix renamed the enclosing `| lhs rhs |` and `lib/cmp.sth`'s
-/// own `| lhs rhs |` to one name, and the name-keyed local lookups in
-/// `func_builder` resolved the member's read to the *enclosing* value: this
-/// program printed the comparison of `9 9` (the enclosing pair) instead of
-/// `1 2`. The fixture names its locals `lhs`/`rhs` deliberately, matching the
-/// shipped `impl: Ord` bodies, so the collision is the real one and not a
-/// synthetic rename.
+/// A spliced member body's locals must not collide with those of a combinator
+/// the body itself splices. `alpha_rename_member_locals`'s suffix is what
+/// keeps them apart, because the *uid* does not: a member body is spliced
+/// under the member word's own check-time seed (P7.S8's R1), and that seed is
+/// also the uid minted for the first combinator splice nested inside it, so a
+/// shared suffix renames both `| lhs |`s to one name. `self.locals` is scanned
+/// front-to-back, so `bump`'s read of its own `lhs` then finds the member
+/// body's `lhs` -- the `Point` -- and the comparison silently answers off the
+/// wrong values rather than panicking.
+///
+/// Measured, not assumed: with `MEMBER_SPLICE_SUFFIX` set to `INLINE_SUFFIX`
+/// this program prints `1`/`1`/`1` instead of `-1`/`1`/`0`. `bump` must be the
+/// member body's *first* nested splice for the uids to meet, which is why it
+/// is called before any other combinator in `cmp`.
+///
+/// The enclosing `cmp_shadowed` binds `lhs`/`rhs` too. That pairing can no
+/// longer collide (a caller's splice uid and a member's seed differ), so it is
+/// here as the ordinary shadowing control, not as the witness.
 #[test]
-fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
+fn ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own() {
     let (_t, entry) = program(
         "ord-inline-collide",
         &format!(
             "{ORD_INLINE_IMPORTS}\
+             type: Point x i64 ;
+\
+             : bump inline ( i64 -- i64 ) | lhs | lhs 100 add ;
+\
+             impl: Ord for Point
+\
+               : cmp
+\
+                 | lhs rhs |
+\
+                 &lhs &x @ | a | &rhs &x @ | b |
+\
+                 lhs drop rhs drop
+\
+                 a bump | ab | b bump | bb |
+\
+                 ab bb ult [ Less ] [ ab bb ugt [ Greater ] [ Equal ] branch ] branch ;
+\
+             ;
+\
              : cmp_shadowed inline ( 'T: Ord 'T 'T 'T -- i64 )
 \
                | lhs rhs a b |
@@ -338,16 +368,136 @@ fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
 \
              : main ( -- )
 \
-               9 9 1 2 cmp_shadowed .
+               9 Point 9 Point 1 Point 2 Point cmp_shadowed .
 \
-               9 9 2 1 cmp_shadowed .
+               9 Point 9 Point 2 Point 1 Point cmp_shadowed .
 \
-               9 9 1 1 cmp_shadowed . ;
+               9 Point 9 Point 1 Point 1 Point cmp_shadowed . ;
 "
         ),
     );
-    // The compared pair is `a b`, never the `lhs rhs` the member body's own
-    // locals share a name with: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
-    // Under the collision all three printed 0 (comparing 9 with 9).
+    // The compared pair is `a b`, and `bump` adds 100 to each side, so the
+    // ordering is theirs: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
     assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}
+
+// -- P7.S8: the nested-splice uid rule ------------------------------------
+
+/// P7.S8 (R6): the panic the slice fixes, with **no generic word anywhere in
+/// the call chain**. `Point`'s `impl: Ord` body calls the library `lt`/`gt`,
+/// which are `inline`, so lowering splices `lt`'s body into `main`, then
+/// splices `cmp`-for-`Point`'s body into that, then splices `lt`/`gt` again at
+/// `i64` inside it -- three splice levels deep with no `mymax` and no `θ`.
+///
+/// Before the fix the member splice reused the *caller's* `inline_uid`, so the
+/// second level's `(uid, span)` lookup missed its `splice_trait_calls` entry
+/// and fell through to the ordinary call path, panicking with `checked user
+/// word exists` at `ir/func_builder/calls.rs`.
+#[test]
+fn a_concrete_impl_ord_delegating_to_lt_builds_and_runs() {
+    let (_t, entry) = program(
+        "concrete-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : main ( -- )\n\
+               3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               7 Point 3 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               5 Point 5 Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "1\n0\n0\n");
+}
+
+/// P7.S8 (R7): the same member splice inside a self-tail-recursive loop body.
+/// uid minting is static and `emit_back_edge` never reads `splice_uid_stack`,
+/// so the loop transform and the uid rule are independent -- this is the guard
+/// on that, and it does panic at the same site without the fix.
+#[test]
+fn a_self_tail_word_comparing_a_user_struct_in_its_loop_builds_and_runs() {
+    let (_t, entry) = program(
+        "self-tail-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : countdown ( i64 i64 -- i64 )\n\
+               | n acc |\n\
+               0 Point n Point lt\n\
+               ~[ n 1 sub acc n add countdown ]\n\
+               ~[ acc ] if ;\n\
+             : main ( -- ) 5 0 countdown . ;\n"
+        ),
+    );
+    // 5+4+3+2+1: the loop runs until `0 < n` is false.
+    assert_eq!(build_and_run(&entry), "15\n");
+}
+
+/// P7.S8 (R1c): a **bound member call inside a combinator's quotation
+/// argument**, in a generic body, instantiated at two distinct types. This
+/// shape builds and runs on pristine `main`; it is committed here because it is
+/// the counter-example that rules out gating `trait_calls` on
+/// `splice_uid_stack.is_empty()`. That blanket gate also fires for an ordinary
+/// combinator splice like the `if` below, and this call has no
+/// `splice_trait_calls` entry to fall through to (`resolve_splice_member_call`
+/// needs a `combinator_sig` this shape does not have), so the broad gate turns
+/// it into a `checked user word exists` panic. The narrow
+/// `member_splice_depth` gate leaves it alone.
+#[test]
+fn a_bound_member_call_inside_a_quotation_argument_instantiates_at_two_types() {
+    let (_t, entry) = program(
+        "member-call-in-quotation",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool True Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : myeq ( 'T: Copy Ord 'T -- i64 )\n\
+               | a b |\n\
+               True\n\
+               ~[ a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ]\n\
+               ~[ 9 ] if ;\n\
+             : main ( -- )\n\
+               3 Point 7 Point myeq .\n\
+               7 Point 3 Point myeq .\n\
+               4 4 myeq . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}
+
+/// P7.S8 (R2): an ordinary word declared **before** the `impl:` block, which is
+/// what makes the seed *formula* observable rather than merely its presence.
+///
+/// Every other fixture here puts the `impl:` block first, so its member lands at
+/// `module.words[0]` and `word_idx * INLINE_UID_STRIDE` is 0 -- a constant-`0`
+/// seed is accidentally right there. One leading word shifts the member to index
+/// 1, so lowering must derive the seed from the member's own index or its body's
+/// splices look up a `(0, span)` key the checker never wrote.
+///
+/// Measured, and worth stating because the obvious alternative fixture does not
+/// work: *two* user `impl: Ord` blocks do not discriminate the formula. Under a
+/// constant seed their splices collide on a key that resolves to a numeric
+/// `impl: Ord` either way, and `lib/cmp.sth`'s numeric bodies are all the same
+/// terms over type-directed intrinsics, so the wrong dispatch computes the same
+/// answer. A leading word makes the lookup miss outright.
+#[test]
+fn a_word_declared_before_the_impl_block_shifts_the_members_uid_seed() {
+    let (_t, entry) = program(
+        "leading-word-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             : leading ( i64 -- i64 ) 1 add ;\n\
+             {POINT_IMPL}\
+             : main ( -- )\n\
+               2 leading Point 7 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               7 Point 2 leading Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "1\n0\n");
 }

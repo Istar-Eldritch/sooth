@@ -605,18 +605,17 @@ dispatch inside materialized quotations rather than prefixing the resolution key
 settled as sound (the motivating program's `~[ ]` arms are spliced, never materialized). The
 transitive skip is cheap (a `Provenance` flag) but the hard part is injecting
 `poly_trait_member_call` into `check_terms_relaxed` (the splice path has zero bound-dispatch
-calls today). **P7.S3s supplies the motivating program and the oracle**: a bounded `inline`
-comparison over a library `Ord`, shipped non-inline so this slice inherits a differential
-oracle -- flip `inline` on the same source and diff the resolved `impl:` symbols at two and
-three splices. The harness skeleton is already in tree (`tests/phase7_slice3s_oracle.rs`):
-it builds `examples/poly_if.sth` twice and diffs stdout plus, per `mymax*` entry point, the
-dispatch targets its own call graph reaches (the `impl: Ord` body, and the monomorphized
-comparison on the way to it), against itself for now since there is no second variant to diff
-against until this slice flips `mymax`/`mymax3` back to `inline`. Besides that flip, the oracle
-side needs one more thing: `examples/poly_if.sth`'s `main` calls `mymax3` only, so `mymax`
-mints no monomorph and the harness never sees it. A source calling both words is what makes the
-"at two splices, at three" diff exist at all, and `tests/corpus_stdout/poly_if.txt` must stay
-byte-identical, so it belongs in a new fixture rather than in the example.
+calls today). **P7.S3s supplied the motivating program**: a bounded `inline` comparison over a library
+`Ord`. The library's six comparisons are now `inline` (P7.S8), so the dispatch-target-diffing
+oracle this slice originally planned to build no longer has a non-inline baseline to diff
+against -- P7.S8's own oracle work found that comparison permanently unsatisfiable once the
+library inlines and dropped it, keeping a stdout-identity check with `gt`/`lt` swap controls
+on both sides instead (`tests/phase7_slice3s_oracle.rs`). This slice's own oracle strategy
+needs re-deriving against a real second variant now that `mymax`/`mymax3` are the only
+remaining non-inline comparison-adjacent surface; `examples/poly_if.sth`'s `main` calling
+both `mymax` and `mymax3` (currently only `mymax3` is called, so `mymax` mints no monomorph)
+is still a prerequisite, and still belongs in a new fixture, since `tests/corpus_stdout/
+poly_if.txt` must stay byte-identical.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -705,29 +704,25 @@ surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are derived from `cmp`. `'
 a struct or enum like any other bound, and a user type opts in with its own `impl: Ord for
 Point`; there is no compiler-hardcoded notion of "ordered" left to reject it.
 
-The six comparisons ship **non-inline**, and regress to a real call frame each, because an
-`inline` word may declare no `Bound::User` variable at all
-(`reject_user_bound_on_combinator`) and `Ord` is now one -- a measured ~2x tax over the old
-branch-and-construct body on a comparison-heavy loop, accepted for this slice. **P7.S3o**
-(parked) is the named follow-on that could restore the splice, using the differential oracle
-this slice's non-inline landing set up (flip `inline`, diff resolved `impl:` symbols at two
-and three splices). The REPL carries no whole-program trait/`impl:` registry, so a bound
-naming `Ord` at REPL scope gets a located, REPL-specific diagnostic pointing at that gap
-rather than claiming the name is wrong (`repl_unknown_capability_error`), in first position
-and after a folded `Copy` alike. Closing the gap itself -- a session carrying its imported
+The six comparisons are `inline`, so a comparison and its `Ordering?` eliminator fold into
+the caller and a library comparison costs no call frame (**P7.S8**, which supplied the uid
+rule that makes a spliced `impl:` body lower correctly). The REPL carries no whole-program
+trait/`impl:` registry, so a bound naming `Ord` at REPL scope gets a located, REPL-specific
+diagnostic pointing at that gap rather than claiming the name is wrong
+(`repl_unknown_capability_error`), in first position and after a folded `Copy` alike.
+Closing the gap itself -- a session carrying its imported
 modules' trait and `impl:` registries, so `'T: Ord` resolves at REPL scope the way it does in
 a file -- has no owning slice.
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;
 the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
-still behaves identically (codegen regresses, behaviour does not).
+still behaves identically.
 
 **P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ planned ]`
-S3s shipped `cmp` and the six surface comparisons non-inline as a named, deliberate tradeoff
-("a measured ~2x tax… accepted for this slice"), with S3o as its own named follow-on to undo
-it. S3o has since landed: bound dispatch reaches a spliced/materialized body, so an `inline`
-trait member is mechanically live. What is missing is the declaration surface. A trait member
+`cmp` and the six surface comparisons are `inline` (P7.S8); bound dispatch reaches a
+spliced/materialized body, so an `inline` trait member is mechanically live for the library's
+own trait. What is missing is the declaration surface for a *user*-written trait. A trait member
 today is a bare `name ( sig )` inside `trait: Name 'T ... ;`, with no slot for the `inline`
 keyword `parse_worddef` already recognizes between a word's name and its `(` -- and no slot
 *could* be added without one, since `impl:` bodies inherit the trait's signature verbatim
@@ -744,9 +739,8 @@ exist in tree: `examples/traits.sth` and `lib/cmp.sth`; `docs/book/` needs check
 whether it teaches the old bare-member grammar (already flagged separately as teaching
 rejected `if`/`else`/`end` syntax).
 **Exit:** `trait: Ord 'T : cmp inline ( 'T 'T -- Ordering ) ; ;` parses, and each `impl: Ord for
-...` block's `cmp` is spliced at every call site reached through a bound `'T: Ord` word,
-with `lib/cmp.sth`'s stale "comparisons are deliberately not inline" header comment corrected
-to match. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
+...` block's `cmp` is spliced at every call site reached through a bound `'T: Ord` word.
+`cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
 **P7.S3u -- Trait objects (an erased owner with a reachable destructor).** `[ parked ]` Traits dispatch
 statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete
@@ -1075,19 +1069,50 @@ Sequenced so nothing but the last subslice touches the compiler:
   `import:`, no compatibility shim. Detail:
   [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md).
 
-**P7.S8 -- Nested inline-combinator splice-uid collision.** `[ planned ]` Not a
-polymorphism gap (an earlier draft of this entry claimed `check_poly_call` needed a new
-splice branch for a poly body calling a bound combinator; two probe subagents refuted that
--- it already works). The real, confirmed defect: `lower_resolved_word_call`
-(`src/ir/func_builder/calls.rs:189`) reuses the *enclosing caller's* splice uid when
-splicing a resolved trait member's body, instead of that member's own check-time uid
-namespace, so an ordinary `inline` combinator nested inside a reused member splice (e.g.
-`impl: Ord for Point`'s `cmp` calling `lt` internally, no generics involved) resolves at
-the wrong `(uid, span)` key and panics (`"checked user word exists"`,
-`src/ir/func_builder/calls.rs:733`). This is the blocker named in `lib/cmp.sth`'s own
-comment against making `eq`/`lt`/`gt`/`lte`/`gte`/`ne` `inline` (`cmp` itself already is)
--- delegating a user `Ord` impl to a primitive comparison is the ordinary shape, not a
-corner case. Detail: [slice8-brief](./P7/slice8-brief.md).
+**P7.S8 -- Nested inline-combinator splice-uid collision.** `[ done ]` A spliced trait
+member body lowers under **that member's own** check-time uid namespace: the member's seed
+(`word_idx * INLINE_UID_STRIDE`, the same numbering `src/check.rs` uses) is pushed onto
+`splice_uid_stack` and `FuncBuilder::inline_uid` is reset to it for the duration, so a
+combinator splice nested inside the body mints the uid the checker minted for it. The
+span-keyed `trait_calls` lookup stands aside while such a re-splice is active
+(`member_splice_depth`), because a member body can reach one source span under a second
+grounding and the recorded answer is then the wrong one. With both rules in place
+`lib/cmp.sth`'s six surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are `inline`, so
+a user `impl: Ord` delegating to a primitive comparison builds and a library comparison
+costs no call frame. Detail: [slice8-spec](./P7/slice8-spec.md).
+
+`MEMBER_SPLICE_SUFFIX`'s disjointness from `INLINE_SUFFIX` is load-bearing: a member body is
+spliced at the member's seed, and so is the first combinator splice nested *inside* that
+body, so a shared suffix would be a silent wrong answer rather than a panic. Witnessed by
+`ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own`.
+
+CLAUDE.md's five split signals against `src/ir/func_builder/calls.rs`: 0 of 5 fire (one
+`use super::*`, nine functions in a single call chain, no import divergence, no mixed
+high/low-level code) -- no split.
+
+`check_no_combinator_cycle` (`src/check/combinators.rs`) matches a call's surface name
+against `c.word.name` to detect a combinator recursing through itself; an `impl:` member is
+named `cmp;Ord;Point`, so a bare `cmp` call inside the same member's body adds no edge and
+the cycle guard never fires. A recursive `impl: Ord` whose `cmp` calls a surface comparison
+on its own type therefore splices forever -- a compiler stack overflow (SIGABRT), not a
+diagnostic. Pre-existing (reachable at base via a user `inline` combinator calling `cmp`);
+this slice moves it onto the shipped library comparisons, so it is reachable from any
+recursive-type `impl: Ord`. Not fixed here; no owning slice yet.
+
+Two more follow-ups the slice deliberately did not fix:
+
+- **Unsatisfied-`Ord` attribution.** An unsatisfied `Ord` bound now names `cmp`, the
+  spliced trait member, at `lib/cmp.sth`'s own line, rather than the `lt`/`gt` the user
+  wrote. The second, useful line (`no ( T T -- Ordering ) found`) is unchanged. Restoring
+  the caller's attribution needs a splice-origin span carried through unsatisfied-bound
+  reporting: a diagnostics feature with its own design surface, not a uid fix.
+- **REPL trait/impl checking.** `src/check.rs`'s two REPL check sites hardcode
+  `TraitResolveCtx::scratch()`, whose premise (a session declares no `trait:`) is false the
+  moment a session imports `core::cmp`; a comparison call then indexes past the scratch
+  trait table and ICEs at `src/check/poly.rs:976`. Ten `#[ignore]`d REPL tests state this
+  as their reason. The fix needs a `Session`-level traits/impls accumulation table (Session
+  has `structs`/`enums` but no trait analogue) threaded through both sites -- comparable in
+  size to the earlier struct/enum REPL work, so it is its own slice.
 
 **P7.S9 -- Remove the REPL.** `[ planned ]` The REPL (`src/repl.rs`, 5.3k lines, plus
 the hand-rolled line editor in `src/editor.rs`) is a second, parallel execution path:
@@ -1142,4 +1167,4 @@ not part of its exit criteria.
 REPL or its incremental-compile machinery; every workaround named above is deleted,
 not merely unreached, confirmed by grepping the corpus for its own review-graph
 notes; `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green with
-no REPL-only test module skipped or stubbed out.
+no REPL-only test module skipped or stubbed out

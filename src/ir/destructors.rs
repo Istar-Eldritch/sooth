@@ -402,6 +402,7 @@ fn synthesize_struct_destructor_override(
         EnvPlan::None,
         empty_splice_records(),
         empty_splice_trait_calls(),
+        empty_member_uid_seeds(),
         0,
     );
     funcs[0].name = struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation);

@@ -5,10 +5,10 @@
 //! with `'T: Copy Ord`. This harness validates that flip by differential
 //! testing: the inline candidate (the same source with `inline` restored)
 //! must produce byte-identical stdout to the non-inline baseline (the same
-//! source with `inline` stripped), and the resolved `impl: Ord` dispatch
-//! targets reached through the call graph must match — whether the `gt`
-//! calls are reached through a real call frame (non-inline) or a splice
-//! (inline).
+//! source with `inline` stripped), and a `gt` -> `lt` swap control on each
+//! side must change that side's own stdout -- proving a comparison-direction
+//! swap stays visible regardless of which symbols either side happens to
+//! mint (P7.S8 phase 1; see review round 4 below).
 //!
 //! A fixture calling *both* `mymax` and `mymax3` at two types (i64 and f64)
 //! is needed because `examples/poly_if.sth`'s `main` calls `mymax3` only;
@@ -37,6 +37,20 @@
 //! of the diff: the comparison is over the `gt` monomorphs and `impl: Ord`
 //! bodies that both versions must reach, not the call frames one version
 //! happens to inline away.
+//!
+//! Review round 4 (P7.S8 phase 1): P7.S8 inlines the six surface comparisons
+//! themselves. Once `gt` is `inline` too, a call to it from an already-inline
+//! `mymax` collapses to a pure lowering-time splice that mints no symbol at
+//! all, so "both versions reach the monomorphized `gt`" and "the two
+//! versions' dispatch-target sets are equal" both go permanently false --
+//! not an edge case, a structural certainty once the caller and callee are
+//! both combinators. Both assertions are replaced by a `gt` -> `lt` swap
+//! control applied independently to each side (`fixture_source_with_cmp`):
+//! whatever either side mints or doesn't, swapping the comparison direction
+//! must change that side's own stdout, or the harness is diffing a program
+//! against itself. The byte-identical stdout comparison between the two
+//! unswapped sides, and the i64/f64 monomorph-presence checks on the
+//! baseline, are unaffected and stay.
 
 mod common;
 
@@ -86,9 +100,7 @@ fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
 /// comparison words reached on the way there. A monomorph carries the
 /// `sooth_mono_` prefix, so a substring filter needs no knowledge of the
 /// mangling scheme itself -- only the walk needs to start from the entry
-/// point under test rather than the whole binary. The monomorphs are what
-/// distinguish *which* comparison a site calls (`sooth_mono_gt__*` vs
-/// `sooth_mono_lt__*`).
+/// point under test rather than the whole binary.
 ///
 /// P7.S3s-follow: `cmp` is an `inline` trait member, so the `impl: Ord`
 /// bodies are spliced into the comparison monomorphs and mint no symbol of
@@ -135,22 +147,29 @@ fn main_dispatch_targets(binary: &Path) -> Vec<String> {
 /// own imports so it builds against the fixture manifest without
 /// `fixture_source` auto-injection.
 fn fixture_source(inline: bool) -> String {
+    fixture_source_with_cmp(inline, "gt")
+}
+
+/// `fixture_source` parameterized over which comparison `mymax`/`mymax3` call,
+/// so the swap control (`gt` -> `lt`, picking the min instead of the max) can
+/// share this source of truth rather than a hand-duplicated string.
+fn fixture_source_with_cmp(inline: bool, cmp: &str) -> String {
     let kw = if inline { "inline " } else { "" };
     format!(
         "\
 import: intrinsics * ;
 import: core::prelude * ;
 
-: mymax {kw}( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+: mymax {kw}( 'T: Copy Ord 'T -- 'T ) over over {cmp} ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;
 
 : mymax3 {kw}( 'T: Copy Ord 'T 'T -- 'T )
   | a b c |
-  a b gt ~[
-    a c gt ~[ a ] ~[ c ] if
+  a b {cmp} ~[
+    a c {cmp} ~[ a ] ~[ c ] if
   ] ~[
-    b c gt ~[ b ] ~[ c ] if
+    b c {cmp} ~[ b ] ~[ c ] if
   ] if ;
 
 : main ( -- )
@@ -216,10 +235,9 @@ fn build_run_and_dispatch_targets(src: &str, tag: &str) -> (String, Vec<String>)
 }
 
 /// R7: the inline candidate (`mymax`/`mymax3` with `inline`) must produce
-/// byte-identical stdout and the same resolved `impl: Ord` dispatch targets
-/// as the non-inline baseline (the same source without `inline`), at two
-/// splices of `mymax3` and two types (i64 and f64), with `mymax` also called
-/// at both types so it mints monomorphs in the baseline.
+/// byte-identical stdout as the non-inline baseline (the same source without
+/// `inline`), at two splices of `mymax3` and two types (i64 and f64), with
+/// `mymax` also called at both types so it mints monomorphs in the baseline.
 #[test]
 fn inline_mymax_mymax3_matches_noninline_baseline() {
     let baseline_src = fixture_source(false);
@@ -227,8 +245,7 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
 
     let (baseline_stdout, baseline_targets) =
         build_run_and_dispatch_targets(&baseline_src, "noninline-baseline");
-    let (candidate_stdout, candidate_targets) =
-        build_run_and_dispatch_targets(&candidate_src, "inline-candidate");
+    let candidate_stdout = build_run_and_dispatch_targets(&candidate_src, "inline-candidate").0;
 
     // R8: stdout is byte-identical.
     assert_eq!(
@@ -250,29 +267,35 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
          nothing: baseline stdout was {baseline_stdout:?}"
     );
 
-    // Both versions must reach the monomorphized `gt` — the comparison
-    // monomorph is what distinguishes a `gt` -> `lt` swap in the source.
-    // P7.S3s-follow: `cmp` is `inline`, so the `impl: Ord` bodies are spliced
-    // into the `gt` monomorphs and mint no symbol of their own; the
-    // monomorphs carry `cmp`'s body inlined and are the dispatch targets that
-    // remain.
-    for (label, targets) in [
-        ("baseline", &baseline_targets),
-        ("candidate", &candidate_targets),
-    ] {
-        assert!(
-            targets.iter().any(|t| t.starts_with("sooth_mono_gt")),
-            "{label} must reach the monomorphized `gt`, or a `gt` -> `lt` swap in the source \
-             is invisible to this diff"
-        );
-    }
-
-    // R7: the resolved dispatch targets (comparison monomorphs) match
-    // between inline and non-inline. The `mymax*` call frames are filtered
-    // out — they exist only in the non-inline version by design.
-    assert_eq!(
-        baseline_targets, candidate_targets,
-        "inline and non-inline must resolve the same dispatch targets from `sooth_main`"
+    // P7.S8 phase 1: `sooth_mono_gt` reachability and dispatch-target-set
+    // equality (`baseline_targets == candidate_targets`) stop being usable
+    // discriminators once the library inlines its comparisons: an inline
+    // `mymax` calling an inline `gt` collapses to a pure lowering-time
+    // splice that mints no symbol at all, so the candidate side would mint
+    // zero comparison monomorphs while the baseline still mints its own real
+    // ones -- the equality goes permanently false, not an edge case a
+    // symbol-name check happens to expose. A `gt` -> `lt` swap control on
+    // *each* side, independent of what either side mints, is what proves a
+    // comparison-direction swap stays visible.
+    let baseline_swap_stdout = build_run_and_dispatch_targets(
+        &fixture_source_with_cmp(false, "lt"),
+        "noninline-baseline-swap",
+    )
+    .0;
+    assert_ne!(
+        baseline_stdout, baseline_swap_stdout,
+        "swapping `gt` for `lt` must change the non-inline baseline's stdout, or the \
+         harness cannot tell a comparison-direction miscompile from a correct build"
+    );
+    let candidate_swap_stdout = build_run_and_dispatch_targets(
+        &fixture_source_with_cmp(true, "lt"),
+        "inline-candidate-swap",
+    )
+    .0;
+    assert_ne!(
+        candidate_stdout, candidate_swap_stdout,
+        "swapping `gt` for `lt` must change the inline candidate's stdout, or the \
+         harness cannot tell a comparison-direction miscompile from a correct build"
     );
 
     // R10: two types — both i64 and f64 comparison monomorphs are reached.

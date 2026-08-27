@@ -81,6 +81,16 @@ pub(crate) fn empty_splice_trait_calls() -> &'static HashMap<(u32, Span), String
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7.S8 (R2): the member-seed companion of `empty_splice_trait_calls`. A
+/// member splice reached from a path with no seed map reuses the enclosing
+/// splice's uid, which is today's behaviour and is the REPL's state: both REPL
+/// lowering paths already hand out `empty_splice_trait_calls`, so no member
+/// splice there has an entry to miss.
+pub(crate) fn empty_member_uid_seeds() -> &'static HashMap<String, u32> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, u32>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
 /// handed to every lowering path with no user builtin overloads (the REPL,
 /// destructor synthesis, unit tests, and every corpus program).

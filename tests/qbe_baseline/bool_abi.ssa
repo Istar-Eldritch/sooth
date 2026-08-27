@@ -12,36 +12,6 @@ data $strfmt = { b "%.*s", b 0 }
 export function w $pos__m0(l %v0) {
 @start
 	%v1 =l copy 0
-	%v2 =w call $sooth_mono_gt__m3__t0_i64(l %v0, l %v1)
-	ret %v2
-}
-
-export function l $classify__m0(l %v0) {
-@start
-	%v1 =w call $pos__m0(l %v0)
-	%v4 =w copy %v1
-	jnz %v4, @blk1, @blk2
-@blk1
-	%v5 =l copy 1
-	jmp @blk3
-@blk2
-	%v6 =l copy 0
-	jmp @blk3
-@blk3
-	%v7 =l phi @blk1 %v5, @blk2 %v6
-	ret %v7
-}
-
-export function $sooth_main() {
-@start
-	%v0 =l copy 7
-	%v1 =l call $classify__m0(l %v0)
-	call $printf(l $fmt, l %v1, ...)
-	ret
-}
-
-export function w $sooth_mono_gt__m3__t0_i64(l %v0, l %v1) {
-@start
 	%v2 =w csltl %v1, %v0
 	jnz %v2, @blk1, @blk2
 @blk1
@@ -80,6 +50,30 @@ export function w $sooth_mono_gt__m3__t0_i64(l %v0, l %v1) {
 @blk11
 	%v23 =w phi @blk7 %v20, @blk8 %v21, @blk9 %v22
 	ret %v23
+}
+
+export function l $classify__m0(l %v0) {
+@start
+	%v1 =w call $pos__m0(l %v0)
+	%v4 =w copy %v1
+	jnz %v4, @blk1, @blk2
+@blk1
+	%v5 =l copy 1
+	jmp @blk3
+@blk2
+	%v6 =l copy 0
+	jmp @blk3
+@blk3
+	%v7 =l phi @blk1 %v5, @blk2 %v6
+	ret %v7
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 7
+	%v1 =l call $classify__m0(l %v0)
+	call $printf(l $fmt, l %v1, ...)
+	ret
 }
 
 function $sooth_oob_trap(l %line, l %idx, l %len) {

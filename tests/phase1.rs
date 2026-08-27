@@ -156,14 +156,14 @@ fn failed_redefinition_keeps_old_generation_resident() {
     assert_eq!(lines[5], "stack: 9 9");
 }
 
-#[ignore = "P7.S3s review finding: the REPL's `splice_import` binds a \
-    concrete word (`w.poly.is_none()`) or retains a combinator \
-    (`declares_inline`); it has no case for an imported non-inline poly \
-    word, a category R5 creates for the first time (the six comparisons \
-    all lost `inline`). Every comparison is unusable from the REPL now, \
-    not just a session's own `'T: Copy Ord` declaration (R8's narrower, \
-    already-accepted scope) -- fixing this needs the REPL to support \
-    calling/monomorphizing a non-inline generic word, a separate slice."]
+#[ignore = "REPL trait/impl checking is unimplemented: `check.rs`'s two \
+    REPL check sites (`:1293`/`:1387`) hardcode `TraitResolveCtx::scratch()`, \
+    whose premise (a session declares no `trait:`, so no `Bound::User` \
+    reaches a REPL body) is false once a session imports `core::cmp`. A \
+    comparison call then indexes past the scratch trait table and ICEs at \
+    `check/poly.rs:976`. Fixing it needs a `Session`-level traits/impls \
+    accumulation table (Session has none, unlike its `structs`/`enums`) \
+    threaded through both sites: tracked as the REPL trait/impl slice."]
 #[test]
 fn sign_definable_and_callable_in_repl() {
     // P8.S2 (R3): the typed core is imported, not seeded -- a session names
@@ -597,7 +597,7 @@ fn enum_declaration_errors_report_and_session_survives() {
 /// lowering with no REPL-specific plumbing) and completes in constant stack
 /// over N >= 1_000_000, the depth at which un-transformed recursion would
 /// overflow the host stack.
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `sign_definable_and_callable_in_repl` -- see that test's #[ignore] note."]
 #[test]
 fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
@@ -629,7 +629,7 @@ fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
 /// through the `dlopen` path with no REPL-specific plumbing (established by
 /// Slice 6 criterion 8), and the session runs the same N = 100_000 program as
 /// the native golden, so "the same result" is literal.
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `sign_definable_and_callable_in_repl` -- see that test's #[ignore] note."]
 #[test]
 fn vm_dogfood_runs_in_repl() {

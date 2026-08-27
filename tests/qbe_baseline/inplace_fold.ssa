@@ -108,47 +108,83 @@ export function :AccC $prefix.2d.copy__m0(:arr_0 %v0, :AccC %v1) {
 	%v7 =l copy 0
 	jmp @blk1
 @blk1
-	%v8 =l phi @start %v4, @blk7 %v23
-	%v9 =l phi @start %v7, @blk7 %v31
-	%v10 =l phi @start %v5, @blk7 %v10
-	%v11 =w call $sooth_mono_lt__m4__t0_i64(l %v9, l %v10)
-	%v14 =w copy %v11
-	jnz %v14, @blk2, @blk3
+	%v8 =l phi @start %v4, @blk18 %v44
+	%v9 =l phi @start %v7, @blk18 %v52
+	%v10 =l phi @start %v5, @blk18 %v10
+	%v11 =w csltl %v9, %v10
+	jnz %v11, @blk2, @blk3
 @blk2
-	%v15 =l add %v0, 0
-	%v16 =l copy %v9
-	%v17 =l copy 4
-	%v18 =w cultl %v16, %v17
-	jnz %v18, @blk5, @blk6
-@blk6
-	%v19 =l copy 37
-	%v20 =l copy 4
-	call $sooth_oob_trap(l %v19, l %v16, l %v20)
-	jmp @blk5
+	%v14 =w copy 0
+	jmp @blk4
+@blk3
+	%v15 =w csgtl %v9, %v10
+	jnz %v15, @blk5, @blk6
 @blk5
-	%eoff0 =l mul %v16, 8
-	%v21 =l add %v15, %eoff0
-	%v22 =l loadl %v21
-	%v23 =l add %v8, %v22
-	%v24 =l copy %v9
-	%v25 =l copy 4
-	%v26 =w cultl %v24, %v25
-	jnz %v26, @blk7, @blk8
-@blk8
-	%v27 =l copy 37
-	%v28 =l copy 4
-	call $sooth_oob_trap(l %v27, l %v24, l %v28)
+	%v18 =w copy 2
+	jmp @blk7
+@blk6
+	%v19 =w copy 1
 	jmp @blk7
 @blk7
-	%eoff1 =l mul %v24, 8
-	%v29 =l add %v3, %eoff1
-	storel %v23, %v29
-	%v30 =l copy 1
-	%v31 =l add %v9, %v30
-	jmp @blk1
-@blk3
+	%v20 =w phi @blk5 %v18, @blk6 %v19
 	jmp @blk4
 @blk4
+	%v21 =w phi @blk2 %v14, @blk7 %v20
+	%v25 =w copy 0
+	%v26 =w ceqw %v21, %v25
+	jnz %v26, @blk8, @blk11
+@blk11
+	%v27 =w copy 1
+	%v28 =w ceqw %v21, %v27
+	jnz %v28, @blk9, @blk10
+@blk8
+	%v29 =w copy 1
+	jmp @blk12
+@blk9
+	%v30 =w copy 0
+	jmp @blk12
+@blk10
+	%v31 =w copy 0
+	jmp @blk12
+@blk12
+	%v32 =w phi @blk8 %v29, @blk9 %v30, @blk10 %v31
+	%v35 =w copy %v32
+	jnz %v35, @blk13, @blk14
+@blk13
+	%v36 =l add %v0, 0
+	%v37 =l copy %v9
+	%v38 =l copy 4
+	%v39 =w cultl %v37, %v38
+	jnz %v39, @blk16, @blk17
+@blk17
+	%v40 =l copy 37
+	%v41 =l copy 4
+	call $sooth_oob_trap(l %v40, l %v37, l %v41)
+	jmp @blk16
+@blk16
+	%eoff0 =l mul %v37, 8
+	%v42 =l add %v36, %eoff0
+	%v43 =l loadl %v42
+	%v44 =l add %v8, %v43
+	%v45 =l copy %v9
+	%v46 =l copy 4
+	%v47 =w cultl %v45, %v46
+	jnz %v47, @blk18, @blk19
+@blk19
+	%v48 =l copy 37
+	%v49 =l copy 4
+	call $sooth_oob_trap(l %v48, l %v45, l %v49)
+	jmp @blk18
+@blk18
+	%eoff1 =l mul %v45, 8
+	%v50 =l add %v3, %eoff1
+	storel %v44, %v50
+	%v51 =l copy 1
+	%v52 =l add %v9, %v51
+	jmp @blk1
+@blk14
+	jmp @blk15
+@blk15
 	ret %v1
 }
 
@@ -161,47 +197,83 @@ export function :AccL $prefix.2d.linear__m0(:arr_0 %v0, :AccL %v1) {
 	%v7 =l copy 0
 	jmp @blk1
 @blk1
-	%v8 =l phi @start %v4, @blk7 %v23
-	%v9 =l phi @start %v7, @blk7 %v31
-	%v10 =l phi @start %v5, @blk7 %v10
-	%v11 =w call $sooth_mono_lt__m4__t0_i64(l %v9, l %v10)
-	%v14 =w copy %v11
-	jnz %v14, @blk2, @blk3
+	%v8 =l phi @start %v4, @blk18 %v44
+	%v9 =l phi @start %v7, @blk18 %v52
+	%v10 =l phi @start %v5, @blk18 %v10
+	%v11 =w csltl %v9, %v10
+	jnz %v11, @blk2, @blk3
 @blk2
-	%v15 =l add %v0, 0
-	%v16 =l copy %v9
-	%v17 =l copy 4
-	%v18 =w cultl %v16, %v17
-	jnz %v18, @blk5, @blk6
-@blk6
-	%v19 =l copy 44
-	%v20 =l copy 4
-	call $sooth_oob_trap(l %v19, l %v16, l %v20)
-	jmp @blk5
+	%v14 =w copy 0
+	jmp @blk4
+@blk3
+	%v15 =w csgtl %v9, %v10
+	jnz %v15, @blk5, @blk6
 @blk5
-	%eoff0 =l mul %v16, 8
-	%v21 =l add %v15, %eoff0
-	%v22 =l loadl %v21
-	%v23 =l add %v8, %v22
-	%v24 =l copy %v9
-	%v25 =l copy 4
-	%v26 =w cultl %v24, %v25
-	jnz %v26, @blk7, @blk8
-@blk8
-	%v27 =l copy 44
-	%v28 =l copy 4
-	call $sooth_oob_trap(l %v27, l %v24, l %v28)
+	%v18 =w copy 2
+	jmp @blk7
+@blk6
+	%v19 =w copy 1
 	jmp @blk7
 @blk7
-	%eoff1 =l mul %v24, 8
-	%v29 =l add %v3, %eoff1
-	storel %v23, %v29
-	%v30 =l copy 1
-	%v31 =l add %v9, %v30
-	jmp @blk1
-@blk3
+	%v20 =w phi @blk5 %v18, @blk6 %v19
 	jmp @blk4
 @blk4
+	%v21 =w phi @blk2 %v14, @blk7 %v20
+	%v25 =w copy 0
+	%v26 =w ceqw %v21, %v25
+	jnz %v26, @blk8, @blk11
+@blk11
+	%v27 =w copy 1
+	%v28 =w ceqw %v21, %v27
+	jnz %v28, @blk9, @blk10
+@blk8
+	%v29 =w copy 1
+	jmp @blk12
+@blk9
+	%v30 =w copy 0
+	jmp @blk12
+@blk10
+	%v31 =w copy 0
+	jmp @blk12
+@blk12
+	%v32 =w phi @blk8 %v29, @blk9 %v30, @blk10 %v31
+	%v35 =w copy %v32
+	jnz %v35, @blk13, @blk14
+@blk13
+	%v36 =l add %v0, 0
+	%v37 =l copy %v9
+	%v38 =l copy 4
+	%v39 =w cultl %v37, %v38
+	jnz %v39, @blk16, @blk17
+@blk17
+	%v40 =l copy 44
+	%v41 =l copy 4
+	call $sooth_oob_trap(l %v40, l %v37, l %v41)
+	jmp @blk16
+@blk16
+	%eoff0 =l mul %v37, 8
+	%v42 =l add %v36, %eoff0
+	%v43 =l loadl %v42
+	%v44 =l add %v8, %v43
+	%v45 =l copy %v9
+	%v46 =l copy 4
+	%v47 =w cultl %v45, %v46
+	jnz %v47, @blk18, @blk19
+@blk19
+	%v48 =l copy 44
+	%v49 =l copy 4
+	call $sooth_oob_trap(l %v48, l %v45, l %v49)
+	jmp @blk18
+@blk18
+	%eoff1 =l mul %v45, 8
+	%v50 =l add %v3, %eoff1
+	storel %v44, %v50
+	%v51 =l copy 1
+	%v52 =l add %v9, %v51
+	jmp @blk1
+@blk14
+	jmp @blk15
+@blk15
 	ret %v1
 }
 
@@ -234,134 +306,164 @@ export function $sooth_main() {
 	%v16 =l copy 0
 	jmp @blk4
 @blk4
-	%v17 =l phi @blk3 %v16, @blk8 %v33
-	%v18 =l phi @blk3 %v14, @blk8 %v18
-	%v19 =w call $sooth_mono_lt__m4__t0_i64(l %v17, l %v18)
-	%v22 =w copy %v19
-	jnz %v22, @blk5, @blk6
+	%v17 =l phi @blk3 %v16, @blk19 %v54
+	%v18 =l phi @blk3 %v14, @blk19 %v18
+	%v19 =w csltl %v17, %v18
+	jnz %v19, @blk5, @blk6
 @blk5
-	%v23 =l add %v13, 0
-	%v24 =l add %v23, 0
-	%v25 =l copy %v17
-	%v26 =l copy 4
-	%v27 =w cultl %v25, %v26
-	jnz %v27, @blk8, @blk9
-@blk9
-	%v28 =l copy 50
-	%v29 =l copy 4
-	call $sooth_oob_trap(l %v28, l %v25, l %v29)
-	jmp @blk8
-@blk8
-	%eoff1 =l mul %v25, 8
-	%v30 =l add %v24, %eoff1
-	%v31 =l loadl %v30
-	call $printf(l $fmt, l %v31, ...)
-	%v32 =l copy 1
-	%v33 =l add %v17, %v32
-	jmp @blk4
+	%v22 =w copy 0
+	jmp @blk7
 @blk6
+	%v23 =w csgtl %v17, %v18
+	jnz %v23, @blk8, @blk9
+@blk8
+	%v26 =w copy 2
+	jmp @blk10
+@blk9
+	%v27 =w copy 1
+	jmp @blk10
+@blk10
+	%v28 =w phi @blk8 %v26, @blk9 %v27
 	jmp @blk7
 @blk7
-	%v34 =l add %v13, 0
-	%v35 =:arr_0 call $input__m0()
-	%v36 =l copy 0
-	%v37 =l copy 4
-	%v38 =l alloc8 32
-	%v39 =l copy 0
-	jmp @blk10
-@blk10
-	%v40 =l phi @blk7 %v39, @blk11 %v45
-	%v41 =l copy 4
-	%v42 =w csltl %v40, %v41
-	jnz %v42, @blk11, @blk12
-@blk11
-	%eoff2 =l mul %v40, 8
-	%v43 =l add %v38, %eoff2
-	storel %v36, %v43
-	%v44 =l copy 1
-	%v45 =l add %v40, %v44
-	jmp @blk10
-@blk12
-	%v46 =l alloc8 32
-	%v47 =l add %v46, 0
-	blit %v38, %v47, 32
-	%v48 =:AccL call $prefix.2d.linear__m0(:arr_0 %v35, :AccL %v46)
-	%v49 =l copy 4
-	%v51 =l copy 0
-	jmp @blk13
-@blk13
-	%v52 =l phi @blk12 %v51, @blk17 %v68
-	%v53 =l phi @blk12 %v49, @blk17 %v53
-	%v54 =w call $sooth_mono_lt__m4__t0_i64(l %v52, l %v53)
-	%v57 =w copy %v54
-	jnz %v57, @blk14, @blk15
+	%v29 =w phi @blk5 %v22, @blk10 %v28
+	%v33 =w copy 0
+	%v34 =w ceqw %v29, %v33
+	jnz %v34, @blk11, @blk14
 @blk14
-	%v58 =l add %v48, 0
-	%v59 =l add %v58, 0
-	%v60 =l copy %v52
-	%v61 =l copy 4
-	%v62 =w cultl %v60, %v61
-	jnz %v62, @blk17, @blk18
-@blk18
-	%v63 =l copy 53
-	%v64 =l copy 4
-	call $sooth_oob_trap(l %v63, l %v60, l %v64)
-	jmp @blk17
-@blk17
-	%eoff3 =l mul %v60, 8
-	%v65 =l add %v59, %eoff3
-	%v66 =l loadl %v65
-	call $printf(l $fmt, l %v66, ...)
-	%v67 =l copy 1
-	%v68 =l add %v52, %v67
-	jmp @blk13
-@blk15
-	jmp @blk16
-@blk16
-	call $sooth_struct_drop_1(:AccL %v48)
-	ret
-}
-
-export function w $sooth_mono_lt__m4__t0_i64(l %v0, l %v1) {
-@start
-	%v2 =w csltl %v0, %v1
-	jnz %v2, @blk1, @blk2
-@blk1
-	%v5 =w copy 0
-	jmp @blk3
-@blk2
-	%v6 =w csgtl %v0, %v1
-	jnz %v6, @blk4, @blk5
-@blk4
-	%v9 =w copy 2
-	jmp @blk6
-@blk5
-	%v10 =w copy 1
-	jmp @blk6
-@blk6
-	%v11 =w phi @blk4 %v9, @blk5 %v10
-	jmp @blk3
-@blk3
-	%v12 =w phi @blk1 %v5, @blk6 %v11
-	%v16 =w copy 0
-	%v17 =w ceqw %v12, %v16
-	jnz %v17, @blk7, @blk10
-@blk10
-	%v18 =w copy 1
-	%v19 =w ceqw %v12, %v18
-	jnz %v19, @blk8, @blk9
-@blk7
-	%v20 =w copy 1
-	jmp @blk11
-@blk8
-	%v21 =w copy 0
-	jmp @blk11
-@blk9
-	%v22 =w copy 0
-	jmp @blk11
+	%v35 =w copy 1
+	%v36 =w ceqw %v29, %v35
+	jnz %v36, @blk12, @blk13
 @blk11
-	%v23 =w phi @blk7 %v20, @blk8 %v21, @blk9 %v22
-	ret %v23
+	%v37 =w copy 1
+	jmp @blk15
+@blk12
+	%v38 =w copy 0
+	jmp @blk15
+@blk13
+	%v39 =w copy 0
+	jmp @blk15
+@blk15
+	%v40 =w phi @blk11 %v37, @blk12 %v38, @blk13 %v39
+	%v43 =w copy %v40
+	jnz %v43, @blk16, @blk17
+@blk16
+	%v44 =l add %v13, 0
+	%v45 =l add %v44, 0
+	%v46 =l copy %v17
+	%v47 =l copy 4
+	%v48 =w cultl %v46, %v47
+	jnz %v48, @blk19, @blk20
+@blk20
+	%v49 =l copy 50
+	%v50 =l copy 4
+	call $sooth_oob_trap(l %v49, l %v46, l %v50)
+	jmp @blk19
+@blk19
+	%eoff1 =l mul %v46, 8
+	%v51 =l add %v45, %eoff1
+	%v52 =l loadl %v51
+	call $printf(l $fmt, l %v52, ...)
+	%v53 =l copy 1
+	%v54 =l add %v17, %v53
+	jmp @blk4
+@blk17
+	jmp @blk18
+@blk18
+	%v55 =l add %v13, 0
+	%v56 =:arr_0 call $input__m0()
+	%v57 =l copy 0
+	%v58 =l copy 4
+	%v59 =l alloc8 32
+	%v60 =l copy 0
+	jmp @blk21
+@blk21
+	%v61 =l phi @blk18 %v60, @blk22 %v66
+	%v62 =l copy 4
+	%v63 =w csltl %v61, %v62
+	jnz %v63, @blk22, @blk23
+@blk22
+	%eoff2 =l mul %v61, 8
+	%v64 =l add %v59, %eoff2
+	storel %v57, %v64
+	%v65 =l copy 1
+	%v66 =l add %v61, %v65
+	jmp @blk21
+@blk23
+	%v67 =l alloc8 32
+	%v68 =l add %v67, 0
+	blit %v59, %v68, 32
+	%v69 =:AccL call $prefix.2d.linear__m0(:arr_0 %v56, :AccL %v67)
+	%v70 =l copy 4
+	%v72 =l copy 0
+	jmp @blk24
+@blk24
+	%v73 =l phi @blk23 %v72, @blk39 %v110
+	%v74 =l phi @blk23 %v70, @blk39 %v74
+	%v75 =w csltl %v73, %v74
+	jnz %v75, @blk25, @blk26
+@blk25
+	%v78 =w copy 0
+	jmp @blk27
+@blk26
+	%v79 =w csgtl %v73, %v74
+	jnz %v79, @blk28, @blk29
+@blk28
+	%v82 =w copy 2
+	jmp @blk30
+@blk29
+	%v83 =w copy 1
+	jmp @blk30
+@blk30
+	%v84 =w phi @blk28 %v82, @blk29 %v83
+	jmp @blk27
+@blk27
+	%v85 =w phi @blk25 %v78, @blk30 %v84
+	%v89 =w copy 0
+	%v90 =w ceqw %v85, %v89
+	jnz %v90, @blk31, @blk34
+@blk34
+	%v91 =w copy 1
+	%v92 =w ceqw %v85, %v91
+	jnz %v92, @blk32, @blk33
+@blk31
+	%v93 =w copy 1
+	jmp @blk35
+@blk32
+	%v94 =w copy 0
+	jmp @blk35
+@blk33
+	%v95 =w copy 0
+	jmp @blk35
+@blk35
+	%v96 =w phi @blk31 %v93, @blk32 %v94, @blk33 %v95
+	%v99 =w copy %v96
+	jnz %v99, @blk36, @blk37
+@blk36
+	%v100 =l add %v69, 0
+	%v101 =l add %v100, 0
+	%v102 =l copy %v73
+	%v103 =l copy 4
+	%v104 =w cultl %v102, %v103
+	jnz %v104, @blk39, @blk40
+@blk40
+	%v105 =l copy 53
+	%v106 =l copy 4
+	call $sooth_oob_trap(l %v105, l %v102, l %v106)
+	jmp @blk39
+@blk39
+	%eoff3 =l mul %v102, 8
+	%v107 =l add %v101, %eoff3
+	%v108 =l loadl %v107
+	call $printf(l $fmt, l %v108, ...)
+	%v109 =l copy 1
+	%v110 =l add %v73, %v109
+	jmp @blk24
+@blk37
+	jmp @blk38
+@blk38
+	call $sooth_struct_drop_1(:AccL %v69)
+	ret
 }
 
 export function $sooth_struct_drop_1(:AccL %v0) {

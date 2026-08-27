@@ -1581,14 +1581,14 @@ fn repl_mono_combinator_define_and_call() {
     assert_eq!(transcript, "defined on_double\nstack: 12\n");
 }
 
-#[ignore = "P7.S3s review finding: the REPL's `splice_import` binds a \
-    concrete word (`w.poly.is_none()`) or retains a combinator \
-    (`declares_inline`); it has no case for an imported non-inline poly \
-    word, a category R5 creates for the first time (the six comparisons \
-    all lost `inline`). Every comparison is unusable from the REPL now, \
-    not just a session's own `'T: Copy Ord` declaration (R8's narrower, \
-    already-accepted scope) -- fixing this needs the REPL to support \
-    calling/monomorphizing a non-inline generic word, a separate slice."]
+#[ignore = "REPL trait/impl checking is unimplemented: `check.rs`'s two \
+    REPL check sites (`:1293`/`:1387`) hardcode `TraitResolveCtx::scratch()`, \
+    whose premise (a session declares no `trait:`, so no `Bound::User` \
+    reaches a REPL body) is false once a session imports `core::cmp`. A \
+    comparison call then indexes past the scratch trait table and ICEs at \
+    `check/poly.rs:976`. Fixing it needs a `Session`-level traits/impls \
+    accumulation table (Session has none, unlike its `structs`/`enums`) \
+    threaded through both sites: tracked as the REPL trait/impl slice."]
 #[test]
 fn repl_while_define_runs_to_fixpoint() {
     // Criterion 2 (mutation-pins R5's `lower_line` combinator threading): `while`
@@ -1605,7 +1605,7 @@ fn repl_while_define_runs_to_fixpoint() {
     );
 }
 
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `repl_while_define_runs_to_fixpoint` -- see that test's #[ignore] note."]
 #[test]
 fn repl_two_output_combinator_define_and_call() {
@@ -2044,7 +2044,7 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     );
 }
 
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `repl_while_define_runs_to_fixpoint` -- see that test's #[ignore] note."]
 #[test]
 fn repl_imported_while_runs_to_fixpoint() {
@@ -2066,7 +2066,7 @@ fn repl_imported_while_runs_to_fixpoint() {
     );
 }
 
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `repl_while_define_runs_to_fixpoint` -- see that test's #[ignore] note."]
 #[test]
 fn repl_imported_filter_runs() {
@@ -2112,7 +2112,7 @@ fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
     );
 }
 
-#[ignore = "P7.S3s review finding: same REPL non-inline-poly-word gap as \
+#[ignore = "same unimplemented REPL trait/impl checking as \
     `repl_while_define_runs_to_fixpoint` -- see that test's #[ignore] note."]
 #[test]
 fn repl_combinators_dogfood_matches_native() {
