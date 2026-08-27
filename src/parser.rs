@@ -222,6 +222,16 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
             span.line, span.col
         ));
     }
+    // P7.S6 (R3): `array` is the named array type's spelling, intercepted at
+    // every type-position entry ahead of every user registry, so a type or
+    // variant declared under that name would be silently unreachable rather
+    // than merely shadowed -- the same reason `Slice` is reserved just above.
+    if matches!(kind, "type" | "variant") && name == ARRAY_TYPE_NAME {
+        return Err(format!(
+            "error: `{name}` is reserved for the array type syntax (`{ARRAY_TYPE_NAME}[T N]`) and cannot be used as a {kind} name at line {}, col {}",
+            span.line, span.col
+        ));
+    }
     // P7.S3h: `owning` is intercepted at every type-position entry ahead of
     // every user registry, so a type or variant declared under that name would
     // be silently unreachable rather than merely shadowed -- the same reason
@@ -234,6 +244,12 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     }
     Ok(())
 }
+
+/// P7.S6 (R1): the named array type's spelling. `array[T N]` resolves
+/// through the interned array registry, so it is intercepted by name ahead
+/// of every user lookup exactly as `Slice[T]` is. Reserved against
+/// `type:`/variant names by `reject_reserved_name`.
+pub const ARRAY_TYPE_NAME: &str = "array";
 
 /// P7 slice 3c (R1.1): the one surface spelling of a slice type. Not a
 /// registered `type:` name and not a generic header: `Slice[T]` resolves
@@ -1934,6 +1950,17 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
     )
 }
 
+/// P7.S6 (R2): `array` in a type position with no following `[` is a located
+/// error naming the required form, not "unknown type `array`". Raised at the
+/// single funnel `resolve_type_or_apply`, which every bare-word type reader
+/// passes through.
+fn array_without_bracket_error(span: Span) -> String {
+    format!(
+        "error: `{ARRAY_TYPE_NAME}` must be followed by `[T N]` to form an array type at line {}, col {}",
+        span.line, span.col
+    )
+}
+
 /// P7.S3t (R2): a glued `[` opened an explicit type instantiation and the end
 /// of input arrived before its `]`. Named after the call rather than reported
 /// as a generic "expected `]`", since the construct only exists because of the
@@ -3247,6 +3274,13 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             return self.parse_poly_quotation_inner(builder, true, word_is_output);
         }
+        // P7.S6 (R1): `array[T N]` -- the named array type. The word
+        // `array` followed by `[` enters the poly array reader, which threads
+        // `builder` so a variable element/count is preserved.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_poly_array(builder, word_is_output);
+        }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
                 return self.parse_poly_quotation(builder, word_is_output);
@@ -3294,6 +3328,18 @@ impl<'t> Parser<'t> {
                     let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
                     return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
+                // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
+                // glued into one word, so the `[`-dispatch sites cannot
+                // reach this spelling. Intercept `array` ahead of the
+                // concrete-reader fallthrough, dispatching into the *poly*
+                // array reader so a variable element is preserved.
+                if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    self.pos += 1;
+                    let inner = self.parse_poly_array(builder, word_is_output)?;
+                    return Ok(RawTy::Ref(Box::new(inner), mutable));
+                }
             }
         }
         // P7.S3n (R3): a `^`-led slot, intercepted before the
@@ -3329,6 +3375,13 @@ impl<'t> Parser<'t> {
                     };
                     self.pos += 1;
                     Some(self.parse_poly_ty_var(builder, &remainder, remainder_span)?)
+                } else if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    // P7.S6 (R1a): `^array['T 4]` -- same interception as the
+                    // `&` arm above, dispatching into the poly array reader.
+                    self.pos += 1;
+                    Some(self.parse_poly_array(builder, word_is_output)?)
                 } else {
                     None
                 };
@@ -3926,6 +3979,16 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
+        // P7.S6 (R1): `array[T N]` -- the named array type. The word `array`
+        // followed by `[` enters the concrete array reader. A slot *named*
+        // `array` (`array : i64`) has `:` as its next token, so this check
+        // declines and `array` is consumed as a slot name below (R1b: no
+        // special-case code needed).
+        if self.array_type_ahead() {
+            self.pos += 1;
+            let ty = self.parse_array_type_expr()?;
+            return Ok(TypedSlot { name: None, ty });
+        }
         // An array type has no name of its own to lead with (`[i64 4]` opens
         // on `[`, not a word), so an unnamed array slot is recognised before
         // the usual name-then-optional-`:type` read (R3, R7).
@@ -3990,6 +4053,11 @@ impl<'t> Parser<'t> {
     fn parse_type_expr(&mut self) -> Result<Type, String> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
+        }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_array_type_expr();
         }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
@@ -4078,6 +4146,11 @@ impl<'t> Parser<'t> {
             }
             let (inputs, outputs) = self.parse_quotation_effect_rows()?;
             crate::ast::owning_quotation_type(inputs, outputs)
+        } else if remainder == ARRAY_TYPE_NAME && matches!(self.peek(), Some((Token::LBracket, _)))
+        {
+            // P7.S6 (R1a): `^array[T N]` -- same interception as the `&`
+            // splitter, dispatching into the concrete array reader.
+            self.parse_array_type_expr()?
         } else {
             // `span` names the whole word (e.g. `^Nope` starts at the `^`);
             // point at the remainder's own column so the error names and
@@ -4116,6 +4189,13 @@ impl<'t> Parser<'t> {
             self.parse_type_expr()?
         } else if remainder.starts_with('^') {
             self.split_owning_cell_word(remainder, remainder_span)?
+        } else if remainder == ARRAY_TYPE_NAME && matches!(self.peek(), Some((Token::LBracket, _)))
+        {
+            // P7.S6 (R1a): `&array[T N]` -- `&` and `array` are glued into
+            // one word, so the `[`-dispatch sites cannot reach this spelling.
+            // Intercept `array` ahead of `resolve_type_or_apply`, which would
+            // report "unknown type `array`".
+            self.parse_array_type_expr()?
         } else {
             self.resolve_type_or_apply(remainder, remainder_span)?
         };
@@ -4136,6 +4216,17 @@ impl<'t> Parser<'t> {
         let count = self.parse_array_count(element.name())?;
         self.expect(Token::RBracket)?;
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
+    }
+
+    /// P7.S6 (R1): whether the parser is positioned on the word `array`
+    /// followed by `[`, which opens a named array type (`array[T N]`).
+    /// `array` is reserved (R3), so no user type can shadow it and the
+    /// dispatch is unambiguous. The existing array readers consume the `[`
+    /// themselves, so callers advance past the `array` word before calling
+    /// them.
+    fn array_type_ahead(&self) -> bool {
+        matches!(self.peek(), Some((Token::Word(w), _)) if w == ARRAY_TYPE_NAME)
+            && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
     }
 
     /// Slice 6a (R1): whether the `[` the parser is positioned on opens a
@@ -4463,6 +4554,11 @@ impl<'t> Parser<'t> {
     fn parse_field_type_expr(&mut self) -> Result<Type, String> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
+        }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_array_type_expr();
         }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             return if self.quotation_type_ahead() {
@@ -5037,6 +5133,15 @@ impl<'t> Parser<'t> {
             let mutable = name == MUT_SLICE_TYPE_NAME;
             return Ok(crate::ast::intern_slice_type(self.slices, args[0], mutable));
         }
+        // P7.S6 (R2): `array` is the named array type's spelling. When
+        // followed by `[` it is intercepted at the bracket-dispatch sites
+        // (R1) or at the `&`/`^` splitters (R1a) and never reaches here. The
+        // only way `array` arrives at this funnel is without a following `[`,
+        // which is a located error naming the required form -- not "unknown
+        // type `array`".
+        if name == ARRAY_TYPE_NAME {
+            return Err(array_without_bracket_error(span));
+        }
         let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
                 Some(&target) => (base, target, Some(qualifier)),
@@ -5234,6 +5339,11 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_generic_field_array(decl_name, ty_vars, used);
+        }
         // A `[` opens either a quotation effect or an array type, decided by
         // `quotation_type_ahead`'s top-depth `--` scan exactly as
         // `parse_field_type_expr` decides it -- without this the array
@@ -5288,6 +5398,21 @@ impl<'t> Parser<'t> {
                         remainder_span,
                     )?;
                     return Ok(self.fold_field_ref(PolyType::Var(id), mutable));
+                }
+                // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
+                // glued into one word, so the `[`-dispatch sites cannot
+                // reach this spelling. Intercept `array` ahead of
+                // `poly_generic_header`, which looks it up in the user
+                // registries and would misreport "unknown type `array`".
+                // Placed before the `poly_generic_header` case, since `array`
+                // must be recognised ahead of the user registry exactly as
+                // `resolve_type_or_apply` recognises `Slice`.
+                if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    self.pos += 1;
+                    let inner = self.parse_generic_field_array(decl_name, ty_vars, used)?;
+                    return Ok(self.fold_field_ref(inner, mutable));
                 }
                 // A run glued to a generic header that is then applied
                 // (`&Ent['K i64]`), mirroring the `^` arm below. Without it
@@ -5345,6 +5470,14 @@ impl<'t> Parser<'t> {
                         remainder_span,
                     )?;
                     Some(PolyType::Var(id))
+                } else if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    // P7.S6 (R1a): `^array['T 4]` -- same interception as
+                    // the `&` arm above, dispatching into the generic-field
+                    // array reader.
+                    self.pos += 1;
+                    Some(self.parse_generic_field_array(decl_name, ty_vars, used)?)
                 } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
                     match self.poly_generic_header(&remainder, remainder_span)? {
                         Some((is_enum, idx, module)) => {
@@ -10512,5 +10645,213 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("expected `:` after"), "{err}");
+    }
+
+    // ---- P7.S6 Phase 1: the named array type (R1/R1a/R1b/R2/R3) ----
+
+    #[test]
+    fn parse_poly_slot_named_array_parses() {
+        let module = parse_src(": f ( array['T 'N] -- array['T 'N] ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Array(e, Len::Var(0)) if **e == PolyType::Var(0)),
+            "input should be array['T 'N]"
+        );
+        assert!(
+            matches!(&sig.outputs[0], PolyType::Array(e, Len::Var(0)) if **e == PolyType::Var(0)),
+            "output should be array['T 'N]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_nested_named_array_parses() {
+        let module = parse_src(": f ( array[array['T 2] 3] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Array(outer, Len::Concrete(3)) if matches!(&**outer, PolyType::Array(inner, Len::Concrete(2)) if **inner == PolyType::Var(0))),
+            "input should be array[array['T 2] 3]"
+        );
+    }
+
+    #[test]
+    fn parse_slot_named_array_parses() {
+        let module = parse_src(": f ( array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::Array(_, _)),
+            "input should be a Type::Array"
+        );
+    }
+
+    #[test]
+    fn parse_slot_named_array_with_type_annotation_parses() {
+        // R1b: a slot *named* `array` (`array : i64`) needs no special-case
+        // code. R1's dispatch predicate requires `array` followed by `[`, and
+        // here the next token is `:`, so no dispatch is entered. This is a
+        // plain regression test, not mutation-testable.
+        let module = parse_src(": f ( array : i64 -- ) drop ;").unwrap();
+        assert_eq!(
+            module.words[0].effect.inputs[0].name.as_deref(),
+            Some("array"),
+            "`array` should be the slot name"
+        );
+    }
+
+    #[test]
+    fn parse_ref_type_expr_named_array_parses() {
+        // R1a concrete path: `&array[i64 4]` -- `&` and `array` are glued
+        // into one word, so the `[`-dispatch sites cannot reach this
+        // spelling. `parse_ref_type_expr` intercepts `array` and dispatches
+        // into `parse_array_type_expr`.
+        let module = parse_src(": f ( &array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::Ref(_, false, _)),
+            "input should be a Type::Ref over an array"
+        );
+    }
+
+    #[test]
+    fn split_owning_cell_word_named_array_parses() {
+        // R1a concrete path: `^array[i64 4]` -- same interception in
+        // `split_owning_cell_word`.
+        let module = parse_src(": f ( ^array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::OwnedCell(_, _)),
+            "input should be a Type::OwnedCell over an array"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_ref_named_array_parses() {
+        // R1a poly path: `&array['T 4]` inside a PolySig. The `&` and `array`
+        // are glued, so `parse_poly_slot`'s `&` arm intercepts `array` and
+        // dispatches into `parse_poly_array` (not the concrete array reader,
+        // which cannot hold a type-variable element).
+        let module = parse_src(": f ( &array['T 4] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "input should be &array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_owned_cell_named_array_parses() {
+        // R1a poly path: `^array['T 4]` inside a PolySig.
+        let module = parse_src(": f ( ^array['T 4] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "input should be ^array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_shape_ref_named_array_parses() {
+        // R1a generic-field path: `&array['T 4]` in a generic struct field.
+        // This is a regression test: today's `&['T 4]` field spelling builds
+        // via the bare-sigil recursion, so migrating to `array[…]` must not
+        // break it. The co-assertion that `&['T 4]` still builds is
+        // phases 1–3 only.
+        let named = sole_generic_field("type: Box 'T f &array['T 4] ;");
+        assert!(
+            matches!(&named, PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "field should be &array['T 4]"
+        );
+        // Co-assertion: the legacy bare-`[` spelling still builds.
+        let legacy = sole_generic_field("type: Box 'T f &['T 4] ;");
+        assert_eq!(
+            named, legacy,
+            "both spellings should produce the same PolyType"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_shape_owned_cell_named_array_parses() {
+        // R1a generic-field path: `^array['T 4]` in a generic struct field.
+        // Same regression-test rationale and phases 1–3 co-assertion as the
+        // `&` twin above.
+        let named = sole_generic_field("type: Box 'T f ^array['T 4] ;");
+        assert!(
+            matches!(&named, PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "field should be ^array['T 4]"
+        );
+        // Co-assertion: the legacy bare-`[` spelling still builds.
+        let legacy = sole_generic_field("type: Box 'T f ^['T 4] ;");
+        assert_eq!(
+            named, legacy,
+            "both spellings should produce the same PolyType"
+        );
+    }
+
+    #[test]
+    fn parse_type_expr_array_without_bracket_is_error() {
+        // R2: `array` in a type position with no following `[` is a located
+        // error naming the required form, not "unknown type `array`".
+        let err = parse_src(": f ( array -- ) drop ;").unwrap_err();
+        assert!(err.contains("`array`"), "names the word: {err}");
+        assert!(err.contains("`[T N]`"), "names the required form: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "not an unknown-type error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_ref_type_expr_array_without_bracket_is_error() {
+        // R2 via the `&` splitter: `&array` with no following `[` falls
+        // through to `resolve_type_or_apply`, which is R2's single raise site.
+        let err = parse_src(": f ( &array -- ) drop ;").unwrap_err();
+        assert!(err.contains("`array`"), "names the word: {err}");
+        assert!(err.contains("`[T N]`"), "names the required form: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "not an unknown-type error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_reserved_name_array_type_is_error() {
+        let err = parse_src("type: array x i64 ;").unwrap_err();
+        assert!(
+            err.contains("reserved") && err.contains("`array`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_reserved_name_array_variant_is_error() {
+        let err = parse_src("type: E | array | Other ;").unwrap_err();
+        assert!(
+            err.contains("reserved") && err.contains("`array`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn a_word_named_array_still_parses() {
+        // R3: `array` is reserved against `type:`/variant names, not against
+        // every use of the spelling. A word named `array` is legal.
+        let module = parse_src(": array ( i64 -- i64 ) ;").unwrap();
+        assert_eq!(module.words[0].name, "array");
+    }
+
+    #[test]
+    fn parse_impl_target_named_array_parses() {
+        // R8 (first half): `impl: Show for array['T 'N]` falls out of R1
+        // through `parse_poly_slot`.
+        let module = parse_src(
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_concrete());
+        assert!(
+            module.words[0].poly.is_some(),
+            "generic impl member word should be polymorphic"
+        );
     }
 }
