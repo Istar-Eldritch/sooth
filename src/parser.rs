@@ -76,7 +76,7 @@ fn prepass_type_decls(
                     // `prepass_generic_typedefs`, run over every file in the
                     // closure once this pass has registered every concrete
                     // name a generic field might forward-reference.
-                    if header_ty_var_count(tokens, i + 2) > 0 {
+                    if header_is_generic(tokens, i + 2) {
                         continue;
                     }
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
@@ -108,6 +108,22 @@ fn header_ty_var_count(tokens: &[(Token, Span)], start: usize) -> usize {
         n += 1;
     }
     n
+}
+
+/// P7.S6 (R5a): whether the token at `start` is `[`, opening the new
+/// bracketed type-variable list (`type: Box['T]`). A bare lookahead, no
+/// consumption.
+fn bracket_follows(tokens: &[(Token, Span)], start: usize) -> bool {
+    matches!(tokens.get(start), Some((Token::LBracket, _)))
+}
+
+/// P7.S6 (R5a): whether a `type:` header at `start` is generic, accepting BOTH
+/// the new bracketed form (`type: Box['T]`) and the legacy postfix form
+/// (`type: Box 'T`). The OR of the two shapes must survive phases 2–3 so the
+/// un-migrated corpus keeps parsing; narrowing to bracket-only happens in
+/// phase 4 (R10).
+fn header_is_generic(tokens: &[(Token, Span)], start: usize) -> bool {
+    bracket_follows(tokens, start) || header_ty_var_count(tokens, start) > 0
 }
 
 /// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
@@ -1882,6 +1898,25 @@ fn duplicate_generic_ty_var_error(name: &str, decl_name: &str, span: Span) -> St
     )
 }
 
+/// P7.S6 (R5): an empty type-variable bracket in a `type:`/`trait:` header
+/// (`type: Box[]`, `trait: Ord[]`). The bracket is present but binds nothing.
+fn empty_header_bracket_error(decl_name: &str, span: Span) -> String {
+    format!(
+        "error: empty type-variable bracket in `{decl_name}` at line {}, col {} (expected one or more `'`-prefixed variables, e.g. `type: {decl_name}['T]`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R5): a token inside a header bracket that is neither a `'`-prefixed
+/// variable nor `]`. The bracket's contents are `'`-prefixed words only (no
+/// bounds on a `type:`/`trait:` header), so anything else is a located error.
+fn header_bracket_non_var_error(decl_name: &str, tok: &Token, span: Span) -> String {
+    format!(
+        "error: expected a type variable (`'T`) or `]` inside `{decl_name}`'s bracket at line {}, col {}, found {tok:?}",
+        span.line, span.col
+    )
+}
+
 /// Phase 5 slice 1 (R1): a generic `type:` field naming a `'`-prefixed
 /// variable its header never bound.
 fn unbound_generic_ty_var_error(name: &str, decl_name: &str, span: Span) -> String {
@@ -1978,6 +2013,36 @@ fn unterminated_instantiation_error(name: &str, span: Span) -> String {
 fn empty_instantiation_error(name: &str, span: Span) -> String {
     format!(
         "error: `{name}[]` at line {}, col {} instantiates nothing; name one concrete type per declared variable, or insert a space for a quotation literal",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): an empty bound bracket on a word definition (`: f[] ( ... )`).
+/// The bracket is present but declares no variables.
+fn empty_bound_bracket_error(span: Span) -> String {
+    format!(
+        "error: empty bound bracket at line {}, col {} (expected one or more `'`-prefixed variable declarations, e.g. `['T: Copy]`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): a token inside a bound bracket that is neither a `'`-prefixed
+/// variable nor `]`. Inside the bracket only variable declarations and the
+/// closing `]` are legal.
+fn bound_bracket_non_var_error(tok: &Token, span: Span) -> String {
+    format!(
+        "error: expected a type variable (`'T`) or `]` inside the bound bracket at line {}, col {}, found {tok:?}",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): a bracket-declared variable that never appears in the word's
+/// effect. The bracket *adds* a bound declaration; the effect keeps every
+/// mention of the variable. A variable that appears in the bracket but not
+/// the effect would leave a bound on a variable with no slot.
+fn bracket_var_unused_error(name: &str, span: Span, word_name: &str) -> String {
+    format!(
+        "error: type variable `{name}` declared in the bound bracket of `{word_name}` at line {}, col {} never appears in the effect",
         span.line, span.col
     )
 }
@@ -2329,12 +2394,24 @@ impl<'t> Parser<'t> {
         if declares_inline {
             self.pos += 1;
         }
+        // P7.S6 (R6): the optional bound bracket sits after `inline` and
+        // before `(`, e.g. `: max['T: Copy Ord] ( 'T 'T -- 'T )`. Parsed into
+        // a side table and attached to effect-derived ids after
+        // `parse_poly_effect` (never pre-interned), so ids stay effect-derived.
+        let bound_bracket = self.parse_optional_bound_bracket()?;
+        // A word carrying a non-empty bracket takes the `PolySig` path
+        // regardless of `effect_has_variable`.
+        let force_poly = bound_bracket.as_ref().is_some_and(|b| !b.is_empty());
         self.expect(Token::LParen)?;
         // R1/R2: a variable-bearing effect (`'T`, `'N`, `..s`) parses into a
         // `PolySig`; every other effect stays a concrete `StackEffect`, byte
         // for byte as before (the whole regression guarantee, R15).
-        let (effect, poly) = if self.effect_has_variable() {
-            let sig = self.parse_poly_effect()?;
+        let (effect, poly) = if force_poly || self.effect_has_variable() {
+            let mut sig = self.parse_poly_effect()?;
+            // R6: attach bracket bounds to the ids the effect interned.
+            if let Some(bracket) = &bound_bracket {
+                self.attach_bracket_bounds(&mut sig, bracket, &name)?;
+            }
             (StackEffect::default(), Some(Box::new(sig)))
         } else {
             (self.parse_effect()?, None)
@@ -2362,6 +2439,104 @@ impl<'t> Parser<'t> {
             span: name_span,
             declared_globals,
         })
+    }
+
+    /// P7.S6 (R6): parse the optional bound bracket `[ 'T: Copy 'U: Ord ]` that
+    /// sits after `inline` and before `(` in a word definition. Returns
+    /// `None` if no bracket is present, or a side table of
+    /// `(name, span, Vec<Bound>)` entries. The bracket is parsed into a local
+    /// side table and attached to effect-derived ids *after* `parse_poly_effect`
+    /// (never pre-interned), so ids stay effect-derived and `PolySig.ty_var_names`
+    /// order is unchanged.
+    ///
+    /// The bracket's grammar (R6a): `[' var_decl+ ]`, where each `var_decl`
+    /// is `'T` or `'T: bound_list`. A `bound_list` ends at the next `'`-prefixed
+    /// word or `]`; an unrecognised name inside a bound list is an
+    /// unknown-capability error (bracket mode), not a silent break.
+    #[allow(clippy::type_complexity)]
+    fn parse_optional_bound_bracket(
+        &mut self,
+    ) -> Result<Option<Vec<(String, Span, Vec<Bound>)>>, String> {
+        if !matches!(self.peek(), Some((Token::LBracket, _))) {
+            return Ok(None);
+        }
+        let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
+        self.pos += 1; // consume `[`
+        let mut entries: Vec<(String, Span, Vec<Bound>)> = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                Some((Token::Word(w), span)) if w.starts_with('\'') => {
+                    let glued_colon = w.ends_with(':') && w.len() > 1;
+                    let (name, span) = if glued_colon {
+                        (w[..w.len() - 1].to_string(), *span)
+                    } else {
+                        let (nw, ns) = self.expect_word_any_spanned()?;
+                        (nw, ns)
+                    };
+                    if glued_colon {
+                        self.pos += 1;
+                    }
+                    // Check for a standalone `:` (not glued).
+                    let bound_follows = if glued_colon {
+                        true
+                    } else {
+                        matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
+                    };
+                    if bound_follows && !glued_colon {
+                        self.pos += 1;
+                    }
+                    let bounds = if bound_follows {
+                        self.parse_capabilities(span, true)?
+                    } else {
+                        Vec::new()
+                    };
+                    if entries.iter().any(|(n, _, _)| n == &name) {
+                        return Err(duplicate_generic_ty_var_error(
+                            &name,
+                            "<bound bracket>",
+                            span,
+                        ));
+                    }
+                    entries.push((name, span, bounds));
+                }
+                Some((tok, span)) => {
+                    return Err(bound_bracket_non_var_error(tok, *span));
+                }
+                None => return Err(self.eof_error("`]` (unterminated bound bracket)")),
+            }
+        }
+        if entries.is_empty() {
+            return Err(empty_bound_bracket_error(bracket_span));
+        }
+        Ok(Some(entries))
+    }
+
+    /// P7.S6 (R6): attach bracket-declared bounds to the ids the effect
+    /// interned. Each bracket entry's variable name is looked up in
+    /// `sig.ty_var_names`; a name that never appears in the effect is a
+    /// located error (it would leave a bound on a variable with no slot).
+    fn attach_bracket_bounds(
+        &self,
+        sig: &mut PolySig,
+        bracket: &[(String, Span, Vec<Bound>)],
+        word_name: &str,
+    ) -> Result<(), String> {
+        for (name, span, bounds) in bracket {
+            let id = sig
+                .ty_var_names
+                .iter()
+                .position(|n| n == name)
+                .ok_or_else(|| bracket_var_unused_error(name, *span, word_name))?
+                as u32;
+            for b in bounds {
+                sig.bounds.push((id, *b));
+            }
+        }
+        Ok(())
     }
 
     /// Parse one `import:` form (R6, regrammared by P8 slice 1a OQ3):
@@ -2519,20 +2694,46 @@ impl<'t> Parser<'t> {
         let span = self.expect_word("trait:")?;
         let (name, name_span) = self.expect_word_any_spanned()?;
         reject_reserved_name("trait", &name, name_span)?;
+        // P7.S6 (R5b): accept EITHER a bracketed header (`trait: Ord['T]`)
+        // or the legacy postfix variable (`trait: Ord 'T`). The bracket is
+        // mandatory only at slice exit (post phase 4); during phases 2–3
+        // both forms parse, so the un-migrated corpus (217 postfix `trait:`
+        // occurrences including `lib/cmp.sth:38`) keeps building.
         let (ty_var, ty_var_span) = match self.peek() {
+            // New bracketed header.
+            Some((Token::LBracket, _)) => {
+                let vars = self.parse_header_bracket(&name)?;
+                if vars.len() > 1 {
+                    return Err(multi_variable_trait_error(&name, vars[1].1));
+                }
+                vars.into_iter()
+                    .next()
+                    .expect("parse_header_bracket rejects an empty bracket")
+            }
+            // Legacy postfix variable (byte-for-byte unchanged).
             Some((Token::Word(w), s)) if w.starts_with('\'') => {
                 let (w, s) = (w.clone(), *s);
                 self.pos += 1;
                 (w, s)
             }
+            // Neither form: the existing located error, retargeted in message
+            // text to name `trait: Name['T]`. Both arms retargeted, not just
+            // the first, so a `trait: Ord` at EOF still advises the bracket form.
             Some((tok, s)) => {
                 return Err(format!(
-                    "parse error: expected a type variable (`'T`) after `trait: {name}`, found {tok:?} at line {}, col {}",
+                    "parse error: expected a type variable or bracketed header (`trait: {name}['T]`) after `trait: {name}`, found {tok:?} at line {}, col {}",
                     s.line, s.col
                 ));
             }
-            None => return Err(self.eof_error("a type variable (`'T`)")),
+            None => {
+                return Err(self.eof_error(&format!(
+                    "a type variable (`'T`) or bracketed header (`trait: {name}['T]`)"
+                )))
+            }
         };
+        // P7.S6 (R5b): today's second-variable check, byte-for-byte unchanged
+        // -- it guards the postfix form. A `'`-prefixed word after a bracket
+        // form also hits this, which is fine.
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             return Err(multi_variable_trait_error(&name, ty_var_span));
         }
@@ -2582,8 +2783,15 @@ impl<'t> Parser<'t> {
                     if declares_inline {
                         self.pos += 1;
                     }
+                    // P7.S6 (R6): the same bound bracket `parse_worddef`
+                    // admits, in the same slot relative to `inline`. A
+                    // trait member's implicit header variable is unchanged.
+                    let bound_bracket = self.parse_optional_bound_bracket()?;
                     self.expect(Token::LParen)?;
-                    let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    let mut sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    if let Some(bracket) = &bound_bracket {
+                        self.attach_bracket_bounds(&mut sig, bracket, &member_name)?;
+                    }
                     self.expect(Token::RParen)?;
                     self.expect(Token::Semicolon)?;
                     members.push(TraitMember {
@@ -2855,7 +3063,7 @@ impl<'t> Parser<'t> {
             if !glued_colon {
                 self.pos += 1; // consume standalone `:`
             }
-            let caps = self.parse_capabilities(colon_span)?;
+            let caps = self.parse_capabilities(colon_span, false)?;
             for b in caps {
                 bounds.push((id, b));
             }
@@ -3537,7 +3745,7 @@ impl<'t> Parser<'t> {
             self.pos += 1; // the standalone `:`
         }
         let bounds = if bound_follows {
-            Some(self.parse_capabilities(span)?)
+            Some(self.parse_capabilities(span, false)?)
         } else {
             None
         };
@@ -3715,7 +3923,18 @@ impl<'t> Parser<'t> {
     /// not a bespoke reserved-word check. A `Nominal` (user-declared) trait
     /// name resolves through the same table (R18, `bound_trait_id`) and
     /// yields `Bound::User`.
-    fn parse_capabilities(&mut self, colon_span: Span) -> Result<Vec<Bound>, String> {
+    /// P7.S6 (R6a): `bracket_mode` changes the `None` fallthrough. Outside a
+    /// bracket, an unrecognised word is the enclosing signature's next slot,
+    /// so the greedy list ends silently (`break`). Inside a bracket there is
+    /// no next slot -- the only things that can follow a bound are another
+    /// `'`-var (the next `var_decl`) or `]` -- so an unrecognised
+    /// non-`'`-prefixed name is an unknown-capability error, not a silent
+    /// break. A `'`-prefixed word still breaks (it is the next `var_decl`).
+    fn parse_capabilities(
+        &mut self,
+        colon_span: Span,
+        bracket_mode: bool,
+    ) -> Result<Vec<Bound>, String> {
         let mut out = Vec::new();
         while let Some((Token::Word(c), span)) = self.peek() {
             let (c, span) = (c.clone(), *span);
@@ -3752,7 +3971,12 @@ impl<'t> Parser<'t> {
                 None if self.is_repl && c == "Ord" && !self.declares_type(&c) => {
                     return Err(repl_unknown_capability_error(&c, span));
                 }
-                None => break,
+                None => {
+                    if bracket_mode && !c.starts_with('\'') {
+                        return Err(unknown_capability_error(&c, span));
+                    }
+                    break;
+                }
             }
         }
         if out.is_empty() {
@@ -4673,10 +4897,12 @@ impl<'t> Parser<'t> {
     }
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
-    /// position is generic (Phase 5 slice 1, R1/D2) -- its header binds one or
-    /// more type variables. `self.pos` must point at `type:`.
+    /// position is generic (Phase 5 slice 1, R1/D2 / P7.S6 R5a) -- its
+    /// header binds one or more type variables, in either the new bracketed
+    /// form (`type: Box['T]`) or the legacy postfix form (`type: Box 'T`).
+    /// `self.pos` must point at `type:`.
     fn current_typedef_is_generic(&self) -> bool {
-        header_ty_var_count(self.tokens, self.pos + 2) > 0
+        header_is_generic(self.tokens, self.pos + 2)
     }
 
     /// The enum `type:` production (D1, M3): `type: Name '|'? variant ('|'
@@ -4961,7 +5187,7 @@ impl<'t> Parser<'t> {
         let mut i = 0;
         while i < self.tokens.len() {
             if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
-                && header_ty_var_count(self.tokens, i + 2) > 0
+                && header_is_generic(self.tokens, i + 2)
             {
                 self.pos = i;
                 if self.generic_header_at_cursor_is_registered(already) {
@@ -5279,17 +5505,28 @@ impl<'t> Parser<'t> {
         Ok(args)
     }
 
-    /// A generic `type:` header's bound type variables (R1/D2): one or more
-    /// `'`-prefixed words immediately following the declared name, each
-    /// interned with its span for the phantom-variable diagnostic. The
-    /// caller (`current_typedef_is_generic`) has already established at
-    /// least one is present. A name bound twice in one header is rejected
-    /// here, at the binding site, rather than left for a field reference to
-    /// misreport as unbound or phantom.
+    /// A generic `type:` header's bound type variables (R1/D2 / P7.S6 R5):
+    /// one or more `'`-prefixed words, in either the new bracketed form
+    /// (`type: Box['T]`) or the legacy postfix form (`type: Box 'T`). The
+    /// caller (`header_is_generic`) has already established at least one is
+    /// present in one of the two shapes. A name bound twice in one header is
+    /// rejected here, at the binding site, rather than left for a field
+    /// reference to misreport as unbound or phantom.
+    ///
+    /// P7.S6 (R5a): dual acceptance -- the bracket reader is a *first arm*
+    /// beside the legacy postfix loop, not a replacement. Removing the postfix
+    /// loop would satisfy `header_is_generic` and still break every un-migrated
+    /// header (`lib/result.sth:1` among them) three phases before phase 3
+    /// migrates them. The OR must survive phases 2 and 3 untouched.
     fn parse_generic_header_vars(
         &mut self,
         decl_name: &str,
     ) -> Result<Vec<(String, Span)>, String> {
+        // R5: bracketed type-variable list `type: Box['T]`.
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            return self.parse_header_bracket(decl_name);
+        }
+        // Legacy postfix form: `type: Box 'T ...`
         let mut ty_vars: Vec<(String, Span)> = Vec::new();
         while matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
@@ -5297,6 +5534,41 @@ impl<'t> Parser<'t> {
                 return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
             }
             ty_vars.push((w, span));
+        }
+        Ok(ty_vars)
+    }
+
+    /// P7.S6 (R5): parse a bracketed type-variable list `[ 'T 'U ]` from a
+    /// `type:`/`trait:` header. Assumes `[` is the current token; consumes
+    /// through the matching `]`. The bracket's contents are `'`-prefixed words
+    /// only (no bounds on a header -- bounds are a word-definition feature,
+    /// R6). An empty bracket, a duplicate variable, or a non-`'`/non-`]` token
+    /// are located errors.
+    fn parse_header_bracket(&mut self, decl_name: &str) -> Result<Vec<(String, Span)>, String> {
+        let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
+        self.pos += 1; // consume `[`
+        let mut ty_vars: Vec<(String, Span)> = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                Some((Token::Word(w), span)) if w.starts_with('\'') => {
+                    let (w, span) = self.expect_word_any_spanned()?;
+                    if ty_vars.iter().any(|(n, _)| *n == w) {
+                        return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
+                    }
+                    ty_vars.push((w, span));
+                }
+                Some((tok, span)) => {
+                    return Err(header_bracket_non_var_error(decl_name, tok, *span));
+                }
+                None => return Err(self.eof_error("`]` (unterminated type-variable list)")),
+            }
+        }
+        if ty_vars.is_empty() {
+            return Err(empty_header_bracket_error(decl_name, bracket_span));
         }
         Ok(ty_vars)
     }
@@ -9860,12 +10132,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_capabilities_stops_before_a_following_type_slot() {
-        // The greedy list ends at the first word the trait table does not
-        // know, which is then the enclosing signature's next input slot --
-        // not a capability, and not an error.
+    fn parse_bound_bracket_ends_at_close_and_effect_follows() {
+        // P7.S6 (R6a): the greedy bound list inside a bracket ends at `]`, not
+        // at the enclosing effect's next input slot (there is no next slot inside
+        // a bracket). Retargeted from `parse_capabilities_stops_before_a_following_type_slot`:
+        // the old fixture's `'T: Show` token *was* the first input slot, so both
+        // spellings have two inputs. The migration strips the `: Show` off that
+        // slot and restates it in the bracket; the `sig.inputs` assertion is
+        // unchanged, byte for byte.
         let module =
-            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f ( 'T: Show i64 -- 'T ) ;")
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f['T: Show] ( 'T i64 -- 'T ) ;")
                 .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
@@ -9880,24 +10156,41 @@ mod tests {
         // R18(a): `parse_capabilities` has no `resolve_type` to delegate to,
         // so an unresolvable qualifier needs its own located rejection rather
         // than falling through to the generic unknown-capability message.
-        let err = parse_src(": f ( 'T: q::Show -- 'T ) ;").unwrap_err();
+        // P7.S6 (R6a): migrated to bracket spelling.
+        let err = parse_src(": f['T: q::Show] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown module qualifier `q`"), "{err}");
         assert!(err.contains("`q::Show`"), "{err}");
     }
 
     #[test]
-    fn parse_capabilities_unbound_qualifier_after_a_bound_is_the_next_slot() {
-        // Review finding 2: an unresolvable qualifier used to raise the
-        // unbound-qualifier error unconditionally, even past the first bound
-        // -- so a legal signature whose next input happens to be a qualified
-        // type (unrelated to any bound) was misdiagnosed as a bad bound.
+    fn parse_bound_bracket_unknown_name_after_a_bound_is_an_error() {
+        // P7.S6 (R6a): inside a bracket there is no next slot to fall through
+        // to, so an unrecognised name past the first bound must now error
+        // rather than silently breaking. Retired from
+        // `parse_capabilities_unbound_qualifier_after_a_bound_is_the_next_slot`,
+        // whose subject (an unresolvable qualifier falling through to the next
+        // slot) is destroyed by the bracket grammar.
         let err = parse_src(
-            "trait: Copy2 'T : dummy ( 'T -- ) ; ;\n: f ( 'T: Copy2 q::Point -- 'T ) drop ;",
+            "trait: Copy2 'T : dummy ( 'T -- ) ; ;\n: f['T: Copy2 q::Point] ( 'T -- 'T ) ;",
         )
         .unwrap_err();
-        // `q::Point` is not itself resolvable to anything here (no `q`
-        // import exists), so this must fail as an ordinary unknown-type
-        // error on the next slot, never as an unbound-bound-qualifier one.
+        assert!(
+            err.contains("unknown module qualifier `q`") || err.contains("q::Point"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_bound_bracket_qualified_type_in_effect_still_resolves_as_a_slot() {
+        // P7.S6 (R6a): the companion to the test above, keeping the original's
+        // real-world case alive on the effect side. A qualified type in the
+        // effect (not the bracket) is still an ordinary input slot, not a
+        // bound -- so `q::Point` fails as an unknown-type error on the slot,
+        // never as an in-bound error.
+        let err = parse_src(
+            "trait: Copy2 'T : dummy ( 'T -- ) ; ;\n: f['T: Copy2] ( 'T q::Point -- 'T ) ;",
+        )
+        .unwrap_err();
         assert!(!err.contains("in bound"), "{err}");
         assert!(err.contains("q::Point"), "{err}");
     }
@@ -10853,5 +11146,330 @@ mod tests {
             module.words[0].poly.is_some(),
             "generic impl member word should be polymorphic"
         );
+    }
+
+    // ---- P7.S6 Phase 2: R5/R5a/R5b/R6/R6a bracket binding sites ----
+
+    #[test]
+    fn parse_typedef_generic_header_brackets_parses() {
+        // R5: `type: Box['T] val 'T ;` parses as a generic struct with one
+        // type variable.
+        let module = parse_src("type: Box['T] val 'T ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        assert_eq!(
+            module.generic_structs[0].ty_var_names,
+            vec!["'T".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_brackets_enum_parses() {
+        // R5: `type: Result['T 'E] | Ok 'T | Err 'E ;` parses as a generic enum.
+        let module = parse_src("type: Result['T 'E] | Ok 'T | Err 'E ;").unwrap();
+        assert_eq!(module.generic_enums.len(), 1);
+        assert_eq!(
+            module.generic_enums[0].ty_var_names,
+            vec!["'T".to_string(), "'E".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_empty_bracket_is_error() {
+        let err = parse_src("type: Box[] val 'T ;").unwrap_err();
+        assert!(err.contains("empty type-variable bracket"), "{err}");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_duplicate_var_is_error() {
+        let err = parse_src("type: Box['T 'T] val 'T ;").unwrap_err();
+        assert!(err.contains("bound twice"), "{err}");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_bare_name_is_concrete() {
+        // R5: a bare name with no following `[` is a concrete (non-generic)
+        // declaration, unchanged.
+        let module = parse_src("type: Ordering | Less | Equal | Greater ;").unwrap();
+        assert!(module.generic_structs.is_empty());
+        assert!(module.generic_enums.is_empty());
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].name, "Ordering");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_non_var_token_in_bracket_is_error() {
+        // R5: a non-`'`, non-`]` token inside a header bracket is a located
+        // error naming the expected form.
+        let err = parse_src("type: Box[i64] val 'T ;").unwrap_err();
+        assert!(err.contains("expected a type variable"), "{err}");
+    }
+
+    #[test]
+    fn header_is_generic_accepts_both_bracket_and_postfix_during_migration() {
+        // R5a: both the bracket form (`type: Box['T]`) and the legacy postfix
+        // form (`type: Box 'T`) are classified as generic during phases 2–3.
+        let bracket_module = parse_src("type: Box['T] val 'T ;").unwrap();
+        assert_eq!(bracket_module.generic_structs.len(), 1);
+
+        let postfix_module = parse_src("type: Box 'T val 'T ;").unwrap();
+        assert_eq!(postfix_module.generic_structs.len(), 1);
+
+        // Both produce the same ty_var_names.
+        assert_eq!(
+            bracket_module.generic_structs[0].ty_var_names,
+            postfix_module.generic_structs[0].ty_var_names
+        );
+    }
+
+    #[test]
+    fn parse_trait_decl_bracket_header_parses() {
+        // R5b: `trait: Ord['T]` parses with the bracketed header form.
+        let module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
+        assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Ord");
+        let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
+        assert_eq!(ord.members.len(), 1);
+    }
+
+    #[test]
+    fn parse_trait_decl_two_bracket_vars_is_error() {
+        // R5b: a second variable inside the bracket keeps
+        // `multi_variable_trait_error`.
+        let err = parse_src("trait: Ord['T 'U] : cmp ( &'T &'T -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("more than one type variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_with_neither_form_is_still_an_error() {
+        // R5b: with neither form present the existing located error fires,
+        // retargeted in message text to name `trait: Name['T]`.
+        let err = parse_src("trait: Ord : cmp ( i64 i64 -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("bracketed header"), "{err}");
+        assert!(err.contains("trait: Ord['T]"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_accepts_both_bracket_and_postfix_during_migration() {
+        // R5b: both `trait: Ord['T]` and `trait: Ord 'T` produce the same
+        // TraitDecl during phases 2–3.
+        let bracket_module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
+        let postfix_module = parse_src("trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
+
+        let bracket_ord = bracket_module
+            .traits
+            .iter()
+            .find(|t| t.name == "Ord")
+            .unwrap();
+        let postfix_ord = postfix_module
+            .traits
+            .iter()
+            .find(|t| t.name == "Ord")
+            .unwrap();
+        assert_eq!(bracket_ord.name, postfix_ord.name);
+        assert_eq!(bracket_ord.members.len(), postfix_ord.members.len());
+        assert_eq!(bracket_ord.members[0].name, postfix_ord.members[0].name);
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_parses() {
+        // R6: `: f['T: Copy] ( 'T -- 'T )` parses with the bound bracket.
+        let module =
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f['T: Copy] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_after_inline_parses() {
+        // R6: the bracket sits after `inline` and before `(`.
+        let module =
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f inline ['T: Copy] ( 'T -- 'T ) ;")
+                .unwrap();
+        assert!(module.words[0].declares_inline);
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_var_unused_in_effect_is_error() {
+        // R6: a bracket-declared variable that never appears in the effect is
+        // a located error.
+        let err = parse_src(": f['T: Copy] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("never appears in the effect"), "{err}");
+        assert!(err.contains("'T"), "{err}");
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_var_id_order_follows_effect() {
+        // R6: ids stay effect-derived. The bracket must not pre-intern its
+        // variables; `ty_var_names` order follows the effect's first-mention
+        // order, not the bracket's declaration order.
+        let module = parse_src(": f['U: Copy 'T: Copy] ( 'T 'U -- 'T 'U ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        // Effect mentions 'T first, then 'U, so id 0 is 'T and id 1 is 'U --
+        // even though the bracket declares 'U first.
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string(), "'U".to_string()]);
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_preserves_effect_arity() {
+        // R6: moving a bound into the bracket never removes a slot. The
+        // bound-bearing occurrence is a stack slot and stays one.
+        // `: eq['T: Ord] ( 'T 'T -- Bool )` has two inputs (before and after).
+        let module = parse_src(
+            "type: Bool | False | True ;\ntrait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;\n: eq['T: Ord] ( 'T 'T -- Bool ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.inputs.len(), 2, "two inputs preserved");
+        assert_eq!(sig.outputs.len(), 1);
+    }
+
+    #[test]
+    fn parse_bound_bracket_multiple_bound_vars_parse() {
+        // R6a: `['T: Copy 'U: Ord]` parses as two var_decls.
+        let module = parse_src(
+            "trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;\n: f['T: Copy 'U: Ord] ( 'T 'U -- 'T ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_bound_bracket_unbounded_var_parses() {
+        // R6a: `['T 'U: Ord]` is legal -- `'T` unbounded, declared for
+        // documentation, but it must still appear in the effect.
+        let module = parse_src(
+            "trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;\n: f['T 'U: Ord] ( 'T 'U -- 'T ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(!sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_bound_bracket_empty_is_error() {
+        // R6: an empty bound bracket is a located error.
+        let err = parse_src(": f[] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("empty bound bracket"), "{err}");
+    }
+
+    #[test]
+    fn parse_bound_bracket_non_var_token_is_error() {
+        // R6: a non-`'`, non-`]` token inside a bound bracket is a located error.
+        let err = parse_src(": f[i64] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("expected a type variable"), "{err}");
+    }
+
+    #[test]
+    fn repl_generic_typedef_bracket_header_is_rejected() {
+        // R5: the REPL's generic-`type:` rejection fires on the bracketed
+        // form, so a REPL `type: Box['T]` still gets its "not supported in the
+        // REPL yet" message.
+        let tokens = lex("type: Box['T] val 'T ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let err = parse_typedef_line(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(err.contains("not supported in the REPL"), "{err}");
+    }
+
+    #[test]
+    fn repl_word_def_bound_bracket_parses() {
+        // R6: the REPL word-def path (parse_line_with_structs) also supports
+        // the bound bracket -- this project has a documented history of
+        // regressing the REPL path separately from the file path.
+        let tokens = lex(": f['T: Copy] ( 'T -- 'T ) ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let line = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .expect("REPL word-def with bound bracket should parse");
+        let Line::Def(def) = line else {
+            panic!("expected a word definition");
+        };
+        let sig = def.poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn skip_typedef_with_bracket_header_skips_whole_decl() {
+        // R5: `skip_typedef` and the pipe/variant scans must remain correct
+        // with header brackets present. The bracket contains only
+        // `'`-prefixed words, so no Pipe/Semicolon enters the scanned range.
+        // This test verifies a bracketed generic `type:` header is correctly
+        // skipped by `parse_generic_typedefs` and doesn't leave a residue that
+        // breaks the body pass.
+        let module = parse_src("type: Box['T] val 'T ;\n: f ( i64 -- i64 ) 1 add ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        assert_eq!(module.words.len(), 1);
+        assert_eq!(module.words[0].name, "f");
+    }
+
+    #[test]
+    fn enum_detection_with_bracket_header_is_correct() {
+        // R5: a bracketed generic enum header is correctly classified as an
+        // enum (the pipe/variant scan must not be confused by the bracket).
+        let module =
+            parse_src("type: Result['T 'E] | Ok 'T | Err 'E ;\n: f ( i64 -- i64 ) ;").unwrap();
+        assert_eq!(module.generic_enums.len(), 1);
+        assert_eq!(module.generic_enums[0].ty_var_names.len(), 2);
+        assert_eq!(module.words.len(), 1);
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_with_user_trait_bound_parses() {
+        // R6: a user-trait bound inside the bracket resolves at parse time.
+        let module =
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f['T: Show] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_glued_colon_parses() {
+        // R6a: the `:` may be glued (`'T:`) or spaced, exactly as in the
+        // in-effect bound syntax.
+        let module =
+            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f['T: Copy] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_trait_member_bound_bracket_parses() {
+        // R6: the same bracket is admitted on a trait member declaration, in
+        // the same slot relative to its own `inline` peek.
+        let module = parse_src("trait: Show 'T : show ['T: Copy] ( 'T -- ) ; ;").unwrap();
+        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
+        let sig = &show.members[0].sig;
+        assert!(sig.has_bound(0, Bound::Copy));
     }
 }
