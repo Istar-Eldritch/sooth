@@ -2268,14 +2268,14 @@ mod tests {
     #[test]
     fn splice_depth_guard_names_the_outermost_member_of_a_three_cycle() {
         let src = "import: intrinsics * ;\n\
-             trait: Cyc 'T\n\
+             trait: Cyc['T]\n\
              \x20 : a inline ( 'T 'T -- 'T ) ;\n\
              \x20 : b inline ( 'T 'T -- 'T ) ;\n\
              \x20 : c inline ( 'T 'T -- 'T ) ;\n\
              ;\n\
-             : ra inline ( 'T: Cyc 'T -- 'T ) a ;\n\
-             : rb inline ( 'T: Cyc 'T -- 'T ) b ;\n\
-             : rc inline ( 'T: Cyc 'T -- 'T ) c ;\n\
+             : ra inline ['T: Cyc] ( 'T 'T -- 'T ) a ;\n\
+             : rb inline ['T: Cyc] ( 'T 'T -- 'T ) b ;\n\
+             : rc inline ['T: Cyc] ( 'T 'T -- 'T ) c ;\n\
              impl: Cyc for i64\n\
              \x20 : a\n\
              \x20\x20 | x y |\n\
