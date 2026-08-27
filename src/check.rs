@@ -2924,9 +2924,25 @@ fn merge_arm_output_slot(
             span: x.span,
         }),
     };
+    // Preserve the quotation marker (`quot`) the same way `check_branch_join`
+    // does: a row slot carrying a `Known` literal rides untouched through
+    // every arm body, so both arms agree and the marker survives the merge.
+    // Without this, `Slot::computed(a.ty)` silently drops `quot`, and a
+    // self-tail combinator forwarding its own quotation parameter through an
+    // eliminator (e.g. `gt`'s `Ordering?`) sees a bare `Cstr` placeholder at
+    // the back-edge and rejects it.
+    let quot = match (a.quot, b.quot) {
+        (None, None) => None,
+        (Some(x), Some(y)) if x == y => Some(x),
+        // A quotation literal on one arm but not the other is a shape
+        // disagreement the type check above should have caught; fall through
+        // to `None` rather than silently picking one.
+        _ => None,
+    };
     Ok(Slot {
         alias,
         deriv,
+        quot,
         surviving: prov.union_surviving(a.surviving, b.surviving),
         ..Slot::computed(a.ty)
     })
