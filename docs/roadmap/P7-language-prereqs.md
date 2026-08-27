@@ -1075,15 +1075,16 @@ Sequenced so nothing but the last subslice touches the compiler:
   `import:`, no compatibility shim. Detail:
   [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md).
 
-**P7.S8 -- Poly-body-calls-poly-combinator lowering.** `[ planned ]` A polymorphic word's
-body calling another word that is both `is_combinator` (declares `inline`) and generic with
-a bound on its own type variable (`'T: Ord`) checks fine (`check_poly_call` treats it as an
-ordinary generic callee) but has no lowering: a combinator mints no `IrFunc`, so
-`self.env.get(name).expect("checked user word exists")` panics at the call site
-(`src/ir/func_builder/calls.rs:733`). Splicing the callee's body into the caller's poly body
-(extending the P7.S3o concrete-caller splice to a poly caller) is the target outcome; a
-located rejection at the call site is the fallback if that design doesn't hold up. This is
-the blocker named in `lib/cmp.sth`'s own comment against making `eq`/`lt`/`gt`/`lte`/`gte`/
-`ne` `inline` (`cmp` itself already is) -- `'T: Ord` generic code using a comparison from
-inside another generic word is the ordinary shape, not a corner case. Detail:
-[slice8-brief](./P7/slice8-brief.md).
+**P7.S8 -- Nested inline-combinator splice-uid collision.** `[ planned ]` Not a
+polymorphism gap (an earlier draft of this entry claimed `check_poly_call` needed a new
+splice branch for a poly body calling a bound combinator; two probe subagents refuted that
+-- it already works). The real, confirmed defect: `lower_resolved_word_call`
+(`src/ir/func_builder/calls.rs:189`) reuses the *enclosing caller's* splice uid when
+splicing a resolved trait member's body, instead of that member's own check-time uid
+namespace, so an ordinary `inline` combinator nested inside a reused member splice (e.g.
+`impl: Ord for Point`'s `cmp` calling `lt` internally, no generics involved) resolves at
+the wrong `(uid, span)` key and panics (`"checked user word exists"`,
+`src/ir/func_builder/calls.rs:733`). This is the blocker named in `lib/cmp.sth`'s own
+comment against making `eq`/`lt`/`gt`/`lte`/`gte`/`ne` `inline` (`cmp` itself already is)
+-- delegating a user `Ord` impl to a primitive comparison is the ordinary shape, not a
+corner case. Detail: [slice8-brief](./P7/slice8-brief.md).
