@@ -4821,9 +4821,12 @@ pub(super) fn resolve_combinator_overload<'a>(
                 arrays,
                 cells,
                 refs,
-                // A combinator's own type variable can carry no `Bound::User`
-                // at all (`reject_user_bound_on_combinator`), so there is
-                // nothing for an `impl:` registry lookup to filter here.
+                // A combinator's own type variable may carry a `Bound::User`
+                // (an `inline` trait member like `cmp`), but
+                // `resolve_combinator_overload` only matches the stack shape
+                // against the signature here; the bound is resolved later at
+                // the call site via the per-splice trait-call map, so there
+                // is nothing for an `impl:` registry lookup to filter here.
                 &[],
                 &[],
             ),
@@ -7504,44 +7507,6 @@ fn trait_member_operand_error(
         span.col,
         poly_type_str(expected, sig),
         poly_type_str(found, sig),
-    )
-}
-
-/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): reject a user trait bound on
-/// a polymorphic combinator's own type variable, before its body is checked.
-/// P7.S3o Phase 1: the call site at `check.rs` is removed; this function is
-/// retained (dead code) for documented rationale and future reuse.
-#[allow(dead_code)]
-pub(super) fn reject_user_bound_on_combinator(
-    word: &WordDef,
-    sig: &PolySig,
-    traits: &[TraitDecl],
-) -> Result<(), String> {
-    let Some((v, tid)) = sig.bounds.iter().find_map(|(v, bound)| match bound {
-        Bound::User(tid) => Some((*v, *tid)),
-        _ => None,
-    }) else {
-        return Ok(());
-    };
-    Err(user_bound_on_combinator_error(
-        crate::resolve::demangle_word(&word.name),
-        &traits[tid.index()].name,
-        &sig.ty_var_names[v as usize],
-        word.span,
-    ))
-}
-
-/// P7.S3e (R9/R17 scope cut, tracked as P7.S3o): a polymorphic *combinator*'s
-/// body is checked standalone and its instantiation records are scratch --
-/// they never reach `Module::instantiations`, so there is no `CallInst` for a
-/// resolved trait obligation to live on. A user bound on such a word's own
-/// type variable is rejected rather than dispatched against stale records.
-/// P7.S3o Phase 1: dead code after the call site removal above.
-#[allow(dead_code)]
-fn user_bound_on_combinator_error(word: &str, trait_name: &str, var: &str, span: Span) -> String {
-    format!(
-        "error: `{var}: {trait_name}` on the combinator `{word}` at line {}, col {} is not supported\n  note: a combinator is spliced at its call sites and records no instantiation a trait bound could resolve against",
-        span.line, span.col
     )
 }
 

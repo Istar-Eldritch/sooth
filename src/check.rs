@@ -938,15 +938,14 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
             if is_combinator(word) {
-                // P7.S3o: the `reject_user_bound_on_combinator` gate is
-                // removed — bounded combinators now proceed to the standalone
+                // P7.S3s-follow: bounded combinators proceed to the standalone
                 // check. A bounded poly word (like `gt` with `'T: Ord`) is
                 // handled by the per-splice mechanism: `check_poly_call`
                 // redirects the inner CallInst to `splice_records`, carrying
                 // the seeded `trait_calls` map. A bare member call (like
-                // `cmp` directly) falls through the standalone check's
-                // `env.get` as an unknown word until Phase 3's dispatch
-                // injection lands.
+                // `cmp` directly) is resolved through the per-splice
+                // `splice_trait_calls` map, which `lower_resolved_word_call`
+                // reads to splice an `inline` member's body at its call site.
                 // R14-R17: a polymorphic combinator (`each`/`map`/`fold`) is
                 // checked standalone by instantiating its signature at
                 // concrete stand-in types and running the ordinary checker on

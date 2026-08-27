@@ -247,12 +247,12 @@ fn tag_on_a_non_enum_is_a_located_check_error() {
 /// Part 1: the six surface names resolve to `lib/` definitions and no
 /// comparison builtin row remains.
 ///
-/// Revised under P7.S3s R5: `Ord` became a nominal trait, and
-/// `reject_user_bound_on_combinator` refuses any `Bound::User` on an
-/// `inline` word's own type variable -- so the six comparisons, once `Ord`
-/// stopped being a reserved predicate, could no longer stay `inline` (they
-/// are ordinary non-inline calls now, a measured ~2x tax accepted for this
-/// slice, P7.S3o names the follow-on that could restore the splice).
+/// Revised under P7.S3s R5: `Ord` became a nominal trait. The six
+/// comparisons carry a `'T: Ord` bound but are ordinary non-inline words:
+/// splicing them inside a quotation-carrying combinator perturbs quotation
+/// provenance tracking (P7.S3s Phase 1), so the inline cost saving is taken
+/// at `cmp`'s trait member body instead (P7.S3s-follow), not at the six
+/// callers of it.
 #[test]
 fn the_six_comparisons_are_library_words() {
     let core = test_support::core_lib_words();
@@ -264,7 +264,7 @@ fn the_six_comparisons_are_library_words() {
             .unwrap_or_else(|| panic!("`{name}` is a `lib/cmp.sth` word"));
         assert!(
             !word.declares_inline,
-            "`{name}` is a real call now (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline` word may not declare"
+            "`{name}` is a real call, not spliced (P7.S3s Phase 1): splicing inside a quotation-carrying combinator perturbs provenance tracking, so the inline saving is taken at `cmp`'s member body instead"
         );
         let sig = word
             .poly
@@ -353,14 +353,13 @@ fn check_ueq_family_lowers_to_cmpop() {
 }
 
 /// Part 3: the canonical `a b eq if ... ...` pattern. `if` is still spliced
-/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is now a real call
-/// through `cmp` (P7.S3s R5): `Ord` is a `Bound::User`, which an `inline`
-/// word cannot declare, so the comparison itself is the accepted ~2x tax,
-/// not a free abstraction any more.
+/// (no `Instr::Call` for it, no `IrFunc` minted), but `eq` is a real call
+/// through `cmp` (P7.S3s R5): the six comparisons are non-inline words so
+/// the comparison itself is the accepted ~2x tax, not a free abstraction.
 ///
-/// Measured mutation: restore `inline` on `eq` (with its `Ord` bound still in
-/// place) and the program stops building -- `reject_user_bound_on_combinator`
-/// refuses a `Bound::User` on a combinator's own type variable.
+/// Measured mutation: restore `inline` on `eq` and the program stops
+/// building -- splicing inside a quotation-carrying combinator perturbs
+/// quotation provenance tracking (P7.S3s Phase 1 triage).
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
     let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
