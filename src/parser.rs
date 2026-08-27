@@ -69,11 +69,6 @@ fn prepass_type_decls(
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
                     reject_reserved_name("type", name, *span)?;
-                    // P7.S6 (R10): the postfix header form is retired. Caught
-                    // here, where the narrowed `header_is_generic` below would
-                    // otherwise register `type: Box 'T ...` as a concrete
-                    // struct and leave the mis-parse to the field loop.
-                    reject_postfix_header_var("type:", name, tokens, i + 2)?;
                     // Phase 5 slice 1 (R1/D5): a generic header mints no
                     // concrete struct/enum registry entry here -- its full
                     // variable-scoped shape is parsed into
@@ -107,8 +102,8 @@ fn prepass_type_decls(
 /// pre-pass (which skips registering a generic header into the concrete
 /// registries) and the parser's own lookahead before dispatching to the
 /// generic or concrete production, so the three sites can never disagree.
-/// The retired postfix form (`type: Box 'T`) is not merely non-generic here:
-/// `reject_postfix_header_var` turns it into a located error rather than
+/// The retired postfix form (`type: Box 'T`) is not merely non-generic: the
+/// concrete productions raise `reject_postfix_header_var` on it rather than
 /// letting it mis-parse as a concrete declaration.
 fn header_is_generic(tokens: &[(Token, Span)], start: usize) -> bool {
     matches!(tokens.get(start), Some((Token::LBracket, _)))
@@ -128,9 +123,12 @@ fn postfix_header_var_error(kind: &str, decl_name: &str, var: &str, span: Span) 
 
 /// P7.S6 (R10): raise `postfix_header_var_error` when the token at `start` --
 /// the one directly following a declaration's name -- is a `'`-prefixed word.
-/// Called from every entry path that reads a `type:` header: the module
-/// pre-pass, and both concrete productions (which the REPL's own `type:` line
-/// readers reach without the pre-pass).
+/// Called from both concrete `type:` productions, which is every entry path
+/// that reads a `type:` header -- including the REPL's own `type:`-line
+/// readers, which arrive without the module pre-pass. Not from the pre-pass:
+/// there it would only fire on a `type:` the parser never dispatches to a
+/// production at all (one inside a word body), where blaming the header form
+/// hides the real defect.
 fn reject_postfix_header_var(
     kind: &str,
     decl_name: &str,
@@ -11695,6 +11693,9 @@ mod tests {
             !err.contains("array[T N]"),
             "a `~[` opener must not be offered the array spelling: {err}"
         );
+        // Located at the `~[`, which the base-1 caller has already consumed,
+        // so the span comes from behind the cursor rather than at it.
+        assert!(err.contains("line 1, col 7"), "{err}");
     }
 
     #[test]
