@@ -1401,6 +1401,108 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     std::fs::remove_file(&hand_bin).ok();
 }
 
+// -- criterion 18 (phase 4): dogfood, the combinator rewrite ------------------
+
+#[test]
+fn combinators_dogfood_matches_hand_threaded() {
+    // R27: `examples/array_totals.sth` sums and doubles a small array through
+    // `fold`/`map`/`each` imported from `lib/combinators.sth`. This asserts
+    // it builds and runs to the same total and doubled elements as its
+    // hand-threaded twin, `examples/array_totals_hand.sth`: three manual
+    // `times` loops over the same array, each with a synthesized `>usize`
+    // index, a `&arr i &> @` read, and (for the doubling loop) a
+    // `&!arr i &!> v !` write, the exact shape the inliner must produce
+    // (recon 2). Both are real committed files, not a string invented inside
+    // this test, so the equivalence is pinned against an actual baseline.
+    fn build_and_run(path: &str) -> (String, Option<i32>) {
+        let binary = common::build_example(path);
+        let output = std::process::Command::new(&binary)
+            .output()
+            .expect("binary should run");
+        std::fs::remove_file(&binary).ok();
+        (
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            output.status.code(),
+        )
+    }
+
+    let (hand_stdout, hand_code) = build_and_run("examples/array_totals_hand.sth");
+    assert_eq!(hand_code, Some(0));
+    assert_eq!(hand_stdout, "25\n6\n14\n2\n18\n10\n");
+
+    let (combinator_stdout, combinator_code) = build_and_run("examples/array_totals.sth");
+    assert_eq!(combinator_stdout, hand_stdout);
+    assert_eq!(combinator_code, Some(0));
+}
+
+// -- criterion 16 (phase 3): the filter/while dogfood ------------------------
+
+#[test]
+fn filter_while_dogfood_matches_hand_threaded() {
+    // R18: `examples/filter_while.sth` keeps `scores`' elements greater than
+    // 4 and counts them via `filter`, then runs a fixpoint loop via `while`,
+    // both from `lib/combinators.sth`. This asserts it builds and runs to the
+    // same output as its hand-threaded twin, `examples/filter_while_hand.sth`:
+    // a manual `times` loop threading a write cursor for the filter, and a
+    // hand-written self-tail-recursive word for the fixpoint. `scores`'
+    // result is passed straight from the producer word into `filter`, never
+    // bound to a local first, so this does not trip 6a's bind-then-pass alias
+    // limitation (recon 10).
+    fn build_and_run(path: &str) -> (String, Option<i32>) {
+        let binary = common::build_example(path);
+        let output = std::process::Command::new(&binary)
+            .output()
+            .expect("binary should run");
+        std::fs::remove_file(&binary).ok();
+        (
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            output.status.code(),
+        )
+    }
+
+    let (hand_stdout, hand_code) = build_and_run("examples/filter_while_hand.sth");
+    assert_eq!(hand_code, Some(0));
+    assert_eq!(hand_stdout, "3\n5\n");
+
+    let (combinator_stdout, combinator_code) = build_and_run("examples/filter_while.sth");
+    assert_eq!(combinator_stdout, hand_stdout);
+    assert_eq!(combinator_code, Some(0));
+}
+
+// -- criterion 9 (phase 3): the combinator-in-`times` dogfood ----------------
+
+#[test]
+fn combinator_in_times_dogfood_matches_hand_threaded() {
+    // R9: `examples/combinator_in_times.sth` runs `each` from
+    // `lib/combinators.sth` inside an outer `times` body, ROADMAP's own
+    // motivating shape for 6d (`2 [ | i | mk [ . ] c::each ] times`), which
+    // R18 rejected before this slice lifted the limit. This asserts it
+    // builds and runs to the same output as its hand-threaded twin,
+    // `examples/combinator_in_times_hand.sth`: an outer `times` over 3 rounds,
+    // each building a 3-element array and printing its elements through a
+    // manual inner `times` loop with the same `&arr i &> @` read, the exact
+    // shape `each`'s internal loop takes once spliced.
+    fn build_and_run(path: &str) -> (String, Option<i32>) {
+        let binary = common::build_example(path);
+        let output = std::process::Command::new(&binary)
+            .output()
+            .expect("binary should run");
+        std::fs::remove_file(&binary).ok();
+        (
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            output.status.code(),
+        )
+    }
+
+    let (hand_stdout, hand_code) = build_and_run("examples/combinator_in_times_hand.sth");
+    assert_eq!(hand_code, Some(0));
+    assert_eq!(hand_stdout, "0\n1\n2\n1\n2\n3\n2\n3\n4\n");
+
+    let (combinator_stdout, combinator_code) = build_and_run("examples/combinator_in_times.sth");
+    assert_eq!(combinator_stdout, hand_stdout);
+    assert_eq!(combinator_code, Some(0));
+}
+
 // -- slice 6c (phase 1): quotation-taking words retained at a session line ---
 
 /// Write `contents` to a uniquely-named temp `.sth` file and return its path.
