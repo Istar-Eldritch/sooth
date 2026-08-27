@@ -162,15 +162,30 @@ impl<'a> FuncBuilder<'a> {
     /// its terms, truncate `self.locals`, mirroring the ordinary combinator
     /// splice in `lower_call`'s `_` arm.
     ///
-    /// **The uid rule.** The checker does not splice a resolved trait member
-    /// (it checks it as an ordinary call against the member word's grounded
-    /// signature), so no splice uid was allocated for it. Minting one here
-    /// desynchronizes lowering's uid counter from the checker's, and the next
-    /// splice's `splice_records`/`splice_trait_calls` lookups miss; the
-    /// observed symptom is a downstream `checked user word exists: cmp` panic,
-    /// one comparison later. The member splice therefore reuses the enclosing
-    /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) and
-    /// pushes nothing.
+    /// **The uid rule (P7.S8, R1).** The checker checks each `impl:` member as
+    /// an ordinary top-level word, with `inline_uid` seeded at
+    /// `word_idx * INLINE_UID_STRIDE` (`check.rs`), so every splice uid inside
+    /// that body lives in the *member's* namespace, not the caller's. Splicing
+    /// the body here therefore enters that namespace for the duration:
+    ///
+    /// - the member's own seed (`member_uid_seeds`, keyed by the same name as
+    ///   `combinators`) is pushed onto `splice_uid_stack`, so a nested bare
+    ///   member call or poly call in the body finds its
+    ///   `splice_trait_calls`/`splice_records` entry, and
+    /// - `self.inline_uid` -- the minting counter, shared across the whole
+    ///   func's lowering -- is *reset* to that seed, so a combinator splice
+    ///   nested inside the body mints the uid the checker minted for it.
+    ///   Pushing the seed alone is not enough: the nested mint reads this
+    ///   counter, not the stack.
+    ///
+    /// Both are restored on the way out, along with `member_splice_depth`,
+    /// which the re-splice bracket raises so `lower_call`'s span-keyed
+    /// `trait_calls` lookup stands aside for the duration (R1b).
+    ///
+    /// A member absent from `member_uid_seeds` keeps the enclosing splice's uid
+    /// (`splice_uid_stack.last()`, or 0 at the top level): that is the REPL's
+    /// state, and it hands out empty splice tables, so no member splice there
+    /// has an entry to miss.
     ///
     /// That reused uid is not unique, so the member body is renamed through
     /// `alpha_rename_member_locals`, whose suffix is disjoint from the
@@ -186,10 +201,20 @@ impl<'a> FuncBuilder<'a> {
     /// is the predicate that would decide it.
     fn lower_resolved_word_call(&mut self, sym_name: &str) {
         if let Some(entry) = self.combinators.get(sym_name) {
-            let uid = self.splice_uid_stack.last().copied().unwrap_or(0);
+            let uid = match self.member_uid_seeds.get(sym_name) {
+                Some(&seed) => seed,
+                None => self.splice_uid_stack.last().copied().unwrap_or(0),
+            };
             let body = crate::ast::alpha_rename_member_locals(&entry.terms, uid);
             let locals_depth = self.locals.len();
+            let caller_inline_uid = self.inline_uid;
+            self.inline_uid = uid;
+            self.splice_uid_stack.push(uid);
+            self.member_splice_depth += 1;
             self.lower_terms(&body, false);
+            self.member_splice_depth -= 1;
+            self.splice_uid_stack.pop();
+            self.inline_uid = caller_inline_uid;
             self.locals.truncate(locals_depth);
             return;
         }
@@ -240,9 +265,23 @@ impl<'a> FuncBuilder<'a> {
         // to the implementing word's own lowering symbol -- an ordinary concrete
         // word (decision 1/2), never a struct/enum-generated one, so it skips
         // the struct/enum special-casing below and calls it directly.
-        if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
-            self.lower_resolved_word_call(&sym_name);
-            return;
+        //
+        // P7.S8 (R1b): valid except during an active *member re-splice*. This
+        // table is span-keyed and holds one grounding per `FuncBuilder`
+        // session; a member body spliced by `lower_resolved_word_call` can
+        // reach the same source span under a second grounding (the member's
+        // fields' types), where the recorded answer is the wrong one and
+        // re-dispatching to it recurses without bound. Inside that bracket the
+        // uid-scoped `splice_trait_calls` below is the correct table. The gate
+        // is `member_splice_depth`, not `splice_uid_stack.is_empty()`: an
+        // ordinary combinator splice introduces no second grounding, and a
+        // bound member call inside a combinator's quotation argument has no
+        // `splice_trait_calls` entry to fall through to.
+        if self.member_splice_depth == 0 {
+            if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
+                self.lower_resolved_word_call(&sym_name);
+                return;
+            }
         }
         // P7.S3o Phase 3: a bare trait member call resolved at a combinator
         // splice site (e.g. `cmp` called directly inside an inline

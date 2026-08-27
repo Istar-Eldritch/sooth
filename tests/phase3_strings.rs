@@ -187,14 +187,14 @@ fn usize_carried_across_a_repl_line_renders_unsigned_not_negative() {
     assert_eq!(out, "stack: 18446744073709551615\n");
 }
 
-#[ignore = "P7.S3s review finding: the REPL's `splice_import` binds a \
-    concrete word (`w.poly.is_none()`) or retains a combinator \
-    (`declares_inline`); it has no case for an imported non-inline poly \
-    word, a category R5 creates for the first time (`lt` lost `inline`). \
-    Every comparison is unusable from the REPL now, not just a session's \
-    own `'T: Copy Ord` declaration (R8's narrower, already-accepted scope) \
-    -- fixing this needs the REPL to support calling/monomorphizing a \
-    non-inline generic word, a separate slice."]
+#[ignore = "REPL trait/impl checking is unimplemented: `check.rs`'s two \
+    REPL check sites (`:1293`/`:1387`) hardcode `TraitResolveCtx::scratch()`, \
+    whose premise (a session declares no `trait:`, so no `Bound::User` \
+    reaches a REPL body) is false once a session imports `core::cmp`. A \
+    comparison call then indexes past the scratch trait table and ICEs at \
+    `check/poly.rs:976`. Fixing it needs a `Session`-level traits/impls \
+    accumulation table (Session has none, unlike its `structs`/`enums`) \
+    threaded through both sites: tracked as the REPL trait/impl slice."]
 #[test]
 fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
     // The sharpest regression: a degraded carried `usize` compares signed

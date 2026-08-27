@@ -60,6 +60,17 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .map(|(idx, _)| idx)
         .collect();
     let combinator_bodies = crate::check::combinator_index(module.words.iter());
+    // P7.S8 (R2): each word's check-time `inline_uid` seed, by name. Built from
+    // the same `module.words.iter().enumerate()` the per-word pass below and
+    // `check.rs`'s own word loop walk, so the two sides agree by construction
+    // rather than by copying. `lower_resolved_word_call` reads it to lower a
+    // spliced trait member body under that member's own uid namespace.
+    let member_uid_seeds: HashMap<String, u32> = module
+        .words
+        .iter()
+        .enumerate()
+        .map(|(idx, w)| (w.name.clone(), idx as u32 * crate::check::INLINE_UID_STRIDE))
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -226,6 +237,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 EnvPlan::None,
                 &module.splice_records,
                 &module.splice_trait_calls,
+                &member_uid_seeds,
                 // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
                 // both walk `module.words` in the same order (this loop
                 // filters afterward, but `idx` still comes from the same
@@ -363,11 +375,19 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            // The real map, not an empty one: a composed instantiation's body
+            // is exactly where the generic path reaches a member re-splice, so
+            // an empty map here would leave P7.S8's R1 inert on that path.
+            &member_uid_seeds,
             // A generic instantiation's own body is never checked through
             // `check_word`'s real (non-scratch) `PolyCtx` (`check_poly_body`'s
             // symbolic `poly_walk` pre-pass handles a poly body instead, and
             // never writes `splice_trait_calls`/`splice_records`), so no seed
-            // here can collide with a real entry.
+            // here can collide with a real entry. P7.S8 (R3): safe because a
+            // member body spliced out of this one no longer inherits this
+            // counter at all -- it is reset to the member's own seed for the
+            // duration of its splice, so the transitive collision that made
+            // this `0` questionable cannot happen through that path.
             0,
         ));
     }
@@ -712,6 +732,7 @@ pub fn lower_line(
         combinators,
         empty_splice_records(),
         empty_splice_trait_calls(),
+        empty_member_uid_seeds(),
     );
     (func, extra, m, out_bytes as usize)
 }
@@ -898,6 +919,10 @@ pub(crate) fn lower_word(
         EnvPlan::None,
         splice_records,
         splice_trait_calls,
+        // REPL path: it hands out empty splice tables, so a member splice here
+        // has no `(uid, span)` entry to miss and the seed map is a documented
+        // no-op (`empty_member_uid_seeds`).
+        empty_member_uid_seeds(),
         // REPL path: `check_def_collecting_drop_sites` seeds the matching
         // checker-side `Provenance::inline_uid` at 0 too.
         0,
@@ -965,6 +990,7 @@ pub(crate) fn lower_instantiation(
         EnvPlan::None,
         empty_splice_records(),
         empty_splice_trait_calls(),
+        empty_member_uid_seeds(),
         0,
     )
 }
@@ -997,6 +1023,90 @@ mod tests {
     use crate::check::check;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
+
+    /// A user `impl: Ord` whose `cmp` body calls the `inline` library
+    /// comparisons, so its own body splices and the checker records splice
+    /// entries under the *member word's* uid namespace.
+    const POINT_ORD: &str = "type: Point x i64 ;\n\
+         impl: Ord for Point\n\
+           : cmp\n\
+             | a b |\n\
+             &a &x @ | ax | &b &x @ | bx |\n\
+             a drop b drop\n\
+             ax bx lt ~[ Less ] ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if ;\n\
+         ;\n";
+
+    /// P7.S8 (R1/R2): the seed `member_uid_seeds` hands `lower_resolved_word_call`
+    /// is the uid the checker *actually* minted for that member's first splice,
+    /// measured off `module.splice_trait_calls` rather than assumed from the
+    /// formula. The member word is not at index 0, so `word_idx * STRIDE` is a
+    /// non-zero value a constant-`0` seed could not have produced.
+    #[test]
+    fn a_member_words_check_time_seed_is_its_word_index_times_the_stride() {
+        // A word ahead of the `impl:` block, so the member is not `words[0]`
+        // and its seed is a value a constant-`0` formula could not produce.
+        let src = format!(
+            ": leading ( -- ) ;\n{POINT_ORD}: main ( -- ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+        );
+        let tokens = lex(&src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+
+        let (idx, name) = module
+            .words
+            .iter()
+            .enumerate()
+            .find_map(|(i, w)| w.name.ends_with(";Point").then(|| (i, w.name.clone())))
+            .expect("the `impl: Ord for Point` member word is a module word");
+        let seed = idx as u32 * crate::check::INLINE_UID_STRIDE;
+        assert_ne!(
+            seed, 0,
+            "the member is not `words[0]`, so the seed is not 0"
+        );
+
+        let uids: Vec<u32> = module
+            .splice_trait_calls
+            .keys()
+            .map(|&(uid, _)| uid)
+            .filter(|uid| *uid / crate::check::INLINE_UID_STRIDE == idx as u32)
+            .collect();
+        assert!(
+            !uids.is_empty(),
+            "`{name}`'s body splices `lt`/`gt`, whose bare `cmp` calls are recorded per splice"
+        );
+        assert_eq!(
+            uids.iter().copied().min(),
+            Some(seed),
+            "the first uid minted inside the member body is its seed itself, not `seed + k`"
+        );
+
+        let seeds: HashMap<String, u32> = module
+            .words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| (w.name.clone(), i as u32 * crate::check::INLINE_UID_STRIDE))
+            .collect();
+        assert_eq!(seeds.get(&name), Some(&seed), "`lower`'s map agrees");
+    }
+
+    /// P7.S8 (R1): the shape the fix exists for -- a spliced member body that
+    /// itself splices a combinator, two levels below the caller. It reaches
+    /// lowering through `lower_src`'s own `check` -> `lower` path, so a
+    /// regression in the uid rule is a panic here and not only in the
+    /// integration goldens.
+    #[test]
+    fn a_spliced_member_body_that_splices_a_combinator_lowers() {
+        let module = lower_src(&format!(
+            "{POINT_ORD}: w ( -- i64 ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if ;\n\
+             : main ( -- ) w . ;\n"
+        ));
+        let w = func(&module, "w");
+        assert!(
+            call_symbols(w).is_empty(),
+            "every level splices: no call survives in `w`, got {:?}",
+            call_symbols(w)
+        );
+    }
 
     /// Whether a function's block graph contains a real cycle (a block
     /// reachable from one of its own successors), rather than guessing from

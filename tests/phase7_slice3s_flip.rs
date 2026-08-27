@@ -134,9 +134,13 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
 /// exact text, minus the line/column, which is the fixture's layout rather
 /// than the diagnostic's content.
 ///
-/// `lt` is non-inline (the six surface comparisons are ordinary words), so
-/// the unsatisfied-bound error names `lt` directly — the word the caller
-/// wrote — rather than `cmp` (the trait member `lt` calls internally).
+/// The error names `cmp`, the trait member, not `lt`, the word the caller
+/// wrote: the six surface comparisons are `inline`, so `lt`'s body is spliced
+/// and the failing instantiation is `cmp`'s, reported at `lib/cmp.sth`'s own
+/// line. The second line -- the useful one, naming the missing `impl:`
+/// signature -- is unaffected. Restoring the caller's own attribution needs a
+/// splice-origin span carried through unsatisfied-bound reporting, which is a
+/// diagnostics feature of its own (recorded as a P7 follow-up).
 #[test]
 fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     let (_t, entry) = program(
@@ -148,7 +152,7 @@ fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
+        err.contains("cannot instantiate `'T` of `cmp` with `Vec2` in `main`"),
         "unexpected diagnostic: {err}"
     );
     assert!(
@@ -349,5 +353,93 @@ fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
     // The compared pair is `a b`, never the `lhs rhs` the member body's own
     // locals share a name with: 1 2 -> Less, 2 1 -> Greater, 1 1 -> Equal.
     // Under the collision all three printed 0 (comparing 9 with 9).
+    assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
+}
+
+// -- P7.S8: the nested-splice uid rule ------------------------------------
+
+/// P7.S8 (R6): the panic the slice fixes, with **no generic word anywhere in
+/// the call chain**. `Point`'s `impl: Ord` body calls the library `lt`/`gt`,
+/// which are `inline`, so lowering splices `lt`'s body into `main`, then
+/// splices `cmp`-for-`Point`'s body into that, then splices `lt`/`gt` again at
+/// `i64` inside it -- three splice levels deep with no `mymax` and no `θ`.
+///
+/// Before the fix the member splice reused the *caller's* `inline_uid`, so the
+/// second level's `(uid, span)` lookup missed its `splice_trait_calls` entry
+/// and fell through to the ordinary call path, panicking with `checked user
+/// word exists` at `ir/func_builder/calls.rs`.
+#[test]
+fn a_concrete_impl_ord_delegating_to_lt_builds_and_runs() {
+    let (_t, entry) = program(
+        "concrete-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : main ( -- )\n\
+               3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               7 Point 3 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               5 Point 5 Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "1\n0\n0\n");
+}
+
+/// P7.S8 (R7): the same member splice inside a self-tail-recursive loop body.
+/// uid minting is static and `emit_back_edge` never reads `splice_uid_stack`,
+/// so the loop transform and the uid rule are independent -- this is the guard
+/// on that, and it does panic at the same site without the fix.
+#[test]
+fn a_self_tail_word_comparing_a_user_struct_in_its_loop_builds_and_runs() {
+    let (_t, entry) = program(
+        "self-tail-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : countdown ( i64 i64 -- i64 )\n\
+               | n acc |\n\
+               0 Point n Point lt\n\
+               ~[ n 1 sub acc n add countdown ]\n\
+               ~[ acc ] if ;\n\
+             : main ( -- ) 5 0 countdown . ;\n"
+        ),
+    );
+    // 5+4+3+2+1: the loop runs until `0 < n` is false.
+    assert_eq!(build_and_run(&entry), "15\n");
+}
+
+/// P7.S8 (R1c): a **bound member call inside a combinator's quotation
+/// argument**, in a generic body, instantiated at two distinct types. This
+/// shape builds and runs on pristine `main`; it is committed here because it is
+/// the counter-example that rules out gating `trait_calls` on
+/// `splice_uid_stack.is_empty()`. That blanket gate also fires for an ordinary
+/// combinator splice like the `if` below, and this call has no
+/// `splice_trait_calls` entry to fall through to (`resolve_splice_member_call`
+/// needs a `combinator_sig` this shape does not have), so the broad gate turns
+/// it into a `checked user word exists` panic. The narrow
+/// `member_splice_depth` gate leaves it alone.
+#[test]
+fn a_bound_member_call_inside_a_quotation_argument_instantiates_at_two_types() {
+    let (_t, entry) = program(
+        "member-call-in-quotation",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool True Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             {POINT_IMPL}\
+             : myeq ( 'T: Copy Ord 'T -- i64 )\n\
+               | a b |\n\
+               True\n\
+               ~[ a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ]\n\
+               ~[ 9 ] if ;\n\
+             : main ( -- )\n\
+               3 Point 7 Point myeq .\n\
+               7 Point 3 Point myeq .\n\
+               4 4 myeq . ;\n"
+        ),
+    );
     assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
 }
