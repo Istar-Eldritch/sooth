@@ -13,6 +13,9 @@ inverts: mutation testing applies to the *migrated* tests (does the relocated fo
 fail when the rule it guards breaks?), and completeness of the deletions is proved by grep
 over the corpus and its review-graph notes, not by a green build.
 
+Per-phase reports (the classifications, rulings and carried-forward findings the phases
+below demand) go in [`slice9-phase-notes.md`](./slice9-phase-notes.md).
+
 Three facts the brief did not surface, and they dominate the schedule:
 
 1. **The bare-line path is load-bearing test infrastructure, not just REPL production
