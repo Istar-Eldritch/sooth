@@ -65,10 +65,10 @@ fn self_calls(f: &IrFunc) -> usize {
 /// Jumps to *the loop's own header*, the target `begin_loop` seals block 0's
 /// `Jmp` into (`opens_a_loop_header`, below, locates the fact a header was
 /// opened at all; this locates which block it is and counts real back-edges
-/// to it). Not "any block whose `Jmp` target id is <= its own": a spliced
-/// eliminator's join block is also reached by an earlier-numbered arm's jump
-/// (an ordinary forward-branch-then-merge shape, no loop involved), which the
-/// old id-comparison heuristic miscounted as a back-edge the moment a
+/// to it). Not "any block whose `Jmp` target id is <= its own": a jump to an
+/// earlier-allocated merge block (an ordinary forward-branch-then-merge
+/// shape, no loop involved) is also target-id-<= its source, which the old
+/// id-comparison heuristic miscounted as a back-edge the moment a
 /// comparison's `Ordering?` splices inside a self-tail loop's body.
 fn back_edges(f: &IrFunc) -> usize {
     let Terminator::Jmp(header) = f.blocks[0].term else {
@@ -330,10 +330,11 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
 /// miscounted -- before the six comparisons themselves are flipped (P7.S8).
 /// Built by hand over the raw `ult`/`ugt`/`branch` primitives (not `cmp`,
 /// which needs a generic `'T: Ord` body to dispatch bare) so the witness
-/// needs no flip: `Ordering?`'s eliminator allocates its join block before
-/// its arm blocks, and the `Greater` arm's self-tail-spliced jump to that
-/// join is a second, earlier-numbered-target `Jmp` the old helper counted as
-/// a back-edge alongside the real one to the loop header.
+/// needs no flip: the outer `branch`'s merge block (where `Ordering?`
+/// dispatches) is allocated before the inner `branch`'s join block, so the
+/// inner join's jump back to that earlier merge block is a second,
+/// earlier-numbered-target `Jmp` the old helper counted as a back-edge
+/// alongside the real one to the loop header.
 #[test]
 fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
     let src = "\

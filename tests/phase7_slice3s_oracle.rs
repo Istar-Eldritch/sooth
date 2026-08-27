@@ -100,9 +100,7 @@ fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
 /// comparison words reached on the way there. A monomorph carries the
 /// `sooth_mono_` prefix, so a substring filter needs no knowledge of the
 /// mangling scheme itself -- only the walk needs to start from the entry
-/// point under test rather than the whole binary. The monomorphs are what
-/// distinguish *which* comparison a site calls (`sooth_mono_gt__*` vs
-/// `sooth_mono_lt__*`).
+/// point under test rather than the whole binary.
 ///
 /// P7.S3s-follow: `cmp` is an `inline` trait member, so the `impl: Ord`
 /// bodies are spliced into the comparison monomorphs and mint no symbol of
@@ -237,10 +235,9 @@ fn build_run_and_dispatch_targets(src: &str, tag: &str) -> (String, Vec<String>)
 }
 
 /// R7: the inline candidate (`mymax`/`mymax3` with `inline`) must produce
-/// byte-identical stdout and the same resolved `impl: Ord` dispatch targets
-/// as the non-inline baseline (the same source without `inline`), at two
-/// splices of `mymax3` and two types (i64 and f64), with `mymax` also called
-/// at both types so it mints monomorphs in the baseline.
+/// byte-identical stdout as the non-inline baseline (the same source without
+/// `inline`), at two splices of `mymax3` and two types (i64 and f64), with
+/// `mymax` also called at both types so it mints monomorphs in the baseline.
 #[test]
 fn inline_mymax_mymax3_matches_noninline_baseline() {
     let baseline_src = fixture_source(false);
@@ -248,11 +245,7 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
 
     let (baseline_stdout, baseline_targets) =
         build_run_and_dispatch_targets(&baseline_src, "noninline-baseline");
-    // P7.S8 phase 1: the candidate's dispatch targets are no longer compared
-    // against the baseline's (see review round 4 above), so only its stdout
-    // is read here.
-    let (candidate_stdout, _candidate_targets) =
-        build_run_and_dispatch_targets(&candidate_src, "inline-candidate");
+    let candidate_stdout = build_run_and_dispatch_targets(&candidate_src, "inline-candidate").0;
 
     // R8: stdout is byte-identical.
     assert_eq!(
