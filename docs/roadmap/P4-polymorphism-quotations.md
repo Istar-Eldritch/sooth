@@ -292,16 +292,11 @@ then find out what the compiler owes it.
    linking as one program, with a non-exported word rejected at a use site in the second and
    `import:` at the REPL rejected with a located error.
 
-   **5b — imports at the REPL.** What an import means in a session: whether a line may
-   `import:` at all or only a loaded file may, how an imported module interacts with
-   generation-mangled redefinition, whether re-importing after an edit reloads or is frozen
-   the way every other REPL binding is frozen (DESIGN.md's deferred REPL late-binding
-   question is adjacent and should not be reopened here by accident), and whether the export
-   list is enforced against REPL lines or a session sees everything. Sized at its own brief;
-   the honest possibility is that the frozen-binding rule makes this smaller than it looks,
-   since an imported file is just more words entering the env at a known generation.
-   **Exit:** a REPL session importing a file and calling an exported word from it, with the
-   frozen-binding rule holding across a redefinition.
+   **5b — imports at the REPL.** Retired with the REPL (P7.S9): the REPL no longer exists,
+   so a session-scoped `import:` is not a criterion. The module-system facts it exercised
+   (a qualified word/type resolving across files, a locked export list, a rejected imported
+   `main`, transitive closure, struct-id aliasing across a qualified/unqualified spelling)
+   are covered natively by `tests/phase4_modules.rs`.
 
    **Dogfood (5a):** the combinator library (slice 6) lives in its own file; a small
    standalone type (e.g. a `Point`/`Vec2` or a stack-like struct) lives in another, exported

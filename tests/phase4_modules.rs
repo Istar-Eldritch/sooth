@@ -172,6 +172,98 @@ fn diamond_import_dedupes_by_canonical_path() {
 }
 
 #[test]
+fn imported_third_file_stays_closed_behind_a_reexporting_module() {
+    // Migrated from the retired REPL suite (P7.S9): a library that imports a
+    // third file and calls it stays the only door to that file's result --
+    // the importer's own qualifier never reaches through to the third file.
+    let c = Closure::new("transitive-closed");
+    c.write("base.sth", ": deep ( -- i64 ) 9 ;\nexport: deep ;\n");
+    c.write(
+        "lib.sth",
+        "import: \"base.sth\" base ;\n: shallow ( -- i64 ) base::deep ;\nexport: shallow ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: \"lib.sth\" q ;\n: main ( -- ) q::shallow . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "9\n",
+        "the re-exporting module's own result crosses"
+    );
+    assert_eq!(code, 0);
+
+    let entry2 = c.write(
+        "main2.sth",
+        "import: \"lib.sth\" q ;\n: main ( -- ) q::deep . ;\n",
+    );
+    let err = build_err(&entry2);
+    assert!(
+        err.contains("unknown word") && err.contains("deep"),
+        "the third file's name never crosses under q: {err}"
+    );
+}
+
+#[test]
+fn nested_struct_ids_remap_when_a_local_type_declares_first() {
+    // Migrated from the retired REPL suite (P7.S9): a locally-declared
+    // struct forces a non-zero id base before the import runs, so a remap
+    // that kept closure-local ids would point the imported `Outer`'s field
+    // at `Local` and misread the inner field.
+    let c = Closure::new("nested-remap");
+    c.write(
+        "lib.sth",
+        "type: Inner a i64 ;\ntype: Outer i Inner ;\nexport: Inner Outer ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "type: Local z i64 ;\nimport: \"lib.sth\" q ;\n: main ( -- ) 1 q::Inner q::Outer &i @ &a @ . drop drop ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "1\n",
+        "the nested field reads back to its scalar via remapped ids"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn imported_type_resolves_in_signature_and_typedef_position() {
+    // Migrated from the retired REPL suite (P7.S9): a qualified type name
+    // resolves both in a word's stack effect and in a `type:` field position,
+    // not just at the call/body-rewrite site.
+    let c = Closure::new("typos");
+    c.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: \"lib.sth\" q ;\n: id ( q::T -- q::T ) ;\ntype: Wrap t q::T ;\n: main ( -- ) 1 q::T id &v @ . drop ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn selective_type_import_aliases_one_struct_id() {
+    // Migrated from the retired REPL suite (P7.S9): a value constructed via
+    // the unqualified spelling and one via the qualified spelling are the
+    // same type -- one `StructId` behind both aliases, not two incompatible
+    // ones.
+    let c = Closure::new("selective-type-alias");
+    c.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: \"lib.sth\" q | T | ;\n: id ( T -- q::T ) ;\n: main ( -- ) 1 T id &v @ . drop ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "1\n",
+        "a word typed `T` in and `q::T` out type-checks: same StructId behind both spellings"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn core_word_called_from_an_imported_module_resolves() {
     // P8.S2 (R3/R8): `if`/`eq` are `core` words reached by `import:` now, not a
     // prelude injected into every module, so the interesting witness moved: an
