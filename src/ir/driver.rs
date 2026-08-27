@@ -998,6 +998,59 @@ mod tests {
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
 
+    /// Whether a function's block graph contains a real cycle (a block
+    /// reachable from one of its own successors), rather than guessing from
+    /// block-id ordering. `BlockId`s are allocated in construction order, not
+    /// execution order: a branch's join block is minted before an else-arm
+    /// that itself branches is descended into, so that inner branch's own
+    /// join can end up with a *higher* id than the outer join it jumps
+    /// forward into. A plain "does some block jump to an id <= its own" check
+    /// mistakes that ordinary forward merge for a back-edge -- exactly the
+    /// shape an inlined multi-arm eliminator (`eq`'s `Ordering?` dispatch)
+    /// produces once spliced into a caller. Real DFS-based cycle detection is
+    /// immune to id allocation order.
+    fn block_graph_has_cycle(blocks: &[crate::ir::Block]) -> bool {
+        use std::collections::HashMap;
+        let succs: HashMap<u32, Vec<u32>> = blocks
+            .iter()
+            .map(|b| {
+                let out = match b.term {
+                    Terminator::Ret(_) => vec![],
+                    Terminator::Jmp(to) => vec![to.0],
+                    Terminator::Jnz(_, a, b) => vec![a.0, b.0],
+                };
+                (b.id.0, out)
+            })
+            .collect();
+        #[derive(Clone, Copy, PartialEq)]
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+        let mut color: HashMap<u32, Color> =
+            blocks.iter().map(|b| (b.id.0, Color::White)).collect();
+        fn visit(id: u32, succs: &HashMap<u32, Vec<u32>>, color: &mut HashMap<u32, Color>) -> bool {
+            color.insert(id, Color::Gray);
+            for &next in &succs[&id] {
+                match color[&next] {
+                    Color::Gray => return true,
+                    Color::White => {
+                        if visit(next, succs, color) {
+                            return true;
+                        }
+                    }
+                    Color::Black => {}
+                }
+            }
+            color.insert(id, Color::Black);
+            false
+        }
+        blocks
+            .iter()
+            .any(|b| color[&b.id.0] == Color::White && visit(b.id.0, &succs, &mut color))
+    }
+
     /// E-P1-4 (slice 10c): the checker's tail-splice predicate and the loop
     /// lowering actually built must answer the same question. Asked across the
     /// two sites rather than of one function twice: the checker side is the
@@ -1025,10 +1078,7 @@ mod tests {
 
             let ir = lower(&module).unwrap();
             let sum = ir.funcs.iter().find(|f| f.name == "sum-to").unwrap();
-            let lowered_a_loop = sum
-                .blocks
-                .iter()
-                .any(|b| matches!(b.term, Terminator::Jmp(to) if to.0 <= b.id.0));
+            let lowered_a_loop = block_graph_has_cycle(&sum.blocks);
 
             assert_eq!(checker, expected, "the checker's decision for {callee}");
             assert_eq!(
