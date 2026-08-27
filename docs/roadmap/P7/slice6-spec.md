@@ -930,6 +930,26 @@ is bit-identical.
     one function and gains a bracket-header parser, a bound-bracket parser and R1a's
     splitter arms; record the verdict).
 
+## 6a. Phase 4 verification (recorded post-merge)
+
+- **`src/parser.rs` split signals, re-run (criterion 11):** the file is now 6289 non-test
+  lines with 3 `use` lines and no would-be circular dependency, so import divergence and the
+  circular-dependency signal do not fire. The other three fire: the file mixes driver-facing
+  pre-passes, token-level peeks and the REPL line readers (high- and low-level code in one
+  place); it does several unrelated things (bracket-header parsing, bound-bracket parsing,
+  effect/slot parsing, REPL line entry points); and some of its functions never call each
+  other (e.g. the REPL line readers vs. the module pre-passes). **3 of 5, the same posture as
+  the deferred `poly.rs` split** (`project_poly_rs_split_deferred`): deferred, not split, with
+  no candidate cut identified yet.
+- **Undisclosed test deletion (criterion 8).** `parse_x3_bound_on_use_occurrence_is_error`
+  (present at `9c13878`, asserting `: f ( 'T: Copy 'T: Copy -- 'T ) drop ;` raised a located
+  "must be written at its binding" error) is gone as of `64b4d4e`. The deletion is
+  defensible, not a silent weakening: that fixture now raises `bound_in_effect_error` (a bound
+  cannot appear in an effect at all any more, use-occurrence or not), and the surviving
+  bracket-mode analogue is the duplicate-bound-variable error inside a header bracket. The
+  phase's own licence for the deletion ("no dedicated test exists for it") was wrong; this
+  entry is the correction the commit message should have carried.
+
 ## 7. Risks
 
 - **R4a is the only behaviour-changing edit, and its entry point is the trap.**

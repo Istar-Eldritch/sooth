@@ -10,7 +10,7 @@
 //!   variant         := Word (Word Word)*
 //!   externdef       := 'extern:' Word '(' effect ')' Str ';'
 //!   effect   := slot* '--' slot*
-//!   slot     := Word (':' Word)?
+//!   slot     := Word
 //!   binding  := '|' Word+ '|'
 //!   term     := Int | Word | binding | if
 //!   if       := 'if' term* ('else' term*)? 'end'
@@ -11361,6 +11361,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(repl_err.contains("retired postfix form"), "{repl_err}");
+
+        let enum_tokens = lex("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap();
+        let mut enum_arrays = Vec::new();
+        let mut enum_owned_cells = Vec::new();
+        let mut enum_refs = Vec::new();
+        let repl_enum_err = parse_enum_typedef_line(
+            &enum_tokens,
+            &[],
+            &[],
+            &mut enum_arrays,
+            &mut enum_owned_cells,
+            &mut enum_refs,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            repl_enum_err.contains("retired postfix form"),
+            "{repl_enum_err}"
+        );
     }
 
     #[test]

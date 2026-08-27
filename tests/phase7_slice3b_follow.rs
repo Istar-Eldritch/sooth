@@ -699,7 +699,7 @@ fn inline_generic_body_still_splices_a_row_combinator() {
 /// self-recursion (`P7.S3g`'s standing limit).
 ///
 /// `clampsum` takes three `'T` parameters (`hi`, `lo`, `val`) plus the
-/// iteration count: `( 'T: Copy Ord 'T 'T i64 -- 'T )` is the spec's own
+/// iteration count: `['T: Copy Ord] ( 'T 'T 'T i64 -- 'T )` is the spec's own
 /// literal header, and the bound-declaring first `'T` is itself an input, so
 /// three `'T` values enter, not two. Each iteration clamps `val` into
 /// `[lo, hi]` in two comparisons, each its own `if`: `over over gt` peeks the

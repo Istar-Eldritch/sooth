@@ -1643,7 +1643,7 @@ pub(super) fn poly_call_term(
     // never fired outside the unmangled `parse_with_core` test harness. Their
     // one real capability -- a comparison on the body's own `'T`, gated on its
     // bounds -- is now a special case of the generic-callee arm below, driven
-    // by `gt`'s declared `( 'T: Copy Ord 'T -- Bool )` rather than by name.
+    // by `gt`'s declared `['T: Copy Ord] ( 'T 'T -- Bool )` rather than by name.
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
     // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
@@ -10876,7 +10876,7 @@ mod tests {
         // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
         // located error.
         // P7.S3k (R7): `Copy` joins the declaration. `gt` is `lib/cmp.sth`'s
-        // `( 'T: Copy Ord 'T -- Bool )`, and the body's comparison now
+        // `['T: Copy Ord] ( 'T 'T -- Bool )`, and the body's comparison now
         // discharges that whole bound set across the call (R3) instead of
         // being special-cased by name against `Ord` alone. The subject is
         // unchanged: `Bool` is `Copy` but not `Ord`, so it is `less`'s own
