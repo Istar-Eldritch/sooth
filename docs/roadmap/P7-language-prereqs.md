@@ -945,7 +945,7 @@ corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`
 `src/ir/func_builder/word_families.rs:394-455`, array drop is `unreachable!` at
 `src/ir/func_builder/quotation.rs:412`, and `synthesize_aggregate_destructors`
 (`src/ir/destructors.rs:37`) does not handle arrays. The orphaned testing-vocabulary brief
-was renamed `slice5-testing-brief.md`.
+was renamed `slice7-testing-brief.md` (**P7.S7**).
 
 **P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
 surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
@@ -1052,3 +1052,9 @@ for each `'N` (`src/check/poly.rs:395`).
 a conflicting operand produces the same "explicit instantiation conflict" diagnostic a
 conflicting type argument already produces. `cargo fmt --check && cargo clippy -- -D warnings
 && cargo test` is green.
+
+**P7.S7 -- A testing vocabulary in `core`, and a `sooth test` command.** `[ planned ]` Two
+assertion words, `expect ( Bool str -- )` and `expect-eq ( 'T: Ord 'T str -- )`, printing a
+numberless TAP-style `ok -- <label>` / `not ok -- <label>` line per assertion, plus a driver
+subcommand that discovers, builds, and runs test programs and interprets that output as
+pass/fail. Detail: [slice7-testing-brief](./P7/slice7-testing-brief.md).

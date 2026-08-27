@@ -1,4 +1,4 @@
-# Phase 7 Slice 5: a testing vocabulary in `core`, and a `sooth test` command (brief)
+# Phase 7 Slice 7: a testing vocabulary in `core`, and a `sooth test` command (brief)
 
 Unit-testing Sooth code in Sooth itself. Two halves: an assertion vocabulary the
 language already has every prerequisite for (traits, enums, generics, string printing,
