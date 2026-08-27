@@ -389,6 +389,14 @@ pub(super) struct FuncBuilder<'a> {
     /// lookups. Empty on the REPL paths, which also hand out
     /// `empty_splice_trait_calls` and so have no member-splice entry to miss.
     member_uid_seeds: &'a HashMap<String, u32>,
+    /// P7.S10 (R3.3): each word's own declaration span, name-keyed exactly
+    /// like `member_uid_seeds` and read only by the splice-budget guard to
+    /// locate the offending impl member's own declaration rather than a call
+    /// site (no call-site span survives past `lib/cmp.sth`'s `inline`
+    /// splice). A miss (the REPL/destructor paths, which hand out
+    /// `empty_member_spans`) omits the diagnostic's location clause rather
+    /// than substituting a wrong span.
+    member_spans: &'a HashMap<String, Span>,
     /// P7.S8 (R1b): nesting depth of an active *member re-splice* (the bracket
     /// in `lower_resolved_word_call`'s combinator branch) specifically -- not
     /// `splice_uid_stack.is_empty()`, which also counts an ordinary combinator
@@ -397,6 +405,13 @@ pub(super) struct FuncBuilder<'a> {
     /// ordinary splice nesting; it only goes stale once a member re-splice
     /// reintroduces a second grounding within the same session.
     member_splice_depth: u32,
+    /// P7.S10 (R3.2): the symbol whose member splice took
+    /// `member_splice_depth` from 0 to 1 -- the *outermost* member being
+    /// spliced, which is what the budget guard's diagnostic names and looks
+    /// up in `member_spans`, not necessarily the guard's own `sym_name` (the
+    /// two diverge under mutual recursion between two impl members). Set on
+    /// the 0->1 transition, cleared on the 1->0 transition.
+    member_splice_outermost: Option<String>,
     /// Slice 7a (R9): the quotation literals this func materialized, in mint
     /// order. Drained by the lowering driver, which lowers each into its own
     /// `IrFunc`. Deduped by `symbol` at mint (one literal materialized twice in
@@ -466,7 +481,9 @@ impl<'a> FuncBuilder<'a> {
             splice_trait_calls: empty_splice_trait_calls(),
             splice_uid_stack: Vec::new(),
             member_uid_seeds: empty_member_uid_seeds(),
+            member_spans: empty_member_spans(),
             member_splice_depth: 0,
+            member_splice_outermost: None,
             materialized: Vec::new(),
         }
     }
@@ -934,6 +951,7 @@ pub(super) fn lower_word_parts(
     // to resolve to the entry the checker actually recorded for this word,
     // rather than another word's that happens to share a `(0, span)` key.
     inline_uid_seed: u32,
+    member_spans: &HashMap<String, Span>,
 ) -> Result<Vec<IrFunc>, String> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
@@ -959,6 +977,7 @@ pub(super) fn lower_word_parts(
     b.splice_records = splice_records;
     b.splice_trait_calls = splice_trait_calls;
     b.member_uid_seeds = member_uid_seeds;
+    b.member_spans = member_spans;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
     // the target quotation type for the slot it materializes.
     b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
@@ -1101,6 +1120,7 @@ pub(super) fn lower_word_parts(
         splice_records,
         splice_trait_calls,
         member_uid_seeds,
+        member_spans,
     )?);
     Ok(out)
 }
@@ -1127,6 +1147,7 @@ pub(super) fn lower_materialized(
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
     member_uid_seeds: &HashMap<String, u32>,
+    member_spans: &HashMap<String, Span>,
 ) -> Result<Vec<IrFunc>, String> {
     let mut out = Vec::new();
     for m in mats {
@@ -1180,6 +1201,7 @@ pub(super) fn lower_materialized(
             // bound dispatch inside one for exactly this reason, so nothing
             // here reads back a per-splice record seeded elsewhere).
             0,
+            member_spans,
         )?);
     }
     Ok(out)

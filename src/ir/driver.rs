@@ -71,6 +71,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .enumerate()
         .map(|(idx, w)| (w.name.clone(), idx as u32 * crate::check::INLINE_UID_STRIDE))
         .collect();
+    // P7.S10 (R3.3): each word's own declaration span, name-keyed exactly
+    // like `member_uid_seeds` above -- read only by `lower_resolved_word_call`'s
+    // splice-budget guard to locate the offending impl member's own `: name`
+    // declaration rather than a call site (R3.3: no call-site span survives
+    // past `lib/cmp.sth`'s `inline` splice).
+    let member_spans: HashMap<String, Span> = module
+        .words
+        .iter()
+        .map(|w| (w.name.clone(), w.span))
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -241,6 +251,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // resolves to the checker's own record for it, not another
             // word's that happens to share a `(0, span)` key.
             idx as u32 * crate::check::INLINE_UID_STRIDE,
+            &member_spans,
         )?);
     }
 
@@ -384,6 +395,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // duration of its splice, so the transitive collision that made
             // this `0` questionable cannot happen through that path.
             0,
+            &member_spans,
         )?);
     }
 
@@ -728,6 +740,7 @@ pub fn lower_line(
         empty_splice_records(),
         empty_splice_trait_calls(),
         empty_member_uid_seeds(),
+        empty_member_spans(),
     )?;
     Ok((func, extra, m, out_bytes as usize))
 }
@@ -921,6 +934,9 @@ pub(crate) fn lower_word(
         // REPL path: `check_def_collecting_drop_sites` seeds the matching
         // checker-side `Provenance::inline_uid` at 0 too.
         0,
+        // REPL path: no `member_spans` to key from, so a guard fired here
+        // omits the diagnostic's location clause (R3.3).
+        empty_member_spans(),
     )
 }
 
@@ -987,6 +1003,7 @@ pub(crate) fn lower_instantiation(
         empty_splice_trait_calls(),
         empty_member_uid_seeds(),
         0,
+        empty_member_spans(),
     )
 }
 
@@ -1073,6 +1090,41 @@ mod tests {
             uids.iter().copied().min(),
             Some(seed),
             "the first uid minted inside the member body is its seed itself, not `seed + k`"
+        );
+    }
+
+    /// P7.S10 (R4.4): error propagation, beside `lower`'s own driver code. A
+    /// real recursive `impl: Ord` -- the same shape as the golden -- drives
+    /// `lower_resolved_word_call`'s budget guard to `Err`, and this asserts
+    /// that `lower()`'s own `Result` carries it unchanged, rather than a
+    /// swallowing `.unwrap()`/`if let Ok(..)` dam anywhere in the 18-function
+    /// closure discarding it first. `check_trait_decls`/`check_impl_decls` run
+    /// inside `parse_with_core` (its own doc comment), so this needs no
+    /// synthetic forced error: the real route works, per R4.4's mandate to
+    /// attempt it first.
+    #[test]
+    fn a_recursive_impl_ord_error_propagates_unchanged_to_lowers_result() {
+        let src = "type: Wrap v i64 ;\n\
+             impl: Ord for Wrap\n\
+               : cmp\n\
+                 | a b |\n\
+                 a b lt ~[ Less ] ~[ Equal ] if ;\n\
+             ;\n\
+             : main ( -- )\n\
+               1 Wrap 2 Wrap lt ~[ 1 ] ~[ 0 ] if . ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+
+        let err = crate::ir::lower(&module)
+            .expect_err("a recursive impl member's splice exceeds the budget");
+        assert!(
+            err.contains("exceeded the splice budget of"),
+            "lower()'s Err should carry the budget guard's own message unchanged, got: {err}"
+        );
+        assert!(
+            err.contains("`cmp` (member of trait `Ord` for `Wrap`)"),
+            "unexpected diagnostic: {err}"
         );
     }
 

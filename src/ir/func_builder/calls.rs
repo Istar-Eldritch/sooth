@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// P7.S10 (R1.3): the splice-depth budget `lower_resolved_word_call`'s guard
+/// enforces, bounding a recursive `impl:` member's re-splice instead of
+/// letting it overflow the native stack unbounded. Measured (spec time):
+/// the legitimate maximum across the corpus is 2; a self-recursive `impl:
+/// Ord` overflows a 2MB test-thread stack at depth 148. 64 sits comfortably
+/// above the former and well below the latter.
+const SPLICE_BUDGET: u32 = 64;
+
 impl<'a> FuncBuilder<'a> {
     pub(in crate::ir) fn lower_terms(&mut self, terms: &[Term], tail: bool) -> Result<(), String> {
         // Only the final term of a body can be in tail position (R1); a term
@@ -220,6 +228,35 @@ impl<'a> FuncBuilder<'a> {
     /// is the predicate that would decide it.
     fn lower_resolved_word_call(&mut self, sym_name: &str) -> Result<(), String> {
         if let Some(entry) = self.combinators.get(sym_name) {
+            // P7.S10 (R1.1/R1.4): a recursive `impl:` member -- one whose
+            // body dispatches back to a member resolved via bound dispatch,
+            // directly or through another member -- re-splices here without
+            // bound; nothing upstream of lowering can see the cycle (P7.S8's
+            // `check_combinator_cycles` widened to catch it once rejected the
+            // ordinary field-delegating impl too, brief "What was refuted").
+            // Checked before the depth bump, so a body that legitimately
+            // re-splices up to `SPLICE_BUDGET - 1` times still lowers.
+            if self.member_splice_depth >= SPLICE_BUDGET {
+                // R3.2: the *outermost* member -- the one whose splice took
+                // the depth from 0 to 1 -- not this frame's `sym_name`, which
+                // diverges under mutual recursion between two impl members.
+                let outermost = self
+                    .member_splice_outermost
+                    .clone()
+                    .unwrap_or_else(|| sym_name.to_string());
+                let rendered = crate::resolve::render_word(&outermost);
+                let mut msg = format!(
+                    "a trait member cannot dispatch back to itself (lowering would splice it forever): {rendered} exceeded the splice budget of {SPLICE_BUDGET}"
+                );
+                // R3.3: a lookup miss (the REPL/destructor paths, which hand
+                // out `empty_member_spans`) omits the location clause rather
+                // than substituting a wrong span; the guard still fires and
+                // still reports.
+                if let Some(span) = self.member_spans.get(&outermost) {
+                    msg.push_str(&format!(" (line {}, col {})", span.line, span.col));
+                }
+                return Err(msg);
+            }
             let uid = match self.member_uid_seeds.get(sym_name) {
                 Some(&seed) => seed,
                 None => self.splice_uid_stack.last().copied().unwrap_or(0),
@@ -229,9 +266,15 @@ impl<'a> FuncBuilder<'a> {
             let caller_inline_uid = self.inline_uid;
             self.inline_uid = uid;
             self.splice_uid_stack.push(uid);
+            if self.member_splice_depth == 0 {
+                self.member_splice_outermost = Some(sym_name.to_string());
+            }
             self.member_splice_depth += 1;
             self.lower_terms(&body, false)?;
             self.member_splice_depth -= 1;
+            if self.member_splice_depth == 0 {
+                self.member_splice_outermost = None;
+            }
             self.splice_uid_stack.pop();
             self.inline_uid = caller_inline_uid;
             self.locals.truncate(locals_depth);
@@ -2095,6 +2138,114 @@ mod tests {
         assert!(
             cmp_calls.is_empty(),
             "the inline `cmp` is spliced, not called; unexpected calls: {cmp_calls:?}"
+        );
+    }
+
+    /// R4.4: the depth arithmetic beside the stage code it guards. A
+    /// legitimate re-splice (under the budget) returns `Ok` and leaves
+    /// `member_splice_depth` exactly where it started -- the `+= 1`/`-= 1`
+    /// bracket around `lower_terms` is balanced on every `Ok` path, whatever
+    /// depth it started from.
+    #[test]
+    fn splice_depth_bracket_is_balanced_on_a_legitimate_resplice() {
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut combinators: crate::check::CombinatorIndex = HashMap::new();
+        combinators.insert(
+            "cmp".to_string(),
+            crate::check::CombinatorEntry {
+                terms: line_terms("1"),
+                inputs: 0,
+                ambiguous: false,
+            },
+        );
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                slices: empty_slices(),
+                statics: empty_statics(),
+            },
+        );
+        b.combinators = &combinators;
+
+        // One level under the budget: still legitimate, still `Ok`.
+        b.member_splice_depth = SPLICE_BUDGET - 1;
+        b.lower_resolved_word_call("cmp")
+            .expect("a splice one level under the budget succeeds");
+        assert_eq!(
+            b.member_splice_depth,
+            SPLICE_BUDGET - 1,
+            "the bracket restores the depth it started from on the Ok path"
+        );
+
+        // From a fresh (0) depth too, the ordinary case every real program
+        // exercises.
+        b.member_splice_depth = 0;
+        b.lower_resolved_word_call("cmp")
+            .expect("an ordinary splice succeeds");
+        assert_eq!(b.member_splice_depth, 0);
+    }
+
+    /// R4.4/R1.4/R3: the guard fires exactly at the budget (not one before),
+    /// names the outermost member via `render_word`, and omits the location
+    /// clause when `member_spans` has no entry for it (R3.3's lookup-miss
+    /// ruling) rather than substituting a wrong span.
+    #[test]
+    fn splice_depth_guard_fires_at_the_budget_and_omits_a_missing_span() {
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut combinators: crate::check::CombinatorIndex = HashMap::new();
+        combinators.insert(
+            "cmp;Ord;0;Wrap".to_string(),
+            crate::check::CombinatorEntry {
+                terms: line_terms("1"),
+                inputs: 0,
+                ambiguous: false,
+            },
+        );
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+                slices: empty_slices(),
+                statics: empty_statics(),
+            },
+        );
+        b.combinators = &combinators;
+        // Simulates the outer frame of a real re-splice chain: the 0->1
+        // transition already recorded this as the outermost member.
+        b.member_splice_outermost = Some("cmp;Ord;0;Wrap".to_string());
+        b.member_splice_depth = SPLICE_BUDGET;
+
+        let err = b
+            .lower_resolved_word_call("cmp;Ord;0;Wrap")
+            .expect_err("a splice at the budget is rejected");
+        assert_eq!(
+            err,
+            "a trait member cannot dispatch back to itself (lowering would splice it forever): \
+             `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64",
+            "a `member_spans` miss omits the location clause entirely, not a zero span"
         );
     }
 }
