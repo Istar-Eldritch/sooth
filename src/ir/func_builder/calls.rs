@@ -182,10 +182,13 @@ impl<'a> FuncBuilder<'a> {
     /// which the re-splice bracket raises so `lower_call`'s span-keyed
     /// `trait_calls` lookup stands aside for the duration (R1b).
     ///
-    /// A member absent from `member_uid_seeds` keeps the enclosing splice's uid
-    /// (`splice_uid_stack.last()`, or 0 at the top level): that is the REPL's
-    /// state, and it hands out empty splice tables, so no member splice there
-    /// has an entry to miss.
+    /// A member absent from `member_uid_seeds` falls back to the enclosing
+    /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) for the
+    /// `inline_uid` reset and the alpha-rename suffix; the push/pop of
+    /// `splice_uid_stack` and `member_splice_depth` still happen, so R1b's
+    /// gate still stands aside for this splice. That is the REPL's state, and
+    /// it hands out empty splice tables, so no member splice there has an
+    /// entry to miss in the first place.
     ///
     /// That reused uid is not unique, so the member body is renamed through
     /// `alpha_rename_member_locals`, whose suffix is disjoint from the

@@ -1087,6 +1087,14 @@ grounding and the recorded answer is then the wrong one. With both rules in plac
 a user `impl: Ord` delegating to a primitive comparison builds and a library comparison
 costs no call frame. Detail: [slice8-spec](./P7/slice8-spec.md).
 
+Phase 2's eight section-6 mutations (the uid-stack push, the `inline_uid` reset, the
+`member_splice_depth` gate and its blanket-gate regression against the R1c counter-example,
+the seed formula, the `back_edges` repair, both swap controls, and the composed-
+instantiation seed) all reproduced their predicted failures. CLAUDE.md's five split
+signals were re-run against `src/ir/func_builder/calls.rs` post-change: 0 of 5 fire (one
+`use super::*`, six functions in a single call chain, no import divergence, no mixed
+high/low-level code) -- no split.
+
 Two follow-ups the slice deliberately did not fix:
 
 - **Unsatisfied-`Ord` attribution.** An unsatisfied `Ord` bound now names `cmp`, the
