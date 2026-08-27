@@ -305,18 +305,76 @@ width dispatch; this phase does not pre-empt it.
 ## Phase 4 (R4 part a) — retire the two whole-file non-Phase-1 REPL suites
 
 `tests/repl_ux.rs` (16 tests) deleted in full: its subject is interactive UX (prompt,
-banner, `:words`, line editing), which has no non-REPL counterpart. `tests/phase4_repl_imports.rs`
-(23 tests, Phase 4 slice 5b's exit-criterion set) also deleted in full, after confirming
-each *module-system* fact it pinned has a `sooth run`/`build` twin. Four had none and were
-migrated into `tests/phase4_modules.rs`: `imported_third_file_stays_closed_behind_a_reexporting_module`,
-`nested_struct_ids_remap_when_a_local_type_declares_first`,
-`imported_type_resolves_in_signature_and_typedef_position`, and
-`selective_type_import_aliases_one_struct_id`. The remaining ~17 were spot-checked against
-the live retired suite and are already covered natively (qualified word resolution, export
-list enforcement, transitive closure basics, struct-id aliasing under other spellings).
-The retired 5b exit criterion at `docs/roadmap/P4-polymorphism-quotations.md:295` was
-updated in place with a one-line reason and a pointer at its native replacement, rather than
-removed.
+banner, `:words`, line editing), which has no non-REPL counterpart.
+`tests/phase4_repl_imports.rs` (23 tests, Phase 4 slice 5b's exit-criterion set) also
+deleted in full. The retired 5b exit criterion at
+`docs/roadmap/P4-polymorphism-quotations.md:295` was updated in place with a one-line reason
+and a pointer at its native replacement, rather than removed.
+
+### Per-test classification of `tests/phase4_repl_imports.rs` (all 23)
+
+**Migrated (4)** — a module-system fact with no `run`/`build` twin, now in
+`tests/phase4_modules.rs`:
+
+| retired test | native form |
+| --- | --- |
+| `repl_import_type_resolves_in_signature_and_typedef_position` | `imported_type_resolves_in_signature_and_typedef_position:231` |
+| `repl_imported_nested_struct_ids_remap` | `nested_struct_ids_remap_when_a_local_type_declares_first:208` |
+| `repl_transitive_reexport_stays_closed` | `imported_third_file_stays_closed_behind_a_reexporting_module:175` |
+| `repl_selective_type_import_aliases_one_struct_id` | `selective_type_import_aliases_one_struct_id:247` |
+
+**Deleted as already covered natively (11)** — line numbers in `tests/phase4_modules.rs`
+unless stated:
+
+| retired test | covering test |
+| --- | --- |
+| `repl_import_word_is_callable_qualified` | `two_files_word_import_compiles_and_runs:69` |
+| `repl_import_type_accessor_resolves` | `imported_type_is_nameable_and_runs:83` |
+| `repl_qualified_private_name_is_not_exported` | `unexported_word_is_not_exported_error:311`, `absent_word_in_module_is_unknown_not_unexported:338` |
+| `repl_import_path_is_relative_to_cwd` | `import_path_is_relative_to_importing_file:291` (see caveat below) |
+| `repl_import_cycle_and_missing_are_located` | `import_cycle_is_located_error_naming_both:114`, `missing_import_file_is_located_error:137` |
+| `repl_malformed_import_is_located_error` | `malformed_import_form_is_located_parse_error:412` |
+| `repl_import_of_library_declaring_main_is_rejected` | `src/driver.rs`'s `check_no_main_in_closure_rejects_imported_module_main:1240`, `build_rejects_imported_module_declaring_main:1269` |
+| `repl_selective_import_exposes_unqualified` | `selective_import_exposes_names_unqualified:795` |
+| `repl_selective_import_of_private_is_error` | `selective_import_of_private_name_is_error:810` |
+| `repl_selective_import_collides_with_local` | `selective_import_colliding_with_local_word_is_error:850` |
+| `repl_modules_dogfood_session_runs` | `modules_example_builds_and_runs:962` |
+
+Caveat on the one partial match: the retired test's subject was resolution against the
+*process cwd*, which only the REPL has (a bare line has no importing file). The native rule
+is resolution against the importing file, and that is what the covering test pins; the
+cwd-relative half retires with the REPL rather than being covered.
+
+**Deleted as REPL-only session mechanism (7)** — each tests the session boundary itself
+(import epochs, reload, qualifier rebind, session survival), which has no native analogue
+because a native build resolves every import once and aborts on failure:
+`repl_failed_import_leaves_session_intact`, `repl_reimport_freezes_existing_caller`,
+`repl_reimport_of_type_leaves_unrelated_typedef_unaffected`,
+`repl_reimport_of_type_resolution_does_not_diverge`,
+`repl_qualifier_rebind_frozen_and_rejudged`,
+`repl_selective_reimport_same_qualifier_reloads`,
+`repl_dispose_of_imported_override_without_selective_import_is_unaffected` (its own comment
+states the rule it pins is unreachable off `Ctx::Line`).
+
+**Recorded as a gap (1):** `repl_double_colon_in_declared_name_is_located_rejection`, below.
+
+### Mutation proof for the four migrated tests
+
+Each mutation was applied to a copy of the tree and assessed with `cargo test
+--no-fail-fast`, so the "also killed" column is corpus-wide, not one binary.
+
+| mutation | migrated tests killed | also killed |
+| --- | --- | --- |
+| `struct_base.push(structs.len())` -> `push(0)` (`src/driver.rs:518`) | `nested_struct_ids_remap_when_a_local_type_declares_first`, `imported_type_resolves_in_signature_and_typedef_position` | `same_named_types_in_two_modules_coexist` |
+| qualified word lookup falls through to any module that declares the name, after the target and re-export branches both miss (`src/resolve.rs`) | `imported_third_file_stays_closed_behind_a_reexporting_module` | `a_name_the_hub_does_not_export_is_unreachable_through_it` (`tests/phase8_slice2.rs:255`) |
+| a qualified type name resolved against the current module instead of the import target (`ast::resolve_type_name_in_module`) | `imported_type_resolves_in_signature_and_typedef_position`, `selective_type_import_aliases_one_struct_id` | 8 others, incl. `imported_type_is_nameable_and_runs` and both `unexported_type_*` tests |
+
+All four migrated tests are live: each fails under at least one mutation of the rule it
+asserts. **None of the four is a sole witness**, though — every mutation above is also
+caught by a pre-existing test, so the migration adds redundancy rather than closing a hole.
+What each migrated fixture does add is the positive and negative half of one rule in a
+single program (e.g. the re-exporter's own result crossing *and* the third file's name not
+crossing), which no single pre-existing test pairs up.
 
 - **A committed mutation regressed `struct_base` and was caught, then wrongly accepted as a
   fix.** A later commit on this branch (`9b24f99`, titled as a refactor) changed
@@ -329,20 +387,40 @@ removed.
   above, killed this mutation on contact (`recursive struct definition (infinite size)`,
   and a field-value mismatch in the sibling struct-collision test). The commit reworded the
   test's comment to match the broken behaviour instead of reverting the code. Reverted here
-  (`e948ea0`); this phase's own migrated tests are the mutation proof for the fix, not new
-  coverage written after the fact.
-- **`nested_struct_ids_remap_when_a_local_type_declares_first` and
-  `selective_type_import_aliases_one_struct_id` are each their own mutation witness** by
-  construction (multi-module struct field readback; a mixed unqualified/qualified stack
-  effect), independent of the harness bug above.
+  (`e948ea0`). Note the mutation table above: the pre-existing
+  `same_named_types_in_two_modules_coexist` also kills this mutation, so the migrated tests
+  were not the only thing standing between the branch and a silent miscompile.
 - **One fact from the retired suite has no native twin and is not fixed by this phase.**
   `repl_double_colon_in_declared_name_is_located_rejection` guarded a REPL-only rule: a
   declared name containing `::` is a located rejection, closing off the internal module-tag
-  separator's forgeability. On the native build path, both `type: q::T x i64 ;` and
-  `: q::foo ( -- ) ;` build clean, and with an actual import present a local `q::foo`
-  silently shadows the imported one rather than erroring. Recording this as a gap for
-  whichever future phase owns name-resolution/declaration validation on the native path;
-  implementing the rejection is out of this retirement phase's scope.
+  separator's forgeability. Measured on the native build path:
+  - `type: q::T x i64 ;` and `: q::foo ( -- ) ;` both build clean; the declaration is
+    silently accepted.
+  - The declared name is nevertheless unreachable. With **no** import bound, calling
+    `q::foo` fails with ``unknown word `q::foo` ``: a qualified call site is always routed
+    through module resolution, never to a local declaration of that literal spelling.
+  - With an import binding `q` to a library exporting `foo`, calling `q::foo` runs the
+    **imported** word. The import wins and the local declaration is dead code, not the
+    other way round.
+  - A local `type: q::T x i64 ;` alongside an import that binds `q` is not a collision
+    error either; it builds clean.
+  So the shape of the gap is a silently-accepted declaration that can never be called,
+  rather than a shadowing hazard. Recording it for whichever future phase owns
+  name-resolution/declaration validation on the native path; implementing the rejection is
+  out of this retirement phase's scope.
+- **Spec item (d) defers to phase 6, as the spec anticipated.** `tests/common/mod.rs`'s
+  `repl_core_import:64`, `repl_core_lines:74` and `REPL_CORE_ECHO:85` are *not* callerless
+  after this phase: `tests/phase1.rs`, `tests/phase3_strings.rs`,
+  `tests/phase4_combinators.rs` and `tests/phase4_slice10c_tail_splice.rs` still call them
+  (four files, one more than the spec's three — `phase4_combinators.rs` was not on its
+  list). Deleting them here would break the build, so they stay for phase 6 (R4 part c),
+  which already owns their deletion.
+- **Carry-forward for phase 6.** `tests/phase7_slice3v.rs:316`'s `run_session` helper
+  documents itself as "`tests/repl_ux.rs`'s harness", now a dangling reference to a file
+  this phase deleted. Phase 6's named-test list includes that file's
+  `an_owning_cell_payload_of_a_plain_quotation_is_still_rejected`, but its
+  locally-defined-spawn-helper list does not include `tests/phase7_slice3v.rs:316`; the
+  helper needs deleting with its last caller there, and the stale comment goes with it.
 - Retirement-note pointer fixed: the "rejected imported `main`" fact this note claimed was
   covered by `tests/phase4_modules.rs` actually lives in `src/driver.rs`'s own test module
   (`check_no_main_in_closure_rejects_imported_module_main:1240`,

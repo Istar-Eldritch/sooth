@@ -230,8 +230,11 @@ fn nested_struct_ids_remap_when_a_local_type_declares_first() {
 #[test]
 fn imported_type_resolves_in_signature_and_typedef_position() {
     // Migrated from the retired REPL suite (P7.S9): a qualified type name
-    // resolves both in a word's stack effect and in a `type:` field position,
-    // not just at the call/body-rewrite site.
+    // resolves in a `type:` *field* position (`type: Wrap t q::T ;`) -- the
+    // only fixture in this corpus that puts one there. The signature half is
+    // already covered by `imported_type_is_nameable_and_runs`, and both
+    // positions funnel through `resolve_type_or_apply`, so the field half is
+    // not separately mutable; it is here to keep the two spelled together.
     let c = Closure::new("typos");
     c.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
     let entry = c.write(
