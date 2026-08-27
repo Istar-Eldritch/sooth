@@ -113,8 +113,9 @@ Two parts, and the second is the larger one:
 - **House style template: `combinator_cycle_error`** (`src/check/combinators.rs:291-303`).
   The new message should read as its sibling.
 - **Double-prefix hazard is live.** `main.rs` does `eprintln!("error: {e}")` while existing
-  diagnostics such as `combinator_cycle_error` also embed `error: ` themselves. Decide the
-  new message's prefix deliberately and pin it in the golden test.
+  diagnostics such as `combinator_cycle_error` open their own message with the same
+  `"error: "` literal, so such a message renders doubled. Decide the new message's prefix
+  deliberately and pin it in the golden test.
 
 ## The real cost: lowering has no error path
 
