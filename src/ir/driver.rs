@@ -1102,7 +1102,7 @@ mod tests {
     #[test]
     fn poly_self_call_lowers_to_ordinary_recursive_call() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg dup drop ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -1162,7 +1162,7 @@ mod tests {
     #[test]
     fn poly_self_tail_call_lowers_to_loop_back_edge() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn poly_non_tail_self_call_in_a_self_tail_body_stays_an_ordinary_call() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg 0 loopg ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -1264,7 +1264,7 @@ mod tests {
         // instantiates a poly ref slot, so lowering must ground it *now*,
         // not in a later phase. Stubbing the arm to `panic!` breaks this
         // build.
-        let src = ": firstref ( &['T 4] -- ) drop ;\n\
+        let src = ": firstref ( &array['T 4] -- ) drop ;\n\
              : main ( -- ) 7 4 fill | a | &a firstref a drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -1796,7 +1796,7 @@ mod tests {
     #[test]
     fn bound_dispatch_lowers_each_instantiation_to_its_own_impl_member() {
         let m = lower_with_resolve(
-            "trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+            "trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              type: Qt n i64 ;\n\
              impl: Getter for Pt\n\
@@ -1805,7 +1805,7 @@ mod tests {
              impl: Getter for Qt\n\
                : get | q | q &n @ ;\n\
              ;\n\
-             : getval ( &'T: Getter -- i64 ) get ;\n\
+             : getval ['T: Getter] ( &'T -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p getval . p drop\n\
                            9 Qt |q| &q getval . q drop ;\n",
         );
@@ -1830,13 +1830,13 @@ mod tests {
     #[test]
     fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_resolve(
-            "trait: Getter 'T : get ( &'T &'T -- i64 ) ; ;\n\
+            "trait: Getter['T] : get ( &'T &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\
              impl: Getter for Pt\n\
                : get | a b | a b max ;\n\
              ;\n\
-             : getval ( &'T: Getter &'T -- i64 ) get ;\n\
+             : getval ['T: Getter] ( &'T &'T -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p &p getval . p drop ;\n",
         );
         assert_eq!(

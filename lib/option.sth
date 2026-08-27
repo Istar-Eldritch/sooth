@@ -1,4 +1,4 @@
-type: Option 'T | None | Some 'T ;
+type: Option['T] | None | Some 'T ;
 export: Option ;
 export: Some ;
 export: None ;

@@ -9,7 +9,7 @@ import: intrinsics * ;
 
 type: Vec2 x i64 y i64 ;
 
-: setat ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 2 &!> v ! a ;
+: setat['T: Copy] ( array['T 4] 'T -- array['T 4] ) | a v | &!a 2 &!> v ! a ;
 : main ( -- )
   0 4 fill | a |
   &!a 0 &!> 10 !  &!a 1 &!> 20 !  &!a 2 &!> 30 !  &!a 3 &!> 40 !

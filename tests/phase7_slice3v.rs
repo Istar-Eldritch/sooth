@@ -107,7 +107,7 @@ fn dropping_an_owning_closure_in_a_generic_body_disposes_its_capture_once() {
         "drop-owning-poly",
         &format!(
             "{SPY_DEF}{MK_DEF}\
-             : g ( 'T: Copy -- 'T ) | x | 7 Spy mk drop x ;\n\
+             : g ['T: Copy] ( 'T -- 'T ) | x | 7 Spy mk drop x ;\n\
              : main ( -- ) 5 g . ;\n"
         ),
     );

@@ -207,11 +207,11 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         // `w.poly`, not `w.effect`, so the output-position and nested-in-effect
         // audits must walk the poly path too or these slip through.
         Row {
-            src: ": w ( ['T 'N] [ 'T -- ] -- ['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
+            src: ": w ( array['T 'N] [ 'T -- ] -- array['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
             position: "the output of `w`",
         },
         Row {
-            src: ": w ( ['T 'N] [ [ 'T -- ] -- ] -- ) drop drop ;\n: main ( -- ) ;\n",
+            src: ": w ( array['T 'N] [ [ 'T -- ] -- ] -- ) drop drop ;\n: main ( -- ) ;\n",
             position: "nested inside a quotation effect",
         },
         // Item 2: a quotation hiding in a poly *array element* -- the shallow
@@ -604,8 +604,8 @@ fn polymorphic_combinator_cycle_is_located_error() {
     // A two-word poly cycle (and a mixed mono/poly one) both name their
     // members.
     let poly = check_error(
-        ": a inline ( ['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
-         : b inline ( ['T 'N] [ 'T -- ] -- ) [ drop ] a ;\n\
+        ": a inline ( array['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
+         : b inline ( array['T 'N] [ 'T -- ] -- ) [ drop ] a ;\n\
          : main ( -- ) 0 3 fill [ drop ] a ;\n",
     );
     assert!(
@@ -613,7 +613,7 @@ fn polymorphic_combinator_cycle_is_located_error() {
         "a polymorphic combinator cycle should name both members, got: {poly}"
     );
     let mixed = check_error(
-        ": a inline ( ['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
+        ": a inline ( array['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
          : b inline ( i64 [ i64 -- ] -- ) 0 3 fill [ drop ] a ;\n\
          : main ( -- ) 0 3 fill [ drop ] a ;\n",
     );
@@ -660,7 +660,7 @@ fn each_checks_standalone() {
     // in its `times` body checks against `f`'s *declared* effect `[ 'T -- ]`
     // exactly as an ordinary word call checks against a `Sig`. The signature is
     // not documentation over a macro.
-    let each = ": each inline ( ['T 'N] [ 'T -- ] -- )\n\
+    let each = ": each inline ( array['T 'N] [ 'T -- ] -- )\n\
                 | f | len >i64 | count | | arr |\n\
                 count ~[ | i | &arr i >usize &> @ f call ] times\n\
                 arr drop ;\n";
@@ -686,11 +686,11 @@ fn map_and_fold_check_compositionally() {
     // and a counter cell. "Compositional" (D4) therefore means each body checks
     // `f call` against `f`'s *declared quotation effect*, not a concrete
     // literal body. Both check standalone:
-    let map = ": map inline ( ['T 'N] [ 'T -- 'T ] -- ['T 'N] )\n\
+    let map = ": map inline ( array['T 'N] [ 'T -- 'T ] -- array['T 'N] )\n\
                | f | len >i64 | count | | arr |\n\
                count ~[ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times\n\
                arr ;\n";
-    let fold = ": fold inline ( ['T 'N] 'A [ 'A 'T -- 'A ] -- 'A )\n\
+    let fold = ": fold inline ( array['T 'N] 'A [ 'A 'T -- 'A ] -- 'A )\n\
                 | f | | acc | len >i64 | count | | arr |\n\
                 acc count ~[ | i | &arr i >usize &> @ f call ] times\n\
                 arr drop ;\n";
@@ -703,7 +703,7 @@ fn map_and_fold_check_compositionally() {
     // own def site -- is proof `f call` was checked to *produce* a `'T` per the
     // declared effect, not rubber-stamped.
     let err = check_error(&format!(
-        "{TIMES_DEF}: m inline ( ['T 'N] [ 'T -- 'T ] -- )\n\
+        "{TIMES_DEF}: m inline ( array['T 'N] [ 'T -- 'T ] -- )\n\
          | f | len >i64 | count | | arr |\n\
          count ~[ | i | &arr i >usize &> @ f call ] times\n\
          arr drop ;\n"
@@ -720,11 +720,11 @@ fn map_and_fold_check_compositionally() {
 
 #[test]
 fn each_over_array_inlines_and_runs() {
-    // Criterion 10 (R17/R19/R21): `arr [ . ] c::each` over an `[i64 4]` inlines
+    // Criterion 10 (R17/R19/R21): `arr [ . ] c::each` over an `array[i64 4]` inlines
     // the imported combinator to a `times` loop and prints each element in
     // order.
     let src = format!(
-        "{}: arr ( -- [i64 4] )\n\
+        "{}: arr ( -- array[i64 4] )\n\
          0 4 fill | s |\n\
          &!s 0 >usize &!> 1 !\n\
          &!s 1 >usize &!> 2 !\n\
@@ -743,10 +743,10 @@ fn each_over_array_inlines_and_runs() {
 
 #[test]
 fn fold_computes_sum() {
-    // Criterion 11 (R17/R19): `fold` threads an accumulator across an `[i64 4]`
+    // Criterion 11 (R17/R19): `fold` threads an accumulator across an `array[i64 4]`
     // and sums 4 + 8 + 7 + 9 to 28.
     let src = format!(
-        "{}: arr ( -- [i64 4] )\n\
+        "{}: arr ( -- array[i64 4] )\n\
          0 4 fill | s |\n\
          &!s 0 >usize &!> 4 !\n\
          &!s 1 >usize &!> 8 !\n\
@@ -770,7 +770,7 @@ fn filter_checks_standalone() {
     // own def site with no call site and no compiler change. Combinators
     // splice at the concrete call site (recon 1), so the polymorphic-`if`
     // rejection never gates this.
-    let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- ['T 'N] usize )\n\
+    let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- array['T 'N] usize )\n\
                   | p | len >i64 | n | | arr |\n\
                   0 n ~[ | i | &arr i >usize &> @ dup p call ~[\n\
                           | v | &!arr over >usize &!> v ! 1 add\n\
@@ -779,7 +779,7 @@ fn filter_checks_standalone() {
     check_ok(&format!("{TIMES_DEF}{filter}"));
 }
 
-// -- criterion 2: `filter` over `[i64 4]` inlines, runs, and compacts --------
+// -- criterion 2: `filter` over `array[i64 4]` inlines, runs, and compacts --------
 
 #[test]
 fn filter_over_array_inlines_and_runs() {
@@ -787,7 +787,7 @@ fn filter_over_array_inlines_and_runs() {
     // through 6a's inliner, prints the kept count `2`, and the array is
     // compacted in place, with `8` and `9` at the front.
     let src = format!(
-        "{}: arr ( -- [i64 4] )\n\
+        "{}: arr ( -- array[i64 4] )\n\
          0 4 fill | s |\n\
          &!s 0 >usize &!> 8 !\n\
          &!s 1 >usize &!> 3 !\n\
@@ -811,10 +811,10 @@ fn filter_over_array_inlines_and_runs() {
 
 #[test]
 fn filter_is_element_polymorphic() {
-    // Criterion 3 (R1): the same `filter` inlines over an `[f64 3]` array with
+    // Criterion 3 (R1): the same `filter` inlines over an `array[f64 3]` array with
     // a float predicate, keeping the single element greater than `1.0`.
     let src = format!(
-        "{}: arr ( -- [f64 3] )\n\
+        "{}: arr ( -- array[f64 3] )\n\
          0.0 3 fill | s |\n\
          &!s 0 >usize &!> 0.5 !\n\
          &!s 1 >usize &!> 2.5 !\n\
@@ -1292,7 +1292,7 @@ fn poly_combinator_consuming_local_is_error() {
     // lives (def site, not splice site).
     let src = format!(
         "{TIMES_DEF}{SPY_DEF}\
-         : bad inline ( ['T 'N] Spy [ 'T -- ] -- )\n\
+         : bad inline ( array['T 'N] Spy [ 'T -- ] -- )\n\
          | f | | s | len >i64 | count | | arr |\n\
          count ~[ | i | &arr i >usize &> @ f call s drop ] times\n\
          arr drop ;\n"
@@ -1314,7 +1314,7 @@ fn poly_combinator_borrow_across_loop_is_error() {
     // def site.
     let src = format!(
         "{TIMES_DEF}type: V x i64 ;\n\
-         : bad inline ( ['T 'N] V [ 'T -- ] -- )\n\
+         : bad inline ( array['T 'N] V [ 'T -- ] -- )\n\
          | f | | v | len >i64 | count | | arr |\n\
          count ~[ | i | &arr i >usize &> @ f call &v ] times\n\
          arr drop v drop ;\n"
@@ -1382,7 +1382,7 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
     // argument site, naming `refout` and `b`.
     let src = format!(
         "{TIMES_DEF}type: Box v i64 ;\n\
-         : refout inline ( ['T 4] [ 'T -- &i64 ] -- )\n\
+         : refout inline ( array['T 4] [ 'T -- &i64 ] -- )\n\
          | f | | arr |\n\
          4 ~[ | i | &arr i >usize &> @ f call drop ] times\n\
          arr drop ;\n\
@@ -1412,7 +1412,7 @@ fn quotation_at_runtime_position_in_poly_body_is_error() {
     // word carries a quotation parameter, so the body is checked on the
     // `Slot`-with-`quot` path), not slice 4's blanket `poly_term` rejection.
     let err = check_error(
-        ": bad inline ( ['T 'N] [ 'T -- ] -- ['T 'N] )\n\
+        ": bad inline ( array['T 'N] [ 'T -- ] -- array['T 'N] )\n\
          | f arr | [ 1 add ] 4 fill drop arr ;\n",
     );
     assert!(
@@ -1515,7 +1515,7 @@ fn repl_error(input: &str) -> String {
 // `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
     ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n";
-const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
+const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- array['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
 
 // A REPL expr line's residual stack is what the in-process driver writes to the
 // capture buffer; the runtime `.` word prints to the real process stdout, which
@@ -1622,7 +1622,7 @@ fn repl_two_output_combinator_define_and_call() {
     assert_eq!(
         transcript,
         format!(
-            "{}defined times-helper\ndefined times\ndefined filter\nstack: <[i64 3]> 3\n",
+            "{}defined times-helper\ndefined times\ndefined filter\nstack: <array[i64 3]> 3\n",
             common::REPL_CORE_ECHO
         )
     );
@@ -2082,7 +2082,10 @@ fn repl_imported_filter_runs() {
     ));
     assert_eq!(
         transcript,
-        format!("{}imported c\nstack: <[i64 3]> 3\n", common::REPL_CORE_ECHO)
+        format!(
+            "{}imported c\nstack: <array[i64 3]> 3\n",
+            common::REPL_CORE_ECHO
+        )
     );
 }
 
@@ -2129,7 +2132,7 @@ fn repl_combinators_dogfood_matches_native() {
         "{}{}{}\n{}\n{}\n:quit\n",
         common::repl_core_lines(),
         combinators_import("c"),
-        ": scores ( -- [i64 5] ) 0 5 fill | s | \
+        ": scores ( -- array[i64 5] ) 0 5 fill | s | \
          &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
          &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
         "scores ~[ 4 gt ] c::filter | n | | out | out drop n",
@@ -2227,7 +2230,7 @@ fn r7a_quotation_output_diagnostic_shows_unmangled_word() {
     // a poly one; the diagnostic must name `c`, not the mangled `c__m0`.
     let err = build_error_with_import(
         "m0-r7a",
-        ": c ( ['T 'N] -- ['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
+        ": c ( array['T 'N] -- array['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
     );
     assert!(
         err.contains("cannot appear as the output of `c`"),
@@ -2554,7 +2557,7 @@ fn splice_two_types_compiles_and_runs_correctly() {
 fn bounded_poly_word_from_inline_combinator_at_two_types() {
     let src = "import: core::prelude * ;
 \
-         : maxof inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+         : maxof inline ['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 \
          : main ( -- ) 3 7 maxof . 2.5 9.5 maxof . ;
 ";
@@ -2601,7 +2604,7 @@ fn bare_member_from_bounded_combinator_compiles_and_runs() {
 \
          import: core::prelude * ;
 \
-         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+         : cmptag inline ['T: Copy Ord] ( 'T 'T -- ) cmp tag . ;
 \
          : main ( -- ) -1 1 cmptag -0.0 0.0 cmptag ;
 ";
@@ -2633,7 +2636,7 @@ fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
 \
          import: core::prelude * ;
 \
-         : inner inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+         : inner inline ['T: Copy Ord] ( 'T 'T -- ) cmp tag . ;
 \
          : outer inline ( 'T 'T -- ) inner ;
 \
@@ -2665,7 +2668,7 @@ fn transitive_skip_unbounded_splicing_bounded_compiles_and_runs() {
 fn bound_dispatch_in_materialized_quotation_is_rejected() {
     let src = "type: Thunk q [ -- ] ;
 \
-         : foo inline ( 'T: Copy Ord 'T -- )
+         : foo inline ['T: Copy Ord] ( 'T 'T -- )
 \
          | a b |
 \
@@ -2698,7 +2701,7 @@ fn bound_dispatch_in_materialized_quotation_is_rejected() {
 fn materialized_quotation_without_bare_member_is_not_rejected() {
     let src = "type: Thunk q [ -- ] ;
 \
-         : foo inline ( 'T: Copy Ord 'T -- )
+         : foo inline ['T: Copy Ord] ( 'T 'T -- )
 \
          | a b | a b cmp drop [ ] Thunk drop ;
 \
@@ -2718,9 +2721,9 @@ fn materialized_quotation_without_bare_member_is_not_rejected() {
 fn splice_record_with_multi_output_poly_call_interns_bundle() {
     let src = "import: intrinsics * ;
 \
-         : pair ( 'T: Copy -- 'T 'T ) dup ;
+         : pair ['T: Copy] ( 'T -- 'T 'T ) dup ;
 \
-         : c inline ( 'T: Copy -- 'T 'T ) pair ;
+         : c inline ['T: Copy] ( 'T -- 'T 'T ) pair ;
 \
          : main ( -- ) 1 c . . ;
 ";
@@ -2776,7 +2779,7 @@ fn two_words_splicing_same_inline_combinator_dispatch_correctly() {
 \
          import: core::prelude * ;
 \
-         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+         : cmptag inline ['T: Copy Ord] ( 'T 'T -- ) cmp tag . ;
 \
          : w1 ( -- ) -1 1 cmptag ;
 \
@@ -2810,9 +2813,9 @@ fn poly_word_calling_inline_bounded_combinator_compiles_and_runs() {
 \
          import: core::prelude * ;
 \
-         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+         : cmptag inline ['T: Copy Ord] ( 'T 'T -- ) cmp tag . ;
 \
-         : usecmp ( 'T: Copy Ord 'T -- ) cmptag ;
+         : usecmp ['T: Copy Ord] ( 'T 'T -- ) cmptag ;
 \
          : main ( -- ) -1 1 usecmp -0.0 0.0 usecmp ;
 ";
@@ -2841,7 +2844,7 @@ fn poly_word_calling_inline_bounded_combinator_compiles_and_runs() {
 #[test]
 fn inline_eliminator_preserves_quotation_marker_in_self_tail_combinator() {
     check_ok(
-        ": mygt inline ( 'T: Copy Ord 'T -- Bool )
+        ": mygt inline ['T: Copy Ord] ( 'T 'T -- Bool )
 \
          swap cmp
 \

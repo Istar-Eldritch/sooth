@@ -118,7 +118,7 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
              import: core::prelude | if Bool Ord lt gt | ;\n\
              import: core::cmp | Ordering Less Equal Greater | ;\n\
              {POINT_IMPL}\
-             : mymax ( 'T: Copy Ord 'T -- 'T )\n\
+             : mymax ['T: Copy Ord] ( 'T 'T -- 'T )\n\
                | a b | a b gt ~[ a ] ~[ b ] if ;\n\
              : main ( -- )\n\
                3 Point 7 Point mymax | m | &m &x @ . m drop\n\
@@ -187,7 +187,7 @@ fn a_concrete_overload_coexists_with_an_ord_bounded_generic_of_the_same_name() {
         "import: intrinsics * ;\n\
          import: core::prelude | if Bool Ord lt | ;\n\
          type: Vec2 x i64 y i64 ;\n\
-         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+         : mylt ['T: Copy Ord] ( 'T 'T -- Bool ) lt ;\n\
          : mylt ( Vec2 Vec2 -- Bool )\n\
            | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
          : main ( -- )
@@ -224,7 +224,7 @@ fn an_impl_ord_on_the_concrete_overloads_type_makes_the_pair_an_overlap_error() 
              a drop b drop\n\
              ax bx lt ~[ Less ] ~[ ax bx gt ~[ Greater ] ~[ Equal ] if ] if ;\n\
          ;\n\
-         : mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+         : mylt ['T: Copy Ord] ( 'T 'T -- Bool ) lt ;\n\
          : mylt ( Vec2 Vec2 -- Bool )\n\
            | a b | &a &x @ &b &x @ lt | r | a drop b drop r ;\n\
          : main ( -- ) 5 3 mylt ~[ 1 ] ~[ 0 ] if . ;\n",
@@ -253,7 +253,7 @@ fn ord_inline_cmp_behavioural_golden() {
         "ord-inline-golden",
         &format!(
             "{ORD_INLINE_IMPORTS}\
-             : my_cmp inline ( 'T: Ord 'T -- i64 )
+             : my_cmp inline ['T: Ord] ( 'T 'T -- i64 )
 \
                cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
 \
@@ -289,7 +289,7 @@ fn ord_inline_cmp_two_splices_produce_correct_value() {
         "ord-inline-two-splice",
         &format!(
             "{ORD_INLINE_IMPORTS}\
-             : cmp_twice inline ( 'T: Ord 'T 'T 'T -- i64 i64 )
+             : cmp_twice inline ['T: Ord] ( 'T 'T 'T 'T -- i64 i64 )
 \
                | a b c d |
 \
@@ -328,7 +328,7 @@ fn ord_inline_cmp_member_local_colliding_with_caller_local_reads_its_own() {
         "ord-inline-collide",
         &format!(
             "{ORD_INLINE_IMPORTS}\
-             : cmp_shadowed inline ( 'T: Ord 'T 'T 'T -- i64 )
+             : cmp_shadowed inline ['T: Ord] ( 'T 'T 'T 'T -- i64 )
 \
                | lhs rhs a b |
 \

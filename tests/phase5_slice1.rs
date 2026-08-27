@@ -58,7 +58,7 @@ fn generic_header_colliding_with_a_concrete_type_is_a_duplicate() {
 fn generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate() {
     let err = build_err(
         "phase5-slice1-dup-enum",
-        "type: Opt | None | Some v i64 ;\ntype: Opt 'T | Nothing | Just v 'T ;\n: main ( -- ) 1 . ;\n",
+        "type: Opt | None | Some v i64 ;\ntype: Opt['T] | Nothing | Just v 'T ;\n: main ( -- ) 1 . ;\n",
     );
     assert!(err.contains("duplicate type `Opt`"), "unexpected: {err}");
     assert!(err.contains("line 2, col 1"), "unlocated: {err}");
@@ -94,7 +94,7 @@ fn generic_instantiations_reach_the_backend_and_run() {
 fn generic_enum_instantiation_reaches_the_backend_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-enum-instantiation",
-        "type: Res 'T 'E | Ok val 'T | Err val 'E ;\n: f ( Res[i64 Bool] -- Res[i64 Bool] ) ;\n: main ( -- ) 9 . ;\n",
+        "type: Res['T 'E] | Ok val 'T | Err val 'E ;\n: f ( Res[i64 Bool] -- Res[i64 Bool] ) ;\n: main ( -- ) 9 . ;\n",
     );
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
@@ -120,7 +120,7 @@ fn generic_application_with_the_wrong_argument_count_is_a_build_error() {
 fn generic_enum_declared_but_never_used_builds_and_runs() {
     let (stdout, code) = build_and_run(
         "phase5-slice1-unused-generic-enum",
-        "type: Result 'T 'E | Ok val 'T | Err val 'E ;\n: main ( -- ) 7 . ;\n",
+        "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n: main ( -- ) 7 . ;\n",
     );
     assert_eq!(stdout, "7\n");
     assert_eq!(code, 0);

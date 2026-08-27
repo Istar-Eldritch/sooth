@@ -3611,7 +3611,7 @@ mod tests {
     /// by coincidence.
     #[test]
     fn poly_signature_quotation_param_interns_a_bundle() {
-        let bundles = interned_bundles(": call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T ) ;\n");
+        let bundles = interned_bundles(": call_it ['T: Copy] ( 'T [ i64 -- i64 i64 ] -- 'T ) ;\n");
         assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
     }
 
@@ -3676,10 +3676,11 @@ mod tests {
     #[test]
     fn variable_bearing_poly_quotation_interns_no_bundle() {
         assert!(
-            interned_bundles(": call_it ( 'T: Copy [ i64 -- 'T i64 i64 ] -- ) drop ;\n").is_empty()
+            interned_bundles(": call_it ['T: Copy] ( 'T [ i64 -- 'T i64 i64 ] -- ) drop ;\n")
+                .is_empty()
         );
         assert!(interned_bundles(
-            ": call_it ( 'T: Copy [ 'T -- 'T 'T ] 'T -- 'T ) swap call drop drop ;\n"
+            ": call_it ['T: Copy] ( 'T [ 'T -- 'T 'T ] 'T -- 'T ) swap call drop drop ;\n"
         )
         .is_empty());
     }
@@ -4316,18 +4317,18 @@ mod tests {
 
     #[test]
     fn check_fill_len_happy_path_ok() {
-        // `fill` builds `[i64 4]`; `len` is non-consuming (the array stays).
+        // `fill` builds `array[i64 4]`; `len` is non-consuming (the array stays).
         check_src(": w ( -- ) 7 4 fill len drop drop ;").unwrap();
     }
     #[test]
     fn check_fill_output_type_is_the_array_shape() {
-        // `fill` interns `[i64 4]` and the declared output must match it, so
+        // `fill` interns `array[i64 4]` and the declared output must match it, so
         // this word type-checks with an array-typed output slot (R2/R3/R10).
-        check_src(": w ( -- [i64 4] ) 7 4 fill ;").unwrap();
+        check_src(": w ( -- array[i64 4] ) 7 4 fill ;").unwrap();
     }
     #[test]
     fn check_len_is_non_consuming_leaves_array_ok() {
-        check_src(": w ( [i64 4] -- [i64 4] usize ) | a | a len ;").unwrap();
+        check_src(": w ( array[i64 4] -- array[i64 4] usize ) | a | a len ;").unwrap();
     }
     #[test]
     fn check_len_on_non_array_is_error() {
@@ -4346,7 +4347,7 @@ mod tests {
         // the length and the index. Index (9) and length (4) are deliberately
         // distinct so a swapped-arg diagnostic bug can't hide behind a
         // same-valued assertion.
-        let err = check_src(": w ( [i64 4] -- ) | a | &a 9 &> drop ;").unwrap_err();
+        let err = check_src(": w ( array[i64 4] -- ) | a | &a 9 &> drop ;").unwrap_err();
         assert!(err.contains("out of range"), "unexpected message: {err}");
         assert!(err.contains('9'), "should name the index: {err}");
         assert!(err.contains('4'), "should name the length: {err}");
@@ -4356,7 +4357,7 @@ mod tests {
         // Index == length is the first invalid index (valid range is
         // 0..length-1); this off-by-one boundary is distinct from the
         // gross-violation case above and must be rejected too.
-        let err = check_src(": w ( [i64 4] -- ) | a | &a 4 &> drop ;").unwrap_err();
+        let err = check_src(": w ( array[i64 4] -- ) | a | &a 4 &> drop ;").unwrap_err();
         assert!(err.contains("out of range"), "unexpected message: {err}");
         assert!(err.contains("index 4"), "should name the index: {err}");
         assert!(err.contains("length 4"), "should name the length: {err}");
@@ -4364,7 +4365,7 @@ mod tests {
     #[test]
     fn check_computed_index_without_conversion_is_error() {
         // X10: a computed (non-literal) `i64` index needs an explicit `>usize`.
-        let err = check_src(": w ( [i64 4] i64 -- ) | a n | &a n &> drop ;").unwrap_err();
+        let err = check_src(": w ( array[i64 4] i64 -- ) | a n | &a n &> drop ;").unwrap_err();
         assert!(err.contains(">usize"), "unexpected message: {err}");
     }
     #[test]
@@ -4529,21 +4530,27 @@ mod tests {
     fn check_equality_on_array_is_error() {
         // X7/R13: `eq` on arrays reaches the operand guard naming the type.
         let err = check_src(": w ( -- Bool ) 0 4 fill 0 4 fill eq ;").unwrap_err();
-        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+        assert!(
+            err.contains("array[i64 4]"),
+            "should name the array type: {err}"
+        );
     }
     #[test]
     fn check_arithmetic_on_array_is_error() {
         // X7/R13: `add` on arrays reaches the operand guard naming the type
         // (the diagnostic covers `eq` *and* arithmetic; both are exercised).
-        let err = check_src(": w ( -- [i64 4] ) 0 4 fill 0 4 fill add ;").unwrap_err();
-        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+        let err = check_src(": w ( -- array[i64 4] ) 0 4 fill 0 4 fill add ;").unwrap_err();
+        assert!(
+            err.contains("array[i64 4]"),
+            "should name the array type: {err}"
+        );
     }
     #[test]
     fn check_two_spellings_of_same_shape_are_one_type_ok() {
-        // R8: structural dedup means `[i64 4]` in two positions is one type, so
-        // an `[i64 4]` argument satisfies an `[i64 4]`-typed word.
+        // R8: structural dedup means `array[i64 4]` in two positions is one type, so
+        // an `array[i64 4]` argument satisfies an `array[i64 4]`-typed word.
         check_src(
-            ": mk ( -- [i64 4] ) 0 4 fill ;\n: use ( [i64 4] -- i64 ) | a | &a 0 &> @ ;\n: w ( -- i64 ) mk use ;",
+            ": mk ( -- array[i64 4] ) 0 4 fill ;\n: use ( array[i64 4] -- i64 ) | a | &a 0 &> @ ;\n: w ( -- i64 ) mk use ;",
         )
         .unwrap();
     }

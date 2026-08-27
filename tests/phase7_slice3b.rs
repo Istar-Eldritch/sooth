@@ -162,7 +162,7 @@ fn poly_body_tagged_arm_not_adjacent_to_its_eliminator_is_error() {
 fn poly_body_orphan_tagged_quotation_is_error() {
     let src = format!(
         "{SHAPE}\
-         : bad ( 'T: Copy -- 'T ) ~[ ( Rect ) drop ] drop ;\n\
+         : bad ['T: Copy] ( 'T -- 'T ) ~[ ( Rect ) drop ] drop ;\n\
          : main ( -- ) 1 bad . ;\n"
     );
     let err = check_err(&src);
@@ -181,7 +181,7 @@ fn poly_body_orphan_tagged_quotation_is_error() {
 fn poly_eliminator_arm_output_type_disagreement_is_error() {
     let src = format!(
         "{SHAPE}\
-         : bad ( 'T: Copy Shape -- 'T )\n\
+         : bad ['T: Copy] ( 'T Shape -- 'T )\n\
            ~[ ( Rect )   Rect> drop drop dup ]\n\
            ~[ ( Circle ) Circle> ]\n\
            Shape? drop ;\n\
@@ -202,7 +202,7 @@ fn poly_eliminator_arm_output_type_disagreement_is_error() {
 fn poly_eliminator_arm_depth_mismatch_reuses_the_branch_shape_diagnostic() {
     let src = format!(
         "{SHAPE}\
-         : bad ( 'T: Copy Shape -- 'T )\n\
+         : bad ['T: Copy] ( 'T Shape -- 'T )\n\
            ~[ ( Rect )   Rect> drop drop ]\n\
            ~[ ( Circle ) Circle> ]\n\
            Shape? ;\n\
@@ -234,7 +234,7 @@ fn poly_eliminator_reference_scrutinee_is_located_error() {
     );
     let borrowed = format!(
         "{SHAPE}\
-         : bad ( 'T: Copy Shape -- 'T )\n\
+         : bad ['T: Copy] ( 'T Shape -- 'T )\n\
            | s | &s\n\
            ~[ ( Circle ) drop ]\n\
            ~[ ( Rect ) drop ]\n\
@@ -267,7 +267,7 @@ fn poly_eliminator_arm_borrow_disagreement_is_the_false_accept_guard() {
         format!(
             "type: P a i64 ;\n\
              {SHAPE}\
-             : bad ( 'T: Copy P P Shape -- 'T )\n\
+             : bad ['T: Copy] ( 'T P P Shape -- 'T )\n\
                | x y s | s\n\
                ~[ ( Rect )   Rect> drop drop &!x ]\n\
                ~[ ( Circle ) Circle> drop &!y ]\n\
@@ -296,7 +296,7 @@ fn poly_eliminator_cross_arm_borrow_mutability_disagreement_is_error() {
     let src = format!(
         "type: P a i64 ;\n\
          {SHAPE}\
-         : bad ( 'T: Copy P Shape -- 'T )\n\
+         : bad ['T: Copy] ( 'T P Shape -- 'T )\n\
            | x s | s\n\
            ~[ ( Rect )   Rect> drop drop &!x @ drop ]\n\
            ~[ ( Circle ) Circle> drop &x @ drop ]\n\
@@ -420,7 +420,7 @@ fn poly_eliminator_untagged_arm_is_error() {
 fn poly_eliminator_bound_quotation_as_scrutinee_is_an_untagged_arm() {
     let src = format!(
         "{SHAPE}\
-         : bad ( 'T: Copy -- 'T )\n\
+         : bad ['T: Copy] ( 'T -- 'T )\n\
            ~[ dup ] | q |\n\
            q\n\
            ~[ ( Rect ) Rect> drop drop ]\n\
@@ -440,7 +440,7 @@ fn poly_eliminator_bound_quotation_as_scrutinee_is_an_untagged_arm() {
 /// *be* a value to leave the word, and it has none in a generic body.
 #[test]
 fn poly_body_materialized_quotation_is_located_error() {
-    let src = ": bad ( 'T: Copy -- 'T ) ~[ dup ] swap ;\n\
+    let src = ": bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] swap ;\n\
                : main ( -- ) 1 bad . ;\n";
     let err = check_err(src);
     assert!(
@@ -460,7 +460,7 @@ fn poly_body_materialized_quotation_is_located_error() {
 fn poly_eliminator_arm_unconsumed_quotation_reports_the_inner_literal_span() {
     let err = check_err(
         "type: One | A p i64 ;\n\
-         : bad ( 'T: Copy One -- 'T )\n\
+         : bad ['T: Copy] ( 'T One -- 'T )\n\
            ~[ ( A )\n\
               A> drop\n\
               ~[ ] ] One? ;\n\
@@ -481,7 +481,7 @@ fn poly_eliminator_arm_unconsumed_quotation_reports_the_inner_literal_span() {
 fn poly_body_quotation_as_data_operand_is_located_error() {
     let ctor = check_err(
         "type: P a i64 ;\n\
-         : bad ( 'T: Copy -- 'T ) ~[ dup ] P swap drop ;\n\
+         : bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] P swap drop ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
@@ -489,7 +489,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
         "{ctor}"
     );
     let arith = check_err(
-        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] add drop ;\n\
+        ": bad ['T: Copy] ( 'T -- 'T ) 1 ~[ dup ] add drop ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
@@ -502,7 +502,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     // whose concrete suffix stops at the marker and reports `add` as
     // underflowing a stack that is not actually short.
     let deep = check_err(
-        ": bad ( 'T: Copy -- 'T ) 1 ~[ dup ] swap add drop ;\n\
+        ": bad ['T: Copy] ( 'T -- 'T ) 1 ~[ dup ] swap add drop ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(
@@ -524,7 +524,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
 #[test]
 fn poly_body_branch_on_a_quotation_is_located_error() {
     let err = check_err(
-        ": bad ( 'T: Copy -- 'T ) ~[ dup ] branch ;\n\
+        ": bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] branch ;\n\
          : main ( -- ) 1 bad . ;\n",
     );
     assert!(

@@ -27,7 +27,7 @@ pub struct Module {
     pub enums: Vec<EnumDecl>,
     /// The per-program interned array-type registry (D3, M1): one entry per
     /// distinct `(element, count)` shape, indexed by `ArrayId` and deduped
-    /// structurally, so two spellings of the same shape (e.g. two `[i64 4]`
+    /// structurally, so two spellings of the same shape (e.g. two `array[i64 4]`
     /// occurrences) share one entry. Populated during type resolution
     /// (`intern_array_type`), not by a name pre-pass: an array shape has no
     /// declared name to scan for ahead of parsing.
@@ -659,7 +659,7 @@ pub struct NameRegistries<'a> {
 
 /// P7.S3n (R5): `NameRegistries` plus the write access substitution needs.
 /// `substitute_generic_field` grounds a field that wraps a type variable
-/// (`['T 2]`, `^'T`, `Ent['K 'V]`), and grounding one *interns*: the array /
+/// (`array['T 2]`, `^'T`, `Ent['K 'V]`), and grounding one *interns*: the array /
 /// cell / ref shape it produces may be one nothing has registered yet, and
 /// its `Generic` arm re-enters `instantiate_struct`/`instantiate_enum`, which
 /// interns in turn. `NameRegistries` is `Copy` over immutable slices and can
@@ -765,7 +765,7 @@ fn type_arg_key(t: &Type, regs: NameRegistries) -> String {
 
 /// R4: the registry name of one monomorphized instantiation, a pure function
 /// of `(generic name, concrete type arguments)` with no dependence on
-/// processing order. Spelled the way `ArrayDecl`'s `[i64 4]` name is -- the
+/// processing order. Spelled the way `ArrayDecl`'s `array[i64 4]` name is -- the
 /// structural shape itself -- rather than through `instantiation_symbol`'s
 /// sanitizing scheme: this name is registry identity and diagnostic
 /// rendering (`sooth_mono_Box__t0_i64` would be a regression in every type
@@ -799,7 +799,7 @@ impl GenericTypes {
     /// concrete type arguments.
     ///
     /// P7.S3n (R4): a field may wrap the header's own variables to any depth
-    /// (`[['T 2] 2]`, `^'T`, `&'T`, `Ent['K 'V]`), so this recurses and
+    /// (`array[array['T 2] 2]`, `^'T`, `&'T`, `Ent['K 'V]`), so this recurses and
     /// interns the ground shape at each level -- the same bottom-up grounding
     /// `apply_subst` performs for a word signature, and the reason it needs
     /// `MutRegistries` rather than `NameRegistries`. Its `Generic` arm
@@ -1270,7 +1270,7 @@ pub fn resolve_bool_type(enums: &[EnumDecl]) -> Option<Type> {
 }
 
 /// A registered array type: its element type, compile-time count, and the
-/// leaked `&'static str` spelling `[T N]` every `Type::Array` naming it
+/// leaked `&'static str` spelling `array[T N]` every `Type::Array` naming it
 /// carries directly (mirrors `StructDecl::name_static`). Interned and deduped
 /// structurally by `(element, count)` shape (D3, M1): two spellings of the
 /// same shape share one `ArrayDecl`/`ArrayId`.
@@ -1459,7 +1459,7 @@ pub fn intern_array_type(arrays: &mut Vec<ArrayDecl>, element: Type, count: u32)
     {
         return Type::Array(ArrayId::from_index(idx), arrays[idx].name_static);
     }
-    let name = format!("[{} {}]", element.name(), count);
+    let name = format!("array[{} {}]", element.name(), count);
     let name_static: &'static str = Box::leak(name.into_boxed_str());
     let id = ArrayId::from_index(arrays.len());
     arrays.push(ArrayDecl {
@@ -1485,7 +1485,7 @@ pub fn intern_bundle_struct(structs: &mut Vec<StructDecl>, outputs: &[Type]) -> 
     }
     let id = StructId::from_index(structs.len());
     // Positional, like the backend's array type symbols: an output tuple's own
-    // spelling (`[i64 4]`, `&!Buf`) is not a legal QBE aggregate name, and the
+    // spelling (`array[i64 4]`, `&!Buf`) is not a legal QBE aggregate name, and the
     // name is never the dedup key.
     let name = format!("__ret_{}", structs.len());
     let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
@@ -1891,7 +1891,7 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
 /// P7.S4 (R1): the target of an `impl:` declaration, carrying the pattern
 /// the registry matches against together with the impl's own variable name
 /// tables (mirroring `PolySig`'s `ty_var_names`/`len_var_names`). A concrete
-/// target (`Point`, `[i64 4]`) folds to `PolyType::Concrete(t)` and behaves
+/// target (`Point`, `array[i64 4]`) folds to `PolyType::Concrete(t)` and behaves
 /// exactly as before; a generic target (`['T N]`, `'T`, `Box['T]`) carries
 /// variables and the member word is polymorphic.
 #[derive(Debug, Clone)]
@@ -1960,7 +1960,7 @@ pub enum Len {
 }
 
 /// R4: a type in a polymorphic signature. A monomorphic sub-type folds to
-/// `Concrete`; a variable-bearing array (`['T 'N]`, `[i64 'N]`, `['T 4]`)
+/// `Concrete`; a variable-bearing array (`array['T 'N]`, `array[i64 'N]`, `array['T 4]`)
 /// stays `Array`. `Type` itself gains **no** variant (S1): the variable forms
 /// live only here, in a word's declared effect and in call-site unification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1983,7 +1983,7 @@ pub enum PolyType {
     /// (R4), so it shares that id space rather than minting its own.
     Quotation(Vec<PolyType>, Vec<PolyType>, bool, Option<u32>, Option<u32>),
     /// Slice 13 (R-A1/D1): a reference whose referent is still polymorphic
-    /// (`&'T`, `&['T 4]`, and their `&!` twins): the referent, then whether
+    /// (`&'T`, `&array['T 4]`, and their `&!` twins): the referent, then whether
     /// it is mutable. There is deliberately no `RefId` -- the referent may be
     /// a variable, which no registry entry can name; the id is minted only
     /// when the referent grounds to a concrete `Type` (`apply_subst` /
@@ -1994,7 +1994,7 @@ pub enum PolyType {
     /// asked at sites that hold no registry.
     Ref(Box<PolyType>, bool),
     /// P7.S3n (R3): an owning cell whose payload is still polymorphic
-    /// (`^'T`, `^['T 4]`), deferred for exactly the reason `Ref` documents:
+    /// (`^'T`, `^array['T 4]`), deferred for exactly the reason `Ref` documents:
     /// the payload may be a variable, which no registry entry can name, so
     /// the `OwnedCellId` is minted only once the payload grounds
     /// (`apply_subst` / `subst_polytype`, via `intern_owned_cell_type`), and
@@ -2141,7 +2141,7 @@ pub struct CallInst {
 /// entry: it is either a concrete type the caller supplied outright, or one
 /// of the caller's own rigid variables, to be grounded later against the
 /// caller's own θ. R6's growth rule is what keeps the set this small -- a
-/// compound image mentioning a caller variable (`Box['T]`, `['T 4]`) is a
+/// compound image mentioning a caller variable (`Box['T]`, `array['T 4]`) is a
 /// located rejection at the call site, so no type constructor ever needs
 /// representing here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2281,7 +2281,7 @@ pub struct TypedSlot {
 /// `StructId` and the struct's leaked `&'static str` name so `Type` stays
 /// `Copy` and self-renders without a registry (see `StructDecl::name_static`).
 /// `Type::Array` mirrors this: an `ArrayId` into the interned `(element,
-/// count)` registry plus the leaked `[T N]` spelling (D2, D3).
+/// count)` registry plus the leaked `array[T N]` spelling (D2, D3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int(IntType),
@@ -3531,11 +3531,11 @@ mod tests {
         match a {
             Type::Array(id, name) => {
                 assert_eq!(id, ArrayId(0));
-                assert_eq!(name, "[i64 4]");
+                assert_eq!(name, "array[i64 4]");
             }
             other => panic!("expected Type::Array, got {other:?}"),
         }
-        assert_eq!(a.to_string(), "[i64 4]");
+        assert_eq!(a.to_string(), "array[i64 4]");
     }
 
     /// P7 slice 3c (R1.1/R1.3): the two spellings, and that `Type::name`
@@ -3649,8 +3649,8 @@ mod tests {
         }
     }
 
-    /// P7.S3n (R4): `items ['T 2]` at `'T = i64` grounds to the interned
-    /// `[i64 2]` shape -- the array arm, which panicked in `unreachable!`
+    /// P7.S3n (R4): `items array['T 2]` at `'T = i64` grounds to the interned
+    /// `array[i64 2]` shape -- the array arm, which panicked in `unreachable!`
     /// before phase 2.
     #[test]
     fn substitute_generic_field_array_of_ty_var_interns_concrete_array() {
@@ -4199,7 +4199,7 @@ mod tests {
         let mut arrays = Vec::new();
         let inner = intern_array_type(&mut arrays, Type::I64, 4);
         let outer = intern_array_type(&mut arrays, inner, 4);
-        assert_eq!(outer.to_string(), "[[i64 4] 4]");
+        assert_eq!(outer.to_string(), "array[array[i64 4] 4]");
     }
 
     #[test]

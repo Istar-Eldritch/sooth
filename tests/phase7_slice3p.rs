@@ -89,7 +89,7 @@ fn indexable_at_on_pair_dispatches_a_non_trailing_receiver() {
          import: core::prelude | eq if | ;\n\
          type: Pair a i64 b i64 ;\n\
          type: Flip a i64 b i64 ;\n\
-         trait: Indexable 'T : at ( &'T i64 -- i64 ) ; ;\n\
+         trait: Indexable['T] : at ( &'T i64 -- i64 ) ; ;\n\
          impl: Indexable for Pair\n\
            : at | n | | p |\n\
              n 0 eq ~[ p &a @ ] ~[ p &b @ ] if ;\n\
@@ -98,7 +98,7 @@ fn indexable_at_on_pair_dispatches_a_non_trailing_receiver() {
            : at | n | | p |\n\
              n 0 eq ~[ p &b @ ] ~[ p &a @ ] if ;\n\
          ;\n\
-         : uses ( &'T: Indexable i64 -- i64 )\n\
+         : uses ['T: Indexable] ( &'T i64 -- i64 )\n\
            | n | | p |\n\
            n 0 eq ~[ 0 ] ~[ 1 ] if | i |\n\
            p i at ;\n\

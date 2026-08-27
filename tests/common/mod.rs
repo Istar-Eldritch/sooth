@@ -125,8 +125,16 @@ fn fixture_imports(src: &str) -> String {
     // fixture that names its own `Ord`-shadowing `trait:`/`type:`, and
     // `import: core::cmp`/`core::prelude` both defer to a fixture's own
     // explicit import, exactly as the `Bool` block below does.
+    // P7.S6 (R6): a bound bracket `[\'T: Copy Ord]` glues `Ord` to `]`, so a
+    // whitespace-only token check (`tokens.contains`) misses it. A substring
+    // check on `src` with word-boundary splitting (matching `Ord` but not
+    // `Order`/`Ordering`) is what the `Bool` block below already does for the
+    // same bracket-adjacency reason.
+    let ord_as_word = src
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '\'')
+        .any(|t| t == "Ord");
     if !declared.contains(&"Ord")
-        && tokens.contains(&"Ord")
+        && ord_as_word
         && !src.contains("import: core::cmp")
         && !src.contains("import: core::prelude")
     {

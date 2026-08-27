@@ -9,7 +9,7 @@ import: intrinsics * ;
 
 import: core::combinators c | times | ;
 
-: scores ( -- [i64 5] )
+: scores ( -- array[i64 5] )
   0 5 fill | s |
   &!s 0 >usize &!> 3 !
   &!s 1 >usize &!> 7 !

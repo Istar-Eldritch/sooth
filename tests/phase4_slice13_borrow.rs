@@ -1,5 +1,5 @@
 //! Phase 4 Slice 13, phase 2 (R-B8): the shared read witness. `first`
-//! declares a poly borrow (`&['T 4]` is legal to *declare* since Part A;
+//! declares a poly borrow (`&array['T 4]` is legal to *declare* since Part A;
 //! Part B teaches the checker to *produce* one), borrows its array local,
 //! bounds-checks a literal index against the concrete length, and fetches
 //! the element through `@` -- all still generic, monomorphized at `i64` by

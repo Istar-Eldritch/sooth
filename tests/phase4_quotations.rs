@@ -286,11 +286,11 @@ fn capturing_i32_u32_and_usize_scalars_snapshot_into_env() {
 
 #[test]
 fn escaping_closure_over_param_ref_compiles_and_runs() {
-    // `make-b`'s closure captures `r`, a `&[i64 4]` *parameter*: its referent
+    // `make-b`'s closure captures `r`, a `&array[i64 4]` *parameter*: its referent
     // is rooted outside `make-b`'s frame (in `main`'s `a`, still live at the
     // call), so the escaping capture is admitted. The env holds the reference;
     // reading `r[0] = 5` and adding the input 4 gives 9.
-    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
+    let src = ": make-b ( &array[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
                : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     let (stdout, code) = run_src("qmakeb", src);
     assert_eq!(stdout, "9\n");
@@ -315,7 +315,7 @@ fn materialized_single_capture_builds_inline_env() {
     // Phase 2's multi-capture path and does not exist yet, so asserting its
     // absence would be a placebo; the discriminating witness is the param
     // shape, which goes red if the env param (R17) is dropped.
-    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
+    let src = ": make-b ( &array[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
                : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     assert_eq!(
         materialized_quot_params(src),
@@ -334,7 +334,7 @@ fn materialized_single_capture_builds_inline_env() {
 
 #[test]
 fn escaping_closure_over_frame_local_is_past_owning_frame() {
-    // `make-a`'s closure borrows `arr`, a `[i64 4]` bound *inside* `make-a`;
+    // `make-a`'s closure borrows `arr`, a `array[i64 4]` bound *inside* `make-a`;
     // returning the closure would let it outlive `arr`'s storage. Unlike
     // `make-b`'s parameter, this is frame-rooted, so the escaping boundary is a
     // past-owning-frame error (R15/R24), asserted whole.
@@ -863,7 +863,7 @@ fn same_frame_closure_through_heap_cell_runs() {
 
 #[test]
 fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
-    // `ra`/`rb` are both outer-rooted (`&[i64 2]` parameters, `deriv: None`),
+    // `ra`/`rb` are both outer-rooted (`&array[i64 2]` parameters, `deriv: None`),
     // so R22's frame-rooted walk sees no frame-rooted member and would have
     // wrongly admitted this before the fix. The closure still needs a
     // 2-capture stack bundle (R16), built in `make`'s frame; storing it into
@@ -872,7 +872,7 @@ fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
     // bundle's references point to.
     let err = check_error(
         "type: Holder q [ -- i64 ] ;\n\
-         : make ( &[i64 2] &[i64 2] -- Holder )\n\
+         : make ( &array[i64 2] &array[i64 2] -- Holder )\n\
          | ra rb |\n\
          [ ra 0 >usize &> @ rb 0 >usize &> @ add ] Holder ;\n\
          : main ( -- )\n\
@@ -896,7 +896,7 @@ fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
     // tracks total capture count separately.
     let err = check_error(
         "type: Holder q [ -- i64 ] ;\n\
-         : make ( &[i64 3] i64 -- Holder )\n\
+         : make ( &array[i64 3] i64 -- Holder )\n\
          | ra n |\n\
          [ ra 0 >usize &> @ n add ] Holder ;\n\
          : main ( -- )\n\

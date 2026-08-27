@@ -134,9 +134,9 @@ fn repl_words_shows_user_facing_name_for_imported_word() {
 /// to `:words` just because it has no concrete instantiation yet.
 #[test]
 fn repl_words_lists_polymorphic_word() {
-    let out = run_session(&[": alen ( ['T 'N] -- ) drop ;", ":words"]);
+    let out = run_session(&[": alen ( array['T 'N] -- ) drop ;", ":words"]);
     assert!(
-        out.contains("alen ( ['T 'N] -- )"),
+        out.contains("alen ( array['T 'N] -- )"),
         "`:words` should list the polymorphic word `alen` with its poly signature, got: {out}"
     );
 }
@@ -325,7 +325,7 @@ fn repl_owning_quotation_declarations_are_errors_not_crashes() {
 /// would get.
 #[test]
 fn repl_ord_bound_is_a_located_repl_specific_diagnostic() {
-    let out = run_session(&[": mymax ( 'T: Ord 'T -- 'T ) drop ;"]);
+    let out = run_session(&[": mymax ['T: Ord] ( 'T 'T -- 'T ) drop ;"]);
     assert!(
         out.contains(
             "error: unknown capability `Ord` at line 1, col 15 (`Ord` is a core::cmp trait; \
@@ -346,7 +346,7 @@ fn repl_ord_bound_is_a_located_repl_specific_diagnostic() {
 /// the slot parser's `unknown type `Ord``.
 #[test]
 fn repl_ord_bound_after_copy_is_the_same_repl_specific_diagnostic() {
-    let out = run_session(&[": mymax ( 'T: Copy Ord 'T -- 'T ) drop ;", "7 ."]);
+    let out = run_session(&[": mymax ['T: Copy Ord] ( 'T 'T -- 'T ) drop ;", "7 ."]);
     assert!(
         out.contains(
             "error: unknown capability `Ord` at line 1, col 20 (`Ord` is a core::cmp trait; \
@@ -373,7 +373,7 @@ fn repl_ord_bound_after_copy_is_the_same_repl_specific_diagnostic() {
 fn repl_declared_ord_type_still_parses_as_a_bound_slot() {
     let out = run_session(&[
         "type: Ord val i64 ;",
-        ": mymax ( 'T: Copy Ord 'T -- 'T ) drop ;",
+        ": mymax ['T: Copy Ord] ( 'T 'T -- 'T ) drop ;",
     ]);
     assert!(
         out.contains("stack effect mismatch in `mymax`"),

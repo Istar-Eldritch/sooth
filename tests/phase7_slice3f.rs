@@ -66,7 +66,7 @@ fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
 fn argument_boundary_materializes_ground_quotation_param() {
     let src = "import: intrinsics * ;\n\
                import: core::bool * ;\n\
-               : run_it ( 'T: Copy [ i64 -- i64 ] -- 'T ) drop ;\n\
+               : run_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T ) drop ;\n\
                : main ( -- )\n\
                  7 [ 1 add ] run_it .\n\
                  True [ 1 add ] run_it .\n\
@@ -89,7 +89,7 @@ fn argument_boundary_materializes_ground_quotation_param() {
 fn body_boundary_calls_ground_quotation_param() {
     let src = "import: intrinsics * ;\n\
                import: core::bool * ;\n\
-               : call_it ( 'T: Copy [ i64 -- i64 ] -- 'T i64 )\n\
+               : call_it ['T: Copy] ( 'T [ i64 -- i64 ] -- 'T i64 )\n\
                  1 swap call\n\
                ;\n\
                : main ( -- )\n\
@@ -114,7 +114,7 @@ fn body_boundary_calls_ground_quotation_param() {
 fn argument_and_body_boundary_together() {
     let src = "import: intrinsics * ;\n\
                import: core::bool * ;\n\
-               : apply_it ( 'T: Copy [ i64 i64 -- i64 ] i64 -- 'T i64 )\n\
+               : apply_it ['T: Copy] ( 'T [ i64 i64 -- i64 ] i64 -- 'T i64 )\n\
                  3 rot call\n\
                ;\n\
                : main ( -- )\n\
@@ -141,7 +141,7 @@ fn argument_and_body_boundary_together() {
 fn body_boundary_pops_declared_inputs_deepest_first() {
     let src = "import: intrinsics * ;\n\
                import: core::bool * ;\n\
-               : call_it ( 'T: Copy [ i64 Bool -- ] -- 'T )\n\
+               : call_it ['T: Copy] ( 'T [ i64 Bool -- ] -- 'T )\n\
                  1 True rot call\n\
                ;\n\
                : main ( -- )\n\

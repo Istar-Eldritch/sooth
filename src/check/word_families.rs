@@ -631,10 +631,10 @@ pub(super) fn check_access_word(
 /// (like the shuffles and numeric operators) they dispatch on the concrete
 /// operand types rather than a fixed env signature (R6, R10):
 ///
-/// - `fill ( T -- [T N] )`: the top slot is the compile-time count `N` (a
+/// - `fill ( T -- array[T N] )`: the top slot is the compile-time count `N` (a
 ///   literal, M1), the slot below is the element `T`; interns the `(T, N)`
 ///   shape (R3) and pushes it.
-/// - `len ( [T N] -- usize )`: **non-consuming**, folds to the constant `N`.
+/// - `len ( array[T N] -- usize )`: **non-consuming**, folds to the constant `N`.
 ///
 /// Element access is a reference word (`&>`/`&!>` then `@`/`!`), not an
 /// array word: it goes through `check_access_word` instead.
@@ -771,7 +771,7 @@ pub(super) fn check_array_word(
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
-        // R10.1: `slice ( &[T N] -- Slice[T] )`. The view carries the source
+        // R10.1: `slice ( &array[T N] -- Slice[T] )`. The view carries the source
         // array's length at runtime, so the receiver's compile-time `N` is
         // read here and never named again. The receiver is consumed and its
         // region forwarded onto the view exactly as `&>` forwards it onto an
@@ -853,7 +853,7 @@ pub(super) fn check_array_word(
                 ..Slot::derived(recv.ty, deriv)
             });
         }
-        // R1: `tabulate ( usize ~[ -- T ] -- [T N] )` allocates an array and,
+        // R1: `tabulate ( usize ~[ -- T ] -- array[T N] )` allocates an array and,
         // for each index 0..N, splices the quotation to produce a fresh `T`
         // and stores it. Unlike `fill`, the element is freshly produced each
         // iteration (never replicated), so `check_array_element_gate` is not
@@ -1338,7 +1338,7 @@ fn drop_import_visibility_error(
     }
 }
 
-/// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
+/// A constant (literal) index out of range for a `array[T N]` (X4, R11): a compile
 /// error naming the length `N` and the offending index.
 pub(super) fn array_index_out_of_range_error(
     ctx: &Ctx,
@@ -1540,7 +1540,7 @@ fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type)
     )
 }
 /// A reference-mode word applied to something that is not the reference shape
-/// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
+/// it projects through (`&array[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
 pub(super) fn reference_word_operand_error(
     ctx: &Ctx,
     span: Span,
@@ -1942,7 +1942,7 @@ mod tests {
                 "only `call` accepts one",
             ),
             w(
-                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
+                ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
                 "passed to `dupit`",
                 "only `call` accepts one",
             ),
@@ -2769,7 +2769,7 @@ mod tests {
     #[test]
     fn array_index_ref_forwards_its_receivers_region() {
         let err = check_src(
-            "type: Buf data ^[u8 4] len usize ;\n\
+            "type: Buf data ^array[u8 4] len usize ;\n\
              : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
              : main ( -- ) mk &data &^ 0 >usize &> swap drop @ >i64 . ;",
         )
@@ -2786,7 +2786,7 @@ mod tests {
     #[test]
     fn nested_field_ref_forwards_its_receivers_region() {
         let err = check_src(
-            "type: Buf data ^[u8 4] len usize ;\n\
+            "type: Buf data ^array[u8 4] len usize ;\n\
              type: Wrap b Buf ;\n\
              : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
              : main ( -- ) mk Wrap &b &data &^ swap drop 0 >usize &> @ >i64 . ;",
@@ -2901,9 +2901,9 @@ mod tests {
     /// pass.
     #[test]
     fn slice_constructs_a_view_from_an_array_reference() {
-        check_src(": f ( &[i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap();
+        check_src(": f ( &array[i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap();
         // ...and the view it builds really is `Slice[i64]`, named as such.
-        let err = check_src(": f ( &[i64 3] -- i64 ) slice ;\n: main ( -- ) ;\n").unwrap_err();
+        let err = check_src(": f ( &array[i64 3] -- i64 ) slice ;\n: main ( -- ) ;\n").unwrap_err();
         assert!(err.contains("Slice[i64]"), "unexpected message: {err}");
     }
 
@@ -2917,8 +2917,8 @@ mod tests {
     /// `check_slice_element_gate_*` in `declarations.rs`.
     #[test]
     fn slice_element_copy_rule_is_enforced() {
-        let linear =
-            check_src(": f ( &[^i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n").unwrap_err();
+        let linear = check_src(": f ( &array[^i64 3] -- usize ) slice len ;\n: main ( -- ) ;\n")
+            .unwrap_err();
         assert!(
             linear.contains("`slice` cannot create a slice with a linear element"),
             "unexpected message: {linear}"
@@ -2943,7 +2943,7 @@ mod tests {
         let src = |sigil: &str, recv: &str| {
             format!(
                 ": take ( {sigil}Slice[i64] -- usize ) len ;\n\
-                 : f ( {recv}[i64 3] -- usize ) slice take ;\n\
+                 : f ( {recv}array[i64 3] -- usize ) slice take ;\n\
                  : main ( -- ) ;\n"
             )
         };
@@ -3053,7 +3053,7 @@ mod tests {
     #[test]
     fn consuming_the_buffer_under_a_live_slice_is_error() {
         let err = check_src(
-            "type: W a [i64 4] ;\n\
+            "type: W a array[i64 4] ;\n\
              : main ( -- ) 7 4 fill W &a slice swap W> drop len . ;\n",
         )
         .unwrap_err();
@@ -3066,7 +3066,7 @@ mod tests {
         // says the slice row above is not merely inheriting some unrelated
         // rejection.
         let twin = check_src(
-            "type: W a [i64 4] ;\n\
+            "type: W a array[i64 4] ;\n\
              : main ( -- ) 7 4 fill W &a 0 >usize &> swap W> drop @ . ;\n",
         )
         .unwrap_err();
@@ -3094,15 +3094,15 @@ mod tests {
     // --- Phase 7 slice 5: `tabulate` word family (checker arm) ---
 
     /// R1: `tabulate` accepts an inline `~[ -- T ]` quotation and a literal
-    /// count, producing `[T N]`.  Each slot is freshly produced by the
+    /// count, producing `array[T N]`.  Each slot is freshly produced by the
     /// spliced quotation body.
     #[test]
     fn tabulate_accepts_inline_quotation_producing_one_value() {
-        check_src(": f ( -- [i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n").unwrap();
+        check_src(": f ( -- array[i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n").unwrap();
         // A struct element works too (aggregate store via `Blit`).
         check_src(
             "type: P a i64 b i64 ;\n\
-             : f ( -- [P 2] ) 2 ~[ 1 2 P ] tabulate ;\n\
+             : f ( -- array[P 2] ) 2 ~[ 1 2 P ] tabulate ;\n\
              : main ( -- ) ;\n",
         )
         .unwrap();
@@ -3113,15 +3113,15 @@ mod tests {
     /// `literal_effect_mismatch_error` path.
     #[test]
     fn tabulate_rejects_quotation_with_wrong_output_count() {
-        let two =
-            check_src(": f ( -- [i64 3] ) 3 ~[ 1 2 ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+        let two = check_src(": f ( -- array[i64 3] ) 3 ~[ 1 2 ] tabulate ;\n: main ( -- ) ;\n")
+            .unwrap_err();
         assert!(
             two.contains("the quotation passed to `tabulate`"),
             "unexpected message: {two}"
         );
         // An empty body produces zero values — also a mismatch.
         let zero =
-            check_src(": f ( -- [i64 3] ) 3 ~[ ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+            check_src(": f ( -- array[i64 3] ) 3 ~[ ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
         assert!(
             zero.contains("the quotation passed to `tabulate`"),
             "unexpected message: {zero}"
@@ -3166,8 +3166,8 @@ mod tests {
     /// `~[ ... ]` (inline, spliced at the call site).
     #[test]
     fn tabulate_rejects_non_inline_quotation() {
-        let err =
-            check_src(": f ( -- [i64 3] ) 3 [ 42 ] tabulate ;\n: main ( -- ) ;\n").unwrap_err();
+        let err = check_src(": f ( -- array[i64 3] ) 3 [ 42 ] tabulate ;\n: main ( -- ) ;\n")
+            .unwrap_err();
         assert!(
             err.contains("ordinary `[ ... ]` quotation"),
             "unexpected message: {err}"

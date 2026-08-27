@@ -18,12 +18,12 @@ import: intrinsics * ;
 
 import: core::combinators c | times | ;
 
-type: AccC arr [i64 4] ;
-type: AccL arr [i64 4] ;
+type: AccC arr array[i64 4] ;
+type: AccL arr array[i64 4] ;
 
 : drop ( AccL -- )  | a | a AccL> drop ;
 
-: input ( -- [i64 4] )
+: input ( -- array[i64 4] )
   0 4 fill | s |
   &!s 0 >usize &!> 1 !
   &!s 1 >usize &!> 2 !
@@ -31,14 +31,14 @@ type: AccL arr [i64 4] ;
   &!s 3 >usize &!> 4 !
   s ;
 
-: prefix-copy ( [i64 4] AccC -- AccC )
+: prefix-copy ( array[i64 4] AccC -- AccC )
   | src acc |
   &!acc &!arr | out |
   0 4 ~[ | i | &src i >usize &> @ add | run | out i >usize &!> run ! run ] times
   drop
   acc ;
 
-: prefix-linear ( [i64 4] AccL -- AccL )
+: prefix-linear ( array[i64 4] AccL -- AccL )
   | src acc |
   &!acc &!arr | out |
   0 4 ~[ | i | &src i >usize &> @ add | run | out i >usize &!> run ! run ] times

@@ -122,8 +122,8 @@ fn owned_cell_without_payload_in_signature_is_located_error() {
 #[test]
 fn generic_field_shapes_wrapping_own_ty_var_declare() {
     for (tag, decl) in [
-        ("arr", "type: Pair 'T items ['T 2] ;"),
-        ("nest", "type: NestArr 'T grid [['T 2] 3] ;"),
+        ("arr", "type: Pair 'T items array['T 2] ;"),
+        ("nest", "type: NestArr 'T grid array[array['T 2] 3] ;"),
         ("cell", "type: Cell 'T c ^'T ;"),
         ("ref", "type: Box 'T r &'T ;"),
         (
@@ -230,13 +230,13 @@ fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
 /// R4, whole pipeline: an array-of-type-variable field instantiated at two
 /// differently-sized payloads, constructed from a real array and read back.
 /// Two payloads rather than one, because a substitution that ignored the
-/// argument and grounded every `['T 2]` to the same shape would pass with one.
+/// argument and grounded every `array['T 2]` to the same shape would pass with one.
 #[test]
 fn array_of_ty_var_field_instantiates_and_runs_at_two_payloads() {
     let (stdout, code) = build_and_run(
         "arrfield",
         "import: intrinsics * ;\n\
-         type: Pair 'T items ['T 2] ;\n\
+         type: Pair 'T items array['T 2] ;\n\
          : first ( Pair[i64] -- i64 )\n\
            Pair> | items | &items 0 >usize &> @ items drop ;\n\
          : firstb ( Pair[u8] -- u8 )\n\
@@ -251,12 +251,12 @@ fn array_of_ty_var_field_instantiates_and_runs_at_two_payloads() {
 
 /// R4: the nesting claim at instantiation. A one-level array arm that did not
 /// recurse would reach `substitute_generic_field`'s `unreachable!` on the
-/// inner `['T 2]` (N1).
+/// inner `array['T 2]` (N1).
 #[test]
 fn nested_array_of_ty_var_field_instantiates() {
     build(
         "nestfield",
-        "type: NestArr 'T grid [['T 2] 3] ;\n\
+        "type: NestArr 'T grid array[array['T 2] 3] ;\n\
          : f ( NestArr[i64] -- NestArr[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -398,7 +398,7 @@ fn cell_wrapped_generic_self_reference_builds_and_terminates() {
 fn cell_wrapped_generic_self_reference_enum_builds_and_terminates() {
     build(
         "cellcycleenum",
-        "type: L 'T | Nil | Cons v 'T next ^L['T] ;\n\
+        "type: L['T] | Nil | Cons v 'T next ^L['T] ;\n\
          : f ( L[i64] -- L[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -464,12 +464,12 @@ fn poly_body_constructs_generic_with_cell_argument() {
 /// (positional) variant field cannot be an array. Pre-existing and unrelated
 /// to type variables -- this fixture has no generic header at all -- and
 /// deliberately untouched by this slice. A *named* generic variant field
-/// (`Some xs ['T 2]`) is in scope and covered elsewhere.
+/// (`Some xs array['T 2]`) is in scope and covered elsewhere.
 #[test]
 fn attributeless_variant_array_field_is_still_a_parse_error() {
     let err = build(
         "posvariant",
-        "type: Foo | Some [i64 2] | None ;\n: main ( -- ) ;\n",
+        "type: Foo | Some array[i64 2] | None ;\n: main ( -- ) ;\n",
     )
     .expect_err("a positional array variant field does not parse");
     assert!(

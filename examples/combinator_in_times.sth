@@ -11,7 +11,7 @@ import: intrinsics * ;
 
 import: core::combinators c ;
 
-: mk ( i64 -- [i64 3] )
+: mk ( i64 -- array[i64 3] )
   | base | 0 3 fill | s |
   &!s 0 >usize &!> base !
   &!s 1 >usize &!> base 1 add !
