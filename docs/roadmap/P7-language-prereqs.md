@@ -945,7 +945,7 @@ corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`
 `src/ir/func_builder/word_families.rs:394-455`, array drop is `unreachable!` at
 `src/ir/func_builder/quotation.rs:412`, and `synthesize_aggregate_destructors`
 (`src/ir/destructors.rs:37`) does not handle arrays. The orphaned testing-vocabulary brief
-was renamed `slice7-testing-brief.md` (**P7.S7**).
+was renamed and split into **P7.S7a-S7d** (see that entry below).
 
 **P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
 surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
@@ -1053,11 +1053,27 @@ a conflicting operand produces the same "explicit instantiation conflict" diagno
 conflicting type argument already produces. `cargo fmt --check && cargo clippy -- -D warnings
 && cargo test` is green.
 
-**P7.S7 -- A testing vocabulary in `core`, and a `sooth test` command.** `[ planned ]` Two
-assertion words, `expect ( Bool str -- )` and `expect-eq ( 'T: Ord 'T str -- )`, printing a
-numberless TAP-style `ok -- <label>` / `not ok -- <label>` line per assertion, plus a driver
-subcommand that discovers, builds, and runs test programs and interprets that output as
-pass/fail. Detail: [slice7-testing-brief](./P7/slice7-testing-brief.md).
+**P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ planned ]`
+Split into four subslices during briefing: the vocabulary itself needed a `hosted` home
+that didn't exist yet (`.` prints through libc unconditionally, a hosted-layer dependency
+the compiler currently hides as a builtin), and reporting more than a bare label on
+failure wants a `Show` trait, whose naive one-impl-per-type shape collides with the
+existing orphan rule the moment a second target (embedded, UART) wants its own sink.
+Sequenced so nothing but the last subslice touches the compiler:
+
+- **S7a** -- `lib/core`/`lib/hosted` package split, `lib/hosted/libc.sth` with `exit`.
+  Detail: [slice7a-libc-brief](./P7/slice7a-libc-brief.md).
+- **S7b** -- `hosted::testing`'s `expect`/`expect-eq` and the `sooth test` driver, label-only
+  output, printing via the still-intrinsic `.`. Detail:
+  [slice7b-testing-brief](./P7/slice7b-testing-brief.md).
+- **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic: one `Show` impl per type,
+  living in `core`; per-target `Write` impls carry the platform dependency), with
+  `hosted::libc` supplying the `Stdout` sink. Detail:
+  [slice7c-show-brief](./P7/slice7c-show-brief.md).
+- **S7d** -- retires the compiler-intrinsic `.` in favor of an ordinary `hosted::show` word
+  over S7c's traits; every printing program migrates to an explicit `depends: hosted`/
+  `import:`, no compatibility shim. Detail:
+  [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md).
 
 **P7.S8 -- Poly-body-calls-poly-combinator lowering.** `[ planned ]` A polymorphic word's
 body calling another word that is both `is_combinator` (declares `inline`) and generic with

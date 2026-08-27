@@ -1,4 +1,4 @@
-# Phase 7 Slice 7: a testing vocabulary in `core`, and a `sooth test` command (brief)
+# Phase 7 Slice 7b: a testing vocabulary in `hosted`, and a `sooth test` command (brief)
 
 Unit-testing Sooth code in Sooth itself. Two halves: an assertion vocabulary the
 language already has every prerequisite for (traits, enums, generics, string printing,
@@ -11,6 +11,10 @@ of the P7 machinery (`Ord` dispatch, enum elimination, `Bound::User` generics,
 string printing through the intrinsic `.` row) and because the CLI is ordinary
 driver work over machinery P8.S1a/S1b landed (manifest resolution, package
 discovery) — both halves exist today, this slice is assembly, not extension.
+
+Depends on **S7a** for the `lib/core`/`lib/hosted` split (this vocabulary lives in
+`hosted`, not `core` — see R3) and, if a suite wants to abort early rather than
+report through the protocol, for `hosted::libc`'s `exit`.
 
 ## Design rulings
 
@@ -29,18 +33,11 @@ test file is run by hand — a property that matters for a language whose feedba
 loop is run-the-program.
 
 A test program that traps or aborts already exits non-zero, which the runner
-reports as failure; build errors are failures on their own channel.
+reports as failure; build errors are failures on their own channel. A suite that
+wants to abort itself deliberately (a fatal precondition, not an assertion) reaches
+for S7a's `exit`, not a new primitive here.
 
-### R2 — No `exit` intrinsic in this slice
-
-A test program cannot yet exit non-zero by its own choice; it does not need to. The
-protocol line carries the failure signal (R1), the runner interprets it, and
-aborting a suite early is an unforced requirement. If a future consumer wants
-process-level failure (a golden harness, CI without the runner), a one-word
-`exit ( i32 -- )` intrinsic is a separate, tiny slice. Deferring keeps this slice
-zero-language-change.
-
-### R3 — The vocabulary is `core::testing`, two words
+### R2 — The vocabulary is `hosted::testing`, two words
 
     expect    ( Bool str -- )
     expect-eq ( 'T: Ord 'T str -- )
@@ -49,15 +46,19 @@ zero-language-change.
 the values it checks rather than holding them), compares through the library `Ord`,
 prints per R1. It is deliberately non-`inline` for the same reason S3s made the
 comparisons non-`inline`: its body binds `Bound::User`. Reported on failure is the
-label alone — generic value printing wants a `Show` trait, which is P7.S4
-(generic `impl:` targets, briefed) territory and correctly ordered after this
-slice's own consumer exists. Label-only output matches what the Rust-side goldens
-have proven is workable.
+label alone — generic value printing wants the `Show`/`Write` trait pair, which is
+S7c/S7d territory, correctly ordered after this slice's own consumer exists. Label-
+only output matches what the Rust-side goldens have proven is workable.
 
-`lib/testing.sth` joins `core`'s `module:` list; layer `core` is satisfied (the
-protocol prints through the intrinsic `.` row, same as `core::bool`'s overload).
+`lib/hosted/testing.sth` joins `hosted`'s `module:` list, not `core`'s. Printing —
+today the compiler-injected `.` row, after S7d an ordinary `hosted` word over
+`Show`/`Write` — is inescapably an OS-facing capability; the layer this vocabulary
+declares should say so regardless of which mechanism happens to back it on a given
+day. (Before S7d lands, `.` remains callable from any layer as a compiler
+intrinsic, same as `core::bool`'s own overload; the `hosted` tag here is a
+statement of intent, enforced retroactively once S7d makes `.` an ordinary word.)
 
-### R4 — Discovery is convention, never manifest grammar
+### R3 — Discovery is convention, never manifest grammar
 
 `sooth test [path...]`:
 
@@ -68,13 +69,13 @@ protocol prints through the intrinsic `.` row, same as `core::bool`'s overload).
   every `*.sth` under it.
 
 Each entry must define a `main ( -- )` and builds as its own program against its
-own package resolution — a test file in a consumer package imports `core::*`
+own package resolution — a test file in a consumer package imports `hosted::*`
 through `depends:` like any other program, so no new import-resolution rule is
 introduced anywhere. Explicitly *not* a manifest section: a `tests:` line in
 `sooth.pkg` would bake the convention into the grammar P8.S3 is about to baseline,
 for a convention that has had zero consumers until now.
 
-### R5 — Compiled test binaries never touch the source tree
+### R4 — Compiled test binaries never touch the source tree
 
 `build`/`run`'s pid-suffixed binary lands beside the source (the litter in
 `examples/` is the visible evidence). `sooth test` builds each entry into a temp
@@ -82,34 +83,34 @@ directory and deletes it after the run: test binaries are byproducts, not files 
 reader of the tree should ever see. One compile+run per file, sequential, captured
 stdout; parallelism is unforced at this scale.
 
-### R6 — The exit criterion is a dogfood suite for `core` itself
+### R5 — The exit criterion is a dogfood suite for `core` itself
 
 `examples/tests/` — placed in the `examples` package (layer `hosted`,
-`depends: core` already declared) rather than inside `core`, because a test file
-inside package `core` would need to refer to its own package's modules by name and
-that is a resolution question this slice does not want to force. Suites for `bool`,
-`cmp`, `option`, `result`, `combinators`, authored in `core::testing`, green under
-`sooth test examples`. This is the half that turns the runner from machinery into a
-thing you use; per the roadmap's own rule, a slice that produces no runnable
-program isn't done.
+`depends: core hosted` already declared) rather than inside `core`, because a test
+file inside package `core` would need to refer to its own package's modules by
+name and that is a resolution question this slice does not want to force. Suites
+for `bool`, `cmp`, `option`, `result`, `combinators`, authored against
+`hosted::testing`, green under `sooth test examples`. This is the half that turns
+the runner from machinery into a thing you use; per the roadmap's own rule, a
+slice that produces no runnable program isn't done.
 
 ## Out of scope
 
-- A `Show`/value-printing trait family: P7.S4's consumer, ordered after this.
-- An `exit` intrinsic: R2.
-- Manifest-level test declaration: R4.
+- The `Show`/`Write` trait pair: S7c.
+- Retiring the compiler-intrinsic `.`: S7d.
+- Manifest-level test declaration: R3.
 - Failure-only output, filtering, watch mode, golden-stdout comparison (the Rust
   corpus harness already owns source-in/stdout-out), property testing, fixtures.
   All unforced.
 
 ## Exit
 
-1. `core::testing` exports `expect` and `expect-eq` as specified in R3; a program
+1. `hosted::testing` exports `expect` and `expect-eq` as specified in R2; a program
    importing it compiles and prints the R1 protocol.
-2. `sooth test` behaves per R4/R5: discovery by convention, temp-dir builds, counts
+2. `sooth test` behaves per R3/R4: discovery by convention, temp-dir builds, counts
    `ok`/`not ok`, non-zero exit on any `not ok`, non-zero process exit, or failed
    build; a summary line reports totals.
-3. The R6 dogfood suite runs green via `sooth test examples`, and its deliberately-
+3. The R5 dogfood suite runs green via `sooth test examples`, and its deliberately-
    broken twin (not committed, or committed as an ignored fixture asserted by the
    Rust integration test) shows the runner catching it.
 4. Rust integration coverage for the driver halves (pass, fail-by-protocol,
