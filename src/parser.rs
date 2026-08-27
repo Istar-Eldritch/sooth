@@ -10239,9 +10239,18 @@ mod tests {
             "trait: Copy2['T] : dummy ( 'T -- ) ; ;\n: f['T: Copy2 q::Point] ( 'T -- 'T ) ;",
         )
         .unwrap_err();
+        // Pinned to the *discriminating* text. Reverting the gate does not
+        // make this program build -- the bracket loop's own
+        // `bound_bracket_non_var_error` catches the broken-out token -- so an
+        // "is an error" assertion, or one satisfied by either message naming
+        // `q::Point`, passes with the gate deleted and guards nothing.
         assert!(
-            err.contains("unknown module qualifier `q`") || err.contains("q::Point"),
-            "{err}"
+            err.contains("unknown capability `q::Point`"),
+            "the bound list must reject the name itself: {err}"
+        );
+        assert!(
+            !err.contains("inside the bound bracket"),
+            "the name must not break out to the bracket loop's shape error: {err}"
         );
     }
 
