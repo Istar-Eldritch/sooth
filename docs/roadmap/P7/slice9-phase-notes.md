@@ -857,3 +857,226 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
 - The REPL still exists at the end of this phase (phase 7 deletes it). Every test file
   this phase touched still compiles and links against the live `sooth repl` binary having
   had only its REPL-driving tests and helpers removed.
+
+---
+
+## Phase 7 (R5a + R6) — delete the REPL, and flip `Ctx` to a struct
+
+Commit: `5b8e68c`. One commit, as the spec requires: `clippy -D warnings` forces the
+REPL's deletion, `infer_line`'s deletion and the `Ctx` flip into a single compile unit.
+
+### R5a (a): the REPL surface
+
+`src/repl.rs` and `src/editor.rs` deleted in full; `pub mod repl;` / `pub mod editor;`
+out of `src/lib.rs`; `Some("repl") => driver::repl()` and the `usage()` subcommand line
+out of `src/main.rs`; `driver::repl` out of `src/driver.rs`. E1 witness, run against the
+rebuilt binary:
+
+```
+$ ./target/debug/sooth repl
+unknown command: repl
+
+sooth — the Sooth compiler (bootstrap)
+
+usage:
+   sooth build <file.sth> [--manifest <path>]   compile to a native binary
+   sooth run   <file.sth> [--manifest <path>]   compile and run
+...
+$ echo $?
+2
+```
+
+### R5a (b): the forced cascade, which is larger than the spec's four items
+
+The spec named four items that `dead_code` fires on the moment `repl.rs` dies:
+`InferredLine`, `infer_line`, `check_poly_combinator_repl` and `Ctx`. That list is
+incomplete. `cargo build` (no `cfg(test)`) enumerated the rest, and each was verified
+REPL-only against `HEAD` before deletion (`git grep <name> HEAD -- src/` showing
+`repl.rs` as the only non-definition caller):
+
+| Deleted | Was reached from |
+| --- | --- |
+| `check::InferredLine`, `check::infer_line` (with its line-residual quotation error) | `repl.rs` |
+| `check::check_def`, `check::check_def_collecting_drop_sites`, `check::ResolvedCalls` | `repl.rs` (`ResolvedCalls` fell with `check_def`) |
+| `check::poly::check_poly_combinator_repl` | `repl.rs` |
+| `check::drop_graph::check_drop_overload_reachability` | `repl.rs` |
+| `check::combinators::CombinatorEnv::insert`, `combinator_of`, `word_declares_quotation_parameter` | `repl.rs:1411`/`:2958`/`:108`, `repl.rs:2017`/`:3067` |
+| `ir::lower_word`, `ir::lower_instantiation` | `repl.rs` |
+| `ir::layout::DropOverride` | `repl.rs` built its `AlreadyLoaded` entries |
+
+Three items were **not** deleted but narrowed to `#[cfg(test)]`, because their only
+surviving callers are unit-test harnesses and the alternative (deleting them and
+open-coding the construction at each call site) would have been churn without a subject:
+`driver::discover_closure` (the environment-configured wrapper; production reaches
+`discover_closure_audited` directly with its own `ResolutionConfig`),
+`check::poly::TraitCtx::scratch` and `TraitResolveCtx::scratch`. `ir::layout::empty_statics`
+joined the existing `#[cfg(test)] pub(crate) use self::layout::{empty_slices, Refs}`
+re-export, which is the pattern already established for `empty_slices`.
+
+Two collateral effects worth naming:
+
+- **`DropOverride` collapsed to `&WordDef`, not to a single-variant enum.** Deleting
+  `AlreadyLoaded` left `DropOverride::Body(&WordDef)` alone in its enum, which is the exact
+  shape the spec's own `Ctx` ruling rejects ("keeping a single-variant enum would keep
+  match arms alive for no reason"). `DropOverrides<'a>` is now
+  `HashMap<StructId, &'a WordDef>` and the six sites that named the type were updated.
+- **An orphaned doc paragraph moved, it did not die.** The prose documenting
+  `check::Overload` was attached to `check.rs`'s `ResolvedCalls` alias (a pre-existing
+  misplacement — `Overload` lives in `check/builtins.rs:28` and carried no doc). Deleting
+  the alias orphaned it and `clippy::empty_line_after_doc_comments` caught it. The
+  paragraph was moved onto `struct Overload`, not deleted.
+
+`tests/phase4_combinators.rs` and `tests/phase7_slice3r.rs` were touched only to correct
+comments naming items this phase deleted; no test body or assertion changed.
+
+### R6: `Ctx` is a struct
+
+`enum Ctx<'a>` → `pub(super) struct Ctx<'a>` carrying the former `Ctx::Word` fields, which
+are now `pub(super)` — the same visibility the enum's variant fields already had, so this
+is not a widening. `word_ctx` builds it; `with_module` is a single `Ctx { module, ..*self }`
+rebuild.
+
+Method fates, as shipped:
+
+| Method | Before | After |
+| --- | --- | --- |
+| `structs`, `enums` | shared match arm | field read |
+| `static_type` | `Option<Type>` | **`Option<Type>`** (a name may genuinely not be a static) |
+| `module` | `0` on `Line` | `u32`, infallible |
+| `modules` | `None` on `Line` | **`Option<&[ModuleInfo]>`** — kept, see the finding below |
+| `rendered_word_or(fallback)` | borrowed `fallback` on `Line` | **`rendered_word()`**, no parameter |
+| `mangled_name` | `Option<&str>` | `&str` |
+| `effect` | `Option<&StackEffect>` | `&StackEffect` |
+| `declared_outputs` | `Option<&[TypedSlot]>` | `&[TypedSlot]` |
+| `is_self_tail_call` | `false` on `Line` | `bool`, infallible |
+| `generics` | `None` on `Line` | **`Option<&RefCell<GenericTypes>>`** (a real production `None`, below) |
+
+**61 `Ctx::Line` match arms collapsed**, not 73: the spec's 73 counted
+`check/engine.rs`'s own 12-arm method block, which this phase rewrote as field reads
+rather than collapsed. Re-derived per file with `grep -rnE 'Ctx::Line[^=]*=>'` before the
+edit: `check.rs` 23, `check/operators.rs` 12, `check/word_families.rs` 11,
+`check/poly.rs` 11, `check/terms.rs` 4, `check/engine.rs` 12 (the method block),
+`check/captures.rs` 0. 23+12+11+11+4 = 61 collapsed arms + 12 method-block arms = 73.
+
+Each collapse kept the `Word` arm's body verbatim and replaced the pattern bindings with
+accessor calls: `mangled` → `ctx.mangled_name()`, `effect` → `ctx.effect()`, and the
+resulting `crate::resolve::render_word(ctx.mangled_name())` → `ctx.rendered_word()` (the
+two are definitionally the same expression).
+
+The four `mangled_name` consumers that compared against `Some(..)` shed the wrapper
+(`check.rs`'s `is_own_drop_body`, `check/terms.rs:922`'s self-tail guard,
+`check/terms.rs`'s `unwrap_or("the branch")` whose fallback is now dead, and
+`check/poly.rs`'s self-call guard), as did `effect`'s and `declared_outputs`' one each.
+`rendered_word_or`'s `fallback` died across **41** call sites, re-derived with
+`grep -rn 'rendered_word_or(' src/`: `check/poly.rs` 39 (all `"`<line>`"`),
+`check/captures.rs` 1 (`"`<line>`"`), `check/word_families.rs` 1 (`"`this line`"`).
+
+**No diagnostic text on the surviving path changed.** Proved by diffing every changed
+string literal: each `+ "error: …"` line in the diff has a byte-identical `- "error: …"`
+twin (they are re-indentation moves out of the match arm), and every `-`-only literal is a
+`Ctx::Line` arm's own text. `tests/qbe_baseline` is untouched — zero golden diffs.
+
+One collapse defect was caught and fixed before commit: the scripted `effect` →
+`ctx.effect()` substitution reached inside two string literals, turning
+`"error: stack effect mismatch in …"` into `"error: stack ctx.effect() mismatch in …"`.
+`tests/phase7_slice3r::impl_body_underflow_names_readable_member` failed on it, which is
+the guard working. Both sites were reverted and the whole tree re-swept for the same
+class (`grep` for the two accessor spellings inside quoted literals: zero remaining).
+
+### R6 (d): doc prose naming a signature this phase changed
+
+The labelled exception was applied, and extended to every comment naming an item this
+phase deleted (not only the six the spec listed): `check/word_families.rs` ×2 (`Ctx::Line`
+prose on `intrinsic_is_gated_out` and `drop_import_visibility_error`),
+`check/engine.rs` ×3 (the `modules`/`generics`/`mangled` field docs, `infer_probe_body`'s
+`Ctx::Word` mention, `drop_res`'s), `check/poly.rs` ×2 (`Ctx::Word.effect`, and the
+`repl.rs`-sourced `None` note), `check.rs` ×2 and `test_support.rs` ×1 (`infer_line`),
+`ir/destructors.rs`, `ir/driver.rs` and `ir/func_builder/mod.rs` ×2 (`lower_word`),
+`check/word_entry.rs` (`word_declares_quotation_parameter`), plus the two test-side
+mentions above. The test `ctx_word_carries_owning_module` was renamed
+`ctx_carries_owning_module`: its name asserted a variant that no longer exists.
+
+**Correction to the spec's (d) list.** The spec names `src/driver.rs:1103` and
+`src/check/poly.rs:2046` as "two stale doc comments that describe `ctx.mangled_name()`'s
+old `Option` return". They do not: neither mentions `Option` or `Some`. What both actually
+do is contrast `ctx.mangled_name()` with `ctx.word_name()` — a method that does not exist
+anywhere in the tree, at HEAD or before this phase. Both were corrected to name
+`ctx.rendered_word()`, which is the demangled accessor the comments mean, but the spec's
+stated reason for listing them was wrong and is recorded here rather than silently
+satisfied.
+
+### The `resolve` note, for a future slice
+
+There was no REPL call site of `resolve::resolve_modules` to delete; the brief's claim
+(`slice9-brief.md:57`, `:102`) is wrong and the spec already corrects it. The REPL's
+`always_mangle: false` caller was `driver::assemble_module(&closure, false)` in
+`repl.rs`, which died with (a). `resolve_modules`, its `always_mangle` parameter and its
+single-module forcing are untouched. **After this phase `always_mangle` is
+unreachable-but-retained**: every surviving non-test `assemble_module` caller passes
+`true` (`driver.rs:890`, plus `backend/qbe.rs:1767` and `driver.rs`'s own unit tests),
+and the `false` path is exercised only by `resolve.rs`'s four unit tests. Do not "tidy"
+it in a later slice: the forcing it selects is what closes the QBE symbol-hijack class.
+`cargo test --test symbol_hijack` is green (3 passed).
+
+### Findings
+
+- **`modules: Option` survives the ruling, but its stated justification did not.** The
+  spec keeps `modules` optional because "a retained poly word still passes `None`" — a
+  REPL mechanism. Measured, not assumed: an `assert!(modules.is_some())` in `word_ctx`,
+  run over the whole suite in an isolated copy, fires **27** times and every one is in the
+  lib's own unit-test binary; all 40 integration binaries pass. So after this phase
+  `Ctx.modules` is `Some` on every production path, and `None` reaches only unit-test
+  harnesses. `Option` is kept as the spec rules (collapsing it would arm
+  `intrinsic_is_gated_out` and the drop import-visibility gate for those harnesses), and
+  no behaviour changed here — production already always passed `Some`, the REPL's `None`
+  came through `infer_line`, not `word_ctx`. But the ruling's *reason* is now false, and a
+  later slice deciding this question should re-derive it rather than quote the spec.
+- **`generics: Option` does keep a real production `None`**, unlike `modules`:
+  `check_poly_combinator_standalone` (`check/poly.rs:376`) hardcodes `None`, and
+  `check::check` reaches it for every `inline` polymorphic combinator. `static_type`
+  trivially keeps its `Option`. Neither was collapsed.
+- **Phase 6's carried-forward claim is confirmed: `Instr::Store`'s `_ => storel` arm
+  (`src/backend/qbe.rs:1412`) is now uncovered.** Measured in an isolated copy after this
+  phase's deletions (`src tests lib examples Cargo.*`, baseline recorded first, never a
+  `cp -r` of the worktree): baseline 2686 passed / 0 failed; mutating `storel` → `stores`
+  gives **2686 passed / 0 failed**. The mutation survives. Its last witness was
+  `repl::tests::session_rich_rendering_shows_struct_contents_through_real_session`, which
+  died with `repl.rs` in this phase. Phase 8 should list it with the other unwitnessed
+  width arms, not assume it live.
+
+### Deletion proof (E5, this phase's items)
+
+`grep -rnE '<name>' src/ tests/` for each deleted item, after the commit. All zero except
+one, which is a retirement note phase 6 wrote and not a live reference:
+
+| Item | `src/` | `tests/` |
+| --- | --- | --- |
+| `infer_line`, `InferredLine`, `check_poly_combinator_repl`, `Ctx::Line`, `rendered_word_or` | 0 | 0 |
+| `check_def`, `ResolvedCalls`, `check_drop_overload_reachability` | 0 | 0 |
+| `combinator_of`, `word_declares_quotation_parameter` | 0 | 0 |
+| `lower_word`, `DropOverride` | 0 | 0 |
+| `lower_instantiation` | 0 | 1 — `tests/phase7_slice3t.rs:260`, phase 6's note recording why `explicit_instantiation_is_rejected_at_the_repl` was unmigratable |
+| `editor.rs` | 0 | 0 |
+| `repl.rs` | 2 | 4 — all comment prose (`backend/qbe.rs:303`'s `sooth_line_{seq}` note, `check/poly.rs:489`'s `None` note, three test retirement notes), which phase 10's E2 sweep owns |
+
+`docs/roadmap/` hits for every one of these are in this slice's own spec/brief and in the
+historical implementation specs the spec puts out of scope; none is a statement of current
+design.
+
+### Carried forward
+
+- `parse_line`, `ast::Line` and `ir::lower_line` all still **exist** at the end of this
+  phase, and that is correct: each is `pub` in a `pub` module, so nothing warns. Phase 8
+  removes them. `grep -rn 'parse_line\|ast::Line\|Line::Expr\|line_terms\|lower_line' src/`
+  is phase 8's precondition and this phase did not change its answer for the test tree.
+- Phase 10's E2 sweep inherits six `repl.rs`/`session` comment mentions in `src/` and the
+  three test-side retirement notes listed above.
+- Phase 11's split-signal re-run inherits four files that shrank here: `src/check.rs`
+  (−236 lines), `src/check/engine.rs`, `src/check/poly.rs`, `src/parser.rs` (unchanged
+  this phase; phase 8 shrinks it).
+
+### Gate
+
+`cargo fmt --check` clean, `cargo clippy -- -D warnings` clean,
+`cargo test --no-fail-fast`: **2686 passed, 0 failed**, 3 ignored (the three non-REPL
+`phase7_slice3b_follow.rs` notes). Zero `tests/qbe_baseline` diffs.
