@@ -3789,7 +3789,7 @@ mod tests {
     }
 
     /// R6, asserted directly rather than only through the hang it prevents:
-    /// `type: L 'T next ^L['T] ;` at `'T = i64` re-enters `instantiate_struct`
+    /// `type: L['T] v 'T next ^L['T] ;` at `'T = i64` re-enters `instantiate_struct`
     /// for the *same* `(idx, module, args)` while substituting its own field.
     /// The memo key, the resolved type and the placeholder decl are pushed
     /// before that substitution runs, so the re-entry hits the dedup lookup

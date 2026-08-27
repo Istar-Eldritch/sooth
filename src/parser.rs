@@ -10,7 +10,7 @@
 //!   variant         := Word (Word Word)*
 //!   externdef       := 'extern:' Word '(' effect ')' Str ';'
 //!   effect   := slot* '--' slot*
-//!   slot     := Word
+//!   slot     := Word (':' Word)?
 //!   binding  := '|' Word+ '|'
 //!   term     := Int | Word | binding | if
 //!   if       := 'if' term* ('else' term*)? 'end'
