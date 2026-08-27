@@ -1182,20 +1182,27 @@ not merely unreached, confirmed by grepping the corpus for its own review-graph
 notes; `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green with
 no REPL-only test module skipped or stubbed out
 
-**P7.S10 -- Bound the splice, diagnose the recursive impl.** `[ planned ]` A recursive
+**P7.S10 -- Bound the splice, diagnose the recursive impl.** `[ done ]` A recursive
 `impl: Ord` -- one whose `cmp` compares values of its own type with a surface comparison
-rather than delegating to its fields -- overflows the compiler's own stack (SIGABRT, no
-diagnostic printed). The unbounded recursion is at lowering: `lower_resolved_word_call`
-(`src/ir/func_builder/calls.rs:226`) splices `cmp`'s body, the trait-call dispatch lookup
-(`:292`) resolves back to the same type's own `cmp`, and re-enters unbounded. A
-splice-depth budget at that site converts the overflow into a located diagnostic naming the
-splice chain. It cannot false-reject: it bounds recursion rather than changing acceptance.
-Measured maximum legitimate splice depth across the whole corpus is 2; the pathological
-case overflows at 148 (2MB stack), so the budget sits at 64 with wide margin both ways. The
-bulk of the work is not the guard: `FuncBuilder` has no error path at all (every lowering
-function returns `()`), so the diagnostic needs `Result` threaded through the lowering tree
-to reach the user.
-Catching this statically instead is refuted -- `check_combinator_cycles` runs pre-dispatch,
-and widening it to edge a bare trait-member callee to every impl was measured to reject the
-ordinary field-delegating `impl: Ord` P7.S8 shipped to enable. Detail:
-[slice10-brief](./P7/slice10-brief.md).
+rather than delegating to its fields -- used to overflow the compiler's own stack (SIGABRT,
+no diagnostic printed). `lower_resolved_word_call`
+(`src/ir/func_builder/calls.rs:229`) now guards the member-splice arm with a budget on
+`member_splice_depth`, `SPLICE_BUDGET = 64` (measured legitimate maximum across the corpus
+is 2; the pathological case overflowed at 148 on a 2MB stack). The guard cannot
+false-reject: it bounds recursion rather than changing acceptance. `FuncBuilder` had no
+error path at all (every lowering function returned `()`), so `Result<_, String>` is
+threaded through the full lowering tree up to `lower`'s existing
+`Result<IrModule, String>`, with no `.expect()`/panic left on the guarded path. The
+diagnostic names the *outermost* spliced member (not the frame that trips the budget) via
+`render_word`, and points at that member's own declaration site, not a call site:
+
+```text
+error: a trait member cannot dispatch back to itself (lowering would splice it forever): `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64 (line N, col 5)
+```
+
+A lookup miss for the declaration span (the REPL/destructor paths, which carry no
+`member_spans`) omits the `(line …, col …)` clause rather than substituting a wrong span;
+the guard still fires and still reports. Catching this statically instead was refuted --
+`check_combinator_cycles` runs pre-dispatch, and widening it to edge a bare trait-member
+callee to every impl was measured to reject the ordinary field-delegating `impl: Ord` P7.S8
+shipped to enable. Detail: [slice10-brief](./P7/slice10-brief.md).
