@@ -2752,3 +2752,112 @@ fn poly_call_in_materialized_quotation_in_splice_does_not_panic() {
     assert_eq!(stdout, "");
     assert_eq!(code, 0);
 }
+
+// -- Regression tests for the three bugs blocking inline comparisons ----------
+
+/// Regression for the splice uid collision (commit afc67c1).
+/// `Provenance::inline_uid` restarted at 0 for every top-level word, while
+/// `splice_trait_calls` is a module-wide map keyed on `(inline_uid, Span)`.
+/// Two separate top-level words each splicing the same inline combinator at a
+/// different concrete type reused the same `cmp`-call span and the same
+/// first-splice uid, so the second word's `impl:` resolution silently clobbered
+/// the first's — lowering then dispatched both to whichever impl was recorded
+/// last. The fix seeds each word's uid range at `word_index * INLINE_UID_STRIDE`,
+/// so the composite key is unique module-wide.
+///
+/// This test uses *two* top-level words (`w1`, `w2`) — one word splicing at two
+/// types would not collide (both splices share one uid range). The values are
+/// chosen so a wrong dispatch is observable: i64 `-1 < 1` is `Less` (0), but
+/// `-1` reinterpreted as f64 is NaN, and `cmp(NaN, 1.0)` answers `Greater` (2)
+/// via the float impl's default arm.
+#[test]
+fn two_words_splicing_same_inline_combinator_dispatch_correctly() {
+    let src = "import: intrinsics * ;
+\
+         import: core::prelude * ;
+\
+         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+\
+         : w1 ( -- ) -1 1 cmptag ;
+\
+         : w2 ( -- ) -0.0 0.0 cmptag ;
+\
+         : main ( -- ) w1 w2 ;
+";
+    let (stdout, code) = run_src("uid-collision", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
+    assert_eq!(code, 0);
+}
+
+/// Regression for the poly-to-poly combinator dispatch gap (commit 8a5add3).
+/// `check_poly_body`'s pre-pass skipped ALL combinator words, so a bounded
+/// combinator like `cmptag` never had its `cmp` trait obligation recorded.
+/// `cross_calls_of` also unconditionally skipped inline combinators, so no
+/// composed `CallInst` was produced. Lowering then spliced `cmptag`'s body,
+/// found no resolution for the inner `cmp` call, and panicked ("checked user
+/// word exists"). The fix walks combinator bodies with `Bound::User` in the
+/// pre-pass and composes them as cross-calls in `cross_calls_of`.
+///
+/// `usecmp` is a non-inline poly word with `Ord` bound calling `cmptag` (also
+/// inline with `Ord` bound, bare-calling `cmp`). Before the fix this panicked
+/// at build time; after the fix it compiles and runs.
+#[test]
+fn poly_word_calling_inline_bounded_combinator_compiles_and_runs() {
+    let src = "import: intrinsics * ;
+\
+         import: core::prelude * ;
+\
+         : cmptag inline ( 'T: Copy Ord 'T -- ) cmp tag . ;
+\
+         : usecmp ( 'T: Copy Ord 'T -- ) cmptag ;
+\
+         : main ( -- ) -1 1 usecmp -0.0 0.0 usecmp ;
+";
+    let (stdout, code) = run_src("poly-to-poly", src);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "i64 -1<1 is Less(0), f64 -0.0=0.0 is Equal(1)"
+    );
+    assert_eq!(code, 0);
+}
+
+/// Regression for the eliminator arm-merge dropping `quot` (commit 9683750).
+/// `merge_arm_output_slot` used `Slot::computed(a.ty)` which silently drops the
+/// `quot` field, unlike `check_branch_join` which explicitly preserves
+/// `QuotRef::Known` when both arms agree. When an inline combinator's body
+/// includes an eliminator (`Ordering?`), the arm merge stripped `quot` from
+/// row slots carrying a quotation parameter. A self-tail combinator (`rep`)
+/// forwarding its quotation parameter through the eliminator then saw a bare
+/// `Cstr` placeholder at the back-edge and rejected it with "expects a quotation,
+/// found cstr".
+///
+/// This is a checker-only test (`check_ok`) because the full build still hits
+/// lowering-side bugs with quotation phantoms in eliminator phi nodes — a
+/// separate bug class. The checker fix is what unblocks the check; the lowering
+/// fix is future work.
+#[test]
+fn inline_eliminator_preserves_quotation_marker_in_self_tail_combinator() {
+    check_ok(
+        ": mygt inline ( 'T: Copy Ord 'T -- Bool )
+\
+         swap cmp
+\
+         ~[ ( Less ) drop True ]
+\
+         ~[ ( Equal ) drop False ]
+\
+         ~[ ( Greater ) drop False ]
+\
+         Ordering? ;
+\
+         : rep inline ( i64 [ -- ] -- )
+\
+         dup call swap 1 sub dup 0 mygt ~[ swap rep ] ~[ drop drop ] if ;
+\
+         : main ( -- ) 3 [ ] rep ;
+",
+    );
+}
