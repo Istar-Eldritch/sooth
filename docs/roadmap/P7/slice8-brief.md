@@ -107,15 +107,24 @@ Fix the uid-reuse mismatch at its two confirmed sites:
    INLINE_UID_STRIDE`), or make the reuse path in (1) uid-correct so this stops
    mattering — probe which; they may collapse to one fix.
 
-## Open questions, not yet probed
+## Open questions
 
-- **Self-tail recursion** (a recursive poly word calling a bound combinator in its
-  tail branch, interacting with `emit_back_edge`/`cur_combinator`): genuinely unknown,
-  flagged by the dogfood probe as needing its own spike before this slice's exit
-  criteria can claim it.
+- **Self-tail recursion — resolved, no hazard (2026-08-27 spike).** A recursive
+  word calling a bound `inline` combinator in its tail branch, including through a
+  member splice on a user struct inside the loop, was built and probed directly.
+  `splice_uid_stack` is never referenced by `emit_back_edge` (`calls.rs:746`) or
+  anywhere in the loop/back-edge transform: uid minting happens once, statically,
+  per splice site during the ordinary tree-walk lowering pass, entirely before the
+  self-tail-to-loop rewrite operates on the resulting blocks. There is no
+  loop-carried uid state a back-edge re-entry could see stale. The one fixture that
+  did panic (a member splice on `Point` inside the loop body) failed identically to
+  the non-recursive case, from `lower_if` during straight-line lowering, before
+  `emit_back_edge` is ever reached — the same known bug (above), not a new one. No
+  extra scope needed for this shape.
 - Two different bound combinators called in sequence from the same body: low-risk
   extrapolation from the working shape-1 case (distinct spans, no reuse-uid
-  indirection), not independently verified.
+  indirection), not independently verified. Not blocking; if it surfaces during
+  implementation it will look identical to the already-diagnosed mechanism.
 
 ## Out of scope
 
@@ -133,6 +142,6 @@ Fix the uid-reuse mismatch at its two confirmed sites:
 `lib/cmp.sth`'s six comparisons made `inline`; `an_ord_bounded_generic_word_
 instantiates_over_a_user_struct` and a new, `mymax`-free regression test (`impl: Ord
 for T` delegating to `lt`/`gt` directly, no generics anywhere in the call chain) both
-pass; the self-tail-recursion open question above is either resolved or explicitly
-re-scoped out with a located test proving it's rejected rather than silently
-miscompiled.
+pass; a self-tail-recursive fixture calling a bound member-splice inside its loop body
+(the shape probed above) also passes, as a regression guard on the resolved open
+question.
