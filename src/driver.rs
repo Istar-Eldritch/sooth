@@ -515,7 +515,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     let mut struct_base = Vec::with_capacity(closure.nodes.len());
     let mut enum_base = Vec::with_capacity(closure.nodes.len());
     for (m, node) in closure.nodes.iter().enumerate() {
-        struct_base.push(0);
+        struct_base.push(structs.len());
         enum_base.push(enums.len());
         parser::prepass_and_register(&node.tokens, m as u32, &mut structs, &mut enums)?;
     }
