@@ -1168,8 +1168,8 @@ no REPL-only test module skipped or stubbed out
 `impl: Ord` -- one whose `cmp` compares values of its own type rather than
 delegating to its fields -- is bounded and diagnosed at lowering. `lower_resolved_word_call`
 (`src/ir/func_builder/calls.rs:229`) guards the member-splice arm with a budget on
-`member_splice_depth`, `SPLICE_BUDGET = 64` (measured legitimate maximum across the corpus
-is 2; the pathological case overflowed at 148 on a 2MB stack). The guard cannot
+`member_splice_depth`, `SPLICE_BUDGET = 64` (the legitimate maximum across the corpus is 2;
+an unguarded splice overflows at depth 148 on a 2MB stack). The guard cannot
 false-reject: it bounds recursion rather than changing acceptance. `Result<_, String>` is
 threaded through the full lowering tree up to `lower`'s existing
 `Result<IrModule, String>`, with no `.expect()`/panic left on the guarded path. The
@@ -1177,12 +1177,24 @@ diagnostic names the *outermost* spliced member (not the frame that trips the bu
 `render_word`, and points at that member's own declaration site, not a call site:
 
 ```text
-error: a trait member cannot dispatch back to itself (lowering would splice it forever): `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64 (line N, col 5)
+error: a trait member cannot dispatch back to itself (lowering would splice it forever): `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64 (line 6, col 5)
 ```
 
 A lookup miss for the declaration span (the REPL/destructor paths, which carry no
 `member_spans`) omits the `(line …, col …)` clause rather than substituting a wrong span;
-the guard still fires and still reports. Catching this statically instead was refuted --
+the guard still fires and still reports. Catching this statically instead is refuted --
 `check_combinator_cycles` runs pre-dispatch, and widening it to edge a bare trait-member
-callee to every impl was measured to reject the ordinary field-delegating `impl: Ord` P7.S8
-shipped to enable. Detail: [slice10-brief](./P7/slice10-brief.md).
+callee to every impl false-rejects the ordinary field-delegating `impl: Ord` P7.S8 shipped
+to enable. Detail: [slice10-brief](./P7/slice10-brief.md).
+
+The declaration-site location is behaviour, not decoration: it is what separates this from
+the bare stack overflow it replaces. Witnessed end-to-end by
+`a_recursive_impl_ord_is_a_located_diagnostic_not_a_stack_overflow`, with
+`a_recursive_impl_ord_diagnostic_line_tracks_the_declaration_site` shifting the `impl:`
+block down two lines so the reported line cannot be a pinned constant.
+
+CLAUDE.md's five split signals re-run against the two files the slice grew,
+`src/ir/func_builder/calls.rs` (+203 lines, ~150 of them the new test module) and
+`src/ir/driver.rs` (+52): calls.rs stays at 0 of 5, as at P7.S8. driver.rs fires 1 of 5 --
+`lower` and `lower_line` are separate entry points that never call each other -- which is
+below the two-signal threshold and predates this slice. Neither splits.
