@@ -124,8 +124,8 @@ Diagnostics are behaviour, so this is specified. In the member position, a
 `Token::Word` that is not `:` is overwhelmingly the old grammar, so the error
 names the new form directly rather than reporting a token mismatch:
 
-> `error: trait `{trait_name}` declares member `{member}` without a leading `:` at line {l}, col {c}`
-> `  note: a trait member is declared `: {member} ( ... ) ;`, the same form as a word definition`
+> `error: trait`{trait_name}` declares member `{member}` without a leading `:`at line {l}, col {c}`
+> ` note: a trait member is declared `: {member} ( ... ) ;`, the same form as a word definition`
 
 The non-word case (`(`, a literal, EOF) keeps the existing "expected a member
 name or `;`" shape, reworded to name `:` instead of a member name. The

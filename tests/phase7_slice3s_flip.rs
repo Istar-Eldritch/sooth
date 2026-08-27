@@ -134,9 +134,9 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
 /// exact text, minus the line/column, which is the fixture's layout rather
 /// than the diagnostic's content.
 ///
-/// Now that `lt` is `inline`, its `cmp` call is spliced into the caller, so
-/// the unsatisfied-bound error names `cmp` (the trait member the splice
-/// resolves) rather than `lt` (the inline wrapper the caller wrote).
+/// `lt` is non-inline (the six surface comparisons are ordinary words), so
+/// the unsatisfied-bound error names `lt` directly — the word the caller
+/// wrote — rather than `cmp` (the trait member `lt` calls internally).
 #[test]
 fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     let (_t, entry) = program(
@@ -148,7 +148,7 @@ fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `cmp` with `Vec2` in `main`"),
+        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
         "unexpected diagnostic: {err}"
     );
     assert!(
@@ -276,32 +276,37 @@ fn ord_inline_cmp_behavioural_golden() {
 /// spliced; the two results are independent and correct. They do not collide
 /// because a member splice renames through `alpha_rename_member_locals`,
 /// whose suffix is disjoint from the enclosing splice's.
+///
+/// Takes four values (two pairs) rather than reusing one pair twice: the
+/// merged checker (P7.S4b `8a5add3`) walks an inline combinator body with a
+/// `Bound::User` through `check_poly_body`, so `cmp` is checked as a
+/// consuming call and reusing `a`/`b` would be a linear use-after-move. The
+/// two splices still happen under the same enclosing uid — the point of the
+/// test — they just operate on independent values.
 #[test]
 fn ord_inline_cmp_two_splices_produce_correct_value() {
     let (_t, entry) = program(
         "ord-inline-two-splice",
         &format!(
             "{ORD_INLINE_IMPORTS}\
-             : cmp_twice inline ( 'T: Ord 'T -- i64 i64 )
+             : cmp_twice inline ( 'T: Ord 'T 'T 'T -- i64 i64 )
 \
-               | a b |
+               | a b c d |
 \
                a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering?
 \
-               b a cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
+               c d cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ;
 \
              : main ( -- )
 \
-               1 2 cmp_twice . .
+               1 2 2 1 cmp_twice . .
 \
-               2 1 cmp_twice . . ;
+               2 1 1 2 cmp_twice . . ;
 "
         ),
     );
-    // 1 2: a b cmp = Less -> -1; b a cmp = Greater -> 1. Stack: -1 1.
-    // . . prints 1 then -1.
-    // 2 1: a b cmp = Greater -> 1; b a cmp = Less -> -1. Stack: 1 -1.
-    // . . prints -1 then 1.
+    // 1 2 2 1: a=1 b=2 c=2 d=1. a b cmp = Less -> -1; c d cmp = Greater -> 1.
+    // 2 1 1 2: a=2 b=1 c=1 d=2. a b cmp = Greater -> 1; c d cmp = Less -> -1.
     assert_eq!(build_and_run(&entry), "1\n-1\n-1\n1\n");
 }
 

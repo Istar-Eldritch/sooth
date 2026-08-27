@@ -336,8 +336,7 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v140 =l loadl %v139
 	jmp @blk18
 @blk18
-	%v141 =l phi @blk10 %v140
-	ret %v141
+	ret %v140
 }
 
 export function :arr_0 $build__m0() {

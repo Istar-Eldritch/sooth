@@ -9442,8 +9442,8 @@ mod tests {
     #[test]
     fn find_bound_impl_recursive_discharge_succeeds() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             trait: Print 'T print ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Print 'T : print ( &'T -- ) ; ;\n\
              impl: Print for Point\n\
                : print | p | p drop ;\n\
              ;\n\
@@ -9468,8 +9468,8 @@ mod tests {
     #[test]
     fn find_bound_impl_recursive_discharge_fails_when_bound_unmet() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             trait: Print 'T print ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Print 'T : print ( &'T -- ) ; ;\n\
              impl: Show for ['T 4] where 'T: Print\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -9495,7 +9495,7 @@ mod tests {
     #[test]
     fn bound_cycle_error_self_referential_impl_is_located_error() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for 'T where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -9518,8 +9518,8 @@ mod tests {
     #[test]
     fn bound_cycle_error_transitive_cycle_is_located_error() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: A 'T a ( &'T -- ) ;\n\
-             trait: B 'T b ( &'T -- ) ;\n\
+             trait: A 'T : a ( &'T -- ) ; ;\n\
+             trait: B 'T : b ( &'T -- ) ; ;\n\
              impl: A for 'T where 'T: B\n\
                : a | x | x drop ;\n\
              ;\n\
@@ -9543,7 +9543,7 @@ mod tests {
     fn candidate_bounds_discharge_copy_bound_excludes_linear_type() {
         let src = "type: Spy tag i64 ;\n\
              : drop ( Spy -- ) | s | s Spy> drop ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for 'T where 'T: Copy\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -9567,8 +9567,8 @@ mod tests {
     #[test]
     fn bound_cycle_no_false_positive_on_independent_resolutions() {
         let src = "type: Point x i64 y i64 ;\n\
-             trait: Show 'T show ( &'T -- ) ;\n\
-             trait: Print 'T print ( &'T -- ) ;\n\
+             trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Print 'T : print ( &'T -- ) ; ;\n\
              impl: Print for Point\n\
                : print | p | p drop ;\n\
              ;\n\

@@ -10400,7 +10400,7 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_single_bound_threads_into_poly_sig() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;",
@@ -10421,8 +10421,8 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_multiple_bounds_on_one_var() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             trait: Eq 'T eq ( &'T &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Eq 'T : eq ( &'T &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'T: Show Eq\n\
                : show | a | a drop ;\n\
              ;",
@@ -10439,8 +10439,8 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_multiple_variables() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
-             trait: Eq 'T eq ( &'T &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+             trait: Eq 'T : eq ( &'T &'T -- ) ; ;\n\
              type: Pair 'A 'B a 'A b 'B ;\n\
              impl: Show for Pair['T 'V] where 'T: Show 'V: Eq\n\
                : show | a | a drop ;\n\
@@ -10465,7 +10465,7 @@ mod tests {
         // 'N in ['T 'N] is a length variable, not in ty_var_names, so a
         // `where`-clause bound on it is an unknown-type-variable error.
         let err = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'N: Show\n\
                : show | a | a drop ;\n\
              ;",
@@ -10478,7 +10478,7 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_no_where_keeps_bounds_empty() {
         let module = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
              ;",
@@ -10492,7 +10492,7 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_unknown_variable_is_error() {
         let err = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'X: Show\n\
                : show | a | a drop ;\n\
              ;",
@@ -10505,7 +10505,7 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_missing_colon_is_error() {
         let err = parse_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'T Show\n\
                : show | a | a drop ;\n\
              ;",

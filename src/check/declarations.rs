@@ -3743,7 +3743,7 @@ mod tests {
     #[test]
     fn check_impl_decls_bounded_and_unbounded_at_same_pattern_are_distinct() {
         impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N]\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -3757,7 +3757,7 @@ mod tests {
     #[test]
     fn check_impl_decls_same_pattern_same_bounds_is_duplicate() {
         let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\
@@ -3774,7 +3774,7 @@ mod tests {
         // Alpha-equivalent targets with the same bound set are duplicates,
         // even though the variable names differ ('T vs 'U).
         let err = impl_check_src(
-            "trait: Show 'T show ( &'T -- ) ;\n\
+            "trait: Show 'T : show ( &'T -- ) ; ;\n\
              impl: Show for ['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;\n\

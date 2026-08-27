@@ -91,8 +91,8 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
 fn bounded_generic_impl_runs_identically_to_concrete_counterpart() {
     let trait_decls = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
-trait: Print 'T print ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Print 'T : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n";
@@ -144,8 +144,8 @@ impl: Print for Point\n\
 fn omitting_element_impl_produces_unsatisfied_bound_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
-trait: Print 'T print ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Print 'T : print ( &'T -- ) ; ;\n\
 \\ No impl: Print for Point — the bound 'T: Print won't discharge\n\
 impl: Show for ['T 4] where 'T: Print\n\
   : show | a | a 0 >usize &> print a 1 >usize &> print a 2 >usize &> print a 3 >usize &> print a drop ;\n\
@@ -174,7 +174,7 @@ impl: Show for ['T 4] where 'T: Print\n\
 fn self_referential_bound_cycle_is_located_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
 impl: Show for 'T where 'T: Show\n\
   : show | a | a drop ;\n\
 ;\n\
@@ -203,7 +203,7 @@ impl: Show for 'T where 'T: Show\n\
 fn unbounded_generic_impl_still_dispatches() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
 impl: Show for ['T 4]\n\
   : show | a | a drop ;\n\
 ;\n\
@@ -238,8 +238,8 @@ impl: Show for ['T 4]\n\
 fn bounded_impl_overrides_unbounded_at_satisfied_instantiation() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
-trait: Print 'T print ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Print 'T : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n\
@@ -279,8 +279,8 @@ impl: Show for ['T 'N]\n\
 fn bounded_impl_overrides_unbounded_reversed_declaration_order() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
-trait: Print 'T print ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Print 'T : print ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | 42 . p drop ;\n\
 ;\n\
@@ -320,9 +320,9 @@ impl: Show for ['T 'N] where 'T: Print\n\
 fn incomparable_bound_sets_produce_ambiguity_error() {
     let src = "\
 type: Point x i64 y i64 ;\n\
-trait: Show 'T show ( &'T -- ) ;\n\
-trait: Print 'T print ( &'T -- ) ;\n\
-trait: Display 'T display ( &'T -- ) ;\n\
+trait: Show 'T : show ( &'T -- ) ; ;\n\
+trait: Print 'T : print ( &'T -- ) ; ;\n\
+trait: Display 'T : display ( &'T -- ) ; ;\n\
 impl: Print for Point\n\
   : print | p | p drop ;\n\
 ;\n\
