@@ -592,6 +592,28 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   no hole. **Method note for later phases: grepping a diagnostic's format string does not
   find the tests that guard it, because a test may assert substrings the format string
   spans. Mutate, or grep the fixture shape.**
+- **Two message *shapes* the deleted tests pinned have no surviving verbatim witness.**
+  "Covered natively" in the poly table above is true of the *rule* and looser about the
+  *text*, and this phase applied a stricter standard to
+  `tests/phase0.rs::surplus_linear_on_stack_is_error` (whose two carried lines it pinned).
+  Neither gap is one this phase opened, so neither is a code change here:
+  - `poly_copy_body_error`'s `dup` op label (`src/check/poly.rs:7619`).
+    `polymorphic_repl_definition_with_ill_typed_body_is_the_real_x1_not_the_old_blanket_rejection`
+    pinned `` cannot `dup` the type variable `'T` `` and `` `twice` `` verbatim; the
+    covering `check_x7_dup_of_unbounded_variable_names_missing_copy_bound` asserts only
+    `'T` and `Copy`. ``grep -rn 'cannot `dup` the type variable' src/ tests/`` is empty
+    corpus-wide: that format string is pinned verbatim only at `:13159` and `:13174`, for
+    the `!` and `@` operands. So the `{op}` slot has two witnesses, and `dup` is not one.
+  - `poly_copy_bound_error`'s callee name and `Copy` clause (`:8285`).
+    `polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2` asserted
+    `id` and `Copy`; `check_x5_copy_bound_on_linear_type_names_variable_type_and_reason`
+    asserts `'T`, `Spy` and `linear`, so it pins neither. The deleted assertions were on
+    the `Ctx::Line` arm (`:8298`), which phase 7 deletes with `infer_line`, so nothing is
+    carried forward for that arm. The surviving `Ctx::Word` arm's (`:8294`) looser pin
+    pre-dates this slice. **Recommendation for phase 7**: while collapsing that match it
+    will be editing this function anyway, so tighten `check_x5` onto the callee name and
+    `Copy` then, rather than leaving the `Ctx::Word` text guarded by three substrings the
+    format string spans — the same blind spot the finding above records.
 - **`alloc_trace_stays_empty_for_a_program_that_never_allocates` is one-directional**, like
   the REPL test it replaces: it fails if the trace prints spuriously, but survives a
   mutation that disables the trace entirely. That direction is covered separately by
@@ -617,13 +639,28 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   not. Phase 6 should delete both helpers with their last callers.
   `tests/phase3_resources.rs:4` also names `tests/phase1.rs` in a module-level provenance
   comment; it goes with that file's REPL surface in phase 6.
-- **Five roadmap/doc files still name `tests/phase1.rs`**, not three as first counted, and
-  are phase 10's, not this phase's: `docs/roadmap/P3-linear-spine.md:259` (a migration note
-  listing test files), `docs/roadmap/operator-words-spec.md:33` (`tests/phase1.rs:333`, a
-  line reference that is now doubly stale), `docs/repl-ux-spec.md` (`:8`, `:63`, `:75`), and
-  two more found on re-sweep, `docs/roadmap/P4/slice2-spec.md` (six mentions) and
-  `docs/roadmap/P4/slice2-brief.md:167`. All five are historical slice specs/briefs
-  documenting work already landed, which R8 puts out of scope the same way.
+- **Twenty-two roadmap/doc files still name `tests/phase1.rs`**, not five as this bullet
+  first recorded, and are phase 10's, not this phase's. `grep -rln 'tests/phase1\.rs'
+  docs/` returns 24; two of those are this slice's own `P7/slice9-spec.md` and this file.
+  Nineteen are out of scope by R8's own wording, which excludes
+  `docs/roadmap/P{0..8}/slice*-{brief,spec}.md` and `docs/repl-ux-spec.md` by name:
+  eighteen `slice*-{brief,spec}.md` files under `P2` (9), `P3` (6), `P4` (2) and `P7` (1),
+  plus `docs/repl-ux-spec.md` (`:8`, `:63`, `:75`).
+  **Three fall outside R8's literal enumeration, and phase 10 should rule on them
+  explicitly rather than assume the exclusion reaches them**:
+  `docs/roadmap/P1/spec.md` (`:65`, `:69`), Phase 1's own spec — the same historical class,
+  but `P1/spec.md` is not matched by the `slice*` glob;
+  `docs/roadmap/P3-linear-spine.md:259`, a *phase* file rather than a slice spec (the
+  mention is a migration note inside slice 8c's "✅ done" record); and
+  `docs/roadmap/operator-words-spec.md:33`, top-level in `docs/roadmap/`, whose
+  `tests/phase1.rs:333` is a line reference that was already stale before this phase.
+  All three were read: each sits in a past-tense record of landed work, so the *historical*
+  conclusion holds for all 22. The earlier description of the set as "slice specs/briefs"
+  did not — four of the 22 are not slice specs or briefs.
+  `docs/repl-ux-spec.md` is the most stale of them: alongside `tests/phase1.rs` it cites
+  `tests/phase4_repl_imports.rs` (F2 at `:8`, exit-criterion row at `:75`) and
+  `tests/repl_ux.rs` (`:3`, `:63`, `:105`, `:107`), both retired by phase 4 (`c0bb5dd`).
+  Every test file that spec names as a witness is now a deleted file.
 - **`docs/roadmap/P1-repl-and-liveness.md`'s opening paragraph is unswept and is not on any
   phase's list.** It still states the removed design as current: "The REPL runs on the
   **backend** via `dlopen`: each new word is compiled to a shared object and loaded into
