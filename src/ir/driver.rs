@@ -108,8 +108,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     //
     // The name is demangled for the operator test alone: a closure rewrites
     // every module-0 word to `{name}__m0`, and `.__m0` is the same overload.
-    // The REPL reaches none of this: a session definition lowers through
-    // `lower_word` directly, so its own uncalled overload is emitted regardless.
     let called = called_names(&module.words);
     let uncalled_operator_overloads: std::collections::HashSet<usize> = module
         .words
@@ -393,11 +391,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     }
 
     // R2: the override's body, by reference, keyed the way synthesis is keyed.
-    // The REPL builds the same map from its own session-level store instead of
-    // from a module's `words` (R11).
     let overrides: DropOverrides = drop_overloads
         .iter()
-        .map(|(id, idx)| (*id, DropOverride::Body(&module.words[*idx])))
+        .map(|(id, idx)| (*id, &module.words[*idx]))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
@@ -875,124 +871,6 @@ pub(super) fn subst_polytype(
             )
         }
     }
-}
-
-/// Lower a single word body against an external env/resolver. The REPL uses
-/// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
-/// so a definition compiles against previously-loaded words. A REPL line has
-/// no polymorphic words (D2), so its calls carry no instantiation table.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn lower_word(
-    word: &WordDef,
-    env: &HashMap<String, Arity>,
-    resolve: Resolver,
-    regs: Registries,
-    instantiations: &HashMap<Span, CallInst>,
-    builtin_overloads: &HashMap<Span, String>,
-    resolved_fields: &HashMap<Span, (StructId, usize)>,
-    resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
-    poly_arities: &HashMap<String, usize>,
-    combinators: &crate::check::CombinatorIndex,
-    splice_records: &HashMap<(u32, Span), CallInst>,
-    splice_trait_calls: &HashMap<(u32, Span), String>,
-) -> Vec<IrFunc> {
-    let self_tail = crate::check::has_self_tail_call(word, combinators);
-    lower_word_parts(
-        &word.name,
-        &word.effect,
-        &word.body,
-        self_tail,
-        None,
-        env,
-        resolve,
-        regs,
-        instantiations,
-        builtin_overloads,
-        // R15/decision 8: the REPL path is explicitly out of scope for
-        // trait-bound dispatch this slice.
-        empty_trait_calls(),
-        empty_poly_calls(),
-        resolved_fields,
-        resolved_variant_fields,
-        poly_arities,
-        combinators,
-        EnvPlan::None,
-        splice_records,
-        splice_trait_calls,
-        // REPL path: it hands out empty splice tables, so a member splice here
-        // has no `(uid, span)` entry to miss and the seed map is a documented
-        // no-op (`empty_member_uid_seeds`).
-        empty_member_uid_seeds(),
-        // REPL path: `check_def_collecting_drop_sites` seeds the matching
-        // checker-side `Provenance::inline_uid` at 0 too.
-        0,
-    )
-}
-
-/// R7 (Slice 2): lower one REPL polymorphic-word instantiation `(word, θ)`
-/// into a monomorphized `IrFunc` under its mangled `symbol`. The body is the
-/// retained polymorphic word's own body, checked once at its defining line;
-/// `resolve` is the frozen defining-line snapshot (D3), not the instantiating
-/// line's env, so an unrelated later redefinition of a callee cannot change
-/// this body's meaning. Nested polymorphic calls are out of scope (Slice 1
-/// R14), so the body carries no instantiation table of its own.
-///
-/// `self_tail` is the caller's `has_self_tail_call` verdict for the retained
-/// word (the REPL holds the whole `WordDef`; this function only has its body),
-/// so a tail self-call in a generic body lowers to a loop back-edge here the
-/// same way it does on the native path (P7 slice 3g-follow).
-///
-/// Phase 6 slice 3 (R6): the variant-field table is hardcoded empty rather
-/// than taken as a parameter for the same reason the caller passes an empty
-/// `resolved_fields` -- `poly_reference_word` rejects a field projection in a
-/// generic body outright, so a retained polymorphic word records neither
-/// table. Kept as a parameter on the struct side only because the caller
-/// owns that decision there.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn lower_instantiation(
-    symbol: &str,
-    callee: &str,
-    sig: &PolySig,
-    builtin_overloads: &HashMap<Span, String>,
-    resolved_fields: &HashMap<Span, (StructId, usize)>,
-    subst: &Subst,
-    body: &[Term],
-    self_tail: bool,
-    env: &HashMap<String, Arity>,
-    resolve: Resolver,
-    regs: Registries,
-    arrays: &[ArrayDecl],
-    owned_cells: &[OwnedCellDecl],
-    refs: &[RefDecl],
-    generics: &GenericTypes,
-    combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
-    let effect = concrete_effect(sig, subst, arrays, owned_cells, refs, generics);
-    lower_word_parts(
-        symbol,
-        &effect,
-        body,
-        self_tail,
-        Some(callee),
-        env,
-        resolve,
-        regs,
-        empty_instantiations(),
-        builtin_overloads,
-        // R15/decision 8: the REPL path is explicitly out of scope for
-        // trait-bound dispatch this slice.
-        empty_trait_calls(),
-        empty_poly_calls(),
-        resolved_fields,
-        empty_resolved_variant_fields(),
-        empty_poly_arities(),
-        combinators,
-        EnvPlan::None,
-        empty_splice_records(),
-        empty_splice_trait_calls(),
-        empty_member_uid_seeds(),
-        0,
-    )
 }
 
 /// Every word name called anywhere in `words`' bodies, quotation bodies

@@ -7,8 +7,7 @@ fn usage() -> ! {
         "sooth — the Sooth compiler (bootstrap)\n\n\
          usage:\n\
          \x20 sooth build <file.sth> [--manifest <path>]   compile to a native binary\n\
-         \x20 sooth run   <file.sth> [--manifest <path>]   compile and run\n\
-         \x20 sooth repl                 interactive session (Phase 1)\n\n\
+         \x20 sooth run   <file.sth> [--manifest <path>]   compile and run\n\n\
          \x20 --manifest <path>  resolve the entry file's dependency-anchored\n\
          \x20                    imports against this manifest, overriding an\n\
          \x20                    ancestor manifest (entry file only)\n"
@@ -66,7 +65,6 @@ fn main() {
                 Err(e) => Err(e),
             }
         }
-        Some("repl") => driver::repl(),
         None | Some("-h") | Some("--help") => usage(),
         Some(other) => {
             eprintln!("unknown command: {other}\n");

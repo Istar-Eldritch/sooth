@@ -24,6 +24,15 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
     }
 }
 
+/// Slice 8a fix 1 (R1): one candidate registered under a name that may carry
+/// more than one -- an overload set. The word env's value type widened from a
+/// single `Sig` to `Vec<Overload>` so a name with several same-arity,
+/// differing-input-type candidates (R1/R4 already guarantee at most one can
+/// match a given call's operand types) keeps every one of them reachable,
+/// rather than the env's old bare `HashMap<String, Vec<Overload>>` silently keeping
+/// only the last inserted. `symbol` is the distinct lowering symbol this
+/// candidate's body was minted under (`ast::overload_symbols`): equal to the
+/// surface name unless this name has more than one candidate in scope.
 #[derive(Debug, Clone)]
 pub struct Overload {
     pub sig: Sig,

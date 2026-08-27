@@ -1098,62 +1098,51 @@ pub(super) enum BlockEnd {
     Arm { token: &'static str, span: Span },
 }
 
-/// Error context for the shared stack simulation: a full word (with its
-/// declared effect to cite) or a bare REPL line (no signature to cite).
-/// Both carry the struct/enum registries `is_copy` needs to resolve a
-/// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
-/// works identically whether the caller is a compiled word or a REPL line.
-pub(super) enum Ctx<'a> {
-    Word {
-        /// The name as `check` sees it: `resolve` rewrites module 0's decls to
-        /// `{name}__m{module}` as soon as a file has an import, and a P7.S3r
-        /// impl member is synthesized as `member;Trait;module;Type`. Both are
-        /// compiler-internal spellings, so a diagnostic renders this through
-        /// `rendered_word_or` (R3) rather than interpolating it; self-tail
-        /// recognition compares it against mangled *call* names.
-        mangled: &'a str,
-        effect: &'a StackEffect,
-        structs: &'a [StructDecl],
-        enums: &'a [EnumDecl],
-        /// R1 (P7 slice 2): the closure's `static:` declarations, which the
-        /// borrow-typing arm consults for the second kind of place a `&`/`&!`
-        /// can name. Scoped to `module` at every lookup: a static is
-        /// module-private.
-        statics: &'a [StaticDecl],
-        /// R2 (slice 8b): the owning module of the word being checked, the
-        /// caller module D1's `drop` gate and 8a's operator fix scope a name's
-        /// visibility against.
-        module: u32,
-        /// R3 (slice 8b): the import closure's per-module data, `Some` on the
-        /// native build path and `None` on the REPL path (`infer_line` builds
-        /// `Ctx::Line`, and a retained poly word passes `None`): the gate reads
-        /// it and never fires when it is absent.
-        modules: Option<&'a [ModuleInfo]>,
-        /// Slice 10c (review fix, Phase 1): whether lowering actually builds a
-        /// splice-time back-edge for this word's own self-tail call
-        /// (`has_self_tail_call`, the same predicate `inline_combinator` and
-        /// every lowering site consult). The back-edge-only linear/reference
-        /// guards (R15) must gate on this, not on the syntactic `tail` flag
-        /// alone: `TailWalk` declines (a forwarded quotation reached through a
-        /// mid-body local, an ambiguous name, a forwarding cycle) in cases
-        /// where the positional `tail` flag still reaches the recursive call,
-        /// and there lowering emits an ordinary `Instr::Call` with no back
-        /// edge to guard.
-        self_tail_call: bool,
-        /// P7 slice 3a phase 2 (R2): the live generic instantiator, `Some`
-        /// on the native build path (`check::check`), `None` everywhere else
-        /// (the REPL never declares its own generic `type:`, so no session
-        /// poly word's signature can ever carry a `PolyType::Generic` -- see
-        /// `GenericTypes`'s own doc). A `RefCell` because `Ctx` otherwise only
-        /// ever borrows immutably, but grounding a generic mid-body-walk
-        /// (`unify_poly_input`/`apply_subst`'s `Generic` arms, and
-        /// `poly_call_term`'s construction arm) needs to mint through it.
-        generics: Option<&'a RefCell<GenericTypes>>,
-    },
-    Line {
-        structs: &'a [StructDecl],
-        enums: &'a [EnumDecl],
-    },
+/// Error context for the shared stack simulation: the word being checked, with
+/// its declared effect to cite. Carries the struct/enum registries `is_copy`
+/// needs to resolve a `Type::Struct`/`Type::Enum`'s linearity.
+pub(super) struct Ctx<'a> {
+    /// The name as `check` sees it: `resolve` rewrites module 0's decls to
+    /// `{name}__m{module}` as soon as a file has an import, and a P7.S3r
+    /// impl member is synthesized as `member;Trait;module;Type`. Both are
+    /// compiler-internal spellings, so a diagnostic renders this through
+    /// `rendered_word` (R3) rather than interpolating it; self-tail
+    /// recognition compares it against mangled *call* names.
+    pub(super) mangled: &'a str,
+    pub(super) effect: &'a StackEffect,
+    pub(super) structs: &'a [StructDecl],
+    pub(super) enums: &'a [EnumDecl],
+    /// R1 (P7 slice 2): the closure's `static:` declarations, which the
+    /// borrow-typing arm consults for the second kind of place a `&`/`&!`
+    /// can name. Scoped to `module` at every lookup: a static is
+    /// module-private.
+    pub(super) statics: &'a [StaticDecl],
+    /// R2 (slice 8b): the owning module of the word being checked, the
+    /// caller module D1's `drop` gate and 8a's operator fix scope a name's
+    /// visibility against.
+    pub(super) module: u32,
+    /// R3 (slice 8b): the import closure's per-module data, `Some` on the
+    /// whole-program build path and `None` off it (a retained poly word passes
+    /// `None`): the gate reads it and never fires when it is absent.
+    pub(super) modules: Option<&'a [ModuleInfo]>,
+    /// Slice 10c (review fix, Phase 1): whether lowering actually builds a
+    /// splice-time back-edge for this word's own self-tail call
+    /// (`has_self_tail_call`, the same predicate `inline_combinator` and
+    /// every lowering site consult). The back-edge-only linear/reference
+    /// guards (R15) must gate on this, not on the syntactic `tail` flag
+    /// alone: `TailWalk` declines (a forwarded quotation reached through a
+    /// mid-body local, an ambiguous name, a forwarding cycle) in cases
+    /// where the positional `tail` flag still reaches the recursive call,
+    /// and there lowering emits an ordinary `Instr::Call` with no back
+    /// edge to guard.
+    pub(super) self_tail_call: bool,
+    /// P7 slice 3a phase 2 (R2): the live generic instantiator, `Some`
+    /// on the native build path (`check::check`), `None` everywhere else
+    /// (see `GenericTypes`'s own doc). A `RefCell` because `Ctx` otherwise
+    /// only ever borrows immutably, but grounding a generic mid-body-walk
+    /// (`unify_poly_input`/`apply_subst`'s `Generic` arms, and
+    /// `poly_call_term`'s construction arm) needs to mint through it.
+    pub(super) generics: Option<&'a RefCell<GenericTypes>>,
 }
 
 /// The `Ctx` for checking `word`'s body: shared by the body walkers and the
@@ -1171,7 +1160,7 @@ pub(super) fn word_ctx<'a>(
     combs: &CombinatorIndex,
     generics: Option<&'a RefCell<GenericTypes>>,
 ) -> Ctx<'a> {
-    Ctx::Word {
+    Ctx {
         mangled: &word.name,
         effect: &word.effect,
         structs,
@@ -1187,8 +1176,7 @@ pub(super) fn word_ctx<'a>(
 /// Walk `src` as the body of a synthetic one-word module and return the
 /// residual typed stack, seeded with `entry`. The shared harness for the unit
 /// tests that assert a *type* the walk produces rather than a diagnostic: they
-/// need `check_terms`'s exit stack, which no production entry point hands back,
-/// and they get it over the `Ctx::Word` arm every caller of the walk takes.
+/// need `check_terms`'s exit stack, which no production entry point hands back.
 /// The registries start empty and are dropped with the walk, so a fixture that
 /// needs to read one back has to build it itself.
 #[cfg(test)]
@@ -1262,15 +1250,11 @@ pub(super) fn infer_probe_body(
 
 impl Ctx<'_> {
     pub(super) fn structs(&self) -> &[StructDecl] {
-        match self {
-            Ctx::Word { structs, .. } | Ctx::Line { structs, .. } => structs,
-        }
+        self.structs
     }
 
     pub(super) fn enums(&self) -> &[EnumDecl] {
-        match self {
-            Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
-        }
+        self.enums
     }
 
     /// R1 (P7 slice 2): the declared type of the static `name`, or `None`
@@ -1282,84 +1266,57 @@ impl Ctx<'_> {
     /// but wrong: a combinator splice checks the caller's own quotation
     /// arguments under the callee's module (`inline_combinator`'s
     /// `ctx.with_module`), so `ctx.module()` need not be the module that
-    /// mangled `name` even though the lookup is still correct. A REPL line
-    /// declares no statics.
+    /// mangled `name` even though the lookup is still correct.
     pub(super) fn static_type(&self, name: &str) -> Option<Type> {
-        match self {
-            Ctx::Word { statics, .. } => statics.iter().find(|s| s.name == name).map(|s| s.ty),
-            Ctx::Line { .. } => None,
-        }
+        self.statics.iter().find(|s| s.name == name).map(|s| s.ty)
     }
 
     /// R2 (slice 8b): the caller module a scoped-name visibility check runs
-    /// against. A bare REPL line denotes module 0.
+    /// against.
     pub(super) fn module(&self) -> u32 {
-        match self {
-            Ctx::Word { module, .. } => *module,
-            Ctx::Line { .. } => 0,
-        }
+        self.module
     }
 
-    /// R3 (slice 8b): the import closure's per-module data, or `None` on the
-    /// REPL path, where the `drop` import-visibility gate does not fire.
+    /// R3 (slice 8b): the import closure's per-module data, or `None` off the
+    /// whole-program path, where the `drop` import-visibility gate does not
+    /// fire.
     pub(super) fn modules(&self) -> Option<&[ModuleInfo]> {
-        match self {
-            Ctx::Word { modules, .. } => *modules,
-            Ctx::Line { .. } => None,
-        }
+        self.modules
     }
 
     /// The enclosing word, rendered for a diagnostic (`resolve::render_word`,
     /// R3): a synthesized impl member reads back as the member/trait/type it
     /// came from, never its raw `;`-delimited spelling. The result carries its
     /// own delimiters, so an interpolating template must not add backticks of
-    /// its own -- which is why `fallback`, the stand-in for a bare REPL line
-    /// with no enclosing word, carries them too.
-    pub(super) fn rendered_word_or<'f>(&'f self, fallback: &'f str) -> Cow<'f, str> {
-        match self {
-            Ctx::Word { mangled, .. } => crate::resolve::render_word(mangled),
-            Ctx::Line { .. } => Cow::Borrowed(fallback),
-        }
+    /// its own.
+    pub(super) fn rendered_word(&self) -> Cow<'_, str> {
+        crate::resolve::render_word(self.mangled)
     }
 
-    pub(super) fn mangled_name(&self) -> Option<&str> {
-        match self {
-            Ctx::Word { mangled, .. } => Some(mangled),
-            Ctx::Line { .. } => None,
-        }
+    pub(super) fn mangled_name(&self) -> &str {
+        self.mangled
     }
 
     /// The enclosing word's own declared effect, for recognizing which
     /// struct (not just which name) a `drop` override's body is exempt for
-    /// (D3's destructure guard). A bare REPL line has no declared effect.
-    pub(super) fn effect(&self) -> Option<&StackEffect> {
-        match self {
-            Ctx::Word { effect, .. } => Some(effect),
-            Ctx::Line { .. } => None,
-        }
+    /// (D3's destructure guard).
+    pub(super) fn effect(&self) -> &StackEffect {
+        self.effect
     }
 
     /// R11: the enclosing word's declared output row, the context a branch join
     /// in tail position materializes its quotation arms against (the merged
-    /// slot maps to the output at the same index). A bare REPL line has no
-    /// declared row, so a materializing join there stays a located error.
-    pub(super) fn declared_outputs(&self) -> Option<&[TypedSlot]> {
-        match self {
-            Ctx::Word { effect, .. } => Some(&effect.outputs),
-            Ctx::Line { .. } => None,
-        }
+    /// slot maps to the output at the same index).
+    pub(super) fn declared_outputs(&self) -> &[TypedSlot] {
+        &self.effect.outputs
     }
 
     /// Slice 10c (review fix, Phase 1): whether the enclosing word's own
     /// self-tail call actually lowers to a splice-time back-edge. Gates the
     /// back-edge-only guards (R15) so they fire exactly where lowering
-    /// back-edges; see the field doc on `Ctx::Word::self_tail_call`. A bare
-    /// REPL line has no word to recurse into, so it is never a back-edge.
+    /// back-edges; see the field doc on `Ctx::self_tail_call`.
     pub(super) fn is_self_tail_call(&self) -> bool {
-        match self {
-            Ctx::Word { self_tail_call, .. } => *self_tail_call,
-            Ctx::Line { .. } => false,
-        }
+        self.self_tail_call
     }
 }
 
@@ -1372,47 +1329,20 @@ impl<'a> Ctx<'a> {
     /// check, 8a's operator scoping) run against `ctx.module()` while
     /// checking that spliced body must see the combinator's own declaring
     /// module, or a library combinator disposing its own resource gets
-    /// attributed to whichever module happened to call it. A no-op on
-    /// `Ctx::Line`, which has no module to scope against.
+    /// attributed to whichever module happened to call it.
     pub(super) fn with_module(&self, module: u32) -> Ctx<'a> {
-        match *self {
-            Ctx::Word {
-                mangled,
-                effect,
-                structs,
-                enums,
-                statics,
-                modules,
-                self_tail_call,
-                generics,
-                ..
-            } => Ctx::Word {
-                mangled,
-                effect,
-                structs,
-                enums,
-                statics,
-                module,
-                modules,
-                self_tail_call,
-                generics,
-            },
-            Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
-        }
+        Ctx { module, ..*self }
     }
 
     /// P7 slice 3a phase 2 (R2): the live generic instantiator, or `None` on
     /// a path that can never carry a `PolyType::Generic` in the first place
-    /// (a bare REPL line, or a session-defined poly word). A grounding arm
+    /// (a session-defined poly word). A grounding arm
     /// (`unify_poly_input`/`apply_subst`) that sees `None` here has reached a
     /// `PolyType::Generic` some path never grounds, and stays the Phase 1
     /// not-yet-groundable error rather than mint through a table that is not
     /// there.
     pub(super) fn generics(&self) -> Option<&'a RefCell<GenericTypes>> {
-        match self {
-            Ctx::Word { generics, .. } => *generics,
-            Ctx::Line { .. } => None,
-        }
+        self.generics
     }
 }
 
@@ -1442,7 +1372,7 @@ mod tests {
         }
     }
     /// Run `check_shuffle`'s `"drop"` arm on a single `Res` operand under a
-    /// caller-module `Ctx::Word` built with `modules`.
+    /// caller-module `Ctx` built with `modules`.
     fn drop_res(
         structs: &[StructDecl],
         modules: Option<&[ModuleInfo]>,
@@ -1615,9 +1545,9 @@ mod tests {
         scope.bind("q", quot, false, &mut prov);
         assert_eq!(scope.local("q").unwrap().quot, marker);
     }
-    /// R2: `Ctx::Word` carries its word's owning module.
+    /// R2: a `Ctx` carries its word's owning module.
     #[test]
-    fn ctx_word_carries_owning_module() {
+    fn ctx_carries_owning_module() {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();

@@ -54,10 +54,7 @@ mod word_entry;
 mod word_families;
 
 use self::audits::*;
-pub(crate) use self::audits::{
-    audit_quotation_type_registries, audit_word_quotation_positions, drop_overload_struct_id,
-    find_drop_overloads, reject_owning_quotation_declarations,
-};
+pub(crate) use self::audits::{find_drop_overloads, reject_owning_quotation_declarations};
 pub use self::builtins::builtin_table;
 use self::builtins::*;
 pub(crate) use self::builtins::{
@@ -67,28 +64,22 @@ use self::captures::*;
 pub use self::combinators::is_combinator;
 use self::combinators::*;
 pub(crate) use self::combinators::{
-    check_combinator_cycles, combinator_index, combinator_of, word_declares_quotation_parameter,
-    CombinatorEnv, CombinatorIndex,
+    check_combinator_cycles, combinator_index, CombinatorEnv, CombinatorIndex,
 };
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
     check_exported_signatures, check_impl_decls, check_no_word_shadows_eliminator,
-    check_selective_imports, check_slice_element_gate, check_static_decls, check_trait_decls,
-    check_types, enum_generated_sigs, selective_not_exported_error, struct_generated_sigs,
-    variant_generated_sigs, word_shadows_eliminator_error, SelectiveName,
+    check_selective_imports, check_static_decls, check_trait_decls, check_types,
+    enum_generated_sigs, struct_generated_sigs, variant_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
-pub(crate) use self::drop_graph::{
-    check_drop_overload_reachability, has_self_tail_call, terms_tail_call_self,
-};
+pub(crate) use self::drop_graph::{has_self_tail_call, terms_tail_call_self};
 use self::engine::*;
 pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
-pub(crate) use self::poly::{
-    check_poly_body, check_poly_combinator_repl, poly_type_str, CrossCtx, TraitCtx,
-};
+pub(crate) use self::poly::{check_poly_body, poly_type_str, CrossCtx, TraitCtx};
 use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
@@ -99,36 +90,6 @@ pub(crate) use self::word_entry::{
 };
 use self::word_entry::{check_reference_free_signature, check_word};
 use self::word_families::*;
-
-/// Slice 8a fix 1 (R1): one candidate registered under a name that may carry
-/// more than one -- an overload set. The word env's value type widened from a
-/// single `Sig` to `Vec<Overload>` so a name with several same-arity,
-/// differing-input-type candidates (R1/R4 already guarantee at most one can
-/// match a given call's operand types) keeps every one of them reachable,
-/// rather than the env's old bare `HashMap<String, Vec<Overload>>` silently keeping
-/// only the last inserted. `symbol` is the distinct lowering symbol this
-/// candidate's body was minted under (`ast::overload_symbols`): equal to the
-/// surface name unless this name has more than one candidate in scope.
-/// The per-call-site records a body walk fills: `CallInst` per polymorphic
-/// instantiation (R14) and, since slice 8a, the resolved candidate's lowering
-/// symbol per overloaded call (R7). Lowering reads both keyed by `Span`.
-type ResolvedCalls = (
-    HashMap<Span, CallInst>,
-    HashMap<Span, String>,
-    HashMap<Span, (StructId, usize)>,
-    HashMap<Span, (EnumId, usize, usize)>,
-);
-
-/// `ResolvedCalls` plus the residual stack a REPL line leaves behind and the
-/// field projections it resolved (R2), which the session's own lowering path
-/// needs exactly as the module path does.
-type InferredLine = (
-    Vec<Type>,
-    HashMap<Span, CallInst>,
-    HashMap<Span, String>,
-    HashMap<Span, (StructId, usize)>,
-    HashMap<Span, (EnumId, usize, usize)>,
-);
 
 /// R5/R14: every candidate registered under one polymorphic-word name, its
 /// `PolySig` paired with the REPL generation it was retained at (`None` on
@@ -143,8 +104,7 @@ pub(crate) type PolyEnv = HashMap<String, Vec<(PolySig, Option<u64>)>>;
 /// walk: the `PolySig`s of every polymorphic word (looked up before the
 /// concrete `env`), and the instantiation table each unified call site writes
 /// into. A monomorphic body that never calls a polymorphic word touches
-/// neither; the REPL (`infer_line`) passes an empty one, so no `repl.rs`
-/// change is needed (D2).
+/// neither.
 ///
 /// R2b: each `PolySig` carries its generation alongside it (`None` natively,
 /// `Some(g)` for a REPL word retained at generation `g`, Slice 2), so
@@ -226,8 +186,8 @@ struct PolyCtx<'a> {
 /// unifies with a `usize` position without an explicit `>usize`, but a
 /// *computed* `i64` may not, X10), so the checker's internal stack carries
 /// this flag alongside every `Type` it already tracked. It never escapes
-/// `check.rs`: every external-facing function (`infer_line`, `check_outputs`'
-/// callers) still speaks plain `Type`. A shuffle (`dup`/`swap`/`over`/`rot`)
+/// `check.rs`: every external-facing function (`check_outputs`' callers)
+/// still speaks plain `Type`. A shuffle (`dup`/`swap`/`over`/`rot`)
 /// moves a `Slot` verbatim, so a literal duplicated by `dup` is still a
 /// literal at each copy; any operator, conversion, or word call produces a
 /// non-literal result (D8: no constant folding, no comptime interpreter).
@@ -1177,257 +1137,6 @@ fn collect_quotation_bundles(ty: Type, found: &mut Vec<Vec<Type>>) {
     }
 }
 
-/// Check a single word definition against an external env, seeding the env with
-/// the word's own signature so self-recursion type-checks. `enums` is the
-/// registry the elimination checks (arm coverage, scrutinee type,
-/// variant-name collision) consult. Also returns this body's recorded overload-dispatch
-/// call sites (item 3), so the REPL definition path can thread them into
-/// lowering instead of discarding them.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn check_def(
-    word: &WordDef,
-    enums: &[EnumDecl],
-    env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    slices: &mut Vec<SliceDecl>,
-    structs: &[StructDecl],
-    poly_env: &PolyEnv,
-    combinators: &CombinatorEnv,
-) -> Result<ResolvedCalls, String> {
-    let (_sites, insts, overloads, fields, variant_fields) = check_def_collecting_drop_sites(
-        word,
-        enums,
-        env,
-        arrays,
-        cells,
-        refs,
-        slices,
-        structs,
-        poly_env,
-        combinators,
-    )?;
-    Ok((insts, overloads, fields, variant_fields))
-}
-
-/// R6/R11: `check_def`'s own body-check, but returning this one word's
-/// recorded `drop` call sites instead of discarding them. The REPL keeps the
-/// result cached per override (`Session::drop_dropped_sites`) so a later
-/// line's reachability query (`check_drop_overload_reachability`) never has
-/// to re-check an *earlier* override's body against a *later* line's env --
-/// the same stale-env hazard R11.2/R11.3 already fixed for lowering. A
-/// `drop` call site's resolved operand type does not change once recorded;
-/// only whether that type is *currently* overridden can, and that question
-/// is answered fresh, from `structs`, every time the graph is built.
-///
-/// Item 3 (slice 8a fix): also returns this body's recorded overload-dispatch
-/// sites (span -> resolved symbol). `eval_def`'s caller threads them into
-/// `ir::lower_word` so a REPL definition dispatches an overloaded call
-/// exactly like a native one; `compile_drop_overload` (a `drop` override body)
-/// has no such threading yet and discards them, an accepted, narrower gap
-/// than this fix's crash (see the item 3 report).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn check_def_collecting_drop_sites(
-    word: &WordDef,
-    enums: &[EnumDecl],
-    env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    slices: &mut Vec<SliceDecl>,
-    structs: &[StructDecl],
-    poly_env: &PolyEnv,
-    combinators: &CombinatorEnv,
-) -> Result<InferredLine, String> {
-    let mut env = env.clone();
-    let symbol = word.name.clone();
-    env.insert(
-        word.name.clone(),
-        vec![Overload {
-            sig: sig_of(&word.effect),
-            symbol,
-        }],
-    );
-    let mut sites = Vec::new();
-    // R5 (Slice 2): the session poly-env threads through so a defined word's
-    // own body can call a retained polymorphic word; the REPL drop-overload
-    // collector passes the empty map (a `drop` overload is never polymorphic),
-    // keeping the reachability walk byte-identical on the concrete path (D2).
-    let mut insts: HashMap<Span, CallInst> = HashMap::new();
-    // P7.S3o: scratch splice records (REPL path, never lowered).
-    let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
-    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
-    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
-    // Item 3: this body's resolved-overload call sites, relayed to the
-    // caller so lowering can dispatch through them instead of
-    // `empty_builtin_overloads()`.
-    let mut overloads: HashMap<Span, String> = HashMap::new();
-    // R2 (P7 slice 1): this body's receiver-directed field projections,
-    // relayed to the caller so the session lowers them like a native build.
-    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
-    // R6 (Phase 6 slice 3): this body's receiver-directed variant-field
-    // projections, relayed to the caller so the session lowers them like a
-    // native build.
-    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
-    // R3 (Slice 6c): the session's retained combinators thread through so a
-    // defined word's body can call one and have it inlined, exactly as native
-    // inlines one drawn from `module.words`. The build path and unit tests
-    // pass the empty map, keeping the concrete path byte-identical.
-    // Phase 6 slice 3 (R3): the eliminator registry is derived from the
-    // session's own enums, so a session-defined word eliminates a retained
-    // enum exactly as a native one does.
-    let eliminators = eliminator_registry(enums);
-    let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
-    let mut poly = PolyCtx {
-        env: poly_env,
-        insts: &mut insts,
-        builtin_overloads: &mut overloads,
-        resolved_fields: &mut fields,
-        resolved_variant_fields: &mut variant_fields,
-        combinators,
-        eliminators: &eliminators,
-        // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
-        // reaches a REPL-checked body or line -- the same bypass
-        // `structs`/`enums` already follow here.
-        trait_resolve: TraitResolveCtx::scratch(),
-        splice_records: &mut splice_recs,
-        impl_monos: &mut scratch_monos,
-        splice_trait_calls: &mut splice_trait_recs,
-        combinator_sig: None,
-        combinator_subst: None,
-        combinator_name: None,
-    };
-    // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
-    // `drop` import-visibility gate never fires on the session path.
-    // A REPL session declares no `static:` storage (P7 slice 2 is a build-path
-    // feature), so the static table is empty here.
-    // P7 slice 3a: the REPL never declares its own generic `type:` (D2), so
-    // no session poly word's signature can carry a `PolyType::Generic`; `None`
-    // here is correct, not a gap.
-    check_word(
-        word,
-        enums,
-        &env,
-        arrays,
-        cells,
-        refs,
-        slices,
-        structs,
-        &[],
-        None,
-        &mut sites,
-        &mut poly,
-        None,
-        0,
-    )?;
-    Ok((sites, insts, overloads, fields, variant_fields))
-}
-
-/// Infer the net effect of a bare line: simulate the typed stack from
-/// `entry_stack` (the carried slot types) and return the resulting typed stack.
-/// A type mismatch or underflow against the carried stack is a reported error.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn infer_line(
-    terms: &[Term],
-    entry_stack: &[Type],
-    env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    slices: &mut Vec<SliceDecl>,
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    poly_env: &PolyEnv,
-    combinators: &CombinatorEnv,
-) -> Result<InferredLine, String> {
-    let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
-    // A line is one block: names it binds die with it, so its end is a scope
-    // end like any other. It is not a word body, so nothing in it is in tail
-    // position.
-    let ctx = Ctx::Line { structs, enums };
-    let mut scope = Scope::default();
-    let mut prov = Provenance::default();
-    // R5 (Slice 2): the session poly-env threads through so a bare line can
-    // call a retained polymorphic word; the filled instantiation table is
-    // relayed to the caller for lowering. A `build`-path caller passes the
-    // empty map (Slice 1's D2 behaviour).
-    let mut insts: HashMap<Span, CallInst> = HashMap::new();
-    // P7.S3o: scratch splice records (REPL path, never lowered).
-    let mut splice_recs: HashMap<(u32, Span), CallInst> = HashMap::new();
-    // P7.S3o Phase 3: scratch per-splice trait-member calls (REPL path).
-    let mut splice_trait_recs: HashMap<(u32, Span), String> = HashMap::new();
-    // Item 3: this line's resolved-overload call sites, relayed to the
-    // caller so lowering can dispatch through them instead of
-    // `empty_builtin_overloads()`.
-    let mut overloads: HashMap<Span, String> = HashMap::new();
-    // R2 (P7 slice 1): this line's receiver-directed field projections,
-    // relayed to the caller so the session lowers them like a native build.
-    let mut fields: HashMap<Span, (StructId, usize)> = HashMap::new();
-    // R6 (Phase 6 slice 3): this line's receiver-directed variant-field
-    // projections, relayed to the caller so the session lowers them like a
-    // native build.
-    let mut variant_fields: HashMap<Span, (EnumId, usize, usize)> = HashMap::new();
-    // R3 (Slice 6c): the session's retained combinators thread through so a
-    // bare line can call one and have it inlined, exactly as native inlines one
-    // drawn from `module.words`. The build path and unit tests pass empty.
-    let eliminators = eliminator_registry(enums);
-    let mut scratch_monos: Vec<(String, crate::ast::Subst)> = Vec::new();
-    let mut poly = PolyCtx {
-        env: poly_env,
-        insts: &mut insts,
-        builtin_overloads: &mut overloads,
-        resolved_fields: &mut fields,
-        resolved_variant_fields: &mut variant_fields,
-        combinators,
-        eliminators: &eliminators,
-        // P7.S3e (R8): a session declares no `trait:`, so no `Bound::User`
-        // reaches a REPL-checked body or line -- the same bypass
-        // `structs`/`enums` already follow here.
-        trait_resolve: TraitResolveCtx::scratch(),
-        splice_records: &mut splice_recs,
-        impl_monos: &mut scratch_monos,
-        splice_trait_calls: &mut splice_trait_recs,
-        combinator_sig: None,
-        combinator_subst: None,
-        combinator_name: None,
-    };
-    let final_stack = check_terms(
-        terms, initial, &ctx, env, arrays, cells, refs, slices, &mut prov, &mut scope, false,
-        &mut poly,
-    )?;
-    let line = terms.last().map(|t| t.span.line).unwrap_or(0);
-    leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
-    // R19: a REPL line has no declared outputs (so R10's route never runs),
-    // yet the session carries its residual stack into the next line while the
-    // `quot` side channel dies at the boundary and lowering has pushed a
-    // phantom the spill would marshal. Reject a quotation left here.
-    if final_stack.iter().any(|s| s.quot.is_some()) {
-        return Err(
-            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` accepts a quotation (a runtime quotation value exists since slice 7a/7b, but the REPL line boundary is not yet a materialization boundary, so nothing has been pushed for the session to carry)".to_string(),
-        );
-    }
-    // The sixth position of the no-stored-reference rule: the session's
-    // inter-line stack outlives this line's
-    // locals, so a reference that survived to here would outlive its referent.
-    if let Some(slot) = final_stack
-        .iter()
-        .find(|s| contains_reference(s.ty, structs, enums, arrays))
-    {
-        return Err(format!(
-            "error: a reference cannot be stored: the line leaves `{}` on the stack, which the session carries into the next line\n  a `&T`/`&!T` borrows a local of this line, and this line's locals are gone by then",
-            slot.ty
-        ));
-    }
-    Ok((
-        final_stack.into_iter().map(|s| s.ty).collect(),
-        insts,
-        overloads,
-        fields,
-        variant_fields,
-    ))
-}
-
 fn effect_str(effect: &StackEffect) -> String {
     let ins: Vec<String> = effect.inputs.iter().map(|s| s.ty.to_string()).collect();
     let outs: Vec<String> = effect.outputs.iter().map(|s| s.ty.to_string()).collect();
@@ -1456,15 +1165,10 @@ fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String>
     if !is_registered_variant(name, ctx.enums()) {
         return Ok(());
     }
-    Err(match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: {kind} `{name}` in {word_name} collides with the variant name `{name}`",
-            word_name = crate::resolve::render_word(mangled)
-        ),
-        Ctx::Line { .. } => {
-            format!("error: {kind} `{name}` collides with the variant name `{name}`")
-        }
-    })
+    Err(format!(
+        "error: {kind} `{name}` in {word_name} collides with the variant name `{name}`",
+        word_name = ctx.rendered_word()
+    ))
 }
 
 /// D5: the diagnostic for a local whose name collides with a callable name —
@@ -1479,16 +1183,10 @@ fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String>
 /// it still isn't caught here (same class as the recorded operator-overload
 /// module-scoping gap).
 fn callable_local_error(ctx: &Ctx, name: &str, span: Span) -> String {
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
+    format!(
             "error: local `{name}` in {word_name} collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
             span.line
-        , word_name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => format!(
-            "error: local `{name}` collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
-            span.line
-        ),
-    }
+        , word_name = ctx.rendered_word())
 }
 
 /// A name repeated in a binding list (`| a a |`) collapses to last-wins when
@@ -1504,16 +1202,10 @@ fn reject_duplicate_local<'a>(
     if seen.insert(name) {
         return Ok(());
     }
-    Err(match ctx {
-        Ctx::Word { mangled, .. } => format!(
+    Err(format!(
             "error: duplicate local `{name}` in {word_name} (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
             span.line
-        , word_name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => format!(
-            "error: duplicate local `{name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
-            span.line
-        ),
-    })
+        , word_name = ctx.rendered_word()))
 }
 
 /// The output-count / output-type mismatch check for a word body (M6, X8):
@@ -1607,15 +1299,12 @@ pub(super) fn impl_target_str(target: &ImplTarget) -> String {
 }
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: unknown word `{}` in {} (line {})",
-            name,
-            crate::resolve::render_word(mangled),
-            span.line
-        ),
-        Ctx::Line { .. } => format!("error: unknown word `{name}`"),
-    }
+    format!(
+        "error: unknown word `{}` in {} (line {})",
+        name,
+        ctx.rendered_word(),
+        span.line
+    )
 }
 
 /// P7.S3t (R3): an explicit type-argument list (`f[Point]`) on a call that is
@@ -1635,10 +1324,7 @@ fn no_type_arguments_error(span: Span, name: &str) -> String {
 /// substitution to seed, so the list is rejected rather than dropped; naming
 /// the enclosing word matters because the remedy is at the *caller* of it.
 fn type_arguments_in_poly_body_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    let enclosing = match ctx {
-        Ctx::Word { mangled, .. } => format!(" in {}", crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => String::new(),
-    };
+    let enclosing = format!(" in {}", ctx.rendered_word());
     format!(
         "error: `{}`{enclosing} (line {}) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type argument through a polymorphic body is not supported",
         crate::resolve::demangle_call(name),
@@ -1666,26 +1352,18 @@ fn no_overload_matches_error(ctx: &Ctx, span: Span, name: &str, candidates: &[Ov
         .iter()
         .map(|s| format!("\n  candidate: {s}"))
         .collect::<String>();
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: no overload of `{name}` in {wname} (line {}) accepts these operands{listed}",
-            span.line,
-            wname = crate::resolve::render_word(mangled)
-        ),
-        Ctx::Line { .. } => {
-            format!("error: no overload of `{name}` accepts these operands{listed}")
-        }
-    }
+    format!(
+        "error: no overload of `{name}` in {wname} (line {}) accepts these operands{listed}",
+        span.line,
+        wname = ctx.rendered_word()
+    )
 }
 
 fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: stack effect mismatch in {} (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, needs, holds, effect_str(effect)),
-        Ctx::Line { .. } => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
-    }
+            ctx.rendered_word(), span.line, op, needs, holds, effect_str(ctx.effect()))
 }
 
 /// R7: `str` -> `cstr` is an explicit word, never an implicit conversion; a
@@ -1693,26 +1371,16 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
 /// mismatch, mirroring `size_conversion_needed_error`'s shape.
 fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: type mismatch: `{op}` wants `cstr`, found `str`: convert it explicitly with `cstr` first"
-        ),
-    }
+            ctx.rendered_word(), span.line, op, effect_str(ctx.effect()))
 }
 
 fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, expected, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, op, expected, found, effect_str(ctx.effect()))
 }
 
 /// R4 (D3): `dup`/`over` applied to a non-`Copy` value, in the DESIGN.md form.
@@ -1743,44 +1411,34 @@ fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
             "`{found}` is linear: it owns a resource and has no `Copy` instance, so there are no bits to copy; thread the value through instead"
         )
     };
-    match ctx {
-        Ctx::Word {
-            mangled, effect, ..
-        } => {
-            format!(
+    {
+        format!(
             "error: cannot `{}` a value of type `{}` in {} (line {})\n  {}\n  note: declared {}",
-            op, found, crate::resolve::render_word(mangled), span.line, why, effect_str(effect))
-        }
-        Ctx::Line { .. } => format!("error: cannot `{op}` a value of type `{found}`: {why}"),
+            op,
+            found,
+            ctx.rendered_word(),
+            span.line,
+            why,
+            effect_str(ctx.effect())
+        )
     }
 }
 
 /// R3 (D2): a linear local mentioned again after its value was moved out, the
 /// diagnostic naming the earlier move site.
 fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: use after move in {} (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, local, ty, site.line, site.col, ty, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: use after move: local `{local}` of type `{ty}` was moved at line {}, col {}",
-            site.line, site.col
-        ),
-    }
+            ctx.rendered_word(), span.line, local, ty, site.line, site.col, ty, effect_str(ctx.effect()))
 }
 
 /// R13/R14: a linear local still holding a value at the end of its scope,
 /// either never mentioned or consumed on one branch only. Nothing is
 /// auto-dropped, so this is an error rather than a compiler-inserted disposal.
 fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: linear value `{}` is never consumed in {} (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
-            local, crate::resolve::render_word(mangled), line, local, ty, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: linear value `{local}` is never consumed (line {line})\n  `{local}` has type `{ty}`, which is linear: drop it or leave it on the stack (nothing is dropped for you)"
-        ),
-    }
+            local, ctx.rendered_word(), line, local, ty, effect_str(ctx.effect()))
 }
 
 /// R13/R14: a linear local consumed on one `if` arm but not the other. Unlike
@@ -1788,14 +1446,9 @@ fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) ->
 /// disposed on one path; the bug is the other arm forgetting it, so the
 /// message points at the divergence rather than implying nothing happened.
 fn linear_local_maybe_moved_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: linear value `{}` is not consumed on every path in {} (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
-            local, crate::resolve::render_word(mangled), line, local, ty, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: linear value `{local}` is not consumed on every path (line {line})\n  `{local}` has type `{ty}`, which is linear: it is consumed on one `if` arm but not the other, so drop it on every path"
-        ),
-    }
+            local, ctx.rendered_word(), line, local, ty, effect_str(ctx.effect()))
 }
 
 /// R6: a linear value bound inside a block and still holding its value when the
@@ -1814,15 +1467,9 @@ fn linear_local_out_of_scope_error(
         true => "is not consumed on every path",
         false => "is never consumed",
     };
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: linear value `{}` {} in {} (line {})\n  `{}` has type `{}`, which is linear, and its scope ends at the `{}` on line {}, col {}: consume it before then (nothing is dropped for you)\n  note: declared {}",
-            local, cause, crate::resolve::render_word(mangled), span.line, local, ty, token, span.line, span.col, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: linear value `{local}` {cause} (line {})\n  `{local}` has type `{ty}`, which is linear, and its scope ends at the `{token}` on line {}, col {}: consume it before then (nothing is dropped for you)",
-            span.line, span.line, span.col,
-        ),
-    }
+            local, cause, ctx.rendered_word(), span.line, local, ty, token, span.line, span.col, effect_str(ctx.effect()))
 }
 
 /// R13 (D7): a linear value left on the stack beyond the declared outputs. The
@@ -1852,14 +1499,9 @@ fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
     let callee = crate::resolve::demangle_call(callee);
     let place = crate::resolve::demangle_word(place);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: a reference to a local cannot cross a loop in {} (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: a reference to a local cannot cross a loop: a reference derived from `{place}` crosses the back-edge to `{callee}`"
-        ),
-    }
+            ctx.rendered_word(), span.line, effect_str(ctx.effect()))
 }
 
 /// Reject a reference argument to the recursive call whose derivation's
@@ -3191,18 +2833,12 @@ fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str)
 
 fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: `{name}` is already bound in {word} (line {}, col {})\n  {scope_end}",
-            span.line,
-            span.col,
-            word = crate::resolve::render_word(mangled)
-        ),
-        Ctx::Line { .. } => format!(
-            "error: `{name}` is already bound (line {}, col {})\n  {scope_end}",
-            span.line, span.col
-        ),
-    }
+    format!(
+        "error: `{name}` is already bound in {word} (line {}, col {})\n  {scope_end}",
+        span.line,
+        span.col,
+        word = ctx.rendered_word()
+    )
 }
 
 /// R2/R6: take every name bound past `depth` out of scope, and reject a linear
@@ -3231,14 +2867,9 @@ fn leave_block(ctx: &Ctx, scope: &mut Scope, depth: usize, at: BlockEnd) -> Resu
 /// explicitly, naming whichever size type `target` is.
 fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, target, target, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: type mismatch: `{op}` mixes `{target}` with a computed `i64`: convert it explicitly with `>{target}` first"
-        ),
-    }
+            ctx.rendered_word(), span.line, op, target, target, effect_str(ctx.effect()))
 }
 
 /// Slice 10c: the two arms of a `branch` disagree. Named for the *arms*, not
@@ -3248,39 +2879,24 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
 /// itself. (The span still points at the first arm, which is the user's own
 /// literal either way -- see `check_branch_join`.)
 fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: stack effect mismatch in {} (line {})\n  the two branch arms leave different stack depths (then: {}, else: {})\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, d_then, d_else, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: the two branch arms leave different stack depths (then: {d_then}, else: {d_else})"
-        ),
-    }
+            ctx.rendered_word(), span.line, d_then, d_else, effect_str(ctx.effect()))
 }
 
 fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  the two branch arms leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, t_then, t_else, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: the two branch arms leave different types (then: `{t_then}`, else: `{t_else}`)"
-        ),
-    }
+            ctx.rendered_word(), span.line, t_then, t_else, effect_str(ctx.effect()))
 }
 
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
 /// array word and the offending operand type (X8).
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, op, found, effect_str(ctx.effect()))
 }
 
 /// P7.S5 (R10): `fill` given a linear, non-nullary-variant seed — the case
@@ -3289,14 +2905,9 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
 /// located error names the element type and points to `tabulate` as the
 /// construction path for distinct linear values.
 fn fill_linear_non_nullary_seed_error(ctx: &Ctx, span: Span, elem: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: `fill` cannot replicate a linear value in {} (line {})\n  `{}` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, elem, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: `fill` cannot replicate a linear value: `{elem}` is linear and has no `Copy` instance, so replicating it across every slot would duplicate a resource\n  note: use `tabulate` to construct an array of distinct linear values"
-        ),
-    }
+            ctx.rendered_word(), span.line, elem, effect_str(ctx.effect()))
 }
 
 /// The referent of a reference type, and whether it is mutable.
@@ -3323,10 +2934,7 @@ fn borrow_mutability(ty: Type, refs: &[RefDecl]) -> Option<bool> {
 /// slice's own diagnostics use to place themselves the way every other
 /// located error here does.
 fn in_word(ctx: &Ctx) -> String {
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(" in {}", crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => String::new(),
-    }
+    format!(" in {}", ctx.rendered_word())
 }
 
 /// R11: a quotation used as the operand of any type-directed consumer is an
@@ -3431,10 +3039,8 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
     // through *any* word named `drop`, including one overriding a different
     // struct that destructures this one -- compare the struct identity the
     // enclosing word's effect declares, not the word's name.
-    let is_own_drop_body = ctx.mangled_name() == Some("drop")
-        && ctx.effect().is_some_and(|eff| {
-            matches!(eff.inputs.as_slice(), [input] if matches!(input.ty, Type::Struct(id, _) if id.index() == struct_idx))
-        });
+    let is_own_drop_body = ctx.mangled_name() == "drop"
+        && matches!(ctx.effect().inputs.as_slice(), [input] if matches!(input.ty, Type::Struct(id, _) if id.index() == struct_idx));
     if is_own_drop_body {
         return Ok(());
     }
@@ -3446,16 +3052,10 @@ fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(),
 fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -> String {
     let source = crate::resolve::demangle_word(&decl.name);
     let note = "\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out";
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
+    format!(
             "error: cannot destructure `{source}` in {name} (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
             span.line
-        , name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => format!(
-            "error: cannot destructure `{source}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
-            span.line
-        ),
-    }
+        , name = ctx.rendered_word())
 }
 
 #[allow(clippy::too_many_arguments)]

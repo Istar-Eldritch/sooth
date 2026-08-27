@@ -1,30 +1,5 @@
 use super::*;
 
-/// R6/R11: the REPL's own whole-session call to `check_drop_overload_recursion`,
-/// asked over every override currently live in the session (the new one
-/// already included) and each one's *cached* `drop` call sites
-/// (`check_def_collecting_drop_sites`, recorded once per override, at the
-/// line that defined it) rather than a re-check of every body.
-pub(crate) fn check_drop_overload_reachability(
-    overrides: &[(StructId, &WordDef, &[Type])],
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &[ArrayDecl],
-    cells: &[OwnedCellDecl],
-) -> Result<(), String> {
-    let words: Vec<&WordDef> = overrides.iter().map(|&(_, word, _)| word).collect();
-    let overloads: HashMap<StructId, usize> = overrides
-        .iter()
-        .enumerate()
-        .map(|(i, &(id, _, _))| (id, i))
-        .collect();
-    let dropped: Vec<Vec<Type>> = overrides
-        .iter()
-        .map(|&(_, _, sites)| sites.to_vec())
-        .collect();
-    check_drop_overload_recursion(&words, structs, enums, arrays, cells, &overloads, &dropped)
-}
-
 /// `main` is the program's entry point: nothing in the program calls it, so
 /// a linear value in its declared effect either leaks past the program
 /// boundary unnoticed (an output) or runs a destructor over an

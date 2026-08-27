@@ -16,11 +16,10 @@ use super::*;
 
 /// R10: the `IrType` a word returns — its one output, or the synthesized
 /// bundle struct for two or more. The single derivation both the lowering env's
-/// `ret_ty` and `lower_word`'s own `ret` go through, so a caller reading the
-/// env and the callee it calls can never disagree about the return shape.
-/// Falls back to the first output where no bundle was interned (the REPL's
-/// registries, D2): that path keeps its pre-slice lowering rather than
-/// half-entering the bundle ABI.
+/// `ret_ty` and `lower_word_parts`'s own `ret` go through, so a caller reading
+/// the env and the callee it calls can never disagree about the return shape.
+/// Falls back to the first output where no bundle was interned: that path keeps
+/// its pre-slice lowering rather than half-entering the bundle ABI.
 pub(super) fn word_ret_ty(outputs: &[TypedSlot], structs: &Structs) -> Option<IrType> {
     match bundle_of(outputs, structs) {
         Some(id) => Some(IrType::Struct(id)),
@@ -1214,8 +1213,7 @@ mod tests {
     #[test]
     fn func_builder_new_threads_current_word_name() {
         // R5: FuncBuilder carries the word being lowered, set from `word.name`
-        // in `lower_word`; the REPL path calls the same `lower_word` (no
-        // REPL-specific plumbing), so this covers both callers.
+        // in `lower_word_parts`.
         let env: HashMap<String, Arity> = HashMap::new();
         let structs = Structs::default();
         let enums = Enums::default();

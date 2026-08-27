@@ -45,9 +45,7 @@ pub fn core_lib_words() -> Vec<WordDef> {
 }
 
 /// `core::bool`'s registry as its own parse produces it -- the `bool` enum and
-/// nothing else. The stand-in a bare-line (REPL-shaped) helper uses for the
-/// startup seed `Session::new` performs, for the same reason: `infer_line`
-/// takes a registry, not a source.
+/// nothing else, for a harness that takes a registry rather than a source.
 pub fn core_bool_enums() -> Vec<EnumDecl> {
     let tokens = crate::lexer::lex(CORE_SOURCES[0]).expect("`lib/bool.sth` lexes");
     crate::parser::parse(&tokens)

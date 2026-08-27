@@ -618,8 +618,8 @@ fn impl_body_unknown_word_names_readable_member() {
 }
 
 /// R3 (Phase 2), the other half of the mechanism: the three goldens above all
-/// reach diagnostics that read `Ctx::Word`'s `mangled` directly, while a second
-/// family goes through the `rendered_word_or` accessor. Reverting that accessor
+/// reach diagnostics that read `Ctx`'s `mangled` directly, while a second
+/// family goes through the `rendered_word` accessor. Reverting that accessor
 /// alone leaves those three passing, so this fixture -- an intrinsic called in a
 /// member body of a file with no `import: intrinsics` line -- is what pins it.
 #[test]

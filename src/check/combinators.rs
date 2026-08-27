@@ -31,13 +31,6 @@ impl<'a> CombinatorEnv<'a> {
         &self.tail
     }
 
-    /// Register (or replace) one name's candidates, as the REPL does when it
-    /// adds the word being defined to the view it checks the body against.
-    pub(crate) fn insert(&mut self, name: String, candidates: Vec<Combinator<'a>>) {
-        self.candidates.insert(name, candidates);
-        self.tail = combinator_index(self.candidates.values().flatten().map(|c| c.word));
-    }
-
     fn members(&self) -> impl Iterator<Item = &Combinator<'a>> {
         self.candidates.values().flatten()
     }
@@ -131,15 +124,6 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
     map.into_iter().collect()
 }
 
-/// R2 (Slice 6c): the checker's inline view for one retained combinator, the
-/// per-`WordDef` analogue of `collect_combinators`, so the REPL can project its
-/// session store into the `HashMap<String, Combinator>` the inline path reads
-/// without reaching into `Combinator`'s private fields.
-pub(crate) fn combinator_of(word: &WordDef) -> Combinator<'_> {
-    let terms = &word.body;
-    Combinator { word, terms }
-}
-
 /// R18/R20: a combinator is a word declaring `inline` (recognition is
 /// **declared, not inferred**, R-A1). The checker inlines a call to one
 /// (splicing its body) and lowering mints no `IrFunc` for it, so `check` and
@@ -154,24 +138,6 @@ pub(crate) fn combinator_of(word: &WordDef) -> Combinator<'_> {
 /// `inline` is an ordinary real call (part D lowers that shape).
 pub fn is_combinator(word: &WordDef) -> bool {
     word.declares_inline
-}
-
-/// R23 (D7): whether a word's declared effect names a quotation parameter,
-/// regardless of flavour. This is *not* the
-/// "does this word splice?" question -- `is_combinator` answers that, from the
-/// declaration alone -- but the coarser "is this slot a quotation?" one its
-/// callers across `check/{poly,terms,audits,captures}.rs` ask, and the one the
-/// REPL's own boundary asks to decline the ordinary `[ ... ]` parameter shape
-/// it does not support.
-pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
-    match &word.poly {
-        None => word
-            .effect
-            .inputs
-            .iter()
-            .any(|s| crate::ast::is_quotation_type(s.ty).is_some()),
-        Some(sig) => sig.inputs.iter().any(poly_input_is_quotation),
-    }
 }
 
 /// A polymorphic input slot that declares a quotation parameter: either a
@@ -819,31 +785,6 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
 
-    /// Slice 10a (R1): a monomorphic word whose input is a `~` still counts as
-    /// declaring a quotation parameter (accessor-routed), so it is inlined
-    /// rather than lowered to a call.
-    #[test]
-    fn word_declares_quotation_parameter_recognizes_inline() {
-        use crate::ast::TypedSlot;
-        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
-        let w = WordDef {
-            name: "w".to_string(),
-            effect: StackEffect {
-                inputs: vec![TypedSlot {
-                    name: None,
-                    ty: inl,
-                }],
-                outputs: Vec::new(),
-            },
-            body: Vec::new(),
-            poly: None,
-            declares_inline: false,
-            module: 0,
-            span: Span::default(),
-            declared_globals: None,
-        };
-        assert!(word_declares_quotation_parameter(&w));
-    }
     #[test]
     fn quotation_taking_word_mints_no_symbol() {
         // Slice 12 (R-A1, M-A): recognition is declared, not inferred. An
@@ -852,7 +793,7 @@ mod tests {
         // word (a real call, part D's territory), same as `plain`.
         // Constructed directly (not via an end-to-end build) so the test
         // discriminates the retired inference leg from an end-to-end "it
-        // still builds" placebo: re-adding the `word_declares_quotation_parameter`
+        // still builds" placebo: re-adding the retired quotation-parameter
         // disjunct to `is_combinator` flips `apply` to `true` and this must fail.
         let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
                    : apply-inline inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
@@ -901,7 +842,13 @@ mod tests {
             span: Span::default(),
             declared_globals: None,
         };
-        assert!(!word_declares_quotation_parameter(&w));
+        assert!(
+            !w.effect
+                .inputs
+                .iter()
+                .any(|s| crate::ast::is_quotation_type(s.ty).is_some()),
+            "the fixture names no quotation parameter, so nothing but `inline` can make it spliced"
+        );
         assert!(is_combinator(&w), "`inline` alone makes a word spliced");
         w.declares_inline = false;
         assert!(

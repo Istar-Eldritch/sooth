@@ -116,8 +116,8 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
 /// `check_inline_declaration` above: that function rejects an `inline` the
 /// splice cannot deliver on; this one rejects a `~` parameter the splice is
 /// the *only* way to deliver on, absent `inline`. Phrased over
-/// `Type::InlineQuotation` specifically, not `word_declares_quotation_parameter`
-/// (which also matches an ordinary `Type::Quotation`): an ordinary `[ ... ]`
+/// `Type::InlineQuotation` specifically, not any quotation parameter
+/// (an ordinary `Type::Quotation` included): an ordinary `[ ... ]`
 /// parameter is representable, so it is a real call by default (part D) and
 /// needs no `inline`.
 pub(crate) fn check_inline_quotation_requires_inline(word: &WordDef) -> Result<(), String> {

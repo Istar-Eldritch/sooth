@@ -35,24 +35,22 @@ pub use self::types::{
     SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
-pub(crate) use self::layout::{
-    build_registries, build_slices, build_statics, carried_slot_bytes, empty_statics, ArrayLayout,
-    Arrays, Cells, DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Slices,
-    Statics, StructLayout, Structs,
-};
-// `VariantLayout` and `Refs` have no non-test caller anywhere in the crate
-// today (only a `repl.rs` test constructs a `VariantLayout`; every `Refs` is a
-// unit test's empty stand-in); both are still part of the historical `ir::*`
-// re-export contract (spec surface list), so they stay reachable for tests
-// without tripping `unused_imports` on a plain (non-test) build.
-pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
 pub use self::driver::{lower, lower_line};
 use self::layout::{
     array_drop_symbol, cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align,
     struct_drop_symbol, EnumWord, StructWord,
 };
+pub(crate) use self::layout::{
+    build_registries, build_slices, build_statics, carried_slot_bytes, ArrayLayout, Arrays, Cells,
+    DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Slices, Statics, StructLayout,
+    Structs,
+};
+// `Refs` has no non-test caller anywhere in the crate today (every one is a
+// unit test's empty stand-in), and `empty_slices`/`empty_statics` exist for
+// exactly that; they stay reachable for tests without tripping `unused_imports`
+// on a plain (non-test) build.
 #[cfg(test)]
-pub(crate) use self::layout::{empty_slices, Refs, VariantLayout};
+pub(crate) use self::layout::{empty_slices, empty_statics, Refs};
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
 /// call sites (the REPL, D2; destructor synthesis; unit tests), so

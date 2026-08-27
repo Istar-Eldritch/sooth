@@ -106,7 +106,11 @@ fn user_manifest_path(config_home: Option<OsString>, home: Option<OsString>) -> 
 /// directory; a module name resolves against its package, by its anchor. Both
 /// canonicalize and dedupe by canonical path (a diamond imports a file once).
 /// Rejects a cycle and a self-import with a located both-files error (R4) and a
-/// missing file with a located error (R5).
+/// missing file with a located error (R5). The production entry points reach
+/// `discover_closure_audited` directly with their own `ResolutionConfig`; this
+/// is the environment-configured wrapper the unit tests walk the closure
+/// through.
+#[cfg(test)]
 pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
     discover_closure_audited(entry, &ResolutionConfig::from_env())
 }
@@ -937,12 +941,6 @@ pub fn run_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<ExitSta
         .map_err(|e| format!("running {binary:?}: {e}"))
 }
 
-pub fn repl() -> Result<(), String> {
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
-    crate::repl::run(stdin.lock(), stdout.lock())
-}
-
 /// Compile QBE IL text to a shared object at `out`. Mirrors `build`'s qbe/cc
 /// plumbing but targets a `.so`: no C shim, since a shared object has no `main`.
 pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
@@ -1165,7 +1163,7 @@ mod tests {
     /// *non-entry* module mangles to `rec__m1`, and `resolve::mangle` rewrites
     /// the self-call body reference to match -- so the checker's guard must
     /// compare against `ctx.mangled_name()`. A demangled comparison
-    /// (`ctx.word_name()`, still `"rec"` here) would never match the mangled
+    /// (`ctx.rendered_word()`, still `"rec"` here) would never match the mangled
     /// call term and would wrongly fall through to the cross-call arm, which
     /// would then look `rec` up as a *different* generic word.
     #[test]

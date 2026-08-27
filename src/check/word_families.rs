@@ -680,28 +680,18 @@ pub(super) fn check_tag_word(
 
 /// `tag` applied to something that is not an enum at all.
 fn tag_operand_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `tag` requires an enum operand, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `tag` requires an enum operand, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
 }
 
 /// R-P3-2/OQ4: `tag` outside its domain — an enum at least one of whose
 /// variants carries a payload, where the discriminant is a field in tagged
 /// storage rather than the value itself.
 fn tag_payload_enum_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `tag` requires an enum whose variants all carry no payload, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: type mismatch: `tag` requires an enum whose variants all carry no payload, found `{found}`"
-        ),
-    }
+            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
 }
 
 /// The two `str`-only words: `len ( str -- usize )` (R8) and `cstr
@@ -1171,9 +1161,9 @@ pub(super) fn is_name_visible_to_module(
 /// (`Ctx::with_module`) and would otherwise be judged against the library's
 /// `import:` lines rather than its author's.
 ///
-/// Never fires on the REPL/`Ctx::Line` path, where `ctx.modules()` is `None` --
-/// the same exemption the `drop` visibility gate has, and the reason the
-/// "no builtin without an `intrinsics` import" rule is a file/driver-path rule.
+/// Never fires where `ctx.modules()` is `None` -- the same exemption the `drop`
+/// visibility gate has, and the reason the "no builtin without an `intrinsics`
+/// import" rule is a file/driver-path rule.
 pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool {
     if !is_name_dispatched_builtin(name) {
         return false;
@@ -1196,7 +1186,7 @@ pub(super) fn intrinsic_is_gated_out(ctx: &Ctx, span: Span, name: &str) -> bool 
 /// unknown-word error because the word does exist -- it is simply not imported
 /// here -- so the remedy is an import, not a definition.
 pub(super) fn ungated_intrinsic_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    let caller = ctx.rendered_word_or("`this line`");
+    let caller = ctx.rendered_word();
     format!(
         "error: `{name}` is an intrinsic and is not imported in {caller} (line {}, col {})\n  add `import: intrinsics * ;` (or `import: intrinsics | {name} ... | ;`) to this file",
         span.line, span.col
@@ -1271,9 +1261,7 @@ pub(super) fn check_drop_import_visibility(
 /// R5 (slice 8b): the located diagnostic for a `drop` whose destructor lives in
 /// a module the caller imported qualified-only. Names the demangled type under
 /// the qualifier the caller binds it (the qualifier whose import maps to the
-/// declaring module) and the remedy: import the type by name. The `Ctx::Line`
-/// arm names no enclosing word, though the REPL path never reaches the gate
-/// (`ctx.modules()` is `None` there, R8).
+/// declaring module) and the remedy: import the type by name.
 fn drop_import_visibility_error(
     ctx: &Ctx,
     span: Span,
@@ -1325,17 +1313,11 @@ fn drop_import_visibility_error(
             ),
         ),
     };
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
-            "error: cannot `drop` a value of type `{ty_name}` in {name} (line {})\n  {note}",
-            span.line,
-            name = crate::resolve::render_word(mangled)
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `drop` a value of type `{ty_name}` (line {})\n  {note}",
-            span.line
-        ),
-    }
+    format!(
+        "error: cannot `drop` a value of type `{ty_name}` in {name} (line {})\n  {note}",
+        span.line,
+        name = ctx.rendered_word()
+    )
 }
 
 /// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
@@ -1346,14 +1328,9 @@ pub(super) fn array_index_out_of_range_error(
     count: u32,
     index: i64,
 ) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: array index out of range in {} (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, index, count, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: array index out of range: index {index} is out of bounds for length {count}"
-        ),
-    }
+            ctx.rendered_word(), span.line, index, count, effect_str(ctx.effect()))
 }
 
 /// `fill` given a *computed* (non-literal) count (M1): the count must be a
@@ -1366,39 +1343,23 @@ pub(super) fn array_index_out_of_range_error(
 /// its own gate.  Reference elements are still rejected upstream by
 /// `check_no_stored_references`, so only the linear case reaches here.
 fn slice_linear_element_error(ctx: &Ctx, span: Span, element: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: `slice` cannot create a slice with a linear element in {} (line {})\n  `{}` is linear and has no `Copy` instance\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, element, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: `slice` cannot create a slice with a linear element: `{element}` is linear and has no `Copy` instance"
-        ),
-    }
+            ctx.rendered_word(), span.line, element, effect_str(ctx.effect()))
 }
 
 fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
-        ),
-    }
+            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
 }
 
 /// `fill` given a literal count `< 1` (or `> u32::MAX`): an array length must
 /// be `>= 1` (X2, M1), named against the offending count.
 fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: invalid array length in {} (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, count, u32::MAX, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
-            u32::MAX
-        ),
-    }
+            ctx.rendered_word(), span.line, count, u32::MAX, effect_str(ctx.effect()))
 }
 
 /// An exact `usize` is a runtime index; a bare integer literal coerces and
@@ -1452,27 +1413,17 @@ fn check_slice_offset(operand: Slot, ctx: &Ctx, span: Span, op: &str) -> Result<
 /// for the discard-the-length conversion, so the error names it by name
 /// rather than as a generic type mismatch.
 fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
 }
 /// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
 /// word and the offending operand type, mirroring `array_word_operand_error`.
 fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, op, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, op, found, effect_str(ctx.effect()))
 }
 /// `^|>` on a linear payload: the cell stays live afterward, so peeking
 /// would leave a second, unowned reference to a resource the cell still
@@ -1483,14 +1434,9 @@ fn peek_of_linear_owned_payload_error(
     cell_ty: Type,
     payload: Type,
 ) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: cannot `^|>` a linear payload in {} (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, cell_ty, payload, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
-        ),
-    }
+            ctx.rendered_word(), span.line, cell_ty, payload, effect_str(ctx.effect()))
 }
 /// `&x`/`&!x` applied to something that is not a local. A place is a
 /// local name and nothing more, so the diagnostic names what was found there
@@ -1549,15 +1495,10 @@ pub(super) fn reference_word_operand_error(
     found: Type,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {name} (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
             span.line,
-            effect_str(effect), name = crate::resolve::render_word(mangled)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` expected {expected}, found `{found}`")
-        }
-    }
+            effect_str(ctx.effect()), name = ctx.rendered_word())
 }
 /// `!`/`+!` through a shared reference. Storing through a `&T` is
 /// meaningless, and the mutable spelling is right there.
@@ -1773,7 +1714,7 @@ mod tests {
             ..ModuleInfo::default()
         }];
         fn ctx<'a>(effect: &'a StackEffect, modules: Option<&'a [ModuleInfo]>) -> Ctx<'a> {
-            Ctx::Word {
+            Ctx {
                 mangled: "w",
                 effect,
                 structs: &[],

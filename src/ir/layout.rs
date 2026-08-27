@@ -89,23 +89,8 @@ pub(super) fn field_is_linear(
 /// destructor, keyed the way destructor synthesis itself is keyed — by
 /// `StructId`, never by the shared literal name `"drop"`, so overrides for
 /// distinct structs cannot collide. Borrowed rather than owned: the bodies live
-/// in the module being lowered (or, at the REPL, in the session).
-pub type DropOverrides<'a> = HashMap<StructId, DropOverride<'a>>;
-
-/// What an overridden struct's destructor is *for the module being lowered*.
-#[derive(Debug, Clone, Copy)]
-pub enum DropOverride<'a> {
-    /// Compile this body as the struct's destructor. The build path always
-    /// uses this; at the REPL, only the line declaring the override does.
-    Body(&'a WordDef),
-    /// R11.3: emit no destructor for this struct at all. Its symbol is pinned
-    /// to the epoch its override was defined at, so the body compiled on that
-    /// line is already loaded `RTLD_GLOBAL` and resolves for every later line.
-    /// Re-lowering the retained body here would resolve its callees against a
-    /// *later* line's env, which the body was never checked against — a
-    /// redefined callee of different arity panics lowering outright.
-    AlreadyLoaded,
-}
+/// in the module being lowered.
+pub type DropOverrides<'a> = HashMap<StructId, &'a WordDef>;
 
 /// The synthesized per-type destructor symbol for a linear struct. `epoch`
 /// is `Some` only at the REPL once its session holds at least one `drop`
@@ -529,6 +514,7 @@ pub fn build_statics(decls: &[StaticDecl], enums: &Enums) -> (Statics, Vec<Stati
 /// The shared empty static table, for every lowering path with no module
 /// statics to see (the REPL, destructor synthesis, unit tests), so a
 /// `Registries` can be built without each caller owning a `Statics`.
+#[cfg(test)]
 pub fn empty_statics() -> &'static Statics {
     static EMPTY: std::sync::OnceLock<Statics> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Statics::default)

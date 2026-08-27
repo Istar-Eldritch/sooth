@@ -30,10 +30,6 @@ use super::*;
 /// `drop_level_fields` through it), so substituting the body here is the whole
 /// of dispatch: no call site resolves a `drop` overload by name.
 ///
-/// R11.3: an `AlreadyLoaded` entry gets no destructor emitted at all — the
-/// REPL marks every override but the one being declared that way, since each
-/// override's symbol is pinned to its defining epoch and its body must be
-/// lowered once, against the env it was checked against.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -61,10 +57,10 @@ pub fn synthesize_aggregate_destructors(
         // outputs, moved out by the unpack the instant the call returns, so a
         // destructor for the shell would free a linear one a second time.
         .filter(|(_, layout)| layout.is_linear && !layout.bundle)
-        .filter_map(|(idx, _)| {
+        .flat_map(|(idx, _)| {
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
-                Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
+                Some(word) => synthesize_struct_destructor_override(
                     id,
                     word,
                     env,
@@ -73,12 +69,10 @@ pub fn synthesize_aggregate_destructors(
                     resolved_fields,
                     resolved_variant_fields,
                     combinators,
-                )),
-                Some(DropOverride::AlreadyLoaded) => None,
-                None => Some(vec![synthesize_struct_destructor(id, env, resolve, regs)]),
+                ),
+                None => vec![synthesize_struct_destructor(id, env, resolve, regs)],
             }
         })
-        .flatten()
         .collect();
     let enum_destructors = enums
         .layouts
@@ -362,12 +356,9 @@ pub(super) fn synthesize_struct_destructor(
 /// replaces `synthesize_struct_destructor`'s field glue rather than running
 /// before or alongside it (R5), so there is no glue left to compose with.
 ///
-/// Calls `lower_word_parts` directly rather than the `lower_word` convenience
-/// wrapper: `lower_word` hardcodes `empty_combinators()`, which is correct for
-/// its one remaining caller (the REPL's `eval_def`, which cannot yet retain
-/// any combinator to call) but was silently wrong here — a drop override's
-/// body can call a combinator like any other word body, and a native build's
-/// `combinator_bodies` map already exists by the time this runs.
+/// Threads the caller's `combinator_bodies` map into `lower_word_parts` rather
+/// than an empty one: a drop override's body can call a combinator like any
+/// other word body.
 #[allow(clippy::too_many_arguments)]
 fn synthesize_struct_destructor_override(
     id: StructId,

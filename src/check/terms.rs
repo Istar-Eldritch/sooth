@@ -919,7 +919,7 @@ fn check_term(
             // whether *this word* actually gets the loop shape, so gating on
             // both together means this guard fires exactly where lowering
             // back-edges, never on a call that lowers as ordinary recursion.
-            if tail && ctx.mangled_name() == Some(name.as_str()) && ctx.is_self_tail_call() {
+            if tail && ctx.mangled_name() == name.as_str() && ctx.is_self_tail_call() {
                 check_linear_across_back_edge(
                     ctx,
                     span,
@@ -1189,14 +1189,9 @@ pub(super) fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str
 /// rather than silence. Copy loops are untouched.
 fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
     let callee = crate::resolve::demangle_call(callee);
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: linear values across a loop are not supported yet in {} (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, ty, callee, effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: linear values across a loop are not supported yet: a `{ty}` is live across the back-edge to `{callee}`"
-        ),
-    }
+            ctx.rendered_word(), span.line, ty, callee, effect_str(ctx.effect()))
 }
 
 /// R15: reject a linear value that would survive the back-edge of a
@@ -1263,16 +1258,10 @@ fn check_linear_across_back_edge(
 /// `call` reached without a statically-known quotation literal on top (D4):
 /// the value there is not traceable to a single literal.
 fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
-    match ctx {
-        Ctx::Word { mangled, .. } => format!(
+    format!(
             "error: `call` in {} (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
-            crate::resolve::render_word(mangled), span.line
-        ),
-        Ctx::Line { .. } => format!(
-            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
-            span.line
-        ),
-    }
+            ctx.rendered_word(), span.line
+        )
 }
 
 /// R8: check a call of an *abstract* quotation (one typed only by a declared
@@ -1458,9 +1447,7 @@ fn check_branch_join(
                 // tail = false`. Without either the join cannot type the
                 // erased value, so it stays a located error.
                 let expected = if tail {
-                    ctx.declared_outputs()
-                        .and_then(|outs| outs.get(i))
-                        .map(|slot| slot.ty)
+                    ctx.declared_outputs().get(i).map(|slot| slot.ty)
                 } else {
                     i.checked_sub(1)
                         .and_then(|below| ref_parts(then_stack[below].ty, refs))
@@ -1499,7 +1486,7 @@ fn check_branch_join(
                         // `literal_effect_mismatch_error` renders what it is
                         // handed (`render_word`), so this hands it the mangled
                         // name rather than a pre-demangled one.
-                        let word = ctx.mangled_name().unwrap_or("the branch");
+                        let word = ctx.mangled_name();
                         let a_span = prov.quotations[a.0].span;
                         let b_span = prov.quotations[b.0].span;
                         // P7.S3h: the two literals are *alternatives*, and an
@@ -1771,14 +1758,9 @@ fn check_branch(
 
 /// `branch` handed something that is not a quotation in either branch slot.
 fn branch_needs_quotation_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: type mismatch in {} (line {})\n  `branch` requires two quotation operands, found `{}`\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, found, effect_str(effect)),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `branch` requires two quotation operands, found `{found}`")
-        }
-    }
+            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
 }
 
 /// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
@@ -1832,15 +1814,9 @@ pub(super) fn borrow_join_disagreement_error(
         Some((None, Some(place))) => format!("a reborrow of `{place}`"),
         Some((None, None)) => "a borrow with no local root".to_string(),
     };
-    match ctx {
-        Ctx::Word { mangled, effect, .. } => format!(
+    format!(
             "error: borrow state disagrees at the branch join in {} (line {})\n  the first arm leaves {}, the second arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
-            crate::resolve::render_word(mangled), span.line, describe(t_then), describe(t_else), effect_str(effect)),
-        Ctx::Line { .. } => format!(
-            "error: borrow state disagrees at the branch join (line {})\n  the first arm leaves {}, the second arm leaves {}",
-            span.line, describe(t_then), describe(t_else),
-        ),
-    }
+            ctx.rendered_word(), span.line, describe(t_then), describe(t_else), effect_str(ctx.effect()))
 }
 /// R7, both arms leave a quotation but not the *same* literal: a quotation's
 /// body must be statically known where it is used, and a branch merge that
