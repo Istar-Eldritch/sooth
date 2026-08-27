@@ -455,7 +455,7 @@ fn a_bound_member_call_inside_a_quotation_argument_instantiates_at_two_types() {
              import: core::prelude | if Bool True Ord lt gt | ;\n\
              import: core::cmp | Ordering Less Equal Greater | ;\n\
              {POINT_IMPL}\
-             : myeq ( 'T: Copy Ord 'T -- i64 )\n\
+             : myeq ['T: Copy Ord] ( 'T 'T -- i64 )\n\
                | a b |\n\
                True\n\
                ~[ a b cmp ~[ ( Less ) drop -1 ] ~[ ( Equal ) drop 0 ] ~[ ( Greater ) drop 1 ] Ordering? ]\n\
