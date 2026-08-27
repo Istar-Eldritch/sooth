@@ -1939,15 +1939,15 @@ mod tests {
         );
     }
 
-    /// P7.S3s-follow Phase 4 (section 3): two member splices under one
-    /// enclosing uid alpha-rename to the same local names, which is correct
-    /// because the splice truncates `self.locals` to its entry depth and the
-    /// resolver is scope-bounded. Both `dbl` calls inside the spliced
-    /// `apply2` body resolve through `splice_trait_calls` under the same uid,
+    /// P7.S3s-follow Phase 4 (section 3): two splices of the same member share
+    /// that member's own uid seed, so they alpha-rename to the same local
+    /// names. That is correct because each splice truncates `self.locals` to
+    /// its entry depth and the resolver is scope-bounded. Both `dbl` calls
+    /// inside the spliced `apply2` body resolve through `splice_trait_calls`,
     /// and both are spliced. Asserting the right *value* (two doublings), not
     /// merely that it builds, so a wrong splice is caught as a wrong answer.
     #[test]
-    fn lower_resolved_inline_trait_member_two_splices_under_one_uid() {
+    fn lower_resolved_inline_trait_member_two_splices_share_the_members_seed() {
         let ir = lower_src(
             "trait: Doubler 'T : dbl inline ( 'T -- 'T ) ; ;\n\
              impl: Doubler for i64\n\
@@ -1975,8 +1975,9 @@ mod tests {
 
     /// P7.S3s-follow Phase 4: the `trait_calls` path (a non-combinator poly
     /// word calling an inline trait member). The poly word has its own
-    /// `IrFunc`, but inside it the member is spliced, not called. This tests
-    /// the uid = 0 (top-level default) case, where `splice_uid_stack` is empty.
+    /// `IrFunc`, but inside it the member is spliced, not called -- reached
+    /// from an empty `splice_uid_stack`, so the member's own seed is the only
+    /// thing that decides its body's uid namespace.
     #[test]
     fn lower_resolved_inline_trait_member_trait_calls_path_splices() {
         let ir = lower_src(
@@ -2013,9 +2014,9 @@ mod tests {
     /// so a `'T: Ord` word's `cmp` call splices the `impl:` body instead of
     /// calling it. The impl body's `ult`/`ugt` comparisons appear in the
     /// word's monomorph as `Instr::Cmp` (`Lt`/`Gt`), and no `Instr::Call` to
-    /// any `cmp` symbol survives. This exercises the `trait_calls` path
-    /// (uid = 0) with the real library trait, complementing the Phase 4
-    /// synthetic `Doubler` tests. The `Ordering?` tag dispatch uses
+    /// any `cmp` symbol survives. This exercises the `trait_calls` path with
+    /// the real library trait, complementing the Phase 4 synthetic `Doubler`
+    /// tests. The `Ordering?` tag dispatch uses
     /// `CmpOp::Eq`, so the `Lt`/`Gt` counts isolate the spliced `cmp` body
     /// from the eliminator's own comparisons.
     #[test]

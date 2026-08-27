@@ -56,7 +56,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
-| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-2, 3a-3d, 3f-3g, 3i) |
+| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-2, 3a-3d, 3f-3g, 3i, 8) |
 | **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — type-class abstraction over type constructors |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |

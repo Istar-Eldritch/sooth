@@ -443,3 +443,36 @@ fn a_bound_member_call_inside_a_quotation_argument_instantiates_at_two_types() {
     );
     assert_eq!(build_and_run(&entry), "-1\n1\n0\n");
 }
+
+/// P7.S8 (R2): an ordinary word declared **before** the `impl:` block, which is
+/// what makes the seed *formula* observable rather than merely its presence.
+///
+/// Every other fixture here puts the `impl:` block first, so its member lands at
+/// `module.words[0]` and `word_idx * INLINE_UID_STRIDE` is 0 -- a constant-`0`
+/// seed is accidentally right there. One leading word shifts the member to index
+/// 1, so lowering must derive the seed from the member's own index or its body's
+/// splices look up a `(0, span)` key the checker never wrote.
+///
+/// Measured, and worth stating because the obvious alternative fixture does not
+/// work: *two* user `impl: Ord` blocks do not discriminate the formula. Under a
+/// constant seed their splices collide on a key that resolves to a numeric
+/// `impl: Ord` either way, and `lib/cmp.sth`'s numeric bodies are all the same
+/// terms over type-directed intrinsics, so the wrong dispatch computes the same
+/// answer. A leading word makes the lookup miss outright.
+#[test]
+fn a_word_declared_before_the_impl_block_shifts_the_members_uid_seed() {
+    let (_t, entry) = program(
+        "leading-word-impl-ord",
+        &format!(
+            "import: intrinsics * ;\n\
+             import: core::prelude | if Bool Ord lt gt | ;\n\
+             import: core::cmp | Ordering Less Equal Greater | ;\n\
+             : leading ( i64 -- i64 ) 1 add ;\n\
+             {POINT_IMPL}\
+             : main ( -- )\n\
+               2 leading Point 7 Point lt ~[ 1 ] ~[ 0 ] if .\n\
+               7 Point 2 leading Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+        ),
+    );
+    assert_eq!(build_and_run(&entry), "1\n0\n");
+}

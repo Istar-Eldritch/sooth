@@ -1096,8 +1096,11 @@ mod tests {
     /// integration goldens.
     #[test]
     fn a_spliced_member_body_that_splices_a_combinator_lowers() {
+        // The leading word shifts the member off `words[0]`, so its seed is
+        // non-zero and a constant-`0` seed makes the nested lookup miss.
         let module = lower_src(&format!(
-            "{POINT_ORD}: w ( -- i64 ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if ;\n\
+            ": leading ( -- ) ;\n{POINT_ORD}\
+             : w ( -- i64 ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if ;\n\
              : main ( -- ) w . ;\n"
         ));
         let w = func(&module, "w");

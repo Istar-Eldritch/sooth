@@ -1075,16 +1075,29 @@ Sequenced so nothing but the last subslice touches the compiler:
   `import:`, no compatibility shim. Detail:
   [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md).
 
-**P7.S8 -- Nested inline-combinator splice-uid collision.** `[ planned ]` Not a
-polymorphism gap (an earlier draft of this entry claimed `check_poly_call` needed a new
-splice branch for a poly body calling a bound combinator; two probe subagents refuted that
--- it already works). The real, confirmed defect: `lower_resolved_word_call`
-(`src/ir/func_builder/calls.rs:189`) reuses the *enclosing caller's* splice uid when
-splicing a resolved trait member's body, instead of that member's own check-time uid
-namespace, so an ordinary `inline` combinator nested inside a reused member splice (e.g.
-`impl: Ord for Point`'s `cmp` calling `lt` internally, no generics involved) resolves at
-the wrong `(uid, span)` key and panics (`"checked user word exists"`,
-`src/ir/func_builder/calls.rs:733`). This is the blocker named in `lib/cmp.sth`'s own
-comment against making `eq`/`lt`/`gt`/`lte`/`gte`/`ne` `inline` (`cmp` itself already is)
--- delegating a user `Ord` impl to a primitive comparison is the ordinary shape, not a
-corner case. Detail: [slice8-brief](./P7/slice8-brief.md).
+**P7.S8 -- Nested inline-combinator splice-uid collision.** `[ done ]` A spliced trait
+member body lowers under **that member's own** check-time uid namespace: the member's seed
+(`word_idx * INLINE_UID_STRIDE`, the same numbering `src/check.rs` uses) is pushed onto
+`splice_uid_stack` and `FuncBuilder::inline_uid` is reset to it for the duration, so a
+combinator splice nested inside the body mints the uid the checker minted for it. The
+span-keyed `trait_calls` lookup stands aside while such a re-splice is active
+(`member_splice_depth`), because a member body can reach one source span under a second
+grounding and the recorded answer is then the wrong one. With both rules in place
+`lib/cmp.sth`'s six surface comparisons (`eq`/`lt`/`gt`/`lte`/`gte`/`ne`) are `inline`, so
+a user `impl: Ord` delegating to a primitive comparison builds and a library comparison
+costs no call frame. Detail: [slice8-spec](./P7/slice8-spec.md).
+
+Two follow-ups the slice deliberately did not fix:
+
+- **Unsatisfied-`Ord` attribution.** An unsatisfied `Ord` bound now names `cmp`, the
+  spliced trait member, at `lib/cmp.sth`'s own line, rather than the `lt`/`gt` the user
+  wrote. The second, useful line (`no ( T T -- Ordering ) found`) is unchanged. Restoring
+  the caller's attribution needs a splice-origin span carried through unsatisfied-bound
+  reporting: a diagnostics feature with its own design surface, not a uid fix.
+- **REPL trait/impl checking.** `src/check.rs`'s two REPL check sites hardcode
+  `TraitResolveCtx::scratch()`, whose premise (a session declares no `trait:`) is false the
+  moment a session imports `core::cmp`; a comparison call then indexes past the scratch
+  trait table and ICEs at `src/check/poly.rs:976`. Ten `#[ignore]`d REPL tests state this
+  as their reason. The fix needs a `Session`-level traits/impls accumulation table (Session
+  has `structs`/`enums` but no trait analogue) threaded through both sites -- comparable in
+  size to the earlier struct/enum REPL work, so it is its own slice.
