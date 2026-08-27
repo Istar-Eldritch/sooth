@@ -2,10 +2,8 @@
 
 use super::destructors::recursive_disposal_path;
 use super::*;
-use crate::ast::Line;
 use crate::check::check;
 use crate::lexer::lex;
-use crate::parser::parse_line;
 
 pub(super) fn lower_src(src: &str) -> IrModule {
     let tokens = lex(src).unwrap();
@@ -242,12 +240,13 @@ pub(super) fn instrs(func: &IrFunc) -> Vec<&Instr> {
     func.blocks.iter().flat_map(|b| b.instrs.iter()).collect()
 }
 
-pub(super) fn line_terms(src: &str) -> Vec<Term> {
-    let tokens = lex(src).unwrap();
-    match parse_line(&tokens).unwrap() {
-        Line::Expr(terms) => terms,
-        other => panic!("expected Expr, got {other:?}"),
-    }
+/// `src` read as the body of a synthetic one-word module. The `FuncBuilder`
+/// entry points under test take a bare `&[Term]`, and a word body is where a
+/// term list comes from.
+pub(super) fn body_terms(src: &str) -> Vec<Term> {
+    let tokens = lex(&format!(": probe ( -- ) {src} ;")).unwrap();
+    let mut module = crate::parser::parse(&tokens).unwrap();
+    module.words.remove(0).body
 }
 
 pub(super) fn count(func: &IrFunc, pred: impl Fn(&Instr) -> bool) -> usize {

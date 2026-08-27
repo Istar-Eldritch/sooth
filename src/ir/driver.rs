@@ -1378,94 +1378,6 @@ mod tests {
     }
 
     #[test]
-    fn lower_line_marshals_all_inputs_and_outputs() {
-        // `add` from a carried depth of 2 loads both slots and stores the single
-        // result: D=2 loads, M=1 store.
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let (func, _q, m, _) = lower_line(
-            0,
-            &line_terms("add"),
-            2,
-            &[Type::I64, Type::I64],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 1);
-    }
-
-    #[test]
-    fn lower_line_returns_advanced_top() {
-        // `2 3 +` from D=0 nets +1, so new_top = top + 8.
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let (func, _q, m, _) = lower_line(
-            0,
-            &line_terms("2 3 add"),
-            0,
-            &[],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        let last = func.blocks.last().unwrap();
-        let ret = match last.term {
-            Terminator::Ret(Some(v)) => v,
-            ref other => panic!("expected Ret(Some), got {other:?}"),
-        };
-        // The returned value is `top (%v1) + delta` with delta = 8.
-        let is = instrs(&func);
-        let (add_lhs, add_rhs) = is
-            .iter()
-            .find_map(|i| match i {
-                Instr::Bin(d, BinOp::Add, a, b) if *d == ret => Some((*a, *b)),
-                _ => None,
-            })
-            .expect("a top-advancing add");
-        assert_eq!(add_lhs, Value(1), "add should read the `top` param %v1");
-        let delta = is
-            .iter()
-            .find_map(|i| match i {
-                Instr::Const(v, n) if *v == add_rhs => Some(*n),
-                _ => None,
-            })
-            .expect("a delta const");
-        assert_eq!(delta, 8);
-    }
-
-    #[test]
     fn extern_call_lowers_to_a_call_with_the_declared_symbol() {
         // R1: an `extern:` declaration's C symbol, not its Sooth word name,
         // is what the emitted call names; binding a name that differs from
@@ -1489,331 +1401,57 @@ mod tests {
     }
 
     #[test]
-    fn lower_line_struct_slot_blits_in_and_out() {
-        // A carried struct slot is copied out of the buffer on entry and back
-        // on exit by aggregate blits, and the returned top advances by the
-        // struct's aligned carried size. An empty line carries the one
-        // Vec2 straight through: one prologue blit, one epilogue blit.
-        let s = structs_of("type: Vec2 x i64 y i64 ;");
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
-        let (func, _q, m, out_bytes) = lower_line(
-            0,
-            &line_terms(""),
-            1,
-            &[vec2],
-            &env,
-            &resolve,
-            Registries {
-                structs: &s,
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        assert_eq!(out_bytes, 16);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
-        // No scalar 8-byte-cell Load/Store touches a struct slot.
-        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
-    }
-
-    #[test]
-    fn lower_line_carried_str_slot_keeps_its_own_ir_type() {
-        // The carried-slot prologue's match used to fall through a `_` arm
-        // for `str` (and other non-aggregate types), loading it as a bare
-        // `IrType::I64` and losing the type a later `len`/`.`/`cstr` in the
-        // line dispatches on. An empty line carries one `str` straight
-        // through: the loaded value must keep `IrType::Str`.
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let (func, _q, m, out_bytes) = lower_line(
-            0,
-            &line_terms(""),
-            1,
-            &[Type::Str],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        assert_eq!(out_bytes, 8);
-        let loaded = instrs(&func)
-            .iter()
-            .find_map(|i| match i {
-                Instr::Load(dst, _) => Some(*dst),
-                _ => None,
-            })
-            .expect("a load of the carried str slot");
-        assert_eq!(func.value_types[loaded.0 as usize], IrType::Str);
-    }
-
-    #[test]
-    fn lower_line_scalar_only_uses_eight_byte_cells_and_no_blit() {
-        // R16/NF3: a scalar-only line marshals exactly as before — 8-byte-cell
-        // stores, `PtrOffset`s at multiples of 8, and never an aggregate
-        // `Blit`. `add` from a carried depth of 2 reads cells 0/8 and writes the
-        // single result at 0.
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let (func, _q, m, out_bytes) = lower_line(
-            0,
-            &line_terms("add"),
-            2,
-            &[Type::I64, Type::I64],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        assert_eq!(out_bytes, 8);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 0);
-        let offsets: Vec<i64> = instrs(&func)
-            .iter()
-            .filter_map(|i| match i {
-                Instr::PtrOffset(_, _, off) => Some(*off),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            offsets,
-            vec![0, 8, 0],
-            "two input cells at 0/8, one output cell at 0"
-        );
-    }
-
-    #[test]
-    fn lower_line_carried_narrow_slot_relabels_after_load() {
-        // Q2/R16: a `u8` carried slot loads as `l`-width `i64` from the buffer
-        // (canonicalization keeps its low bits authoritative), then must be
-        // relabeled to `IrType::Int { bits: 8, signed: false }` via `Conv` so a
-        // later homogeneous op in the same line sees the real operand type.
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let u8_ty = Type::from_name("u8").unwrap();
-        let (func, _q, _m, _) = lower_line(
-            0,
-            &line_terms("1 >u8 add"),
-            1,
-            &[u8_ty],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        let conv_dst = instrs(&func)
-            .iter()
-            .find_map(|i| match i {
-                Instr::Conv(dst, _) => Some(*dst),
-                _ => None,
-            })
-            .expect("a Conv relabeling the loaded slot");
-        assert_eq!(
-            func.value_types[conv_dst.0 as usize],
-            IrType::Int {
-                bits: 8,
-                signed: false
-            }
-        );
-    }
-
-    #[test]
     fn lower_call_uses_resolved_generation_symbol() {
-        let mut env = HashMap::new();
-        env.insert(
-            "sq".to_string(),
-            Arity {
-                in_arity: 1,
-                out_arity: 1,
-                ret_ty: None,
-                quot_inputs: Vec::new(),
-            },
+        // D1: an instantiation retained at generation `g` lowers to the
+        // `__gen{g}`-suffixed symbol. `lower` mints the monomorph's
+        // `IrFunc.name` from `inst.generation` (not from the checker's
+        // already-minted `inst.symbol`, which is what the call site reads),
+        // so the two are asserted to agree rather than read off one field
+        // twice.
+        let src = ": idg ( 'T: Copy -- 'T ) ;\n: main ( -- ) 5 idg . ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        for inst in module.instantiations.values_mut() {
+            inst.generation = Some(2);
+            inst.symbol =
+                crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
+        }
+        let ir = lower(&module).unwrap();
+        let mono = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.contains("idg"))
+            .expect("the monomorph of `idg`");
+        assert!(
+            mono.name.ends_with("__gen2"),
+            "the lowered monomorph carries its generation: {}",
+            mono.name
         );
-        let resolve = |name: &str| format!("{name}__gen2");
-        let (func, _q, _m, _) = lower_line(
-            0,
-            &line_terms("5 sq"),
-            0,
-            &[],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        let calls: Vec<&str> = instrs(&func)
+        let calls: Vec<&str> = instrs(func(&ir, "main"))
             .iter()
             .filter_map(|i| match i {
                 Instr::Call(_, sym, _) => Some(sym.as_str()),
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec!["sq__gen2"]);
+        assert!(
+            calls.contains(&mono.name.as_str()),
+            "the call site names the same generation symbol: {calls:?}"
+        );
     }
 
     #[test]
-    fn lower_line_carried_float_slot_loads_as_float() {
-        // A carried `f64` slot loads at its float `IrType` (R20), so the value
-        // re-enters as a true float rather than a stale `i64`; no `Conv`
-        // relabel is needed (that path is integer-only).
-        let terms = line_terms("dup");
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _q, _m, _) = lower_line(
-            0,
-            &terms,
-            1,
-            &[f64_ty],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        let loaded = func
-            .blocks
-            .iter()
-            .flat_map(|b| b.instrs.iter())
-            .find_map(|i| match i {
-                Instr::Load(v, _) => Some(*v),
-                _ => None,
-            });
-        let v = loaded.expect("a load in the prologue");
-        assert_eq!(func.value_types[v.0 as usize], IrType::Float { bits: 64 });
-        assert!(!func
-            .blocks
-            .iter()
-            .flat_map(|b| b.instrs.iter())
-            .any(|i| matches!(i, Instr::Conv(..))));
-    }
-
-    #[test]
-    fn lower_line_enum_slot_blits_in_and_out() {
-        // R17: a carried enum slot is copied out of the buffer on entry and
-        // back on exit by aggregate blits, and the returned top advances by
-        // the enum's aligned carried size. An empty line carries the one Shape
-        // straight through: one prologue blit, one epilogue blit.
-        let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
-        let (structs, enums, arrays, cells, refs) = {
-            let tokens = lex(src).unwrap();
-            let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-            check(&mut module).unwrap();
-            build_registries(
-                &module.structs,
-                &module.enums,
-                &module.arrays,
-                &module.owned_cells,
-                &module.refs,
-            )
-        };
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let shape = Type::Enum(enum_id(&enums, "Shape"), "Shape");
-        let (func, _q, m, out_bytes) = lower_line(
-            0,
-            &line_terms(""),
-            1,
-            &[shape],
-            &env,
-            &resolve,
-            Registries {
-                structs: &structs,
-                enums: &enums,
-                arrays: &arrays,
-                cells: &cells,
-                refs: &refs,
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            empty_instantiations(),
-            empty_builtin_overloads(),
-            empty_resolved_fields(),
-            empty_resolved_variant_fields(),
-            empty_poly_arities(),
-            empty_combinators(),
-        );
-        assert_eq!(m, 1);
-        assert_eq!(out_bytes, 24);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
-        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
+    fn word_str_slot_keeps_its_own_ir_type() {
+        // A `str` slot enters a lowered frame as `IrType::Str`, not as a bare
+        // 8-byte integer: it is the type a later `len`/`.`/`cstr` dispatches
+        // on. The retired carried-slot form asserted this of a session buffer
+        // load; the mapping itself is what survives, and `ir_type_of`'s own
+        // width/float cases do not cover `Type::Str`.
+        let ir = lower_src(": w ( str -- usize ) len ;");
+        let w = func(&ir, "w");
+        assert_eq!(w.params, vec![IrType::Str]);
+        assert_eq!(w.value_types[0], IrType::Str);
     }
 
     #[test]

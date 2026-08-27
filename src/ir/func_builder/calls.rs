@@ -920,7 +920,7 @@ mod tests {
                 statics: empty_statics(),
             },
         );
-        let term = &line_terms("[ add ]")[0];
+        let term = &body_terms("[ add ]")[0];
         assert!(matches!(term.kind, TermKind::Quotation(_, _, _)));
         b.lower_term(term, false);
         assert!(
@@ -994,7 +994,7 @@ mod tests {
         let saved_header = b.header;
         let saved_entry = b.entry_block;
         let saved_alloca_home = b.alloca_home;
-        b.lower_self_tail_combinator("foo", &line_terms("foo"));
+        b.lower_self_tail_combinator("foo", &body_terms("foo"));
 
         assert_eq!(b.header, saved_header, "header restored");
         assert_eq!(b.entry_block, saved_entry, "entry_block restored");

@@ -1447,16 +1447,10 @@ fn emit_term(out: &mut String, term: &Terminator) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{
-        empty_slices, empty_statics, lower, lower_line, Arrays, Cells, Enums, IrModule, Refs,
-        Registries, Structs,
-    };
+    use crate::ir::{lower, IrModule};
     use crate::lexer::lex;
-    use crate::parser::parse_line;
-    use std::collections::HashMap;
 
     fn empty_layouts() -> Layouts<'static> {
         Layouts {
@@ -1472,45 +1466,6 @@ mod tests {
         check(&mut module).unwrap();
         let ir = lower(&module).unwrap();
         emit(&ir).unwrap()
-    }
-
-    fn emit_line(src: &str, entry_depth: usize) -> String {
-        let tokens = lex(src).unwrap();
-        let terms = match parse_line(&tokens).unwrap() {
-            Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let entry_types = vec![Type::I64; entry_depth];
-        let (func, _q, _m, _) = lower_line(
-            0,
-            &terms,
-            entry_depth,
-            &entry_types,
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-        );
-        emit(&IrModule {
-            funcs: vec![func],
-            ..Default::default()
-        })
-        .unwrap()
     }
 
     #[test]
@@ -1893,51 +1848,28 @@ mod tests {
     }
 
     #[test]
-    fn emit_float_slot_round_trips_with_float_load_store() {
-        // A carried `f64` slot loads/stores with the float ops (R20), so its
-        // bits re-enter as a true float rather than a stale `i64`.
-        let tokens = lex("dup").unwrap();
-        let terms = match parse_line(&tokens).unwrap() {
-            Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        let env = HashMap::new();
-        let resolve = |name: &str| name.to_string();
-        let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _q, _m, _) = lower_line(
-            0,
-            &terms,
-            1,
-            &[f64_ty],
-            &env,
-            &resolve,
-            Registries {
-                structs: &Structs::default(),
-                enums: &Enums::default(),
-                arrays: &Arrays::default(),
-                cells: &Cells::default(),
-                refs: &Refs::default(),
-                slices: empty_slices(),
-                statics: empty_statics(),
-            },
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-            &std::collections::HashMap::new(),
-        );
-        let il = emit(&IrModule {
-            funcs: vec![func],
-            ..Default::default()
-        })
-        .unwrap();
-        assert!(il.contains("loadd "), "expected a float load: {il}");
-        assert!(il.contains("stored "), "expected a float store: {il}");
-        assert!(
-            !il.contains("loadl "),
-            "a float slot never uses loadl: {il}"
-        );
+    fn emit_scalar_store_and_load_follow_the_value_type_not_the_slot() {
+        // `Instr::Store`/`Instr::Load` pick their width from the *value's*
+        // `IrType`, not from the 8-byte slot they address (R20). `max-total`'s
+        // `total_order_key` is the surviving producer of both: it stores an
+        // `f64` operand into a scratch slot and reads the same bytes back as
+        // an unsigned integer, so one program pins the float arm (`stored`)
+        // and the integer arm (`loadl`) against a single slot.
+        //
+        // Scoped to `$w`'s own body: the `.` this program calls reads string
+        // descriptors through `Instr::StrPtr`, whose `loadl` is hardcoded, so
+        // a whole-module `contains` would pass with `Instr::Load`'s width
+        // dispatch broken.
+        let il = emit_src(": w ( -- ) 1.5 2.5 max-total . ;");
+        let w = il
+            .split("export function $w()")
+            .nth(1)
+            .expect("the emitted `w`")
+            .split("\n}")
+            .next()
+            .expect("the body up to its closing brace");
+        assert!(w.contains("stored "), "expected a float store: {w}");
+        assert!(w.contains("loadl "), "expected an integer load: {w}");
     }
 
     #[test]
@@ -2019,32 +1951,16 @@ mod tests {
     }
 
     #[test]
-    fn emit_comparison_line_stores_bool_via_extension() {
-        // `5 3 ugt` from D=0 leaves a 32-bit flag on top; the line-wrapper
-        // epilogue must widen it (`extuw`) before the fixed 8-byte `storel`
-        // (R4/RK1). Slice 10c: the *primitive*, since `gt` is a `lib/` word now
-        // and this helper lowers a bare line with no word environment.
-        let il = emit_line("5 3 ugt", 0);
+    fn emit_comparison_of_word_width_operands_uses_an_l_suffixed_compare() {
+        // A comparison narrows to a 32-bit flag whatever its operands' width,
+        // so the mnemonic's suffix names the *operand* width, not the result's:
+        // two `i64`s compare as `csgtl`, not `csgtw`. The `emit_cmp_*` family
+        // below covers the ops themselves, all at `w` operand width, so this
+        // is the only witness that the suffix follows the operand.
+        // Slice 10c: the *primitive*, since `gt` is a `lib/` word that would
+        // splice its own body in.
+        let il = emit_src(": w ( -- u32 ) 5 3 ugt ;");
         assert!(il.contains("=w csgtl"), "unexpected IL: {il}");
-        assert!(il.contains("extuw"), "expected a w->l extension: {il}");
-        assert!(il.contains("storel"), "expected a storel: {il}");
-    }
-
-    #[test]
-    fn emit_wrapper_signature_takes_stack_and_top() {
-        let il = emit_line("2 3 add", 0);
-        assert!(
-            il.contains("export function l $sooth_line_0(l %v0, l %v1)"),
-            "unexpected signature: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_line_wrapper_has_load_and_store() {
-        // `add` from a carried depth of 2 loads the two slots and stores the result.
-        let il = emit_line("add", 2);
-        assert!(il.contains("loadl "), "expected a load: {il}");
-        assert!(il.contains("storel "), "expected a store: {il}");
     }
 
     fn int(bits: u8, signed: bool) -> IrType {

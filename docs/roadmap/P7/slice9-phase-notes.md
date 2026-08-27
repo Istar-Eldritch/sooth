@@ -189,3 +189,115 @@ single assertion" would have retired the first.
   neither helper-bypassing site does — including `engine.rs:2152`, the general Liveness
   test, which was **migrated** to a module parse with every assertion intact (the `unused`
   control included) and is the sharp precondition for phase 8's `cargo test` compile.
+
+## Phase 3 (R3) — migrate the ir/backend-side bare-line unit-test harness
+
+Nothing in production `src/` was deleted: `lower_line`, `parse_line` and `ast::Line` all
+still exist, so every claim below was proved against the live mechanism. Lib tests
+1700 → 1691 (twelve `#[test]` fns retired, three added).
+
+### The gate, done first
+
+`src/ir/test_helpers.rs` ends the phase with **zero** `parse_line` dependency: both the
+`crate::parser::parse_line` and `crate::ast::Line` imports are gone. `line_terms` was
+replaced in place by `body_terms`, which lexes `": probe ( -- ) {src} ;"`, runs
+`crate::parser::parse` and returns `module.words.remove(0).body` — the same module-parse
+recipe phase 2 used for `engine.rs`'s `releasable_into` migration. No `check` call, since
+both consumers want a term list, not a typed one.
+
+`grep -rn 'parse_line\|ast::Line\|Line::Expr\|line_terms\|lower_line' src/` now returns,
+outside `repl.rs`/`parser.rs`, only phase 8's own targets: `ir/driver.rs:513` (the `pub fn`),
+`ir.rs:49` (the `pub use`) and two doc-comment mentions (`ir/driver.rs:2`,
+`ir/func_builder/mod.rs:1112`).
+
+### A count correction
+
+The spec says `line_terms` has "9 call sites across 8 test fns" in `ir/driver.rs`. It is
+**9 sites across 9 fns**, one apiece. The eleven-consumer total (9 + `calls.rs` ×2) is right.
+
+### Migrated, with the per-test mutation result
+
+| Test | Migration | Mutation applied | Result |
+| --- | --- | --- | --- |
+| `quotation_literal_emits_no_instr_and_records_body` (`func_builder/calls.rs`) | `line_terms` → `body_terms`; the test drives `lower_term` directly and never wanted a `Line` | `lower_term`'s `Quotation` arm stops inserting into `quot_bodies` | KILLED |
+| `self_tail_combinator_saves_and_restores_loop_state` (`func_builder/calls.rs`) | same | `restore_loop_state` stops restoring `alloca_home` (the mutation the test's own comment names) | KILLED |
+| `lower_call_uses_resolved_generation_symbol` (`ir/driver.rs`) | off `lower_line` onto `ir::lower` — see below | the emit-loop mints the monomorph symbol with `None` instead of `inst.generation` | KILLED |
+| `word_str_slot_keeps_its_own_ir_type` (`ir/driver.rs`, new) | replaces `lower_line_carried_str_slot_keeps_its_own_ir_type`'s shared half | `ir_type_of`'s `Type::Str` arm → `IrType::Ptr` | KILLED |
+| `emit_comparison_of_word_width_operands_uses_an_l_suffixed_compare` (`backend/qbe.rs`) | replaces `emit_comparison_line_stores_bool_via_extension`'s compare half, over `emit_src` | `Instr::Cmp`'s width suffix follows the *result* type instead of the operand | KILLED |
+| `emit_scalar_store_and_load_follow_the_value_type_not_the_slot` (`backend/qbe.rs`) | replaces `emit_float_slot_round_trips_with_float_load_store` **and** `emit_line_wrapper_has_load_and_store` | `Instr::Store`'s float arm emits `storel` | KILLED |
+| " | " | `Instr::Load`'s default arm loads at `w` width | KILLED (**after a fix — see below**) |
+
+**`lower_call_uses_resolved_generation_symbol` is a stronger witness after the migration,
+and the spec's premise for keeping it was wrong.** It did *not* witness
+`ast::Instantiation::generation` at all: it passed a `|name| format!("{name}__gen2")`
+closure as the `Resolver` and asserted the emitted `Instr::Call` named `sq__gen2`, which
+witnesses only that `lower_line` consults its `Resolver` — a fact
+`extern_call_lowers_to_a_call_with_the_declared_symbol` already covers off the line path.
+The migrated form checks a one-generic-word module, sets each `inst.generation` to `Some(2)`
+and re-mints `inst.symbol` exactly as the REPL does, then asserts the emitted monomorph's
+`IrFunc.name` and `main`'s call symbol agree and both end in `__gen2`. That is a real
+unit-level witness for `driver.rs:322` reading `inst.generation`, which is what phase 9
+deletes. **The name is deliberately unchanged** so phase 9 finds the test where its focus
+text says it is. Post-`check` field mutation follows `Probe::with_overrides`' existing
+precedent in `ir/test_helpers.rs`.
+
+### Retired as coverage of the session stack-marshalling protocol (12 tests + 1 helper)
+
+Classified against what each **asserts**, not its name. `ir/driver.rs`, eight:
+
+| Test | Why it is retired, not migrated |
+| --- | --- |
+| `lower_line_marshals_all_inputs_and_outputs` | D buffer loads / M buffer stores. The protocol itself. |
+| `lower_line_returns_advanced_top` | The wrapper's `Ret(top + delta)` contract. |
+| `lower_line_scalar_only_uses_eight_byte_cells_and_no_blit` | The `PtrOffset` cadence `[0, 8, 0]` into the session buffer. |
+| `lower_line_struct_slot_blits_in_and_out` | Carried-slot blit + `out_bytes == 16`. The shared "a struct aggregate is copied by `Alloc` + `Blit`" fact keeps its witness in `lower_dup_of_struct_allocs_and_blits` (`func_builder/calls.rs`), over `lower_src`. |
+| `lower_line_enum_slot_blits_in_and_out` | Same, for enums; twin witness `lower_dup_of_enum_allocs_and_blits`. |
+| `lower_line_carried_float_slot_loads_as_float` | The prologue loading a buffer cell at `d` width. The shared mapping `f64 → IrType::Float { bits: 64 }` is witnessed by `ir_type_of_float_widths_expected` (`ir/types.rs`). |
+| `lower_line_carried_narrow_slot_relabels_after_load` | The prologue's `Conv` relabel of an `l`-width buffer load — a step that exists only because the buffer cell is 8 bytes wide. The shared mapping `u8 → IrType::Int { bits: 8, signed: false }` is witnessed by `ir_type_of_each_width_expected`. |
+| `lower_line_carried_str_slot_keeps_its_own_ir_type` | The prologue's `_`-arm bug. **The only one of the eight whose shared fact had no surviving witness**: `ir_type_of` has no positive `Type::Str` case (`ir_type_of_slice_is_a_two_word_aggregate_not_a_pointer` only asserts `assert_ne!(ir, IrType::Str)`). Re-expressed as `word_str_slot_keeps_its_own_ir_type` over `ir::lower`, above. |
+
+`backend/qbe.rs`, three, plus the `emit_line` helper they were the only callers of:
+
+| Test | Why |
+| --- | --- |
+| `emit_wrapper_signature_takes_stack_and_top` | `export function l $sooth_line_0(l %v0, l %v1)` — the wrapper signature is the protocol. |
+| `emit_line_wrapper_has_load_and_store` | `loadl`/`storel` in the wrapper. Both mnemonics are re-expressed on their surviving producer in `emit_scalar_store_and_load_follow_the_value_type_not_the_slot`. |
+| `emit_comparison_line_stores_bool_via_extension` | Three assertions, split: `=w csgtl` migrated (above); `extuw` + `storel` are the epilogue's widen-before-8-byte-store step, and die with the epilogue. `extuw` as a mnemonic keeps `emit_print_on_subword_unsigned_widens_via_extuw`, which is the `Instr::Conv` path. |
+
+### One IL expectation changed, and why
+
+`emit_comparison_line_stores_bool_via_extension` lowered `5 3 ugt` as a bare line with no
+word environment. The migrated form is `emit_src(": w ( -- u32 ) 5 3 ugt ;")` — the declared
+output is **`u32`, not `Bool`**, because off the line path the flag has to satisfy a
+declaration and `ugt` leaves a 32-bit flag (`body leaves u32 where the declaration requires
+Bool`). The asserted IL, `=w csgtl`, is byte-identical. The primitive `ugt` is kept rather
+than `lib/`'s `gt` for the reason the original comment gives: `gt` would splice its own body.
+
+### The inert assertion this phase caught
+
+`emit_scalar_store_and_load_follow_the_value_type_not_the_slot`'s `loadl` assertion **passed
+with `Instr::Load`'s width dispatch broken** on first writing: the fixture calls `.`, and
+`$.2e.` reads string descriptors through `Instr::StrPtr`, whose `loadl` is hardcoded in the
+emitter. The whole-module `il.contains("loadl ")` matched those. Fixed by scoping both
+assertions to `$w`'s own body, the pattern `emit_print_of_cstr_uses_string_format` already
+uses; the mutation is KILLED against the scoped form. This is the exact green-and-inert
+shape the slice warns about, and it only showed up because the mutation was run.
+
+### Finding for phase 8: two emitter arms lose their last producer
+
+Not acted on here (production code is untouched this phase), and worth knowing before
+phase 8 deletes `lower_line` rather than after. `Instr::Load` and `Instr::Store` have
+exactly three producers between them once the line prologue/epilogue
+(`ir/driver.rs:583`, `604`, `609`, `630`, `679`, `693`) goes:
+`ir/func_builder/word_families.rs:79` (a `Ptr`), `:152` (an `OwnedCell`) and
+`ir/func_builder/control_flow.rs:63`/`:65` (`total_order_key`: stores a float, loads an
+unsigned integer). So after phase 8:
+
+- `Instr::Load`'s float arms (`backend/qbe.rs:1378-1379`, `loads`/`loadd`) have **no
+  producer**. `loadd` itself stays reachable through `field_load_op` (`:484`), pinned by
+  `tests/qbe_baseline/shapes.ssa:23`.
+- `Instr::Store`'s `w`-width widen-then-`storel` branch (`:1404-1410`) has **no producer**.
+- `Instr::Store`'s float arms keep one (`total_order_key`), which is what the new test pins.
+
+Phase 8 or 10 should decide whether those arms become `unreachable!` or stay as defensive
+width dispatch; this phase does not pre-empt it.
