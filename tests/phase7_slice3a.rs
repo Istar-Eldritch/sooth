@@ -206,7 +206,7 @@ fn generic_constructor_undetermined_argument_is_error() {
 /// never deferred into synthesis.
 #[test]
 fn generic_constructor_operand_mismatch_is_error() {
-    let src = "type: Pair 'T val1 'T val2 'T ;\n\
+    let src = "type: Pair['T] val1 'T val2 'T ;\n\
                : mk ( 'T -- Pair['T] ) 1 swap Pair ;\n\
                : main ( -- ) \"oops\" mk drop ;\n";
     let tokens = sooth::lexer::lex(src).unwrap();

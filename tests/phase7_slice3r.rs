@@ -140,10 +140,10 @@ fn impl_body_form_builds_and_runs() {
         "import: intrinsics * ;\n\
          import: core::prelude | if Bool lt gt | ;\n\
          type: Rank | Under | Same | Over ;\n\
-         trait: Order 'T\n\
+         trait: Order['T]\n\
            : cmp ( &'T &'T -- Rank ) ;\n\
          ;\n\
-         trait: Show 'T\n\
+         trait: Show['T]\n\
            : show ( &'T -- ) ;\n\
          ;\n\
          type: Point x i64 y i64 ;\n\
@@ -284,7 +284,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     for member in ["max", "dup", ">u8"] {
         let (_t, entry) = program(
             "builtin-member",
-            &format!("trait: Getter 'T\n  : {member} ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n"),
+            &format!("trait: Getter['T]\n  : {member} ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n"),
         );
         let err = build_error(&entry);
         assert!(
@@ -303,7 +303,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     }
     let (_t, entry) = program(
         "access-word-member",
-        "trait: Getter 'T\n  : @ ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
+        "trait: Getter['T]\n  : @ ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -314,7 +314,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     );
     let (_t, entry) = program(
         "caret-member",
-        "trait: Getter 'T\n  : ^cell ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
+        "trait: Getter['T]\n  : ^cell ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -433,8 +433,8 @@ fn impl_body_disambiguates_same_named_traits_from_two_modules() {
          impl: b::Getter for Point\n\
            : get | p | p &y @ ;\n\
          ;\n\
-         : via_a ( &'T: a::Getter -- i64 ) get ;\n\
-         : via_b ( &'T: b::Getter -- i64 ) get ;\n\
+         : via_a ['T: a::Getter] ( &'T -- i64 ) get ;\n\
+         : via_b ['T: b::Getter] ( &'T -- i64 ) get ;\n\
          : main ( -- )\n\
            3 4 Point | p |\n\
            &p via_a .\n\
@@ -523,7 +523,7 @@ fn impl_body_wrong_effect_is_rejected_in_body() {
         "import: intrinsics * ;\n\
          type: Ordering | Less | Equal | Greater ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Order 'T\n\
+         trait: Order['T]\n\
            : lo ( &'T -- i64 ) ;\n\
            : cmp ( &'T &'T -- Ordering ) ;\n\
          ;\n\
@@ -655,7 +655,7 @@ fn impl_body_sibling_call_does_not_reach_the_sibling() {
          import: core::prelude | if eq lt | ;\n\
          import: core::bool | Bool | ;\n\
          type: Point n i64 ;\n\
-         trait: Keyed 'T\n\
+         trait: Keyed['T]\n\
            : eq ( &'T &'T -- Bool ) ;\n\
            : hash ( &'T -- i64 ) ;\n\
          ;\n\

@@ -586,8 +586,8 @@ mod tests {
         // own `Ref` arm, but never `reject_poly_quotation_anywhere`'s `Ref` arm --
         // reached only when a `Ref` shows up *inside* a position that arm is
         // already recursing through (here, an array element). Stubbing that
-        // arm to `Ok(())` lets `[&[ 'T -- ] 4]` sail through the checker.
-        let err = check_src(": f ( [&[ 'T -- ] 4] -- ) drop ;\n").unwrap_err();
+        // arm to `Ok(())` lets `array[&[ 'T -- ] 4]` sail through the checker.
+        let err = check_src(": f ( array[&[ 'T -- ] 4] -- ) drop ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a quotation type `[ 'T -- ]` cannot appear as a reference's referent: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
@@ -603,7 +603,7 @@ mod tests {
         // monomorphic twin of this signature is already rejected at
         // declaration; the poly path must match.
         let err = check_src(
-            ": peek ( ['T: Copy 4] -- &array['T 4] ) | a | &a ;\n: main ( -- ) 10 4 fill peek drop ;\n",
+            ": peek['T: Copy] ( array['T 4] -- &array['T 4] ) | a | &a ;\n: main ( -- ) 10 4 fill peek drop ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -632,7 +632,7 @@ mod tests {
         // is -- `reject_poly_quotation_anywhere`'s `Generic` arm recurses
         // into `args` rather than accepting them unseen.
         let err =
-            check_src("type: Box 'T val 'T ;\n: f ( Box[[ 'T -- 'T ]] -- ) drop ;\n").unwrap_err();
+            check_src("type: Box['T] val 'T ;\n: f ( Box[[ 'T -- 'T ]] -- ) drop ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a quotation type `[ 'T -- 'T ]` cannot appear as a generic type argument: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
@@ -645,7 +645,7 @@ mod tests {
         // into `args`, so a reference carried inside a generic argument
         // (`Box[&'T]`) still trips the reference-cannot-be-stored audit on
         // an output, exactly as a bare `&'T` output does.
-        let err = check_src("type: Box 'T val 'T ;\n: f ( &'T -- Box[&'T] ) | r | Box r ;\n")
+        let err = check_src("type: Box['T] val 'T ;\n: f ( &'T -- Box[&'T] ) | r | Box r ;\n")
             .unwrap_err();
         assert_eq!(
             err,
@@ -1036,7 +1036,7 @@ mod tests {
     fn owning_quotation_element_is_rejected() {
         // Array: rejected by the audit as a quotation type in an illegal
         // position.
-        let arr_err = check_src(": f ( [owning [ -- ] 4] -- ) drop ;\n").unwrap_err();
+        let arr_err = check_src(": f ( array[owning [ -- ] 4] -- ) drop ;\n").unwrap_err();
         assert!(
             arr_err.contains("owning [ -- ]")
                 && arr_err.contains("cannot appear as an array element"),

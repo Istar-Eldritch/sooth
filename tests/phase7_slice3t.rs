@@ -561,7 +561,7 @@ fn a_nullary_member_of_two_traits_on_one_variable_is_ambiguous() {
          impl: B for Point\n\
            : fresh 2 Point ;\n\
          ;\n\
-         : f ( -- 'T: A B ) fresh ;\n\
+         : f ['T: A B] ( -- 'T ) fresh ;\n\
          : main ( -- ) f[Point] drop ;\n",
     );
     assert!(
@@ -590,7 +590,7 @@ fn a_nullary_member_across_two_variables_is_ambiguous() {
          impl: B for Other\n\
            : fresh 2 Other ;\n\
          ;\n\
-         : f ( -- 'T: A 'U: B ) fresh drop fresh ;\n\
+         : f ['T: A 'U: B] ( -- 'T 'U ) fresh drop fresh ;\n\
          : main ( -- ) f[Point Other] drop ;\n",
     );
     assert!(

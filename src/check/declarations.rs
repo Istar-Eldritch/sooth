@@ -2580,7 +2580,7 @@ mod tests {
     /// can't see that, since it builds both `GenericStructDecl`s by hand.
     #[test]
     fn duplicate_generic_struct_header_through_real_source_is_error() {
-        let err = check_src("type: Box 'T val 'T ;\ntype: Box 'T val 'T ;\n").unwrap_err();
+        let err = check_src("type: Box['T] val 'T ;\ntype: Box['T] val 'T ;\n").unwrap_err();
         assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
     }
     #[test]

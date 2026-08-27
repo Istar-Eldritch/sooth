@@ -1234,7 +1234,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
+            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box['T] val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -1296,7 +1296,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[^P] b Box[^o::P] c Box[array[P 2]] d Box[[o::P 2]] ;\n: main ( -- ) ;\n",
+            "import: \"other.sth\" o ;\ntype: P x i64 ;\ntype: Box['T] val 'T ;\ntype: W a Box[^P] b Box[^o::P] c Box[array[P 2]] d Box[array[o::P 2]] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -1341,8 +1341,8 @@ mod tests {
         let s = Sandbox::new("generic-map-shaped-field");
         let entry = s.write(
             "main.sth",
-            "type: Ent 'K 'V k 'K v 'V ;\n\
-             type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+            "type: Ent['K 'V] k 'K v 'V ;\n\
+             type: Map['K 'V] slots array[Ent['K 'V] 8] ;\n\
              : f ( Map[i64 str] -- Map[i64 str] ) ;\n\
              : g ( Map[str i64] -- Map[str i64] ) ;\n\
              : main ( -- ) ;\n",
@@ -1373,7 +1373,7 @@ mod tests {
             "the two instantiations must mint distinct StructIds, not share one layout"
         );
 
-        // `Map`'s only field is `[Ent['K 'V] 8]`: an interned array whose
+        // `Map`'s only field is `array[Ent['K 'V] 8]`: an interned array whose
         // element is the substituted `Ent` instantiation. Both the element's
         // rendered name *and* its field types are asserted, and the two are
         // not the same claim: a substitution that swapped `'K`/`'V` would be
@@ -1448,8 +1448,8 @@ mod tests {
             let s = Sandbox::new("generic-map-cell-arg");
             let entry = s.write(
                 "main.sth",
-                "type: Ent 'K 'V k 'K v 'V ;\n\
-                 type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+                "type: Ent['K 'V] k 'K v 'V ;\n\
+                 type: Map['K 'V] slots array[Ent['K 'V] 8] ;\n\
                  : f ( Map[^i64 i64] -- Map[^i64 i64] ) ;\n\
                  : main ( -- ) ;\n",
             );
@@ -1465,8 +1465,8 @@ mod tests {
             let s = Sandbox::new("generic-map-ref-arg");
             let entry = s.write(
                 "main.sth",
-                "type: Ent 'K 'V k 'K v 'V ;\n\
-                 type: Map 'K 'V slots [Ent['K 'V] 8] ;\n\
+                "type: Ent['K 'V] k 'K v 'V ;\n\
+                 type: Map['K 'V] slots array[Ent['K 'V] 8] ;\n\
                  : f ( Map[&i64 i64] -- Map[&i64 i64] ) ;\n\
                  : main ( -- ) ;\n",
             );
@@ -1490,7 +1490,7 @@ mod tests {
     /// two discovery reaches first.
     fn assemble_generic_cross_module_closure(tag: &str, entry_src: &str) -> Module {
         let s = Sandbox::new(tag);
-        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
+        s.write("box.sth", "type: Box['T] val 'T ;\nexport: Box ;\n");
         s.write(
             "use.sth",
             "import: \"box.sth\" b ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
@@ -1550,7 +1550,7 @@ mod tests {
     #[test]
     fn selectively_imported_generic_name_applies_bare() {
         let s = Sandbox::new("generic-xmod-selective");
-        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
+        s.write("box.sth", "type: Box['T] val 'T ;\nexport: Box ;\n");
         let entry = s.write(
             "main.sth",
             "import: \"box.sth\" b | Box | ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
@@ -1574,10 +1574,10 @@ mod tests {
     #[test]
     fn local_generic_header_shadows_a_selectively_imported_one() {
         let s = Sandbox::new("generic-xmod-selective-shadow");
-        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
+        s.write("box.sth", "type: Box['T] val 'T ;\nexport: Box ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"box.sth\" b | Box | ;\ntype: Box 'T val 'T tag i64 ;\n\
+            "import: \"box.sth\" b | Box | ;\ntype: Box['T] val 'T tag i64 ;\n\
              type: W f Box[i64] ;\n: main ( -- ) ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -1601,7 +1601,7 @@ mod tests {
         s.write("other.sth", "type: P a i64 ;\nexport: P ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"other.sth\" o ;\ntype: Box 'T val 'T p o::P ;\n\
+            "import: \"other.sth\" o ;\ntype: Box['T] val 'T p o::P ;\n\
              type: W b Box[i64] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2510,7 +2510,7 @@ mod tests {
             "main.sth",
             "import: intrinsics * ;\n\
              import: \"show.sth\" s ;\n\
-             : shows ( &'T: s::Show -- ) show ;\n\
+             : shows ['T: s::Show] ( &'T -- ) show ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2529,7 +2529,7 @@ mod tests {
             "main.sth",
             "import: intrinsics * ;\n\
              import: \"show.sth\" s ;\n\
-             : shows ( &'T: s::Show -- ) show ;\n\
+             : shows ['T: s::Show] ( &'T -- ) show ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2567,7 +2567,7 @@ mod tests {
              impl: b::B for Pt\n\
                : t1 | p | p drop ;\n\
              ;\n\
-             : f ( &'T: A B -- ) a::t1 ;\n\
+             : f ['T: A B] ( &'T -- ) a::t1 ;\n\
              : main ( -- ) 1 Pt |p| &p f p drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2603,7 +2603,7 @@ mod tests {
             "import: intrinsics * ;\n\
              import: \"a.sth\" a | A | ;\n\
              import: \"b.sth\" b | B | ;\n\
-             : f ( &'T: A B -- ) t1 ;\n\
+             : f ['T: A B] ( &'T -- ) t1 ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2631,7 +2631,7 @@ mod tests {
             "main.sth",
             "import: intrinsics * ;\n\
              import: \"ab.sth\" ab | A B | ;\n\
-             : f ( &'T: A B -- ) ab::t1 ;\n\
+             : f ['T: A B] ( &'T -- ) ab::t1 ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2666,7 +2666,7 @@ mod tests {
             "main.sth",
             "import: intrinsics * ;\n\
              import: \"a.sth\" a | A | ;\n\
-             : f ( &'T: A -- ) a::t1 ;\n\
+             : f ['T: A] ( &'T -- ) a::t1 ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -2705,7 +2705,7 @@ mod tests {
             "main.sth",
             "import: intrinsics * ;\n\
              import: \"a.sth\" a | A | ;\n\
-             : f ( &'T: A -- ) a::t1 ;\n\
+             : f ['T: A] ( &'T -- ) a::t1 ;\n\
              : main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");

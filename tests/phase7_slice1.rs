@@ -125,7 +125,7 @@ fn projection_resolves_per_instantiation() {
         "per-instantiation",
         "type: S1 a i64 ;\n\
          type: S2 a i64 b i64 ;\n\
-         type: Box 'T val 'T tag i64 ;\n\
+         type: Box['T] val 'T tag i64 ;\n\
          : show1 ( Box[S1] -- ) &tag @ . drop ;\n\
          : show2 ( Box[S2] -- ) &tag @ . drop ;\n\
          : main ( -- )\n  \

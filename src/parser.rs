@@ -6340,7 +6340,7 @@ mod tests {
     #[test]
     fn parse_generic_typedef_and_enum_stamp_the_parser_module_id() {
         let tokens =
-            lex("type: Box 'T val 'T ; type: Result['T 'E] | Ok val 'T | Err val 'E ;\n").unwrap();
+            lex("type: Box['T] val 'T ; type: Result['T 'E] | Ok val 'T | Err val 'E ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
@@ -7520,7 +7520,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_single_var_registers_decl() {
-        let module = parse_src("type: Box 'T val 'T ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;").unwrap();
         // A generic header mints no concrete struct entry (R1/D5): only the
         // side registry gains an entry.
         assert!(module.structs.is_empty());
@@ -7535,7 +7535,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_multi_var_binds_each_field_to_its_own_variable() {
-        let module = parse_src("type: Pair 'A 'B a 'A b 'B ;").unwrap();
+        let module = parse_src("type: Pair['A 'B] a 'A b 'B ;").unwrap();
         assert_eq!(module.generic_structs.len(), 1);
         let decl = &module.generic_structs[0];
         assert_eq!(decl.name, "Pair");
@@ -7546,7 +7546,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_concrete_field_resolves_alongside_a_variable_field() {
-        let module = parse_src("type: Wrap 'T tag i64 val 'T ;").unwrap();
+        let module = parse_src("type: Wrap['T] tag i64 val 'T ;").unwrap();
         let decl = &module.generic_structs[0];
         assert_eq!(
             decl.fields[0],
@@ -7558,18 +7558,18 @@ mod tests {
     #[test]
     fn parse_generic_typedef_field_naming_unbound_variable_is_error() {
         // R1: `'E` is never bound by `Box`'s header.
-        let result = parse_src("type: Box 'T val 'E ;");
+        let result = parse_src("type: Box['T] val 'E ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("'E"), "unexpected message: {err}");
         assert!(err.contains("Box"), "unexpected message: {err}");
-        assert!(err.contains("line 1, col 18"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 19"), "unlocated: {err}");
     }
 
     #[test]
     fn parse_generic_typedef_phantom_variable_is_error() {
         // R1 (round 2): `'T` is bound but never used in any field.
-        let result = parse_src("type: Phantom 'T x i64 ;");
+        let result = parse_src("type: Phantom['T] x i64 ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("phantom"), "unexpected message: {err}");
@@ -7586,7 +7586,7 @@ mod tests {
         // referencing `'T` used to resolve against the first entry and leave
         // the second entry's `used` flag false, misreporting this as a
         // phantom-variable error rather than naming the real fault.
-        let result = parse_src("type: Bad 'T 'T x 'T ;");
+        let result = parse_src("type: Bad['T 'T] x 'T ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("bound twice"), "unexpected message: {err}");
@@ -7632,13 +7632,13 @@ mod tests {
         // name with no type. The plain odd-field-count message would name
         // `i64`, a token the author never got wrong; this one says the header
         // was read as generic over `'bar`.
-        let result = parse_src("type: Foo 'bar i64 ;");
+        let result = parse_src("type: Foo['bar] i64 ;");
         let err = result.unwrap_err();
         assert!(
             err.contains("generic `type: Foo 'bar`"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("line 1, col 20"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 21"), "unlocated: {err}");
     }
 
     #[test]
@@ -7665,7 +7665,7 @@ mod tests {
 
     #[test]
     fn parse_generic_enum_typedef_without_leading_pipe_registers_first_variant() {
-        let module = parse_src("type: Maybe 'T None | Some v 'T ;").unwrap();
+        let module = parse_src("type: Maybe['T] None | Some v 'T ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(decl.variants[0].name, "None");
         assert!(decl.variants[0].fields.is_empty());
@@ -7768,7 +7768,7 @@ mod tests {
         // error alongside an ordinary word def. The end-to-end claim (a whole
         // program with this shape builds and runs) is the actual golden,
         // `tests/phase5_slice1.rs::generic_type_declared_but_never_used_builds_and_runs`.
-        let module = parse_src("type: Box 'T val 'T ; : main ( -- ) ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ; : main ( -- ) ;").unwrap();
         assert_eq!(module.generic_structs.len(), 1);
         assert!(module.words.iter().any(|w| w.name == "main"));
     }
@@ -7777,7 +7777,7 @@ mod tests {
     fn parse_generic_typedef_does_not_shadow_a_concrete_typedef_registered_after_it() {
         // A generic header is skipped entirely by the concrete pre-pass, so a
         // concrete `type:` elsewhere in the file is unaffected.
-        let module = parse_src("type: Box 'T val 'T ; type: Vec2 x i64 y i64 ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ; type: Vec2 x i64 y i64 ;").unwrap();
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
         assert_eq!(module.generic_structs.len(), 1);
@@ -7799,7 +7799,7 @@ mod tests {
         // descent this was `error: unknown type 'T` -- the variable sits one
         // token deeper than the old single-`if` production could look.
         assert_eq!(
-            sole_generic_field("type: Pair 'T items array['T 2] ;"),
+            sole_generic_field("type: Pair['T] items array['T 2] ;"),
             PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2))
         );
     }
@@ -7808,7 +7808,7 @@ mod tests {
     fn parse_generic_field_nested_array_of_ty_var_builds_nested_polytype() {
         // R1: the descent recurses, so depth is unbounded rather than one.
         assert_eq!(
-            sole_generic_field("type: NestArr 'T grid array[array['T 2] 3] ;"),
+            sole_generic_field("type: NestArr['T] grid array[array['T 2] 3] ;"),
             PolyType::Array(
                 Box::new(PolyType::Array(
                     Box::new(PolyType::Var(0)),
@@ -7824,12 +7824,12 @@ mod tests {
         // R3: `^'T` arrives as one glued token, so the payload is a substring
         // rather than a following token.
         assert_eq!(
-            sole_generic_field("type: Cell 'T c ^'T ;"),
+            sole_generic_field("type: Cell['T] c ^'T ;"),
             PolyType::OwnedCell(Box::new(PolyType::Var(0)))
         );
         // A `^`-run nests, one wrapper per caret.
         assert_eq!(
-            sole_generic_field("type: Cell2 'T c ^^'T ;"),
+            sole_generic_field("type: Cell2['T] c ^^'T ;"),
             PolyType::OwnedCell(Box::new(PolyType::OwnedCell(Box::new(PolyType::Var(0)))))
         );
     }
@@ -7839,11 +7839,11 @@ mod tests {
         // R1/R10: `&'T` *parses* -- it does not build, but the rejection must
         // come from the no-stored-reference rule rather than `unknown type`.
         assert_eq!(
-            sole_generic_field("type: Box 'T r &'T ;"),
+            sole_generic_field("type: Box['T] r &'T ;"),
             PolyType::Ref(Box::new(PolyType::Var(0)), false)
         );
         assert_eq!(
-            sole_generic_field("type: BoxM 'T r &!'T ;"),
+            sole_generic_field("type: BoxM['T] r &!'T ;"),
             PolyType::Ref(Box::new(PolyType::Var(0)), true)
         );
     }
@@ -7853,7 +7853,7 @@ mod tests {
         // R1: each argument is a field type in its own right, so the header's
         // variables reach an application's argument list.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: Wrap 'K 'V e Ent['K 'V] ;\n").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: Wrap['K 'V] e Ent['K 'V] ;\n").unwrap();
         let wrap = module
             .generic_structs
             .iter()
@@ -7874,7 +7874,7 @@ mod tests {
         // purpose -- `Ent['K i64]` and `Ent[i64 'K]` are distinguishable,
         // which a same-type pair would not be.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K i64] ;\n").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] e Ent['K i64] ;\n").unwrap();
         let w = module
             .generic_structs
             .iter()
@@ -7893,10 +7893,10 @@ mod tests {
         // R1: the leaf error is the field parser's own, naming the
         // declaration -- not `PolyBuilder`'s word-signature wording, and not
         // a bare `unknown type`.
-        let err = parse_src("type: Box 'T items array['E 2] ;").unwrap_err();
+        let err = parse_src("type: Box['T] items array['E 2] ;").unwrap_err();
         assert!(err.contains("'E"), "unexpected message: {err}");
         assert!(err.contains("Box"), "unexpected message: {err}");
-        assert!(err.contains("line 1, col 26"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 27"), "unlocated: {err}");
     }
 
     #[test]
@@ -7904,9 +7904,9 @@ mod tests {
         // N4: `check_no_phantom_ty_var` reads the `used` bitmap alone, so the
         // descent has to set it at the leaf, at whatever depth. Without that
         // this fixture is rejected as a phantom parameter.
-        assert!(parse_src("type: Pair 'T items array['T 2] ;").is_ok());
-        assert!(parse_src("type: Cell 'T c ^'T ;").is_ok());
-        assert!(parse_src("type: Deep 'T g array[array[^'T 2] 3] ;").is_ok());
+        assert!(parse_src("type: Pair['T] items array['T 2] ;").is_ok());
+        assert!(parse_src("type: Cell['T] c ^'T ;").is_ok());
+        assert!(parse_src("type: Deep['T] g array[array[^'T 2] 3] ;").is_ok());
     }
 
     #[test]
@@ -7927,7 +7927,7 @@ mod tests {
         // parsed. Nothing here needs R1's descent -- the argument is fully
         // concrete -- which is why this is R2's own witness. Before the
         // two-stage split this was `error: unknown type 'L'`.
-        let module = parse_src("type: L 'T v 'T next ^L[i64] ;").unwrap();
+        let module = parse_src("type: L['T] v 'T next ^L[i64] ;").unwrap();
         let decl = &module.generic_structs[0];
         match decl.fields[1].1 {
             PolyType::Concrete(Type::OwnedCell(..)) => {}
@@ -7975,7 +7975,7 @@ mod tests {
         // `generic_header_at_cursor_is_registered`'s snapshot must not let
         // that push make the *second* `Box` look pre-registered -- which
         // would swallow it before `check_duplicate_type_names` ever saw it.
-        let module = parse_src("type: Box 'T v 'T ; type: Box 'T w 'T ;").unwrap();
+        let module = parse_src("type: Box['T] v 'T ; type: Box['T] w 'T ;").unwrap();
         assert_eq!(
             module.generic_structs.len(),
             2,
@@ -7990,7 +7990,7 @@ mod tests {
         // immediately before parsing its own fields still fails here, because
         // `B` has no placeholder yet when `A`'s field list is read.
         let module =
-            parse_src("type: A 'T v 'T next ^B['T] ;\ntype: B 'T w 'T back ^A['T] ;\n").unwrap();
+            parse_src("type: A['T] v 'T next ^B['T] ;\ntype: B['T] w 'T back ^A['T] ;\n").unwrap();
         let a = module
             .generic_structs
             .iter()
@@ -8010,17 +8010,17 @@ mod tests {
         // R8: each hop wraps `'T` in another cell, so `L` would need
         // instantiating at a strictly larger argument forever. Rejected
         // structurally, at the field, with no instantiation involved.
-        let err = parse_src("type: L 'T v 'T next ^L[^'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[^'T] ;").unwrap_err();
         assert!(err.contains("owning cell over"), "unexpected: {err}");
         assert!(
             err.contains("fully concrete or a bare type variable"),
             "the message must name the restriction, not just say `recursive`: {err}"
         );
-        assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 23"), "unlocated: {err}");
         // The array and reference wrappers are the same rule.
-        let err = parse_src("type: L 'T v 'T next ^L[array['T 2]] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[array['T 2]] ;").unwrap_err();
         assert!(err.contains("array of"), "unexpected: {err}");
-        let err = parse_src("type: L 'T v 'T next ^L[&'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[&'T] ;").unwrap_err();
         assert!(err.contains("reference to"), "unexpected: {err}");
     }
 
@@ -8030,15 +8030,15 @@ mod tests {
         // varies the offending argument's wrapper while pinning the field's
         // own top level as `^`, so it only ever exercises the `OwnedCell`
         // arm of the walk. Both other wrapper arms can be stubbed to `Ok(())`
-        // with the whole suite still green, and `[L[^'T] 2]` -- an array of
+        // with the whole suite still green, and `array[L[^'T] 2]` -- an array of
         // an application, the shape `Map`'s backing store actually takes --
         // is then silently admitted.
-        let err = parse_src("type: L 'T v 'T kids [L[^'T] 2] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T kids array[L[^'T] 2] ;").unwrap_err();
         assert!(
             err.contains("owning cell over"),
             "the walk must descend through an array field: {err}"
         );
-        let err = parse_src("type: L 'T v 'T kids & L[^'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T kids & L[^'T] ;").unwrap_err();
         assert!(
             err.contains("owning cell over"),
             "the walk must descend through a reference field: {err}"
@@ -8061,11 +8061,12 @@ mod tests {
         // and the compound concrete argument beside it is what the clause has
         // to admit.
         assert!(
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K array[i64 2]] ;\n").is_ok(),
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] e Ent['K array[i64 2]] ;\n")
+                .is_ok(),
             "a concrete array argument beside a variable one is inert"
         );
         assert!(
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W2 'K e Ent['K Ent[i64 u32]] ;\n")
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W2['K] e Ent['K Ent[i64 u32]] ;\n")
                 .is_ok(),
             "a concrete *nested application* argument is inert too -- and is \
              deliberately asymmetric with the word-signature path, which \
@@ -8079,7 +8080,7 @@ mod tests {
         // sigil whose referent turns out concrete must intern a real
         // `Type::Ref` rather than leaving a second representation of one
         // shape (`Ref(Concrete(..))`) for substitution to trip over.
-        let module = parse_src("type: B 'T v 'T r & array[i64 2] ;").unwrap();
+        let module = parse_src("type: B['T] v 'T r & array[i64 2] ;").unwrap();
         match module.generic_structs[0].fields[1].1 {
             PolyType::Concrete(Type::Ref(..)) => {}
             ref other => panic!("expected a folded concrete reference, got {other:?}"),
@@ -8090,11 +8091,11 @@ mod tests {
     fn parse_generic_field_variable_quotation_is_error() {
         // R7: out of scope, and a located rejection rather than `'T` being
         // misreported as an unknown concrete type.
-        let err = parse_src("type: QF 'T f [ 'T -- 'T ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ 'T -- 'T ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(err.contains("QF"), "unexpected: {err}");
-        assert!(err.contains("line 1, col 17"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 18"), "unlocated: {err}");
     }
 
     #[test]
@@ -8104,7 +8105,7 @@ mod tests {
         // ends the scan before `'T`, and the field then falls through to the
         // concrete parser, which misreports `'T` as an unknown type instead of
         // naming the unsupported shape.
-        let err = parse_src("type: QF 'T f [ array[i64 2] -- 'T ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ array[i64 2] -- 'T ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(
             !err.contains("unknown type"),
@@ -8118,7 +8119,7 @@ mod tests {
         // token, so the scan must peel the sigil off before comparing against
         // `ty_vars` -- otherwise the variable is invisible to this rule and
         // falls through to the concrete parser's misleading `unknown type`.
-        let err = parse_src("type: QF 'T f [ ^'T -- ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ ^'T -- ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(
@@ -8126,7 +8127,7 @@ mod tests {
             "the glued cell sigil must not hide the variable: {err}"
         );
 
-        let err = parse_src("type: QF 'T f [ &'T -- ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ &'T -- ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(
@@ -8138,9 +8139,9 @@ mod tests {
         // shape R1 admits outside a quotation (it builds nested cells), so a
         // single-strip peel leaves R7 blind to something R1 accepts.
         for src in [
-            "type: QF 'T f [ ^^'T -- ] ;",
-            "type: QF 'T f [ ^^^'T -- ] ;",
-            "type: QF 'T f [ &!^'T -- ] ;",
+            "type: QF['T] f [ ^^'T -- ] ;",
+            "type: QF['T] f [ ^^^'T -- ] ;",
+            "type: QF['T] f [ &!^'T -- ] ;",
         ] {
             let err = parse_src(src).unwrap_err();
             assert!(err.contains("quotation field"), "{src}: unexpected: {err}");
@@ -8160,7 +8161,7 @@ mod tests {
         // `&` intercept exists to prevent. The field itself still never
         // builds (R10, phase 2); this is about which diagnostic it reaches.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K k 'K w &Ent['K i64] ;").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] k 'K w &Ent['K i64] ;").unwrap();
         let w = module
             .generics
             .structs
@@ -8189,7 +8190,7 @@ mod tests {
         // concrete quotation field. `Q` needs a variable-bearing field of its
         // own too, else the phantom check rejects the fixture for an
         // unrelated reason.
-        let module = parse_src("type: Q 'T v 'T f [ i64 -- i64 ] ;").unwrap();
+        let module = parse_src("type: Q['T] v 'T f [ i64 -- i64 ] ;").unwrap();
         let decl = &module.generic_structs[0];
         match decl.fields[1].1 {
             PolyType::Concrete(Type::Quotation(_)) => {}
@@ -8252,7 +8253,7 @@ mod tests {
         // R2/R4/R5: `Box[i64]` in a field position mints an ordinary concrete
         // `StructDecl` -- substituted fields, appended after every pre-pass
         // entry -- and the field carries its `StructId`.
-        let module = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64] ;").unwrap();
         assert_eq!(module.structs.len(), 2);
         let (box_id, boxed) = struct_by_name(&module, "Box[i64]");
         assert_eq!(boxed.fields, vec![("val".to_string(), Type::I64)]);
@@ -8269,7 +8270,7 @@ mod tests {
         // R4: two applications of one generic type are two registry entries
         // with their own field layouts, not one shared entry.
         let module =
-            parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] y Box[u32] ;").unwrap();
+            parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64] y Box[u32] ;").unwrap();
         let (int_id, int_box) = struct_by_name(&module, "Box[i64]");
         let (u32_id, u32_box) = struct_by_name(&module, "Box[u32]");
         assert_ne!(int_id, u32_id);
@@ -8283,7 +8284,7 @@ mod tests {
         // direct assertion (mirrors `intern_bundle_struct`'s own dedup test):
         // three uses across two declarations and a signature, one entry.
         let module = parse_src(
-            "type: Box 'T val 'T ;\ntype: A x Box[i64] ;\ntype: B y Box[i64] ;\n: f ( Box[i64] -- ) drop ;",
+            "type: Box['T] val 'T ;\ntype: A x Box[i64] ;\ntype: B y Box[i64] ;\n: f ( Box[i64] -- ) drop ;",
         )
         .unwrap();
         assert_eq!(
@@ -8309,7 +8310,7 @@ mod tests {
     fn parse_generic_application_resolves_at_a_word_signature_slot() {
         // R2: a signature slot is a distinct parser call site from a field
         // (`parse_slot`, not `parse_field_type_expr`).
-        let module = parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] -- Box[i64] ) ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\n: f ( Box[i64] -- Box[i64] ) ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         let f = module.words.iter().find(|w| w.name == "f").unwrap();
         assert_eq!(f.effect.inputs[0].ty, Type::Struct(box_id, "Box[i64]"));
@@ -8321,7 +8322,7 @@ mod tests {
         // R2: the third call site, `parse_poly_slot`'s concrete fallthrough --
         // a variable-bearing signature never reaches `parse_slot` at all.
         let module =
-            parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] 'A -- 'A Box[i64] ) ;").unwrap();
+            parse_src("type: Box['T] val 'T ;\n: f ( Box[i64] 'A -- 'A Box[i64] ) ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         let f = module.words.iter().find(|w| w.name == "f").unwrap();
         let poly = f.poly.as_ref().expect("a `'A` slot makes the word poly");
@@ -8336,7 +8337,7 @@ mod tests {
         // R6: an argument is a full type expression, so a concrete
         // application inside another resolves by recursion, minting the inner
         // instantiation first.
-        let module = parse_src("type: Box 'T val 'T ;\ntype: W x Box[Box[i64]] ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\ntype: W x Box[Box[i64]] ;").unwrap();
         let (inner_id, _) = struct_by_name(&module, "Box[i64]");
         let (_, outer) = struct_by_name(&module, "Box[Box[i64]]");
         assert_eq!(outer.fields[0].1, Type::Struct(inner_id, "Box[i64]"));
@@ -8347,7 +8348,7 @@ mod tests {
         // The generic declarations are parsed ahead of the body pass, so an
         // application need not follow its declaration -- the order
         // independence a concrete `type:` name already has from the pre-pass.
-        let module = parse_src("type: Wrap x Box[i64] ;\ntype: Box 'T val 'T ;").unwrap();
+        let module = parse_src("type: Wrap x Box[i64] ;\ntype: Box['T] val 'T ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         assert_eq!(
             struct_by_name(&module, "Wrap").1.fields[0].1,
@@ -8358,7 +8359,7 @@ mod tests {
     #[test]
     fn parse_generic_application_with_no_arguments_is_a_located_error() {
         // R3: a generic name is never a type by itself.
-        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box ;").unwrap_err();
         assert!(
             err.contains("generic type `Box` declares 1 type variable"),
             "unexpected message: {err}"
@@ -8371,7 +8372,7 @@ mod tests {
     fn parse_generic_application_with_too_many_arguments_is_a_located_error() {
         // R3: the over-applied case, decidable only because the argument list
         // is bracketed.
-        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64 u32] ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64 u32] ;").unwrap_err();
         assert!(
             err.contains("generic type `Box` declares 1 type variable"),
             "unexpected message: {err}"
@@ -8385,7 +8386,7 @@ mod tests {
         // R3 for a multi-variable header: the count is what's checked, not
         // merely the presence of a bracket.
         let err =
-            parse_src("type: Pair 'A 'B a 'A b 'B ;\n: f ( Pair[i64] -- ) drop ;").unwrap_err();
+            parse_src("type: Pair['A 'B] a 'A b 'B ;\n: f ( Pair[i64] -- ) drop ;").unwrap_err();
         assert!(
             err.contains("generic type `Pair` declares 2 type variables"),
             "unexpected message: {err}"
@@ -8399,7 +8400,7 @@ mod tests {
         // R4: the instantiation key is the ordered argument list, so the two
         // orderings are two entries with mirrored field types.
         let module =
-            parse_src("type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64 u32] y Pair[u32 i64] ;")
+            parse_src("type: Pair['A 'B] a 'A b 'B ;\ntype: W x Pair[i64 u32] y Pair[u32 i64] ;")
                 .unwrap();
         let (first, _) = struct_by_name(&module, "Pair[i64 u32]");
         let (second, _) = struct_by_name(&module, "Pair[u32 i64]");
@@ -8448,7 +8449,7 @@ mod tests {
     /// so cannot discriminate.
     #[test]
     fn parse_generic_application_from_another_module_is_unknown() {
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -8491,7 +8492,7 @@ mod tests {
     /// case needs the export to reach the application at all.
     #[test]
     fn parse_qualified_generic_application_from_another_module_resolves() {
-        let owner = lex("type: Box 'T val 'T ;\nexport: Box ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\nexport: Box ;\n").unwrap();
         let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -8543,7 +8544,7 @@ mod tests {
     /// concrete one is not.
     #[test]
     fn parse_qualified_generic_application_of_unexported_type_is_not_exported() {
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -8586,7 +8587,7 @@ mod tests {
     /// local `Box`.
     #[test]
     fn parse_generic_application_with_unbound_qualifier_is_unknown_type() {
-        let err = parse_src("type: Box 'T val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
         assert!(err.contains("unknown type `q::Box`"), "unexpected: {err}");
     }
 
@@ -8597,7 +8598,7 @@ mod tests {
     #[test]
     fn parse_generic_application_stamps_the_instantiating_module_id() {
         let tokens = lex(
-            "type: Box 'T val 'T ;\ntype: Res['T] | Ok v 'T ;\n: f ( Box[i64] Res[u32] -- ) drop drop ;\n",
+            "type: Box['T] val 'T ;\ntype: Res['T] | Ok v 'T ;\n: f ( Box[i64] Res[u32] -- ) drop drop ;\n",
         )
         .unwrap();
         let mut arrays = Vec::new();
@@ -8712,7 +8713,7 @@ mod tests {
              type: S q owning [ -- ] ;\n\
              type: E | None | Some q owning [ -- ] ;\n\
              : nested ( [ owning [ -- ] -- ] -- ) drop ;\n\
-             : elem ( [owning [ -- ] 4] -- ) drop ;\n\
+             : elem ( array[owning [ -- ] 4] -- ) drop ;\n\
              : poly ['T: Copy] ( 'T owning [ -- ] -- 'T ) drop ;\n",
         )
         .unwrap();
@@ -9472,7 +9473,7 @@ mod tests {
         // empty `traits` slice, so a bound (`'T: Copy`) inside a member
         // signature saw no predicate-trait table and reported "unknown
         // capability `Copy`" instead of the located bound-on-use error.
-        let err = parse_src("trait: Show 'T : show ( 'T: Copy -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Show['T] : show ( 'T: Copy -- ) ; ;").unwrap_err();
         assert!(
             err.contains("must be written at its binding"),
             "unexpected message: {err}"
@@ -9978,7 +9979,7 @@ mod tests {
     fn parse_capabilities_unknown_name_is_still_an_error() {
         // A name that resolves to neither a pre-seeded predicate entry nor a
         // declared trait is still X3.
-        let err = parse_src(": f ( 'T: Nope -- 'T ) ;").unwrap_err();
+        let err = parse_src(": f ['T: Nope] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
     }
 
@@ -10016,7 +10017,7 @@ mod tests {
     /// wording is only true for `Ord`.
     #[test]
     fn parse_capabilities_at_repl_scope_unknown_name_keeps_the_generic_error() {
-        let tokens = lex(": f ( 'T: Bogus 'T -- 'T ) drop ;").unwrap();
+        let tokens = lex(": f ['T: Bogus] ( 'T 'T -- 'T ) drop ;").unwrap();
         let mut arrays = Vec::new();
         let mut owned_cells = Vec::new();
         let mut refs = Vec::new();
@@ -10335,8 +10336,8 @@ mod tests {
     fn parse_poly_generic_nested_depth_two_is_error() {
         // D5: a generic type argument that is itself a generic application
         // is rejected at nesting depth > 1, naming both headers.
-        let err =
-            parse_src("type: Box 'T val 'T ;\n: f ( 'T Box[Box['T]] -- ) drop drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( 'T Box[Box['T]] -- ) drop drop ;")
+            .unwrap_err();
         assert!(
             err.contains("names `Box[...]` as a type argument"),
             "unexpected message: {err}"
@@ -10347,7 +10348,7 @@ mod tests {
     fn parse_poly_generic_arity_mismatch_is_error() {
         // R1: the poly-slot argument list reuses `generic_arity_error`
         // exactly as the concrete path does.
-        let err = parse_src("type: Box 'T val 'T ;\n: f ( Box['T 'E] -- ) drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( Box['T 'E] -- ) drop ;").unwrap_err();
         assert!(
             err.contains("declares 1 type variable"),
             "unexpected message: {err}"
@@ -10360,7 +10361,7 @@ mod tests {
         // privacy gate, so a qualified generic application inside a poly
         // slot is rejected exactly as the concrete path already rejects
         // `parse_qualified_generic_application_of_unexported_type_is_not_exported`.
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( 'T b::Box['T] -- ) drop drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -10665,7 +10666,7 @@ mod tests {
     #[test]
     fn parse_x3_unknown_capability_is_error() {
         // X3: an unknown capability name after a bound colon is a located error.
-        let err = parse_src(": f ( 'T: Frobnicate -- 'T ) ;").unwrap_err();
+        let err = parse_src(": f ['T: Frobnicate] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("Frobnicate"), "unexpected message: {err}");
         assert!(err.contains("capability"), "unexpected message: {err}");
     }
@@ -10870,7 +10871,7 @@ mod tests {
         let module = parse_src(
             "trait: Show['T] : show ( &'T -- ) ; ;\n\
              trait: Eq['T] : eq ( &'T &'T -- ) ; ;\n\
-             type: Pair 'A 'B a 'A b 'B ;\n\
+             type: Pair['A 'B] a 'A b 'B ;\n\
              impl: Show for Pair['T 'V] where 'T: Show 'V: Eq\n\
                : show | a | a drop ;\n\
              ;",
@@ -11050,13 +11051,13 @@ mod tests {
         // via the bare-sigil recursion, so migrating to `array[…]` must not
         // break it. The co-assertion that `&array['T 4]` still builds is
         // phases 1–3 only.
-        let named = sole_generic_field("type: Box 'T f &array['T 4] ;");
+        let named = sole_generic_field("type: Box['T] f &array['T 4] ;");
         assert!(
             matches!(&named, PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
             "field should be &array['T 4]"
         );
         // Co-assertion: the legacy bare-`[` spelling still builds.
-        let legacy = sole_generic_field("type: Box 'T f &array['T 4] ;");
+        let legacy = sole_generic_field("type: Box['T] f &array['T 4] ;");
         assert_eq!(
             named, legacy,
             "both spellings should produce the same PolyType"
@@ -11068,13 +11069,13 @@ mod tests {
         // R1a generic-field path: `^array['T 4]` in a generic struct field.
         // Same regression-test rationale and phases 1–3 co-assertion as the
         // `&` twin above.
-        let named = sole_generic_field("type: Box 'T f ^array['T 4] ;");
+        let named = sole_generic_field("type: Box['T] f ^array['T 4] ;");
         assert!(
             matches!(&named, PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
             "field should be ^array['T 4]"
         );
         // Co-assertion: the legacy bare-`[` spelling still builds.
-        let legacy = sole_generic_field("type: Box 'T f ^array['T 4] ;");
+        let legacy = sole_generic_field("type: Box['T] f ^array['T 4] ;");
         assert_eq!(
             named, legacy,
             "both spellings should produce the same PolyType"
@@ -11255,7 +11256,7 @@ mod tests {
         // R5b: both `trait: Ord['T]` and `trait: Ord 'T` produce the same
         // TraitDecl during phases 2–3.
         let bracket_module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
-        let postfix_module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
+        let postfix_module = parse_src("trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
 
         let bracket_ord = bracket_module
             .traits
@@ -11475,5 +11476,32 @@ mod tests {
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         let sig = &show.members[0].sig;
         assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn generic_field_type_str_renders_named_array() {
+        // R8b: `generic_field_type_str` renders `array[...]` (not `[...]`)
+        // for an array type, so a generic struct field's surface spelling is
+        // copy-pasteable source.
+        let ty_vars = [("'T".to_string(), Span::default())];
+        let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(generic_field_type_str(&arr, &ty_vars), "array['T 4]");
+        // A nested array also picks up the new spelling.
+        let nested = PolyType::Array(Box::new(arr), Len::Concrete(2));
+        assert_eq!(
+            generic_field_type_str(&nested, &ty_vars),
+            "array[array['T 4] 2]"
+        );
+    }
+
+    #[test]
+    fn poly_type_shape_str_renders_old_spelling_by_exemption() {
+        // R8b: `poly_type_shape_str` is the ruled-on exemption — it renders
+        // `[...]` (not `array[...]`) because it keys synthesized member word
+        // names, a compiler-internal spelling never shown to the user. Assert
+        // *no* change so a well-meaning sweep cannot quietly rename synthesized
+        // member words.
+        let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(poly_type_shape_str(&arr), "['T0 4]");
     }
 }

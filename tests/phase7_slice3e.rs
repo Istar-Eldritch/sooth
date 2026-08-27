@@ -274,7 +274,7 @@ fn trait_member_named_after_a_surface_comparison_dispatches() {
          impl: C for Tag\n\
            : eq | t | t &v @ ;\n\
          ;\n\
-         : uses ( &'T: C -- i64 ) eq ;\n\
+         : uses ['T: C] ( &'T -- i64 ) eq ;\n\
          : main ( -- ) 5 Tag |t| &t uses . t drop ;\n",
     );
     assert_eq!(build_and_run(&entry), "5\n");
@@ -487,7 +487,7 @@ fn ambiguous_unqualified_member_call_is_rejected() {
         "ambiguous-member",
         "trait: A['T] : t1 ( &'T -- ) ; ;\n\
          trait: B['T] : t1 ( &'T -- ) ; ;\n\
-         : f ( &'T: A B -- ) t1 ;\n\
+         : f ['T: A B] ( &'T -- ) t1 ;\n\
          : main ( -- ) ;\n",
     );
     let err = build_error(&entry);
@@ -539,7 +539,7 @@ fn a_user_bound_on_a_poly_combinator_compiles() {
 fn an_unbound_qualifier_in_a_bound_is_rejected() {
     let (_t, entry) = single_file(
         "bound-unbound-qualifier",
-        ": shows ( &'T: q::Show -- ) drop ;\n: main ( -- ) ;\n",
+        ": shows ['T: q::Show] ( &'T -- ) drop ;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -605,7 +605,7 @@ fn the_array_sort_consumer_runs_at_two_concrete_instantiations() {
     let t = tree_with_core("sort");
     let entry = t.write(
         "main.sth",
-"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Rank | Under | Same | Over ;\ntrait: Order['T] : cmp ( &'T &'T -- Rank ) ; ;\ntype: Pair n i64 ;\nimpl: Order for i64\n  : cmp\n    | b | | a |\n    a @ b @ lt ~[ Under ] ~[\n      a @ b @ gt ~[ Over ] ~[ Same ] if\n    ] if ;\n;\nimpl: Order for Pair\n  : cmp\n    | b | | a |\n    a &n @ | an | b &n @ | bn |\n    an bn lt ~[ Over ] ~[\n      an bn gt ~[ Under ] ~[ Same ] if\n    ] if ;\n;\n: sort3 ( ['T: Copy Order 3] -- array['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Under ) drop a0 ]\n  ~[ ( Same ) drop a0 ]\n  ~[ ( Over )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Rank? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Under ) drop a1 ]\n  ~[ ( Same ) drop a1 ]\n  ~[ ( Over )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Rank? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Under ) drop a2 ]\n  ~[ ( Same ) drop a2 ]\n  ~[ ( Over )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Rank? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
+"import: intrinsics * ;\nimport: core::prelude | if lt gt | ;\nimport: core::bool | Bool | ;\ntype: Rank | Under | Same | Over ;\ntrait: Order['T] : cmp ( &'T &'T -- Rank ) ; ;\ntype: Pair n i64 ;\nimpl: Order for i64\n  : cmp\n    | b | | a |\n    a @ b @ lt ~[ Under ] ~[\n      a @ b @ gt ~[ Over ] ~[ Same ] if\n    ] if ;\n;\nimpl: Order for Pair\n  : cmp\n    | b | | a |\n    a &n @ | an | b &n @ | bn |\n    an bn lt ~[ Over ] ~[\n      an bn gt ~[ Under ] ~[ Same ] if\n    ] if ;\n;\n: sort3['T: Copy Order] ( array['T 3] -- array['T 3] )\n  | a0 |\n  &a0 0 &> &a0 1 &> cmp\n  ~[ ( Under ) drop a0 ]\n  ~[ ( Same ) drop a0 ]\n  ~[ ( Over )\n     drop\n     &a0 0 &> @ | x0 |\n     &a0 1 &> @ | y0 |\n     &!a0 0 &!> y0 !\n     &!a0 1 &!> x0 !\n     a0\n  ]\n  Rank? | a1 |\n  &a1 1 &> &a1 2 &> cmp\n  ~[ ( Under ) drop a1 ]\n  ~[ ( Same ) drop a1 ]\n  ~[ ( Over )\n     drop\n     &a1 1 &> @ | x1 |\n     &a1 2 &> @ | y1 |\n     &!a1 1 &!> y1 !\n     &!a1 2 &!> x1 !\n     a1\n  ]\n  Rank? | a2 |\n  &a2 0 &> &a2 1 &> cmp\n  ~[ ( Under ) drop a2 ]\n  ~[ ( Same ) drop a2 ]\n  ~[ ( Over )\n     drop\n     &a2 0 &> @ | x2 |\n     &a2 1 &> @ | y2 |\n     &!a2 0 &!> y2 !\n     &!a2 1 &!> x2 !\n     a2\n  ]\n  Rank? ;\n: main ( -- )\n  0 3 fill |a|\n  &!a 0 &!> 3 !\n  &!a 1 &!> 1 !\n  &!a 2 &!> 2 !\n  a sort3 |sorted|\n  &sorted 0 &> @ .\n  &sorted 1 &> @ .\n  &sorted 2 &> @ .\n  sorted drop\n  0 Pair 3 fill |p|\n  &!p 0 &!> 3 Pair !\n  &!p 1 &!> 1 Pair !\n  &!p 2 &!> 2 Pair !\n  p sort3 |ps|\n  &ps 0 &> &n @ .\n  &ps 1 &> &n @ .\n  &ps 2 &> &n @ .\n  ps drop\n  ;\n"
     );
     let stdout = build_and_run(&entry);
     assert_eq!(stdout, "1\n2\n3\n3\n2\n1\n");

@@ -3522,6 +3522,17 @@ mod tests {
     }
 
     #[test]
+    fn intern_array_type_renders_named_array() {
+        // R8/R9: `intern_array_type` mints `array[i64 4]`, the new spelling
+        // that every diagnostic and pretty-printer picks up through
+        // `name_static`.
+        let mut arrays = Vec::new();
+        let a = intern_array_type(&mut arrays, Type::I64, 4);
+        assert_eq!(a.name(), "array[i64 4]");
+        assert_eq!(a.to_string(), "array[i64 4]");
+    }
+
+    #[test]
     fn intern_array_type_same_shape_dedups_expected() {
         let mut arrays = Vec::new();
         let a = intern_array_type(&mut arrays, Type::I64, 4);

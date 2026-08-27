@@ -110,7 +110,7 @@ fn hub_reexported_trait_resolves_as_a_bound_via_bare_qualifier() {
          impl: h::Greet for Point\n\
            : greet | p | p drop 42 .  ;\n\
          ;\n\
-         : greets ( &'T: h::Greet -- ) greet ;\n\
+         : greets ['T: h::Greet] ( &'T -- ) greet ;\n\
          : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
     );
     let out = build_and_run(&entry);

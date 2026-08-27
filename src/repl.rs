@@ -5018,7 +5018,7 @@ mod tests {
         let mut session = Session::new();
         let mut out = Vec::new();
         let err = session
-            .eval_line("type: Box 'T val 'T ;", &mut out)
+            .eval_line("type: Box['T] val 'T ;", &mut out)
             .unwrap_err();
         assert!(
             err.contains("not supported in the REPL yet"),
