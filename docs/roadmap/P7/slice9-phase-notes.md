@@ -675,6 +675,40 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
 
 ## Phase 6 (R4 part c) — the remaining 14 single-surface test files, then the `#[ignore]` sweep
 
+- **Three non-REPL exit-criterion tests were swept out of `tests/phase4_combinators.rs` by
+  a contiguous deletion hunk, and restored in `2dcaecc`.** `combinators_dogfood_matches_
+  hand_threaded` (`P4/slice6a-spec.md:276`, criterion 18), `filter_while_dogfood_matches_
+  hand_threaded` (`P4/slice6b-spec.md:94`, criterion 16) and `combinator_in_times_dogfood_
+  matches_hand_threaded` (R9's dogfood) sat inside the 380-line hunk that removed the
+  file's `repl_*` block; all three drive `common::build_example` over a committed
+  `examples/*.sth` and assert byte-identical stdout against a hand-threaded twin, with no
+  REPL content at all. `tests/qbe_baseline.rs` pins those examples' IL text, not run-level
+  combinator/hand equivalence, so nothing else carried the fact.
+- **What hid it: group-level accounting.** "All 20 of `phase4_combinators.rs`'s `repl_*`
+  tests" was true and still three short of what the file lost. The check that catches it is
+  per-file, against git: `git show <commit> -- <file> | grep -c '^-fn '`, reconciled
+  against the classification list one file at a time. Reconciled that way for every file
+  this phase touched (helpers included, so each count is one or two above its test count):
+
+  | File | Deleted `fn`s | Helpers | Tests | All REPL-driving? |
+  | --- | --- | --- | --- | --- |
+  | `phase3_locals.rs` | 6 | 1 | 5 | yes |
+  | `phase3_refs.rs` | 2 | 1 | 1 | yes |
+  | `phase3_resources.rs` | 10 | 1 | 9 | yes |
+  | `phase3_strings.rs` | 9 | 1 | 8 | yes |
+  | `phase4_combinators.rs` | 24 | 1 | 23 | **no — 20 of 23** |
+  | `phase4_generics.rs` | 2 | 1 | 1 | yes |
+  | `phase4_slice10c_tail_splice.rs` | 2 | 1 | 1 | yes |
+  | `phase4_slice11_inline.rs` | 3 | 1 | 2 | yes |
+  | `phase4_slice12_partd.rs` | 5 | 1 | 4 | yes |
+  | `phase7_slice1.rs` | 2 | 1 | 1 (migrated) | yes |
+  | `phase7_slice3g.rs` | 2 | 1 | 1 | yes |
+  | `phase7_slice3i.rs` | 7 | 1 | 6 | yes |
+  | `phase7_slice3t.rs` | 1 | 0 | 1 | yes |
+  | `phase7_slice3v.rs` | 3 | 1 | 2 | yes |
+
+  `phase4_combinators.rs` is the only file that lost a non-REPL test; the other thirteen
+  reconcile exactly.
 - **The spec's own "small REPL surface" framing does not hold for two of the fourteen
   files, and the per-file named-test lists in the phase focus text are not exhaustive
   inventories of each file's REPL tests.** `tests/phase4_combinators.rs` alone carried
@@ -692,23 +726,36 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   `tests/phase1.rs`. This covers the bulk of the corpus: all 20 of
   `tests/phase4_combinators.rs`'s `repl_*` tests (define-then-call-on-a-later-line,
   redefinition freezing, combinator/ordinary-word store eviction, cross-line cycle
-  detection, import hygiene), all 8 of `tests/phase3_resources.rs`'s (destructor
-  generation/epoch behaviour across session lines), all 6 of `tests/phase7_slice3i.rs`'s
+  detection, import hygiene), 8 of `tests/phase3_resources.rs`'s 9 (destructor
+  generation/epoch behaviour across session lines; the ninth is a covered-elsewhere case,
+  below), all 6 of `tests/phase7_slice3i.rs`'s
   (session-only `core::bool` seeding with no package import), both of
   `tests/phase4_slice11_inline.rs`'s and all 4 of `tests/phase4_slice12_partd.rs`'s (the
   REPL's own splice-vs-lower retention gate, distinguished only by session redefinition
   freshness), both of `tests/phase7_slice3v.rs`'s (a session's non-PIC `.so` link limit),
-  6 of `tests/phase3_strings.rs`'s 7 REPL tests (carried-slot marshalling across a REPL
-  line boundary — already migrated to `ir::lower` fixtures at the unit level in phase 3),
-  5 of `tests/phase3_locals.rs`'s (REPL-line binding/frame-floor/transactionality facts),
+  7 of `tests/phase3_strings.rs`'s 8 REPL tests (carried-slot marshalling across a REPL
+  line boundary — phase 3 migrated the *lowering* half to `ir::lower`/`backend::qbe`
+  fixtures, but not the `storel` mnemonic these carried, see the coverage-hole entry
+  below), 5 of `tests/phase3_locals.rs`'s (REPL-line binding/frame-floor/transactionality facts),
   and one each in `tests/phase3_refs.rs` (a reference surviving a REPL line boundary) and
   `tests/phase4_generics.rs` (a quotation left on a REPL line, R19 — the REPL's "no
   declared outputs" boundary has no `build` analogue since every word declares an effect).
-- **One test was retired as covered, not as mechanism-retired**:
-  `tests/phase3_strings.rs::bool_print_dispatches_to_library_overload_same_line`'s own
-  comment names its covering native test, `tests/phase0.rs::leap_year_dogfood_compiles_
-  and_runs` (verified present); deleted rather than migrated since the fact it pins (`.`
-  on `True`/`False` resolves through the library overload) is exercised there already.
+- **Two tests were retired as covered, not as mechanism-retired**, each with its covering
+  native test named and verified present:
+  - `tests/phase3_strings.rs::bool_print_dispatches_to_library_overload_same_line`'s own
+    comment names `tests/phase0.rs::leap_year_dogfood_compiles_and_runs`; deleted rather
+    than migrated since the fact it pins (`.` on `True`/`False` resolves through the
+    library overload) is exercised there already.
+  - `tests/phase3_resources.rs::repl_resource_field_is_disposed_through_the_overload` is
+    **not** in the generation/epoch bucket its `repl_` prefix suggests: its own comment
+    calls it "R7's ordinary composition", an enclosing struct disposing a resource field by
+    calling that field's own destructor instead of inlining glue. Its native twin is
+    `tests/phase0.rs:2136 drop_of_linear_struct_runs_field_glue_in_declaration_order`,
+    where `SPY_DEF`'s user `: drop ( Spy -- )` overload printing `drop 1`/`drop 2` is the
+    proof the glue calls the overload rather than inlining it. Only the REPL-specific half
+    (the enclosing struct declared on a *later session line* than the override) dies:
+    `build` assembles every declaration before synthesizing glue, so source order cannot
+    reproduce it.
 - **Two tests were embedded inside otherwise-surviving non-REPL test functions, not whole
   functions**, and needed surgical excision rather than whole-function deletion:
   `tests/phase4_combinators.rs::quotation_type_is_rejected_at_every_audited_position`'s
@@ -724,15 +771,46 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   control `a_plain_quotation_value_hits_the_same_repl_link_limit`) were unnamed in the
   focus text. Same pattern as `phase7_slice3g.rs`'s and `phase7_slice3i.rs`'s named tests
   (`self_call_concrete_operand_mismatch_is_located_type_error`,
-  `not_on_a_three_variant_enum_named_bool_is_an_error`): not every name the focus text
-  lists is itself REPL-driving, and not every REPL test in a file is named.
+  `not_on_a_three_variant_enum_named_bool_is_an_error`) and two more:
+  `phase4_combinators.rs::combinator_and_hand_threaded_loops_agree_across_stack_limits`
+  (`:1351`, a `build`-level equivalence witness for criterion 14) and
+  `phase3_refs.rs::times_def_hand_copy_is_pinned_to_the_library` (`:79`, a
+  `assert_pinned_to_combinators_lib` source-pin). Both survive untouched. So five of the
+  focus text's named tests carry no REPL at all: not every name the focus text lists is
+  itself REPL-driving, and not every REPL test in a file is named.
 - **One migration, `tests/phase7_slice1.rs::repl_session_projects_struct_fields` →
-  `projections_reach_every_lowering_path`**: rewritten over `run_program` as an ordinary
-  program binding a local and projecting through it, keeping the same read/write/getx/bump
-  sequence and asserted output (`2\n9\n1\n2\n`). Mutation-proved: forcing
-  `check_field_projection`'s field lookup (`src/check/word_families.rs`) to always resolve
-  index 0 regardless of name breaks this test (and its three siblings in the same file),
-  confirmed, then reverted; `git diff --stat -- src/` empty before commit.
+  `projection_in_a_called_word_body_matches_an_inline_one`**: rewritten over `run_program`
+  as an ordinary program binding a local and projecting through it, keeping the same
+  read/write/getx/bump sequence and asserted output (`2\n9\n1\n2\n`). Mutation-proved:
+  forcing `check_field_projection`'s field lookup (`src/check/word_families.rs`) to always
+  resolve index 0 regardless of name breaks this test, confirmed, then reverted;
+  `git diff --stat -- src/` empty before commit.
+
+  **The migrated test is near-redundant, and its first name overclaimed.** That mutation
+  kills its three siblings in the same file too, so it discriminates nothing they do not.
+  Its only content the siblings lack is a projection written inside a *callee's* body
+  against a `&`/`&!` parameter (`getx`/`bump`) — and even that has twins in
+  `phase3_refs.rs:557` (`: bump ( &!Counter -- ) &!n 1 +! ;`) and `phase4_modules.rs:558`.
+  It was named `projections_reach_every_lowering_path` after the criterion it came from,
+  P7.S1's **R5, whose title is literally "the REPL path"** (`P7/slice1-spec.md:130`): the
+  two paths R5 meant were `build` and the session, so with the REPL gone there is one path
+  and the name asserted a coverage claim no test can hold. Renamed and its doc comment
+  rewritten to state the callee-body fact instead. **R5 goes vacuous with the REPL** — a
+  later phase should not read it as a live requirement needing a witness.
+- **Coverage hole, measured not assumed: `Instr::Store`'s `_ => storel` arm
+  (`src/backend/qbe.rs:1412`) now has exactly one witness left, and it is inside
+  `repl.rs`.** Phase 3 measured this arm as killed only by REPL tests; this phase deletes
+  the last of the *integration* ones, so the claim "already migrated to `ir::lower`
+  fixtures" was wrong and is corrected above. Re-measured after this phase's deletions, in
+  an isolated copy (`src tests lib examples Cargo.*`, baseline recorded first): mutating
+  the arm to `stores` moves the suite from 2766 passed / 0 failed to 2765 / 1, and the one
+  kill is `repl::tests::session_rich_rendering_shows_struct_contents_through_real_session`.
+  Every integration test survives it. `emit_scalar_store_and_load_follow_the_value_type_
+  not_the_slot`, which phase 3's report offered as the replacement, asserts `stored` and
+  `loadl` and never `storel`; `tests/qbe_baseline/*.ssa`'s `storel`s come from
+  `field_store_op`, a different function. **Phase 7 deletes that last witness with
+  `repl.rs`**, leaving the arm uncovered — phase 8 must treat it as an uncovered width arm
+  alongside the float/`w`-widen ones, not as covered.
 - **One finding: `tests/phase7_slice3t.rs::explicit_instantiation_is_rejected_at_the_repl`
   cannot be migrated, contrary to its focus-text instruction.** Its guard
   (`error: explicit type instantiation is not available at the REPL`) lives only at
@@ -759,16 +837,23 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   deleted**: their three remaining callers (phase 5's carried-forward count) all fell with
   this phase's deletions in `tests/phase3_strings.rs`, `tests/phase4_combinators.rs` and
   `tests/phase4_slice10c_tail_splice.rs`; re-grepped callerless before deleting.
-- Exit witness: `grep -rn 'arg("repl")\|repl::run\|repl_core' tests/` empty.
-  `grep -rnE '^[[:space:]]*#\[ignore' tests/` shows only the three non-REPL notes above.
-  Full gate green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test
-  --no-fail-fast` (0 failures). `cargo clippy --all-targets -- -D warnings` is red at HEAD
-  (3 pre-existing errors, confirmed via `git stash`) and is not this phase's gate.
+- Exit witness, re-verified after `2dcaecc`'s restore: `grep -rn 'arg("repl")\|repl::run\|
+  repl_core' tests/` empty. `grep -rnE '^[[:space:]]*#\[ignore' tests/` shows only the three
+  non-REPL notes above. Full gate green: `cargo fmt --check`, `cargo clippy -- -D warnings`,
+  `cargo test --no-fail-fast` (0 failures). `cargo clippy --all-targets -- -D warnings` is
+  red at HEAD (3 pre-existing errors, confirmed via `git stash`) and is not this phase's
+  gate.
 
 ### Carried forward
 
 - Phase 8's precondition re-grep (`parse_line\|ast::Line\|Line::Expr\|line_terms\|
   lower_line` in `src/`) is unaffected by this phase: nothing here touched `src/`.
+- **Phase 8: `Instr::Store`'s `_ => storel` arm is uncovered once phase 7 lands**, per the
+  measurement above. If phase 8 wants a witness for it, the cheapest one is an integration
+  golden whose IL contains a scalar `Instr::Store` outside `field_store_op`; if it does not,
+  the arm should be listed with the other unwitnessed width arms rather than assumed live.
+- **P7.S1's R5 ("the REPL path") goes vacuous with the REPL.** Its witness has been
+  repurposed, not preserved; do not schedule a replacement.
 - The REPL still exists at the end of this phase (phase 7 deletes it). Every test file
   this phase touched still compiles and links against the live `sooth repl` binary having
   had only its REPL-driving tests and helpers removed.

@@ -110,16 +110,19 @@ fn projection_resolves_per_instantiation() {
     assert_eq!(out, "11\n22\n");
 }
 
-/// R5: the resolved-field table has to reach every lowering path a projection
-/// can be written in -- not only a top-level word body. Migrated off the
-/// REPL's now-dead bare-line/word-definition split: `getx`/`bump` are
-/// ordinary word definitions, and the bare-line reads/writes become `main`'s
-/// own body, so the single remaining path (whole-program `build`) still
-/// covers both a defined word's projection and an inline one.
+/// A projection written inside a callee's body, against a `&`/`&!` parameter,
+/// resolves the same field as one written inline in the caller: `getx`/`bump`
+/// and `main`'s own `&p &y @` agree on `Point`'s layout.
+///
+/// Migrated off the REPL's bare-line/word-definition split (P7.S1's R5, "the
+/// REPL path", which goes vacuous when the REPL does). It does not witness
+/// "every lowering path": with the REPL gone there is one, `build`, and the
+/// inline half is already covered by `projections_read_and_write_struct_fields`
+/// above.
 #[test]
-fn projections_reach_every_lowering_path() {
+fn projection_in_a_called_word_body_matches_an_inline_one() {
     let out = run_program(
-        "every-lowering-path",
+        "callee-body-projection",
         "type: Point x i64 y i64 ;\n\
          : getx ( &Point -- i64 ) &x @ ;\n\
          : bump ( &!Point -- ) &!x 1 +! ;\n\
