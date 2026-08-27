@@ -427,3 +427,209 @@ crossing), which no single pre-existing test pairs up.
   `build_rejects_imported_module_declaring_main:1269`); the note now points there.
 - Full gate green after the revert: `cargo fmt --check`, `cargo clippy -- -D warnings`,
   `cargo test --no-fail-fast` (0 failures, all binaries).
+
+## Phase 5 (R4 part b) — `tests/phase1.rs`
+
+`tests/phase1.rs` is deleted in full. It was a whole-file REPL suite: all 49 tests ran
+through its own `run_session` (`:11`) / `run_session_traced` (`:30`), both of which spawn
+`sooth repl`, and it had no non-REPL member. Nothing in `src/` changed, so the REPL still
+exists at the end of this phase; `--test phase1` no longer exists to spawn it.
+
+**Nothing was migrated.** Every language fact underneath the suite already had a witness
+off the REPL path, so all 49 are classified below as retired-mechanism or covered, each
+covering test named. One migration *was* written and then reverted after measurement, and
+that is recorded as a finding below rather than quietly dropped.
+
+### The seven named criteria
+
+Six are Phase 1 dogfood **Exit** criteria. The spec's rule is "rewrite against `sooth run`
+over the same `examples/` source, unless an equivalent `run` golden already exists". For
+all six it already exists over the *same file*, so each is a duplicate deletion. Verified
+green as a set before deleting.
+
+| retired test | covering `run` golden |
+| --- | --- |
+| `sign_definable_and_callable_in_repl` (`:168`) | `tests/phase0.rs::sign_compiles_and_runs` over `examples/sign.sth` (the same `0 gt ~[ 1 ] ~[ 0 ] if` word). The REPL form also called `sign` at a *positive* input, which `examples/sign.sth` does not; that both-arms fact is pinned natively by `tests/phase0.rs::eliminator_arm_containing_if_joins_correctly`, whose `0 gt ~[ 1 ] ~[ -1 ] if` runs at `5` and `-5` and asserts both results |
+| `vectors_dogfood_runs_in_repl` (`:354`) | `tests/phase0.rs::vectors_dogfood_compiles_and_runs` over `examples/vectors.sth` (same `25` / `6`) |
+| `shapes_dogfood_runs_full_program_in_repl` (`:459`) | `tests/phase0.rs::shapes_dogfood_compiles_and_runs` over `examples/shapes.sth` (same `12.5664` / `12` / `5` / `7`) |
+| `stack_dogfood_runs_in_repl` (`:511`) | `tests/phase0.rs::stack_dogfood_compiles_and_runs` over `examples/stack.sth` (same `3` / `3` / `2` / `1` / `16`). The REPL form hand-rolled a `Popped` bundle struct because a REPL line cannot take a multi-output return; `examples/stack.sth` uses the real `( Stack -- Stack i64 )` ABI, so the covering golden is the *stronger* form of the same exercise |
+| `self_tail_recursive_word_completes_in_constant_stack_in_repl` (`:603`) | `tests/phase0.rs::countdown_dogfood_runs_in_constant_stack` over `examples/countdown.sth`, whose `sum-to` is the same word at the same `0 1000000` for the same `500000500000` |
+| `vm_dogfood_runs_in_repl` (`:635`) | `tests/phase0.rs::vm_dispatch_loop_runs_in_constant_stack` over `examples/vm.sth`, same N = 100_000, same `5000050000`. The REPL form flattened each definition onto one line; the golden runs the committed file |
+
+**The `#[ignore]` sweep touched exactly these and nothing else.** Re-counted with attribute
+lines only (`grep -nE '^[[:space:]]*#\[ignore' tests/phase1.rs`): **3**, at `:159`, `:600`,
+`:632`, all on exit-criterion tests, as the spec says. Their notes cite a REPL-only gap
+(`check.rs`'s two REPL check sites hardcode `TraitResolveCtx::scratch()`, so a session that
+imports `core::cmp` ICEs). The gap does not exist off the REPL path and the three covering
+goldens run green and un-ignored, which is the proof the criteria survive. Corpus-wide the
+attribute count went 13 → 10: the 7 REPL notes phase 6 owns
+(`phase4_combinators.rs` ×5, `phase3_strings.rs` ×1, `phase4_slice10c_tail_splice.rs` ×1)
+plus `phase7_slice3b_follow.rs`'s 3 non-REPL notes, untouched.
+
+**The seventh, `calculator_session_dogfood` (`:202`), is RETIRED, per the spec's ruling.**
+Its subject is the interactive session: seven lines fed one at a time, asserting the
+per-line `defined …` / `stack: …` echo after each. There is no `run` form of "a tiny
+interactive calculator session". Its ordinary language facts, confirmed covered by named
+`run` tests before deleting:
+
+| fact | named covering test |
+| --- | --- |
+| a `\| n \|`-bound local in a word body | `tests/phase0.rs::gcd_compiles_and_runs` (`examples/gcd.sth`'s `\| a b \|`); `tests/phase3_locals.rs::mid_body_binding_consumes_from_the_stack`, `::mid_body_binding_leftmost_name_takes_deepest_value` |
+| defining a word and calling it | `tests/phase0.rs::factorial_compiles_and_runs`, `::gcd_compiles_and_runs` |
+| `mul` | `tests/phase0.rs::factorial_compiles_and_runs` |
+| `add` | `tests/phase3_locals.rs::mid_body_binding_consumes_from_the_stack` (`a b add .` → `5`) |
+| `sub` | `tests/phase0.rs::countdown_dogfood_runs_in_constant_stack` (`n 1 sub` a million times) |
+| `swap` | `tests/phase4_generics.rs::core_shuffles_are_polymorphic_over_i64_bool_and_a_struct` |
+| `.` | every golden above |
+
+### The other 42, classified individually
+
+Classified against what each **asserts**, not its name.
+
+**Retired: the session boundary itself (16).** No native analogue exists, because a
+whole-program build has no line boundary, no carried stack and no `:quit`.
+
+| test | subject |
+| --- | --- |
+| `alloc_trace_stays_empty_in_a_session_that_never_allocates` (`:64`) | that each REPL `.so` carries its own allocator-shim copy and still prints no trace. Shared fact (trace silent with no allocation) is `tests/phase0.rs::alloc_trace_stays_empty_for_a_program_that_never_allocates` |
+| `define_then_call_across_lines` (`:75`) | a definition on one line reachable from the next |
+| `stack_persists_across_lines` (`:82`) | the session stack surviving a line |
+| `redefinition_takes_effect_for_later_lines` (`:92`) | generation swap |
+| `failed_redefinition_keeps_old_generation_resident` (`:135`) | a rejected redefinition leaving gen0 resident. Its diagnostic half (the stack-effect mismatch naming the word, "body leaves 2 values" / "declares 1 outputs") is pinned natively by the `declared-outputs` row of `tests/phase4_combinators.rs:2281` |
+| `dot_output_interleaves_before_stack` (`:388`) | the flush-before-`stack:` discipline across the host's stdout and the loaded object's C stdio |
+| `subword_carried_value_survives_line_boundary` (`:232`) | the carried `u8` cell staying 8 bytes and being relabelled on reload. Shared fact: `tests/phase0.rs::narrowing_conversion_truncates_and_widens_back_correctly` |
+| `carried_float_survives_line_boundary_and_displays_as_float` (`:251`) | the carried `f64` marshalling (R20/R21). Shared facts: `tests/phase0.rs::float_arithmetic_runs_on_both_widths_end_to_end`, `::print_float_f64_and_f32_via_dot` |
+| `carried_struct_survives_line_boundary` (`:264`) | the size-aware carried stack + the `<Vec2>` residual placeholder. Shared fact: `tests/phase0.rs::struct_flat_construct_get_destructure_native` |
+| `carried_struct_and_scalar_offsets_stay_correct` (`:278`) | byte offsets into the carried buffer past a multi-cell slot |
+| `carried_struct_with_non_eight_multiple_size_survives_line_boundary` (`:301`) | the carried cell count rounding up |
+| `array_and_usize_cross_repl_line_boundary_and_render` (`:497`) | the carried array slot + `<[i64 4]>` render. Shared facts: `tests/phase0.rs::usize_arithmetic_comparison_and_conversion_native`, `::nested_array_shapes_construct_and_read_back_native` |
+| `enum_large_payload_survives_line_boundary` (`:558`) | a three-`i64` payload blitted out of and back into the buffer |
+| `enum_constructs_and_displays_placeholder_across_lines` (`:402`) | the `<Shape>` / `<MaybeInt>` residual placeholders and multi-cell slot sizing. Shared fact: `tests/phase0.rs::enum_crosses_word_call_boundary_with_scalar_underneath_native` |
+| `enum_declared_then_eliminating_word_defined_on_later_lines` (`:433`) | R18's variant-set seeding from `Session.enums`, which exists only because the parser pre-pass sees one line at a time. Shared fact: `tests/phase0.rs::shapes_dogfood_compiles_and_runs` |
+| `bool_residual_displays_as_true_or_false` (`:194`) | the `stack:` line's rendering of a residual `Bool`. `.`'s own `True`/`False` semantics: `tests/phase0.rs::leap_year_dogfood_compiles_and_runs` |
+
+**Retired: `:quit` residual disposal (6).** "A live session can never prove you forgot to
+dispose this" is the REPL relaxation these guard; a compiled `main` has the opposite rule.
+
+| test | shared fact, and its native witness |
+| --- | --- |
+| `repl_quit_disposes_residual_linear` (`:682`) | top-first disposal order at session end. Ordering of drops generally: `tests/phase0.rs::drop_of_linear_struct_runs_field_glue_in_declaration_order` |
+| `repl_explicit_drop_not_redisposed_at_quit` (`:716`) | exactly-once across the boundary. `tests/phase0.rs::explicit_drop_runs_destructor_once` |
+| `repl_quit_disposes_residual_linear_struct` (`:827`) | field-order disposal of a residual struct. `tests/phase0.rs::drop_of_linear_struct_runs_field_glue_in_declaration_order` |
+| `repl_quit_disposes_residual_linear_enum` (`:879`) | tag-dispatched disposal of a residual enum. `tests/phase0.rs::drop_of_linear_enum_dispatches_on_tag` |
+| `repl_quit_frees_residual_owned` (`:908`) | `alloc 8` / `free 8` around a residual `^i64`. `tests/phase0.rs::owned_alloc_and_drop_traces_one_pair` |
+| `repl_quit_frees_residual_recursive_value` (`:925`) | the fused disposal loop reached from `dispose_residual`. `tests/phase0.rs::recursive_list_disposes_in_expected_order`, `::deep_list_disposes_in_constant_stack` |
+
+**Covered natively: linear discipline (5).** Each pairs one REPL-emission claim (the
+synthesized destructor must be emitted into *every* REPL module: a bare line's, a
+definition's, and `:quit`'s) with one ordinary language fact. The emission claim dies with
+the multi-module REPL; the language fact is covered.
+
+| test | covering test |
+| --- | --- |
+| `repl_within_one_line_create_and_drop_prints_once` (`:700`) | `tests/phase0.rs::explicit_drop_runs_destructor_once` |
+| `repl_word_definition_keeps_strict_linear_rule` (`:733`) | `tests/phase0.rs::surplus_linear_on_stack_is_error` (same "linear value left on the stack" / `` `Spy` `` diagnostic); the "unknown word after a rejected definition" half is the session's rollback |
+| `repl_bare_line_drops_linear_struct` (`:779`) | `tests/phase0.rs::drop_of_linear_struct_runs_field_glue_in_declaration_order` |
+| `repl_word_definition_drops_linear_struct` (`:803`) | same |
+| `repl_word_definition_drops_linear_enum` (`:856`) | `tests/phase0.rs::drop_of_linear_enum_dispatches_on_tag` |
+
+**Covered natively: diagnostics that report and leave the session intact (4).** The
+"session survives" half is REPL; the diagnostic is covered.
+
+| test | covering test |
+| --- | --- |
+| `bad_line_reports_and_session_survives` (`:107`) | `tests/phase4_combinators.rs`'s `unknown-word` row (`:2293`, pins ``unknown word `nosuchword` in `w` ``); `src/check.rs::check_unknown_word_is_error` |
+| `type_error_line_reports_and_session_survives` (`:121`) | `tests/phase7_slice3g.rs::self_call_concrete_operand_mismatch_is_located_type_error` (`:185`) pins a mismatch naming both `` `i64` `` and `` `Bool` `` verbatim; `tests/phase4_combinators.rs`'s `type-mismatch` row |
+| `struct_declaration_errors_report_and_session_survives` (`:324`) | duplicate: `src/check/declarations.rs::check_struct_duplicate_type_name_is_error`, `tests/phase5_slice1.rs::generic_header_colliding_with_a_concrete_type_is_a_duplicate`. Recursive: `src/check/declarations.rs::check_recursion_by_value_self_cycle_is_error` (same `type: Loop next Loop ;` fixture), `tests/phase7_slice3n.rs::concrete_generic_self_reference_resolves_and_reaches_recursion_check` |
+| `enum_declaration_errors_report_and_session_survives` (`:571`) | duplicate: `src/check/declarations.rs::check_enum_duplicate_type_name_across_two_enums_is_error`, `tests/phase5_slice1.rs::generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate`. Recursive: `src/check/declarations.rs::check_enum_direct_recursion_is_error_not_hang` (same `Loop`/`Wrap` shape) |
+
+**Covered natively: polymorphic definition and instantiation (4).**
+
+| test | covering test |
+| --- | --- |
+| `polymorphic_repl_definition_with_clean_body_is_accepted_not_rejected` (`:963`) | `tests/phase7_slice3k.rs::a_non_inline_generic_callee_is_monomorphized_once_per_reached_instantiation` builds the same empty-bodied `: id ( 'T -- 'T ) ;` |
+| `polymorphic_repl_definition_with_ill_typed_body_is_the_real_x1_not_the_old_blanket_rejection` (`:973`) | `src/check/poly.rs::check_x7_dup_of_unbounded_variable_names_missing_copy_bound` (same `dup` of an unbounded `'T`, names `'T` and `Copy`); the message's exact shape is pinned verbatim on the same formatter at `src/check/poly.rs:13159`/`:13174` for the `!` and `@` operands. The negative assertions (`!out.contains("REPL")`, `!out.contains("declared ( -- )")`) guarded against a Phase-1 blanket rejection that no longer exists on any path |
+| `polymorphic_repl_word_instantiates_at_two_different_types_across_lines` (`:1000`) | `tests/phase7_slice3k.rs::a_non_inline_generic_callee_is_monomorphized_once_per_reached_instantiation` instantiates `id` at `i64` and `str` in one build; `tests/phase4_generics.rs::copy_bounded_type_variable_word_runs_at_two_concrete_types` runs both instantiations |
+| `polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2` (`:1071`) | `src/check/poly.rs::check_x5_copy_bound_on_linear_type_names_variable_type_and_reason`, which uses the byte-identical fixture (`{SPY}: idc ( 'T: Copy -- 'T ) ;\n: main ( -- ) 0 Spy idc drop ;`). See the finding below |
+
+**Retired: REPL-only generation and instantiation-freezing mechanism (7).**
+
+| test | subject |
+| --- | --- |
+| `polymorphic_repl_word_instantiated_twice_at_one_type_prints_both_values` (`:1016`) | the session's `exported_insts` dedup. Its native form is stronger and already exists: `tests/phase7_slice3k.rs::a_non_inline_generic_callee_is_monomorphized_once_per_reached_instantiation` asserts the exact monomorph symbol set, i.e. one `IrFunc` per reached type |
+| `poly_instantiation_freezes_callee_arity_across_a_differing_redefinition` (`:1033`) | a poly word's instantiation resolving its callee against the defining-*line* snapshot |
+| `poly_instantiation_freezes_callee_value_across_a_same_arity_redefinition` (`:1054`) | the same, witnessed by value |
+| `polymorphic_repl_definition_resolving_to_two_outputs_is_a_located_x3` (`:1095`) | the "resolves to N outputs, which is not yet supported at the REPL" deferral, whose message lives at `src/repl.rs:2895` and has no other producer |
+| `redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds` (`:1126`) | gen0/gen1 freezing across a redefinition |
+| `ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symbol` (`:1175`) | the shared per-name generation counter, and `RTLD_GLOBAL` first-loaded-wins |
+| `consolidated_exit_session_covers_define_instantiate_dedup_and_redefine` (`:1212`) | the consolidated session of the six above |
+
+### Mutation proofs
+
+No test was migrated, so E7's "every migrated test is proved live" is vacant here. In its
+place, the three retirements whose covering test was least self-evident were proved by
+mutation: break the rule, confirm the *named covering test* fails. Each mutation was
+applied to a `git archive` copy of HEAD (never `cp -r` of the worktree, which would share
+the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
+
+| mutation | named covering test | result | also killed |
+| --- | --- | --- | --- |
+| `drop_level_fields` iterates `.rev()` (`src/ir/func_builder/word_families.rs:709`) | `drop_of_linear_struct_runs_field_glue_in_declaration_order` | KILLED | 6 others, incl. `drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor` and `an_owning_field_disposes_alongside_its_siblings_exactly_once` |
+| every enum-destructor arm drops variant 0's fields (`emit_branch`, `layouts[vi]` → `layouts[0]`) | `drop_of_linear_enum_dispatches_on_tag` | KILLED | 27 others, incl. `recursive_list_disposes_in_expected_order` (the twin named for `repl_quit_frees_residual_recursive_value`) and `enum_variant_with_owned_frees_on_drop` |
+| `visit_recursion`'s `InProgress` arm stops reporting a cycle whose repeated node is an enum (`src/check/declarations.rs:1670`) | `check_enum_direct_recursion_is_error_not_hang` | KILLED (stack overflow, SIGABRT: the exact failure its name guards) | none; it is the sole witness for the enum half of the cycle check |
+
+### Findings
+
+- **A migration was written, measured, and reverted.** Grepping for the *message text* of
+  `poly_copy_bound_error` (`src/check/poly.rs:8285`) found no test outside `phase1.rs`, so
+  `polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2` was migrated
+  into `tests/phase4_generics.rs` beside its positive twin. The mutation that was supposed
+  to prove it (both `Bound::Copy` arms at `:2199`/`:5149` collapsed to `None`) killed it —
+  **and also killed `check::poly::tests::check_x5_copy_bound_on_linear_type_names_variable_type_and_reason`**,
+  a pre-existing unit test with a byte-identical fixture. The grep missed it because its
+  three assertions (`'T`, `Spy`, `linear`) are all *looser* than the message. The new test
+  was reverted: it duplicated an existing witness on the same `check_src` path and closed
+  no hole. **Method note for later phases: grepping a diagnostic's format string does not
+  find the tests that guard it, because a test may assert substrings the format string
+  spans. Mutate, or grep the fixture shape.**
+- **`alloc_trace_stays_empty_for_a_program_that_never_allocates` is one-directional**, like
+  the REPL test it replaces: it fails if the trace prints spuriously, but survives a
+  mutation that disables the trace entirely. That direction is covered separately by
+  `tests/phase0.rs::owned_alloc_and_drop_traces_one_pair`. Recorded because the pair, not
+  either test alone, is the witness.
+- **Corpus counts after this phase.** `#[ignore]` attributes 13 → 10 (the 7 REPL notes
+  phase 6 owns, plus `phase7_slice3b_follow.rs`'s 3 non-REPL). REPL-driving test files
+  16 → 15. `tests/common/mod.rs`'s `repl_core_import` / `repl_core_lines` /
+  `REPL_CORE_ECHO` callers 4 → 3 (`phase3_strings.rs`, `phase4_combinators.rs`,
+  `phase4_slice10c_tail_splice.rs`), exactly phase 6's stated set.
+- Lib tests unchanged at 1691; `src/` untouched.
+
+### Carried forward
+
+- **Six doc comments now point at a deleted file.** `tests/phase3_locals.rs:12`,
+  `phase3_refs.rs:90`, `phase3_resources.rs:11`, `phase3_strings.rs:16`,
+  `phase4_generics.rs:14` and `phase4_slice10c_tail_splice.rs:111` each document their
+  local `run_session` spawn helper as "mirroring `tests/phase1.rs`'s harness". Five of the
+  six helpers are on phase 6's deletion list, so the dangling text dies with them.
+  **`tests/phase3_refs.rs:91`'s `run_session` is not on that list** — the same omission
+  phase 4 recorded for `tests/phase7_slice3v.rs:316`, and for the same reason: the file's
+  named test (`times_def_hand_copy_is_pinned_to_the_library`) *is* listed but its helper is
+  not. Phase 6 should delete both helpers with their last callers.
+  `tests/phase3_resources.rs:4` also names `tests/phase1.rs` in a module-level provenance
+  comment; it goes with that file's REPL surface in phase 6.
+- **Three roadmap/doc files still name `tests/phase1.rs`** and are phase 10's, not this
+  phase's: `docs/roadmap/P3-linear-spine.md:259` (a migration note listing test files),
+  `docs/roadmap/operator-words-spec.md:33` (`tests/phase1.rs:333`, a line reference that is
+  now doubly stale), and `docs/repl-ux-spec.md` (`:8`, `:63`, `:75`), which R8 puts out of
+  scope as a historical implementation spec.
+- **`docs/roadmap/P1-repl-and-liveness.md`'s opening paragraph is unswept and is not on any
+  phase's list.** It still states the removed design as current: "The REPL runs on the
+  **backend** via `dlopen`: each new word is compiled to a shared object and loaded into
+  the live session … redefinition loads a new object and swaps the name→symbol entry."
+  This phase's scope is the file's two criterion lines (`:12-13`, `:14-15`), both updated.
+  R8's stated-design sweep enumerates CLAUDE.md, DESIGN.md, ROADMAP.md,
+  `P7-language-prereqs.md`, `docs/design/`, `P8` and `P12`, and this paragraph is the
+  source of CLAUDE.md's load-bearing-invariant wording, so **phase 10 should sweep it in**
+  rather than leave the invariant asserted in the phase file it came from.
+- Full gate green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test
+  --no-fail-fast` (66 binaries, 0 failures).
