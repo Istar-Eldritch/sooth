@@ -1523,7 +1523,7 @@ fn repl_error(input: &str) -> String {
 // `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
     ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n";
-const FILTER_DEF: &str = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- array['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
+const FILTER_DEF: &str = ": filter inline ['T: Copy] ( array['T 'N] [ 'T -- Bool ] -- array['T 'N] usize ) | p | len >i64 | n | | arr | 0 n ~[ | i | &arr i >usize &> @ dup p call ~[ | v | &!arr over >usize &!> v ! 1 add ] ~[ drop ] if ] times | wf | arr wf >usize ;\n";
 
 // A REPL expr line's residual stack is what the in-process driver writes to the
 // capture buffer; the runtime `.` word prints to the real process stdout, which
