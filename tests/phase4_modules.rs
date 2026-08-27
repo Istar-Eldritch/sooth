@@ -245,10 +245,10 @@ fn imported_type_resolves_in_signature_and_typedef_position() {
 
 #[test]
 fn selective_type_import_aliases_one_struct_id() {
-    // Migrated from the retired REPL suite (P7.S9): a value constructed via
-    // the unqualified spelling and one via the qualified spelling are the
-    // same type -- one `StructId` behind both aliases, not two incompatible
-    // ones.
+    // Migrated from the retired REPL suite (P7.S9): a word can mix the
+    // unqualified and qualified spellings in one stack effect (`T` in,
+    // `q::T` out) and still type-check -- selective import binds both names
+    // to the same StructId.
     let c = Closure::new("selective-type-alias");
     c.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
     let entry = c.write(

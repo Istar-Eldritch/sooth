@@ -301,3 +301,51 @@ unsigned integer). So after phase 8:
 
 Phase 8 or 10 should decide whether those arms become `unreachable!` or stay as defensive
 width dispatch; this phase does not pre-empt it.
+
+## Phase 4 (R4 part a) — retire the two whole-file non-Phase-1 REPL suites
+
+`tests/repl_ux.rs` (16 tests) deleted in full: its subject is interactive UX (prompt,
+banner, `:words`, line editing), which has no non-REPL counterpart. `tests/phase4_repl_imports.rs`
+(23 tests, Phase 4 slice 5b's exit-criterion set) also deleted in full, after confirming
+each *module-system* fact it pinned has a `sooth run`/`build` twin. Four had none and were
+migrated into `tests/phase4_modules.rs`: `imported_third_file_stays_closed_behind_a_reexporting_module`,
+`nested_struct_ids_remap_when_a_local_type_declares_first`,
+`imported_type_resolves_in_signature_and_typedef_position`, and
+`selective_type_import_aliases_one_struct_id`. The remaining ~17 were spot-checked against
+the live retired suite and are already covered natively (qualified word resolution, export
+list enforcement, transitive closure basics, struct-id aliasing under other spellings).
+The retired 5b exit criterion at `docs/roadmap/P4-polymorphism-quotations.md:295` was
+updated in place with a one-line reason and a pointer at its native replacement, rather than
+removed.
+
+- **A committed mutation regressed `struct_base` and was caught, then wrongly accepted as a
+  fix.** A later commit on this branch (`9b24f99`, titled as a refactor) changed
+  `struct_base.push(structs.len())` to `push(0)` in `assemble_module`
+  (`src/driver.rs:518`), claiming it "syncs behavior with enum_base". `enum_base` pushes
+  `enums.len()`, so the claim was false; `struct_base[m]` is module `m`'s offset into the
+  merged struct registry, consumed at `src/driver.rs:759` to write parsed fields back into
+  the right slots. The zero-base mutation makes every module write into module 0's slots.
+  `nested_struct_ids_remap_when_a_local_type_declares_first`, one of the four tests migrated
+  above, killed this mutation on contact (`recursive struct definition (infinite size)`,
+  and a field-value mismatch in the sibling struct-collision test). The commit reworded the
+  test's comment to match the broken behaviour instead of reverting the code. Reverted here
+  (`e948ea0`); this phase's own migrated tests are the mutation proof for the fix, not new
+  coverage written after the fact.
+- **`nested_struct_ids_remap_when_a_local_type_declares_first` and
+  `selective_type_import_aliases_one_struct_id` are each their own mutation witness** by
+  construction (multi-module struct field readback; a mixed unqualified/qualified stack
+  effect), independent of the harness bug above.
+- **One fact from the retired suite has no native twin and is not fixed by this phase.**
+  `repl_double_colon_in_declared_name_is_located_rejection` guarded a REPL-only rule: a
+  declared name containing `::` is a located rejection, closing off the internal module-tag
+  separator's forgeability. On the native build path, both `type: q::T x i64 ;` and
+  `: q::foo ( -- ) ;` build clean, and with an actual import present a local `q::foo`
+  silently shadows the imported one rather than erroring. Recording this as a gap for
+  whichever future phase owns name-resolution/declaration validation on the native path;
+  implementing the rejection is out of this retirement phase's scope.
+- Retirement-note pointer fixed: the "rejected imported `main`" fact this note claimed was
+  covered by `tests/phase4_modules.rs` actually lives in `src/driver.rs`'s own test module
+  (`check_no_main_in_closure_rejects_imported_module_main:1240`,
+  `build_rejects_imported_module_declaring_main:1269`); the note now points there.
+- Full gate green after the revert: `cargo fmt --check`, `cargo clippy -- -D warnings`,
+  `cargo test --no-fail-fast` (0 failures, all binaries).
