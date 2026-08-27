@@ -11,9 +11,8 @@
 //! silent otherwise: the whole failure mode this slice guards is a `drop` that
 //! discharges the obligation and frees nothing.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
@@ -311,106 +310,10 @@ fn an_owning_cell_payload_of_a_plain_quotation_is_still_rejected() {
     );
 }
 
-// -- R8: the REPL override-epoch obligation, and why it cannot be exercised ---
-
-/// A scripted REPL session, `tests/repl_ux.rs`'s harness: the failure this pair
-/// is about is a link error the in-process helpers never see.
-fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    stdin
-        .write_all((lines.join("\n") + "\n").as_bytes())
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let out = child.wait_with_output().expect("repl should exit cleanly");
-    assert!(out.status.success(), "repl exited with {:?}", out.status);
-    String::from_utf8(out.stdout).expect("stdout should be utf8")
-}
-
-/// R8 wanted `explicit_repl_override_epoch_disposal`: a session holding a user
-/// `drop` override, then a later line building an owning closure over a
-/// *different* linear struct, stored in a field and dropped, so the disposer's
-/// `emit_drop` has to name the capture's destructor at the session-wide
-/// override epoch. That golden cannot be written, and this pins why.
-///
-/// A disposer exists only for a *materialized* closure, and no session line can
-/// link one: the code pointer is a non-PIC relocation into the line's own
-/// shared object, so the session dies in `ld` before anything runs. Storing the
-/// closure in the field is precisely what forces that materialization, so the
-/// shape R8 asked for is the shape that cannot link. The epoch obligation is
-/// therefore unreachable rather than untested: no session can reach the
-/// disposer's `emit_drop` call at all.
-///
-/// The closure is built and stored on one line, rather than returned from a
-/// session-defined factory word: a `: mk ( Wrap -- owning [ -- ] )` definition
-/// line materializes on its *own* account and dies before `Box` is ever
-/// reached, which is P7.S3h behaviour and would make this a duplicate of the
-/// control below. Written this way it discriminates: revert R6's struct-field
-/// carve-out (`src/check/audits.rs`) and `Box` is refused outright, so the
-/// admission assertion fails and the line never reaches the linker.
-///
-/// Asserted as the blocked state, not skipped, so it is a tripwire: the day the
-/// session-module PIC problem is fixed this fails, and R8's real golden is the
-/// session below with `"drop 7"` asserted in place of the link failure. The
-/// four assertions are the whole claim -- the container is admitted, a disposer
-/// really is minted for the construction site, the disposal still never happens
-/// because the blocker is the linker rather than any checker gate this slice
-/// controls, and the session survives it.
-#[test]
-fn explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit() {
-    let out = run_session(&[
-        "type: Res n i64 ;",
-        ": drop ( Res -- ) | r | \"drop \" . r Res> . ;",
-        "type: Wrap r Res ;",
-        "type: Box q owning [ -- ] ;",
-        "7 Res Wrap | w | [ w drop ] Box drop",
-        "1 2 add .",
-    ]);
-    assert!(
-        out.contains("defined type Box"),
-        "R6 admits the owning field at the REPL too, so the session gets past the audit: {out}"
-    );
-    assert!(
-        out.contains("__quot0__dispose"),
-        "the construction site really does mint a disposer -- the symbol the link step \
-         cannot place is R2's, so this session fails one step past the disposer, not \
-         before it (the text is `ld`'s relocation warning): {out}"
-    );
-    assert!(
-        !out.contains("drop 7"),
-        "the capture is never disposed, because the closure is never built: {out}"
-    );
-    assert!(
-        out.contains("\"cc\" failed"),
-        "the blocker is the link step, not a diagnostic -- if this session now links, \
-         promote it to R8's real golden and assert `drop 7` instead: {out}"
-    );
-    assert!(
-        out.ends_with("3\nstack: (empty)\n"),
-        "a refused line leaves the session usable: {out}"
-    );
-}
-
-/// The control that keeps the test above from being read as this slice's
-/// regression: the same link failure, with no `owning`, no disposer and no
-/// third-word write involved -- a plain quotation value in a session line dies
-/// identically. P7.S3h's roadmap entry already names this as a standing hazard;
-/// this pins it beside the blocked golden so the two are diagnosed together.
-#[test]
-fn a_plain_quotation_value_hits_the_same_repl_link_limit() {
-    let out = run_session(&["type: H f [ i64 -- i64 ] ;", "[ 1 add ] H", "1 2 add ."]);
-    assert!(
-        out.contains("\"cc\" failed"),
-        "a plain quotation value is unlinkable in a session too: {out}"
-    );
-    assert!(
-        out.ends_with("3\nstack: (empty)\n"),
-        "a refused line leaves the session usable: {out}"
-    );
-}
+// R8's REPL override-epoch pair (`explicit_repl_override_epoch_disposal_is_
+// blocked_by_the_repl_link_limit` and its control,
+// `a_plain_quotation_value_hits_the_same_repl_link_limit`) retired with the
+// REPL: both pinned a session's non-PIC-relocation link failure -- a fact
+// about `repl.rs`'s per-line `.so` linking, not about this slice's own
+// disposal mechanism, which the rest of this file already proves end to end
+// under `build`.

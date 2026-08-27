@@ -2,36 +2,11 @@
 //! ABI (R10, R11): a user word may declare two or more outputs, and calling one
 //! now works instead of panicking the compiler.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sooth::{check, lexer, test_support};
 
 mod common;
-
-/// Run a scripted REPL session (one input line per element) against the built
-/// `sooth repl` binary and return the whole transcript (stdout + stderr), so a
-/// line-boundary diagnostic (R19) is observable. Mirrors `tests/phase1.rs`.
-fn repl_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let script = lines.join("\n") + "\n";
-    child
-        .stdin
-        .take()
-        .expect("stdin should be piped")
-        .write_all(script.as_bytes())
-        .expect("writing stdin should succeed");
-    let output = child.wait_with_output().expect("repl should exit");
-    let mut transcript = String::from_utf8(output.stdout).expect("stdout should be utf8");
-    transcript.push_str(&String::from_utf8(output.stderr).expect("stderr should be utf8"));
-    transcript
-}
 
 /// Phase 4 Slice 4, phase 2b/3: the sanctioned diagnostic helper (declared in
 /// the spec's *Sanctioned edits*), copied from `tests/phase3_locals.rs`. This
@@ -887,18 +862,6 @@ fn times_body_constructing_a_quotation_into_the_row_is_error() {
         err.contains("leaves a quotation and the other does not")
             && err.contains("a quotation cannot be a runtime value"),
         "blocker 2 should reject the body-output row quotation, got: {err}"
-    );
-}
-
-#[test]
-fn quotation_left_on_repl_line_is_error() {
-    // R19: a REPL line has no declared outputs, so R10's route never runs; the
-    // `quot` side channel dies at the boundary while lowering has already pushed
-    // a phantom the residual spill would marshal. Reject at the line boundary.
-    let transcript = repl_session(&["1 [ add ]"]);
-    assert!(
-        transcript.contains("a quotation cannot be left on the stack at the end of a line"),
-        "R19 should reject the residual quotation, got: {transcript}"
     );
 }
 

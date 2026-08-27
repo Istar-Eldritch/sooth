@@ -4,39 +4,10 @@
 //! change from this work's base commit, so a new golden belongs somewhere the
 //! addition-only check has nothing to reason about.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use sooth::ir::{lower, Instr};
 use sooth::{check, lexer, test_support};
 
 mod common;
-
-/// Run a scripted REPL session (one input line per element of `lines`) and
-/// return the whole captured stdout, mirroring `tests/phase1.rs`'s harness.
-fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    let script = lines.join("\n") + "\n";
-    stdin
-        .write_all(script.as_bytes())
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let output = child.wait_with_output().expect("repl should exit cleanly");
-    assert!(
-        output.status.success(),
-        "repl exited with {:?}; stderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("stdout should be utf8")
-}
 
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
@@ -116,102 +87,6 @@ fn foreign_call_writes_through_a_mutable_reference_native() {
     let (stdout, code) = run_src("memset-write", src);
     assert_eq!(code, 0, "golden should exit 0");
     assert_eq!(stdout, "65\n");
-}
-
-#[test]
-fn str_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
-    // A carried `str`'s `IrType` used to be discarded at the REPL line
-    // boundary, so `.` on a carried `str` printed a raw decimal pointer
-    // instead of the content.
-    let out = run_session(&["\"hi\"", "."]);
-    // "hi" and "stack:" run together: `.` on a str appends no newline today; R9 records this as pending resolution.
-    assert_eq!(out, "stack: <str>\nhistack: (empty)\n");
-}
-
-#[test]
-fn str_carried_across_a_repl_line_then_len_is_correct_not_a_panic() {
-    // The same discarded `IrType` made `len` fall into the array-`len` path
-    // and hit `unreachable!` at src/ir.rs.
-    let out = run_session(&["\"hi\"", "len"]);
-    assert_eq!(out, "stack: <str>\nstack: 2\n");
-}
-
-#[test]
-fn cstr_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
-    let out = run_session(&["\"hi\" cstr", "."]);
-    // "hi" and "stack:" run together: `.` on a cstr appends no newline, like `str` above.
-    assert_eq!(out, "stack: <cstr>\nhistack: (empty)\n");
-}
-
-#[test]
-fn str_carried_across_a_repl_line_alongside_another_slot_is_correct() {
-    // T4: a `str` slot's buffer offset must stay correct when a scalar slot
-    // sits above it on the carried stack, covering the offset arithmetic end
-    // to end rather than only through the Rust-side `format_stack` units.
-    let out = run_session(&["\"hi\"", "7", ". ."]);
-    // The first `.` pops `7` (an `i64`, which appends a newline); the second
-    // pops the `str` and prints "hi" with none, running into "stack:".
-    assert_eq!(out, "stack: <str>\nstack: <str> 7\n7\nhistack: (empty)\n");
-}
-
-#[test]
-fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
-    // The carried-slot prologue's `_` wildcard used to load every
-    // unrecognised slot, including `Bool`, as a bare `IrType::I64`, so a
-    // carried `true` printed `1` (the old backend `Bool` Print arm was
-    // unreachable from the carried path) instead of `true`. Same-line
-    // `true .` was always correct; only the carried path degraded.
-    let out = run_session(&["True", "."]);
-    assert_eq!(out, "stack: True\nTrue\nstack: (empty)\n");
-}
-
-#[test]
-fn bool_print_dispatches_to_library_overload_same_line() {
-    // Slice 9 phase 2 (R6): the primitive `bool` printable row is gone from
-    // `.`'s `BUILTIN_TABLE`; `true .`/`false .` now resolve through 8a's
-    // `builtin_overloads` dispatch to `core::bool`'s own `.` overload, which
-    // prints identically. A REPL twin of
-    // `leap_year_dogfood_compiles_and_runs`'s native coverage, proving the
-    // session's own copy (`Session::new`'s `eval_def`) resolves too, with no
-    // fall-through to the deleted builtin `Instr::Print` arm (R7).
-    let out = run_session(&["True .", "False ."]);
-    assert_eq!(out, "True\nstack: (empty)\nFalse\nstack: (empty)\n");
-}
-
-#[test]
-fn usize_carried_across_a_repl_line_renders_unsigned_not_negative() {
-    // The same wildcard degraded a carried `usize` to `I64`, so an
-    // underflowed `usize` (whose `i64` bit pattern is negative) rendered
-    // signed in the stack display instead of unsigned.
-    let out = run_session(&["\"h\" len \"hh\" len sub"]);
-    assert_eq!(out, "stack: 18446744073709551615\n");
-}
-
-#[ignore = "REPL trait/impl checking is unimplemented: `check.rs`'s two \
-    REPL check sites (`:1293`/`:1387`) hardcode `TraitResolveCtx::scratch()`, \
-    whose premise (a session declares no `trait:`, so no `Bound::User` \
-    reaches a REPL body) is false once a session imports `core::cmp`. A \
-    comparison call then indexes past the scratch trait table and ICEs at \
-    `check/poly.rs:976`. Fixing it needs a `Session`-level traits/impls \
-    accumulation table (Session has none, unlike its `structs`/`enums`) \
-    threaded through both sites: tracked as the REPL trait/impl slice."]
-#[test]
-fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
-    // The sharpest regression: a degraded carried `usize` compares signed
-    // (`lt`'s dispatch reads the value's `IrType`), which is a semantic
-    // change, not just cosmetic. The wrapped-around difference is negative
-    // as an `i64` but enormous as a `usize`, so `lt "hh" len` (2) flips
-    // between `true` (signed) and `false` (unsigned, correct); the same-line
-    // form is the reference.
-    // P8.S2 (R3): `lt` is a `core` word a session imports, not a seeded one.
-    let cmp = common::repl_core_import("cmp", "lt");
-    let same_line = run_session(&[&cmp, "\"h\" len \"hh\" len sub \"hh\" len lt ."]);
-    let carried = run_session(&[&cmp, "\"h\" len \"hh\" len sub", "\"hh\" len lt ."]);
-    assert_eq!(same_line, "imported cmp\nFalse\nstack: (empty)\n");
-    assert_eq!(
-        carried,
-        "imported cmp\nstack: 18446744073709551615\nFalse\nstack: (empty)\n"
-    );
 }
 
 #[test]

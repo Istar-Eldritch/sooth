@@ -55,35 +55,6 @@ pub fn fixture_package(name: &str) -> String {
     )
 }
 
-/// P8.S2 (R3): the REPL session line that brings the typed core into a session.
-/// A session no longer auto-seeds `if`/`lt` -- it imports them like a file does
-/// -- and it names the two declaring modules rather than the `core::prelude`
-/// hub, because the REPL's dlopen retention keeps a module's own exported
-/// *definitions* and so cannot follow a hub's re-export.
-#[allow(dead_code)]
-pub fn repl_core_import(module: &str, names: &str) -> String {
-    format!(
-        "import: \"{}/lib/{module}.sth\" {module} | {names} | ;",
-        env!("CARGO_MANIFEST_DIR")
-    )
-}
-
-/// `repl_core_import` for both modules as two ready-to-feed session lines: the
-/// whole typed core, for a golden that would rather not enumerate what it uses.
-#[allow(dead_code)]
-pub fn repl_core_lines() -> String {
-    format!(
-        "{}\n{}\n",
-        repl_core_import("cmp", "eq lt gt lte gte ne"),
-        repl_core_import("bool", "if unless")
-    )
-}
-
-/// What `repl_core_lines` itself prints, so a golden can keep pinning the exact
-/// transcript rather than loosening to `contains`.
-#[allow(dead_code)]
-pub const REPL_CORE_ECHO: &str = "imported cmp\nimported bool\n";
-
 /// P8.S2 (R7): the `import:` lines a file-based fixture needs, derived from the
 /// fixture itself and appended by the harness -- for the same reason
 /// `fixture_manifest` is one shared file rather than one per grouping: every

@@ -15,9 +15,8 @@
 //! and the grammar this syntax narrows (a word followed by a *spaced* bracket)
 //! is pinned still parsing as the quotation literal it always was.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod common;
@@ -255,48 +254,17 @@ fn an_instantiation_inside_a_polymorphic_body_is_rejected() {
     );
 }
 
-/// R10: the REPL rejects the syntax outright. A session routes through
-/// `lower_instantiation` and skips the module-level checks this slice's
-/// correctness argument rests on, so the guard fails closed instead of printing
-/// success and binding whichever specialization the session found. Both line
-/// shapes are covered, since a definition's body is walked separately from a
-/// bare expression's terms.
-#[test]
-fn explicit_instantiation_is_rejected_at_the_repl() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    stdin
-        .write_all(b"1 id[i64] .\n: w ( -- ) 1 id[i64] drop ;\n")
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let out = child.wait_with_output().expect("repl should exit cleanly");
-    let session = String::from_utf8(out.stdout).expect("stdout should be utf8");
-    let hits: Vec<&str> = session
-        .lines()
-        .filter(|l| l.contains("explicit type instantiation is not available at the REPL"))
-        .collect();
-    assert_eq!(
-        hits.len(),
-        2,
-        "both line shapes reject; session was:\n{session}"
-    );
-    assert!(hits[0].contains("(line 1, col 3)"), "{session}");
-    assert!(hits[1].contains("(line 1, col 14)"), "{session}");
-    assert!(
-        session.contains(
-            "note: `f[Point]` needs a whole-program impl registry a live session \
-             does not assemble"
-        ),
-        "{session}"
-    );
-    assert!(!session.contains("defined w"), "{session}");
-}
+// R10's `explicit_instantiation_is_rejected_at_the_repl` retired with the
+// REPL: its guard (`error: explicit type instantiation is not available at
+// the REPL`, `src/repl.rs:541`) fired only inside `repl.rs`'s own
+// `lower_instantiation` path, which never existed off the REPL -- `build`
+// always assembles the whole-program impl registry the guard's note says a
+// session cannot, so there is no non-REPL context this rule could be
+// migrated onto. `an_instantiation_inside_a_polymorphic_body_is_rejected`
+// above is the surviving member of this family: the one context where
+// `build` genuinely lacks enough information to ground an explicit
+// instantiation (a call inside a polymorphic word's own body, checked
+// symbolically) already has its own located rejection.
 
 // ---------------------------------------------------------------------------
 // Phase 2: the list seeds `Subst`.

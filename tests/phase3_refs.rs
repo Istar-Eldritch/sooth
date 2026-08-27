@@ -4,8 +4,7 @@
 //! change from this work's base commit, so a new golden belongs somewhere the
 //! addition-only check has nothing to reason about.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sooth::{check, lexer, test_support};
 
@@ -84,27 +83,6 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     test_support::parse_with_core(&tokens).expect_err("parsing should fail")
-}
-
-/// Run a scripted REPL session (one input line per element of `lines`) and
-/// return the whole captured stdout, mirroring `tests/phase1.rs`'s helper.
-fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    let script = lines.join("\n") + "\n";
-    stdin
-        .write_all(script.as_bytes())
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let output = child.wait_with_output().expect("repl should exit cleanly");
-    String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
 /// The buffer half of the slice's dogfood: `push-byte` mutates through a
@@ -537,21 +515,6 @@ fn reference_returned_from_word_is_error() {
         err.contains("a reference cannot be stored")
             && err.contains("`len-of` declares the output `&!usize`"),
         "expected the effect-output rejection: {err}"
-    );
-}
-
-#[test]
-fn reference_surviving_repl_line_is_error() {
-    // Reachable only since Slice 5 gave a REPL line locals: a line can now
-    // form a place, and the session's inter-line stack outlives it.
-    let out = run_session(&["type: V x i64 y i64 ;", "1 2 V | v | &v", "7 ."]);
-    assert!(
-        out.contains("a reference cannot be stored") && out.contains("carries into the next line"),
-        "expected the carried-stack rejection: {out}"
-    );
-    assert!(
-        out.contains("7"),
-        "the session should survive the rejected line: {out}"
     );
 }
 

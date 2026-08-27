@@ -6,8 +6,6 @@
 //! constant-producing word an embedded reader must be able to see costs no
 //! call, without trusting an optimiser to recognise it.
 
-use std::io::BufReader;
-
 use sooth::ir::{lower, Instr};
 use sooth::{check, lexer, test_support};
 
@@ -69,17 +67,6 @@ fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
-}
-
-/// Run a scripted session in-process and return the whole transcript, mirroring
-/// `tests/phase4_combinators.rs`'s 6c REPL goldens (a `.` prints to the real
-/// process stdout, which this buffer does not see, so a value witness must be
-/// left on the residual stack and the exact `stack:` line asserted).
-fn repl_transcript(input: &str) -> String {
-    let reader = BufReader::new(input.as_bytes());
-    let mut out: Vec<u8> = Vec::new();
-    sooth::repl::run(reader, &mut out).expect("the REPL loop itself should not error");
-    String::from_utf8(out).expect("REPL output should be utf8")
 }
 
 #[test]
@@ -479,41 +466,6 @@ fn transitive_inline_reference_output_is_accepted() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "12\n14\n");
     assert_eq!(code, 0);
-}
-
-#[test]
-fn repl_inline_word_is_retained_not_lowered() {
-    // R7: the REPL's retention gate was `word_declares_quotation_parameter`, so
-    // an `inline` word taking no quotation fell through to the ordinary
-    // lowering path and minted a `.so` and a symbol -- D2's forbidden
-    // fall-back, inside the REPL.
-    //
-    // The witness is freshness, the same discrimination
-    // `repl_combinator_splice_sees_current_helper` vs
-    // `repl_ordinary_caller_frozen_across_combinator_redefinition`
-    // (`tests/phase4_combinators.rs`) draws: a retained word is re-spliced at
-    // each later line and sees the *current* `helper` (105 then 205), while a
-    // lowered one is frozen into its `.so` and would leave `105 105`.
-    let transcript = repl_transcript(
-        ": helper ( i64 -- i64 ) 100 add ;\n\
-         : bump inline ( i64 -- i64 ) helper ;\n\
-         5 bump\n\
-         : helper ( i64 -- i64 ) 200 add ;\n\
-         5 bump\n:quit\n",
-    );
-    assert_eq!(
-        transcript,
-        "defined helper\ndefined bump\nstack: 105\ndefined helper\nstack: 105 205\n"
-    );
-}
-
-#[test]
-fn repl_inline_polymorphic_signature_is_accepted() {
-    // The REPL twin of the reversal above: the retention route (R7) carries a
-    // variable-bearing `inline` word into the poly-combinator check, which is
-    // now where it belongs.
-    let transcript = repl_transcript(": id inline ( 'T -- 'T ) ;\n3 id\n:quit\n");
-    assert_eq!(transcript, "defined id\nstack: 3\n");
 }
 
 // -- Phase 3 (Feature B): `lib/combinators.sth` retyped to `~[ ... ]` --------

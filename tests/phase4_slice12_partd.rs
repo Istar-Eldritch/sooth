@@ -1,14 +1,12 @@
-//! Phase 4 Slice 12, phase 3 exit criteria (part D + the OQ4 REPL boundary).
+//! Phase 4 Slice 12, phase 3 exit criteria (part D).
 //!
 //! Retiring the inference leg (part A) made an ordinary `[ ... ]` *parameter* a
 //! real call for the first time. These are the witnesses that the real-call
 //! path actually lowers: the argument reaches `Instr::Call` as the materialized
 //! `(code, env)` aggregate, not the phantom `I64` marker a spliced combinator
-//! leaves behind (X10/M-D), through two call levels (X11); and the REPL, which
-//! declines the shape rather than routing it across an untested `dlopen`
-//! boundary, says so in a located error (X12).
-
-use std::io::BufReader;
+//! leaves behind (X10/M-D), through two call levels (X11).
+//!
+//! X12, the REPL's own boundary declining this shape, retired with the REPL.
 
 use sooth::ir::{lower, Instr, IrType};
 use sooth::test_support;
@@ -38,14 +36,6 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
             .code()
             .expect("process should exit normally, not die by signal"),
     )
-}
-
-/// Run a scripted session in-process and return the whole transcript.
-fn repl_transcript(input: &str) -> String {
-    let reader = BufReader::new(input.as_bytes());
-    let mut out: Vec<u8> = Vec::new();
-    sooth::repl::run(reader, &mut out).expect("the REPL loop itself should not error");
-    String::from_utf8(out).expect("REPL output should be utf8")
 }
 
 /// X10 / M-D, the discriminating half: `main`'s call to `apply` is a real
@@ -131,59 +121,6 @@ fn quotation_through_two_call_levels_and_a_returning_callee_run() {
     assert_eq!(code, 0);
 }
 
-/// X12 (OQ4/R-D5): the REPL's retention gate is `is_combinator`, so the
-/// real-call shape is no longer silently retained and spliced there while the
-/// batch compiler calls it. It is refused with the located E4 error instead.
-#[test]
-fn repl_ordinary_quotation_parameter_word_is_a_located_error() {
-    let transcript =
-        repl_transcript(": apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;\n:quit\n");
-    assert_eq!(
-        transcript,
-        "error: word `apply` takes a `[ ... ]` quotation parameter and lowers to a real call, \
-         which is not supported in the REPL (line 1, col 3)\n"
-    );
-}
-
-/// X12's other half: moving the gate to `is_combinator` must not cost the REPL
-/// the shape it does support -- the same word, declared `inline` over a
-/// `~[ ... ]` parameter, is still retained and spliced at a later line.
-#[test]
-fn repl_still_retains_a_declared_inline_combinator() {
-    let transcript = repl_transcript(
-        ": apply inline ( ~[ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;\n\
-         ~[ 1 add ] 5 apply\n:quit\n",
-    );
-    assert_eq!(transcript, "defined apply\nstack: 6\n");
-}
-
-/// R-D5: the three import-site gates moved from `word_declares_quotation_parameter`
-/// to `is_combinator`, which widens what they skip -- an `inline` word with *no*
-/// quotation parameter at all (`bump` below) is `is_combinator` but not
-/// `word_declares_quotation_parameter`. Under the old predicate it would fall
-/// through the ordinary-word-binding loop and be bound into `self.env` expecting
-/// a `bump__import0` symbol that an inline word never mints, so calling it would
-/// die in `dlopen` with an undefined-symbol error instead of splicing. Import a
-/// library exporting exactly this shape and call it: it must run, not link-fail.
-#[test]
-fn repl_import_gate_retains_an_inline_non_quotation_word() {
-    let lib_path = std::env::temp_dir().join(format!(
-        "sooth-slice12-partd-importgate-{}.sth",
-        std::process::id()
-    ));
-    common::write_fixture(
-        &lib_path,
-        "export: bump ;\n: bump inline ( i64 -- i64 ) 1 add ;\n",
-    )
-    .expect("writing temp library should succeed");
-    let transcript = repl_transcript(&format!(
-        "import: \"{}\" c ;\n5 c::bump\n:quit\n",
-        lib_path.display()
-    ));
-    std::fs::remove_file(&lib_path).ok();
-    assert_eq!(transcript, "imported c\nstack: 6\n");
-}
-
 /// R-D3 at the *back edge*: a self tail call is not the ordinary dispatch, it
 /// pushes its arguments onto `back_edges` and `finalize_loop` blits each
 /// aggregate one into the header's stable slot. A quotation parameter carried
@@ -232,35 +169,4 @@ fn tail_recursive_quotation_argument_is_materialized_at_the_back_edge() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
-}
-
-/// X12/R-D5's import half: `eval_def` refuses the ordinary-`[ ... ]`-parameter
-/// shape, and `eval_import` has to refuse it too. Binding an imported one into
-/// `self.env` leaves the later call site building its quotation argument in the
-/// session's own translation unit, where the `__quot0` code pointer is a
-/// non-PIC relocation: the line dies in `ld` ("relocation R_X86_64_PC32 against
-/// symbol `__quot0`") rather than at the boundary. The error names the library
-/// file, since the span is not in the session's own text.
-#[test]
-fn repl_importing_an_ordinary_quotation_parameter_word_is_a_located_error() {
-    let lib_path = std::env::temp_dir().join(format!(
-        "sooth-slice12-partd-importapply-{}.sth",
-        std::process::id()
-    ));
-    common::write_fixture(&lib_path, &format!("export: apply ;\n{APPLY}"))
-        .expect("writing temp library should succeed");
-    let transcript = repl_transcript(&format!(
-        "import: \"{}\" a ;\n[ 1 add ] 5 a::apply\n:quit\n",
-        lib_path.display()
-    ));
-    std::fs::remove_file(&lib_path).ok();
-    assert_eq!(
-        transcript,
-        format!(
-            "error: word `apply` takes a `[ ... ]` quotation parameter and lowers to a real call, \
-             which is not supported in the REPL ({}, line 2, col 3)\n\
-             error: unknown word `a::apply`\n",
-            lib_path.display()
-        )
-    );
 }

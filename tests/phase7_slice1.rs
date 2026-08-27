@@ -5,9 +5,8 @@
 //! Phase 1 introduces `&f` alongside the fused `Type>f` spelling; the fused one
 //! goes in phase 5, so nothing here asserts its absence.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod common;
@@ -42,30 +41,6 @@ fn run_program(tag: &str, src: &str) -> String {
     let entry = dir.join("main.sth");
     common::write_fixture(&entry, src).expect("writing the entry should succeed");
     build_and_run(&entry)
-}
-
-/// Run a scripted REPL session and return the whole captured stdout.
-fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    stdin
-        .write_all((lines.join("\n") + "\n").as_bytes())
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let output = child.wait_with_output().expect("repl should exit cleanly");
-    assert!(
-        output.status.success(),
-        "repl exited with {:?}; stderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("stdout should be utf8")
 }
 
 /// D2/R6: reading and writing fields through projections, on both receiver
@@ -135,26 +110,30 @@ fn projection_resolves_per_instantiation() {
     assert_eq!(out, "11\n22\n");
 }
 
-/// R5: the resolved-field table has to reach the REPL's own lowering paths --
-/// both the bare-line one and the word-definition one -- or a projection there
-/// misdispatches silently. Features wired only into the module path have been
-/// unenforced at the REPL before.
+/// R5: the resolved-field table has to reach every lowering path a projection
+/// can be written in -- not only a top-level word body. Migrated off the
+/// REPL's now-dead bare-line/word-definition split: `getx`/`bump` are
+/// ordinary word definitions, and the bare-line reads/writes become `main`'s
+/// own body, so the single remaining path (whole-program `build`) still
+/// covers both a defined word's projection and an inline one.
 #[test]
-fn repl_session_projects_struct_fields() {
-    let out = run_session(&[
-        "type: Point x i64 y i64 ;",
-        ": getx ( &Point -- i64 ) &x @ ;",
-        ": bump ( &!Point -- ) &!x 1 +! ;",
-        "1 2 Point &y @ .",
-        "&!y 9 !",
-        "&y @ .",
-        "| p | &p getx . &!p bump &p getx . p drop",
-    ]);
-    let printed: Vec<&str> = out
-        .lines()
-        .filter(|l| !l.starts_with("defined") && !l.starts_with("stack:"))
-        .collect();
-    assert_eq!(printed, vec!["2", "9", "1", "2"], "session output: {out}");
+fn projections_reach_every_lowering_path() {
+    let out = run_program(
+        "every-lowering-path",
+        "type: Point x i64 y i64 ;\n\
+         : getx ( &Point -- i64 ) &x @ ;\n\
+         : bump ( &!Point -- ) &!x 1 +! ;\n\
+         : main ( -- )\n  \
+           1 2 Point | p |\n  \
+           &p &y @ .\n  \
+           &!p &!y 9 !\n  \
+           &p &y @ .\n  \
+           &p getx .\n  \
+           &!p bump\n  \
+           &p getx .\n  \
+           p drop ;\n",
+    );
+    assert_eq!(out, "2\n9\n1\n2\n");
 }
 
 /// Review fix: the owned-receiver arm's output has a region (`Slot.alias`)

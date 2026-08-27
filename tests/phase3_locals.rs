@@ -1,39 +1,9 @@
 //! Phase 3 Slice 5 goldens: `| names |` is a term, legal at any point in a
 //! body, with its extent running to the end of the enclosing block.
 
-use std::io::Write;
-use std::process::{Command, Stdio};
-
 use sooth::{check, lexer, test_support};
 
 mod common;
-
-/// Run a scripted REPL session (one input line per element of `lines`) and
-/// return the whole captured stdout, mirroring `tests/phase1.rs`'s helper.
-fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("repl")
-        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("repl should spawn");
-    let mut stdin = child.stdin.take().expect("stdin should be piped");
-    let script = lines.join("\n") + "\n";
-    stdin
-        .write_all(script.as_bytes())
-        .expect("writing stdin should succeed");
-    drop(stdin);
-    let output = child.wait_with_output().expect("repl should exit cleanly");
-    assert!(
-        output.status.success(),
-        "repl exited with {:?}; stderr: {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("stdout should be utf8")
-}
 
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
@@ -259,71 +229,6 @@ fn mid_body_binding_in_eliminator_arm_binds() {
     );
     assert_eq!(stdout, "4\n12\n");
     assert_eq!(code, 0);
-}
-
-#[test]
-fn repl_line_binds_a_local() {
-    // Criterion 17: a REPL line binds a local and uses it within the line.
-    let out = run_session(&["5 | a | a a mul ."]);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["25", "stack: (empty)"]);
-}
-
-#[test]
-fn repl_line_binding_reaches_earlier_line_values() {
-    // Criterion 18 (R7/D6): the frame floor at a REPL line is the session
-    // stack depth, so a binding may consume values an earlier line left.
-    let out = run_session(&["1 2 3", "| a b | a b add ."]);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["stack: 1 2 3", "5", "stack: 1"]);
-}
-
-#[test]
-fn repl_line_binding_more_than_the_session_stack_holds_is_error() {
-    // R5: the REPL frame floor is the session stack depth, not a declared
-    // input list, so binding more than that depth holds is the same located
-    // underflow shape as anywhere else, naming the REPL's stack rather than a
-    // word's declared effect.
-    let out = run_session(&["| a b |"]);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 1, "unexpected output:\n{out}");
-    assert!(
-        lines[0].contains("stack underflow: needs 2 values, but the stack holds 0"),
-        "unexpected message: {}",
-        lines[0]
-    );
-}
-
-#[test]
-fn failed_repl_line_after_binding_leaves_stack_intact() {
-    // Criterion 19: existing REPL transactionality (a failing line never
-    // commits) still holds once the line binds a name before failing.
-    let out = run_session(&["1 2 3", "| a b | a b add unknown-word", "1 2 3"]);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "unexpected output:\n{out}");
-    assert_eq!(lines[0], "stack: 1 2 3");
-    assert!(
-        lines[1].contains("unknown word") && lines[1].contains("unknown-word"),
-        "unexpected message: {}",
-        lines[1]
-    );
-    assert_eq!(lines[2], "stack: 1 2 3 1 2 3");
-}
-
-#[test]
-fn repl_line_locals_do_not_survive_to_next_line() {
-    // Criterion 20 (D7): a line's locals are scoped to the line; the next
-    // line sees no such name, only the session stack it left behind.
-    let out = run_session(&["1 2 3", "| a b |", "a"]);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 3, "unexpected output:\n{out}");
-    assert_eq!(lines[0], "stack: 1 2 3");
-    assert_eq!(lines[1], "stack: 1");
-    assert!(
-        lines[2].contains("unknown word") && lines[2].contains("`a`"),
-        "unexpected message: {}",
-        lines[2]
-    );
 }
 
 #[test]

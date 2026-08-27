@@ -672,3 +672,103 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   rather than leave the invariant asserted in the phase file it came from.
 - Full gate green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test
   --no-fail-fast` (66 binaries, 0 failures).
+
+## Phase 6 (R4 part c) — the remaining 14 single-surface test files, then the `#[ignore]` sweep
+
+- **The spec's own "small REPL surface" framing does not hold for two of the fourteen
+  files, and the per-file named-test lists in the phase focus text are not exhaustive
+  inventories of each file's REPL tests.** `tests/phase4_combinators.rs` alone carried
+  **20** `repl_error`-driving tests (re-grepped: `grep -c 'fn repl_' tests/phase4_combinators.rs`
+  at phase start), not the seven the focus text names — the seven are exactly the
+  `#[ignore]`-sweep set, not the file's whole REPL surface. `tests/phase7_slice3i.rs`
+  carried **6** REPL tests under "R2: the REPL seeds `core::bool` itself", none of them the
+  one test the focus text names for that file (`not_on_a_three_variant_enum_named_bool_is_
+  an_error`, which is a plain `check_error`/`build_error` test with no REPL in it at all).
+  Re-grepping `fn repl_|repl_error\(|repl_session\(|run_session\(|repl::run\(` per file,
+  not trusting the focus text's per-file lists, is what surfaced both.
+- **Classification rule applied throughout: a REPL test whose subject is session
+  redefinition, generation/epoch freezing, cross-line splice hygiene, or the bare-line
+  boundary itself is retired-mechanism by construction** — the same rule phase 5 applied to
+  `tests/phase1.rs`. This covers the bulk of the corpus: all 20 of
+  `tests/phase4_combinators.rs`'s `repl_*` tests (define-then-call-on-a-later-line,
+  redefinition freezing, combinator/ordinary-word store eviction, cross-line cycle
+  detection, import hygiene), all 8 of `tests/phase3_resources.rs`'s (destructor
+  generation/epoch behaviour across session lines), all 6 of `tests/phase7_slice3i.rs`'s
+  (session-only `core::bool` seeding with no package import), both of
+  `tests/phase4_slice11_inline.rs`'s and all 4 of `tests/phase4_slice12_partd.rs`'s (the
+  REPL's own splice-vs-lower retention gate, distinguished only by session redefinition
+  freshness), both of `tests/phase7_slice3v.rs`'s (a session's non-PIC `.so` link limit),
+  6 of `tests/phase3_strings.rs`'s 7 REPL tests (carried-slot marshalling across a REPL
+  line boundary — already migrated to `ir::lower` fixtures at the unit level in phase 3),
+  5 of `tests/phase3_locals.rs`'s (REPL-line binding/frame-floor/transactionality facts),
+  and one each in `tests/phase3_refs.rs` (a reference surviving a REPL line boundary) and
+  `tests/phase4_generics.rs` (a quotation left on a REPL line, R19 — the REPL's "no
+  declared outputs" boundary has no `build` analogue since every word declares an effect).
+- **One test was retired as covered, not as mechanism-retired**:
+  `tests/phase3_strings.rs::bool_print_dispatches_to_library_overload_same_line`'s own
+  comment names its covering native test, `tests/phase0.rs::leap_year_dogfood_compiles_
+  and_runs` (verified present); deleted rather than migrated since the fact it pins (`.`
+  on `True`/`False` resolves through the library overload) is exercised there already.
+- **Two tests were embedded inside otherwise-surviving non-REPL test functions, not whole
+  functions**, and needed surgical excision rather than whole-function deletion:
+  `tests/phase4_combinators.rs::quotation_type_is_rejected_at_every_audited_position`'s
+  `repl_rows`/`item1_rows` loops (the REPL's own `check_types`-only chokepoint and its
+  session-bricking-registry-rollback regression) and
+  `::stale_phase6_diagnostics_are_reworded`'s trailing REPL assertion (R19's residual-line
+  rejection). Both retired as REPL-only in the same functions whose non-REPL `rows`/
+  `checked_rows` loops survive unchanged.
+- **`tests/phase7_slice3v.rs::an_owning_cell_payload_of_a_plain_quotation_is_still_
+  rejected`, named in the focus text, is a plain `build_error` test with no REPL content**;
+  the file's actual two REPL tests
+  (`explicit_repl_override_epoch_disposal_is_blocked_by_the_repl_link_limit` and its
+  control `a_plain_quotation_value_hits_the_same_repl_link_limit`) were unnamed in the
+  focus text. Same pattern as `phase7_slice3g.rs`'s and `phase7_slice3i.rs`'s named tests
+  (`self_call_concrete_operand_mismatch_is_located_type_error`,
+  `not_on_a_three_variant_enum_named_bool_is_an_error`): not every name the focus text
+  lists is itself REPL-driving, and not every REPL test in a file is named.
+- **One migration, `tests/phase7_slice1.rs::repl_session_projects_struct_fields` →
+  `projections_reach_every_lowering_path`**: rewritten over `run_program` as an ordinary
+  program binding a local and projecting through it, keeping the same read/write/getx/bump
+  sequence and asserted output (`2\n9\n1\n2\n`). Mutation-proved: forcing
+  `check_field_projection`'s field lookup (`src/check/word_families.rs`) to always resolve
+  index 0 regardless of name breaks this test (and its three siblings in the same file),
+  confirmed, then reverted; `git diff --stat -- src/` empty before commit.
+- **One finding: `tests/phase7_slice3t.rs::explicit_instantiation_is_rejected_at_the_repl`
+  cannot be migrated, contrary to its focus-text instruction.** Its guard
+  (`error: explicit type instantiation is not available at the REPL`) lives only at
+  `src/repl.rs:541`, inside `repl.rs`'s own `lower_instantiation` path; `grep -rn
+  '"explicit type instantiation is not available'` confirms no second site. Its own doc
+  comment's premise — "a session routes through `lower_instantiation` and skips the
+  module-level checks this slice's correctness argument rests on" — names exactly why
+  there is nothing to migrate it onto: `build` always assembles the whole-program impl
+  registry the REPL cannot, so no non-REPL context reproduces the REPL's information
+  deficit. The nearby `an_instantiation_inside_a_polymorphic_body_is_rejected` already
+  covers the one context where `build` genuinely lacks enough information (a call checked
+  symbolically inside a polymorphic word's own body, no `Subst` yet seeded) — recorded as
+  the surviving member of the family in place of the unmigratable test.
+- **`#[ignore]` sweep, re-grepped with `grep -rnE '^[[:space:]]*#\[ignore' tests/` (attribute
+  lines only) after every deletion above: exactly `tests/phase7_slice3b_follow.rs`'s 3
+  non-REPL notes (`:84`, `:736`, `:768`) remain.** The seven REPL notes named in the focus
+  text (`tests/phase4_combinators.rs` ×5, `tests/phase3_strings.rs` ×1,
+  `tests/phase4_slice10c_tail_splice.rs` ×1) all fell out of the retired-mechanism/covered
+  classifications above with no separate sweep step needed — each of those seven tests was
+  independently retired for its own reason (session redefinition, covered-by-native, or
+  carried-slot marshalling respectively), which is the coincidence the focus text predicted
+  ("the sweep adds no test beyond it").
+- **`tests/common/mod.rs`'s `repl_core_import`/`repl_core_lines`/`REPL_CORE_ECHO`
+  deleted**: their three remaining callers (phase 5's carried-forward count) all fell with
+  this phase's deletions in `tests/phase3_strings.rs`, `tests/phase4_combinators.rs` and
+  `tests/phase4_slice10c_tail_splice.rs`; re-grepped callerless before deleting.
+- Exit witness: `grep -rn 'arg("repl")\|repl::run\|repl_core' tests/` empty.
+  `grep -rnE '^[[:space:]]*#\[ignore' tests/` shows only the three non-REPL notes above.
+  Full gate green: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test
+  --no-fail-fast` (0 failures). `cargo clippy --all-targets -- -D warnings` is red at HEAD
+  (3 pre-existing errors, confirmed via `git stash`) and is not this phase's gate.
+
+### Carried forward
+
+- Phase 8's precondition re-grep (`parse_line\|ast::Line\|Line::Expr\|line_terms\|
+  lower_line` in `src/`) is unaffected by this phase: nothing here touched `src/`.
+- The REPL still exists at the end of this phase (phase 7 deletes it). Every test file
+  this phase touched still compiles and links against the live `sooth repl` binary having
+  had only its REPL-driving tests and helpers removed.
