@@ -605,18 +605,17 @@ dispatch inside materialized quotations rather than prefixing the resolution key
 settled as sound (the motivating program's `~[ ]` arms are spliced, never materialized). The
 transitive skip is cheap (a `Provenance` flag) but the hard part is injecting
 `poly_trait_member_call` into `check_terms_relaxed` (the splice path has zero bound-dispatch
-calls today). **P7.S3s supplies the motivating program and the oracle**: a bounded `inline`
-comparison over a library `Ord`, shipped non-inline so this slice inherits a differential
-oracle -- flip `inline` on the same source and diff the resolved `impl:` symbols at two and
-three splices. The harness skeleton is already in tree (`tests/phase7_slice3s_oracle.rs`):
-it builds `examples/poly_if.sth` twice and diffs stdout plus, per `mymax*` entry point, the
-dispatch targets its own call graph reaches (the `impl: Ord` body, and the monomorphized
-comparison on the way to it), against itself for now since there is no second variant to diff
-against until this slice flips `mymax`/`mymax3` back to `inline`. Besides that flip, the oracle
-side needs one more thing: `examples/poly_if.sth`'s `main` calls `mymax3` only, so `mymax`
-mints no monomorph and the harness never sees it. A source calling both words is what makes the
-"at two splices, at three" diff exist at all, and `tests/corpus_stdout/poly_if.txt` must stay
-byte-identical, so it belongs in a new fixture rather than in the example.
+calls today). **P7.S3s supplied the motivating program**: a bounded `inline` comparison over a library
+`Ord`. The library's six comparisons are now `inline` (P7.S8), so the dispatch-target-diffing
+oracle this slice originally planned to build no longer has a non-inline baseline to diff
+against -- P7.S8's own oracle work found that comparison permanently unsatisfiable once the
+library inlines and dropped it, keeping a stdout-identity check with `gt`/`lt` swap controls
+on both sides instead (`tests/phase7_slice3s_oracle.rs`). This slice's own oracle strategy
+needs re-deriving against a real second variant now that `mymax`/`mymax3` are the only
+remaining non-inline comparison-adjacent surface; `examples/poly_if.sth`'s `main` calling
+both `mymax` and `mymax3` (currently only `mymax3` is called, so `mymax` mints no monomorph)
+is still a prerequisite, and still belongs in a new fixture, since `tests/corpus_stdout/
+poly_if.txt` must stay byte-identical.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`
@@ -721,10 +720,9 @@ the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Or
 still behaves identically.
 
 **P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ planned ]`
-S3s shipped `cmp` and the six surface comparisons non-inline as a named, deliberate tradeoff
-("a measured ~2x tax… accepted for this slice"), with S3o as its own named follow-on to undo
-it. S3o has since landed: bound dispatch reaches a spliced/materialized body, so an `inline`
-trait member is mechanically live. What is missing is the declaration surface. A trait member
+`cmp` and the six surface comparisons are `inline` (P7.S8); bound dispatch reaches a
+spliced/materialized body, so an `inline` trait member is mechanically live for the library's
+own trait. What is missing is the declaration surface for a *user*-written trait. A trait member
 today is a bare `name ( sig )` inside `trait: Name 'T ... ;`, with no slot for the `inline`
 keyword `parse_worddef` already recognizes between a word's name and its `(` -- and no slot
 *could* be added without one, since `impl:` bodies inherit the trait's signature verbatim
@@ -741,9 +739,8 @@ exist in tree: `examples/traits.sth` and `lib/cmp.sth`; `docs/book/` needs check
 whether it teaches the old bare-member grammar (already flagged separately as teaching
 rejected `if`/`else`/`end` syntax).
 **Exit:** `trait: Ord 'T : cmp inline ( 'T 'T -- Ordering ) ; ;` parses, and each `impl: Ord for
-...` block's `cmp` is spliced at every call site reached through a bound `'T: Ord` word,
-with `lib/cmp.sth`'s stale "comparisons are deliberately not inline" header comment corrected
-to match. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
+...` block's `cmp` is spliced at every call site reached through a bound `'T: Ord` word.
+`cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
 **P7.S3u -- Trait objects (an erased owner with a reachable destructor).** `[ parked ]` Traits dispatch
 statically today: `Bound::User(TraitId)` (`src/ast.rs:1682`) is discharged per concrete
@@ -1084,26 +1081,25 @@ grounding and the recorded answer is then the wrong one. With both rules in plac
 a user `impl: Ord` delegating to a primitive comparison builds and a library comparison
 costs no call frame. Detail: [slice8-spec](./P7/slice8-spec.md).
 
-Phase 2's section-6 mutations each reproduced their predicted failure: the uid-stack push,
-the `inline_uid` reset alone, the `member_splice_depth` gate, its blanket-gate regression
-against the R1c counter-example, both wrong seed formulas (`0` and `seed + 1`), the
-`back_edges` repair and both swap controls. The one exception is the composed-instantiation
-seed, which had nothing to revert: per R3 no third stride was added, and the two tests that
-prove `0` is still safe are `an_ord_bounded_generic_word_instantiates_over_a_user_struct`
-(`tests/phase7_slice3s_flip.rs`) and `inline_mymax_mymax3_matches_noninline_baseline`
-(`tests/phase7_slice3s_oracle.rs`).
-
-The uid rule moved which two renames can meet at one uid, so `MEMBER_SPLICE_SUFFIX`'s
-disjointness from `INLINE_SUFFIX` is load-bearing for a new reason: a member body is
+`MEMBER_SPLICE_SUFFIX`'s disjointness from `INLINE_SUFFIX` is load-bearing: a member body is
 spliced at the member's seed, and so is the first combinator splice nested *inside* that
-body. Sharing the suffix is a silent wrong answer rather than a panic, and is witnessed by
+body, so a shared suffix would be a silent wrong answer rather than a panic. Witnessed by
 `ord_inline_cmp_member_local_colliding_with_a_nested_splices_local_reads_its_own`.
 
-CLAUDE.md's five split signals were re-run against `src/ir/func_builder/calls.rs`
-post-change: 0 of 5 fire (one `use super::*`, six functions in a single call chain, no
-import divergence, no mixed high/low-level code) -- no split.
+CLAUDE.md's five split signals against `src/ir/func_builder/calls.rs`: 0 of 5 fire (one
+`use super::*`, nine functions in a single call chain, no import divergence, no mixed
+high/low-level code) -- no split.
 
-Two follow-ups the slice deliberately did not fix:
+`check_no_combinator_cycle` (`src/check/combinators.rs`) matches a call's surface name
+against `c.word.name` to detect a combinator recursing through itself; an `impl:` member is
+named `cmp;Ord;Point`, so a bare `cmp` call inside the same member's body adds no edge and
+the cycle guard never fires. A recursive `impl: Ord` whose `cmp` calls a surface comparison
+on its own type therefore splices forever -- a compiler stack overflow (SIGABRT), not a
+diagnostic. Pre-existing (reachable at base via a user `inline` combinator calling `cmp`);
+this slice moves it onto the shipped library comparisons, so it is reachable from any
+recursive-type `impl: Ord`. Not fixed here; no owning slice yet.
+
+Two more follow-ups the slice deliberately did not fix:
 
 - **Unsatisfied-`Ord` attribution.** An unsatisfied `Ord` bound now names `cmp`, the
   spliced trait member, at `lib/cmp.sth`'s own line, rather than the `lt`/`gt` the user
