@@ -333,7 +333,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
     // live row (`check_poly_combinator_args`, row = `stack[..base]`), so an
     // inner combinator can push its own type into the row before the
     // caller's literal is re-checked under that inner combinator's `ctx`.
-    // Here `main`'s quotation `[ drop 0 ]` is re-validated inside `c::inner`'s
+    // Here `main`'s quotation `array[ drop 0 ]` is re-validated inside `c::inner`'s
     // splice, where `ctx.module()` is `c`, but `drop`'s span still names
     // `main`, the module it was written in. `Res` is declared in `b`, which
     // `main` imports only as a bare `import: "b.sth" b `, not by name, so the
@@ -508,7 +508,7 @@ fn times_nested_inside_each_map_fold_and_filter_runs() {
     // and `filter` keeps both elements after running an inner loop per element
     // (2).
     let src = format!(
-        "{}: pair ( -- [i64 2] )\n\
+        "{}: pair ( -- array[i64 2] )\n\
          \x20 0 2 fill | s |\n\
          \x20 &!s 0 >usize &!> 1 !\n\
          \x20 &!s 1 >usize &!> 2 !\n\

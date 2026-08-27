@@ -11,11 +11,11 @@ import: core::prelude * ;    \ Bool comes through here, the prelude's own re-exp
 \ `gt` call at each splice site, so each concrete type dispatches to the
 \ correct `impl: Ord` monomorph. `choose` stays `inline` (it carries no
 \ bound).
-: mymax inline ( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+: mymax inline ['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;
 
-: mymax3 inline ( 'T: Copy Ord 'T 'T -- 'T )
+: mymax3 inline ['T: Copy Ord] ( 'T 'T 'T -- 'T )
   | a b c |
   a b gt ~[
     a c gt ~[ a ] ~[ c ] if

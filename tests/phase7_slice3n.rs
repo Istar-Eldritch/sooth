@@ -122,13 +122,13 @@ fn owned_cell_without_payload_in_signature_is_located_error() {
 #[test]
 fn generic_field_shapes_wrapping_own_ty_var_declare() {
     for (tag, decl) in [
-        ("arr", "type: Pair 'T items ['T 2] ;"),
-        ("nest", "type: NestArr 'T grid [['T 2] 3] ;"),
-        ("cell", "type: Cell 'T c ^'T ;"),
-        ("ref", "type: Box 'T r &'T ;"),
+        ("arr", "type: Pair['T] items array['T 2] ;"),
+        ("nest", "type: NestArr['T] grid array[array['T 2] 3] ;"),
+        ("cell", "type: Cell['T] c ^'T ;"),
+        ("ref", "type: Box['T] r &'T ;"),
         (
             "app",
-            "type: Ent 'K 'V k 'K v 'V ;\ntype: Wrap 'K 'V e Ent['K 'V] ;",
+            "type: Ent['K 'V] k 'K v 'V ;\ntype: Wrap['K 'V] e Ent['K 'V] ;",
         ),
     ] {
         let src = format!("{decl}\n: main ( -- ) ;\n");
@@ -150,7 +150,7 @@ fn generic_field_shapes_wrapping_own_ty_var_declare() {
 fn concrete_generic_self_reference_resolves_and_reaches_recursion_check() {
     let err = build(
         "selfref",
-        "type: L 'T v 'T next L[i64] ;\n: main ( -- ) ;\n",
+        "type: L['T] v 'T next L[i64] ;\n: main ( -- ) ;\n",
     )
     .expect_err("a by-value self-reference has infinite size");
     assert!(
@@ -173,7 +173,7 @@ fn concrete_generic_self_reference_resolves_and_reaches_recursion_check() {
 fn growing_generic_self_reference_is_rejected_at_declaration() {
     let err = build(
         "growing",
-        "type: L 'T v 'T next ^L[^'T] ;\n: main ( -- ) ;\n",
+        "type: L['T] v 'T next ^L[^'T] ;\n: main ( -- ) ;\n",
     )
     .expect_err("a growing self-reference must be rejected");
     assert!(
@@ -190,12 +190,12 @@ fn growing_generic_self_reference_is_rejected_at_declaration() {
 fn non_growing_cell_self_reference_declares() {
     build(
         "nongrowing",
-        "type: L 'T v 'T next ^L['T] ;\n: main ( -- ) ;\n",
+        "type: L['T] v 'T next ^L['T] ;\n: main ( -- ) ;\n",
     )
     .expect("a bare-variable argument is not growing");
     build(
         "permuting",
-        "type: A 'K 'V k 'K v 'V next ^A['V 'K] ;\n: main ( -- ) ;\n",
+        "type: A['K 'V] k 'K v 'V next ^A['V 'K] ;\n: main ( -- ) ;\n",
     )
     .expect("a permuting self-reference alternates between two instantiations");
 }
@@ -203,13 +203,16 @@ fn non_growing_cell_self_reference_declares() {
 /// R7: a quotation field naming the declaration's own type variable is out of
 /// scope, rejected with a located message rather than misreporting `'T` as an
 /// unknown concrete type -- and a *concrete* quotation field, legal today,
-/// still declares. Both halves matter: the `[`-arm has to replicate
-/// `quotation_type_ahead`'s disambiguation, or it misparses the concrete one
-/// as a malformed array.
+/// still declares. Both halves matter: the `[`-arm's ty-var scan runs ahead of
+/// the quotation reader, so a defect in either one shows up as the wrong
+/// diagnostic for the other's fixture.
 #[test]
 fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
-    let err = build("quotvar", "type: QF 'T f [ 'T -- 'T ] ;\n: main ( -- ) ;\n")
-        .expect_err("a variable-bearing quotation field is out of scope");
+    let err = build(
+        "quotvar",
+        "type: QF['T] f [ 'T -- 'T ] ;\n: main ( -- ) ;\n",
+    )
+    .expect_err("a variable-bearing quotation field is out of scope");
     assert!(err.contains("quotation field"), "unexpected: {err}");
     assert!(
         !err.contains("unknown type"),
@@ -217,7 +220,7 @@ fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
     );
     build(
         "quotconcrete",
-        "type: Q 'T v 'T f [ i64 -- i64 ] ;\n: main ( -- ) ;\n",
+        "type: Q['T] v 'T f [ i64 -- i64 ] ;\n: main ( -- ) ;\n",
     )
     .expect("a concrete quotation field is unchanged by this slice");
 }
@@ -230,13 +233,13 @@ fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
 /// R4, whole pipeline: an array-of-type-variable field instantiated at two
 /// differently-sized payloads, constructed from a real array and read back.
 /// Two payloads rather than one, because a substitution that ignored the
-/// argument and grounded every `['T 2]` to the same shape would pass with one.
+/// argument and grounded every `array['T 2]` to the same shape would pass with one.
 #[test]
 fn array_of_ty_var_field_instantiates_and_runs_at_two_payloads() {
     let (stdout, code) = build_and_run(
         "arrfield",
         "import: intrinsics * ;\n\
-         type: Pair 'T items ['T 2] ;\n\
+         type: Pair['T] items array['T 2] ;\n\
          : first ( Pair[i64] -- i64 )\n\
            Pair> | items | &items 0 >usize &> @ items drop ;\n\
          : firstb ( Pair[u8] -- u8 )\n\
@@ -251,12 +254,12 @@ fn array_of_ty_var_field_instantiates_and_runs_at_two_payloads() {
 
 /// R4: the nesting claim at instantiation. A one-level array arm that did not
 /// recurse would reach `substitute_generic_field`'s `unreachable!` on the
-/// inner `['T 2]` (N1).
+/// inner `array['T 2]` (N1).
 #[test]
 fn nested_array_of_ty_var_field_instantiates() {
     build(
         "nestfield",
-        "type: NestArr 'T grid [['T 2] 3] ;\n\
+        "type: NestArr['T] grid array[array['T 2] 3] ;\n\
          : f ( NestArr[i64] -- NestArr[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -272,7 +275,7 @@ fn owned_cell_of_ty_var_field_instantiates_and_runs() {
     let (stdout, code) = build_and_run(
         "cellfield",
         "import: intrinsics * ;\n\
-         type: Cell 'T c ^'T ;\n\
+         type: Cell['T] c ^'T ;\n\
          : get ( Cell[i64] -- i64 ) Cell> ^> ;\n\
          : main ( -- ) 9 ^ Cell get . ;\n",
     );
@@ -290,7 +293,7 @@ fn owned_cell_of_ty_var_field_instantiates_and_runs() {
 fn ref_of_ty_var_field_is_rejected_as_stored_reference() {
     let err = build(
         "reffield",
-        "type: Box 'T r &'T ;\n\
+        "type: Box['T] r &'T ;\n\
          : f ( Box[i64] -- Box[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -315,8 +318,8 @@ fn ref_of_ty_var_field_is_rejected_as_stored_reference() {
 fn ref_of_composite_generic_field_is_rejected_as_stored_reference() {
     let err = build(
         "refcomposite",
-        "type: Ent 'K 'V k 'K v 'V ;\n\
-         type: Box 'T r &Ent['T i64] ;\n\
+        "type: Ent['K 'V] k 'K v 'V ;\n\
+         type: Box['T] r &Ent['T i64] ;\n\
          : f ( Box[i64] -- Box[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -340,7 +343,7 @@ fn ref_of_composite_generic_field_is_rejected_as_stored_reference() {
 fn by_value_generic_self_reference_is_infinite_size_error() {
     let err = build(
         "byvalue",
-        "type: L 'T v 'T next L['T] ;\n\
+        "type: L['T] v 'T next L['T] ;\n\
          : f ( L[i64] -- L[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -358,7 +361,7 @@ fn by_value_generic_self_reference_is_infinite_size_error() {
 fn array_wrapped_generic_self_reference_is_infinite_size_error() {
     let err = build(
         "arrwrapped",
-        "type: L 'T v 'T kids [L['T] 4] ;\n\
+        "type: L['T] v 'T kids array[L['T] 4] ;\n\
          : f ( L[i64] -- L[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -382,7 +385,7 @@ fn array_wrapped_generic_self_reference_is_infinite_size_error() {
 fn cell_wrapped_generic_self_reference_builds_and_terminates() {
     build(
         "cellcycle",
-        "type: L 'T v 'T next ^L['T] ;\n\
+        "type: L['T] v 'T next ^L['T] ;\n\
          : f ( L[i64] -- L[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -398,7 +401,7 @@ fn cell_wrapped_generic_self_reference_builds_and_terminates() {
 fn cell_wrapped_generic_self_reference_enum_builds_and_terminates() {
     build(
         "cellcycleenum",
-        "type: L 'T | Nil | Cons v 'T next ^L['T] ;\n\
+        "type: L['T] | Nil | Cons v 'T next ^L['T] ;\n\
          : f ( L[i64] -- L[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -412,8 +415,8 @@ fn cell_wrapped_generic_self_reference_enum_builds_and_terminates() {
 fn mutual_cell_wrapped_generic_self_reference_terminates() {
     build(
         "mutualcycle",
-        "type: A 'T v 'T next ^B['T] ;\n\
-         type: B 'T w 'T back ^A['T] ;\n\
+        "type: A['T] v 'T next ^B['T] ;\n\
+         type: B['T] w 'T back ^A['T] ;\n\
          : f ( A[i64] -- A[i64] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -429,7 +432,7 @@ fn mutual_cell_wrapped_generic_self_reference_terminates() {
 fn permuting_generic_self_reference_terminates() {
     build(
         "permutecycle",
-        "type: A 'K 'V k 'K v 'V next ^A['V 'K] ;\n\
+        "type: A['K 'V] k 'K v 'V next ^A['V 'K] ;\n\
          : f ( A[i64 u8] -- A[i64 u8] ) ;\n\
          : main ( -- ) ;\n",
     )
@@ -451,7 +454,7 @@ fn poly_body_constructs_generic_with_cell_argument() {
     let (stdout, code) = build_and_run(
         "polycellctor",
         "import: intrinsics * ;\n\
-         type: Ent 'K 'V k 'K v 'V ;\n\
+         type: Ent['K 'V] k 'K v 'V ;\n\
          : mkcell ( i64 -- ^i64 ) ^ ;\n\
          : mk ( 'T -- 'T ) 1 mkcell 2 Ent drop ;\n\
          : main ( -- ) 5 mk . ;\n",
@@ -464,7 +467,7 @@ fn poly_body_constructs_generic_with_cell_argument() {
 /// (positional) variant field cannot be an array. Pre-existing and unrelated
 /// to type variables -- this fixture has no generic header at all -- and
 /// deliberately untouched by this slice. A *named* generic variant field
-/// (`Some xs ['T 2]`) is in scope and covered elsewhere.
+/// (`Some xs array['T 2]`) is in scope and covered elsewhere.
 #[test]
 fn attributeless_variant_array_field_is_still_a_parse_error() {
     let err = build(

@@ -128,7 +128,7 @@ fn struct_field_quotation_pushes_both_outputs() {
 fn polymorphic_call_it_pushes_both_quotation_outputs() {
     let src = "import: intrinsics * ;\n\
                import: core::bool * ;\n\
-               : call_it ( 'T: Copy [ i64 -- i64 i64 ] -- 'T ) 3 swap call add . ;\n\
+               : call_it ['T: Copy] ( 'T [ i64 -- i64 i64 ] -- 'T ) 3 swap call add . ;\n\
                : main ( -- )\n\
                  9 [ dup ] call_it .\n\
                  True [ dup ] call_it .\n\

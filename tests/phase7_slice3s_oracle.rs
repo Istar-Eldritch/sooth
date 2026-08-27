@@ -160,11 +160,11 @@ fn fixture_source_with_cmp(inline: bool, cmp: &str) -> String {
 import: intrinsics * ;
 import: core::prelude * ;
 
-: mymax {kw}( 'T: Copy Ord 'T -- 'T ) over over {cmp} ~[ drop ] ~[ swap drop ] if ;
+: mymax {kw}['T: Copy Ord] ( 'T 'T -- 'T ) over over {cmp} ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;
 
-: mymax3 {kw}( 'T: Copy Ord 'T 'T -- 'T )
+: mymax3 {kw}['T: Copy Ord] ( 'T 'T 'T -- 'T )
   | a b c |
   a b {cmp} ~[
     a c {cmp} ~[ a ] ~[ c ] if

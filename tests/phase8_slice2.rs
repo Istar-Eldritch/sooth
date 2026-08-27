@@ -447,7 +447,7 @@ fn the_intrinsic_gate_also_covers_a_polymorphic_body() {
         &t,
         "main.sth",
         "import: intrinsics i | . | ;\n\
-         : twice ( 'T: Copy -- 'T 'T ) dup ;\n\
+         : twice ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
          : main ( -- ) 1 twice . . ;\n",
     );
     let err = build_error(&entry);

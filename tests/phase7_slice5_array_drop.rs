@@ -55,7 +55,7 @@ fn build_and_run(src: &Path) -> String {
 /// double-dispose prints twice.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | \"drop \" . s Spy> . ;\n";
 
-/// R11: `tabulate` builds a `[Spy 2]` (a linear array), and dropping it
+/// R11: `tabulate` builds a `array[Spy 2]` (a linear array), and dropping it
 /// disposes both `Spy` elements exactly once via the synthesized array
 /// destructor (R6/R7). Each `Spy`'s `drop` prints `"drop " <tag>`, so the
 /// golden output is two disposal lines — the witness that the destructor
@@ -96,7 +96,7 @@ fn tabulate_single_element_linear_array_dropped_disposes_once() {
     assert_eq!(build_and_run(prog.path()), "drop 42\n");
 }
 
-/// R12: `None 3 fill` builds an `[Opt 3]` where `Opt` is linear (because
+/// R12: `None 3 fill` builds an `array[Opt 3]` where `Opt` is linear (because
 /// `Some` carries a `Spy`), and every slot is `None` (a nullary variant with
 /// no payload). Dropping the array runs the synthesized destructor, which
 /// calls each `Opt`'s enum destructor; the enum destructor dispatches on the
@@ -114,7 +114,7 @@ fn fill_nullary_variant_linear_enum_array_dropped_disposes_nothing() {
     assert_eq!(build_and_run(prog.path()), "");
 }
 
-/// R12 (mixed): an `[Opt 3]` built via `tabulate` where every slot is
+/// R12 (mixed): an `array[Opt 3]` built via `tabulate` where every slot is
 /// `Some(5 Spy)` — the enum destructor is called per element (the array
 /// destructor's loop calls `emit_drop` on each, which dispatches to the enum
 /// destructor), proving the array destructor calls the *enum* destructor
@@ -131,7 +131,7 @@ fn tabulate_enum_array_dropped_disposes_each_payload() {
     assert_eq!(build_and_run(prog.path()), "drop 5\ndrop 5\ndrop 5\n");
 }
 
-/// R9 (non-regression): a non-linear array (`[i64 3]`) dropped is a no-op —
+/// R9 (non-regression): a non-linear array (`array[i64 3]`) dropped is a no-op —
 /// `emit_drop`'s `_ => {}` arm, unchanged. The `fill`/`len`/array-type paths
 /// compile and run identically.
 #[test]

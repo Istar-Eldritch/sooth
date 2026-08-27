@@ -65,7 +65,7 @@ fn build_and_run_dir(name: &str, files: &[(&str, &str)], entry: &str) -> (String
 fn result_constructs_monomorphizes_and_eliminates_both_arms() {
     let (stdout, code) = build_and_run(
         "slice2-result-basic",
-        "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+        "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
          : safe-add ( i64 i64 -- Result[i64 i64] )\n\
            dup 0 lt ~[ drop drop -1 Err ] ~[ add Ok ] if ;\n\
          : to-int ( Result[i64 i64] -- i64 )\n\
@@ -114,7 +114,7 @@ fn option_constructs_monomorphizes_and_eliminates_both_arms() {
 fn option_instantiates_over_a_pointer_type() {
     let (stdout, code) = build_and_run(
         "slice2-option-pointer",
-        "type: Option 'T | None | Some 'T ;\n\
+        "type: Option['T] | None | Some 'T ;\n\
          type: Node val i64 ;\n\
          : unwrap-or ( i64 Option[^Node] -- i64 )\n\
            ~[ ( Some ) Some> swap drop ^> &val @ swap drop ]\n\

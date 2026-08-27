@@ -596,7 +596,7 @@ fn an_owning_closure_allocates_its_env_and_the_body_frees_it() {
 fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggregate() {
     let il = emit_il(
         "type: W x i64 ;\n\
-         trait: Own 'T\n  : use ( 'T owning [ -- ] -- ) ;\n;\n\
+         trait: Own['T]\n  : use ( 'T owning [ -- ] -- ) ;\n;\n\
          impl: Own for W\n  : use | w q | w drop q call ;\n;\n\
          : main ( -- ) ;\n",
     );

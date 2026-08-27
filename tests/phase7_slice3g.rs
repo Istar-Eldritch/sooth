@@ -89,7 +89,7 @@ fn self_recursive_poly_word_runs_to_base_case() {
     let scratch = Scratch::write(
         "loopg",
         ": iszero ( i64 -- Bool ) 0 eq ;\n\
-         : loopg ( 'T: Copy i64 -- 'T )\n\
+         : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
            dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;\n\
          : main ( -- )\n\
            5 3 loopg .\n\
@@ -116,7 +116,7 @@ fn self_recursive_poly_word_runs_a_large_counter_in_constant_stack() {
     let scratch = Scratch::write(
         "loopg-1m",
         ": iszero ( i64 -- Bool ) 0 eq ;\n\
-         : loopg ( 'T: Copy i64 -- 'T )\n\
+         : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
            dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
          : main ( -- ) 7 1000000 loopg . ;\n",
     );
@@ -154,7 +154,7 @@ fn check_err(src: &str) -> String {
 #[test]
 fn self_call_recursing_at_a_different_type_argument_is_located_type_error() {
     let err = check_err(
-        "type: Box 'T | Box 'T ;\n\
+        "type: Box['T] | Box 'T ;\n\
          : rec ( 'T i64 -- 'T )\n\
            drop Box 3 rec\n\
          ;\n\
@@ -237,7 +237,7 @@ fn repl_self_tail_poly_word_runs_a_deep_counter_in_constant_stack() {
     let session = format!(
         "import: \"{b}\" b | if | ;\n\
          : iszero ( i64 -- Bool ) 0 ueq [ True ] [ False ] branch ;\n\
-         : loopg ( 'T: Copy i64 -- 'T ) dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
+         : loopg ['T: Copy] ( 'T i64 -- 'T ) dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
          7 2000000 loopg .\n",
         b = lib.join("bool.sth").display(),
     );

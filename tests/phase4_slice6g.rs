@@ -306,7 +306,7 @@ fn while_over_an_aliased_array_local_is_accepted() {
         "6g-while",
         &format!(
             "{}\n\
-             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : input ( -- array[i64 4] ) 0 4 fill | s | s ;\n\
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
@@ -332,7 +332,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the
         "6g-while-read",
         &format!(
             "{}\n\
-             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : input ( -- array[i64 4] ) 0 4 fill | s | s ;\n\
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
@@ -354,7 +354,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
         "6g-while-after",
         &format!(
             "{}\n\
-             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : input ( -- array[i64 4] ) 0 4 fill | s | s ;\n\
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
