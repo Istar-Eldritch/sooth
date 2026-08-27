@@ -1190,6 +1190,11 @@ diagnostic printed). The unbounded recursion is at lowering: `lower_resolved_wor
 (`:292`) resolves back to the same type's own `cmp`, and re-enters unbounded. A
 splice-depth budget at that site converts the overflow into a located diagnostic naming the
 splice chain. It cannot false-reject: it bounds recursion rather than changing acceptance.
+Measured maximum legitimate splice depth across the whole corpus is 2; the pathological
+case overflows at 148 (2MB stack), so the budget sits at 64 with wide margin both ways. The
+bulk of the work is not the guard: `FuncBuilder` has no error path at all (every lowering
+function returns `()`), so the diagnostic needs `Result` threaded through the lowering tree
+to reach the user.
 Catching this statically instead is refuted -- `check_combinator_cycles` runs pre-dispatch,
 and widening it to edge a bare trait-member callee to every impl was measured to reject the
 ordinary field-delegating `impl: Ord` P7.S8 shipped to enable. Detail:
