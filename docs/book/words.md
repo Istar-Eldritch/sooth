@@ -24,6 +24,50 @@ and bindings (`| a b |`). There is no statement separator — terms are
 whitespace-delimited, and the parser reads them left to right until it
 hits `;`.
 
+## Inline words
+
+The `inline` keyword goes between the name and the stack effect:
+
+```sooth
+: inc inline ( i64 -- i64 ) | x | x 1 add ;
+```
+
+An inline word is **spliced** at every call site: the compiler copies
+the word's body into the caller and lowers it there. No function is
+emitted for the word, and no call instruction appears in the caller.
+The effect is text expansion — `41 inc` lowers exactly as `41 1 add`
+would.
+
+This works for any word, not just words that take quotations. A small
+helper marked `inline` costs nothing at runtime:
+
+```sooth
+: square inline ( i64 -- i64 ) | x | x x mul ;
+
+: main ( -- )
+  7 square . ;    \ prints 49
+```
+
+`square` mints no function of its own; `main` contains the `mul`
+directly.
+
+Inline is **required** for words that take inline quotation parameters
+(`~[ ... ]`). An inline quotation has no runtime representation, it
+can only be spliced, so any word that accepts one must itself be
+spliced. The array combinators in `lib/combinators.sth` are all
+inline for this reason:
+
+```sooth
+: each inline ( ['T 'N] ~[ 'T -- ] -- )
+  | f | len >i64 | count | | arr |
+  count ~[ | i | &arr i >usize &> @ f call ] times
+  arr drop ;
+```
+
+Two restrictions: `main` cannot be `inline` (it is called by the
+runtime entry point, not spliced), and a word whose name overloads a
+builtin operator (`add`, `mul`, etc.) cannot be `inline`.
+
 ## Names
 
 When the compiler sees a bare name in a word body, it checks the
@@ -64,15 +108,11 @@ first, then checks. This lets you put `main` at the top and helpers
 below:
 
 ```sooth
-: main ( -- ) 5 factorial . ;
+: main ( -- )
+  5 factorial . ;
 
 : factorial ( i64 -- i64 )
-  | n |
-  n 1 eq if
-    1
-  else
-    n n 1 sub factorial mul
-  end ;
+  dup 0 eq ~[ drop 1 ] ~[ dup 1 sub factorial mul ] if ;
 ```
 
 **In the REPL**, each line is processed independently. A word must
@@ -87,12 +127,7 @@ begins.
 
 ```sooth
 : countdown ( i64 -- )
-  | n |
-  n 0 eq if
-  else
-    n .
-    n 1 sub countdown
-  end ;
+  dup 0 eq ~[ drop ] ~[ dup . 1 sub countdown ] if ;
 ```
 
 ```sh
@@ -117,11 +152,7 @@ the line is ignored:
 \ compute the greatest common divisor
 : gcd ( i64 i64 -- i64 )
   | a b |
-  b 0 eq if         \ base case: b is zero
-    a
-  else
-    b a b mod gcd   \ recursive case
-  end ;
+  b 0 eq ~[ a ] ~[ b a b mod gcd ] if ;
 ```
 
 Comments can appear anywhere whitespace can. They are for the reader;
@@ -129,10 +160,10 @@ the compiler ignores them.
 
 ## The main word
 
-A file compiled with `sooth build` must define a word named `main`
-with effect `( -- )`. The C runtime calls `sooth_main` on startup, and
-your `main` word is the entry point. If you forget it, the linker
-fails with an undefined reference to `sooth_main`.
+A file compiled with `sooth build` or `sooth run` must define a word
+named `main` with effect `( -- )`. The binary entry point executes
+your `main` word. If you forget it, the linker fails with an undefined
+reference to `sooth_main`.
 
 ```sooth
 : main ( -- )
