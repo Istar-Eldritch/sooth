@@ -492,7 +492,7 @@ fn ambiguous_unqualified_member_call_is_rejected() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("error: `t1` is required by both `A` and `B` on 'T (line 4, col 21)"),
+        err.contains("error: `t1` is required by both `A` and `B` on 'T (line 4, col 26)"),
         "{err}"
     );
     assert!(
@@ -544,7 +544,7 @@ fn an_unbound_qualifier_in_a_bound_is_rejected() {
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "error: unknown module qualifier `q` in bound `q::Show` at line 2, col 16 (a qualified bound names an import alias)"
+            "error: unknown module qualifier `q` in bound `q::Show` at line 2, col 14 (a qualified bound names an import alias)"
         ),
         "{err}"
     );

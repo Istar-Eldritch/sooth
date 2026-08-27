@@ -531,7 +531,7 @@ pub fn variant_type(enums: &[EnumDecl], id: EnumId, vi: usize) -> Type {
 }
 
 /// Phase 5 slice 1 (R1, D5): a `type:` header that bound one or more type
-/// variables (`type: Box 'T ...`), parsed into its variable-scoped field
+/// variables (`type: Box['T] ...`), parsed into its variable-scoped field
 /// list but not yet monomorphized -- minting a concrete `StructDecl` per
 /// distinct application is Phase 2/3 of this slice. Deliberately a *separate*
 /// type from `StructDecl` (not a `ty_var_names` field bolted onto it): the
@@ -823,7 +823,7 @@ impl GenericTypes {
             PolyType::Concrete(t) => *t,
             PolyType::Var(v) => args[*v as usize],
             // N3: a generic `type:` header binds no length variable
-            // (`parse_generic_header_vars` takes only `'`-prefixed type
+            // (`parse_header_bracket` takes only `'`-prefixed type
             // variables), so a field's count is always literal. A `Len::Var`
             // arm here would be unconstructible dead code.
             PolyType::Array(elem, Len::Concrete(count)) => {

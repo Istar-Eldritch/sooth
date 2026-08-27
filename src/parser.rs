@@ -69,6 +69,11 @@ fn prepass_type_decls(
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
                     reject_reserved_name("type", name, *span)?;
+                    // P7.S6 (R10): the postfix header form is retired. Caught
+                    // here, where the narrowed `header_is_generic` below would
+                    // otherwise register `type: Box 'T ...` as a concrete
+                    // struct and leave the mis-parse to the field loop.
+                    reject_postfix_header_var("type:", name, tokens, i + 2)?;
                     // Phase 5 slice 1 (R1/D5): a generic header mints no
                     // concrete struct/enum registry entry here -- its full
                     // variable-scoped shape is parsed into
@@ -96,34 +101,48 @@ fn prepass_type_decls(
     Ok(decls)
 }
 
-/// The count of `'`-prefixed tokens starting at `start` (Phase 5 slice 1,
-/// R1/D2): a `type:` header's bound type variables, immediately following its
-/// declared name, zero for a concrete (non-generic) declaration. Shared by
-/// the pre-pass (which skips registering a generic header into the concrete
+/// P7.S6 (R5/R10): whether a `type:` header at `start` is generic -- i.e.
+/// whether it opens a bracketed type-variable list (`type: Box['T]`), which
+/// is the only spelling. A bare lookahead, no consumption. Shared by the
+/// pre-pass (which skips registering a generic header into the concrete
 /// registries) and the parser's own lookahead before dispatching to the
-/// generic or concrete production.
-fn header_ty_var_count(tokens: &[(Token, Span)], start: usize) -> usize {
-    let mut n = 0;
-    while matches!(tokens.get(start + n), Some((Token::Word(w), _)) if w.starts_with('\'')) {
-        n += 1;
-    }
-    n
-}
-
-/// P7.S6 (R5a): whether the token at `start` is `[`, opening the new
-/// bracketed type-variable list (`type: Box['T]`). A bare lookahead, no
-/// consumption.
-fn bracket_follows(tokens: &[(Token, Span)], start: usize) -> bool {
+/// generic or concrete production, so the three sites can never disagree.
+/// The retired postfix form (`type: Box 'T`) is not merely non-generic here:
+/// `reject_postfix_header_var` turns it into a located error rather than
+/// letting it mis-parse as a concrete declaration.
+fn header_is_generic(tokens: &[(Token, Span)], start: usize) -> bool {
     matches!(tokens.get(start), Some((Token::LBracket, _)))
 }
 
-/// P7.S6 (R5a): whether a `type:` header at `start` is generic, accepting BOTH
-/// the new bracketed form (`type: Box['T]`) and the legacy postfix form
-/// (`type: Box 'T`). The OR of the two shapes must survive phases 2–3 so the
-/// un-migrated corpus keeps parsing; narrowing to bracket-only happens in
-/// phase 4 (R10).
-fn header_is_generic(tokens: &[(Token, Span)], start: usize) -> bool {
-    bracket_follows(tokens, start) || header_ty_var_count(tokens, start) > 0
+/// P7.S6 (R10): the retired postfix header form, in which a `type:`/`trait:`
+/// declaration bound its type variables as bare `'`-prefixed words after its
+/// name. Without this the narrowed `header_is_generic` would silently classify
+/// `type: Box 'T val 'T ;` as *concrete* and the field loop would blame `'T`
+/// for not being a field name.
+fn postfix_header_var_error(kind: &str, decl_name: &str, var: &str, span: Span) -> String {
+    format!(
+        "error: `{kind} {decl_name} {var}` at line {}, col {} binds its type variables in the retired postfix form; write `{kind} {decl_name}[{var}]`",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R10): raise `postfix_header_var_error` when the token at `start` --
+/// the one directly following a declaration's name -- is a `'`-prefixed word.
+/// Called from every entry path that reads a `type:` header: the module
+/// pre-pass, and both concrete productions (which the REPL's own `type:` line
+/// readers reach without the pre-pass).
+fn reject_postfix_header_var(
+    kind: &str,
+    decl_name: &str,
+    tokens: &[(Token, Span)],
+    start: usize,
+) -> Result<(), String> {
+    if let Some((Token::Word(w), span)) = tokens.get(start) {
+        if w.starts_with('\'') {
+            return Err(postfix_header_var_error(kind, decl_name, w, *span));
+        }
+    }
+    Ok(())
 }
 
 /// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
@@ -1393,7 +1412,7 @@ pub fn parse_typedef_line(
     Ok(fields)
 }
 
-/// Phase 5 slice 1: a generic `type:` header (`type: Box 'T ...`) has no REPL
+/// Phase 5 slice 1: a generic `type:` header (`type: Box['T] ...`) has no REPL
 /// support yet -- `parse_typedef_line`/`parse_enum_typedef_line` only ever
 /// reach the concrete productions, so without this gate a generic header runs
 /// straight into `parse_typedef`'s/`parse_enum_typedef`'s field loop and
@@ -1550,7 +1569,6 @@ struct PolyBuilder {
     ty_index: HashMap<String, u32>,
     len_index: HashMap<String, u32>,
     kind: HashMap<String, VarKind>,
-    bounds: Vec<(u32, Bound)>,
     row_in: Option<u32>,
     row_out: Option<u32>,
     /// Slice 10a (R7): the row-name id table, shared by the top-level row
@@ -1566,9 +1584,12 @@ struct PolyBuilder {
     /// checks each one once the whole signature is known, since only then can
     /// "is this the signature's own top-level row" be answered.
     pending_quotation_rows: Vec<(u32, String, Span)>,
-    /// P7.S4 (R1): when `true`, `parse_poly_ty_var` does not check for a `:`-
-    /// bound after a type variable. Set by `parse_impl_target` so the `:`
-    /// starting a member body (`: show ...`) is not consumed as a bound colon.
+    /// P7.S4 (R1): when `true`, only a *glued* `'T:` counts as a bound, so
+    /// the `:` starting a member body (`: show ...`) is not mistaken for a
+    /// bound colon. Set by `parse_impl_target`. P7.S6 (R7a): it is also the
+    /// selector between `parse_poly_ty_var`'s two rejections -- an `impl:`
+    /// target gets `impl_target_bound_error`, a word or trait-member effect
+    /// gets `bound_in_effect_error`.
     forbid_bounds: bool,
 }
 
@@ -1692,7 +1713,11 @@ impl PolyBuilder {
             inputs,
             outputs,
             row_out: self.row_out,
-            bounds: self.bounds,
+            // P7.S6 (R6/R7): bounds are declared only in a word's bound
+            // bracket, which `attach_bracket_bounds` fills in *after* this
+            // signature is built (so ids stay effect-derived). Nothing an
+            // effect can contain declares one.
+            bounds: Vec::new(),
             ty_var_names: self.ty_names,
             len_var_names: self.len_names,
             row_var_names: self.row_names,
@@ -1749,6 +1774,26 @@ fn row_var_misplaced_error(name: &str, span: Span) -> String {
 fn annotation_missing_arrow_error(span: Span) -> String {
     format!(
         "parse error: a quotation annotation must be written in full as `( inputs -- outputs )`, found `)` with no `--` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R4a): a bracket in a type position holding no top-depth `--`.
+/// After R4's retirement a bare `[` opens a quotation effect
+/// unconditionally, so this is what an author who meant an array now gets --
+/// hence the `array[T N]` half of the advice. That half is dropped when the
+/// bracket was opened with `~[`, which has no array reading anywhere in the
+/// grammar (every type-position reader rejects a bare `Token::TildeLBracket`
+/// outright), so offering it would send the author somewhere the parser
+/// refuses.
+fn quotation_effect_missing_arrow_error(span: Span, opened_with_tilde: bool) -> String {
+    let alternative = if opened_with_tilde {
+        ""
+    } else {
+        " (for an array type write `array[T N]`)"
+    };
+    format!(
+        "parse error: a quotation effect at line {}, col {} must be written in full as `[ inputs -- outputs ]`, found no top-depth `--`{alternative}",
         span.line, span.col
     )
 }
@@ -1825,9 +1870,14 @@ fn ref_no_referent_error(word: &str, span: Span) -> String {
     )
 }
 
-fn bound_on_use_error(name: &str, span: Span) -> String {
+/// P7.S6 (R7): a bound written inside a stack effect. Bounds live in the
+/// word's own bound bracket and only there, so the effect can never be the
+/// place a bound is *declared*. Selected against `impl_target_bound_error` by
+/// `PolyBuilder::forbid_bounds` inside `parse_poly_ty_var`, which is the only
+/// place that knows which of the two entry paths detected it.
+fn bound_in_effect_error(name: &str, span: Span) -> String {
     format!(
-        "error: bound on `{name}` at line {}, col {} must be written at its binding (first) occurrence, not a use",
+        "error: bound on `{name}` at line {}, col {} may not be written inside a stack effect; declare it in the word's bound bracket (e.g. `: f[{name}: Copy] ( ... )`)",
         span.line, span.col
     )
 }
@@ -1885,7 +1935,7 @@ fn var_kind_conflict_error(name: &str, span: Span) -> String {
 }
 
 /// Phase 5 slice 1 (R1, round-3 review): a generic `type:` header binding
-/// the same variable name twice (`type: Bad 'T 'T ...`). Caught here, at the
+/// the same variable name twice (`type: Bad['T 'T] ...`). Caught here, at the
 /// binding site, rather than left to surface as an unbound-or-phantom error
 /// once a field references the name: the second binding shadows nothing (the
 /// header has no scoping), so a field naming it would otherwise resolve
@@ -1941,10 +1991,9 @@ fn phantom_ty_var_error(decl_name: &str, name: &str, span: Span) -> String {
 
 /// Phase 5 slice 1: the generic path's twin of the concrete odd-field-count
 /// error. It names the header's bound variables because the likeliest way to
-/// reach it is writing a `'`-prefixed *field* name directly after the type
-/// name (`type: Foo 'bar i64 ;`), which the header scan consumes as a type
-/// parameter -- leaving the plain message pointing at a token the author never
-/// got wrong.
+/// reach it is writing a `'`-prefixed *field* name inside the header bracket
+/// (`type: Foo['bar] i64 ;`), which binds it as a type parameter -- leaving the
+/// plain message pointing at a token the author never got wrong.
 fn generic_odd_field_count_error(
     decl_name: &str,
     ty_vars: &[(String, Span)],
@@ -1954,7 +2003,7 @@ fn generic_odd_field_count_error(
 ) -> String {
     let header: Vec<&str> = ty_vars.iter().map(|(n, _)| n.as_str()).collect();
     format!(
-        "parse error: field `{field_name}` has no type before `{before}` at line {}, col {} (odd field-token count in the body of generic `type: {decl_name} {}`; a `'`-prefixed word after the type name binds a type parameter)",
+        "parse error: field `{field_name}` has no type before `{before}` at line {}, col {} (odd field-token count in the body of generic `type: {decl_name}[{}]`; a `'`-prefixed word inside the header bracket binds a type parameter)",
         span.line,
         span.col,
         header.join(" "),
@@ -2694,13 +2743,10 @@ impl<'t> Parser<'t> {
         let span = self.expect_word("trait:")?;
         let (name, name_span) = self.expect_word_any_spanned()?;
         reject_reserved_name("trait", &name, name_span)?;
-        // P7.S6 (R5b): accept EITHER a bracketed header (`trait: Ord['T]`)
-        // or the legacy postfix variable (`trait: Ord 'T`). The bracket is
-        // mandatory only at slice exit (post phase 4); during phases 2–3
-        // both forms parse, so the un-migrated corpus (217 postfix `trait:`
-        // occurrences including `lib/cmp.sth:38`) keeps building.
+        // P7.S6 (R5/R10): a `trait:` binds its single type variable in a
+        // *mandatory* bracket. There is no such thing as a non-generic trait,
+        // so the bracket is not optional the way a `type:`'s is.
         let (ty_var, ty_var_span) = match self.peek() {
-            // New bracketed header.
             Some((Token::LBracket, _)) => {
                 let vars = self.parse_header_bracket(&name)?;
                 if vars.len() > 1 {
@@ -2710,15 +2756,15 @@ impl<'t> Parser<'t> {
                     .next()
                     .expect("parse_header_bracket rejects an empty bracket")
             }
-            // Legacy postfix variable (byte-for-byte unchanged).
+            // R10: the retired postfix variable (`trait: Ord 'T`). Its own
+            // error rather than the neither-form one below, which would
+            // wrongly claim no type variable was written at all.
             Some((Token::Word(w), s)) if w.starts_with('\'') => {
-                let (w, s) = (w.clone(), *s);
-                self.pos += 1;
-                (w, s)
+                return Err(postfix_header_var_error("trait:", &name, w, *s));
             }
-            // Neither form: the existing located error, retargeted in message
-            // text to name `trait: Name['T]`. Both arms retargeted, not just
-            // the first, so a `trait: Ord` at EOF still advises the bracket form.
+            // Neither form: the pre-existing located error, naming the bracket
+            // form. Both arms name it, not just the first, so a `trait: Ord`
+            // at EOF still advises the bracket rather than the postfix word.
             Some((tok, s)) => {
                 return Err(format!(
                     "parse error: expected a type variable or bracketed header (`trait: {name}['T]`) after `trait: {name}`, found {tok:?} at line {}, col {}",
@@ -2731,9 +2777,10 @@ impl<'t> Parser<'t> {
                 )))
             }
         };
-        // P7.S6 (R5b): today's second-variable check, byte-for-byte unchanged
-        // -- it guards the postfix form. A `'`-prefixed word after a bracket
-        // form also hits this, which is fine.
+        // A `'`-prefixed word *after* the bracket is a second header variable
+        // written in the retired postfix form; `multi_variable_trait_error` is
+        // the sharper report of the two, since one variable is the hard limit
+        // either way.
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             return Err(multi_variable_trait_error(&name, ty_var_span));
         }
@@ -2966,11 +3013,6 @@ impl<'t> Parser<'t> {
             ..PolyBuilder::default()
         };
         let raw = self.parse_poly_slot(&mut builder, false)?;
-        if !builder.bounds.is_empty() {
-            // A glued bound (`'T: Copy`) bypassed `forbid_bounds`'s standalone
-            // `:` check. Reject it explicitly.
-            return Err(impl_target_bound_error());
-        }
         if builder.row_in.is_some() || builder.row_out.is_some() {
             return Err(impl_target_row_var_error());
         }
@@ -2989,12 +3031,11 @@ impl<'t> Parser<'t> {
     /// target's already-parsed `ty_var_names` table (erroring on an unknown
     /// name), then `:` and the bound list reuse `parse_capabilities` (the
     /// existing bound-list parser). This deliberately does NOT reuse
-    /// `parse_poly_ty_var`: that function interns the variable via
-    /// `intern_ty_var` and rejects bounds on a non-binding (already-interned)
-    /// occurrence (`bound_on_use_error`), but `parse_impl_target` has already
-    /// interned every target variable, so a `where`-clause re-mention is a
-    /// *use*, not a binding. A target with no `where`-clause behaves exactly
-    /// as today (`bounds: vec![]`).
+    /// `parse_poly_ty_var`: since P7.S6 (R7) that function *rejects* every
+    /// bound it detects (bounds belong in a word's bound bracket, and on an
+    /// `impl:` target in this `where`-clause), so routing a `where`-clause
+    /// through it would reject the one spelling that is legal here. A target
+    /// with no `where`-clause behaves exactly as today (`bounds: vec![]`).
     fn parse_impl_bounds(&mut self, target: &ImplTarget) -> Result<Vec<(u32, Bound)>, String> {
         if !matches!(self.peek(), Some((Token::Word(w), _)) if w == "where") {
             return Ok(Vec::new());
@@ -3489,11 +3530,10 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             return self.parse_poly_array(builder, word_is_output);
         }
+        // P7.S6 (R4): a bare `[` is a quotation effect unconditionally; an
+        // array is spelled `array[T N]` and was taken by the arm above.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                return self.parse_poly_quotation(builder, word_is_output);
-            }
-            return self.parse_poly_array(builder, word_is_output);
+            return self.parse_poly_quotation(builder, word_is_output);
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
@@ -3741,23 +3781,19 @@ impl<'t> Parser<'t> {
         } else {
             glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
         };
-        if bound_follows && !glued_colon {
-            self.pos += 1; // the standalone `:`
+        // P7.S6 (R7/R7a): a bound is detected here but never parsed here --
+        // it belongs in the word's own bound bracket. The two entry paths get
+        // different errors, and this is the only site that knows which one it
+        // is on, so the selection happens here rather than post hoc in
+        // `parse_impl_target`.
+        if bound_follows {
+            return Err(if builder.forbid_bounds {
+                impl_target_bound_error()
+            } else {
+                bound_in_effect_error(&name, span)
+            });
         }
-        let bounds = if bound_follows {
-            Some(self.parse_capabilities(span, false)?)
-        } else {
-            None
-        };
-        let (id, is_binding) = builder.intern_ty_var(&name, span)?;
-        if let Some(bounds) = bounds {
-            if !is_binding {
-                return Err(bound_on_use_error(&name, span));
-            }
-            for b in bounds {
-                builder.bounds.push((id, b));
-            }
-        }
+        let (id, _) = builder.intern_ty_var(&name, span)?;
         Ok(RawTy::Var(id))
     }
 
@@ -3778,6 +3814,10 @@ impl<'t> Parser<'t> {
     /// `Token::LBracket` and `parse_poly_slot`'s `~[` arm consumes as part of
     /// `Token::TildeLBracket` (Slice 10a R1). Split out so the token that
     /// already ate the bracket has somewhere to resume.
+    ///
+    /// P7.S6 (R4a(i)): being entered *past* the opener is why R4a's validator
+    /// is called here, once, at depth base `1`, rather than in each of the
+    /// three callers.
     #[allow(clippy::type_complexity)]
     fn parse_poly_quotation_inner(
         &mut self,
@@ -3785,6 +3825,7 @@ impl<'t> Parser<'t> {
         is_inline: bool,
         word_is_output: bool,
     ) -> Result<RawTy, String> {
+        self.require_top_depth_arrow(1)?;
         let (inputs, row_in, row_in_span) =
             self.parse_poly_quot_list(builder, true, word_is_output)?;
         self.expect_word("--")?;
@@ -3827,7 +3868,11 @@ impl<'t> Parser<'t> {
     }
 
     /// One side of a polymorphic quotation effect, stopping on the top-depth
-    /// `--` (inputs) or `]` (outputs). A leading `..`-prefixed name is R4's
+    /// `--` (inputs) or `]` (outputs). Like its concrete twin
+    /// (`parse_quot_type_list`) this loop cannot detect a *missing* `--`:
+    /// a bare array count reaches `parse_poly_slot` and fails there before the
+    /// `]` is observed, so R4a's validator runs ahead of it.
+    /// A leading `..`-prefixed name is R4's
     /// row mention: it must already denote the signature's own top-level
     /// row, and its name/span are returned alongside so the caller can
     /// render R5's one-sided-row error.
@@ -4213,15 +4258,13 @@ impl<'t> Parser<'t> {
             let ty = self.parse_array_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
-        // An array type has no name of its own to lead with (`array[i64 4]` opens
-        // on `[`, not a word), so an unnamed array slot is recognised before
-        // the usual name-then-optional-`:type` read (R3, R7).
+        // A quotation-effect type has no name of its own to lead with, so a
+        // bare `[` slot is recognised before the usual
+        // name-then-optional-`:type` read (R3, R7). P7.S6 (R4): it is a
+        // quotation effect unconditionally -- the array spelling leads with
+        // the word `array` and was taken by the arm above.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            let ty = if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()?
-            } else {
-                self.parse_array_type_expr()?
-            };
+            let ty = self.parse_quotation_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
         // An owning-cell type is likewise nameless, so it too is recognised
@@ -4284,11 +4327,8 @@ impl<'t> Parser<'t> {
             return self.parse_array_type_expr();
         }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()
-            } else {
-                self.parse_array_type_expr()
-            }
+            // P7.S6 (R4): a bare `[` is a quotation effect unconditionally.
+            self.parse_quotation_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
             self.parse_ref_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
@@ -4323,12 +4363,13 @@ impl<'t> Parser<'t> {
         Ok(crate::ast::owning_quotation_type(inputs, outputs))
     }
 
-    /// Whether the very next token opens a quotation *effect* (a `[` whose
-    /// matching `]` holds a top-depth `--`) rather than an array type or
-    /// anything else. `quotation_type_ahead` requires its caller to have
-    /// already confirmed the `[`, which the `owning` readers have not.
+    /// Whether the very next token opens a quotation *effect*. Since P7.S6
+    /// (R4) a bare `[` in a type position is unconditionally a quotation
+    /// effect -- an array is spelled `array[T N]` -- so this is a plain peek.
+    /// It stays a named predicate because the `owning` readers ask the
+    /// question to raise their own error rather than to dispatch.
     fn quotation_effect_opens_here(&self) -> bool {
-        matches!(self.peek(), Some((Token::LBracket, _))) && self.quotation_type_ahead()
+        matches!(self.peek(), Some((Token::LBracket, _)))
     }
 
     /// `^` is not a lexer delimiter, so `^^i64` arrives as one word.
@@ -4453,41 +4494,70 @@ impl<'t> Parser<'t> {
             && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
     }
 
-    /// Slice 6a (R1): whether the `[` the parser is positioned on opens a
-    /// **quotation effect** rather than an array type, decided by scanning to
-    /// its matching `]` for a **top-depth `--`**. An array type can never
-    /// contain a `--` (arrays hold no quotations, slice 4), and a quotation
-    /// effect always contains exactly one at depth 1, so the scan is local and
-    /// unambiguous with no new token or sigil. A nested `[ [ i64 -- ] 3 ]` has
-    /// its inner `--` at depth 2, so the outer `[` reads as an array (R7a then
-    /// rejects the array-of-quotation at check time). Caller has already
-    /// confirmed `self.peek()` is `[`.
-    fn quotation_type_ahead(&self) -> bool {
-        let mut depth = 0i32;
+    /// P7.S6 (R4a): the bracket being entered must hold a top-depth `--`,
+    /// i.e. it must really be a quotation effect. Since R4 retired the
+    /// bare-`[`-as-array spelling, a quotation reader is entered on a bare
+    /// `[` unconditionally, so what used to be a *disambiguator*
+    /// is a *validator*, not a disambiguator: a bracket with no `--` is a
+    /// located error naming the missing `--`, not a silent reroute into the
+    /// array production.
+    ///
+    /// `depth_base` is the bracket nesting the caller has already consumed:
+    /// `0` when the parser still sits *on* the opening bracket
+    /// (`parse_quotation_effect_rows`), `1` when it has been consumed
+    /// (`parse_poly_quotation_inner`, entered past its opener by all three of
+    /// its callers). It is explicit rather than defaulted so no call site can
+    /// be added without ruling on it: seeded at `0` past the bracket, a legal
+    /// `~[ 'T -- Bool ]` meets its closing `]` first, falls to `-1`, never
+    /// satisfies the `depth == 0` stop and runs to EOF -- false-rejecting
+    /// every inline combinator.
+    ///
+    /// `Token::TildeLBracket` is a single token that opens a bracket, so the
+    /// walk counts it too. Without that the validator fails *open*: a bracket
+    /// holding a nested `~[ … -- … ]` passes vacuously on the inner arrow and
+    /// then dies further down with a worse diagnostic.
+    fn require_top_depth_arrow(&self, depth_base: i32) -> Result<(), String> {
+        // R4a(iii): `~[` has no array reading anywhere in the grammar, so the
+        // error must not offer `array[T N]` to an author who opened with one.
+        // Every base-1 caller consumed exactly one opener token immediately
+        // before entry, so the token behind the cursor *is* that opener.
+        let opened_with_tilde = depth_base > 0
+            && matches!(
+                self.tokens.get(self.pos - 1),
+                Some((Token::TildeLBracket, _))
+            );
+        let opener = if depth_base > 0 {
+            self.tokens.get(self.pos - 1)
+        } else {
+            self.tokens.get(self.pos)
+        };
+        let span = opener.map(|(_, s)| *s).unwrap_or_default();
+        let mut depth = depth_base;
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
             match tok {
-                Token::LBracket => depth += 1,
+                Token::LBracket | Token::TildeLBracket => depth += 1,
                 Token::RBracket => {
                     depth -= 1;
                     if depth == 0 {
-                        return false;
+                        break;
                     }
                 }
-                Token::Word(w) if w == "--" && depth == 1 => return true,
+                Token::Word(w) if w == "--" && depth == 1 => return Ok(()),
                 _ => {}
             }
             i += 1;
         }
-        false
+        Err(quotation_effect_missing_arrow_error(
+            span,
+            opened_with_tilde,
+        ))
     }
 
     /// Slice 6a (R2): parse `[ <in-types> -- <out-types> ]` into a
     /// `Type::Quotation`. Each side is a possibly-empty list of ordinary type
     /// expressions (reusing `parse_type_expr`, so a nested array/ref/effect is
-    /// read the same way), so the nil effect `[ -- ]` is legal. Only called
-    /// once `quotation_type_ahead` has confirmed a top-depth `--` exists, so
-    /// the input-list scan always terminates on it.
+    /// read the same way), so the nil effect `[ -- ]` is legal.
     fn parse_quotation_type_expr(&mut self) -> Result<Type, String> {
         let (inputs, outputs) = self.parse_quotation_effect_rows()?;
         Ok(crate::ast::quotation_type(inputs, outputs))
@@ -4497,6 +4567,9 @@ impl<'t> Parser<'t> {
     /// Shared by the plain and the `owning` reader so the two spellings can
     /// never drift apart on what an effect's rows are.
     fn parse_quotation_effect_rows(&mut self) -> Result<(Vec<Type>, Vec<Type>), String> {
+        // R4a: the one depth-base-0 validator call -- the parser is still on
+        // the `[`, which the `expect` below consumes.
+        self.require_top_depth_arrow(0)?;
         self.expect(Token::LBracket)?;
         let inputs = self.parse_quot_type_list(true)?;
         self.expect_word("--")?;
@@ -4507,7 +4580,11 @@ impl<'t> Parser<'t> {
 
     /// One side of a quotation effect: type expressions until the delimiter
     /// (`--` for the input side, `]` for the output side). A malformed type on
-    /// either side is a located parse error from `parse_type_expr` (R3).
+    /// either side is a located parse error from `parse_type_expr` (R3). This
+    /// loop cannot be where a missing `--` is detected: it dispatches every
+    /// unmatched token to `parse_type_expr`, which dies on a bare array count
+    /// (`4` is a `Token::Int`) before the `]` is ever observed. Hence R4a's
+    /// validator ahead of the reader.
     fn parse_quot_type_list(&mut self, stop_on_arrow: bool) -> Result<Vec<Type>, String> {
         let mut out = Vec::new();
         loop {
@@ -4748,7 +4825,12 @@ impl<'t> Parser<'t> {
     /// defining-word field type, or a missing `;` is a located parse error.
     fn parse_typedef(&mut self) -> Result<Vec<(String, Type)>, String> {
         self.expect_word("type:")?;
-        self.expect_word_any()?; // the struct name; already registered by the pre-pass
+        // The struct name is already registered by the pre-pass.
+        let name = self.expect_word_any()?;
+        // P7.S6 (R10): the REPL's `type:`-line readers reach this production
+        // without the module pre-pass, so the postfix-form rejection is raised
+        // here too rather than relied on from there.
+        reject_postfix_header_var("type:", &name, self.tokens, self.pos)?;
         let mut fields = Vec::new();
         loop {
             match self.peek() {
@@ -4784,12 +4866,9 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             return self.parse_array_type_expr();
         }
+        // P7.S6 (R4): a bare `[` is a quotation effect unconditionally.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            return if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()
-            } else {
-                self.parse_array_type_expr()
-            };
+            return self.parse_quotation_type_expr();
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             return self.parse_owning_cell_type_expr();
@@ -4888,18 +4967,17 @@ impl<'t> Parser<'t> {
     /// position is an enum (D1's `|`-separated-variants body), per
     /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`.
     /// `body_has_pipe_before_semicolon` scans forward for the first `Pipe` or
-    /// `Semicolon` and ignores every other token, so a generic header's bound
-    /// type variables (Phase 5 slice 1, always plain `Word` tokens) in the
-    /// scanned range don't change the verdict; the search need not skip past
-    /// them first.
+    /// `Semicolon` and ignores every other token, so a generic header's
+    /// bracketed type-variable list in the scanned range doesn't change the
+    /// verdict (it holds only `'`-prefixed words and its own brackets); the
+    /// search need not skip past it first.
     fn current_typedef_is_enum(&self) -> bool {
         body_has_pipe_before_semicolon(self.tokens, self.pos + 2)
     }
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
-    /// position is generic (Phase 5 slice 1, R1/D2 / P7.S6 R5a) -- its
-    /// header binds one or more type variables, in either the new bracketed
-    /// form (`type: Box['T]`) or the legacy postfix form (`type: Box 'T`).
+    /// position is generic (Phase 5 slice 1, R1/D2 / P7.S6 R5) -- its header
+    /// binds one or more type variables in a bracket (`type: Box['T]`).
     /// `self.pos` must point at `type:`.
     fn current_typedef_is_generic(&self) -> bool {
         header_is_generic(self.tokens, self.pos + 2)
@@ -4913,7 +4991,11 @@ impl<'t> Parser<'t> {
     /// variant at all) is a located malformed-declaration error (M3).
     fn parse_enum_typedef(&mut self) -> Result<Vec<Vec<(String, Type)>>, String> {
         let type_span = self.expect_word("type:")?;
-        let name = self.expect_word_any()?; // the enum name; already registered by the pre-pass
+        // The enum name is already registered by the pre-pass.
+        let name = self.expect_word_any()?;
+        // P7.S6 (R10): as in `parse_typedef` -- the REPL's enum `type:`-line
+        // reader arrives here without the module pre-pass.
+        reject_postfix_header_var("type:", &name, self.tokens, self.pos)?;
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
@@ -5082,7 +5164,8 @@ impl<'t> Parser<'t> {
     fn parse_generic_header(&mut self) -> Result<GenericHeader, String> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars(&name)?;
+        // `header_is_generic` gates every route here, so the `[` is present.
+        let ty_vars = self.parse_header_bracket(&name)?;
         Ok((name, ty_vars, type_span))
     }
 
@@ -5505,40 +5588,7 @@ impl<'t> Parser<'t> {
         Ok(args)
     }
 
-    /// A generic `type:` header's bound type variables (R1/D2 / P7.S6 R5):
-    /// one or more `'`-prefixed words, in either the new bracketed form
-    /// (`type: Box['T]`) or the legacy postfix form (`type: Box 'T`). The
-    /// caller (`header_is_generic`) has already established at least one is
-    /// present in one of the two shapes. A name bound twice in one header is
-    /// rejected here, at the binding site, rather than left for a field
-    /// reference to misreport as unbound or phantom.
-    ///
-    /// P7.S6 (R5a): dual acceptance -- the bracket reader is a *first arm*
-    /// beside the legacy postfix loop, not a replacement. Removing the postfix
-    /// loop would satisfy `header_is_generic` and still break every un-migrated
-    /// header (`lib/result.sth:1` among them) three phases before phase 3
-    /// migrates them. The OR must survive phases 2 and 3 untouched.
-    fn parse_generic_header_vars(
-        &mut self,
-        decl_name: &str,
-    ) -> Result<Vec<(String, Span)>, String> {
-        // R5: bracketed type-variable list `type: Box['T]`.
-        if matches!(self.peek(), Some((Token::LBracket, _))) {
-            return self.parse_header_bracket(decl_name);
-        }
-        // Legacy postfix form: `type: Box 'T ...`
-        let mut ty_vars: Vec<(String, Span)> = Vec::new();
-        while matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
-            let (w, span) = self.expect_word_any_spanned()?;
-            if ty_vars.iter().any(|(n, _)| *n == w) {
-                return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
-            }
-            ty_vars.push((w, span));
-        }
-        Ok(ty_vars)
-    }
-
-    /// P7.S6 (R5): parse a bracketed type-variable list `array[ 'T 'U ]` from a
+    /// P7.S6 (R5): parse a bracketed type-variable list `['T 'U]` from a
     /// `type:`/`trait:` header. Assumes `[` is the current token; consumes
     /// through the matching `]`. The bracket's contents are `'`-prefixed words
     /// only (no bounds on a header -- bounds are a word-definition feature,
@@ -5616,22 +5666,19 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             return self.parse_generic_field_array(decl_name, ty_vars, used);
         }
-        // A `[` opens either a quotation effect or an array type, decided by
-        // `quotation_type_ahead`'s top-depth `--` scan exactly as
-        // `parse_field_type_expr` decides it -- without this the array
-        // production would misparse a legal concrete quotation field.
+        // P7.S6 (R4): a bare `[` opens a quotation effect unconditionally;
+        // an array field is spelled `array['T N]` and was taken above.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                // R7: a quotation field naming the declaration's own type
-                // variable is out of scope, rejected here rather than left
-                // to misreport `'T` as an unknown concrete type. A quotation
-                // field over concrete types alone still parses.
-                if let Some((var, span)) = self.quotation_effect_ty_var_ahead(ty_vars) {
-                    return Err(quotation_field_ty_var_error(decl_name, &var, span));
-                }
-                return Ok(PolyType::Concrete(self.parse_quotation_type_expr()?));
+            // R7: a quotation field naming the declaration's own type
+            // variable is out of scope, rejected here rather than left
+            // to misreport `'T` as an unknown concrete type. A quotation
+            // field over concrete types alone still parses. This scan runs
+            // *ahead* of the reader, so it also fires ahead of R4a's
+            // missing-`--` validator on a variable-bearing bracket.
+            if let Some((var, span)) = self.quotation_effect_ty_var_ahead(ty_vars) {
+                return Err(quotation_field_ty_var_error(decl_name, &var, span));
             }
-            return self.parse_generic_field_array(decl_name, ty_vars, used);
+            return Ok(PolyType::Concrete(self.parse_quotation_type_expr()?));
         }
         if let Some((Token::Word(w), span)) = self.peek() {
             let (w, span) = (w.clone(), *span);
@@ -7635,7 +7682,7 @@ mod tests {
         let result = parse_src("type: Foo['bar] i64 ;");
         let err = result.unwrap_err();
         assert!(
-            err.contains("generic `type: Foo 'bar`"),
+            err.contains("generic `type: Foo['bar]`"),
             "unexpected message: {err}"
         );
         assert!(err.contains("line 1, col 21"), "unlocated: {err}");
@@ -8185,11 +8232,10 @@ mod tests {
 
     #[test]
     fn parse_generic_field_concrete_quotation_still_parses() {
-        // R7/N4: the `[`-arm has to replicate `quotation_type_ahead`'s
-        // top-depth `--` scan, or the array production misparses a legal
-        // concrete quotation field. `Q` needs a variable-bearing field of its
-        // own too, else the phantom check rejects the fixture for an
-        // unrelated reason.
+        // R7/N4: a bare `[` field is a quotation effect (P7.S6 R4), so a
+        // legal concrete quotation field must still declare. `Q` needs a
+        // variable-bearing field of its own too, else the phantom check
+        // rejects the fixture for an unrelated reason.
         let module = parse_src("type: Q['T] v 'T f [ i64 -- i64 ] ;").unwrap();
         let decl = &module.generic_structs[0];
         match decl.fields[1].1 {
@@ -8903,7 +8949,7 @@ mod tests {
     #[test]
     fn parse_array_type_non_literal_count_is_error() {
         // X3: a non-literal count names the offending count token.
-        let result = parse_src(": w ( [i64 n] -- ) drop ;");
+        let result = parse_src(": w ( array[i64 n] -- ) drop ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("decimal literal"), "unexpected message: {err}");
@@ -9468,16 +9514,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_trait_decl_member_bound_reports_bound_on_use_not_unknown_capability() {
+    fn parse_trait_decl_member_bound_in_effect_is_error() {
         // `prepass_trait_decls` used to build its inner `Parser` with an
         // empty `traits` slice, so a bound (`'T: Copy`) inside a member
         // signature saw no predicate-trait table and reported "unknown
-        // capability `Copy`" instead of the located bound-on-use error.
+        // capability `Copy`" instead of a located bound diagnostic. That
+        // subject -- a member-signature bound must not misreport "unknown
+        // capability `Copy`" -- is unchanged; P7.S6 (R7a) only changes *which*
+        // located diagnostic it is. A trait-member effect runs with
+        // `forbid_bounds == false`, so it is the word-def message, not the
+        // `impl:` one.
         let err = parse_src("trait: Show['T] : show ( 'T: Copy -- ) ; ;").unwrap_err();
         assert!(
-            err.contains("must be written at its binding"),
+            err.contains("may not be written inside a stack effect"),
             "unexpected message: {err}"
         );
+        assert!(!err.contains("unknown capability"), "{err}");
+        assert!(!err.contains("`impl:` target"), "{err}");
     }
 
     /// P7.S3r (R2): the body form's whole desugar, read off the AST -- the
@@ -10067,8 +10120,12 @@ mod tests {
     }
 
     /// The gate above must stay narrow: a session that declares a type named
-    /// `Ord` makes it a legitimate slot, so `'T: Copy Ord` parses (and fails
-    /// later, on its stack effect) instead of being claimed as the trait.
+    /// `Ord` keeps `Ord` usable as an ordinary effect slot instead of having it
+    /// claimed as the `core::cmp` trait. P7.S6 (R6a) retired the original
+    /// vehicle for that claim -- `Ord` after `Copy` *inside a bound bracket*
+    /// can no longer fall through to the enclosing effect's next slot, because
+    /// a bracket has no next slot -- so the slot half is asserted where slots
+    /// actually live, in the effect.
     #[test]
     fn parse_capabilities_at_repl_scope_yields_ord_to_a_declared_type() {
         let structs = vec![StructDecl {
@@ -10080,7 +10137,7 @@ mod tests {
             is_bundle: false,
             module: 0,
         }];
-        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
+        let tokens = lex(": f['T: Copy] ( 'T Ord -- 'T ) drop ;").unwrap();
         let mut arrays = Vec::new();
         let mut owned_cells = Vec::new();
         let mut refs = Vec::new();
@@ -10095,15 +10152,20 @@ mod tests {
             &mut slices,
             ImportCtx::empty(),
         )
-        .expect("`Ord` names a declared type here, so it is the next slot");
+        .expect("`Ord` names a declared type here, so it is an ordinary slot");
         let Line::Def(def) = line else {
             panic!("expected a word definition");
         };
         let sig = def.poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
-        // Three inputs: the bound site `'T` is itself a slot, then `Ord`,
-        // then the declared `'T`.
-        assert_eq!(sig.inputs.len(), 3, "`Ord` became an input slot");
+        assert_eq!(
+            sig.inputs,
+            vec![
+                PolyType::Var(0),
+                PolyType::Concrete(Type::Struct(StructId::from_index(0), "Ord"))
+            ],
+            "`Ord` must resolve as the declared struct, not be claimed as the trait"
+        );
     }
 
     #[test]
@@ -10641,7 +10703,7 @@ mod tests {
         // Coverage gap (review cycle 3): the guard must also reach a
         // row-bearing quotation appearing as an array element type.
         let err =
-            parse_src(": fx ( ..s i64 [ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;").unwrap_err();
+            parse_src(": fx ( ..s i64 array[ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;").unwrap_err();
         assert!(err.contains("..s"), "unexpected message: {err}");
         assert!(err.contains("inline"), "unexpected message: {err}");
     }
@@ -10656,11 +10718,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_x3_bound_on_use_occurrence_is_error() {
-        // X3: a bound must be written at the binding occurrence, not a use.
-        let err = parse_src(": f ( 'T: Copy 'T: Copy -- 'T ) drop ;").unwrap_err();
+    fn parse_worddef_bound_in_effect_is_error() {
+        // P7.S6 (R7): a bound written inside an effect is a located error
+        // naming the bracket form. Retired from
+        // `parse_x3_bound_on_use_occurrence_is_error`, whose subject (a bound
+        // legal at a *binding* occurrence but not at a *use*) no longer exists
+        // -- neither occurrence may carry one. The `written twice` half of that
+        // subject survives in the bracket, as a duplicate declaration.
+        let err = parse_src(": f ( 'T: Copy 'T -- 'T ) drop ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
-        assert!(err.contains("binding"), "unexpected message: {err}");
+        assert!(
+            err.contains("may not be written inside a stack effect"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("bound bracket"), "unexpected message: {err}");
+        // The use-occurrence spelling is the same error, not a different one.
+        let at_use = parse_src(": f ( 'T 'T: Copy -- 'T ) drop ;").unwrap_err();
+        assert!(
+            at_use.contains("may not be written inside a stack effect"),
+            "unexpected message: {at_use}"
+        );
+        // And a variable declared twice in the bracket is the duplicate error.
+        let dup = parse_src(": f['T: Copy 'T: Copy] ( 'T -- 'T ) drop ;").unwrap_err();
+        assert!(
+            dup.contains("more than once") || dup.contains("twice"),
+            "{dup}"
+        );
     }
 
     #[test]
@@ -10816,7 +10899,7 @@ mod tests {
     fn parse_impl_target_bound_on_var_is_error() {
         let err = parse_src(
             "trait: Show['T] : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T: Copy 'N]\n\
+             impl: Show for array['T: Copy 'N]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -11056,30 +11139,40 @@ mod tests {
             matches!(&named, PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
             "field should be &array['T 4]"
         );
-        // Co-assertion: the legacy bare-`[` spelling still builds.
-        let legacy = sole_generic_field("type: Box['T] f &array['T 4] ;");
-        assert_eq!(
-            named, legacy,
-            "both spellings should produce the same PolyType"
-        );
     }
 
     #[test]
     fn parse_generic_field_shape_owned_cell_named_array_parses() {
         // R1a generic-field path: `^array['T 4]` in a generic struct field.
-        // Same regression-test rationale and phases 1–3 co-assertion as the
-        // `&` twin above.
+        // Same rationale as the `&` twin above.
         let named = sole_generic_field("type: Box['T] f ^array['T 4] ;");
         assert!(
             matches!(&named, PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
             "field should be ^array['T 4]"
         );
-        // Co-assertion: the legacy bare-`[` spelling still builds.
-        let legacy = sole_generic_field("type: Box['T] f ^array['T 4] ;");
-        assert_eq!(
-            named, legacy,
-            "both spellings should produce the same PolyType"
+    }
+
+    #[test]
+    fn parse_generic_field_shape_bare_bracket_after_retirement_is_a_quotation_error() {
+        // R1a: the successor to the two tests above's phases-1–3 co-assertion
+        // that `&['T 4]` still built. After R4 a bare `[` is a quotation
+        // effect, so that spelling is now rejected -- with a *pinned* message,
+        // since "rejected" alone can hold for an unrelated upstream reason.
+        //
+        // Two arms, because `parse_generic_field_shape`'s ty-var scan
+        // (`quotation_effect_ty_var_ahead`) runs ahead of the reader and so
+        // fires ahead of R4a's validator.
+        let with_var = parse_src("type: Box['T] f &['T 4] ;").unwrap_err();
+        assert!(
+            with_var.contains("quotation") && with_var.contains("'T"),
+            "the declaration's own variable inside a quotation field: {with_var}"
         );
+        let concrete = parse_src("type: Box['T] f &[i64 4] g 'T ;").unwrap_err();
+        assert!(
+            concrete.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "the concrete twin routes through R4a's validator: {concrete}"
+        );
+        assert!(concrete.contains("array[T N]"), "{concrete}");
     }
 
     #[test]
@@ -11209,20 +11302,56 @@ mod tests {
     }
 
     #[test]
-    fn header_is_generic_accepts_both_bracket_and_postfix_during_migration() {
-        // R5a: both the bracket form (`type: Box['T]`) and the legacy postfix
-        // form (`type: Box 'T`) are classified as generic during phases 2–3.
+    fn header_is_generic_rejects_postfix_after_retirement() {
+        // R10: the bracket form is the only generic spelling. Replaces
+        // `header_is_generic_accepts_both_bracket_and_postfix_during_migration`,
+        // whose dual acceptance was a phases-2–3 scaffold.
         let bracket_module = parse_src("type: Box['T] val 'T ;").unwrap();
         assert_eq!(bracket_module.generic_structs.len(), 1);
+        assert_eq!(bracket_module.generic_structs[0].ty_var_names, ["'T"]);
 
-        let postfix_module = parse_src("type: Box 'T val 'T ;").unwrap();
-        assert_eq!(postfix_module.generic_structs.len(), 1);
+        // The postfix form is no longer *classified* as concrete and left to
+        // mis-parse: it is its own located error.
+        let err = parse_src("type: Box 'T val 'T ;").unwrap_err();
+        assert!(err.contains("retired postfix form"), "{err}");
+        assert!(err.contains("type: Box['T]"), "{err}");
+    }
 
-        // Both produce the same ty_var_names.
-        assert_eq!(
-            bracket_module.generic_structs[0].ty_var_names,
-            postfix_module.generic_structs[0].ty_var_names
+    #[test]
+    fn parse_typedef_postfix_header_var_is_error() {
+        // R10: the located error reaches the struct production, the enum
+        // production, and the REPL's own `type:`-line reader (which arrives at
+        // both without the module pre-pass).
+        let struct_err = parse_src("type: Box 'T val 'T ;").unwrap_err();
+        assert!(struct_err.contains("retired postfix form"), "{struct_err}");
+        assert!(struct_err.contains("type: Box['T]"), "{struct_err}");
+        // A `'`-prefixed word is not merely rejected as a field name.
+        assert!(
+            !struct_err.contains("cannot be a field name"),
+            "{struct_err}"
         );
+
+        let enum_err = parse_src("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap_err();
+        assert!(enum_err.contains("retired postfix form"), "{enum_err}");
+        assert!(enum_err.contains("type: Result['T]"), "{enum_err}");
+
+        // The REPL line readers skip the pre-pass, so they need their own
+        // raise site inside the two productions.
+        let tokens = lex("type: Box 'T val 'T ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let repl_err = parse_typedef_line(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(repl_err.contains("retired postfix form"), "{repl_err}");
     }
 
     #[test]
@@ -11252,25 +11381,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_trait_decl_accepts_both_bracket_and_postfix_during_migration() {
-        // R5b: both `trait: Ord['T]` and `trait: Ord 'T` produce the same
-        // TraitDecl during phases 2–3.
-        let bracket_module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
-        let postfix_module = parse_src("trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
-
-        let bracket_ord = bracket_module
-            .traits
-            .iter()
-            .find(|t| t.name == "Ord")
-            .unwrap();
-        let postfix_ord = postfix_module
-            .traits
-            .iter()
-            .find(|t| t.name == "Ord")
-            .unwrap();
-        assert_eq!(bracket_ord.name, postfix_ord.name);
-        assert_eq!(bracket_ord.members.len(), postfix_ord.members.len());
-        assert_eq!(bracket_ord.members[0].name, postfix_ord.members[0].name);
+    fn parse_trait_decl_postfix_header_var_is_error() {
+        // R10: `parse_trait_decl` drops R5b's postfix disjunct. Replaces
+        // `parse_trait_decl_accepts_both_bracket_and_postfix_during_migration`.
+        // Distinct from the neither-form error above, which would wrongly
+        // claim no type variable was written at all.
+        let err = parse_src("trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("retired postfix form"), "{err}");
+        assert!(err.contains("trait: Ord['T]"), "{err}");
+        assert!(!err.contains("expected a type variable"), "{err}");
     }
 
     #[test]
@@ -11491,6 +11610,137 @@ mod tests {
         assert_eq!(
             generic_field_type_str(&nested, &ty_vars),
             "array[array['T 4] 2]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_bare_bracket_is_quotation() {
+        // R4: an array-shaped bare bracket in a poly slot is a quotation
+        // effect now, not an array -- so it is R4a's missing-`--` error.
+        let err = parse_src(": f ( [ 'T 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(err.contains("array[T N]"), "{err}");
+        // And the named spelling in the same position still parses as an array.
+        let module = parse_src(": f ( array[ 'T 4 ] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(
+            sig.inputs[0],
+            PolyType::Array(_, Len::Concrete(4))
+        ));
+    }
+
+    #[test]
+    fn parse_quotation_effect_missing_arrow_is_error() {
+        // R4a, concrete reader, depth base 0, opener `[`. The message *does*
+        // name `array[T N]`: a plain `[` is exactly where an author who meant
+        // an array lands.
+        let err = parse_src(": f ( [ i64 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(
+            err.contains("array[T N]"),
+            "a plain `[` opener gets the array advice: {err}"
+        );
+        // Located at the opening bracket, not at EOF.
+        assert!(err.contains("line 1, col 7"), "{err}");
+    }
+
+    #[test]
+    fn parse_poly_quotation_missing_arrow_is_error() {
+        // R4a(iii), poly reader, depth base 1, opener `~[`. `~[` has no array
+        // reading anywhere in the grammar (every type-position reader rejects
+        // a bare `Token::TildeLBracket`), so the advice must NOT offer
+        // `array[T N]` -- that would send the author somewhere the parser
+        // refuses. Pinned to a different opener than the base-0 test above so
+        // both entry points are covered independently.
+        let err = parse_src(": f ( ~[ i64 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("array[T N]"),
+            "a `~[` opener must not be offered the array spelling: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_poly_quotation_legal_inline_effect_still_parses() {
+        // R4a(i)'s guard: `parse_poly_quotation_inner` is entered *past* its
+        // opener by all three of its callers, so the validator must be seeded
+        // at depth base 1. Seeded at 0 this legal `~[ 'T -- Bool ]` meets its
+        // closing `]` first, falls to -1, never satisfies the `depth == 0`
+        // stop, runs to EOF and is false-rejected -- as would every inline
+        // combinator in `lib/combinators.sth`.
+        let module = parse_src(": f inline ( 'T ~[ 'T -- i64 ] -- i64 ) call ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[1], PolyType::Quotation(ins, outs, true, _, _)
+                if ins.len() == 1 && outs.len() == 1),
+            "the inline quotation parameter should survive: {:?}",
+            sig.inputs[1]
+        );
+        // The `owning [ ... ]` and plain `[ ... ]` openers reach the same
+        // base-1 site; neither may be false-rejected either.
+        parse_src(": g ( [ i64 -- i64 ] 'T -- 'T ) drop ;").expect("a plain poly quotation slot");
+    }
+
+    #[test]
+    fn require_top_depth_arrow_counts_a_nested_tilde_bracket() {
+        // R4a(ii): `Token::TildeLBracket` is a single token that opens a
+        // bracket. A walk that counts only `Token::LBracket` fails *open*
+        // here -- the inner `~[`'s `--` is seen at depth 1 and the outer
+        // bracket passes vacuously, then dies further down with a worse
+        // diagnostic. The author meant `array[ ~[ i64 -- i64 ] 4 ]`, and the
+        // outer opener is a plain `[`, so the array advice is present and
+        // correct.
+        let err = parse_src(": f ( [ ~[ i64 -- i64 ] 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(err.contains("array[T N]"), "{err}");
+        // The all-`[` twin, which a counter blind to `~[` gets right anyway.
+        let plain = parse_src(": f ( [ [ i64 -- i64 ] 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            plain.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{plain}"
+        );
+        // And the named spelling parses, so the fixture's only defect is the
+        // missing `array`.
+        parse_src(": f ( array[ ~[ i64 -- i64 ] 4 ] -- ) drop ;")
+            .expect("the named array of inline quotations parses");
+    }
+
+    #[test]
+    fn repl_word_def_bound_in_effect_is_error() {
+        // R7 on the REPL word-def path (`parse_line_with_structs`), which this
+        // project has a documented history of regressing separately from the
+        // file path.
+        let tokens = lex(": f ( 'T: Copy 'T -- 'T ) drop ;").unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let err = parse_line_with_structs(
+            &tokens,
+            &[],
+            &[],
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+            &mut slices,
+            ImportCtx::empty(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not be written inside a stack effect"),
+            "{err}"
         );
     }
 

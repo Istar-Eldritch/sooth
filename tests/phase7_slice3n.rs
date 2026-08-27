@@ -203,9 +203,9 @@ fn non_growing_cell_self_reference_declares() {
 /// R7: a quotation field naming the declaration's own type variable is out of
 /// scope, rejected with a located message rather than misreporting `'T` as an
 /// unknown concrete type -- and a *concrete* quotation field, legal today,
-/// still declares. Both halves matter: the `[`-arm has to replicate
-/// `quotation_type_ahead`'s disambiguation, or it misparses the concrete one
-/// as a malformed array.
+/// still declares. Both halves matter: the `[`-arm's ty-var scan runs ahead of
+/// the quotation reader, so a defect in either one shows up as the wrong
+/// diagnostic for the other's fixture.
 #[test]
 fn variable_quotation_field_is_rejected_and_concrete_one_still_declares() {
     let err = build(

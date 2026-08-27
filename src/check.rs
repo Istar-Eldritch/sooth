@@ -3628,7 +3628,7 @@ mod tests {
     /// deep from the signature and only the array-registry sweep can reach it.
     #[test]
     fn array_element_quotation_two_outputs_interns_a_bundle() {
-        let bundles = interned_bundles(": w ( &[ [ i64 -- i64 i64 ] 2 ] -- ) ;\n");
+        let bundles = interned_bundles(": w ( &array[ [ i64 -- i64 i64 ] 2 ] -- ) ;\n");
         assert_eq!(bundles, vec![vec![Type::I64, Type::I64]]);
     }
 
@@ -4509,7 +4509,7 @@ mod tests {
         // assertion hold.
         let err = check_src(
             "type: Boxed f [ -- i64 ] ;\n\
-             : mk ( -- [ [ -- i64 ] 4 ] )\n\
+             : mk ( -- array[ [ -- i64 ] 4 ] )\n\
              0 4 fill | arr |\n\
              &arr | r |\n\
              [ r 0 >usize &> @ ] Boxed | b |\n\

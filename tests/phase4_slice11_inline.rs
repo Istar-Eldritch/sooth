@@ -551,7 +551,7 @@ fn combinators_source(quotation_kind: &str) -> String {
   acc count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- Bool ] -- array['T 'N] usize )
+: filter inline ['T: Copy] ( array['T 'N] {quotation_kind}[ 'T -- Bool ] -- array['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
           | v | &!arr over >usize &!> v ! 1 add

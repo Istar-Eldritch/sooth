@@ -328,7 +328,7 @@ fn repl_ord_bound_is_a_located_repl_specific_diagnostic() {
     let out = run_session(&[": mymax ['T: Ord] ( 'T 'T -- 'T ) drop ;"]);
     assert!(
         out.contains(
-            "error: unknown capability `Ord` at line 1, col 15 (`Ord` is a core::cmp trait; \
+            "error: unknown capability `Ord` at line 1, col 14 (`Ord` is a core::cmp trait; \
              the REPL carries no trait or impl: registry to resolve it against -- define a \
              word needing it in a file and load that instead)"
         ),
@@ -349,7 +349,7 @@ fn repl_ord_bound_after_copy_is_the_same_repl_specific_diagnostic() {
     let out = run_session(&[": mymax ['T: Copy Ord] ( 'T 'T -- 'T ) drop ;", "7 ."]);
     assert!(
         out.contains(
-            "error: unknown capability `Ord` at line 1, col 20 (`Ord` is a core::cmp trait; \
+            "error: unknown capability `Ord` at line 1, col 19 (`Ord` is a core::cmp trait; \
              the REPL carries no trait or impl: registry to resolve it against -- define a \
              word needing it in a file and load that instead)"
         ),
@@ -366,21 +366,30 @@ fn repl_ord_bound_after_copy_is_the_same_repl_specific_diagnostic() {
     assert!(out.contains("7"), "the session must survive: {out}");
 }
 
-/// The gate above is narrow: a session-declared type named `Ord` keeps its
-/// claim on the slot, so this program parses and fails on its stack effect
-/// instead of being told `Ord` is the `core::cmp` trait.
+/// The gate above is narrow: a session-declared type named `Ord` must not be
+/// claimed as the `core::cmp` trait. P7.S6 (R6a) retired the original's
+/// vehicle for that claim -- an unresolved name after a bound no longer falls
+/// through to the enclosing effect's next slot, because a bound bracket has
+/// no next slot -- so the same claim is pinned in two halves instead: inside
+/// the bracket `Ord` is an unknown *capability* with the generic message, and
+/// on the effect side it still resolves as the declared type.
 #[test]
-fn repl_declared_ord_type_still_parses_as_a_bound_slot() {
+fn repl_declared_ord_type_is_not_claimed_as_the_core_cmp_trait() {
     let out = run_session(&[
         "type: Ord val i64 ;",
         ": mymax ['T: Copy Ord] ( 'T 'T -- 'T ) drop ;",
+        ": takes_ord ['T: Copy] ( 'T Ord -- 'T ) drop ;",
     ]);
-    assert!(
-        out.contains("stack effect mismatch in `mymax`"),
-        "expected `Ord` to be parsed as a slot, got: {out}"
-    );
     assert!(
         !out.contains("core::cmp trait"),
         "a declared type must not be claimed as the trait: {out}"
+    );
+    assert!(
+        out.contains("unknown capability `Ord`"),
+        "inside a bracket `Ord` is a bound name, which no declared type resolves: {out}"
+    );
+    assert!(
+        out.contains("defined takes_ord"),
+        "on the effect side `Ord` still resolves as the declared type: {out}"
     );
 }

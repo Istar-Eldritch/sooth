@@ -113,16 +113,23 @@ fn quotation_type_in_signature_parses() {
     );
 }
 
-// -- criterion 1b: `[i64]` stays the array diagnostic -------------------------
+// -- criterion 1b: a bare `[` is a quotation effect ---------------------------
 
 #[test]
-fn array_type_without_arrow_stays_array_diagnostic() {
-    // No top-depth `--`, so the scan takes the array branch and reaches
-    // `parse_array_count`: the disambiguation must not swallow this.
+fn bare_bracket_without_arrow_is_a_quotation_effect_error() {
+    // Retired from `array_type_without_arrow_stays_array_diagnostic`, whose
+    // subject (slice 6a's top-depth-`--` scan routing `[i64]` to the array
+    // production) P7.S6 (R4) reverses: a bare `[` in a type position is now
+    // unconditionally a quotation effect, so a bracket with no top-depth `--`
+    // is R4a's located error naming the `--` and the `array[T N]` alternative.
     let err = parse_error(": main ( [i64] -- ) drop ;\n");
     assert!(
-        err.contains("array count must be a decimal literal"),
-        "`[i64]` should still be the array-count diagnostic, got: {err}"
+        err.contains("must be written in full as `[ inputs -- outputs ]`"),
+        "`[i64]` should be the missing-arrow diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("array[T N]"),
+        "a plain `[` opener must be offered the array spelling, got: {err}"
     );
 }
 
@@ -222,11 +229,11 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         // `[ [ i64 -- ] 3 ]` (an earlier row) was already caught via the
         // interned array registry.
         Row {
-            src: ": w ( [ [ 'T -- ] 3 ] -- ) drop ;\n: main ( -- ) ;\n",
+            src: ": w ( array[ [ 'T -- ] 3 ] -- ) drop ;\n: main ( -- ) ;\n",
             position: "an array element",
         },
         Row {
-            src: ": w ( [ [ 'T -- ] 'N ] -- ) drop ;\n: main ( -- ) ;\n",
+            src: ": w ( array[ [ 'T -- ] 'N ] -- ) drop ;\n: main ( -- ) ;\n",
             position: "an array element",
         },
     ];
@@ -337,8 +344,8 @@ fn array_of_quotation_type_is_a_legal_declaration() {
     // an array count. Slice 7a lifts the array-element boundary, so declaring
     // one is now legal (pre-7a this was a located rejection); it must neither
     // error as an array count nor panic in layout.
-    let tokens =
-        lexer::lex(": main ( [ [ i64 -- i64 ] 3 ] -- ) drop ;\n").expect("lexing should succeed");
+    let tokens = lexer::lex(": main ( array[ [ i64 -- i64 ] 3 ] -- ) drop ;\n")
+        .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("an array-of-quotation type is legal to declare in 7a");
 }
@@ -770,7 +777,8 @@ fn filter_checks_standalone() {
     // own def site with no call site and no compiler change. Combinators
     // splice at the concrete call site (recon 1), so the polymorphic-`if`
     // rejection never gates this.
-    let filter = ": filter inline ( ['T: Copy 'N] [ 'T -- Bool ] -- array['T 'N] usize )\n\
+    let filter =
+        ": filter inline ['T: Copy] ( array['T 'N] [ 'T -- Bool ] -- array['T 'N] usize )\n\
                   | p | len >i64 | n | | arr |\n\
                   0 n ~[ | i | &arr i >usize &> @ dup p call ~[\n\
                           | v | &!arr over >usize &!> v ! 1 add\n\

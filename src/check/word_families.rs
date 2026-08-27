@@ -2924,7 +2924,7 @@ mod tests {
             "unexpected message: {linear}"
         );
         for elem in ["&i64", "&!i64"] {
-            let src = format!(": f ( &[{elem} 3] -- usize ) slice len ;\n: main ( -- ) ;\n");
+            let src = format!(": f ( &array[{elem} 3] -- usize ) slice len ;\n: main ( -- ) ;\n");
             let err = check_src(&src).unwrap_err();
             assert!(
                 err.contains("a reference cannot be stored"),

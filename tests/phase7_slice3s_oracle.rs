@@ -141,11 +141,11 @@ fn fixture_source(inline: bool) -> String {
 import: intrinsics * ;
 import: core::prelude * ;
 
-: mymax {kw}( 'T: Copy Ord 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
+: mymax {kw}['T: Copy Ord] ( 'T 'T -- 'T ) over over gt ~[ drop ] ~[ swap drop ] if ;
 
 : choose inline ( 'T 'T Bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;
 
-: mymax3 {kw}( 'T: Copy Ord 'T 'T -- 'T )
+: mymax3 {kw}['T: Copy Ord] ( 'T 'T 'T -- 'T )
   | a b c |
   a b gt ~[
     a c gt ~[ a ] ~[ c ] if

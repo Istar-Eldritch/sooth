@@ -381,7 +381,7 @@ fn frame_capture_escaping_via_store_through_param_ref_is_past_owning_frame() {
     // clean and stored a dangling reference into `tbl`.
     let err = check_error(
         ": seed ( -- [ i64 -- i64 ] ) [ 1 add ] ;\n\
-         : install ( &![ [ i64 -- i64 ] 2 ] -- )\n\
+         : install ( &!array[ [ i64 -- i64 ] 2 ] -- )\n\
          5 4 fill | arr |\n\
          &arr | r |\n\
          0 >usize &!> [ r 0 >usize &> @ add ] ! ;\n\
