@@ -240,11 +240,15 @@ impl<'a> FuncBuilder<'a> {
                 // R3.2: the *outermost* member -- the one whose splice took
                 // the depth from 0 to 1 -- not this frame's `sym_name`, which
                 // diverges under mutual recursion between two impl members.
-                let outermost = self
-                    .member_splice_outermost
-                    .clone()
-                    .unwrap_or_else(|| sym_name.to_string());
-                let rendered = crate::resolve::render_word(&outermost);
+                //
+                // The `None` arm is unreachable in a real lowering (a depth at
+                // the budget implies 64 bumps, and the 0->1 bump records the
+                // outermost unconditionally), but it stays a fallback rather
+                // than an `.expect()`: this is the one path that fires on the
+                // pathological input, and a panic here would reinstate exactly
+                // the abort the guard exists to replace.
+                let outermost = self.member_splice_outermost.as_deref().unwrap_or(sym_name);
+                let rendered = crate::resolve::render_word(outermost);
                 let mut msg = format!(
                     "a trait member cannot dispatch back to itself (lowering would splice it forever): {rendered} exceeded the splice budget of {SPLICE_BUDGET}"
                 );
@@ -252,7 +256,7 @@ impl<'a> FuncBuilder<'a> {
                 // out `empty_member_spans`) omits the location clause rather
                 // than substituting a wrong span; the guard still fires and
                 // still reports.
-                if let Some(span) = self.member_spans.get(&outermost) {
+                if let Some(span) = self.member_spans.get(outermost) {
                     msg.push_str(&format!(" (line {}, col {})", span.line, span.col));
                 }
                 return Err(msg);
