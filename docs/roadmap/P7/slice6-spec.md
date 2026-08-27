@@ -229,6 +229,27 @@ upstream blocker, so every new gate (R2, R3, R4a's two halves, R6's unused-varia
 R6a's bracket-mode unknown name, R7, R10, R3's reserved-name arm) was reverted one at a time
 against a pinned message.
 
+## Phase 4 Verification (recorded post-merge)
+
+- **`src/parser.rs` split signals, re-run (success criterion: bounds parse only in their
+  bracket / whole corpus migrated).** The file grew from 10,516 to 11,786 lines (+1,270) and
+  is now 6,286 non-test lines with 3 `use` lines and no would-be circular dependency, so
+  import divergence and the circular-dependency signal do not fire. The other three fire: the
+  file mixes driver-facing pre-passes, token-level peeks and the REPL line readers (high- and
+  low-level code in one place); it does several unrelated things (bracket-header parsing,
+  bound-bracket parsing, effect/slot parsing, REPL line entry points); and some of its
+  functions never call each other (e.g. the REPL line readers vs. the module pre-passes). **3
+  of 5, the same posture as the deferred `poly.rs` split**: deferred, not split, with no
+  candidate cut identified yet.
+- **Undisclosed test deletion, corrected.** `parse_x3_bound_on_use_occurrence_is_error`
+  (present at `9c13878`, asserting `: f ( 'T: Copy 'T: Copy -- 'T ) drop ;` raised a located
+  "must be written at its binding" error) is gone as of `64b4d4e`. The deletion is
+  defensible, not a silent weakening: that fixture now raises `bound_in_effect_error` (a bound
+  cannot appear in an effect at all any more, use-occurrence or not), and its subject survives
+  as `parse_worddef_bound_in_effect_is_error` (`src/parser.rs:10727`), whose own doc comment
+  records the retirement. The phase's own licence for the deletion ("no dedicated test exists
+  for it") was wrong; this entry is the correction the commit message should have carried.
+
 ## Open Questions
 
 None outstanding.
