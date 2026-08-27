@@ -1900,7 +1900,7 @@ pub struct ImplTarget {
     pub ty_var_names: Vec<String>,
     pub len_var_names: Vec<String>,
     /// P7.S4b (R2): bounds declared on the impl's own type variables via a
-    /// `where`-clause (`impl: Show for ['T N] where 'T: Show`). Each pair's
+    /// `where`-clause (`impl: Show for array['T 'N] where 'T: Show`). Each pair's
     /// `u32` is an index into `ty_var_names`, mirroring `PolySig::bounds`.
     /// Empty when no `where`-clause is present (today's behaviour).
     pub bounds: Vec<(u32, Bound)>,

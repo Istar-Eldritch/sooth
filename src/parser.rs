@@ -469,7 +469,7 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
 /// P7.S4 (R1): an `impl:` target with a bound on one of its variables
 /// (`'T: Copy`). Bounds on impl variables are out of scope this slice.
 fn impl_target_bound_error() -> String {
-    "error: an `impl:` target variable may not carry an inline bound; use a `where`-clause instead (e.g. `impl: Show for ['T N] where 'T: Show`)".to_string()
+    "error: an `impl:` target variable may not carry an inline bound; use a `where`-clause instead (e.g. `impl: Show for array['T 'N] where 'T: Show`)".to_string()
 }
 
 /// P7.S4 (R1): an `impl:` target with a row variable (`..s`). Row variables

@@ -947,20 +947,30 @@ corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`
 (`src/ir/destructors.rs:37`) does not handle arrays. The orphaned testing-vocabulary brief
 was renamed and split into **P7.S7a-S7d** (see that entry below).
 
-**P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
-surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
-`Slice[T]` already is, so a bare `[` unambiguously opens a quotation and the
-`quotation_type_ahead` lookahead scan is deleted); `type:`/`trait:` binding sites move from
-postfix type variables (`type: Box 'T`, `trait: Ord 'T`) to bracketed parameter lists
-(`type: Box['T]`, `trait: Ord['T]`), unifying the spelling with generic application
-(`Box[i64]`); and a word's bounds move from inside the effect (`: word ( 'T: Ord 'T -- )`)
-to a bracket before it (`: word['T: Ord] ( 'T -- )`), separating variable-and-bound
-declaration from the stack effect. The `'` prefix on type variables is retained; `^'T` (owning
-cell) and `&'T` (reference) stay sigiled. Parser-and-test change only: the AST and every
-downstream checker/lowering/IR consumer are unchanged. The bracket binding site this slice
-introduces is the foundation for the kind-annotation syntax `: Len` that **S6a** adds for
-length parameters, and that **P7b** extends to `: * -> *` for higher-kinded type
-variables. Detail: [slice6-brief](./P7/slice6-brief.md).
+**P7.S6 -- Surface syntax unification.** `[ done ]` Every bracket in a type position is
+preceded by the name of what it parameterizes. The array type is named -- `array['T 'N]`,
+as `Slice[T]` and `Box[i64]` already were -- so a bare `[` in a type position opens a
+quotation effect unconditionally, with no lookahead: a bracket carrying no top-depth `--`
+is a located error naming the missing `--` and the `array[T N]` alternative. `array` is a
+reserved `type:`/`variant` name and unparseable without its bracket, but stays legal as a
+word, field or slot name. `type:` and `:` bind their type variables in an *optional*
+bracket (`type: Box['T]`; a bare name is a concrete declaration) and `trait:` in a
+*mandatory* one (`trait: Ord['T]`), unifying the spelling with generic application. A
+word's bounds live in a bracket between its name and its effect, after the optional
+`inline` (`: max['T: Copy Ord] ( 'T 'T 'T -- 'T )`); a bound written inside an effect is a
+located error. The bracket only *adds* a bound declaration and never changes arity -- the
+bound-bearing token was always an input slot, so the effect keeps every mention of the
+variable. Bracket variables are not pre-interned: ids stay effect-first-mention-derived, so
+`PolySig.ty_var_names` order and monomorph symbol names are unchanged. An unbounded
+variable still binds at its first mention and needs no bracket. The `'` prefix on type
+variables is retained; `^'T` (owning cell) and `&'T` (reference) stay sigiled. Parser,
+tests, and one rendering: `ArrayDecl::name_static` renders `array[i64 4]`, which changes
+the emitted QBE symbol of an array-typed monomorph (accepted; `type_arg_key` and
+`poly_type_shape_str` are the two identity-keying exemptions). The AST and every downstream
+checker/lowering/IR consumer are unchanged. The bracket binding site is the foundation for
+the kind-annotation syntax `: Len` that **S6a** adds for length parameters, and that
+**P7b** extends to `: * -> *` for higher-kinded type variables. Detail:
+[slice6-spec](./P7/slice6-spec.md).
 
 **P7.S6a -- Length parameters in `type:` headers and the `Kind` type.** `[ planned ]` Sequenced
 after S6 (which lands the bracket binding site), this subslice makes a user-defined type
