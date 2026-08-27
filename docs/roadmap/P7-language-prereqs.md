@@ -1058,3 +1058,16 @@ assertion words, `expect ( Bool str -- )` and `expect-eq ( 'T: Ord 'T str -- )`,
 numberless TAP-style `ok -- <label>` / `not ok -- <label>` line per assertion, plus a driver
 subcommand that discovers, builds, and runs test programs and interprets that output as
 pass/fail. Detail: [slice7-testing-brief](./P7/slice7-testing-brief.md).
+
+**P7.S8 -- Poly-body-calls-poly-combinator lowering.** `[ planned ]` A polymorphic word's
+body calling another word that is both `is_combinator` (declares `inline`) and generic with
+a bound on its own type variable (`'T: Ord`) checks fine (`check_poly_call` treats it as an
+ordinary generic callee) but has no lowering: a combinator mints no `IrFunc`, so
+`self.env.get(name).expect("checked user word exists")` panics at the call site
+(`src/ir/func_builder/calls.rs:733`). Splicing the callee's body into the caller's poly body
+(extending the P7.S3o concrete-caller splice to a poly caller) is the target outcome; a
+located rejection at the call site is the fallback if that design doesn't hold up. This is
+the blocker named in `lib/cmp.sth`'s own comment against making `eq`/`lt`/`gt`/`lte`/`gte`/
+`ne` `inline` (`cmp` itself already is) -- `'T: Ord` generic code using a comparison from
+inside another generic word is the ordinary shape, not a corner case. Detail:
+[slice8-brief](./P7/slice8-brief.md).
