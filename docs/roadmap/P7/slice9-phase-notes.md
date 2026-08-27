@@ -495,7 +495,7 @@ whole-program build has no line boundary, no carried stack and no `:quit`.
 | `define_then_call_across_lines` (`:75`) | a definition on one line reachable from the next |
 | `stack_persists_across_lines` (`:82`) | the session stack surviving a line |
 | `redefinition_takes_effect_for_later_lines` (`:92`) | generation swap |
-| `failed_redefinition_keeps_old_generation_resident` (`:135`) | a rejected redefinition leaving gen0 resident. Its diagnostic half (the stack-effect mismatch naming the word, "body leaves 2 values" / "declares 1 outputs") is pinned natively by the `declared-outputs` row of `tests/phase4_combinators.rs:2281` |
+| `failed_redefinition_keeps_old_generation_resident` (`:135`) | a rejected redefinition leaving gen0 resident. Its diagnostic half (the stack-effect mismatch naming the word, "body leaves 2 values" / "declares 1 outputs") is pinned natively by `src/check.rs::check_declared_output_mismatch_is_error` (`:4181`); `tests/phase4_combinators.rs:2281`'s declared-outputs row only asserts the substring `` "stack effect mismatch in `w`" `` |
 | `dot_output_interleaves_before_stack` (`:388`) | the flush-before-`stack:` discipline across the host's stdout and the loaded object's C stdio |
 | `subword_carried_value_survives_line_boundary` (`:232`) | the carried `u8` cell staying 8 bytes and being relabelled on reload. Shared fact: `tests/phase0.rs::narrowing_conversion_truncates_and_widens_back_correctly` |
 | `carried_float_survives_line_boundary_and_displays_as_float` (`:251`) | the carried `f64` marshalling (R20/R21). Shared facts: `tests/phase0.rs::float_arithmetic_runs_on_both_widths_end_to_end`, `::print_float_f64_and_f32_via_dot` |
@@ -539,7 +539,7 @@ the multi-module REPL; the language fact is covered.
 | test | covering test |
 | --- | --- |
 | `bad_line_reports_and_session_survives` (`:107`) | `tests/phase4_combinators.rs`'s `unknown-word` row (`:2293`, pins ``unknown word `nosuchword` in `w` ``); `src/check.rs::check_unknown_word_is_error` |
-| `type_error_line_reports_and_session_survives` (`:121`) | `tests/phase7_slice3g.rs::self_call_concrete_operand_mismatch_is_located_type_error` (`:185`) pins a mismatch naming both `` `i64` `` and `` `Bool` `` verbatim; `tests/phase4_combinators.rs`'s `type-mismatch` row |
+| `type_error_line_reports_and_session_survives` (`:121`) | `tests/phase7_slice3g.rs::self_call_concrete_operand_mismatch_is_located_type_error` (`:185`) pins a mismatch naming both `` `i64` `` and `` `Bool` `` verbatim; `tests/phase4_combinators.rs`'s `type-mismatch` row. This test is also on phase 6's classify/delete list; it is not REPL-driving (it drives `check_err`, not a session), so phase 6 must keep it — carried forward explicitly here since nothing on that list says so |
 | `struct_declaration_errors_report_and_session_survives` (`:324`) | duplicate: `src/check/declarations.rs::check_struct_duplicate_type_name_is_error`, `tests/phase5_slice1.rs::generic_header_colliding_with_a_concrete_type_is_a_duplicate`. Recursive: `src/check/declarations.rs::check_recursion_by_value_self_cycle_is_error` (same `type: Loop next Loop ;` fixture), `tests/phase7_slice3n.rs::concrete_generic_self_reference_resolves_and_reaches_recursion_check` |
 | `enum_declaration_errors_report_and_session_survives` (`:571`) | duplicate: `src/check/declarations.rs::check_enum_duplicate_type_name_across_two_enums_is_error`, `tests/phase5_slice1.rs::generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate`. Recursive: `src/check/declarations.rs::check_enum_direct_recursion_is_error_not_hang` (same `Loop`/`Wrap` shape) |
 
@@ -617,11 +617,13 @@ the real gitdir) and assessed corpus-wide with `cargo test --no-fail-fast`.
   not. Phase 6 should delete both helpers with their last callers.
   `tests/phase3_resources.rs:4` also names `tests/phase1.rs` in a module-level provenance
   comment; it goes with that file's REPL surface in phase 6.
-- **Three roadmap/doc files still name `tests/phase1.rs`** and are phase 10's, not this
-  phase's: `docs/roadmap/P3-linear-spine.md:259` (a migration note listing test files),
-  `docs/roadmap/operator-words-spec.md:33` (`tests/phase1.rs:333`, a line reference that is
-  now doubly stale), and `docs/repl-ux-spec.md` (`:8`, `:63`, `:75`), which R8 puts out of
-  scope as a historical implementation spec.
+- **Five roadmap/doc files still name `tests/phase1.rs`**, not three as first counted, and
+  are phase 10's, not this phase's: `docs/roadmap/P3-linear-spine.md:259` (a migration note
+  listing test files), `docs/roadmap/operator-words-spec.md:33` (`tests/phase1.rs:333`, a
+  line reference that is now doubly stale), `docs/repl-ux-spec.md` (`:8`, `:63`, `:75`), and
+  two more found on re-sweep, `docs/roadmap/P4/slice2-spec.md` (six mentions) and
+  `docs/roadmap/P4/slice2-brief.md:167`. All five are historical slice specs/briefs
+  documenting work already landed, which R8 puts out of scope the same way.
 - **`docs/roadmap/P1-repl-and-liveness.md`'s opening paragraph is unswept and is not on any
   phase's list.** It still states the removed design as current: "The REPL runs on the
   **backend** via `dlopen`: each new word is compiled to a shared object and loaded into

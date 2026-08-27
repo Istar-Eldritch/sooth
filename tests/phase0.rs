@@ -1926,6 +1926,14 @@ fn surplus_linear_on_stack_is_error() {
         "unexpected message: {err}"
     );
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("note: declared ( -- )"),
+        "unexpected message: {err}"
+    );
 }
 
 #[test]
