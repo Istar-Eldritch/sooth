@@ -207,9 +207,9 @@ fn imported_third_file_stays_closed_behind_a_reexporting_module() {
 #[test]
 fn nested_struct_ids_remap_when_a_local_type_declares_first() {
     // Migrated from the retired REPL suite (P7.S9): a locally-declared
-    // struct forces a non-zero id base before the import runs, so a remap
-    // that kept closure-local ids would point the imported `Outer`'s field
-    // at `Local` and misread the inner field.
+    // struct is assigned a struct id before the closure's imported types
+    // are, so an imported struct-of-struct reads back correctly rather than
+    // an off-by-one id pointing `Outer`'s field at `Local`.
     let c = Closure::new("nested-remap");
     c.write(
         "lib.sth",

@@ -1034,4 +1034,3 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     therefore a genuine call, minting an `IrFunc` and receiving the quotation as a
     `(code, env)` value (`examples/quotation_argument.sth`); the REPL rejects that shape at
     a located boundary, at both definition and import, rather than lowering it.
-
