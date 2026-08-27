@@ -78,7 +78,7 @@ Classified against what each **asserts**, not its name.
 | `infer_line_net_effect_expected` | A bare line's net effect. |
 | `infer_line_carries_entry_depth` | The carried entry stack's depth. |
 | `infer_line_carries_slot_types_expected` | The carried result *type*. |
-| `line_underflow_against_carried_stack_is_error` | Asserts the `Ctx::Line` **arm's wording** ("stack underflow: needs 2 values, but the stack holds 1"). Checked before retiring, per the spec's instruction: the underflow *rule* has Word-path witnesses — `tests/phase7_slice3r.rs:588` pins the Word arm verbatim (`` `add` needs 2 values, but the stack holds 0``) and `tests/phase4_combinators.rs:2283`/`:2288` pin its lead. Only the Line arm's spelling is lost, and it dies with the arm. |
+| `line_underflow_against_carried_stack_is_error` | Asserts the `Ctx::Line` **arm's wording** ("stack underflow: needs 2 values, but the stack holds 1"). Checked before retiring, per the spec's instruction: the underflow *rule* has Word-path witnesses — `tests/phase7_slice3r.rs:588` pins the Word arm verbatim (`` `add` needs 2 values, but the stack holds 0``). `tests/phase4_combinators.rs:2283`/`:2288` pin the sibling `stack effect mismatch in \`w\`` diagnostic (declared-outputs and locals-exceed-inputs), not underflow, so they are not part of this witness. Only the Line arm's spelling is lost, and it dies with the arm. |
 | `infer_line_unknown_word_is_error` | The `Ctx::Word` twin exists and asserts the same two substrings: `check_unknown_word_is_error` (`check.rs`, through `check_src`). |
 | `infer_line_consumes_a_carried_linear_slot_ok` | "A residual linear slot can be dropped by a *later line*" — the session boundary itself. |
 | `ctx_line_is_module_zero` (`engine.rs`) | Asserts `Ctx::Line`'s placeholder `module() == 0`. Dies with the variant. |
@@ -142,13 +142,16 @@ single assertion" would have retired the first.
 
 ### Findings and one scope deviation
 
-- **One doc comment moved forward from phase 7 to here.** `engine.rs:1580` read "R2:
-  `Ctx::Word` carries its word's owning module; `Ctx::Line` denotes 0" and documented
-  *both* tests. This phase deletes the second, so the clause named a test that no longer
-  exists — the same reasoning the spec uses to assign `engine.rs:1745` to phase 2. It now
-  reads "R2: `Ctx::Word` carries its word's owning module". Phase 7 will find this item
-  already done; its other four (`engine.rs:1129`, `:1300`, `word_families.rs:1174`,
-  `:1274`) are untouched and still its.
+- **One doc comment moved forward from phase 7 to here.** `engine.rs:1580` (spec's line;
+  now `engine.rs:1618` after this phase's own edits) read "R2: `Ctx::Word` carries its
+  word's owning module; `Ctx::Line` denotes 0" and documented *both* tests. This phase
+  deletes the second, so the clause named a test that no longer exists — the same
+  reasoning the spec uses to assign `engine.rs:1745` to phase 2. It now reads "R2:
+  `Ctx::Word` carries its word's owning module". Phase 7 will find this item already
+  done; its other four (spec's `engine.rs:1129`/`:1300`, now `:1129`/`:1376` after this
+  phase's `infer_probe_body` addition and helper dedup; `word_families.rs:1174`, `:1274`,
+  unmoved) are untouched and still its. Re-grep at phase 7 start rather than trusting
+  either set of numbers: this phase's own line count will have shifted again by then.
 - **`quotation_survives_dup_swap_and_bind` is live, but three of its five iterations are
   inert, and that is pre-existing.** The assertion is
   `out.iter().any(|s| s.quot == marker)`. For `dup`, `over` and `rot` the *original* marked
@@ -168,8 +171,18 @@ single assertion" would have retired the first.
   path may change" still holds over these: they are already on the Word path.
 - **`check.rs:1348` is now the only `Ctx::Line` construction in all of `src/`.**
   `grep -rn 'Ctx::Line' src/ | grep -v '=>'` returns it plus four production doc comments
-  (`engine.rs:1129`, `:1300`, `word_families.rs:1174`, `:1274`). Phase 7's premise holds as
+  (`engine.rs:1129`, now `:1376` after this phase's `infer_probe_body` addition and
+  helper dedup; `word_families.rs:1174`, `:1274`, unmoved). Phase 7's premise holds as
   written.
+- **Review round 1 collapsed five near-identical `WordDef` test constructors into one.**
+  `probe_word`/`bare_word` were defined verbatim in `poly.rs`, `word_families.rs`,
+  `engine.rs`, `captures.rs` and inlined a third time in `operators.rs` — CLAUDE.md's
+  elevate-to-lowest-common-ancestor rule applies to test helpers too. Moved to
+  `crate::test_support::bare_word(name, module)`, which `check/captures.rs`'s tests already
+  depended on via `parse_with_core`. `probe_word()` in `poly.rs`/`word_families.rs` is now a
+  one-line wrapper (`bare_word("probe", 0)`); `engine.rs`/`captures.rs` import the shared fn
+  directly. This is what shifted `engine.rs`'s post-phase-2 line numbers a second time,
+  noted above rather than left for phase 7 to rediscover.
 - **`parse_line` in `src/` is down to what phases 3 and 8 own**: `ir/test_helpers.rs:8`/
   `:247` and `backend/qbe.rs:1458`/`:1479`/`:1900` (phase 3), plus `parser.rs`'s own
   definition and its `parse_line_src` test (phase 8). No check-side reference remains, and

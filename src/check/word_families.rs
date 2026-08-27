@@ -2064,20 +2064,8 @@ mod tests {
         Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
     }
 
-    /// A synthetic single-word `WordDef` for the fixtures that call a
-    /// `check_*_word` family member directly: they need a `Ctx`, and the word
-    /// it names is the one a diagnostic would cite.
     fn probe_word() -> WordDef {
-        WordDef {
-            name: "probe".to_string(),
-            effect: StackEffect::default(),
-            body: Vec::new(),
-            poly: None,
-            declares_inline: false,
-            module: 0,
-            span: Span::default(),
-            declared_globals: None,
-        }
+        crate::test_support::bare_word("probe", 0)
     }
 
     /// Mechanism 1: the ordinary env-call path, with only the variant-generated

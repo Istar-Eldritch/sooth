@@ -9596,21 +9596,8 @@ mod tests {
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
     const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
-    /// A synthetic single-word `WordDef` for the unit tests that drive a
-    /// poly-level helper directly rather than through a source program: those
-    /// helpers all take a `Ctx`, and every diagnostic they emit cites the
-    /// enclosing word, which is this one.
     fn probe_word() -> WordDef {
-        WordDef {
-            name: "probe".to_string(),
-            effect: StackEffect::default(),
-            body: Vec::new(),
-            poly: None,
-            declares_inline: false,
-            module: 0,
-            span: Span::default(),
-            declared_globals: None,
-        }
+        crate::test_support::bare_word("probe", 0)
     }
     /// `probe_word`'s `Ctx`. Separate from `probe_word` because `word_ctx`
     /// borrows the `WordDef`, so the caller has to own it.

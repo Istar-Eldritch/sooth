@@ -556,18 +556,7 @@ mod tests {
         );
     }
 
-    fn bare_word(name: &str, module: u32) -> WordDef {
-        WordDef {
-            name: name.to_string(),
-            effect: StackEffect::default(),
-            body: Vec::new(),
-            poly: None,
-            declares_inline: false,
-            module,
-            span: Span::default(),
-            declared_globals: None,
-        }
-    }
+    use crate::test_support::bare_word;
     fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
         Binding {
             name: name.to_string(),

@@ -1426,18 +1426,7 @@ mod tests {
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
     }
-    fn bare_word(name: &str, module: u32) -> WordDef {
-        WordDef {
-            name: name.to_string(),
-            effect: StackEffect::default(),
-            body: Vec::new(),
-            poly: None,
-            declares_inline: false,
-            module,
-            span: Span::default(),
-            declared_globals: None,
-        }
-    }
+    use crate::test_support::bare_word;
     /// A `Res` owned by `defining`, mangled as `resolve` would in a multi-module
     /// build (`Res__m{defining}`), so `check_drop_import_visibility`'s demangle
     /// is exercised for real.

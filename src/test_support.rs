@@ -86,3 +86,20 @@ pub fn parse_with_core(tokens: &[(Token, Span)]) -> Result<Module, String> {
     crate::check::check_impl_decls(&mut module)?;
     Ok(module)
 }
+
+/// A synthetic single-word `WordDef` for `check/`'s unit tests that drive a
+/// checker helper directly rather than through a source program: those
+/// helpers all take a `Ctx`, and every diagnostic they emit cites the
+/// enclosing word, which is this one.
+pub fn bare_word(name: &str, module: u32) -> WordDef {
+    WordDef {
+        name: name.to_string(),
+        effect: crate::ast::StackEffect::default(),
+        body: Vec::new(),
+        poly: None,
+        declares_inline: false,
+        module,
+        span: Span::default(),
+        declared_globals: None,
+    }
+}
