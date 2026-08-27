@@ -7,9 +7,8 @@
 //! target (`.so` not a binary) and in carrying state across lines.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_int, c_void};
 use std::io::{BufRead, IsTerminal, Write};
-use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::Module;
@@ -20,6 +19,7 @@ use crate::ast::{
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
+use crate::driver::Library;
 use crate::editor;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
@@ -27,68 +27,8 @@ use crate::lexer::Token;
 use crate::resolve::split_destructure_suffix;
 use crate::{backend, lexer, parser};
 
-// RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
-const RTLD_NOW: c_int = 2;
-#[cfg(target_os = "linux")]
-const RTLD_GLOBAL: c_int = 0x100;
-#[cfg(target_os = "macos")]
-const RTLD_GLOBAL: c_int = 0x8;
-
 extern "C" {
-    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlerror() -> *mut c_char;
     fn fflush(stream: *mut c_void) -> c_int;
-}
-
-/// A loaded shared object. The session keeps every handle resident (never
-/// `dlclose`) so symbols from earlier lines stay callable by later ones.
-pub struct Library {
-    handle: *mut c_void,
-}
-
-impl Library {
-    /// Open a shared object with global visibility, so its exports resolve for
-    /// objects loaded by later lines.
-    pub fn open(path: &Path) -> Result<Library, String> {
-        let cpath = CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| format!("path has interior nul: {e}"))?;
-        // SAFETY: cpath is a valid nul-terminated C string for the call's duration.
-        let handle = unsafe {
-            dlerror(); // clear any stale error
-            dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_GLOBAL)
-        };
-        if handle.is_null() {
-            return Err(format!("dlopen {path:?} failed: {}", last_dlerror()));
-        }
-        Ok(Library { handle })
-    }
-
-    /// Resolve an exported symbol to a raw pointer (caller transmutes to a fn).
-    pub fn symbol(&self, name: &str) -> Result<*mut c_void, String> {
-        let cname = CString::new(name).map_err(|e| format!("symbol has interior nul: {e}"))?;
-        // SAFETY: handle came from a successful dlopen; cname is nul-terminated.
-        let sym = unsafe {
-            dlerror();
-            dlsym(self.handle, cname.as_ptr())
-        };
-        if sym.is_null() {
-            return Err(format!("dlsym {name:?} failed: {}", last_dlerror()));
-        }
-        Ok(sym)
-    }
-}
-
-fn last_dlerror() -> String {
-    // SAFETY: dlerror returns either null or a valid C string owned by libdl.
-    unsafe {
-        let p = dlerror();
-        if p.is_null() {
-            "unknown error".to_string()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    }
 }
 
 /// A session's knowledge of one user-defined word: its typed effect, the

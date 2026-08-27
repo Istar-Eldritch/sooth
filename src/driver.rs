@@ -1,7 +1,8 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{c_char, c_int, c_void, CStr, CString, OsString};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -965,6 +966,69 @@ pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
     }
     run_command(&mut cc)?;
     Ok(())
+}
+
+// RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
+const RTLD_NOW: c_int = 2;
+#[cfg(target_os = "linux")]
+const RTLD_GLOBAL: c_int = 0x100;
+#[cfg(target_os = "macos")]
+const RTLD_GLOBAL: c_int = 0x8;
+
+extern "C" {
+    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    fn dlerror() -> *mut c_char;
+}
+
+/// A loaded shared object, kept resident (never `dlclose`) so its exports stay
+/// callable for as long as the caller holds it.
+pub struct Library {
+    handle: *mut c_void,
+}
+
+impl Library {
+    /// Open a shared object with global visibility, so its exports resolve for
+    /// objects loaded later.
+    pub fn open(path: &Path) -> Result<Library, String> {
+        let cpath = CString::new(path.as_os_str().as_bytes())
+            .map_err(|e| format!("path has interior nul: {e}"))?;
+        // SAFETY: cpath is a valid nul-terminated C string for the call's duration.
+        let handle = unsafe {
+            dlerror(); // clear any stale error
+            dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_GLOBAL)
+        };
+        if handle.is_null() {
+            return Err(format!("dlopen {path:?} failed: {}", last_dlerror()));
+        }
+        Ok(Library { handle })
+    }
+
+    /// Resolve an exported symbol to a raw pointer (caller transmutes to a fn).
+    pub fn symbol(&self, name: &str) -> Result<*mut c_void, String> {
+        let cname = CString::new(name).map_err(|e| format!("symbol has interior nul: {e}"))?;
+        // SAFETY: handle came from a successful dlopen; cname is nul-terminated.
+        let sym = unsafe {
+            dlerror();
+            dlsym(self.handle, cname.as_ptr())
+        };
+        if sym.is_null() {
+            return Err(format!("dlsym {name:?} failed: {}", last_dlerror()));
+        }
+        Ok(sym)
+    }
+}
+
+fn last_dlerror() -> String {
+    // SAFETY: dlerror returns either null or a valid C string owned by libdl.
+    unsafe {
+        let p = dlerror();
+        if p.is_null() {
+            "unknown error".to_string()
+        } else {
+            CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
 }
 
 /// A build's scratch directory, removed when dropped. Every current caller writes
@@ -2424,6 +2488,27 @@ mod tests {
         let so = dir.join("libsq.so");
         compile_so(&ssa, &so).expect("compile_so should succeed");
         assert!(so.exists(), "shared object should exist at {so:?}");
+    }
+
+    #[test]
+    fn library_opens_and_resolves_a_compiled_symbol() {
+        let src = ": sq ( i64 -- i64 ) | n | n n mul ;\nimport: intrinsics * ;\n";
+        let tokens = lexer::lex(src).unwrap();
+        let mut module = parser::parse(&tokens).unwrap();
+        check::check(&mut module).unwrap();
+        let ir = ir::lower(&module).unwrap();
+        let ssa = backend::qbe::emit(&ir).unwrap();
+
+        let dir = tempfile_dir().unwrap();
+        let so = dir.join("libsq.so");
+        compile_so(&ssa, &so).expect("compile_so should succeed");
+
+        let lib = Library::open(&so).expect("dlopen should succeed");
+        lib.symbol("sq").expect("exported symbol should resolve");
+        assert!(
+            lib.symbol("no_such_symbol").is_err(),
+            "a bad symbol name should error"
+        );
     }
 
     /// P7 slice 1 (R2): `resolved_fields` is keyed on the whole `Span`,
