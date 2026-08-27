@@ -91,7 +91,7 @@ The two orphaned helpers, `check.rs`'s `infer_src` (7 consumers, all above) and
 ### Migrated, with the per-test mutation result
 
 Every migrated test was individually mutation-proved: the rule it guards was broken and the
-**migrated** form confirmed to fail. All 27 mutations were killed. `engine.rs`'s `infer_src`
+**migrated** form confirmed to fail. All 30 mutations were killed. `engine.rs`'s `infer_src`
 was inlined into its single consumer rather than kept as a two-line wrapper under a name
 that no longer describes it.
 
