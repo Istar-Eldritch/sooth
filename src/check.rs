@@ -3866,46 +3866,6 @@ mod tests {
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
-    fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
-        let tokens = lex(src).unwrap();
-        let terms = match crate::parser::parse_line(&tokens).unwrap() {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
-        // session seeds at startup (`Session::new`); this bare-line helper
-        // mirrors that seed so a `bool`-producing comparison resolves.
-        // P8 S2 (R3/R7): a real session no longer seeds them -- it imports
-        // `core::prelude` like a file does -- but this helper resolves no
-        // `import:`, so it keeps seeding the typed core in process so a bare
-        // line's `lt`/`if` still names something.
-        let bool_enums = crate::test_support::core_bool_enums();
-        let core = crate::test_support::core_lib_words();
-        let mut combinators = CombinatorEnv::default();
-        for word in &core {
-            combinators.insert(word.name.clone(), vec![combinator_of(word)]);
-        }
-        // `True`/`False`, which a comparison word's branch-and-construct body
-        // calls; a session registers them from the injected `bool` enum.
-        let env: HashMap<String, Vec<Overload>> = enum_generated_sigs(&bool_enums)
-            .into_iter()
-            .map(|(name, symbol, sig)| (name, vec![Overload { sig, symbol }]))
-            .collect();
-        infer_line(
-            &terms,
-            entry,
-            &env,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-            &bool_enums,
-            &HashMap::new(),
-            &combinators,
-        )
-        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
-    }
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {
         let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
@@ -4101,18 +4061,6 @@ mod tests {
                 && err.contains("leaves a quotation on the stack")
                 && err.contains("declared output"),
             "check_outputs should name `f` and the output, got: {err}"
-        );
-    }
-    #[test]
-    fn infer_line_rejects_a_quotation_left_on_the_residual() {
-        // R19: a REPL line has no declared outputs, so R10's route never runs;
-        // the `quot` side channel would die at the line boundary while lowering
-        // has already pushed a phantom the residual spill would marshal.
-        let err = infer_src("1 [ add ]", &[])
-            .expect_err("a quotation on a line's residual stack should be rejected");
-        assert!(
-            err.contains("a quotation cannot be left on the stack at the end of a line"),
-            "infer_line should reject the residual quotation, got: {err}"
         );
     }
     #[test]
@@ -4564,46 +4512,6 @@ mod tests {
         check_src(": w ( Bool -- f64 ) ~[ 1.0 ] ~[ 2.0 ] if ;").unwrap();
     }
     #[test]
-    fn infer_line_net_effect_expected() {
-        assert_eq!(infer_src("2 3 add", &[]).unwrap(), vec![Type::I64]);
-    }
-    #[test]
-    fn infer_line_carries_entry_depth() {
-        // `2 add` from a carried `i64`: the literal plus the carried slot are
-        // consumed by `add`, leaving one `i64`.
-        assert_eq!(infer_src("2 add", &[Type::I64]).unwrap(), vec![Type::I64]);
-    }
-    #[test]
-    fn infer_line_carries_slot_types_expected() {
-        // A `Bool`-producing line leaves a `Bool` on the carried stack -- the
-        // enum `core::bool` declares, which the helper seeds exactly as a
-        // session does.
-        //
-        // Revised under P7.S3s: the six comparisons (`gt` included) now
-        // dispatch a real `impl: Ord` trait member (`cmp`), which needs a
-        // whole-program `impl:` registry `infer_line` has no parameter for
-        // (mirroring the REPL's own loss of `'T: Copy Ord`, R8) -- `and` is a
-        // plain `Bool`-typed operator, needing no trait resolution, so it
-        // still exercises the same "a line's result type is carried"
-        // property this test pins.
-        let bool_ty = crate::ast::resolve_bool_type(&crate::test_support::core_bool_enums())
-            .expect("`core::bool` declares `Bool`");
-        assert_eq!(infer_src("True False and", &[]).unwrap(), vec![bool_ty]);
-    }
-    #[test]
-    fn line_underflow_against_carried_stack_is_error() {
-        let err = infer_src("add", &[Type::I64]).unwrap_err();
-        assert!(err.contains("stack underflow"), "unexpected message: {err}");
-        assert!(err.contains("needs 2 values"), "unexpected message: {err}");
-        assert!(err.contains("holds 1"), "unexpected message: {err}");
-    }
-    #[test]
-    fn infer_line_unknown_word_is_error() {
-        let err = infer_src("frobnicate", &[]).unwrap_err();
-        assert!(err.contains("unknown word"), "unexpected message: {err}");
-        assert!(err.contains("frobnicate"), "unexpected message: {err}");
-    }
-    #[test]
     fn check_dup_of_linear_value_is_error() {
         let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy dup drop drop ;")).unwrap_err();
         assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
@@ -4721,17 +4629,6 @@ mod tests {
     #[test]
     fn check_copy_self_tail_call_is_unaffected_by_the_linear_guard() {
         check_src(&std::fs::read_to_string("examples/countdown.sth").unwrap()).unwrap();
-    }
-    #[test]
-    fn infer_line_consumes_a_carried_linear_slot_ok() {
-        // The REPL path: a residual linear slot can be dropped by a later
-        // line (no scope-end rule applies to a bare line). `^i64` (an owning
-        // cell, always linear) stands in for a linear entry slot, since this
-        // test exercises `infer_line` directly with no struct/enum registry.
-        let mut owned_cells = Vec::new();
-        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
-        let out = infer_src("drop", &[cell_ty]).unwrap();
-        assert!(out.is_empty());
     }
     /// Slice 10a (R12): the self-call's arguments are checked against the
     /// *ground* declared inputs, with a located diagnostic. The witness must

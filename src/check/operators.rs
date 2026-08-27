@@ -570,19 +570,24 @@ mod tests {
             !crate::check::builtins::printable_types().contains(&slice),
             "a slice is deliberately outside the `.` allowlist"
         );
-        let structs: Vec<StructDecl> = Vec::new();
-        let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
+        let probe = WordDef {
+            name: "probe".to_string(),
+            effect: StackEffect::default(),
+            body: Vec::new(),
+            poly: None,
+            declares_inline: false,
+            module: 0,
+            span: Span::default(),
+            declared_globals: None,
         };
+        let ctx = word_ctx(&probe, &[], &[], &[], None, &CombinatorIndex::new(), None);
         let mut stack = vec![Slot::computed(slice)];
         let Err(err) = check_operator(".", Span::default(), &mut stack, &ctx, None) else {
             panic!("`.` on a slice must be rejected");
         };
         assert_eq!(
             err,
-            "error: type mismatch: `.` requires a printable scalar, found `Slice[i64]`"
+            "error: type mismatch in `probe` (line 0)\n  `.` requires a printable scalar, found `Slice[i64]`\n  note: declared ( -- )"
         );
     }
 

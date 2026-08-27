@@ -1736,31 +1736,6 @@ mod tests {
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }
-    fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
-        let tokens = lex(src).unwrap();
-        let terms = match crate::parser::parse_line(&tokens).unwrap() {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
-        // session seeds at startup (`Session::new`); this bare-line helper
-        // mirrors that seed so a `bool`-producing comparison resolves.
-        let bool_enums = crate::test_support::core_bool_enums();
-        infer_line(
-            &terms,
-            entry,
-            &HashMap::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-            &bool_enums,
-            &HashMap::new(),
-            &CombinatorEnv::default(),
-        )
-        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
-    }
     // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
 
     /// R1: the primitive is a pure function of `(modules, caller, defining,
@@ -1856,8 +1831,7 @@ mod tests {
         // R11t: the audit is a *test artifact*, not prose. A missed guard on the
         // `Cstr` placeholder is a silent accept (R4), so every default-deny site
         // gets a row here: a new consumer added later without a guard turns one
-        // row from `Err` to `Ok` and fails the test. The one `is_line` row is the
-        // REPL residual, checked through `infer_line` rather than `check`.
+        // row from `Err` to `Ok` and fails the test.
         //
         // Each row asserts TWO substrings, and this is load-bearing. `site` is
         // the token the message names (the op, or the word for the argument
@@ -1868,8 +1842,8 @@ mod tests {
         // `site`-only row stays green when its guard is removed and the fallback
         // fires: it names the same op. Requiring `phrase` as well is what turns a
         // removed guard from green to red. Every operand-family row shares the
-        // one `reject_quotation_operand` phrase; the store/argument/output/
-        // residual families carry their own wording no generic diagnostic emits.
+        // one `reject_quotation_operand` phrase; the store/argument/output
+        // families carry their own wording no generic diagnostic emits.
         //
         // FIX 2 (verified, no row): the only `check_operator` op that would
         // accept a `Cstr` operand if its guard were removed is `.` (print, whose
@@ -1881,7 +1855,6 @@ mod tests {
             source: &'static str,
             site: &'static str,
             phrase: &'static str,
-            is_line: bool,
         }
         const OPERAND: &str = "cannot take a quotation as an operand";
         // Operand-family row: `site` is the op, `phrase` is the shared wording.
@@ -1889,14 +1862,12 @@ mod tests {
             source,
             site,
             phrase: OPERAND,
-            is_line: false,
         };
         // Any other family: spell both substrings out.
         let w = |source, site, phrase| Row {
             source,
             site,
             phrase,
-            is_line: false,
         };
         let rows = [
             // check_operator, both operand positions, plus print.
@@ -1952,27 +1923,15 @@ mod tests {
                 "declared output",
                 "leaves a quotation on the stack",
             ),
-            // the REPL residual (R19), checked through `infer_line`.
-            Row {
-                source: "1 [ add ]",
-                site: "end of a line",
-                phrase: "a quotation cannot be left on the stack",
-                is_line: true,
-            },
         ];
         for Row {
             source,
             site,
             phrase,
-            is_line,
         } in rows
         {
-            let err = match is_line {
-                true => infer_src(source, &[])
-                    .expect_err("an audited site must reject a quotation, not silently accept it"),
-                false => check_src(source)
-                    .expect_err("an audited site must reject a quotation, not silently accept it"),
-            };
+            let err = check_src(source)
+                .expect_err("an audited site must reject a quotation, not silently accept it");
             assert!(
                 err.contains(site),
                 "audited site `{site}` was not named, got: {err}"
@@ -2105,33 +2064,31 @@ mod tests {
         Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
     }
 
+    /// A synthetic single-word `WordDef` for the fixtures that call a
+    /// `check_*_word` family member directly: they need a `Ctx`, and the word
+    /// it names is the one a diagnostic would cite.
+    fn probe_word() -> WordDef {
+        WordDef {
+            name: "probe".to_string(),
+            effect: StackEffect::default(),
+            body: Vec::new(),
+            poly: None,
+            declares_inline: false,
+            module: 0,
+            span: Span::default(),
+            declared_globals: None,
+        }
+    }
+
     /// Mechanism 1: the ordinary env-call path, with only the variant-generated
     /// sigs registered, over an entry stack the caller seeds. Returns the
     /// residual stack.
-    fn infer_variant_line(module: &Module, entry: &[Type], src: &str) -> Result<Vec<Type>, String> {
-        let tokens = lex(src).unwrap();
-        let terms = match crate::parser::parse_line(&tokens).unwrap() {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
+    fn infer_variant_call(module: &Module, entry: &[Type], src: &str) -> Result<Vec<Type>, String> {
         let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
         for (name, symbol, sig) in variant_generated_sigs(&module.enums) {
             env.entry(name).or_default().push(Overload { sig, symbol });
         }
-        infer_line(
-            &terms,
-            entry,
-            &env,
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &module.structs,
-            &module.enums,
-            &HashMap::new(),
-            &CombinatorEnv::default(),
-        )
-        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
+        infer_probe_body(src, entry, &env, &module.structs, &module.enums)
     }
 
     #[test]
@@ -2140,7 +2097,7 @@ mod tests {
         // declared order, first field deepest, and has no check function at
         // all (structs have none either).
         let module = shape_module();
-        let stack = infer_variant_line(&module, &[shape_variant(&module, 0)], "Circle>").unwrap();
+        let stack = infer_variant_call(&module, &[shape_variant(&module, 0)], "Circle>").unwrap();
         assert_eq!(stack, vec![Type::I64, struct_ty(&module, "P")]);
     }
 
@@ -2148,7 +2105,7 @@ mod tests {
     fn zero_field_variant_destructures_to_nothing_and_mints_no_getter() {
         // R7: `Dot>` is a no-op destructure and no `Dot>anything` exists.
         let module = shape_module();
-        let stack = infer_variant_line(&module, &[shape_variant(&module, 2)], "Dot>").unwrap();
+        let stack = infer_variant_call(&module, &[shape_variant(&module, 2)], "Dot>").unwrap();
         assert_eq!(stack, vec![]);
         let minted: Vec<String> = variant_generated_sigs(&module.enums)
             .into_iter()
@@ -2247,10 +2204,16 @@ mod tests {
         word: &str,
         operand_mutable: bool,
     ) -> Result<(Slot, Provenance, DerivId, Vec<RefDecl>), String> {
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &module.structs,
+            &module.enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         let mut refs = Vec::new();
         let mut prov = Provenance::default();
         let operand = prov.borrow("s", operand_mutable, false, Span::default());
@@ -2567,10 +2530,16 @@ mod tests {
     #[test]
     fn projection_on_variant_receiver_ok() {
         let module = shape_module();
-        let ctx = Ctx::Line {
-            structs: &module.structs,
-            enums: &module.enums,
-        };
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &module.structs,
+            &module.enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         let mut refs = Vec::new();
         let mut prov = Provenance::default();
         let mut stack = vec![Slot::computed(shape_variant(&module, 0))];

@@ -9596,6 +9596,27 @@ mod tests {
     /// `drop` can only be the recognized override for the struct its declared
     /// effect names).
     const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> drop ;\n";
+    /// A synthetic single-word `WordDef` for the unit tests that drive a
+    /// poly-level helper directly rather than through a source program: those
+    /// helpers all take a `Ctx`, and every diagnostic they emit cites the
+    /// enclosing word, which is this one.
+    fn probe_word() -> WordDef {
+        WordDef {
+            name: "probe".to_string(),
+            effect: StackEffect::default(),
+            body: Vec::new(),
+            poly: None,
+            declares_inline: false,
+            module: 0,
+            span: Span::default(),
+            declared_globals: None,
+        }
+    }
+    /// `probe_word`'s `Ctx`. Separate from `probe_word` because `word_ctx`
+    /// borrows the `WordDef`, so the caller has to own it.
+    fn probe_ctx(word: &WordDef) -> Ctx<'_> {
+        word_ctx(word, &[], &[], &[], None, &CombinatorIndex::new(), None)
+    }
     /// A signature over no variables, for the unit tests that drive
     /// `poly_term` directly rather than through a source program.
     fn bare_sig() -> PolySig {
@@ -9991,10 +10012,8 @@ mod tests {
         // `poly_term` level because no source program can observe the marker
         // directly: every route out of the body rejects it.
         let sig = bare_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let mut overloads = HashMap::new();
@@ -10038,10 +10057,8 @@ mod tests {
         // written adjacency (the concrete path's rule), so no program can put
         // a shuffle between two arms.
         let sig = bare_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let mut overloads = HashMap::new();
@@ -10224,10 +10241,8 @@ mod tests {
         // Driven through the shared helper rather than an eliminator so the
         // machinery is pinned independently of its one caller today.
         let sig = one_var_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let arms = vec![
@@ -10276,10 +10291,8 @@ mod tests {
         // poly walk has no block scope, so nothing else would ever notice a
         // linear local bound inside an arm and dropped on the floor there.
         let sig = one_var_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let arms = vec![interned_arm(&mut scope, arm_binding("a", false))];
@@ -10486,10 +10499,8 @@ mod tests {
         // directly at the `poly_term` level since a bound local's own
         // literal-ness is discarded (D6), not observable through `check_src`.
         let sig = bare_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let mut overloads = HashMap::new();
@@ -10731,10 +10742,8 @@ mod tests {
             len_var_names: Vec::new(),
             row_var_names: Vec::new(),
         };
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let arrays: [ArrayDecl; 0] = [];
         let cells: [OwnedCellDecl; 0] = [];
         let refs: [RefDecl; 0] = [];
@@ -10758,11 +10767,11 @@ mod tests {
         };
         assert_eq!(
             conflict(&[0]),
-            "error: `f` was instantiated at `'T` = `f64` but its operand is `i64`"
+            "error: `f` in `probe` (line 0) was instantiated at `'T` = `f64` but its operand is `i64`"
         );
         assert_eq!(
             conflict(&[]),
-            "error: `f` resolved `'T` to both `f64` and `i64`"
+            "error: `f` in `probe` (line 0) resolved `'T` to both `f64` and `i64`"
         );
     }
     #[test]
@@ -12123,15 +12132,11 @@ mod tests {
             len_var_names: Vec::new(),
             row_var_names: Vec::new(),
         };
-        let structs: [StructDecl; 0] = [];
-        let enums: [EnumDecl; 0] = [];
         let arrays: [ArrayDecl; 0] = [];
         let cells: [OwnedCellDecl; 0] = [];
         let refs: [RefDecl; 0] = [];
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let mut subst = Subst::default();
         unify_poly_input(
             &sig,
@@ -12170,7 +12175,7 @@ mod tests {
         // "`f`" would survive that rendering vanishing, so it is not enough.
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `[ 'T -- ]`, found `[ i64 i64 -- ]`",
+            "error: type mismatch in `probe` (line 0)\n  `f` expected `[ 'T -- ]`, found `[ i64 i64 -- ]`\n  note: declared ( -- )",
         );
         assert!(
             subst2.ty_of(0).is_none(),
@@ -12198,7 +12203,7 @@ mod tests {
         .expect_err("a non-quotation slot must be a located type mismatch");
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `[ 'T -- ]`, found `i64`",
+            "error: type mismatch in `probe` (line 0)\n  `f` expected `[ 'T -- ]`, found `i64`\n  note: declared ( -- )",
         );
         assert!(
             subst3.ty_of(0).is_none(),
@@ -12361,10 +12366,8 @@ mod tests {
         // The gate `dup`/`over` run: a mutable view is refused with the
         // exclusivity wording, not the linear-ownership wording, since a view
         // owns nothing.
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let err = poly_copy_gate(
             &PolyType::Concrete(mutable),
             "dup",
@@ -12378,7 +12381,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot `dup` a value of type `!Slice[i64]`: `!Slice[i64]` is exclusive: at most one may be live for a place, so copying it would make a second one; use it where it is, or borrow again once it is consumed"
+            "error: cannot `dup` a value of type `!Slice[i64]` in `probe` (line 0)\n  `!Slice[i64]` is exclusive: at most one may be live for a place, so copying it would make a second one; use it where it is, or borrow again once it is consumed\n  note: declared ( -- )"
         );
         poly_copy_gate(
             &PolyType::Concrete(shared),
@@ -12433,10 +12436,8 @@ mod tests {
         let mut slices = Vec::new();
         let shared = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
         let sig = bare_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let env: HashMap<String, Vec<Overload>> = HashMap::new();
         let mut scope = PolyScope::default();
         let mut overloads = HashMap::new();
@@ -12543,10 +12544,8 @@ mod tests {
     #[test]
     fn check_poly_slice_offset_admits_usize_and_literals_only() {
         let sig = ref_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let span = Span::default();
         let slot = |pt: PolyType, lit: Option<i64>| PolySlot {
             pt,
@@ -12660,10 +12659,8 @@ mod tests {
         // diagnostic, not an `unreachable!` -- `dup` on a `&!` must reject,
         // and on a `&` must still pass (the positive control).
         let sig = ref_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let span = Span {
             line: 7,
             col: 3,
@@ -12682,7 +12679,7 @@ mod tests {
         .expect_err("`dup` of a mutable reference must be rejected");
         assert_eq!(
             err,
-            "error: cannot `dup` a mutable reference in `<line>` (line 7)\n  `&!'T` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
+            "error: cannot `dup` a mutable reference in `probe` (line 7)\n  `&!'T` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
         );
         poly_copy_gate(
             &poly_ref(PolyType::Var(0), false),
@@ -12703,10 +12700,8 @@ mod tests {
         // registry's referent; a mutability mismatch and a non-reference slot
         // are located mismatches, never a silent bind.
         let sig = ref_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
         let cells: [OwnedCellDecl; 0] = [];
@@ -12752,7 +12747,7 @@ mod tests {
         .expect_err("a mutability mismatch must be a located type mismatch");
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `&['T 4]`, found `&![i64 4]`",
+            "error: type mismatch in `probe` (line 0)\n  `f` expected `&['T 4]`, found `&![i64 4]`\n  note: declared ( -- )",
         );
         assert!(
             subst2.ty_of(0).is_none(),
@@ -12776,7 +12771,7 @@ mod tests {
         .expect_err("a non-reference slot must be a located type mismatch");
         assert_eq!(
             err,
-            "error: type mismatch: `f` expected `&['T 4]`, found `[i64 4]`",
+            "error: type mismatch in `probe` (line 0)\n  `f` expected `&['T 4]`, found `[i64 4]`\n  note: declared ( -- )",
         );
         assert!(
             subst3.ty_of(0).is_none(),
@@ -12790,10 +12785,8 @@ mod tests {
         // shape may be one no call site has interned yet, so the check side
         // interns it (and the lowering side then only looks it up).
         let sig = ref_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let mut subst = Subst::default();
         subst.ty.push((0, Type::I64));
         let mut arrays: Vec<ArrayDecl> = Vec::new();
@@ -13248,10 +13241,8 @@ mod tests {
         // rejects, and a computed (non-literal) `i64` needs the explicit
         // `>usize` conversion the monomorphic checker also requires.
         let sig = ref_sig();
-        let ctx = Ctx::Line {
-            structs: &[],
-            enums: &[],
-        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
         let span = Span::default();
         check_poly_array_index(
             &PolyType::Concrete(Type::I64),

@@ -1184,6 +1184,82 @@ pub(super) fn word_ctx<'a>(
     }
 }
 
+/// Walk `src` as the body of a synthetic one-word module and return the
+/// residual typed stack, seeded with `entry`. The shared harness for the unit
+/// tests that assert a *type* the walk produces rather than a diagnostic: they
+/// need `check_terms`'s exit stack, which no production entry point hands back,
+/// and they get it over the `Ctx::Word` arm every caller of the walk takes.
+/// The registries start empty and are dropped with the walk, so a fixture that
+/// needs to read one back has to build it itself.
+#[cfg(test)]
+pub(super) fn infer_probe_body(
+    src: &str,
+    entry: &[Type],
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+) -> Result<Vec<Type>, String> {
+    let source = format!(": probe ( -- ) {src} ;\n");
+    let tokens = crate::lexer::lex(&source).expect("the probe body lexes");
+    let module = crate::parser::parse(&tokens).expect("the probe body parses");
+    let word = module
+        .words
+        .into_iter()
+        .next()
+        .expect("the probe source declares one word");
+    let ctx = word_ctx(
+        &word,
+        structs,
+        enums,
+        &[],
+        None,
+        &CombinatorIndex::new(),
+        None,
+    );
+    let initial: Vec<Slot> = entry.iter().map(|ty| Slot::computed(*ty)).collect();
+    let mut insts = HashMap::new();
+    let mut overloads = HashMap::new();
+    let mut fields = HashMap::new();
+    let mut variant_fields = HashMap::new();
+    let mut splice_recs = HashMap::new();
+    let mut splice_trait_recs = HashMap::new();
+    let mut impl_monos = Vec::new();
+    let poly_env = PolyEnv::new();
+    let combinators = CombinatorEnv::default();
+    let eliminators = eliminator_registry(enums);
+    let mut poly = PolyCtx {
+        env: &poly_env,
+        insts: &mut insts,
+        builtin_overloads: &mut overloads,
+        resolved_fields: &mut fields,
+        resolved_variant_fields: &mut variant_fields,
+        combinators: &combinators,
+        eliminators: &eliminators,
+        trait_resolve: TraitResolveCtx::scratch(),
+        splice_records: &mut splice_recs,
+        impl_monos: &mut impl_monos,
+        splice_trait_calls: &mut splice_trait_recs,
+        combinator_sig: None,
+        combinator_subst: None,
+        combinator_name: None,
+    };
+    let stack = check_terms(
+        &word.body,
+        initial,
+        &ctx,
+        env,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut Provenance::default(),
+        &mut Scope::default(),
+        false,
+        &mut poly,
+    )?;
+    Ok(stack.into_iter().map(|slot| slot.ty).collect())
+}
+
 impl Ctx<'_> {
     pub(super) fn structs(&self) -> &[StructDecl] {
         match self {
@@ -1433,39 +1509,6 @@ mod tests {
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
-    fn struct_ty(module: &Module, name: &str) -> Type {
-        let idx = module
-            .structs
-            .iter()
-            .position(|s| s.name == name)
-            .expect("declared struct");
-        Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
-    }
-    fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
-        let tokens = lex(src).unwrap();
-        let terms = match crate::parser::parse_line(&tokens).unwrap() {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, which a real REPL
-        // session seeds at startup (`Session::new`); this bare-line helper
-        // mirrors that seed so a `bool`-producing comparison resolves.
-        let bool_enums = crate::test_support::core_bool_enums();
-        infer_line(
-            &terms,
-            entry,
-            &HashMap::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &[],
-            &bool_enums,
-            &HashMap::new(),
-            &CombinatorEnv::default(),
-        )
-        .map(|(stack, _insts, _overloads, _fields, _variant_fields)| stack)
-    }
     /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,
     /// deduping to a single `ArrayId` rather than one per file.
@@ -1532,10 +1575,16 @@ mod tests {
         // witnessed end-to-end by `quotation_forwarded_through_bind_still_calls`).
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
+        let word = bare_word("outer", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         let span = Span {
@@ -1577,7 +1626,7 @@ mod tests {
         scope.bind("q", quot, false, &mut prov);
         assert_eq!(scope.local("q").unwrap().quot, marker);
     }
-    /// R2: `Ctx::Word` carries its word's owning module; `Ctx::Line` denotes 0.
+    /// R2: `Ctx::Word` carries its word's owning module.
     #[test]
     fn ctx_word_carries_owning_module() {
         let word = bare_word("main", 3);
@@ -1593,17 +1642,6 @@ mod tests {
             None,
         );
         assert_eq!(ctx.module(), 3);
-        assert!(ctx.modules().is_none());
-    }
-    #[test]
-    fn ctx_line_is_module_zero() {
-        let structs: Vec<StructDecl> = Vec::new();
-        let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
-        assert_eq!(ctx.module(), 0);
         assert!(ctx.modules().is_none());
     }
     #[test]
@@ -1724,10 +1762,10 @@ mod tests {
     }
     #[test]
     fn check_dup_of_drop_overload_type_names_the_cause() {
-        // Criterion 2/R4: the reason-carrying cause, in both `Ctx` arms. The
-        // generic linear wording ("no bits to copy") would be actively
-        // misleading here: `File`'s bits are one plain `i64`, and its own
-        // `: drop` declaration is the whole reason they may not be copied.
+        // Criterion 2/R4: the reason-carrying cause. The generic linear
+        // wording ("no bits to copy") would be actively misleading here:
+        // `File`'s bits are one plain `i64`, and its own `: drop` declaration
+        // is the whole reason they may not be copied.
         let err = check_src(&format!(
             "{FILE_RESOURCE} : main ( -- ) 1 File dup drop drop ;"
         ))
@@ -1740,33 +1778,6 @@ mod tests {
         assert!(
             !err.contains("no bits to copy"),
             "the generic linear cause was used: {err}"
-        );
-
-        // The `Ctx::Line` arm: the same fact reaches a bare REPL line, whose
-        // carried `File` slot is linear for the same reason.
-        let module = checked_module(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
-        let tokens = lex("dup").unwrap();
-        let terms = match crate::parser::parse_line(&tokens).unwrap() {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
-        let err = infer_line(
-            &terms,
-            &[struct_ty(&module, "File")],
-            &HashMap::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-            &module.structs,
-            &module.enums,
-            &HashMap::new(),
-            &CombinatorEnv::default(),
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("`File` is linear because it defines `drop`"),
-            "unexpected message: {err}"
         );
     }
     #[test]
@@ -1829,15 +1840,19 @@ mod tests {
         // numeric fallback too, so this does *not* prove the table pass is
         // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
         // guard that the exact-match table row actually drives dispatch.
+        // P7 slice 3i (R2): `bool` is `core::bool`'s enum, so the registry a
+        // `Bool`-producing comparison resolves against is seeded here.
+        let enums = crate::test_support::core_bool_enums();
+        let infer = |src| infer_probe_body(src, &[], &HashMap::new(), &[], &enums);
         assert_eq!(
-            infer_src("5 >u8 3 >u8 add", &[]).unwrap(),
+            infer("5 >u8 3 >u8 add").unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
         // Slice 10c: the comparison *primitive*, which is what carries the
         // per-numeric-type rows now; `lt` is a `lib/` word over it and resolves
-        // through the word environment this bare-line helper does not build.
-        assert_eq!(infer_src("5 >u8 3 >u8 ult", &[]).unwrap(), vec![Type::U32]);
-        assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
+        // through the word environment this fixture does not build.
+        assert_eq!(infer("5 >u8 3 >u8 ult").unwrap(), vec![Type::U32]);
+        assert_eq!(infer("5 .").unwrap(), Vec::<Type>::new());
     }
     #[test]
     fn check_parameter_named_after_variant_is_error() {
@@ -2067,10 +2082,7 @@ mod tests {
                 span: Span::default(),
                 declared_globals: None,
             };
-            let ctx = Ctx::Line {
-                structs: &[],
-                enums: &[],
-            };
+            let ctx = word_ctx(&w, &[], &[], &[], None, &CombinatorIndex::new(), None);
             let mut arrays = Vec::new();
             let mut cells = Vec::new();
             let mut refs = Vec::new();
@@ -2148,18 +2160,20 @@ mod tests {
     /// not to withhold from every ancestor indiscriminately.
     #[test]
     fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
-        let tokens = lex("a drop True ~[ 1 . ] ~[ ] if").expect("lexing should succeed");
-        let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
-            crate::ast::Line::Expr(terms) => terms,
-            other => panic!("expected Expr, got {other:?}"),
-        };
+        // The term list, as the body of a one-word module: `releasable_into`
+        // reads terms, not a `Ctx`, so the walk this fixture stands in for is
+        // any block of any body.
+        let tokens =
+            lex(": probe ( -- ) a drop True ~[ 1 . ] ~[ ] if ;\n").expect("lexing should succeed");
+        let module = crate::parser::parse(&tokens).expect("parsing should succeed");
+        let terms = &module.words[0].body;
         let at = terms
             .iter()
             .position(|t| matches!(&t.kind, TermKind::Quotation(..)))
-            .expect("the line's block is a branch-arm quotation literal");
+            .expect("the body's block is a branch-arm quotation literal");
         let rest = &terms[at + 1..];
         let outer: HashSet<String> = ["a", "unused"].iter().map(|n| n.to_string()).collect();
-        let live = Liveness::scan(&terms, &outer, true);
+        let live = Liveness::scan(terms, &outer, true);
         // Both names are ancestor-bound relative to this invocation
         // (`base_depth` past the last of them), so both take R1's new branch.
         let scope = Scope {

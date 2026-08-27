@@ -782,10 +782,16 @@ mod tests {
         }
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
+        let word = bare_word("outer", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         let span = Span {
             line: 1,
             col: 1,
@@ -901,10 +907,16 @@ mod tests {
             },
         ];
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
+        let word = bare_word("outer", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
         let span = Span {
             line: 1,
             col: 1,
@@ -959,30 +971,13 @@ mod tests {
             .push(std::iter::once("f".to_string()).collect());
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = Ctx::Line {
-            structs: &structs,
-            enums: &enums,
-        };
         let span = Span {
             line: 1,
             col: 1,
             module: 0,
         };
-        let err =
-            check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
-                .expect_err("a captured `~` local must be rejected");
-        assert!(
-            err.contains("`~`") && err.contains("captured"),
-            "a captured `~` local should be its own located rejection, not the ordinary \
-             quotation deferral, got: {err}"
-        );
-
-        // The same rejection under `Ctx::Word` must name the enclosing word,
-        // not fall back to `<line>` -- the only other call site exercises
-        // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
-        // from a used one.
         let word = bare_word("outer", 0);
-        let word_ctx = word_ctx(
+        let ctx = word_ctx(
             &word,
             &structs,
             &enums,
@@ -991,20 +986,19 @@ mod tests {
             &CombinatorIndex::new(),
             None,
         );
-        let word_err = check_capture_admission(
-            QuotId(0),
-            true,
-            false,
-            span,
-            &word_ctx,
-            &[],
-            &mut prov,
-            &scope,
-        )
-        .expect_err("a captured `~` local must be rejected");
+        let err =
+            check_capture_admission(QuotId(0), true, false, span, &ctx, &[], &mut prov, &scope)
+                .expect_err("a captured `~` local must be rejected");
         assert!(
-            word_err.contains("`outer`"),
-            "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"
+            err.contains("`~`") && err.contains("captured"),
+            "a captured `~` local should be its own located rejection, not the ordinary \
+             quotation deferral, got: {err}"
+        );
+        // And it names the enclosing word rather than discarding the `Ctx`
+        // parameter it was handed.
+        assert!(
+            err.contains("`outer`"),
+            "a captured `~` local should name the enclosing word: {err}"
         );
     }
 }
