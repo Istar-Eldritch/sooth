@@ -443,7 +443,7 @@ repo before.
     },
     {
       "phase": 6,
-      "focus": "Mutation-test every new guard, re-run the full green gate, and confirm no old-form trait member syntax remains outside docs/roadmap"
+      "focus": "Remove the dead reject_user_bound_on_combinator and user_bound_on_combinator_error functions from poly.rs (S3o dead code whose call site was already removed; the inline member path now handles what it guarded), update the stale comment at poly.rs:4825 that references it, mutation-test every new guard, re-run the full green gate, and confirm no old-form trait member syntax remains outside docs/roadmap"
     }
   ]
 }
