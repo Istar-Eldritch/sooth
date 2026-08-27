@@ -1100,27 +1100,9 @@ CLAUDE.md's five split signals against `src/ir/func_builder/calls.rs`: 0 of 5 fi
 `use super::*`, nine functions in a single call chain, no import divergence, no mixed
 high/low-level code) -- no split.
 
-A recursive `impl: Ord` -- one whose `cmp` compares values of its own type with a surface
-comparison -- splices forever: a compiler stack overflow (SIGABRT, exit 134) with no
-diagnostic printed first. The unbounded recursion is at **lowering**, not check time:
-`lower_call` (`src/ir/func_builder/calls.rs:308`) -> `lower_resolved_word_call` (`:226`)
-splices `cmp`'s body, reaches the trait-call dispatch lookup (`:292`), resolves back to the
-same type's own `cmp`, and re-enters `lower_resolved_word_call` unbounded.
-
-`check_combinator_cycles` (`src/check/combinators.rs`) does not and cannot catch this. It
-runs pre-dispatch over surface callee names, and the cycle is not a syntactic fact: the
-edge back to the impl's own `cmp` exists only once dispatch resolves a bare `cmp` to a
-concrete type's member. Widening that pass to add an edge from a bare trait-member callee
-to every impl of that member was measured and rejected -- it false-rejects the ordinary
-field-delegating `impl: Ord` this slice shipped to enable, failing eight tests including
-this slice's own `a_concrete_impl_ord_delegating_to_lt_builds_and_runs`.
-
-Pre-existing (reachable at base via a user `inline` combinator calling `cmp`); this slice
-moves it onto the shipped library comparisons, so it is reachable from any recursive-type
-`impl: Ord`. Not fixed here; no owning slice yet. The candidate fix is a splice-depth
-budget at `lower_resolved_word_call`, beside the `member_splice_depth` counter already
-there, converting the overflow into a located diagnostic naming the splice chain; it
-cannot false-reject, since it bounds recursion rather than changing acceptance.
+A recursive `impl: Ord` -- one whose `cmp` compares values of its own type rather than
+delegating to its fields -- is reachable from the library comparisons this slice made
+`inline`; it is bounded and diagnosed at lowering by P7.S10.
 
 Two more follow-ups the slice deliberately did not fix:
 
@@ -1192,20 +1174,37 @@ not merely unreached, confirmed by grepping the corpus for its own review-graph
 notes; `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green with
 no REPL-only test module skipped or stubbed out
 
-**P7.S10 -- Bound the splice, diagnose the recursive impl.** `[ planned ]` A recursive
-`impl: Ord` -- one whose `cmp` compares values of its own type with a surface comparison
-rather than delegating to its fields -- overflows the compiler's own stack (SIGABRT, no
-diagnostic printed). The unbounded recursion is at lowering: `lower_resolved_word_call`
-(`src/ir/func_builder/calls.rs:226`) splices `cmp`'s body, the trait-call dispatch lookup
-(`:292`) resolves back to the same type's own `cmp`, and re-enters unbounded. A
-splice-depth budget at that site converts the overflow into a located diagnostic naming the
-splice chain. It cannot false-reject: it bounds recursion rather than changing acceptance.
-Measured maximum legitimate splice depth across the whole corpus is 2; the pathological
-case overflows at 148 (2MB stack), so the budget sits at 64 with wide margin both ways. The
-bulk of the work is not the guard: `FuncBuilder` has no error path at all (every lowering
-function returns `()`), so the diagnostic needs `Result` threaded through the lowering tree
-to reach the user.
-Catching this statically instead is refuted -- `check_combinator_cycles` runs pre-dispatch,
-and widening it to edge a bare trait-member callee to every impl was measured to reject the
-ordinary field-delegating `impl: Ord` P7.S8 shipped to enable. Detail:
-[slice10-brief](./P7/slice10-brief.md).
+**P7.S10 -- Bound the splice, diagnose the recursive impl.** `[ done ]` A recursive
+`impl: Ord` -- one whose `cmp` compares values of its own type rather than
+delegating to its fields -- is bounded and diagnosed at lowering. `lower_resolved_word_call`
+(`src/ir/func_builder/calls.rs:229`) guards the member-splice arm with a budget on
+`member_splice_depth`, `SPLICE_BUDGET = 64` (the legitimate maximum across the corpus is 2;
+an unguarded splice overflows at depth 148 on a 2MB stack). The guard cannot
+false-reject: it bounds recursion rather than changing acceptance. `Result<_, String>` is
+threaded through the full lowering tree up to `lower`'s existing
+`Result<IrModule, String>`, with no `.expect()`/panic left on the guarded path. The
+diagnostic names the *outermost* spliced member (not the frame that trips the budget) via
+`render_word`, and points at that member's own declaration site, not a call site:
+
+```text
+error: a trait member cannot dispatch back to itself (lowering would splice it forever): `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64 (line 6, col 5)
+```
+
+A lookup miss for the declaration span (the REPL/destructor paths, which carry no
+`member_spans`) omits the `(line …, col …)` clause rather than substituting a wrong span;
+the guard still fires and still reports. Catching this statically instead is refuted --
+`check_combinator_cycles` runs pre-dispatch, and widening it to edge a bare trait-member
+callee to every impl false-rejects the ordinary field-delegating `impl: Ord` P7.S8 shipped
+to enable. Detail: [slice10-brief](./P7/slice10-brief.md).
+
+The declaration-site location is behaviour, not decoration: it is what separates this from
+the bare stack overflow it replaces. Witnessed end-to-end by
+`a_recursive_impl_ord_is_a_located_diagnostic_not_a_stack_overflow`, with
+`a_recursive_impl_ord_diagnostic_line_tracks_the_declaration_site` shifting the `impl:`
+block down two lines so the reported line cannot be a pinned constant.
+
+CLAUDE.md's five split signals re-run against the two files the slice grew,
+`src/ir/func_builder/calls.rs` (+203 lines, ~150 of them the new test module) and
+`src/ir/driver.rs` (+52): calls.rs stays at 0 of 5, as at P7.S8. driver.rs fires 1 of 5 --
+`lower` and `lower_line` are separate entry points that never call each other -- which is
+below the two-signal threshold and predates this slice. Neither splits.

@@ -1551,7 +1551,7 @@ impl Session {
         &mut self,
         insts: &HashMap<Span, CallInst>,
         regs: ir::Registries,
-    ) -> Vec<ir::IrFunc> {
+    ) -> Result<Vec<ir::IrFunc>, String> {
         let mut pending: Vec<&CallInst> = insts
             .values()
             .filter(|inst| !self.exported_insts.contains(&inst.symbol))
@@ -1607,13 +1607,13 @@ impl Session {
                 &self.refs,
                 &empty_generics,
                 &bodies,
-            ));
+            )?);
             newly.push(inst.symbol.clone());
         }
         for symbol in newly {
             self.exported_insts.insert(symbol);
         }
-        funcs
+        Ok(funcs)
     }
 
     /// Evaluate one line of input, writing any success output to `writer`.
@@ -2854,7 +2854,7 @@ impl Session {
                 &fields,
                 &variant_fields,
                 &combinator_bodies(&self.combinators),
-            )
+            )?
         };
 
         let quot_sigs =
@@ -3231,7 +3231,7 @@ impl Session {
                 &combinator_bodies(&self.combinators),
                 ir::empty_splice_records(),
                 ir::empty_splice_trait_calls(),
-            );
+            )?;
             funcs[0].name = symbol.clone();
             // R12: this module must carry its own struct/enum destructors
             // (they are not emitted elsewhere in the REPL, unlike the build
@@ -3253,12 +3253,12 @@ impl Session {
                 ir::empty_resolved_fields(),
                 ir::empty_resolved_variant_fields(),
                 &combinator_bodies(&self.combinators),
-            ));
+            )?);
             funcs
         };
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this
         // body recorded into this module, against the frozen snapshot resolver.
-        funcs.extend(self.emit_instantiations(&insts, regs));
+        funcs.extend(self.emit_instantiations(&insts, regs)?);
 
         let quot_sigs =
             ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
@@ -3425,7 +3425,7 @@ impl Session {
                 &line_variant_fields,
                 &poly_arities,
                 &bodies,
-            );
+            )?;
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
             // with an undefined `sooth_struct_drop_N`/`sooth_enum_drop_N`.
@@ -3437,7 +3437,7 @@ impl Session {
                 ir::empty_resolved_fields(),
                 ir::empty_resolved_variant_fields(),
                 &bodies,
-            );
+            )?;
             (func, quot_funcs, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
@@ -3458,7 +3458,7 @@ impl Session {
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this line
         // recorded into this module, against each poly word's frozen snapshot
         // resolver; an already-exported symbol emits nothing (trace B dedup).
-        funcs.extend(self.emit_instantiations(&insts, regs));
+        funcs.extend(self.emit_instantiations(&insts, regs)?);
         let quot_sigs =
             ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
@@ -4533,6 +4533,7 @@ mod tests {
             ir::empty_resolved_variant_fields(),
             &combinator_bodies(&session.combinators),
         )
+        .unwrap()
         .into_iter()
         .map(|f| f.name)
         .collect()

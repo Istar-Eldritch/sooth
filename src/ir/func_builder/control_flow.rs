@@ -96,7 +96,12 @@ impl<'a> FuncBuilder<'a> {
     /// end of either arm back-edges (R7). An arm that back-edges leaves the
     /// builder `terminated` and contributes no predecessor to the join; the
     /// join is elided entirely when both arms back-edge (R8, both-arms-tail).
-    pub(super) fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term], tail: bool) {
+    pub(super) fn lower_if(
+        &mut self,
+        then_branch: &[Term],
+        else_branch: &[Term],
+        tail: bool,
+    ) -> Result<(), String> {
         let test = self.stack.pop().expect("if: test value");
         let then_id = self.fresh_block();
         let else_id = self.fresh_block();
@@ -111,14 +116,14 @@ impl<'a> FuncBuilder<'a> {
         self.start_block(then_id);
         self.terminated = false;
         self.stack = post_pop.clone();
-        self.lower_terms(then_branch, tail);
+        self.lower_terms(then_branch, tail)?;
         let then_arm = self.seal_arm(join_id);
         self.locals.truncate(locals_depth);
 
         self.start_block(else_id);
         self.terminated = false;
         self.stack = post_pop;
-        self.lower_terms(else_branch, tail);
+        self.lower_terms(else_branch, tail)?;
         let else_arm = self.seal_arm(join_id);
         self.locals.truncate(locals_depth);
 
@@ -170,6 +175,7 @@ impl<'a> FuncBuilder<'a> {
                 self.stack = join_stack;
             }
         }
+        Ok(())
     }
 
     /// Seal a just-lowered `if` arm: if it back-edged (terminated) it jumps
@@ -205,7 +211,7 @@ impl<'a> FuncBuilder<'a> {
         params: &[Value],
         scrutinee_parts: (EnumId, Option<bool>),
         tail: bool,
-    ) {
+    ) -> Result<(), String> {
         // A dispatch back-edges only where a header was opened (R6). An
         // eliminator call is a *term*, so its arms inherit tail position only
         // when the call itself sits in it: an arm of a mid-body call that ends
@@ -267,7 +273,7 @@ impl<'a> FuncBuilder<'a> {
             // phi preds (entry + tail arm ends) and the dispatch-join phi
             // preds (non-tail arm ends) therefore stay disjoint.
             self.terminated = false;
-            self.lower_terms(&clause.body, tail);
+            self.lower_terms(&clause.body, tail)?;
             if !self.terminated {
                 let result = self.stack.clone();
                 let pred = self.cur_id;
@@ -285,7 +291,7 @@ impl<'a> FuncBuilder<'a> {
         // terminated (no fall-through Ret).
         if clause_ends.is_empty() {
             self.terminated = true;
-            return;
+            return Ok(());
         }
 
         // Single join block: one phi per declared output, merging the
@@ -316,6 +322,7 @@ impl<'a> FuncBuilder<'a> {
             }
         }
         self.stack = join_stack;
+        Ok(())
     }
 }
 

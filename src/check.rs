@@ -70,6 +70,10 @@ pub(crate) use self::combinators::{
     check_combinator_cycles, combinator_index, combinator_of, word_declares_quotation_parameter,
     CombinatorEnv, CombinatorIndex,
 };
+// P7.S10 (R4.4): test-only, so the splice-budget guard's unit tests can build
+// a `CombinatorIndex` entry directly rather than parsing a real `impl:`.
+#[cfg(test)]
+pub(crate) use self::combinators::CombinatorEntry;
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
