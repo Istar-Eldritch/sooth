@@ -2504,7 +2504,11 @@ mod tests {
         compile_so(&ssa, &so).expect("compile_so should succeed");
 
         let lib = Library::open(&so).expect("dlopen should succeed");
-        lib.symbol("sq").expect("exported symbol should resolve");
+        let sym = lib.symbol("sq").expect("exported symbol should resolve");
+        // SAFETY: `sq` was emitted as `export function l $sq(l %v0)`, i.e. a
+        // C-ABI `l`-taking, `l`-returning function on this 64-bit target.
+        let sq: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(sym) };
+        assert_eq!(sq(5), 25);
         assert!(
             lib.symbol("no_such_symbol").is_err(),
             "a bad symbol name should error"
