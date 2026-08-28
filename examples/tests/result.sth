@@ -1,0 +1,21 @@
+\ Dogfood: `core::result`'s `Result`, exercised through `hosted::testing`.
+\ `Result` has no `Ord` impl, so each case is reduced to a scalar by hand
+\ (R5.1): eliminate the `Result[i64 i64]` down to an `i64` first, then
+\ `expect-eq` the result.
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::result r | Ok Err | ;
+import: hosted::testing | expect-eq | ;
+
+: safe-mod ( i64 i64 -- r::Result[i64 i64] )
+  dup 0 eq ~[ drop drop -1 Err ] ~[ mod Ok ] if ;
+
+: to-int ( r::Result[i64 i64] -- i64 )
+  ~[ ( Ok )  Ok> ]
+  ~[ ( Err ) Err> ]
+  Result? ;
+
+: main ( -- )
+  10 3 safe-mod to-int 1 "Ok carries the successful remainder" expect-eq
+  10 0 safe-mod to-int -1 "Err carries the sentinel on modulo by zero" expect-eq ;

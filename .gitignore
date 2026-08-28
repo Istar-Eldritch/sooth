@@ -11,6 +11,12 @@
 !/examples/sooth.pkg
 # `resources.sth` reads this fixture at run time: source, not an artifact.
 !/examples/resource_fixture.txt
+# The dogfood suites under `examples/tests/` (P7.S7b): un-exclude the
+# directory and its `.sth` sources, but re-exclude everything else a
+# hand-run `sooth build examples/tests/x.sth` would leave behind.
+!/examples/tests/
+/examples/tests/*
+!/examples/tests/*.sth
 
 # Scratch sources a panicking test leaked into the repo root before it could
 # clean up (should live under `temp_dir()`, but guard against the pattern too).

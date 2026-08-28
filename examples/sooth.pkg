@@ -5,3 +5,4 @@
 package: examples ;
 layer: hosted ;
 depends: core path "../lib/core" ;
+depends: hosted path "../lib/hosted" ;

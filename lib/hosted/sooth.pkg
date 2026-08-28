@@ -4,3 +4,4 @@ package: hosted ;
 layer: hosted ;
 depends: core path "../core" ;
 module: libc ;
+module: testing ;

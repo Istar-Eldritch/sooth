@@ -1,0 +1,23 @@
+\ Dogfood: `core::combinators`'s `fold`/`map`/`filter`, exercised through
+\ `hosted::testing`. Arrays and their element type (`i64`) both have an
+\ `Ord` impl, so `expect-eq` does real work here (R5.1), same as `cmp.sth`.
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::combinators c ;
+import: hosted::testing | expect-eq | ;
+
+: scores ( -- array[i64 5] )
+  0 5 fill | s |
+  &!s 0 >usize &!> 3 !
+  &!s 1 >usize &!> 7 !
+  &!s 2 >usize &!> 1 !
+  &!s 3 >usize &!> 9 !
+  &!s 4 >usize &!> 5 !
+  s ;
+
+: main ( -- )
+  scores 0 ~[ add ] c::fold 25 "fold sums the whole array" expect-eq
+  scores ~[ 2 mul ] c::map 0 ~[ add ] c::fold 50 "map doubles every element before folding" expect-eq
+  scores ~[ 4 gt ] c::filter | n | drop
+  n >i64 3 "filter counts the elements greater than 4" expect-eq ;

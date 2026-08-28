@@ -1,0 +1,44 @@
+\ Dogfood: `core::cmp`'s `Ord` surface, exercised through `hosted::testing`.
+\ `expect-eq` does real work here (R5.1) for the two scalar widths this
+\ suite exercises (`i64`, `f64`); the remaining comparisons return a bare
+\ `Bool`, so they go through `expect` instead (`Bool` has no `Ord` impl of
+\ its own), with a false answer asserted by inverting the arms the way
+\ `bool.sth` does.
+\
+\ Each comparison is probed at all three `Ordering` positions (`2 3` is
+\ `Less`, `2 2` is `Equal`, `3 2` is `Greater`), since every one of them is
+\ three arms over `cmp`. One probe per operator lands where that operator
+\ agrees with a neighbour: an equal-operand probe cannot separate `lte` from
+\ `eq`, and an unequal one cannot separate `ne` from `lt`.
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::testing | expect expect-eq | ;
+
+: main ( -- )
+  2 2 "eq holds for equal i64 values" expect-eq
+  1 1 add 2 "eq checks real arithmetic, not just repeated literals" expect-eq
+  2.0 2.0 "eq holds for equal f64 values" expect-eq
+
+  2 3 eq ~[ False ] ~[ True ] if "eq fails when the left operand is smaller" expect
+  3 2 eq ~[ False ] ~[ True ] if "eq fails when the left operand is larger" expect
+
+  2 3 lt "lt holds when the left operand is smaller" expect
+  2 2 lt ~[ False ] ~[ True ] if "lt fails for equal operands" expect
+  3 2 lt ~[ False ] ~[ True ] if "lt fails when the left operand is larger" expect
+
+  2 3 gt ~[ False ] ~[ True ] if "gt fails when the left operand is smaller" expect
+  2 2 gt ~[ False ] ~[ True ] if "gt fails for equal operands" expect
+  3 2 gt "gt holds when the left operand is larger" expect
+
+  2 3 lte "lte holds when the left operand is smaller" expect
+  2 2 lte "lte holds for equal operands" expect
+  3 2 lte ~[ False ] ~[ True ] if "lte fails when the left operand is larger" expect
+
+  2 3 gte ~[ False ] ~[ True ] if "gte fails when the left operand is smaller" expect
+  2 2 gte "gte holds for equal operands" expect
+  3 2 gte "gte holds when the left operand is larger" expect
+
+  2 3 ne "ne holds when the left operand is smaller" expect
+  2 2 ne ~[ False ] ~[ True ] if "ne fails for equal operands" expect
+  3 2 ne "ne holds when the left operand is larger" expect ;

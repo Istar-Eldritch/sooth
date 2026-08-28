@@ -1,11 +1,8 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::{c_char, c_int, c_void, CStr, CString, OsString};
-use std::os::unix::ffi::OsStrExt;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::ast::{
     EnumDecl, ImplDecl, Import, IntrinsicVisibility, Module, ModuleInfo, Span, StructDecl,
@@ -15,13 +12,12 @@ use crate::lexer::Token;
 use crate::packages::{ManifestCache, ResolutionConfig, UnresolvedImport};
 use crate::{backend, check, ir, lexer, packages, parser, resolve};
 
-const C_SHIM: &str = "extern void sooth_main(void);\nint main(void) { sooth_main(); return 0; }\n";
+mod toolchain;
 
-/// The native binary path for a source file: alongside the source, named after its
-/// stem (`examples/gcd.sth` -> `examples/gcd`).
-fn binary_path(source: &Path) -> PathBuf {
-    source.with_extension("")
-}
+pub use toolchain::{
+    build, build_with_manifest, compile_so, discover_test_entries, run, run_with_manifest, test,
+    Library,
+};
 
 /// One file in the import closure (R2). `import_targets` is aligned with
 /// `imports`: the module id the qualifier at that position binds to, or `None`
@@ -896,187 +892,11 @@ pub fn emit_ssa_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<St
     backend::qbe::emit(&ir)
 }
 
-/// Compile a source file to a native binary. Returns the binary's path.
-pub fn build(path: &Path) -> Result<PathBuf, String> {
-    build_with_manifest(path, None)
-}
-
-/// `build` with a `--manifest` override; see `emit_ssa_with_manifest`.
-pub fn build_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<PathBuf, String> {
-    let ssa = emit_ssa_with_manifest(path, manifest)?;
-
-    let dir = tempfile_dir()?;
-    let ssa_path = dir.join("out.ssa");
-    let asm_path = dir.join("out.s");
-    let shim_path = dir.join("shim.c");
-    std::fs::write(&ssa_path, &ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
-    std::fs::write(&shim_path, C_SHIM).map_err(|e| format!("writing {shim_path:?}: {e}"))?;
-
-    run_command(Command::new("qbe").arg(&ssa_path).arg("-o").arg(&asm_path))?;
-
-    let out_path = binary_path(path);
-    run_command(
-        Command::new("cc")
-            .arg(&asm_path)
-            .arg(&shim_path)
-            .arg("-o")
-            .arg(&out_path),
-    )?;
-
-    Ok(out_path)
-}
-
-/// Compile and run a source file, returning the child's exit status. The caller
-/// decides how to propagate it (`main` mirrors it as its own exit code).
-pub fn run(path: &Path) -> Result<ExitStatus, String> {
-    run_with_manifest(path, None)
-}
-
-/// `run` with a `--manifest` override; see `emit_ssa_with_manifest`.
-pub fn run_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<ExitStatus, String> {
-    let binary = build_with_manifest(path, manifest)?;
-    Command::new(&binary)
-        .status()
-        .map_err(|e| format!("running {binary:?}: {e}"))
-}
-
-/// Compile QBE IL text to a shared object at `out`. Mirrors `build`'s qbe/cc
-/// plumbing but targets a `.so`: no C shim, since a shared object has no `main`.
-pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
-    let dir = tempfile_dir()?;
-    let ssa_path = dir.join("out.ssa");
-    let asm_path = dir.join("out.s");
-    std::fs::write(&ssa_path, ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
-
-    run_command(Command::new("qbe").arg(&ssa_path).arg("-o").arg(&asm_path))?;
-
-    let mut cc = Command::new("cc");
-    cc.arg("-shared")
-        .arg("-fPIC")
-        .arg(&asm_path)
-        .arg("-o")
-        .arg(out);
-    // macOS's two-level namespace rejects undefined symbols at link time; allow
-    // them (printf and friends) to resolve at load under RTLD_GLOBAL.
-    if cfg!(target_os = "macos") {
-        cc.arg("-Wl,-undefined,dynamic_lookup");
-    }
-    run_command(&mut cc)?;
-    Ok(())
-}
-
-// RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
-const RTLD_NOW: c_int = 2;
-#[cfg(target_os = "linux")]
-const RTLD_GLOBAL: c_int = 0x100;
-#[cfg(target_os = "macos")]
-const RTLD_GLOBAL: c_int = 0x8;
-
-extern "C" {
-    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
-    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-    fn dlerror() -> *mut c_char;
-}
-
-/// A loaded shared object, kept resident (never `dlclose`) so its exports stay
-/// callable for as long as the caller holds it.
-pub struct Library {
-    handle: *mut c_void,
-}
-
-impl Library {
-    /// Open a shared object with global visibility, so its exports resolve for
-    /// objects loaded later.
-    pub fn open(path: &Path) -> Result<Library, String> {
-        let cpath = CString::new(path.as_os_str().as_bytes())
-            .map_err(|e| format!("path has interior nul: {e}"))?;
-        // SAFETY: cpath is a valid nul-terminated C string for the call's duration.
-        let handle = unsafe {
-            dlerror(); // clear any stale error
-            dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_GLOBAL)
-        };
-        if handle.is_null() {
-            return Err(format!("dlopen {path:?} failed: {}", last_dlerror()));
-        }
-        Ok(Library { handle })
-    }
-
-    /// Resolve an exported symbol to a raw pointer (caller transmutes to a fn).
-    pub fn symbol(&self, name: &str) -> Result<*mut c_void, String> {
-        let cname = CString::new(name).map_err(|e| format!("symbol has interior nul: {e}"))?;
-        // SAFETY: handle came from a successful dlopen; cname is nul-terminated.
-        let sym = unsafe {
-            dlerror();
-            dlsym(self.handle, cname.as_ptr())
-        };
-        if sym.is_null() {
-            return Err(format!("dlsym {name:?} failed: {}", last_dlerror()));
-        }
-        Ok(sym)
-    }
-}
-
-fn last_dlerror() -> String {
-    // SAFETY: dlerror returns either null or a valid C string owned by libdl.
-    unsafe {
-        let p = dlerror();
-        if p.is_null() {
-            "unknown error".to_string()
-        } else {
-            CStr::from_ptr(p).to_string_lossy().into_owned()
-        }
-    }
-}
-
-/// A build's scratch directory, removed when dropped. Every current caller writes
-/// into it and is done (qbe/cc have already produced their output elsewhere, or
-/// `dlopen` has already read the `.so`) by the time its function returns, so
-/// scope-end `Drop` is always ordered after last use, not a race against it.
-pub(crate) struct TempDir(PathBuf);
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        // Best-effort: a compile error earlier in the same function already
-        // reports the real failure, and a second one here on cleanup would
-        // only obscure it.
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-pub(crate) fn tempfile_dir() -> Result<TempDir, String> {
-    // Each build gets its own scratch dir so concurrent in-process builds (e.g.
-    // parallel goldens) don't clobber each other's fixed-name intermediates.
-    static N: AtomicU64 = AtomicU64::new(0);
-    let seq = N.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("sooth-{}-{seq}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("creating temp dir {dir:?}: {e}"))?;
-    Ok(TempDir(dir))
-}
-
-pub(crate) fn run_command(cmd: &mut Command) -> Result<(), String> {
-    let output = cmd
-        .output()
-        .map_err(|e| format!("running {:?}: {e}", cmd.get_program()))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{:?} failed: {}",
-            cmd.get_program(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A scratch directory of `.sth` files for the closure-discovery unit
     /// tests, removed on drop.
@@ -2462,54 +2282,6 @@ mod tests {
                 && err.contains("no manifest at")
                 && err.contains("dep/sooth.pkg"),
             "unexpected message: {err}"
-        );
-    }
-
-    #[test]
-    fn driver_binary_path_from_source_stem() {
-        assert_eq!(
-            binary_path(Path::new("examples/gcd.sth")),
-            PathBuf::from("examples/gcd")
-        );
-    }
-
-    #[test]
-    fn compile_so_produces_loadable_object() {
-        let src = ": sq ( i64 -- i64 ) | n | n n mul ;\nimport: intrinsics * ;\n";
-        let tokens = lexer::lex(src).unwrap();
-        let mut module = parser::parse(&tokens).unwrap();
-        check::check(&mut module).unwrap();
-        let ir = ir::lower(&module).unwrap();
-        let ssa = backend::qbe::emit(&ir).unwrap();
-
-        let dir = tempfile_dir().unwrap();
-        let so = dir.join("libsq.so");
-        compile_so(&ssa, &so).expect("compile_so should succeed");
-        assert!(so.exists(), "shared object should exist at {so:?}");
-    }
-
-    #[test]
-    fn library_opens_and_resolves_a_compiled_symbol() {
-        let src = ": sq ( i64 -- i64 ) | n | n n mul ;\nimport: intrinsics * ;\n";
-        let tokens = lexer::lex(src).unwrap();
-        let mut module = parser::parse(&tokens).unwrap();
-        check::check(&mut module).unwrap();
-        let ir = ir::lower(&module).unwrap();
-        let ssa = backend::qbe::emit(&ir).unwrap();
-
-        let dir = tempfile_dir().unwrap();
-        let so = dir.join("libsq.so");
-        compile_so(&ssa, &so).expect("compile_so should succeed");
-
-        let lib = Library::open(&so).expect("dlopen should succeed");
-        let sym = lib.symbol("sq").expect("exported symbol should resolve");
-        // SAFETY: `sq` was emitted as `export function l $sq(l %v0)`, i.e. a
-        // C-ABI `l`-taking, `l`-returning function on this 64-bit target.
-        let sq: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(sym) };
-        assert_eq!(sq(5), 25);
-        assert!(
-            lib.symbol("no_such_symbol").is_err(),
-            "a bad symbol name should error"
         );
     }
 
