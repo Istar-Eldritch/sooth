@@ -54,7 +54,7 @@ directly.
 Inline is **required** for words that take inline quotation parameters
 (`~[ ... ]`). An inline quotation has no runtime representation, it
 can only be spliced, so any word that accepts one must itself be
-spliced. The array combinators in `lib/combinators.sth` are all
+spliced. The array combinators in `lib/core/combinators.sth` are all
 inline for this reason:
 
 ```sooth

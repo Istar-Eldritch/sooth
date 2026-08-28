@@ -90,7 +90,7 @@ fn option_constructs_monomorphizes_and_eliminates_both_arms() {
     let (stdout, code) = build_and_run(
         "slice2-option-i64",
         &format!(
-            "import: \"{}/lib/option.sth\" o | Some None | ;\n\
+            "import: \"{}/lib/core/option.sth\" o | Some None | ;\n\
              : unwrap-or ( i64 o::Option[i64] -- i64 )\n\
                ~[ ( Some ) Some> swap drop ]\n\
                ~[ ( None ) drop ]\n\
@@ -134,7 +134,7 @@ fn option_instantiates_over_a_pointer_type() {
 /// correctly.
 fn result_import(qualifier: &str) -> String {
     format!(
-        "import: \"{}/lib/result.sth\" {qualifier} | Ok Err | ;\n",
+        "import: \"{}/lib/core/result.sth\" {qualifier} | Ok Err | ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

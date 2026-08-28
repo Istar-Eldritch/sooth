@@ -62,7 +62,7 @@ fn build_check_error(name: &str, src: &str) -> String {
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
+        "import: \"{}/lib/core/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

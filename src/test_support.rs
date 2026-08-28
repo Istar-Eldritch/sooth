@@ -28,8 +28,8 @@ use crate::lexer::Token;
 /// the bool `.` overload) and `core::cmp` (the six comparisons), embedded rather
 /// than mirrored by hand so a change to either file reaches these paths.
 const CORE_SOURCES: [&str; 2] = [
-    include_str!("../lib/bool.sth"),
-    include_str!("../lib/cmp.sth"),
+    include_str!("../lib/core/bool.sth"),
+    include_str!("../lib/core/cmp.sth"),
 ];
 
 /// The typed core's words, parsed from the real `lib/` sources.

@@ -63,7 +63,7 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
 #[test]
 fn migrated_library_words_are_declared_combinators() {
     for (file, name) in MIGRATED {
-        let path = format!("{}/lib/{file}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/lib/core/{file}", env!("CARGO_MANIFEST_DIR"));
         let src = std::fs::read_to_string(&path).expect("a library file should be readable");
         let tokens = sooth::lexer::lex(&src).expect("a library file should lex");
         let module =
@@ -72,7 +72,7 @@ fn migrated_library_words_are_declared_combinators() {
             .words
             .iter()
             .find(|w| w.name == name)
-            .unwrap_or_else(|| panic!("`{name}` should be defined in lib/{file}"));
+            .unwrap_or_else(|| panic!("`{name}` should be defined in lib/core/{file}"));
         assert!(
             sooth::check::is_combinator(word),
             "`{name}` must declare `inline` to stay a combinator once recognition is declared, \
@@ -104,7 +104,7 @@ fn migrated_library_words_still_run() {
 
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
+        "import: \"{}/lib/core/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

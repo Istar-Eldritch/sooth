@@ -50,7 +50,7 @@ const CORE_WORDS: [&str; 8] = ["if", "unless", "eq", "lt", "gt", "lte", "gte", "
 #[allow(dead_code)]
 pub fn fixture_package(name: &str) -> String {
     format!(
-        "package: {name} ;\nlayer: hosted ;\ndepends: core path \"{}/lib\" ;\n",
+        "package: {name} ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -308,11 +308,14 @@ pub fn assert_pinned_to_combinators_lib(hand_copy: &str, renames: &[(&str, &str)
             .collect::<Vec<_>>()
             .join(" ");
     }
-    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
-        .expect("the combinator library should be readable");
+    let lib = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/lib/core/combinators.sth"
+    ))
+    .expect("the combinator library should be readable");
     let lib = normalize_sooth(&lib);
     assert!(
         lib.contains(&normalized),
-        "hand-copied times/times-helper has drifted from lib/combinators.sth\n  copy (normalized): {normalized}\n  lib (normalized):  {lib}"
+        "hand-copied times/times-helper has drifted from lib/core/combinators.sth\n  copy (normalized): {normalized}\n  lib (normalized):  {lib}"
     );
 }

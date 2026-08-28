@@ -4,4 +4,4 @@
 \ `core`.
 package: examples ;
 layer: hosted ;
-depends: core path "../lib" ;
+depends: core path "../lib/core" ;

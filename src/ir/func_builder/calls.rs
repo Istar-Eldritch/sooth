@@ -1911,9 +1911,11 @@ mod tests {
         // actually compiles (not a second, independently-typed copy) against the
         // real library, so a future body change cannot leave that test silently
         // exercising a stale shape.
-        let lib =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
-                .expect("the combinator library should be readable");
+        let lib = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/lib/core/combinators.sth"
+        ))
+        .expect("the combinator library should be readable");
         let normalize = |s: &str| -> String {
             s.lines()
                 .map(|line| line.split('\\').next().unwrap_or(""))
@@ -1925,7 +1927,7 @@ mod tests {
         };
         assert!(
             normalize(&lib).contains(&normalize(TIMES_DEF)),
-            "each_lowers_to_a_loop_not_a_per_element_call's inline times/times-helper has drifted from lib/combinators.sth"
+            "each_lowers_to_a_loop_not_a_per_element_call's inline times/times-helper has drifted from lib/core/combinators.sth"
         );
     }
 

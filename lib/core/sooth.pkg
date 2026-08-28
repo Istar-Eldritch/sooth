@@ -1,0 +1,8 @@
+\ `core`: the `no_std` bottom layer of the standard library. `lib/` is not
+\ itself a package -- `lib/hosted/` is a sibling package one layer up.
+\ `bool` and `cmp` are the typed core the compiler used to inject; `prelude`
+\ is the hub that re-exports both, so a consumer spends one `import:` line
+\ on the typed surface instead of one per module.
+package: core ;
+layer: core ;
+module: bool cmp prelude combinators option result ;

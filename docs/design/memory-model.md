@@ -86,7 +86,7 @@ join: selecting one of two owned records takes no borrow and compiles, and the e
 for the borrow, where the diagnostic can name both ends.
 
 Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
-pointer type. Nullability, when a program wants it, is `Option['T]` (`lib/option.sth`),
+pointer type. Nullability, when a program wants it, is `Option['T]` (`lib/core/option.sth`),
 an ordinary generic enum built from Phase 5's `type:` declarations rather than a
 compiler primitive — a compiler-synthesized `Option` would be exactly the throwaway
 machinery generics exist to replace, so it is never built. The return stack is

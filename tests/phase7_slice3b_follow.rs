@@ -45,7 +45,9 @@ impl Drop for Scratch {
 /// An `import:` line for one of the shipped library files, by absolute path, so
 /// a scratch program in the temp dir reaches the real `lib/`.
 fn import_lib(file: &str, selective: &str) -> String {
-    let lib = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib").join(file);
+    let lib = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("lib/core")
+        .join(file);
     format!("import: \"{}\" c | {selective} | ;\n", lib.display())
 }
 

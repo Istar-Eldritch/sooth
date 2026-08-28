@@ -367,7 +367,7 @@ fn a_consumer_of_core_prelude_calls_drop_bare() {
     t.write(
         "sooth.pkg",
         &format!(
-            "package: p7s3q ;\nlayer: hosted ;\ndepends: core path \"{}/lib\" ;\n",
+            "package: p7s3q ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\n",
             env!("CARGO_MANIFEST_DIR")
         ),
     );

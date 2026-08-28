@@ -63,7 +63,7 @@ fn build_and_run(src: &Path) -> (String, String, i32) {
 
 fn import_times() -> String {
     format!(
-        "import: \"{}/lib/combinators.sth\" c | times | ;\n",
+        "import: \"{}/lib/core/combinators.sth\" c | times | ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }

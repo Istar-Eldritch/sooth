@@ -68,7 +68,7 @@ fn check_ok(src: &str) {
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
     format!(
-        "import: \"{}/lib/combinators.sth\" {qualifier} ;\n",
+        "import: \"{}/lib/core/combinators.sth\" {qualifier} ;\n",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -581,8 +581,11 @@ fn each_checks_standalone() {
 
     // Pin the isolated copy to the committed library: if the real file stopped
     // checking standalone, the copy above could silently drift from it.
-    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
-        .expect("the combinator library should be readable");
+    let lib = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/lib/core/combinators.sth"
+    ))
+    .expect("the combinator library should be readable");
     check_ok(&lib);
 }
 

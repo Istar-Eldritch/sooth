@@ -1757,7 +1757,7 @@ mod tests {
         std::fs::write(
             &entry,
             format!(
-                ": main ( -- ) True . ;\nimport: intrinsics * ;\nimport: \"{}/lib/bool.sth\" b | Bool True False . | ;\n",
+                ": main ( -- ) True . ;\nimport: intrinsics * ;\nimport: \"{}/lib/core/bool.sth\" b | Bool True False . | ;\n",
                 env!("CARGO_MANIFEST_DIR")
             ),
         )

@@ -609,8 +609,11 @@ fn combinators_library_uses_tilde_quotation_parameters() {
     // in `lib/combinators.sth`) leaves the rest of this suite green, since the
     // byte-identical and stored-quotation-rejection tests above both build
     // their own copy of the library text and never read the file on disk.
-    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
-        .expect("the combinator library should be readable");
+    let lib = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/lib/core/combinators.sth"
+    ))
+    .expect("the combinator library should be readable");
     for (word, quotation) in [
         ("each", "~[ 'T -- ]"),
         ("map", "~[ 'T -- 'T ]"),
@@ -620,7 +623,7 @@ fn combinators_library_uses_tilde_quotation_parameters() {
     ] {
         assert!(
             lib.contains(quotation),
-            "`{word}` in lib/combinators.sth should declare `{quotation}`, got:\n{lib}"
+            "`{word}` in lib/core/combinators.sth should declare `{quotation}`, got:\n{lib}"
         );
     }
 }

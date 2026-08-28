@@ -95,7 +95,7 @@ fn tree_with_core(tag: &str) -> Tree {
     t.write(
         "sooth.pkg",
         &format!(
-            "package: {tag} ;\nlayer: hosted ;\ndepends: core path \"{}/lib\" ;\n",
+            "package: {tag} ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\n",
             env!("CARGO_MANIFEST_DIR")
         ),
     );

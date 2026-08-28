@@ -201,7 +201,7 @@ fn times_doorway_grants_the_bound_alias() {
              4 ~[ | i | &!arr i >usize &!> i ! ] times\n\
              &arr 2 >usize &> @ .\n\
              arr drop ;\n",
-            lib_import("c | times |", "lib/combinators.sth")
+            lib_import("c | times |", "lib/core/combinators.sth")
         ),
     );
     assert_eq!(out, "2\n");
@@ -283,7 +283,7 @@ fn bound_array_passed_to_filter_is_accepted() {
              : main ( -- )\n\
              0 4 fill | a |\n\
              a ~[ 4 gt ] c::filter drop drop ;\n",
-            lib_import("c", "lib/combinators.sth")
+            lib_import("c", "lib/core/combinators.sth")
         ),
     );
     assert_eq!(out, "");
@@ -312,7 +312,7 @@ fn while_over_an_aliased_array_local_is_accepted() {
              a | arr |\n\
              0 ~[ | i | &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
-            lib_import("c", "lib/combinators.sth")
+            lib_import("c", "lib/core/combinators.sth")
         ),
     );
     assert_eq!(out, "9\n");
@@ -338,7 +338,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the
              a | arr |\n\
              0 ~[ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
-            lib_import("c", "lib/combinators.sth")
+            lib_import("c", "lib/core/combinators.sth")
         ),
     );
     assert_aliased_by(&err, "arr", "a");
@@ -361,7 +361,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
              0 ~[ | i | &!arr i >usize &!> 9 ! i 1 add dup 4 lt ] c::while drop\n\
              &arr 0 >usize &> @ .\n\
              &a 0 >usize &> @ drop ;\n",
-            lib_import("c", "lib/combinators.sth")
+            lib_import("c", "lib/core/combinators.sth")
         ),
     );
     assert_aliased_by(&err, "arr", "a");

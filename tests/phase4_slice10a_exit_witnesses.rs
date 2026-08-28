@@ -166,16 +166,16 @@ fn combinators_library_declares_exactly_seven_tildes() {
     // filter/while) -- so a stray `~` anywhere else (an eighth signature, or
     // one in a prose comment) fails rather than satisfying a bare `contains`.
     let current_src = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/combinators.sth"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/core/combinators.sth"),
     )
-    .expect("reading lib/combinators.sth should succeed");
+    .expect("reading lib/core/combinators.sth should succeed");
     assert!(
         current_src.contains(": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )"),
-        "lib/combinators.sth must declare `times-helper` over an inline quotation"
+        "lib/core/combinators.sth must declare `times-helper` over an inline quotation"
     );
     assert!(
         current_src.contains(": times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )"),
-        "lib/combinators.sth must declare `times` over an inline quotation"
+        "lib/core/combinators.sth must declare `times` over an inline quotation"
     );
     // Slice 12 (R-C3): every combinator call site inside the library's own
     // bodies now also spells the tilde (`if`'s two branch arms, `times`'
@@ -186,7 +186,7 @@ fn combinators_library_declares_exactly_seven_tildes() {
     assert_eq!(
         current_src.matches('~').count(),
         17,
-        "lib/combinators.sth's total `~` count (signatures add call sites) has drifted"
+        "lib/core/combinators.sth's total `~` count (signatures add call sites) has drifted"
     );
 }
 

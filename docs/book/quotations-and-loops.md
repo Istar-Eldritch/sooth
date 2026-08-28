@@ -307,7 +307,7 @@ per element. Because everything here is `inline`, a call like
 per-element function call. The library keeps these as separate
 "leaf" combinators (rather than building `map`/`fold` on top of
 `each`) specifically to avoid stacking splice depth at every call
-site; see `lib/combinators.sth` for the full reasoning.
+site; see `lib/core/combinators.sth` for the full reasoning.
 
 ## What's next
 

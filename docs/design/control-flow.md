@@ -75,7 +75,7 @@ monomorphization walk. `call`/`times` accept an *abstract* quotation typed only 
 parameter, beside the literal they already accepted; a literal passed to a declared
 parameter is checked directionally against it, enforcing a `Copy`-only capture restriction on
 what it may read from its defining scope. Combinators are now ordinary Sooth library words
-(`lib/combinators.sth`'s `each`/`map`/`fold`), and every call to one is inlined by
+(`lib/core/combinators.sth`'s `each`/`map`/`fold`), and every call to one is inlined by
 term-splicing the callee's AST body against the caller's live stack — the compiler's only
 inliner, generalizing slice 4's `call`/`times` fusion across a `:` boundary — transitively (a
 combinator forwarding its own quotation parameter to a nested combinator splices through both

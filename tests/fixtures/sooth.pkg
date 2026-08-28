@@ -7,4 +7,4 @@
 \ developer's machine.
 package: fixtures ;
 layer: hosted ;
-depends: core path "../../lib" ;
+depends: core path "../../lib/core" ;

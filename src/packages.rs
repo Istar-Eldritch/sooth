@@ -818,6 +818,21 @@ mod tests {
         assert_eq!(find_package_root(&file), None);
     }
 
+    /// R1.2/R5.2a: `lib/` is not itself a package (only `lib/core/` is), and
+    /// the real, committed `lib/core/sooth.pkg` parses.
+    #[test]
+    fn lib_holds_no_manifest_and_lib_core_manifest_parses() {
+        let lib_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
+        assert!(
+            !lib_dir.join("sooth.pkg").exists(),
+            "lib/ must hold no sooth.pkg; only lib/core/ and lib/hosted/ are packages"
+        );
+        let manifest_path = lib_dir.join("core/sooth.pkg");
+        let src =
+            std::fs::read_to_string(&manifest_path).expect("lib/core/sooth.pkg should be readable");
+        manifest::parse_manifest(&src, &manifest_path).expect("lib/core/sooth.pkg should parse");
+    }
+
     #[test]
     fn find_package_root_nested_manifest_inner_wins() {
         let sb = Sandbox::new("nested");
