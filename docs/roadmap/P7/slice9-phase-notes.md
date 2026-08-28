@@ -1203,15 +1203,21 @@ has five other production callers in `ir/layout.rs`.
 
 `parse_line_src` and its five tests were classified per test, not deleted as a block:
 
-- `parse_line_bare_expression_is_expr` and `parse_line_float_lit_is_float_lit` test a
-  general parsing fact with no REPL content (a multi-term sequence, a float literal
-  token) that had no other witness in the tree (`grep -n 'FloatLit'` outside these two
-  found nothing test-level). **Migrated**, not deleted: `parse_bare_term_sequence_is_a_
-  multi_term_body` and `parse_float_lit_term_is_float_lit` re-express the same fact over
-  a one-word module body via `parse_src`/`terms_body`. Mutation-proved individually in an
-  isolated edit-and-revert (not a worktree copy): relabelling `TermKind::IntLit(n)` to
-  `IntLit(n + 1)` fails the migrated multi-term test; relabelling `FloatLit(v)` to
-  `FloatLit(v + 1.0)` fails the migrated float test. Both reverted after.
+- `parse_line_float_lit_is_float_lit` tests a general parsing fact with no REPL content
+  (a float literal token) that had no other witness in the tree (`grep -n 'FloatLit'`
+  outside it found nothing test-level). **Migrated**, not deleted:
+  `parse_float_lit_term_is_float_lit` re-expresses the fact over a one-word module body
+  via `parse_src`/`terms_body`.
+- `parse_line_bare_expression_is_expr` is equally REPL-free (a multi-term sequence) but
+  was **not** a sole witness: `parse_mid_body_binding_produces_bind_term` already asserts
+  a stronger form of the same shape (a 3-term body, `IntLit` at `[0]`, a trailing `Call`
+  at `[2]`, and the `Bind` between them). It is therefore **retired as covered**; its
+  migrated form `parse_bare_term_sequence_is_a_multi_term_body` is kept as redundant
+  restatement, not as the fact's only guard. Both migrated tests were mutation-proved
+  individually in an isolated edit-and-revert (not a worktree copy): relabelling
+  `TermKind::IntLit(n)` to `IntLit(n + 1)` fails the migrated multi-term test;
+  relabelling `FloatLit(v)` to `FloatLit(v + 1.0)` fails the migrated float test. Both
+  reverted after.
 - `parse_line_colon_is_def` tests the `Line::Def`/`Line::Expr` split itself, which is the
   REPL mechanism this phase deletes — **retired**, no twin needed.
 - `parse_line_trailing_tokens_after_def_is_error` tests "one line is one complete unit",
