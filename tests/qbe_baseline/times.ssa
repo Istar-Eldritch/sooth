@@ -8,7 +8,6 @@ data $freefmt = { b "free %ld\n", b 0 }
 data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
-type :arr_0 = align 8 { b 32 }
 
 export function $sooth_main() {
 @start

@@ -9,7 +9,6 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 type :arr_0 = align 8 { b 40 }
-type :arr_1 = align 8 { b 32 }
 
 export function :arr_0 $scores__m0() {
 @start

@@ -797,7 +797,9 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // every monomorphic one, and generic-struct ids mint in poly-word order
     // ahead of monomorphic-word order. A combinator stays on the in-loop
     // `check_poly_combinator_standalone` path, which records nothing that
-    // survives it (R9's scope cut).
+    // survives it: no generic monomorph, no instantiation record, and no
+    // interned array/cell/ref/slice shape -- every registry it writes to is a
+    // word-scoped copy discarded when the check returns (P7.S11 R2/R6).
     let mut trait_obligations: Vec<WordObligations> = Vec::new();
     // P7.S12 (R1.2): the generated-enum-word call sites each of those bodies
     // makes, recorded the same way and for the same reason as
@@ -963,6 +965,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
                     statics,
                     Some(modules),
                     &mut poly,
+                    Some(&generics_cell),
                 )?;
             }
             // R7: a non-combinator polymorphic body was already checked by

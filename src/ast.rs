@@ -493,7 +493,7 @@ impl StructId {
 /// A registered enum: its declared name, its ordered variants, and the
 /// leaked `&'static str` copy of its name every `Type::Enum` naming it
 /// carries directly (mirrors `StructDecl::name_static`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
     pub name_static: &'static str,
@@ -507,7 +507,7 @@ pub struct EnumDecl {
 /// One variant of an `EnumDecl`: its declared name, the leaked `&'static
 /// str` copy of that name, and its ordered `(field-name, Type)` list (empty
 /// for a zero-field variant).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VariantDecl {
     pub name: String,
     pub name_static: &'static str,
@@ -586,7 +586,7 @@ pub struct GenericVariantDecl {
 /// an instantiation's `StructId`/`EnumId` is final the moment it is minted:
 /// the pre-pass has already registered every named `type:` in every file
 /// before any body parses, so nothing can land between them afterwards.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenericTypes {
     pub structs: Vec<GenericStructDecl>,
     pub enums: Vec<GenericEnumDecl>,
@@ -1285,7 +1285,7 @@ pub fn resolve_bool_type(enums: &[EnumDecl]) -> Option<Type> {
 /// carries directly (mirrors `StructDecl::name_static`). Interned and deduped
 /// structurally by `(element, count)` shape (D3, M1): two spellings of the
 /// same shape share one `ArrayDecl`/`ArrayId`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ArrayDecl {
     pub element: Type,
     pub count: u32,
@@ -1296,7 +1296,7 @@ pub struct ArrayDecl {
 /// str` spelling `^T` every `Type::OwnedCell` naming it carries directly.
 /// Deduped structurally by payload shape; unlike `ArrayDecl` there is no
 /// count, since a cell holds exactly one value.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OwnedCellDecl {
     pub payload: Type,
     pub name_static: &'static str,
@@ -1341,7 +1341,7 @@ pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> 
 /// `Type::Ref` naming it carries directly. Deduped structurally by
 /// `(referent, mutable)`; a reference never owns, so unlike `OwnedCellDecl`
 /// there is nothing to free.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RefDecl {
     pub referent: Type,
     pub mutable: bool,
@@ -1391,7 +1391,7 @@ pub fn intern_ref_type(refs: &mut Vec<RefDecl>, referent: Type, mutable: bool) -
 /// storage it does not own, so like a reference there is nothing to free.
 /// There is no count -- the length is a runtime component of the value, which
 /// is the whole difference from `ArrayDecl`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SliceDecl {
     pub element: Type,
     pub mutable: bool,

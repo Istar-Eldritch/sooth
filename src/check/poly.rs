@@ -389,6 +389,81 @@ fn is_reference_slot(pt: &PolyType) -> bool {
     }
 }
 
+/// P7.S11 (R2.1): the word-scoped registry set a standalone combinator
+/// check runs against: copies of the live registries, extended with whatever
+/// the signature grounding minted. Dropped when the check returns (R2 step
+/// 5, R6): nothing here ever reaches `module.structs`/`module.enums`/
+/// `module.arrays`/`module.owned_cells`/`module.refs`/`module.slices`.
+pub(super) struct WordScopedRegistries {
+    pub structs: Vec<StructDecl>,
+    pub enums: Vec<EnumDecl>,
+    pub arrays: Vec<ArrayDecl>,
+    pub cells: Vec<OwnedCellDecl>,
+    pub refs: Vec<RefDecl>,
+    pub slices: Vec<SliceDecl>,
+}
+
+/// P7.S11 (R2/R2.1/R6): rebase a scratch clone of `generics` onto the live
+/// registries' current lengths, run `ground` against word-scoped copies of
+/// the shape registries, then flush the batch `ground` minted into
+/// word-scoped copies of `structs`/`enums`. Returns `ground`'s value and the
+/// extended registries; on `Err`, everything is dropped and nothing reaches a
+/// live registry.
+///
+/// The rebase (P0-A) is what a fresh mint through the scratch clone needs:
+/// without it, a scratch id can collide with whatever an *earlier* word's
+/// check-time mint already flushed into the live registries this call was
+/// handed. The flush into `local.enums`/`local.structs` (P0-B) is what makes
+/// the body walk's unconditional `enums[id.index()]` lookups (`is_copy`,
+/// `contains_reference`, the drop graph, `tag`) safe for an id this call just
+/// minted. `arrays`/`cells`/`refs`/`slices` have no base to rebase (R6.2:
+/// they intern by linear structural scan, with the id fixed at `vec.len()`
+/// the moment a clone is taken) -- they are copied and handed to `ground`
+/// and, via the caller, to the body walk, then simply dropped; keeping a
+/// scratch-minted shape out of the live registries is P0-C's fix.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn ground_into_word_scoped_registries<T>(
+    generics: Option<&RefCell<GenericTypes>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    slices: &[SliceDecl],
+    ground: impl FnOnce(
+        Option<&RefCell<GenericTypes>>,
+        &mut Vec<ArrayDecl>,
+        &mut Vec<OwnedCellDecl>,
+        &mut Vec<RefDecl>,
+    ) -> Result<T, String>,
+) -> Result<(T, WordScopedRegistries), String> {
+    let scratch = generics.map(|c| {
+        let mut g = c.borrow().clone();
+        g.rebase(structs.len(), enums.len());
+        RefCell::new(g)
+    });
+    let mut local = WordScopedRegistries {
+        structs: structs.to_vec(),
+        enums: enums.to_vec(),
+        arrays: arrays.to_vec(),
+        cells: cells.to_vec(),
+        refs: refs.to_vec(),
+        slices: slices.to_vec(),
+    };
+    let value = ground(
+        scratch.as_ref(),
+        &mut local.arrays,
+        &mut local.cells,
+        &mut local.refs,
+    )?;
+    if let Some(s) = &scratch {
+        let mut g = s.borrow_mut();
+        g.flush_structs_into(&mut local.structs);
+        g.flush_enums_into(&mut local.enums);
+    }
+    Ok((value, local))
+}
+
 /// R14-R17: check a polymorphic combinator standalone by instantiating its
 /// signature at concrete stand-in types and running the ordinary concrete
 /// checker on the body. `i64` is Copy/Ord/numeric, so a body that only moves,
@@ -403,35 +478,35 @@ fn is_reference_slot(pt: &PolyType) -> bool {
 /// body is caught at its concrete splice site, the same place obligation 2's
 /// borrow re-check lands (D4/R21). The array length is irrelevant to type
 /// checking (`times` supplies a runtime index), so any value serves.
+///
+/// P7.S11: signature grounding (R1/R2/R3/R6) can mint a monomorph of a
+/// generic header the declared output (or a quotation-input effect, an array
+/// element, a referent or a cell payload) applies. The mint, and every shape
+/// it interns along the way, goes through `ground_into_word_scoped_registries`
+/// and lands only in word-scoped copies (`WordScopedRegistries`): this pass
+/// records nothing that survives it -- no generic monomorph, no instantiation
+/// record, and no interned array/cell/ref/slice shape -- every registry it
+/// writes to is a word-scoped copy discarded when the check returns. A
+/// top-level generic *input* slot is still rejected before grounding starts
+/// (R3): only a slot the signature's own output side applies, or one nested
+/// inside a quotation effect/array/reference/cell, is admitted.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_poly_combinator_standalone(
     word: &WordDef,
     sig: &PolySig,
     enums: &[EnumDecl],
     env: &HashMap<String, Vec<Overload>>,
-    arrays: &mut Vec<ArrayDecl>,
-    cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    slices: &mut Vec<SliceDecl>,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+    slices: &[SliceDecl],
     structs: &[StructDecl],
     statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     poly: &mut PolyCtx,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    // P7 slice 3a: construction (R3) is scoped to an ordinary poly word's
-    // own body, not a combinator's standalone stand-in check -- `None` here,
-    // never threaded in from a caller, keeps that scope decision in one
-    // place rather than relying on every caller to also decline it.
-    let ctx = word_ctx(
-        word,
-        structs,
-        enums,
-        statics,
-        modules,
-        poly.combinators.tail(),
-        None,
-    );
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -440,20 +515,84 @@ pub(super) fn check_poly_combinator_standalone(
     for ln in 0..sig.len_var_names.len() as u32 {
         subst.len.push((ln, STANDALONE_LEN));
     }
-    let mut inputs = Vec::with_capacity(sig.inputs.len());
+    // R3: a declared top-level generic input slot is not yet groundable at a
+    // combinator's standalone check -- unlike a nested one (a quotation
+    // effect's rows, an array element, a referent, a cell payload), which
+    // grounds normally below. Checked before any grounding starts, so it
+    // never depends on whether grounding would have succeeded.
     for pty in &sig.inputs {
-        let ty = apply_subst(
-            sig, pty, &subst, &word.name, span, &ctx, arrays, cells, refs,
-        )?;
-        inputs.push(TypedSlot { name: None, ty });
+        if matches!(
+            pty,
+            PolyType::Generic { .. } | PolyType::GenericVariant { .. }
+        ) {
+            let reject_ctx = word_ctx(
+                word,
+                structs,
+                enums,
+                statics,
+                modules,
+                poly.combinators.tail(),
+                None,
+            );
+            return Err(poly_generic_not_yet_groundable_error(
+                &reject_ctx,
+                span,
+                &word.name,
+                &poly_type_str(pty, sig),
+            ));
+        }
     }
-    let mut outputs = Vec::with_capacity(sig.outputs.len());
-    for pty in &sig.outputs {
-        let ty = apply_subst(
-            sig, pty, &subst, &word.name, span, &ctx, arrays, cells, refs,
-        )?;
-        outputs.push(TypedSlot { name: None, ty });
-    }
+    let ((inputs, outputs), mut local) = ground_into_word_scoped_registries(
+        generics,
+        structs,
+        enums,
+        arrays,
+        cells,
+        refs,
+        slices,
+        |scratch, local_arrays, local_cells, local_refs| {
+            let ctx = word_ctx(
+                word,
+                structs,
+                enums,
+                statics,
+                modules,
+                poly.combinators.tail(),
+                scratch,
+            );
+            let mut inputs = Vec::with_capacity(sig.inputs.len());
+            for pty in &sig.inputs {
+                let ty = apply_subst(
+                    sig,
+                    pty,
+                    &subst,
+                    &word.name,
+                    span,
+                    &ctx,
+                    local_arrays,
+                    local_cells,
+                    local_refs,
+                )?;
+                inputs.push(TypedSlot { name: None, ty });
+            }
+            let mut outputs = Vec::with_capacity(sig.outputs.len());
+            for pty in &sig.outputs {
+                let ty = apply_subst(
+                    sig,
+                    pty,
+                    &subst,
+                    &word.name,
+                    span,
+                    &ctx,
+                    local_arrays,
+                    local_cells,
+                    local_refs,
+                )?;
+                outputs.push(TypedSlot { name: None, ty });
+            }
+            Ok((inputs, outputs))
+        },
+    )?;
     let terms = &word.body;
     let terms = terms.clone();
     // A concrete stand-in for the combinator, checked by the ordinary path.
@@ -484,13 +623,13 @@ pub(super) fn check_poly_combinator_standalone(
     poly.combinator_name = Some(word.name.clone());
     let result = check_word(
         &concrete,
-        enums,
+        &local.enums,
         env,
-        arrays,
-        cells,
-        refs,
-        slices,
-        structs,
+        &mut local.arrays,
+        &mut local.cells,
+        &mut local.refs,
+        &mut local.slices,
+        &local.structs,
         statics,
         modules,
         &mut dropped,
@@ -15274,6 +15413,272 @@ mod tests {
                 None
             ),
             Some(Ordering::Greater)
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // P7.S11 phase 1 (R1/R2/R2.1/R3/R6): standalone-combinator grounding.
+    // -----------------------------------------------------------------
+
+    /// The R1/R2 floor: a constructor-free unbounded combinator whose
+    /// declared output applies a generic header grounds standalone. Without
+    /// R1 threading `generics` in, `apply_subst`'s `Generic` arm hits the
+    /// `ctx.generics()` `None` arm and rejects it at the def site.
+    #[test]
+    fn standalone_combinator_grounds_a_generic_output_without_a_constructor() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : relay inline ( 'T ~[ 'T -- Result['T i64] ] -- Result['T i64] ) call ;\n";
+        check_src(src).expect("a constructor-free combinator grounds its output standalone");
+    }
+
+    /// R3: a declared top-level generic *input* slot is not yet groundable,
+    /// unlike a declared output -- the standing variable-bearing-application
+    /// restriction the S12 fixture already pins.
+    #[test]
+    fn standalone_combinator_generic_input_slot_is_still_rejected() {
+        let src = "type: Option['T] | None | Some 'T ;\n\
+             : probe inline ( Option['T] ~[ -- i64 ] -- i64 ) drop drop 0 ;\n";
+        let err =
+            check_src(src).expect_err("a top-level generic input slot must still be rejected");
+        assert!(
+            err.contains("names the generic type `Option['T]`")
+                && err.contains("cannot yet be instantiated at a variable-bearing application"),
+            "expected the standing variable-bearing restriction, got: {err}"
+        );
+    }
+
+    /// The R3 scope twin: a generic nested inside a quotation-input effect's
+    /// row (not itself the top-level slot) is not rejected and grounds
+    /// normally. Fails if R3's guard recurses into slots instead of testing
+    /// the top level.
+    #[test]
+    fn standalone_generic_nested_in_a_quotation_input_is_not_rejected() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : relay inline ( 'T ~[ 'T -- Result['T i64] ] -- Result['T i64] ) call ;\n";
+        check_src(src)
+            .expect("a generic nested inside a quotation-input row must not be rejected by R3");
+    }
+
+    /// R2's discard guard, and mutation 6's killer: the standalone check's own
+    /// scratch mint must never reach the live `GenericTypes` cell.
+    /// `lookup_enum` is the public route to that state (round-3 fix: the
+    /// private `enum_keys`/`enum_resolved` fields round 2 specified are
+    /// unreachable from here). Checked both before the module checks (so the
+    /// fixture's own lack of a parse-time sibling monomorph is not assumed)
+    /// and after (so a leak into the cell that `check_module` eventually
+    /// restores onto `module.generics` would be caught).
+    #[test]
+    fn standalone_stand_in_monomorph_does_not_enter_the_live_registry() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : relay inline ( 'T ~[ 'T -- Result['T i64] ] -- Result['T i64] ) call ;\n";
+        let tokens = lex(src).unwrap();
+        let fresh = crate::test_support::parse_with_core(&tokens).unwrap();
+        let result_idx = fresh
+            .generics
+            .enums
+            .iter()
+            .position(|e| e.name == "Result")
+            .expect("the Result header is registered before any check runs");
+        let header_module = fresh.generics.enums[result_idx].module;
+        let live_enum_len = fresh.enums.len();
+        assert!(
+            fresh
+                .generics
+                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64])
+                .is_none(),
+            "no parse-time sibling monomorph exists in this fixture"
+        );
+        let (module, _) = checked_like_a_build(src).expect("relay checks standalone clean");
+        assert!(
+            module
+                .generics
+                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64])
+                .is_none(),
+            "the standalone check's own scratch mint must not reach the live GenericTypes cell"
+        );
+        assert!(
+            module.generics.inst_enums.is_empty(),
+            "nothing survives the standalone check into the live batch"
+        );
+        assert_eq!(
+            module.enums.len(),
+            live_enum_len,
+            "no flushed monomorph beyond whatever parsing itself already registered"
+        );
+    }
+
+    /// R2.1's seam, called directly: a stale `enum_base` (forced through the
+    /// public `rebase`, exactly the state a preceding check-time flush
+    /// leaves behind) must not throw off the mint's id -- the rebase inside
+    /// `ground_into_word_scoped_registries` is what re-points it at the live
+    /// registry's *current* length. Kills mutation 4 (dropped rebase) and
+    /// mutation 5 (dropped flush).
+    #[test]
+    fn standalone_grounded_output_id_matches_its_extended_slice_position() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             type: Color | Red | Green | Blue ;\n\
+             type: Status | Active | Done ;\n";
+        let tokens = lex(src).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let result_idx = module
+            .generics
+            .enums
+            .iter()
+            .position(|e| e.name == "Result")
+            .expect("the Result header is registered");
+        let header_module = module.generics.enums[result_idx].module;
+        let live_enum_len = module.enums.len();
+        assert!(
+            live_enum_len >= 2,
+            "the fixture must declare at least two ordinary concrete enums"
+        );
+        let mut generics = module.generics.clone();
+        // Force a stale `enum_base`, exactly the state a preceding check-time
+        // flush (`src/check.rs:1012-1013`) leaves behind: one short of
+        // `module.enums.len()`.
+        generics.rebase(module.structs.len(), live_enum_len - 1);
+        let cell = RefCell::new(generics);
+        let (ty, local) = ground_into_word_scoped_registries(
+            Some(&cell),
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+            &module.refs,
+            &module.slices,
+            |scratch, _arrays, _cells, _refs| {
+                let regs = crate::ast::MutRegistries {
+                    structs: &module.structs,
+                    enums: &module.enums,
+                    arrays: _arrays,
+                    cells: _cells,
+                    refs: _refs,
+                };
+                Ok(scratch
+                    .expect("R1 threads the live cell in")
+                    .borrow_mut()
+                    .instantiate_enum(result_idx, &[Type::I64, Type::I64], header_module, regs))
+            },
+        )
+        .expect("grounding through the free function succeeds");
+        let Type::Enum(id, name) = ty else {
+            panic!("instantiate_enum must mint a Type::Enum: {ty:?}")
+        };
+        assert_eq!(
+            id.index(),
+            live_enum_len,
+            "the rebase (P0-A) must land the mint at the live registry's current \
+             length, not the stale pre-rebase base"
+        );
+        assert_eq!(
+            local.enums.len(),
+            live_enum_len + 1,
+            "the flush (P0-B) must extend the word-scoped copy by exactly the \
+             minted batch"
+        );
+        assert_eq!(
+            local.enums[id.index()].name_static,
+            name,
+            "the id/index/name correspondence, read back off the Type itself"
+        );
+        assert_eq!(
+            module.enums.len(),
+            live_enum_len,
+            "the live registry is untouched"
+        );
+    }
+
+    /// R6's unit guard (P0-C): a combinator whose declared output is an array
+    /// of its own grounded monomorph must intern that array into the
+    /// word-scoped `local.arrays`, never into the live `arrays` registry --
+    /// checked directly through `ground_into_word_scoped_registries` (the
+    /// only route that can observe `local.arrays` at all, since
+    /// `check_poly_combinator_standalone` returns only `Result<(), String>`)
+    /// and, for the live-registry half, through an actual
+    /// `check_poly_combinator_standalone` call (`hold` is a combinator, so
+    /// checking the whole module runs it), so both call routes are covered.
+    #[test]
+    fn standalone_grounding_an_array_of_a_monomorph_leaves_the_live_arrays_untouched() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- array[Result['T i64] 4] )\n\
+               call 4 fill ;\n";
+        let tokens = lex(src).unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let word = module
+            .words
+            .iter()
+            .find(|w| w.name == "hold")
+            .expect("hold parses");
+        let sig = word.poly.as_ref().expect("hold is polymorphic");
+        let cell = RefCell::new(module.generics.clone());
+        let mut subst = Subst::default();
+        for v in 0..sig.ty_var_names.len() as u32 {
+            subst.ty.push((v, Type::I64));
+        }
+        for ln in 0..sig.len_var_names.len() as u32 {
+            subst.len.push((ln, 4));
+        }
+        let span = word_span(word);
+        let live_array_len = module.arrays.len();
+        let (ty, local) = ground_into_word_scoped_registries(
+            Some(&cell),
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+            &module.refs,
+            &module.slices,
+            |scratch, arrays, cells, refs| {
+                let ctx = word_ctx(
+                    word,
+                    &module.structs,
+                    &module.enums,
+                    &[],
+                    None,
+                    &CombinatorIndex::new(),
+                    scratch,
+                );
+                apply_subst(
+                    sig,
+                    &sig.outputs[0],
+                    &subst,
+                    &word.name,
+                    span,
+                    &ctx,
+                    arrays,
+                    cells,
+                    refs,
+                )
+            },
+        )
+        .expect("grounding the array output succeeds");
+        let Type::Array(id, _) = ty else {
+            panic!("the declared output must ground to a Type::Array: {ty:?}")
+        };
+        let elem = local.arrays[id.index()].element;
+        let Type::Enum(enum_id, _) = elem else {
+            panic!("the array's element must ground to the scratch monomorph: {elem:?}")
+        };
+        assert_eq!(
+            enum_id.index(),
+            module.enums.len(),
+            "the array points at the scratch monomorph, inside the local enum registry"
+        );
+        assert_eq!(
+            module.arrays.len(),
+            live_array_len,
+            "the live arrays registry is untouched by the grounding"
+        );
+
+        // The same property through the production entry point:
+        // `check_poly_combinator_standalone` itself must not leak the array
+        // shape into the live registry either.
+        let (checked, _) =
+            checked_like_a_build(src).expect("hold checks standalone and the module compiles");
+        assert_eq!(
+            checked.arrays.len(),
+            live_array_len,
+            "check_poly_combinator_standalone must not intern the array into the live registry"
         );
     }
 }
