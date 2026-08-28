@@ -602,9 +602,14 @@ fn check_term(
             // P7.S12 (R2.4): the registry now also keys a generic header no
             // instantiation has grounded, and this is the *concrete* consumer:
             // a concrete body's scrutinee is always some monomorph, so a
-            // `Generic` entry means there is no monomorph to eliminate here at
-            // all. Located and named rather than fallen through to the unknown-
-            // word path or the adjacency message, both of which describe a
+            // `Generic` entry means no monomorph is registered as reachable
+            // here -- not that none exists. `eliminator_registry` is built
+            // before the poly pre-pass mints monomorphs, so a header can have
+            // a real instantiation elsewhere in the program that is simply
+            // invisible to the registry at this point (a separate,
+            // out-of-scope timing gap; see `concrete_body_generic_eliminator_error`).
+            // Located and named rather than fallen through to the unknown-word
+            // path or the adjacency message, both of which describe a
             // different mistake. `check_poly_combinator_standalone`'s i64
             // stand-in body reaches this too, and has no instantiator to
             // ground a scrutinee with even in principle.

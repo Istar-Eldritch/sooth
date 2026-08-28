@@ -595,16 +595,18 @@ fn a_generic_eliminator_in_a_standalone_checked_combinator_is_rejected() {
 /// from `main`'s call site (`eliminator_registry` is built before the poly
 /// pre-pass mints it, a separate, out-of-scope timing gap this message must
 /// not paper over by asserting something false). The scrutinee's own type
-/// parameter is never `i64` here -- it never appears at all in this program --
-/// so any concrete instantiation the message named would be invented, not
-/// computed. The fix drops the fabricated instantiation and the false
-/// nothing-instantiates claim, and states the one thing that is always true:
-/// a concrete body cannot eliminate the header while it is ungrounded.
+/// parameter is `f64` here, not `i64`, so a resurrected `[i64]` in the
+/// message would be visibly and provably wrong rather than coincidentally
+/// right -- the `!contains("i64")` assertion below discriminates on this
+/// program precisely because `i64` never appears in it. The fix drops the
+/// fabricated instantiation and the false nothing-instantiates claim, and
+/// states the one thing that is always true: a concrete body cannot
+/// eliminate the header while it is ungrounded.
 #[test]
 fn concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation() {
     let src = "type: Pair['A] | Nil | One 'A ;\n\
          : wrap ( 'T -- Pair['T] ) One ;\n\
-         : main ( -- ) 7 wrap ~[ ( One ) One> ] ~[ ( Nil ) 0 ] Pair? . ;\n";
+         : main ( -- ) 7.5 wrap ~[ ( One ) One> ] ~[ ( Nil ) 0.0 ] Pair? . ;\n";
     let prog = Scratch::write("r86-poly-output", src);
     let err = build_error(prog.path());
     assert!(
