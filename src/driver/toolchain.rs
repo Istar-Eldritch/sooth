@@ -97,20 +97,15 @@ fn collect_sth_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// Resolve `sooth test`'s entry set (R3). No `paths` resolves the package
 /// containing `cwd` and takes every `*.sth` under its `tests/` directory
-/// (R3.1); `cwd` itself is probed directly before falling back to
-/// `packages::find_package_root`'s ancestor walk, since that walk starts at
-/// `file.parent()` and would otherwise skip the cwd's own `sooth.pkg`. Given
-/// `paths`, each named file is an entry and each named directory contributes
-/// every `*.sth` directly under it (R3.2, non-recursive).
+/// (R3.1): `find_package_root` walks from a *file's* parent, so `cwd` is
+/// joined with a nonexistent sentinel component first, making the walk's
+/// first step `cwd` itself rather than skipping past it. Given `paths`, each
+/// named file is an entry and each named directory contributes every
+/// `*.sth` directly under it (R3.2, non-recursive).
 pub fn discover_test_entries(cwd: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     if paths.is_empty() {
-        let root = if cwd.join("sooth.pkg").is_file() {
-            Some(cwd.to_path_buf())
-        } else {
-            packages::find_package_root(&cwd.join("_"))
-        };
-        let root =
-            root.ok_or_else(|| format!("no sooth.pkg found at or above {}", cwd.display()))?;
+        let root = packages::find_package_root(&cwd.join("_"))
+            .ok_or_else(|| format!("no sooth.pkg found at or above {}", cwd.display()))?;
         let tests_dir = root.join("tests");
         if !tests_dir.is_dir() {
             return Err(format!("no tests directory at {}", tests_dir.display()));
@@ -156,9 +151,11 @@ fn count_protocol(stdout: &str) -> (usize, usize) {
 /// ok` line appears, the child exits non-zero, or its build fails (R1).
 ///
 /// The per-entry verdicts and the summary go to `report`; the *diagnostic*
-/// text behind a failure -- a build's compiler errors, a failed child's own
-/// stderr -- goes to `diagnostics`, keeping R1.1's build errors on their own
-/// channel and out of the run report. The CLI passes stdout and stderr.
+/// text behind a failure -- a build's compiler errors, a failing entry's own
+/// `not ok -- <label>` lines, a failed child's own stderr -- goes to
+/// `diagnostics`, keeping R1.1's build errors and R1's failing labels on
+/// their own channel and out of the run report. The CLI passes stdout and
+/// stderr.
 pub fn test(
     cwd: &Path,
     paths: &[PathBuf],
@@ -187,6 +184,9 @@ pub fn test(
                     total_ok += ok;
                     total_not_ok += not_ok;
                     if not_ok > 0 || !output.status.success() {
+                        for line in stdout.lines().filter(|l| l.starts_with("not ok -- ")) {
+                            write_diagnostic(diagnostics, &format!("{line}\n"))?;
+                        }
                         write_diagnostic(diagnostics, &String::from_utf8_lossy(&output.stderr))?;
                         Err(format!("{ok} ok, {not_ok} not ok, {}", output.status))
                     } else {
@@ -493,14 +493,16 @@ mod tests {
     #[test]
     fn discover_test_entries_no_ancestor_pkg_is_error() {
         let t = PkgTree::new("no-pkg");
-        assert!(discover_test_entries(&t.0, &[]).is_err());
+        let err = discover_test_entries(&t.0, &[]).expect_err("should be an error");
+        assert!(err.contains("no sooth.pkg found"), "got: {err}");
     }
 
     #[test]
     fn discover_test_entries_missing_tests_dir_is_error() {
         let t = PkgTree::new("missing-tests");
         t.write("sooth.pkg", "package: p ; layer: hosted ;");
-        assert!(discover_test_entries(&t.0, &[]).is_err());
+        let err = discover_test_entries(&t.0, &[]).expect_err("should be an error");
+        assert!(err.contains("no tests directory"), "got: {err}");
     }
 
     #[test]
@@ -508,6 +510,21 @@ mod tests {
         let t = PkgTree::new("empty-tests");
         t.write("sooth.pkg", "package: p ; layer: hosted ;");
         std::fs::create_dir_all(t.0.join("tests")).unwrap();
-        assert!(discover_test_entries(&t.0, &[]).is_err());
+        let err = discover_test_entries(&t.0, &[]).expect_err("should be an error");
+        assert!(err.contains("contains no *.sth files"), "got: {err}");
+    }
+
+    /// R3.1: `find_package_root`'s ancestor walk must resolve the package
+    /// root from a *subdirectory* of it, not only from the root itself --
+    /// every other discovery test puts `sooth.pkg` directly at `cwd`.
+    #[test]
+    fn discover_test_entries_from_subdirectory_walks_up_to_pkgroot() {
+        let t = PkgTree::new("subdir");
+        t.write("sooth.pkg", "package: p ; layer: hosted ;");
+        t.write("tests/a.sth", "");
+        let sub = t.0.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+        let entries = discover_test_entries(&sub, &[]).expect("discovery should succeed");
+        assert_eq!(entries, vec![t.0.join("tests/a.sth")]);
     }
 }

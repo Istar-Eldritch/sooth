@@ -1069,7 +1069,8 @@ Sequenced so nothing but the last subslice touches the compiler:
 - **S7b** `[ done ]` -- `hosted::testing`'s `expect`/`expect-eq` and the `sooth test`
   driver, label-only output, printing via the still-intrinsic `.`; `examples/tests/`
   dogfooded against `bool`/`cmp`/`option`/`result`/`combinators`. Detail:
-  [slice7b-testing-brief](./P7/slice7b-testing-brief.md).
+  [slice7b-testing-brief](./P7/slice7b-testing-brief.md),
+  [slice7b-spec](./P7/slice7b-spec.md).
 - **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic: one `Show` impl per type,
   living in `core`; per-target `Write` impls carry the platform dependency), with
   `hosted::libc` supplying the `Stdout` sink. Detail:

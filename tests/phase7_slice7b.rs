@@ -206,9 +206,13 @@ fn driver_test_fail_by_protocol_is_reported_failed_despite_zero_exit() {
     let t = Tree::new("fail-protocol");
     t.write("sooth.pkg", &pkg_manifest());
     failing_entry(&t, "tests/a.sth");
-    let (code, report, _) = run_test(&t.0, &[t.0.join("tests")]);
+    let (code, report, diagnostics) = run_test(&t.0, &[t.0.join("tests")]);
     assert_ne!(code, 0);
     assert!(report.contains("FAIL "), "failed verdict line: {report}");
+    assert!(
+        diagnostics.contains("not ok -- one equals two"),
+        "the failing assertion's label reaches the diagnostics channel: {diagnostics}"
+    );
 }
 
 /// R1.1: a nonzero child exit is a failure on its own, independent of
@@ -341,7 +345,8 @@ fn driver_test_discovery_explicit_path_resolves_file_and_dir() {
 fn driver_test_discovery_missing_tests_dir_is_error() {
     let t = Tree::new("missing-tests");
     t.write("sooth.pkg", &pkg_manifest());
-    assert!(driver::discover_test_entries(&t.0, &[]).is_err());
+    let err = driver::discover_test_entries(&t.0, &[]).expect_err("should be an error");
+    assert!(err.contains("no tests directory"), "got: {err}");
 }
 
 /// R3.1: a present-but-empty `tests/` directory is the same usage-level
@@ -351,7 +356,8 @@ fn driver_test_discovery_empty_tests_dir_is_error() {
     let t = Tree::new("empty-tests");
     t.write("sooth.pkg", &pkg_manifest());
     std::fs::create_dir_all(t.0.join("tests")).unwrap();
-    assert!(driver::discover_test_entries(&t.0, &[]).is_err());
+    let err = driver::discover_test_entries(&t.0, &[]).expect_err("should be an error");
+    assert!(err.contains("contains no *.sth files"), "got: {err}");
 }
 
 //
