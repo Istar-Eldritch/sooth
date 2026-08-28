@@ -292,7 +292,7 @@ fn normalize_sooth(src: &str) -> String {
 /// Assert a test file's hand-copied `times`/`times-helper` definition (kept so
 /// in-process `check_error`/`check_ok`, which never resolve `import:`, can
 /// exercise `times` without a file-based import) is still a verbatim copy of
-/// the real `lib/combinators.sth`, modulo whitespace. Without this a body
+/// the real `lib/core/combinators.sth`, modulo whitespace. Without this a body
 /// change to `times`/`times-helper` would leave every hand-copy silently
 /// exercising the old shape. `renames` substitutes each `(from, to)`
 /// whole-token identifier in `hand_copy` before comparing, for a copy that

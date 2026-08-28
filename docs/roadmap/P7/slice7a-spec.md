@@ -42,8 +42,10 @@ Built and run against `main` at `e5bfd6e` in a throwaway sibling-package tree
 ### R1 -- `lib/core` is a rename (shipped)
 
 - **R1.1** `bool.sth`, `cmp.sth`, `prelude.sth`, `combinators.sth`, `option.sth`,
-  `result.sth` and `sooth.pkg` moved into `lib/core/` with zero content change to the six
-  `.sth` bodies. `lib/core/sooth.pkg` keeps `package: core ; layer: core ;` and its
+  `result.sth` and `sooth.pkg` moved into `lib/core/` with no content change beyond two
+  doc-comment path strings in `cmp.sth` itself (it names its own pre-move path in prose,
+  which would otherwise ship stale) -- no other `.sth` bodies changed. `lib/core/sooth.pkg`
+  keeps `package: core ; layer: core ;` and its
   `module:` list verbatim; its header comment now opens "`core`: the `no_std` bottom layer
   of the standard library. `lib/` is not itself a package -- `lib/hosted/` is a sibling
   package one layer up."
@@ -129,7 +131,8 @@ with its own manifest (R2.3). No new file under `examples/`, neither `CORPUS` li
   examples plus every fixture tree) is the witness that every `depends: core` entry still
   resolves.
 - **R5.7 (shipped, phase 1)** Full suite green with no test *assertion* changed, only path
-  strings and one drift-guard message.
+  strings and two drift-guard messages (`tests/common/mod.rs:319`,
+  `src/ir/func_builder/calls.rs:1930`).
 - **R5.1 (pending)** `tests/phase7_slice7a.rs`: a fixture tree whose entry does
   `import: hosted::libc l | exit | ;` and calls `7 >i32 exit`, asserting
   `status.code() == Some(7)` **and** the stdout printed before the call (so a program that
@@ -220,7 +223,7 @@ diverge. No growth-signal re-run due: no Rust module gained code.
 Met by phase 1:
 
 - `cargo fmt --check && cargo clippy -- -D warnings && cargo test` green, with no test
-  assertion changed (only path strings and one drift-guard message).
+  assertion changed (only path strings and two drift-guard messages).
 - `lib/` holds no manifest, `lib/core/` is a package, and every `depends: core` entry in the
   tree resolves under the new path.
 - No new file under `examples/`, and neither corpus list changed.
