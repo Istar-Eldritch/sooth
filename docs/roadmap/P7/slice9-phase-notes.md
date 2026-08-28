@@ -1262,3 +1262,125 @@ spec, not a statement of current design.
 non-REPL `phase7_slice3b_follow.rs` notes). Net change from phase 7's 2687: −11
 (parser.rs: −9 tests / +2 migrated = −7; ir/layout.rs: −4 `carried_slot_bytes` tests).
 Zero `tests/qbe_baseline` diffs.
+
+## Phase 9 (R7) — narrow the incremental-compile state
+
+The whole of R7 landed; the stop condition did not fire. Deleted, in one compile unit
+because each is a field or parameter every surviving path passes `None` to:
+
+- `CallInst::generation` (`ast.rs`) and `instantiation_symbol`'s third parameter. The
+  spec calls the field `ast::Instantiation::generation`; the struct is `CallInst` — same
+  field, and `Instantiation` is not a type in this tree.
+- The `(PolySig, Option<u64>)` pairing in `check.rs`'s `PolyEnv`, now
+  `HashMap<String, Vec<PolySig>>`, plus the `PolyCtx` doc paragraph (R2b) that existed
+  only to explain the pairing.
+- `StructLayout`/`EnumLayout`/`ArrayLayout::drop_generation`, `Cells::drop_generations`,
+  the `epoch` parameter of all four minters (`struct_`/`enum_`/`cell_`/`array_drop_symbol`),
+  the R11/R11.2/R11.3 override-epoch doc block and its four mirrors, and every `None` seed.
+- The `drop_generation` argument at every minting site in `ir/destructors.rs`,
+  `ir/func_builder/quotation.rs` and `backend/qbe.rs`, plus the `None` argument at the
+  ~27 `*_drop_symbol(id, None)` call sites in those files' unit tests.
+
+### Four consumer sites the spec did not name
+
+The spec's site list is a lower bound; `cargo build` enumerated the rest, which is the
+whole reason the type flip goes first.
+
+- **`check/terms.rs:731` and `:1130`** destructure `poly.env`'s candidates as
+  `|(sig, _)|`. Neither is in R7's reader list (which names `check/poly.rs` only), and
+  both are on the live monomorphic-dispatch path, not in a test.
+- **`check/poly.rs:2060` `poly_cross_call` and `:4567` `no_poly_overload_matches_error`**
+  both take `candidates: &[(PolySig, Option<u64>)]` in their own signatures. R7 named the
+  `resolve_poly_overload` reader and the four mint sites but not these two, so the
+  `Option<u64>` would have survived in two public-in-module signatures.
+- **Three further `instantiation_symbol(.., None)` call sites** in `check/poly.rs`
+  (`:5272`, `:5415`, `:6152` — the P7.S4 generic-impl member-word monomorph seeds and the
+  trait-call dispatch mint), against the two the spec's `4937-4938`/`5198`/`5231` range
+  implied.
+
+### The surviving `instantiation_symbol` test is renamed
+
+`instantiation_symbol_none_reproduces_native_spelling_expected` becomes
+`instantiation_symbol_reproduces_native_spelling_expected`. The spec says its "only edit
+is dropping the now-absent `None` argument"; the name, however, is the name of a
+parameter this phase deletes, and a test named after a dead argument reads as coverage of
+a mechanism that no longer exists. Content is untouched: it still pins
+`sooth_mono_id__t0_i64`.
+
+### Retired tests (3), each retired-mechanism
+
+- `ast.rs::instantiation_symbol_some_appends_gen_component_expected` — asserted only that
+  `Some(0)` appends `__gen0`. With the parameter gone there is nothing left to assert.
+- `ast.rs::instantiation_symbol_distinct_generations_are_distinct_symbols_expected` —
+  asserted `Some(0)`'s symbol differs from `Some(1)`'s. Same.
+- `ir/driver.rs::lower_call_uses_resolved_generation_symbol` — phase 3 migrated it off
+  `line_terms` and kept it green expressly so this phase would have a witness that fires
+  when the field goes. It did: deleting the field is what makes the test unwritable, not a
+  narrowing that leaves it green-and-inert.
+
+### Stop condition: not triggered
+
+`REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline` regenerated the baseline and
+`git status --porcelain tests/qbe_baseline/` came back **empty**. Not "changed only by
+losing a generation suffix" — *no* baseline symbol changed at all, which is the stronger
+form of the spec's condition: off the REPL path the suffix was never emitted, so removing
+its source is byte-identical. The field was dead, not live-but-quiet.
+
+### Mutation proofs
+
+Two guards, each proved live *after* the parameter removal (isolated edit-and-revert on
+one file at a time, restored and `git diff --stat` checked; no worktree copy).
+
+- `instantiation_symbol`'s `sooth_mono_` prefix → `sooth_monoX_`: kills
+  `ast::tests::instantiation_symbol_reproduces_native_spelling_expected` **and**
+  `check::poly::tests::transitive_discovery_dedups_repeated_instantiation_symbol`
+  (2 failed). The surviving test is not a placebo.
+- `struct_drop_symbol`'s `sooth_struct_drop_` prefix → `sooth_struct_dropX_`: kills
+  `ir::destructors::tests::lower_appends_one_destructor_func_per_linear_struct_only`
+  (1597 passed / 1 failed). The un-parameterised minter is still witnessed.
+
+`lower_call_uses_resolved_generation_symbol` was not mutation-proved because it is
+deleted; its mutation proof is the deletion itself.
+
+### Two doc-prose calls
+
+- **`src/driver.rs:961` stripped here**, out of the spec's literal R7 list. The comment
+  inside `compile_so` read "allow them (earlier generations, printf) to resolve at load
+  under RTLD_GLOBAL" — "earlier generations" names the concept this phase deletes, and
+  **phase 10 would not have found it**: E2's grep is `repl|session|dlopen|override_epoch|
+  drop_generation`, and that line matches none of them (`RTLD_GLOBAL` is not in the word
+  list). Left standing it survives the whole slice. Now reads "(printf and friends)".
+- **`src/ir/types.rs:552` left for phase 10**, deliberately: the `Resolver` doc says "the
+  REPL supplies generation-mangled symbols". It contains `REPL`, so E2's grep does catch
+  it, and it describes no signature this phase changes.
+
+### Deletion proof (E5, this phase's items)
+
+`grep -rni 'generation\|override_epoch\|__gen' src/` returns exactly one line —
+`ir/types.rs:552`, the phase-10 item above. `grep -rn 'drop_generation\|override_epoch'
+src/ tests/` returns one line, `tests/phase7_slice3v.rs:313`, which is phase 6's own
+retirement note recording the two REPL override-epoch tests it deleted (it names them in
+order to record them as gone; that is the note working, not a survival).
+
+### Carried forward
+
+- **`docs/roadmap/P7-language-prereqs.md:811-817` is a phase-10 item and is not on the
+  spec's list.** The S3v entry carries a whole `REPL:` paragraph asserting that the
+  closure disposer "resolves them against the live `drop_generation`, so it carries the
+  session-wide override epoch". That field no longer exists. R8 names
+  `P7-language-prereqs.md`'s **S9** entry, and phase 10 derives its sweep list from a grep
+  over `src/` only, so neither reaches this paragraph; it is recorded here explicitly so
+  the slice does not leave a stated design claim about a deleted field standing.
+- The `always_mangle` note from phase 7 is unaffected: nothing here touches `resolve`.
+
+### Gate
+
+`cargo fmt --check` clean; `cargo clippy -- -D warnings` clean;
+`cargo test --no-fail-fast`: **2673 passed, 0 failed**, 3 ignored (unchanged — the three
+non-REPL `phase7_slice3b_follow.rs` notes). Net from phase 8's 2676: **−3**, exactly the
+three retired tests above. Zero `tests/qbe_baseline` diffs.
+
+`cargo clippy --all-targets` still reports the pre-existing `bool_comparison` warning at
+`src/parser.rs:9892` (an `== false` in a parser unit test) and two
+`needless_borrow`s in `tests/phase4_combinators.rs`. All three predate this phase and are
+outside the `cargo clippy -- -D warnings` gate; not touched, per phase scope.

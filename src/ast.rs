@@ -2094,11 +2094,6 @@ pub struct CallInst {
     pub out_arity: usize,
     pub output_types: Vec<Type>,
     pub bundle: Option<StructId>,
-    /// D1: `None` for a native instantiation; `Some(g)` for a REPL
-    /// instantiation minted against a polymorphic word's generation `g`
-    /// (Slice 2), the same `__gen{N}` device `mangled_symbol` uses for
-    /// ordinary REPL words.
-    pub generation: Option<u64>,
     /// P7.S3f (R2): the positions among the declared inputs that materialized
     /// a `Known` literal against a ground `Type::Quotation` parameter at this
     /// call site (R1's spared case), paired with that position's declared
@@ -2109,7 +2104,7 @@ pub struct CallInst {
     pub quot_inputs: Vec<(usize, &'static QuotEffect)>,
     /// P7.S3e (R8/R9): the trait-member calls inside the callee's own body
     /// that this instantiation's `θ` resolves, span -> the implementing word's
-    /// lowering symbol. A pure function of `(callee, θ, generation)`: the
+    /// lowering symbol. A pure function of `(callee, θ)`: the
     /// spans are the callee body's, never the caller's, so two call sites
     /// sharing a `(callee, θ)` record identical maps and the symbol-dedup step
     /// in lowering may read either one.
@@ -2165,7 +2160,7 @@ pub struct PolyCrossCall {
 /// one source of truth and can never disagree. Mirrors `struct_drop_symbol`'s
 /// positional, id-based shape (a word name or a type spelling may hold
 /// characters no QBE symbol admits, so both are sanitized here).
-pub fn instantiation_symbol(word: &str, subst: &Subst, generation: Option<u64>) -> String {
+pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
     fn sanitize(s: &str) -> String {
         s.chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -2178,11 +2173,7 @@ pub fn instantiation_symbol(word: &str, subst: &Subst, generation: Option<u64>) 
     for (id, n) in &subst.len {
         parts.push(format!("n{id}_{n}"));
     }
-    let base = format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"));
-    match generation {
-        None => base,
-        Some(g) => format!("{base}__gen{g}"),
-    }
+    format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"))
 }
 
 /// Slice 8a fix 1 (R1): the distinct lowering symbol for every word in
@@ -4203,33 +4194,10 @@ mod tests {
     }
 
     #[test]
-    fn instantiation_symbol_none_reproduces_native_spelling_expected() {
+    fn instantiation_symbol_reproduces_native_spelling_expected() {
         let mut subst = Subst::default();
         subst.ty.push((0, Type::I64));
-        assert_eq!(
-            instantiation_symbol("id", &subst, None),
-            "sooth_mono_id__t0_i64"
-        );
-    }
-
-    #[test]
-    fn instantiation_symbol_some_appends_gen_component_expected() {
-        let mut subst = Subst::default();
-        subst.ty.push((0, Type::I64));
-        assert_eq!(
-            instantiation_symbol("id", &subst, Some(0)),
-            "sooth_mono_id__t0_i64__gen0"
-        );
-    }
-
-    #[test]
-    fn instantiation_symbol_distinct_generations_are_distinct_symbols_expected() {
-        let mut subst = Subst::default();
-        subst.ty.push((0, Type::I64));
-        assert_ne!(
-            instantiation_symbol("id", &subst, Some(0)),
-            instantiation_symbol("id", &subst, Some(1))
-        );
+        assert_eq!(instantiation_symbol("id", &subst), "sooth_mono_id__t0_i64");
     }
 
     fn bare_word(name: &str) -> WordDef {

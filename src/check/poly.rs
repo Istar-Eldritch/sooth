@@ -2057,7 +2057,7 @@ fn poly_cross_call(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     traits: &[TraitDecl],
-    candidates: &[(PolySig, Option<u64>)],
+    candidates: &[PolySig],
     cross: &mut CrossCtx,
 ) -> Result<Vec<PolySlot>, String> {
     // R2: which candidate this operand run selects. A lone candidate is the
@@ -2067,11 +2067,10 @@ fn poly_cross_call(
     // applies -- with no ground type in hand there is nothing to rank
     // candidates by.
     let callee_sig = match candidates {
-        [(only, _)] => only,
+        [only] => only,
         _ => {
             let matched = candidates
                 .iter()
-                .map(|(csig, _)| csig)
                 .find(|csig| poly_cross_relate(csig, name, &stack, span, ctx, sig).is_ok());
             match matched {
                 Some(csig) => csig,
@@ -4530,7 +4529,7 @@ pub(super) enum PolyOverloadMiss {
 /// instantiation, not resolution itself.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_poly_overload(
-    candidates: &[(PolySig, Option<u64>)],
+    candidates: &[PolySig],
     stack: &[Slot],
     name: &str,
     span: Span,
@@ -4538,9 +4537,9 @@ pub(super) fn resolve_poly_overload(
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
     refs: &[RefDecl],
-) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
+) -> Result<PolySig, PolyOverloadMiss> {
     let mut saw_quotation = false;
-    for (sig, generation) in candidates {
+    for sig in candidates {
         let n_in = sig.inputs.len();
         if stack.len() < n_in {
             continue;
@@ -4551,7 +4550,7 @@ pub(super) fn resolve_poly_overload(
             continue;
         }
         if poly_sig_unifies(sig, stack, name, span, ctx, arrays, cells, refs) {
-            return Ok((sig.clone(), *generation));
+            return Ok(sig.clone());
         }
     }
     Err(if saw_quotation {
@@ -4568,12 +4567,12 @@ pub(super) fn no_poly_overload_matches_error(
     ctx: &Ctx,
     span: Span,
     name: &str,
-    candidates: &[(PolySig, Option<u64>)],
+    candidates: &[PolySig],
 ) -> String {
     let demangled = crate::resolve::demangle_call(name);
     let mut shapes: Vec<String> = candidates
         .iter()
-        .map(|(sig, _)| poly_sig_str(name, sig))
+        .map(|sig| poly_sig_str(name, sig))
         .collect();
     shapes.sort();
     let listed = shapes
@@ -4850,8 +4849,8 @@ pub(super) fn check_poly_call(
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
     let candidates = poly.env.get(name).expect("caller checked membership");
-    let (sig, generation) = match candidates.as_slice() {
-        [(sig, generation)] => (sig.clone(), *generation),
+    let sig = match candidates.as_slice() {
+        [sig] => sig.clone(),
         _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays, cells, refs) {
             Ok(chosen) => chosen,
             Err(PolyOverloadMiss::Quotation) => {
@@ -5111,7 +5110,7 @@ pub(super) fn check_poly_call(
     }
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
-    let symbol = instantiation_symbol(name, &subst, generation);
+    let symbol = instantiation_symbol(name, &subst);
     // P7.S3o (R1/R2): when inside a combinator splice, redirect the
     // already-minted CallInst to `splice_records` keyed by `(uid, span)`
     // instead of the span-keyed `insts`. A poly combinator's body terms
@@ -5144,7 +5143,6 @@ pub(super) fn check_poly_call(
                     out_arity: outputs.len(),
                     output_types: outputs.clone(),
                     bundle: None,
-                    generation,
                     quot_inputs,
                     trait_calls,
                     poly_calls: HashMap::new(),
@@ -5180,7 +5178,6 @@ pub(super) fn check_poly_call(
             out_arity: outputs.len(),
             output_types: outputs.clone(),
             bundle: None,
-            generation,
             quot_inputs,
             trait_calls,
             // P7.S3k (R4): the concrete path records none. A cross-call is
@@ -5272,7 +5269,7 @@ pub(super) fn discover_transitive_instantiations(
     let mut extra_seeds: Vec<CallInst> = Vec::new();
     let mut seed_discovered: Vec<(String, Subst)> = Vec::new();
     for (word_name, subst) in &impl_monos {
-        let symbol = instantiation_symbol(word_name, subst, None);
+        let symbol = instantiation_symbol(word_name, subst);
         if extra_seeds.iter().any(|s| s.symbol == symbol) {
             continue;
         }
@@ -5415,7 +5412,7 @@ impl CrossGround<'_> {
             // Seed anything composition discovered along the way and loop
             // again if that introduces new work.
             for (word_name, subst) in std::mem::take(&mut discovered) {
-                let symbol = instantiation_symbol(&word_name, &subst, None);
+                let symbol = instantiation_symbol(&word_name, &subst);
                 if !seen.insert(symbol) {
                     continue;
                 }
@@ -5507,7 +5504,7 @@ impl CrossGround<'_> {
                 impl_monos,
             )?;
         }
-        let symbol = instantiation_symbol(word_name, subst, None);
+        let symbol = instantiation_symbol(word_name, subst);
         Ok(Some(CallInst {
             callee: word_name.to_string(),
             subst: subst.clone(),
@@ -5515,7 +5512,6 @@ impl CrossGround<'_> {
             out_arity: outputs.len(),
             output_types: outputs,
             bundle: None,
-            generation: None,
             quot_inputs: Vec::new(),
             trait_calls,
             poly_calls: HashMap::new(),
@@ -5717,9 +5713,7 @@ impl CrossGround<'_> {
                 impl_monos,
             )?;
         }
-        // The caller's `generation` rides along so `instantiation_symbol`
-        // stays collision-free across REPL redefinitions.
-        let symbol = instantiation_symbol(&record.callee, &subst, caller.generation);
+        let symbol = instantiation_symbol(&record.callee, &subst);
         Ok(CallInst {
             callee: record.callee.clone(),
             subst,
@@ -5727,7 +5721,6 @@ impl CrossGround<'_> {
             out_arity: outputs.len(),
             output_types: outputs,
             bundle: None,
-            generation: caller.generation,
             // A quotation parameter is a located rejection on the cross-call
             // path (`poly_cross_signature_supported`), so a composed callee
             // has none to record.
@@ -6156,7 +6149,7 @@ fn resolve_user_bound(
         let symbol = if is_generic {
             // P7.S4 (R6): mint the dispatched symbol as the instantiation of
             // the member word at the matched substitution.
-            let s = instantiation_symbol(word_sym, &subst, None);
+            let s = instantiation_symbol(word_sym, &subst);
             impl_monos.push((word_sym.clone(), subst.clone()));
             s
         } else {

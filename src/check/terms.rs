@@ -728,7 +728,7 @@ fn check_term(
             // poly combinator sits in both tables.
             let fall_through_to_env = env.contains_key(name)
                 && poly.env.get(name).is_some_and(|cands| {
-                    !cands.iter().any(|(sig, _)| {
+                    !cands.iter().any(|sig| {
                         poly_sig_could_match(
                             sig,
                             &stack,
@@ -1127,7 +1127,7 @@ fn poly_call_takes_type_args(
         && !poly.combinators.contains_key(name)
         && poly.env.get(name).is_some_and(|candidates| {
             !env.contains_key(name)
-                || candidates.iter().any(|(sig, _)| {
+                || candidates.iter().any(|sig| {
                     poly_sig_could_match(
                         sig, stack, name, span, ctx, arrays, cells, refs, impls, traits,
                     )

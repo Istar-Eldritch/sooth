@@ -397,20 +397,19 @@ impl<'a> FuncBuilder<'a> {
             // linearity: the synthesized destructor drops a linear payload
             // first.
             IrType::OwnedCell(id) => {
-                let symbol = cell_drop_symbol(id, self.cells.drop_generations[id.index()]);
+                let symbol = cell_drop_symbol(id);
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
-                let symbol =
-                    struct_drop_symbol(id, self.structs.layouts[id.index()].drop_generation);
+                let symbol = struct_drop_symbol(id);
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
-                let symbol = enum_drop_symbol(id, self.enums.layouts[id.index()].drop_generation);
+                let symbol = enum_drop_symbol(id);
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => {
-                let symbol = array_drop_symbol(id, self.arrays.layouts[id.index()].drop_generation);
+                let symbol = array_drop_symbol(id);
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             // P7.S3v (R3): dropping an owning closure runs its per-
@@ -973,7 +972,7 @@ mod tests {
         let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;"));
         let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
         let is = instrs(w);
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(
             count(
                 w,
@@ -1001,7 +1000,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(
             calls,
             vec![spy_drop.as_str()],
@@ -1145,7 +1144,7 @@ mod tests {
             "the boundary names the disposer: {:?}",
             instrs(mk)
         );
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(
             call_symbols(func(&ir, "mk__quot0__dispose")),
             vec![spy_drop.as_str(), FREE_SYMBOL]
@@ -1225,8 +1224,8 @@ mod tests {
             vec![0, 24],
             "the 16-byte `Pair` at 0, the borrow's word skipped at 16, the `Spy` at 24"
         );
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
-        let pair_drop = struct_drop_symbol(StructId::from_index(1), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
+        let pair_drop = struct_drop_symbol(StructId::from_index(1));
         assert_eq!(
             call_symbols(disposer),
             vec![pair_drop.as_str(), spy_drop.as_str(), FREE_SYMBOL],

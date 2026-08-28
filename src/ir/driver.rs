@@ -273,7 +273,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .values()
         .chain(&module.transitive_instantiations)
     {
-        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
         let word = poly_words[inst.callee.as_str()];
         let sig = word
             .poly
@@ -316,7 +316,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .chain(&module.transitive_instantiations)
         .chain(module.splice_records.values())
     {
-        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
         }
@@ -1020,47 +1020,6 @@ mod tests {
             })
             .collect();
         assert_eq!(calls, vec!["strlen"]);
-    }
-
-    #[test]
-    fn lower_call_uses_resolved_generation_symbol() {
-        // D1: an instantiation retained at generation `g` lowers to the
-        // `__gen{g}`-suffixed symbol. `lower` mints the monomorph's
-        // `IrFunc.name` from `inst.generation` (not from the checker's
-        // already-minted `inst.symbol`, which is what the call site reads),
-        // so the two are asserted to agree rather than read off one field
-        // twice.
-        let src = ": idg ( 'T: Copy -- 'T ) ;\n: main ( -- ) 5 idg . ;\n";
-        let tokens = lex(src).unwrap();
-        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
-        check(&mut module).unwrap();
-        for inst in module.instantiations.values_mut() {
-            inst.generation = Some(2);
-            inst.symbol =
-                crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
-        }
-        let ir = lower(&module).unwrap();
-        let mono = ir
-            .funcs
-            .iter()
-            .find(|f| f.name.contains("idg"))
-            .expect("the monomorph of `idg`");
-        assert!(
-            mono.name.ends_with("__gen2"),
-            "the lowered monomorph carries its generation: {}",
-            mono.name
-        );
-        let calls: Vec<&str> = instrs(func(&ir, "main"))
-            .iter()
-            .filter_map(|i| match i {
-                Instr::Call(_, sym, _) => Some(sym.as_str()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            calls.contains(&mono.name.as_str()),
-            "the call site names the same generation symbol: {calls:?}"
-        );
     }
 
     #[test]

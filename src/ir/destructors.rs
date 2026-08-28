@@ -5,24 +5,9 @@
 use super::*;
 
 /// Every linear struct's and enum's synthesized destructor, one `IrFunc` per
-/// type. The REPL redefines these per line; safe because type redefinition is
-/// rejected, so every generation's glue is identical. If type redefinition is
-/// ever allowed, add a generation suffix, matching word symbols.
-///
-/// R11 (slice 8b): a *user* `drop` override is where that premise fails --
-/// redefining one at the REPL puts a different body under the same symbol.
-/// R11.2 additionally suffixes every *other* linear struct's/enum's/cell's
-/// destructor too, once the session holds any override at all: any of them
-/// may `Call` an overridden struct's destructor (directly, or transitively
-/// through a further composed aggregate), so their own body's callee changes
-/// across an override event exactly as the overridden struct's own body does.
-/// All three symbol kinds carry the *same* session-wide override epoch
-/// (`StructLayout`/`EnumLayout::drop_generation`, `Cells::drop_generations`,
-/// set by the session), so every destructor in a session that has ever seen
-/// an override mints a fresh, never-before-loaded symbol per override event
-/// -- the cheap alternative to computing exactly which aggregates reach the
-/// override. Before any override, epoch is `None` everywhere and every
-/// symbol stays unsuffixed, unchanged from the build path.
+/// type, named by `struct_drop_symbol` and its three siblings: a positional,
+/// id-based symbol per aggregate, with no redefinition suffix, since type
+/// redefinition is rejected and a program is compiled once.
 ///
 /// R2 (slice 8b): a struct in `overrides` gets the user's own `drop` body under
 /// that same symbol instead of the synthesized field glue. Every caller of the
@@ -342,7 +327,7 @@ pub(super) fn synthesize_struct_destructor(
         b.seal_block(Terminator::Ret(None));
     }
     IrFunc {
-        name: struct_drop_symbol(id, structs.layouts[id.index()].drop_generation),
+        name: struct_drop_symbol(id),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -396,7 +381,7 @@ fn synthesize_struct_destructor_override(
         empty_member_uid_seeds(),
         0,
     );
-    funcs[0].name = struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation);
+    funcs[0].name = struct_drop_symbol(id);
     funcs
 }
 
@@ -444,7 +429,7 @@ fn synthesize_enum_destructor(
     }
 
     IrFunc {
-        name: enum_drop_symbol(id, enums.layouts[id.index()].drop_generation),
+        name: enum_drop_symbol(id),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -487,7 +472,7 @@ fn synthesize_cell_destructor(
     }
     b.seal_block(Terminator::Ret(None));
     IrFunc {
-        name: cell_drop_symbol(id, cells.drop_generations[id.index()]),
+        name: cell_drop_symbol(id),
         params: vec![IrType::OwnedCell(id)],
         ret: None,
         blocks: b.blocks,
@@ -525,7 +510,7 @@ pub(super) fn synthesize_array_destructor(
         b.seal_block(Terminator::Ret(None));
     }
     IrFunc {
-        name: array_drop_symbol(id, arrays.layouts[id.index()].drop_generation),
+        name: array_drop_symbol(id),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -555,8 +540,8 @@ mod tests {
             "an emitted IrFunc was literally named `drop`: {:?}",
             module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
-        let a = func(&module, &struct_drop_symbol(StructId::from_index(0), None));
-        let b = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
+        let a = func(&module, &struct_drop_symbol(StructId::from_index(0)));
+        let b = func(&module, &struct_drop_symbol(StructId::from_index(1)));
         // `A`'s body prints its field, `B`'s discards it: two distinct bodies
         // under two distinct symbols, not one shared or one clobbered.
         assert_eq!(count(a, |i| matches!(i, Instr::Print(_))), 1);
@@ -574,7 +559,7 @@ mod tests {
         let tokens = lex(&src).unwrap();
         let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let ir_module = lower(&module).unwrap();
-        let file = struct_drop_symbol(StructId::from_index(0), None);
+        let file = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);
         let dtor = func(&ir_module, &file);
         assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
@@ -587,7 +572,7 @@ mod tests {
         // `emit_drop`'s guard pass, and the substituted body is what the
         // symbol now resolves to.
         let module = lower_src(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
-        let file = struct_drop_symbol(StructId::from_index(0), None);
+        let file = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(call_symbols(func(&module, "main")), vec![file.as_str()]);
         // The destructor is the user's body (one `.` of the field), not the
         // generic glue (which for an all-`Copy` struct emits nothing at all).
@@ -607,8 +592,8 @@ mod tests {
              : drop ( Res -- ) | r | r Res> dispose ; \
              : main ( -- ) 1 Spy Inner Res drop ;"
         ));
-        let inner = struct_drop_symbol(StructId::from_index(1), None);
-        let res = struct_drop_symbol(StructId::from_index(2), None);
+        let inner = struct_drop_symbol(StructId::from_index(1));
+        let res = struct_drop_symbol(StructId::from_index(2));
         assert_eq!(call_symbols(func(&module, &res)), vec!["dispose"]);
         // The glue that would have run is still emitted for `Inner` itself,
         // which has no override: `dispose`'s own `drop` calls it.
@@ -626,8 +611,8 @@ mod tests {
             "{FILE_RESOURCE} type: Holder h File n i64 ; \
              : main ( -- ) 1 File 2 Holder drop ;"
         ));
-        let file = struct_drop_symbol(StructId::from_index(0), None);
-        let holder = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
+        let file = struct_drop_symbol(StructId::from_index(0));
+        let holder = func(&module, &struct_drop_symbol(StructId::from_index(1)));
         assert_eq!(call_symbols(holder), vec![file.as_str()]);
         assert_eq!(count(holder, |i| matches!(i, Instr::Print(_))), 0);
     }
@@ -659,7 +644,7 @@ mod tests {
         let chain = synthesize_struct_destructor(p.struct_id("Chain"), &env, &resolve, p.regs());
         assert_eq!(
             call_symbols(&chain),
-            vec![struct_drop_symbol(p.struct_id("Res"), None).as_str()]
+            vec![struct_drop_symbol(p.struct_id("Res")).as_str()]
         );
     }
 
@@ -725,7 +710,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
+        let holds_drop = struct_drop_symbol(StructId::from_index(1));
         assert_eq!(calls, vec![holds_drop.as_str()]);
     }
 
@@ -735,7 +720,7 @@ mod tests {
         // has a linear field (`a`) then a Copy one (`b`), so the destructor
         // calls `Spy`'s destructor exactly once, for `a`.
         let ir = lower_src(&format!("{SPY_DEF}type: Holds a Spy b i64 ; : w ( -- ) ;"));
-        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
+        let holds_drop = struct_drop_symbol(StructId::from_index(1));
         let dtor = ir
             .funcs
             .iter()
@@ -748,7 +733,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
@@ -805,7 +790,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
+        let holds_drop = struct_drop_symbol(StructId::from_index(1));
         assert_eq!(
             calls
                 .iter()
@@ -850,7 +835,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
@@ -877,7 +862,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
@@ -1236,7 +1221,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let array_drop = array_drop_symbol(ArrayId::from_index(0));
         assert_eq!(
             calls,
             vec![array_drop.as_str()],
@@ -1250,7 +1235,7 @@ mod tests {
     #[test]
     fn synthesized_array_destructor_drops_each_element_once() {
         let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
-        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let array_drop = array_drop_symbol(ArrayId::from_index(0));
         let dtor = ir
             .funcs
             .iter()
@@ -1263,7 +1248,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(
             calls,
             vec![spy_drop.as_str()],
@@ -1276,7 +1261,7 @@ mod tests {
     #[test]
     fn synthesized_array_destructor_is_a_loop_not_unrolled() {
         let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 4 ~[ 0 Spy ] tabulate drop ;"));
-        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let array_drop = array_drop_symbol(ArrayId::from_index(0));
         let dtor = ir
             .funcs
             .iter()
@@ -1292,7 +1277,7 @@ mod tests {
         assert!(has_phi, "the array destructor has a loop header phi");
         // Exactly one `emit_drop` call in the body (the loop body calls Spy's
         // destructor once per iteration, not 4 times unrolled).
-        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
         let drop_calls = count(
             dtor,
             |i| matches!(i, Instr::Call(None, sym, _) if sym == &spy_drop),
@@ -1319,7 +1304,6 @@ mod tests {
                     size: 0,
                     align: 8,
                     is_linear: false,
-                    drop_generation: None,
                 }],
             },
             cells: &Cells::default(),
@@ -1344,7 +1328,7 @@ mod tests {
             "{SPY_DEF}type: Opt | None | Some val Spy ; : w ( -- ) None 3 fill drop ;"
         ));
         // The array is linear (its element `Opt` is linear).
-        let array_drop = array_drop_symbol(ArrayId::from_index(0), None);
+        let array_drop = array_drop_symbol(ArrayId::from_index(0));
         assert!(
             ir.funcs.iter().any(|f| f.name == array_drop),
             "a nullary-variant [Opt 3] array gets a synthesized destructor"
@@ -1355,7 +1339,7 @@ mod tests {
             .find(|f| f.name == array_drop)
             .expect("the array destructor");
         // The enum's destructor is called per iteration.
-        let enum_drop = enum_drop_symbol(EnumId::from_index(0), None);
+        let enum_drop = enum_drop_symbol(EnumId::from_index(0));
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {

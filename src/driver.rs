@@ -958,7 +958,7 @@ pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
         .arg("-o")
         .arg(out);
     // macOS's two-level namespace rejects undefined symbols at link time; allow
-    // them (earlier generations, printf) to resolve at load under RTLD_GLOBAL.
+    // them (printf and friends) to resolve at load under RTLD_GLOBAL.
     if cfg!(target_os = "macos") {
         cc.arg("-Wl,-undefined,dynamic_lookup");
     }

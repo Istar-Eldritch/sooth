@@ -91,25 +91,18 @@ pub(crate) use self::word_entry::{
 use self::word_entry::{check_reference_free_signature, check_word};
 use self::word_families::*;
 
-/// R5/R14: every candidate registered under one polymorphic-word name, its
-/// `PolySig` paired with the REPL generation it was retained at (`None` on
-/// the native/module path, which has no generations). `check_poly_call`
-/// resolves a bare call by trial unification across candidates, the same
-/// shape as `Overload`'s exact-match resolution for concrete words -- a
-/// name-keyed single-value map here would silently shadow a second
-/// polymorphic overload exactly as env's `Sig` did before B1.
-pub(crate) type PolyEnv = HashMap<String, Vec<(PolySig, Option<u64>)>>;
+/// R5/R14: every candidate `PolySig` registered under one polymorphic-word
+/// name. `check_poly_call` resolves a bare call by trial unification across
+/// candidates, the same shape as `Overload`'s exact-match resolution for
+/// concrete words -- a name-keyed single-value map here would silently shadow
+/// a second polymorphic overload exactly as env's `Sig` did before B1.
+pub(crate) type PolyEnv = HashMap<String, Vec<PolySig>>;
 
 /// R5/R14: the polymorphic-call context threaded through the monomorphic body
 /// walk: the `PolySig`s of every polymorphic word (looked up before the
 /// concrete `env`), and the instantiation table each unified call site writes
 /// into. A monomorphic body that never calls a polymorphic word touches
 /// neither.
-///
-/// R2b: each `PolySig` carries its generation alongside it (`None` natively,
-/// `Some(g)` for a REPL word retained at generation `g`, Slice 2), so
-/// `check_poly_call`'s mint reads both from one lookup with no second
-/// channel.
 struct PolyCtx<'a> {
     env: &'a PolyEnv,
     insts: &'a mut HashMap<Span, CallInst>,
@@ -643,7 +636,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // Eliminate`. Deleted, nothing observable changes and the generator R2
     // exists to add becomes dead code.
     for (name, _symbol, sig) in enum_eliminator_sigs(&module.enums) {
-        poly_env.entry(name).or_default().push((sig, None));
+        poly_env.entry(name).or_default().push(sig);
     }
     let eliminators = eliminator_registry(&module.enums);
     // Slice 8a fix 1 (R1): each word's distinct lowering symbol, aligned by
@@ -659,7 +652,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             poly_env
                 .entry(word.name.clone())
                 .or_default()
-                .push(((**sig).clone(), None));
+                .push((**sig).clone());
         } else {
             env.entry(word.name.clone()).or_default().push(Overload {
                 sig: sig_of(&word.effect),

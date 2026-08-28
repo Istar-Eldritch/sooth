@@ -3028,7 +3028,6 @@ type: Counter n i64 ;
             is_linear: false,
             has_drop_overload: false,
             bundle: false,
-            drop_generation: None,
         };
         let func = IrFunc {
             name: "t".to_string(),
