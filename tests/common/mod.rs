@@ -228,7 +228,7 @@ pub fn fixture_source(name: &str, contents: &str) -> String {
 /// `/examples/*`.
 ///
 /// P8.S2 (R7): deliberately *not* `--manifest`-passing. `examples/` is a real
-/// package now (`examples/sooth.pkg`, depending on `core` at `../lib`), so a
+/// package now (`examples/sooth.pkg`, depending on `core` at `../lib/core`), so a
 /// committed example resolves through its own ancestor manifest -- which is
 /// what `sooth build examples/gcd.sth` does too, and what makes its `self::`
 /// imports spellable at all (a `--manifest` site rejects those). Fixtures

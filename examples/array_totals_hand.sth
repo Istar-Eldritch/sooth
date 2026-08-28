@@ -1,6 +1,6 @@
 \ The hand-threaded baseline for Phase 4 slice 6a's dogfood. Its combinator twin
 \ `examples/array_totals.sth` expresses the same array walk over
-\ `each`/`map`/`fold` from `lib/combinators.sth`; the golden pins both to the
+\ `each`/`map`/`fold` from `lib/core/combinators.sth`; the golden pins both to the
 \ same output. Three manual `times` loops over one array, each with a
 \ synthesized `>usize` index, a `&arr i &> @` read and (for the doubling loop) a
 \ `&!arr i &!> v !` write.

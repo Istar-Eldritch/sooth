@@ -3,7 +3,7 @@
 \ own symbol and receives its argument as a runtime `(code, env)` quotation
 \ value. `apply2` forwards that value down a second call level, and `run` calls
 \ one and returns its result. A word that must be spliced instead declares
-\ `inline` over a `~[ ... ]` parameter (see `lib/combinators.sth`).
+\ `inline` over a `~[ ... ]` parameter (see `lib/core/combinators.sth`).
 
 import: intrinsics * ;
 

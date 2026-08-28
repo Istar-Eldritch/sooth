@@ -1,6 +1,6 @@
 \ The hand-threaded baseline for Phase 4 slice 6b's dogfood. Its combinator
 \ twin `examples/filter_while.sth` expresses the same walk over
-\ `filter`/`while` from `lib/combinators.sth`; the golden pins both to the
+\ `filter`/`while` from `lib/core/combinators.sth`; the golden pins both to the
 \ same output. The filter loop spells out the write cursor `filter` threads
 \ (a manual `times` loop with the same `&arr i &> @` reads and
 \ `&!arr over &!> v !` writes), and the fixpoint loop is a hand-written
