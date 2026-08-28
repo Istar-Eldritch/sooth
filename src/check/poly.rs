@@ -4373,7 +4373,14 @@ fn poly_destructure_generic(
     let generics = cell.borrow();
     let decl = &generics.enums[idx as usize];
     let variant = &decl.variants[vi];
-    if name != format!("{}>", variant.name) {
+    // R5.2/R6.2: one variant-name rule for both sides of the intercept. The
+    // arm-tag side compares through `generic_surface_name`, so this gate does
+    // too, rather than against a raw `name` a monomorph-minted header decl
+    // would carry a `[...]` suffix on.
+    if name
+        .strip_suffix('>')
+        .is_none_or(|v| v != generic_surface_name(&variant.name))
+    {
         return None;
     }
     let field_ptys: Vec<PolyType> = variant.fields.iter().map(|(_, p)| p.clone()).collect();
@@ -13741,6 +13748,20 @@ mod tests {
              : main ( -- ) 7 oki is-ok drop 1 2 Pt okp is-ok drop ;\n",
         )
         .expect("one poly body eliminates two swapped monomorphs of one header");
+    }
+
+    /// R6.1 (R8.8): the destructure intercept pushes a variant's fields in
+    /// declared order, first field deepest. Two *distinct* field type
+    /// variables make the order observable at check time: `swap drop` keeps
+    /// what `Both>` left on top, which has to be `snd`'s `'B`.
+    #[test]
+    fn poly_destructure_pushes_variant_fields_first_field_deepest() {
+        check_src(
+            "type: Two['A 'B] | Both fst 'A snd 'B ;\n\
+             : take-b ( Two['A 'B] -- 'B ) ~[ ( Both ) Both> swap drop ] Two? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the second field is left on top");
     }
 
     #[test]

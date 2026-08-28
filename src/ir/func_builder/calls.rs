@@ -790,14 +790,12 @@ impl<'a> FuncBuilder<'a> {
                 // path unchanged rather than panicking.
                 if let Some(&found) = self.enum_words.get(&span) {
                     if let Some(&ew) = self.enums.words.get(name) {
-                        // The `Destructure` arm is unreached this phase: `check::poly`
-                        // records an `enum_sites` entry for a constructor
-                        // (`poly_construct_generic`) and an eliminator
-                        // (`poly_eliminator_call`) only, never for a `One>`-style
-                        // whole-variant destructure call -- that recording is
-                        // phase 4's R6.1, not this phase's. Kept here anyway so the
-                        // match stays exhaustive over `EnumWord`'s own three cases,
-                        // ready for R6.1 to populate `self.enum_words` for it.
+                        // All three arms are reached: `check::poly` records an
+                        // `enum_sites` entry for a constructor
+                        // (`poly_construct_generic`), an eliminator
+                        // (`poly_eliminator_call`) and, since R6.1, a `One>`-style
+                        // whole-variant destructure call
+                        // (`poly_destructure_generic`).
                         let ew = match ew {
                             EnumWord::Construct(_, vi) => EnumWord::Construct(found, vi),
                             EnumWord::Destructure(_, vi) => EnumWord::Destructure(found, vi),
