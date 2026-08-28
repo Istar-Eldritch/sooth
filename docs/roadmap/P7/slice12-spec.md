@@ -236,6 +236,16 @@ through the colliding keys.
   `EliminatorTarget` is `Concrete(EnumId) | Generic { idx: u32, module: u32 }` (`u32`
   throughout, matching `PolyType::Generic`'s own field types, `src/ast.rs:2029-2035`), built
   from `enums` **and** from `ctx.generics()`'s `enums: Vec<GenericEnumDecl>`.
+
+  **Amended in phase 3:** `module` is carried for shape parity with `PolyType::Generic` and
+  is not read by any consumer -- `poly_eliminator_call`'s `Generic` scrutinee arm destructures
+  `{ idx, .. }` and says why in its own comment (declaring-module identity is the wrong notion
+  at an instantiation site). `eliminator_registry_prefers_a_monomorph_over_its_own_header`
+  asserts the field equals `generics.enums[bare].module`, i.e. the same value the code reads
+  it from, so it proves storage, not use. Not a defect: nothing in R1-R7 needs to disambiguate
+  two same-named generic headers declared in different modules yet. If a future phase adds
+  such a consumer, that is when this field's assertion needs a multi-module fixture to stop
+  being a placebo.
 - **R2.2 (threading, and the one site that cannot be threaded)** There are six call sites:
   `check_module` (`src/check.rs:692`), `check_def_collecting_drop_sites` (`:1284`),
   `infer_line` (`:1378`), `check_poly_combinator_repl` (`src/check/poly.rs:489`), `poly_walk`
@@ -459,6 +469,14 @@ backend panic is a failure rather than a missing line.
   `&`-mode tag over a generic scrutinee (R5.7); a generic eliminator call inside an `inline`
   combinator body (R1.5); the same inside a standalone-checked combinator (R2.4); R7.2's
   absent-eliminator message. Each names the enum and the call.
+
+  **Amended in phase 3:** the R1.5 case is not witnessed on R1.5's own message, matching R1.5's
+  own construction-side finding from phase 1. `a_combinator_over_a_generic_enum_slot_is_rejected_before_r15_can_fire`
+  is the fixture; it asserts the standing variable-bearing-application rejection, because a
+  combinator carrying a generic-enum slot is rejected during its standalone check before
+  `poly_eliminator_call`'s R1.5 arm can run. R1.5's gate is a sharper message waiting on a
+  restriction this slice does not lift, not a safety net this slice closes -- see R1.5's own
+  note. R2.4's stand-in case is unaffected and is witnessed as specified, on its own text.
 - **R8.7 (no false rejection)** These existing files pass unmodified: `tests/phase5_slice1.rs`,
   `tests/phase5_slice2.rs`, `tests/phase6_slice1.rs`, `tests/phase6_slice3.rs`,
   `tests/phase6_slice3b.rs`, `tests/phase7_slice3a.rs`, `tests/phase7_slice3b.rs`,
