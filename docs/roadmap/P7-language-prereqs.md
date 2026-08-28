@@ -808,13 +808,12 @@ Standing hazard: a closure capturing an array or a slice ICEs at `src/backend/qb
 word per capture. That is the env block, not the closure value, and a scalar or linear-struct
 capture works end to end.
 
-REPL: the disposer calls aggregate destructors through `emit_drop`, which resolves them by the
+The disposer calls aggregate destructors through `emit_drop`, which resolves them by the
 aggregate's positional id symbol (`struct_drop_symbol` and its three siblings,
-`src/ir/destructors.rs:8-35`) with no plumbing of its own. Unreachable rather than untested: a
-disposer exists only for a *materialized* closure, and no session line can link one (the standing
-`__quot0` non-PIC relocation, which storing a closure in a field forces exactly as building a bare
-one does), so no session reaches the disposer at all. Pinned as a blocked-state tripwire in
-`tests/phase7_slice3v.rs`, beside a plain-quotation control showing the limit is not owning's.
+`src/ir/destructors.rs:8-35`) with no plumbing of its own. Standing hazard, now moot: the
+unreachability recorded here was a session line's inability to link a materialized closure
+through the `__quot0` non-PIC relocation, and the REPL no longer exists (P7.S9). Under
+`build` the disposal mechanism is proved end to end by `tests/phase7_slice3v.rs`.
 **Exit:** an owning closure can be `drop`ped without being called, disposing its captures and
 env exactly once; it can be stored in a struct field, a variant field or an owned cell and
 disposed transitively through the container exactly once; and every S3h golden that asserted a

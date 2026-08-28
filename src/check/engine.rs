@@ -1335,8 +1335,8 @@ impl<'a> Ctx<'a> {
     }
 
     /// P7 slice 3a phase 2 (R2): the live generic instantiator, or `None` on
-    /// a path that can never carry a `PolyType::Generic` in the first place
-    /// (a standalone single-word check probe). A grounding arm
+    /// a path that can never carry a `PolyType::Generic` in the first place (a
+    /// standalone single-word check probe). A grounding arm
     /// (`unify_poly_input`/`apply_subst`) that sees `None` here has reached a
     /// `PolyType::Generic` some path never grounds, and stays the Phase 1
     /// not-yet-groundable error rather than mint through a table that is not

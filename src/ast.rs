@@ -130,10 +130,9 @@ pub struct Module {
     pub resolved_variant_fields: std::collections::HashMap<Span, (EnumId, usize, usize)>,
     /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
     /// topological order, module 0 being the entry file. A single-file program
-    /// has exactly one entry. Every `StructDecl`/
-    /// `EnumDecl`/`WordDef`/`ExternDecl` carries an owning module id indexing
-    /// this vector; the entry carries that module's qualifier->module import
-    /// map and its parsed `export:` list.
+    /// has exactly one entry. Every `StructDecl`/`EnumDecl`/`WordDef`/`ExternDecl`
+    /// carries an owning module id indexing this vector; the entry carries that
+    /// module's qualifier->module import map and its parsed `export:` list.
     pub modules: Vec<ModuleInfo>,
     /// P7.S3e (R3): the whole-program trait registry, mirroring
     /// `structs`/`enums`'s flat-`Vec` shape. Pre-seeded with `Copy`/`Ord`
@@ -184,9 +183,9 @@ pub struct ModuleInfo {
 /// table itself does not move and is not per module; only visibility is gated,
 /// so this says which of those names a body in this module may call bare.
 ///
-/// Both `parser::parse` (every in-process test) and
-/// `driver::assemble_module` set this field explicitly on every `ModuleInfo`
-/// they build, so nothing reads the derived `Default`. It fails closed to
+/// Both `parser::parse` (every in-process test) and `driver::assemble_module`
+/// set this field explicitly on every `ModuleInfo` they build, so nothing reads
+/// the derived `Default`. It fails closed to
 /// `None` anyway: a build path that forgot to set it should reject every
 /// bare intrinsic rather than silently admit all of them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -419,9 +418,8 @@ fn find_type_in_module(
     // R8d (slice 5b): match `name_static`, not `name`. `resolve::mangle`
     // rewrites a decl's `.name` with a module suffix so the accessor/
     // constructor recognizers agree on one row per internal spelling, but its
-    // `.name_static` stays the pretty user-typed base spelling; a
-    // type-position reference must
-    // resolve against that. Behavior-preserving for every native call: this
+    // `.name_static` stays the pretty user-typed base spelling; a type-position
+    // reference must resolve against that. Behavior-preserving for every native call: this
     // resolver only ever runs pre-`resolve_modules`, where `.name == .name_static`
     // for every decl, so the switched field compares identically there.
     structs

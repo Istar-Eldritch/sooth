@@ -52,8 +52,7 @@ fusion — `call` splices a literal's body at the consumption site, type-checkin
 to writing the body inline, because there is no standalone effect to infer for a bare body
 (D3). `call` therefore accepts only a statically-known literal; every position that would
 need a real runtime value instead (a branch join, an array element, a user or polymorphic
-word argument, an operator operand) is a located rejection, not a
-panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
+word argument, an operator operand) is a located rejection, not a panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
 runtime quotation type implies to the slice that gives escaping quotations a consumer for
 it (Phase 4 Slice 6). `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index
 and requires the body return the row it received, so effect realization only ever checks an

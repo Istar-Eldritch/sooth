@@ -1411,12 +1411,16 @@ Every hit was read in context, not pattern-substituted blind. Three shapes of ed
   `"Empty on the destructor/test paths"`) where the REPL was one of several callers that
   left a field empty and the others still do.
 - **Rename to the actual current caller** where the REPL was the *only* thing that made a
-  doc's claim true and something else now plays the same structural role — e.g.
-  `check.rs`'s `PolyCtx` fields now say "standalone/scratch paths" (the single-word check
-  probe at `check/engine.rs:1203`, migrated there in phase 2, not the REPL); `ir/func_builder/
-  calls.rs:821`'s "the REPL's env derives a multi-output `ret_ty` from the first output
-  alone" now names `extern:` declarations, verified as the actual surviving producer of that
-  shape (`ir/driver.rs:154`).
+  doc's claim true and something else now plays the same structural role — `check.rs`'s
+  `PolyCtx` fields now name the unit test that probes a body through `infer_probe_body`,
+  not the REPL.
+- **Explain the surviving mechanism** where the REPL was the claim's only witness and
+  *nothing* replaces it. `ir/func_builder/calls.rs:821`'s "the REPL's env derives a
+  multi-output `ret_ty` from the first output alone" had no surviving producer to rename
+  to, so the comment now says why the branch tests the bundle flag rather than
+  `out_arity >= 2` at all. An intermediate draft named `extern:` declarations as the
+  surviving producer of that shape; `extern_multi_output_error` rejects a multi-output
+  `extern:` outright, so that was a counterfactual, corrected in `b5e43f6`.
 - **Delete the clause outright** where the REPL was the sole reason a rule existed and
   nothing replaces it — `check/audits.rs`'s per-word quotation audit no longer contrasts
   against "rejected separately at the REPL (R23)"; that second rejection path died with the
@@ -1474,11 +1478,39 @@ the sole permitted survivor).
 - **`docs/roadmap/P7-language-prereqs.md`'s S9 entry**: rewritten from `[ planned ]`,
   ~50 lines of "what to delete and why", to `[ done ]`, ~10 lines stating the post-removal
   state (`Ctx` is a struct; `driver::Library` retained; `always_mangle` unreachable-but-kept)
-  plus the still-open book-doc follow-up. The S3s entry's own stray REPL mention (`"The REPL
-  carries no whole-program trait/impl registry..."`, describing a now-nonexistent open gap)
-  was **left untouched** — out of this phase's named scope (R8 names the S9 entry
-  specifically), and it is a different, already-`[ done ]` slice's historical note, not
-  current design prose this phase is chartered to revise.
+  plus the still-open book-doc follow-up. **The file's six other REPL mentions were ruled on
+  as a set**, not one at a time — an earlier draft named only the S3s one as an exception,
+  which reads as though the set were exhaustive. R8 names the S9 entry specifically; the
+  rest split by whether the mention asserts a *live premise* or *records history*:
+  - **Swept, because a live premise went false.** A "standing hazard" or open-deferral item
+    claims something about current behaviour, so losing the REPL makes it wrong rather than
+    merely dated. `:423` (S3h's `__quot0` non-PIC session-link hazard), `:811` (S3v's
+    owning-closure disposer, whose "no session line can link one" unreachability claim also
+    cited a blocked-state tripwire in `tests/phase7_slice3v.rs` that phase 6 deleted — that
+    file records the deletion and its reason at `:313-319`), and `:1109` (S8's "REPL
+    trait/impl checking" deferral). Each now carries the moot marker instead of the claim.
+  - **Left untouched, because they record history.** `:366` (S3g), `:384` (S3g-follow),
+    `:514` (S3k) and `:709-714` (S3s) all sit inside an `**Exit:**`-bearing body describing
+    how a landed slice was built — the class R8 puts out of scope as "what was built at the
+    time, not current design". `:384` cites `src/repl.rs`'s `lower_instantiation`, a path
+    that no longer exists; that is stale as a *file reference*, and re-anchoring the
+    roadmap's historical bodies against deleted paths is a doc-hygiene pass over all of
+    `docs/roadmap/`, not R8's stated-design sweep. **Recommended for phase 11's exit sweep
+    to schedule or explicitly decline**, not silently inherit.
+- **`docs/roadmap/P1-repl-and-liveness.md`**: the opening paragraph, handed to this phase by
+  phase 5's notes and on no phase's derived list, still stated the removed design in present
+  tense ("The REPL runs on the **backend** via `dlopen`: each new word is compiled to a
+  shared object and loaded into the live session … redefinition loads a new object and swaps
+  the name→symbol entry"), three lines above the `**Exit (retired):**` note phase 5 wrote —
+  so the file contradicted itself. It is also the source of CLAUDE.md's load-bearing-invariant
+  wording, which this phase rewrote, so leaving it would have left the invariant asserted in
+  the file it came from. Rewritten to the surviving rule (no in-process JIT, no comptime
+  interpreter, `driver::Library`'s `dlopen`/`dlsym` over a `compile_so` output, nothing
+  calling it today, whole-program `run` via compile-to-binary + subprocess), matching CLAUDE.md
+  and `codegen.md`. The redefinition and Factor in-image sentences were dropped rather than
+  reworded: both describe the session's design, and DESIGN.md's `Open/deferred` "Late binding
+  for redefinition" item already carries what survives of the first. The heading and phase 5's
+  retirement notes are untouched.
 - **`docs/design/`**: `control-flow.md` (7 word-boundary mentions, now 0) — the two REPL-
   specific rejection sentences in the 6a/6b narrative were dropped (the whole rejection they
   described no longer exists to contrast against), and the entire "Phase 4 Slice 6c" paragraph
@@ -1486,12 +1518,16 @@ the sole permitted survivor).
   `infer_line`, `lower_line` entry points) was condensed to the two sentences of it that are
   still true design facts independent of the REPL (combinators have no compile event to
   freeze against; a poly word's frozen-resolver precedent doesn't transfer). `modules.md`
-  (6 → 1): the whole "REPL imports (Slice 5b)" paragraph, entirely about a now-deleted
-  mechanism, was replaced with a two-sentence retirement pointer to P7.S9, rather than left
-  narrating a live session that no longer runs. `codegen.md` (4 → 0): the "REPL runs on the
-  backend" bullet and "REPL's stack buffer is a driver artifact" paragraph were rewritten to
-  describe `driver::Library`'s retained primitive as the still-true "no in-process JIT"
-  mechanism, not a session. `memory-model.md` confirmed **0** word-boundary REPL mentions
+  (6 → 0): the whole "REPL imports (Slice 5b)" paragraph, entirely about a now-deleted
+  mechanism, was deleted outright. An intermediate draft left a two-sentence retirement
+  pointer to P7.S9 in its place; `b5e43f6` removed that too, since a pointer to the removal
+  is removal history, which R8 bars from these files. `codegen.md` (4 → 0): the "REPL runs
+  on the backend" bullet and "REPL's stack buffer is a driver artifact" paragraph were
+  rewritten to describe `driver::Library`'s retained primitive as the still-true "no
+  in-process JIT" mechanism, not a session. That bullet initially preserved the old
+  paragraph's "the process holds live, natively-compiled code it can call at once", which
+  invents a consumer: nothing calls the primitive. It now states the capability and says so,
+  matching the wording `b5e43f6` had already settled on in DESIGN.md's `Open/deferred` item. `memory-model.md` confirmed **0** word-boundary REPL mentions
   both before and after, matching the spec's own correction of a review round's false claim.
 - **`docs/roadmap/P8-packages-modules.md`**: `:111` and `:176`'s "also read by the REPL for a
   session" clauses dropped (the fallback chain reads the same regardless); `:291-292`'s
@@ -1520,7 +1556,17 @@ four book files were touched.
 
 `cargo fmt --check` clean; `cargo clippy -- -D warnings` clean; `cargo test --no-fail-fast`:
 all suites green, zero failures (unit-test count and `tests/qbe_baseline` unaffected — no
-production code changed this phase, comment/doc text only). `cargo clippy --all-targets`
+*production* code changed this phase; the `src/` diff is comments, plus one unit-test
+fixture literal (`"q::Point__import3"` → `"Point__m1"`, above) and one test rename, both in
+`#[cfg(test)]` modules).
+
+Nothing in the toolchain catches prose reflow: `cargo fmt` does not rewrap comments and the
+repo has no markdownlint config, so the sweep's rewrites left ragged mid-sentence breaks
+behind. Swept at the end of the phase, in `control-flow.md`, `modules.md`,
+`P8-packages-modules.md` (×2), `src/ast.rs` (×2), `src/ir/layout.rs` (×2), `src/driver.rs`,
+`src/check/engine.rs` and `src/check/poly.rs`. The check is a scan of the phase's own added
+lines for a short line followed by more prose, not a whole-repo pass — plenty of unrelated
+ragged paragraphs predate this slice. `cargo clippy --all-targets`
 still reports the same three pre-existing warnings from phase 9 (`src/parser.rs`'s
 `bool_comparison`, two `needless_borrow`s in `tests/phase4_combinators.rs`), confirmed
 unchanged by diffing against a `git stash` baseline — outside this phase's scope, not fixed.

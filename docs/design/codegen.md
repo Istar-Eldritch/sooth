@@ -85,12 +85,12 @@ share one native engine. Two decisions remove the need for it outright:
   interpreter to build.
 - **Any host-loading path runs on the backend, not an interpreter.** `driver::Library`
   keeps a `dlopen`/`dlsym` wrapper over a `compile_so` output as the load-bearing
-  primitive for this: a compiled word is a shared object loaded in-process, so the
-  process holds live, natively-compiled code it can call at once. Whole-program
-  `run`/watch takes the simpler compile-to-binary + subprocess path. One execution
-  semantics either way, with nothing to keep in sync against a second, interpreted
-  one. Sub-millisecond per-definition loading would require owning a backend (see
-  [Open / deferred](../../DESIGN.md#open--deferred)); not now.
+  primitive for this: a compiled word can be loaded in-process as a shared object.
+  Nothing calls it today; it is retained for a future library-output target and for
+  incremental compilation. Whole-program `run`/watch takes the simpler compile-to-binary
+  - subprocess path. One execution semantics either way, with nothing to keep in sync
+  against a second, interpreted one. Sub-millisecond per-definition loading would require
+  owning a backend (see [Open / deferred](../../DESIGN.md#open--deferred)); not now.
 
 Word bodies compute entirely in SSA/registers; the compile-time-virtual-stack
 invariant holds regardless of which loading path a compiled word reaches the

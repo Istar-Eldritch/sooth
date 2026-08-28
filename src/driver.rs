@@ -1259,9 +1259,9 @@ mod tests {
     /// helper directly: the bug this whole fix exists for was that
     /// `cargo run -- build` never called `check_no_main_in_closure` on the
     /// native path at all, so an imported file's `main` reached codegen
-    /// silently. Calling
-    /// `check_no_main_in_closure` in isolation (the two tests above) cannot
-    /// catch a missing call site; only driving `build` proves it is wired in.
+    /// silently. Calling `check_no_main_in_closure` in isolation (the two tests
+    /// above) cannot catch a missing call site; only driving `build` proves it
+    /// is wired in.
     #[test]
     fn build_rejects_imported_module_declaring_main() {
         let s = Sandbox::new("build-imported-main-bad");

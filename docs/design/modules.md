@@ -4,11 +4,10 @@ Design detail for modules and encapsulation, split from [DESIGN.md](../../DESIGN
 
 ## Modules and encapsulation
 
-A file is a compilation unit (Phase 4 Slice 5a), and
-a directory tree under a `sooth.pkg` manifest is a **package**. `export: name... ;`
-(lines accumulate) is the only way a name leaves its file; a module with none exports
-nothing, so every pre-5a example is unaffected — it exports nothing and stays a
-program, not a library.
+A file is a compilation unit (Phase 4 Slice 5a), and a directory tree under a
+`sooth.pkg` manifest is a **package**. `export: name... ;` (lines accumulate) is the
+only way a name leaves its file; a module with none exports nothing, so every pre-5a
+example is unaffected — it exports nothing and stays a program, not a library.
 
 **Inside a package an import names a module, not a file.** `import: <target> [<q>]
 [ | name... | ] ;` puts the target first and the qualifier last, because the common

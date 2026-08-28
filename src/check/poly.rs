@@ -4454,9 +4454,8 @@ pub(super) fn poly_delegate_op(
         })
         .collect();
     // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
-    // calling module exactly like the concrete path; `None` (a standalone
-    // probe, which runs no mangling pass) falls back to the flat
-    // `env.get(name)`.
+    // calling module exactly like the concrete path; `None` (a standalone probe,
+    // which runs no mangling pass) falls back to the flat `env.get(name)`.
     let scoped_ops = scoped_operator_overloads(ctx, env, name);
     let op_candidates = match &scoped_ops {
         Some(v) => Some(&v[..]),

@@ -108,11 +108,11 @@ sitting inside its package's own tree (a test harness fixture written to a temp 
 a one-off script pointed at a project without living in it). Failing that, a file's package
 is the nearest ancestor manifest. Failing that, the **user-level manifest** at
 `$XDG_CONFIG_HOME/sooth/global_sooth.pkg` supplies the `depends:` a scratch file resolves
-against. Failing *all three*, the
-file is an **implicit anonymous package** with no dependencies: it can import `intrinsics`
-and its own path-derived siblings, and naming any other package is a located error whose
-remedy is a manifest, `--manifest`, or the user-level file. A scratch file therefore stays
-frictionless without a second import form, and the old loophole (a manifest-less file
+against. Failing *all three*, the file is an **implicit anonymous package** with no
+dependencies: it can import `intrinsics` and its own path-derived siblings, and naming
+any other package is a located error whose remedy is a manifest, `--manifest`, or the
+user-level file. A scratch file therefore stays frictionless without a second import
+form, and the old loophole (a manifest-less file
 reaching past a package's `module:` list into a private module) is not policed but
 unspellable.
 
@@ -173,9 +173,9 @@ hard error, so it moves with the corpus migration to module names.
 **P8.S1b — The `--manifest` CLI flag and the fallback chain.** `sooth build`/`run` gain an
 explicit `--manifest <path>` flag ranked above discovery, then the nearest ancestor
 manifest, then the user-level manifest (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), then an
-implicit anonymous package with no dependencies. This is
-what lets S2's ~460-inline-test-fixture migration point at one shared manifest instead of
-generating one per fixture. Brief: `docs/roadmap/P8/slice1b-brief.md`.
+implicit anonymous package with no dependencies. This is what lets S2's
+~460-inline-test-fixture migration point at one shared manifest instead of generating one
+per fixture. Brief: `docs/roadmap/P8/slice1b-brief.md`.
 **Exit:** `sooth build entry.sth --manifest path/to/sooth.pkg` resolves against the named
 manifest regardless of `entry.sth`'s own directory, unconditionally overriding an ancestor
 manifest; a manifest-less, flag-less file resolves against the user-level manifest, then

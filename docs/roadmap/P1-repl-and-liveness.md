@@ -3,12 +3,11 @@
 ### Phase 1 — REPL and liveness  `[M]`  ✅ **done**
 
 No in-process JIT (that left with LLVM), and no comptime interpreter (there are no
-immediate words; see DESIGN Declined). The REPL runs on the **backend** via `dlopen`:
-each new word is compiled to a shared object and loaded into the live session, so the
-process holds natively-compiled code it can call at once; redefinition loads a new
-object and swaps the name→symbol entry. Whole-program `run` uses compile-to-binary +
-subprocess. Factor's in-image model minus the sub-millisecond compile, without owning
-a backend.
+immediate words; see DESIGN Declined). Any host-loading path runs on the **backend**,
+not an interpreter: `driver::Library` keeps a `dlopen`/`dlsym` primitive over a
+`compile_so` output, so a compiled word can be loaded in-process as a shared object.
+Nothing calls that primitive today. Whole-program `run` uses compile-to-binary +
+subprocess.
 **Exit (retired):** the interactive criteria (define and test words
 interactively, redefinition, a live throwaway-but-real session) have no form
 without the REPL. Phase 1's surviving language facts are `sooth run` goldens:

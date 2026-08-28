@@ -410,8 +410,8 @@ pub fn build_statics(decls: &[StaticDecl], enums: &Enums) -> (Statics, Vec<Stati
 }
 
 /// The shared empty static table, for every lowering path with no module
-/// statics to see (destructor synthesis, unit tests), so a
-/// `Registries` can be built without each caller owning a `Statics`.
+/// statics to see (destructor synthesis, unit tests), so a `Registries` can be
+/// built without each caller owning a `Statics`.
 #[cfg(test)]
 pub fn empty_statics() -> &'static Statics {
     static EMPTY: std::sync::OnceLock<Statics> = std::sync::OnceLock::new();
@@ -435,9 +435,9 @@ pub struct Registries<'a> {
 
 /// Build the struct and enum layout + generated-word registries from a
 /// program's declarations (the build path passes `&module.structs` /
-/// `&module.enums`; destructor synthesis and tests pass their own
-/// accumulated registries). The layout
-/// pass is a single combined DFS so a struct field of enum type and a variant
+/// `&module.enums`; destructor synthesis and tests pass their own accumulated
+/// registries). The layout pass is a single combined DFS so a struct field of
+/// enum type and a variant
 /// field of struct/enum type are sized via the peer registry (D9); the
 /// registries themselves stay logically separate (D10). Recursion is already
 /// rejected by the checker, so the memoized layout recursion terminates.
