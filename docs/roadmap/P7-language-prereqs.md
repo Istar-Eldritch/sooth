@@ -362,8 +362,9 @@ takes: the checker records no `CallInst` for it (the poly-body walk is abstract,
 concrete θ to record) and the lowering `env` excludes every poly word. Its callee is
 whichever instantiation is currently being emitted, so `lower_word_parts` carries the poly
 word's own name (`cur_poly_callee`) and dispatches such a call to `cur_word_name`, this
-instantiation's symbol, at that instantiation's own concrete arity. Both real entry points
-thread it: the native monomorphization loop and the REPL's `lower_instantiation`.
+instantiation's symbol, at that instantiation's own concrete arity. The native
+monomorphization loop is the sole entry point that threads it; the REPL, which carried a
+second `lower_instantiation` copy, no longer exists (P7.S9).
 **Exit:** a non-inline generic word can call itself at its own type arguments, compile at two
 instantiations and run; and a self-call at different type arguments is a located type mismatch
 at the call site, not a hang (`docs/roadmap/P7/slice3g-spec.md`, `tests/phase7_slice3g.rs`).
@@ -381,8 +382,8 @@ handles a poly signature, and `check_poly_body` builds its `Ctx` via
 machinery. A poly-side back-edge guard (`src/check/poly.rs`) rejects a reference that would
 cross the back-edge into a rebound local, mirroring the concrete guard
 (`check_reference_across_back_edge`). On the lowering side both call sites that derive a
-word's `self_tail` (`src/ir/driver.rs`, `src/repl.rs`'s `lower_instantiation`) pass
-`has_self_tail_call(word, &combinator_bodies)`, and the poly self-call arm in
+word's `self_tail` (`src/ir/driver.rs`) pass `has_self_tail_call(word, &combinator_bodies)`;
+the REPL carried a second such call site, but no longer exists (P7.S9). The poly self-call arm in
 `src/ir/func_builder/calls.rs` dispatches a back-edge keyed on `self.cur_poly_callee` rather
 than `self.env.get(name)`, which panics on a poly name.
 **Exit:** a self-*tail* call in a non-inline generic body lowers to a loop back-edge, and a
@@ -511,9 +512,10 @@ refused too, for the minting reason above. A cross-call into or out of a *polymo
 set* is refused too -- the records merge under one name while each indexes its own candidate's
 variables. A cross-call whose caller is itself an `inline` combinator is refused at the outer
 call site if the spliced body calls a further polymorphic word -- splicing composes no θ for the
-nested call, so the fixpoint would otherwise reach a callee it cannot ground. The REPL keeps the
-old `unknown word`: its lowering resolves an instantiation through a per-generation store nothing
-composes a cross-call into, so grounding there would check clean and then mis-lower.
+nested call, so the fixpoint would otherwise reach a callee it cannot ground. Standing hazard,
+now moot: the REPL's lowering resolved an instantiation through a per-generation store nothing
+composed a cross-call into, so grounding there would have checked clean and then mis-lowered; the
+REPL no longer exists (P7.S9).
 **Exit:** a non-inline generic word may call another generic word -- same-module or imported,
 user-defined or a library word like `gt`/`lt` -- passing its own rigid type variables through;
 the callee is monomorphized once per concrete instantiation the caller reaches, the same way a
@@ -706,13 +708,10 @@ Point`; there is no compiler-hardcoded notion of "ordered" left to reject it.
 
 The six comparisons are `inline`, so a comparison and its `Ordering?` eliminator fold into
 the caller and a library comparison costs no call frame (**P7.S8**, which supplied the uid
-rule that makes a spliced `impl:` body lower correctly). The REPL carries no whole-program
-trait/`impl:` registry, so a bound naming `Ord` at REPL scope gets a located, REPL-specific
-diagnostic pointing at that gap rather than claiming the name is wrong
-(`repl_unknown_capability_error`), in first position and after a folded `Copy` alike.
-Closing the gap itself -- a session carrying its imported
-modules' trait and `impl:` registries, so `'T: Ord` resolves at REPL scope the way it does in
-a file -- has no owning slice.
+rule that makes a spliced `impl:` body lower correctly). Standing hazard, now moot: the REPL
+carried no whole-program trait/`impl:` registry, so a bound naming `Ord` at REPL scope got a
+located, REPL-specific diagnostic (`repl_unknown_capability_error`) rather than claiming the
+name was wrong; the REPL no longer exists (P7.S9).
 **Exit:** `Ord` bounds a struct or enum, satisfied nominally by an `impl:` block, so a
 comparison-bounded generic word (`sort`, `bin_search`) can be instantiated over a user type;
 a polymorphic body may call a polymorphic word carrying a forwarded user bound without ICE;

@@ -1610,10 +1610,11 @@ src/driver.rs:1033:/// `dlopen` has already read the `.so`) by the time its func
 src/driver.rs:2504:        let lib = Library::open(&so).expect("dlopen should succeed");
 ```
 
-All six lines are `driver.rs`'s relocated `Library`/`dlopen` primitive (R1) — no
-`dlsym`/`dlerror` literal survives because the extern block spells the symbol as a
-function-pointer field, not a call site the grep's word list matches, and that field is
-named in the extern block shown by line `976`'s neighbours. `drop_generation` and
+All six lines are `driver.rs`'s relocated `Library`/`dlopen` primitive (R1). `dlsym` and
+`dlerror` literals do survive in `driver.rs` (the extern block declares ordinary `fn`s with
+real call sites, e.g. `last_dlerror`'s body), but neither word is in this grep's
+alternation, so the six-line count is unaffected by them; this is not evidence they were
+removed, only that this particular pattern doesn't test for them. `drop_generation` and
 `override_epoch` contribute zero hits: phase 9's stop condition did not fire (confirmed
 there by an empty `tests/qbe_baseline` diff after regeneration), so R7 landed in full and
 there is nothing to report blocked. **Pass**, exactly matching the spec's prediction of
@@ -1664,9 +1665,14 @@ the deleted mechanism.
 `slice9-phase-notes.md` (this document) and in the historical `P7/slice*-{brief,spec}.md`
 files — all out of scope per R8 ("historical implementation specs... record what was
 built at the time, not current design"). The current-design roadmap files
-(`P1-repl-and-liveness.md`, `P4-polymorphism-quotations.md`, `P7-language-prereqs.md`,
-`P8-packages-modules.md`, `P12-self-hosting.md`, `ROADMAP.md`) carry none of these
-identifiers. **Pass.**
+(`P1-repl-and-liveness.md`, `P4-polymorphism-quotations.md`, `P8-packages-modules.md`,
+`P12-self-hosting.md`, `ROADMAP.md`) carry none of these identifiers. **`P7-language-prereqs.md`
+did, in four places, missed on first pass: `:366`, `:384` and `:514` named
+`src/repl.rs`'s `lower_instantiation` in present tense as a second live entry point, and
+`:709-715` described a live REPL diagnostic (`repl_unknown_capability_error`) and an open
+follow-up for closing its gap. Fixed in this phase**, each rewritten to a "standing hazard,
+now moot given P7.S9" past-tense note, matching the pattern phase 10 already used at
+`:423`, `:814` and `:1108-1111`. **Pass.**
 
 ### E6 — no REPL-only test module is skipped or stubbed
 
@@ -1687,9 +1693,17 @@ before this slice started); it is not the witness. **Pass.**
 Carried, not re-run here: phases 2–6's per-test mutation proofs are recorded in their own
 sections of this document (phase 2's `Ctx::Word` migrations, phase 3's `ir::lower`
 migrations, phases 4–6's `run`-based rewrites), and every deleted test is classified there
-as retired-mechanism or duplicate-of-a-named-covering-test. Nothing in phases 7–10 altered
-any migrated test's assertions (phase 7's collapse is diagnostic-text-preserving by
-construction; phases 8–10 touch no test logic). **Pass**, by inheritance.
+as retired-mechanism or duplicate-of-a-named-covering-test. "Phases 8–10 touch no test
+logic" is too broad, corrected here: phase 9 (`d170159`) deleted three unit tests
+(`instantiation_symbol_none_reproduces_native_spelling_expected`,
+`instantiation_symbol_some_appends_gen_component_expected`,
+`instantiation_symbol_distinct_generations_are_distinct_symbols_expected`) alongside the
+`generation` parameter they existed to cover, and edited a fourth's call site,
+`lower_call_uses_resolved_generation_symbol`, dropping the generation-suffix assertion phase
+3 deliberately migrated and kept green — all spec-ordered retirement of the mechanism itself,
+not an accidental edit to a surviving test's assertions. Phase 7's collapse is
+diagnostic-text-preserving by construction, and phase 10 is comment/doc-only (`49431ce`'s
+`src/` diff is pure comment reflow). **Pass**, by inheritance.
 
 ### E8 — retired exit criteria are recorded where they are stated
 
@@ -1728,9 +1742,9 @@ dropped, "No metacircular JIT ... still runs on the backend" survives verbatim. 
 
 | File | Lines before slice → after | Import divergence | X-and-Y-and-Z | High/low mixed | Dead-pair functions | Circular-dependency split |
 | --- | --- | --- | --- | --- | --- | --- |
-| `src/check.rs` | 5472 → 4967 (−505) | No — one `use crate::ast::{...}` cluster plus `self::{audits,builtins,captures,combinators,declarations,drop_graph,engine,operators,poly,terms,word_entry,word_families}::*`, already the CLAUDE.md-mandated per-stage split | No — `check.rs` itself is the stage's `mod.rs`-shaped hub; the responsibility split already lives in its submodules | No — the file's own top-level fns didn't move this slice | No new evidence — this slice only deleted `infer_line`/`InferredLine`/`Ctx::Line` arms, it didn't add an unrelated cluster | No |
+| `src/check.rs` | 5472 → 4967 (−505) | No — `std::cell::RefCell`, `std::collections::{HashMap, HashSet}`, one `use crate::ast::{...}` cluster, plus `self::{audits,builtins,captures,combinators,declarations,drop_graph,engine,operators,poly,terms,word_entry,word_families}::*`, already the CLAUDE.md-mandated per-stage split | No — `check.rs` itself is the stage's `mod.rs`-shaped hub; the responsibility split already lives in its submodules | No — the file's own top-level fns didn't move this slice | No new evidence — this slice only deleted `infer_line`/`InferredLine`/`Ctx::Line` arms, it didn't add an unrelated cluster | No |
 | `src/check/engine.rs` | 2184 → 2118 (−66) | No — single `use super::*` plus `std::{borrow::Cow, cell::RefCell}` and `crate::ast::GenericTypes` | No — one responsibility (borrow/scope/liveness engine + `Ctx`/`word_ctx`), stated in its own module doc comment | No | No | No |
-| `src/check/poly.rs` | 14393 → 14241 (−152) | No — `use super::*` only | **Signal present, not new**: at 14241 lines this is by far the largest file in the tree, doing generic-instantiation resolution, bound checking, monomorphization and lowering-adjacent splice work in one file. Per `project_poly_rs_split_deferred`, this signal has fired before this slice and its split was already ruled deferred (3/5 signals present, both candidate splits wrong at the time) — this phase does not reopen that decision, and a −152-line shrink from deletions doesn't change the shape argument that deferred it | No new evidence this slice | No | No |
+| `src/check/poly.rs` | 14393 → 14241 (−152) | No — `std::cell::RefCell`, `std::cmp::Ordering`, `crate::ast::GenericTypes`, plus `use super::*` | **Signal present, not new**: at 14241 lines this is by far the largest file in the tree, doing generic-instantiation resolution, bound checking, monomorphization and lowering-adjacent splice work in one file. Per `project_poly_rs_split_deferred`, this signal has fired before this slice and its split was already ruled deferred (3/5 signals present, both candidate splits wrong at the time) — this phase does not reopen that decision, and a −152-line shrink from deletions doesn't change the shape argument that deferred it | No new evidence this slice | No | No |
 | `src/parser.rs` | 10516 → 10053 (−463) | No — `use crate::ast::{...}`, `crate::lexer::Token`, `std::collections::HashMap` | No — one responsibility (lexer → AST), the `is_repl`/`parse_line` family's removal shrank it without leaving a residual cluster | No | No — the REPL-only unit tests this slice's phase 8 removed were the file's own dead-pair candidate, and they're gone now | No |
 
 Three of four files show no signal beyond what predates this slice; `check/poly.rs`
