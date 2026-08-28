@@ -379,6 +379,33 @@ fn cli_test_with_no_path_discovers_pkgroot_tests_dir() {
     );
 }
 
+/// R3.2: an explicit path reaches the driver. The cwd deliberately holds no
+/// `sooth.pkg`, so a CLI that dropped its `[path...]` argument would fall back
+/// to discovery-by-cwd and fail instead of running the named entry.
+#[test]
+fn cli_test_with_explicit_path_runs_that_entry() {
+    let pkg = Tree::new("cli-explicit-path");
+    pkg.write("sooth.pkg", &pkg_manifest());
+    let entry = passing_entry(&pkg, "suite/a.sth");
+    let elsewhere = Tree::new("cli-explicit-cwd");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("test")
+        .arg(&entry)
+        .current_dir(&elsewhere.0)
+        .output()
+        .expect("sooth test should spawn");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}, stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("1 entries, 0 failed"),
+        "the named entry is the whole run: {stdout}"
+    );
+}
+
 /// A failing suite's exit code must reach the process: the driver's return
 /// code propagated through `main`, not swallowed by a stray `exit(0)`.
 #[test]
