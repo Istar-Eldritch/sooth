@@ -27,11 +27,11 @@ type: Op
 ;
 
 type: Vm
-  prog  [Op 13]
+  prog  array[Op 13]
   pc    usize
-  stack [i64 8]
+  stack array[i64 8]
   sp    usize
-  mem   [i64 4]
+  mem   array[i64 4]
 ;
 
 type: Fetched vm Vm op Op ;
@@ -199,7 +199,7 @@ type: Decoded vm Vm idx usize ;
 \ materializes it).
 : mk-h-push ( -- [ Vm -- Vm ] ) [ h-push ] ;
 
-: build-table ( -- [ [ Vm -- Vm ] 9 ] )
+: build-table ( -- array[ [ Vm -- Vm ] 9 ] )
   mk-h-push 9 fill | t |
   &!t 1 >usize &!> [ h-add ] !
   &!t 2 >usize &!> [ h-sub ] !
@@ -216,7 +216,7 @@ type: Decoded vm Vm idx usize ;
 \ selected handler, then tail-call itself with the updated `Vm`. `table` is
 \ threaded alongside `Vm` across the self-tail-call back-edge exactly as
 \ `Vm`'s own arrays are.
-: dispatch ( Vm [ [ Vm -- Vm ] 9 ] -- i64 )
+: dispatch ( Vm array[ [ Vm -- Vm ] 9 ] -- i64 )
   | vm0 table |
   vm0 fetch Fetched> decode Decoded> | vm idx |
   idx 8 >usize eq
@@ -245,7 +245,7 @@ type: Decoded vm Vm idx usize ;
 \   10 Jmp   0          backward branch to L
 \   11 Load  1    (E)   push acc
 \   12 Halt             result = acc on top of stack (seeded by fill)
-: build ( -- [Op 13] )
+: build ( -- array[Op 13] )
   Halt 13 fill | prog |
   &!prog 0  >usize &!> 0  >usize Load  !
   &!prog 1  >usize &!> 11 >usize Jz    !

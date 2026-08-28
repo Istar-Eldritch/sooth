@@ -109,19 +109,20 @@ type: File fd Fd ;          \ derived glue disposes Fd through its own drop
 
 **Bounded polymorphism.** `'T`/`'N`/`..s` type, length, and row variables,
 monomorphized per instantiation, no vtables. `dup`/`swap`/`max` get honest
-generic signatures. A type variable can carry trait bounds (`'T: Order Show`),
-resolved at each call site against the caller's own `impl:` blocks.
+generic signatures. A type variable can carry trait bounds, declared in a bracket between the
+word's name and its effect (`: w['T: Order Show] ( ... )`) and resolved at each
+call site against the caller's own `impl:` blocks.
 
 **Traits and trait dispatch.** A `trait:` declaration lists required member
 signatures over a type variable; an `impl:` block gives a concrete type its
 own member bodies, inheriting each signature from the trait. A bounded word
-(`'T: Order`) dispatches each required member as an ordinary word call resolved
+(`['T: Order]`) dispatches each required member as an ordinary word call resolved
 at monomorphization — never a runtime vtable. `Copy` and `Ord` are built-in
 predicates satisfied by a type's own shape; user-declared traits are nominal,
 not structural.
 
 ```factor
-trait: Show 'T
+trait: Show['T]
   : show ( &'T -- ) ;
 ;
 
@@ -129,7 +130,7 @@ impl: Show for Point
   : show | p | "(" . p &x @ . "," . p &y @ . ")" . ;
 ;
 
-: print-larger ( &'T: Order Show &'T -- )
+: print-larger['T: Order Show] ( &'T &'T -- )
   | a b | a b cmp
   ~[ drop b show ]
   ~[ drop a show ]

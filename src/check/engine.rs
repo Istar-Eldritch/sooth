@@ -1428,14 +1428,14 @@ mod tests {
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
     const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
-    /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
+    /// U12 (R13): an `array[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,
     /// deduping to a single `ArrayId` rather than one per file.
     #[test]
     fn array_shape_dedupes_across_files() {
         use crate::parser::parse_bodies;
-        let a = lex(": fa ( [i64 8] -- ) drop ;").unwrap();
-        let b = lex(": fb ( [i64 8] -- ) drop ;").unwrap();
+        let a = lex(": fa ( array[i64 8] -- ) drop ;").unwrap();
+        let b = lex(": fb ( array[i64 8] -- ) drop ;").unwrap();
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
         let no_imports = HashMap::new();
@@ -1483,7 +1483,7 @@ mod tests {
         assert_eq!(
             arrays.len(),
             1,
-            "two files' [i64 8] dedupe to one ArrayId in the shared registry"
+            "two files' array[i64 8] dedupe to one ArrayId in the shared registry"
         );
     }
     #[test]

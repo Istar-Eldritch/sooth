@@ -70,6 +70,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .enumerate()
         .map(|(idx, w)| (w.name.clone(), idx as u32 * crate::check::INLINE_UID_STRIDE))
         .collect();
+    // P7.S10 (R3.3): each word's own declaration span, name-keyed exactly
+    // like `member_uid_seeds` above -- read only by `lower_resolved_word_call`'s
+    // splice-budget guard to locate the offending impl member's own `: name`
+    // declaration rather than a call site (R3.3: no call-site span survives
+    // past `lib/cmp.sth`'s `inline` splice).
+    let member_spans: HashMap<String, Span> = module
+        .words
+        .iter()
+        .map(|w| (w.name.clone(), w.span))
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -187,64 +197,60 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // module would collide with it under the identical symbol. The override's
     // body is instead compiled by `synthesize_aggregate_destructors` (R2)
     // into the struct's own destructor symbol.
-    let mut funcs: Vec<IrFunc> = module
-        .words
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| {
-            !drop_overload_indices.contains(idx)
-                && !poly_indices.contains(idx)
-                && !combinator_indices.contains(idx)
-                && !uncalled_operator_overloads.contains(idx)
-        })
-        .flat_map(|(idx, w)| {
-            // A word sharing its name with another candidate is not self-tail
-            // recursive on a bare name match: the same name in its body may
-            // resolve to the other candidate, the same reasoning that excludes
-            // builtin-named words in `has_self_tail_call`.
-            let self_tail =
-                crate::check::has_self_tail_call(w, &combinator_bodies) && symbols[idx] == w.name;
-            // R9: a word plus every quotation literal it materialized (element
-            // 0 is the word itself).
-            lower_word_parts(
-                &symbols[idx],
-                &w.effect,
-                &w.body,
-                self_tail,
-                None,
-                &env,
-                &resolve,
-                regs,
-                &module.instantiations,
-                &module.builtin_overloads,
-                // A monomorphic word declares no bounds (only a polymorphic
-                // word's signature can), so it can never call through a
-                // resolved trait obligation -- empty here, unlike the
-                // per-instantiation loop below.
-                empty_trait_calls(),
-                // A monomorphic word is walked once, so its own polymorphic
-                // call sites are all in the global `instantiations` table;
-                // only a *generic* body's cross-call needs per-instantiation
-                // routing.
-                empty_poly_calls(),
-                &module.resolved_fields,
-                &module.resolved_variant_fields,
-                &poly_arities,
-                &combinator_bodies,
-                EnvPlan::None,
-                &module.splice_records,
-                &module.splice_trait_calls,
-                &member_uid_seeds,
-                // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
-                // both walk `module.words` in the same order (this loop
-                // filters afterward, but `idx` still comes from the same
-                // full enumerate), so a splice this word's body performs
-                // resolves to the checker's own record for it, not another
-                // word's that happens to share a `(0, span)` key.
-                idx as u32 * crate::check::INLINE_UID_STRIDE,
-            )
-        })
-        .collect();
+    let mut funcs: Vec<IrFunc> = Vec::new();
+    for (idx, w) in module.words.iter().enumerate().filter(|(idx, _)| {
+        !drop_overload_indices.contains(idx)
+            && !poly_indices.contains(idx)
+            && !combinator_indices.contains(idx)
+            && !uncalled_operator_overloads.contains(idx)
+    }) {
+        // A word sharing its name with another candidate is not self-tail
+        // recursive on a bare name match: the same name in its body may
+        // resolve to the other candidate, the same reasoning that excludes
+        // builtin-named words in `has_self_tail_call`.
+        let self_tail =
+            crate::check::has_self_tail_call(w, &combinator_bodies) && symbols[idx] == w.name;
+        // R9: a word plus every quotation literal it materialized (element
+        // 0 is the word itself).
+        funcs.extend(lower_word_parts(
+            &symbols[idx],
+            &w.effect,
+            &w.body,
+            self_tail,
+            None,
+            &env,
+            &resolve,
+            regs,
+            &module.instantiations,
+            &module.builtin_overloads,
+            // A monomorphic word declares no bounds (only a polymorphic
+            // word's signature can), so it can never call through a
+            // resolved trait obligation -- empty here, unlike the
+            // per-instantiation loop below.
+            empty_trait_calls(),
+            // A monomorphic word is walked once, so its own polymorphic
+            // call sites are all in the global `instantiations` table;
+            // only a *generic* body's cross-call needs per-instantiation
+            // routing.
+            empty_poly_calls(),
+            &module.resolved_fields,
+            &module.resolved_variant_fields,
+            &poly_arities,
+            &combinator_bodies,
+            EnvPlan::None,
+            &module.splice_records,
+            &module.splice_trait_calls,
+            &member_uid_seeds,
+            // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
+            // both walk `module.words` in the same order (this loop
+            // filters afterward, but `idx` still comes from the same
+            // full enumerate), so a splice this word's body performs
+            // resolves to the checker's own record for it, not another
+            // word's that happens to share a `(0, span)` key.
+            idx as u32 * crate::check::INLINE_UID_STRIDE,
+            &member_spans,
+        )?);
+    }
 
     // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
     // Every call site of a polymorphic word wrote a `CallInst` keyed by its
@@ -386,7 +392,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // duration of its splice, so the transitive collision that made
             // this `0` questionable cannot happen through that path.
             0,
-        ));
+            &member_spans,
+        )?);
     }
 
     // R2: the override's body, by reference, keyed the way synthesis is keyed.
@@ -406,7 +413,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &module.resolved_fields,
         &module.resolved_variant_fields,
         &combinator_bodies,
-    ));
+    )?);
 
     // Slice 7a (R1/Q2): the module's distinct quotation signatures, scanned
     // out of every function and every aggregate layout once all funcs (words,
@@ -703,6 +710,41 @@ mod tests {
         );
     }
 
+    /// P7.S10 (R4.4): error propagation, beside `lower`'s own driver code. A
+    /// real recursive `impl: Ord` -- the same shape as the golden -- drives
+    /// `lower_resolved_word_call`'s budget guard to `Err`, and this asserts
+    /// that `lower()`'s own `Result` carries it unchanged, rather than a
+    /// swallowing `.unwrap()`/`if let Ok(..)` dam anywhere in the 18-function
+    /// closure discarding it first. `check_trait_decls`/`check_impl_decls` run
+    /// inside `parse_with_core` (its own doc comment), so this needs no
+    /// synthetic forced error: the real route works, per R4.4's mandate to
+    /// attempt it first.
+    #[test]
+    fn a_recursive_impl_ord_error_propagates_unchanged_to_lowers_result() {
+        let src = "type: Wrap v i64 ;\n\
+             impl: Ord for Wrap\n\
+               : cmp\n\
+                 | a b |\n\
+                 a b lt ~[ Less ] ~[ Equal ] if ;\n\
+             ;\n\
+             : main ( -- )\n\
+               1 Wrap 2 Wrap lt ~[ 1 ] ~[ 0 ] if . ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+
+        let err = crate::ir::lower(&module)
+            .expect_err("a recursive impl member's splice exceeds the budget");
+        assert!(
+            err.contains("exceeded the splice budget of"),
+            "lower()'s Err should carry the budget guard's own message unchanged, got: {err}"
+        );
+        assert!(
+            err.contains("`cmp` (member of trait `Ord` for `Wrap`)"),
+            "unexpected diagnostic: {err}"
+        );
+    }
+
     /// P7.S8 (R1): the shape the fix exists for -- a spliced member body that
     /// itself splices a combinator, two levels below the caller. It reaches
     /// lowering through `lower_src`'s own `check` -> `lower` path, so a
@@ -829,7 +871,7 @@ mod tests {
     #[test]
     fn poly_self_call_lowers_to_ordinary_recursive_call() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg dup drop ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -889,7 +931,7 @@ mod tests {
     #[test]
     fn poly_self_tail_call_lowers_to_loop_back_edge() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -948,7 +990,7 @@ mod tests {
     #[test]
     fn poly_non_tail_self_call_in_a_self_tail_body_stays_an_ordinary_call() {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
-             : loopg ( 'T: Copy i64 -- 'T )\n\
+             : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg 0 loopg ] if ;\n\
              : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
@@ -991,7 +1033,7 @@ mod tests {
         // instantiates a poly ref slot, so lowering must ground it *now*,
         // not in a later phase. Stubbing the arm to `panic!` breaks this
         // build.
-        let src = ": firstref ( &['T 4] -- ) drop ;\n\
+        let src = ": firstref ( &array['T 4] -- ) drop ;\n\
              : main ( -- ) 7 4 fill | a | &a firstref a drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -1120,7 +1162,7 @@ mod tests {
     #[test]
     fn bound_dispatch_lowers_each_instantiation_to_its_own_impl_member() {
         let m = lower_with_resolve(
-            "trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+            "trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              type: Qt n i64 ;\n\
              impl: Getter for Pt\n\
@@ -1129,7 +1171,7 @@ mod tests {
              impl: Getter for Qt\n\
                : get | q | q &n @ ;\n\
              ;\n\
-             : getval ( &'T: Getter -- i64 ) get ;\n\
+             : getval ['T: Getter] ( &'T -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p getval . p drop\n\
                            9 Qt |q| &q getval . q drop ;\n",
         );
@@ -1154,13 +1196,13 @@ mod tests {
     #[test]
     fn an_impl_body_members_operator_named_call_resolves_to_the_local_overload() {
         let m = lower_with_resolve(
-            "trait: Getter 'T : get ( &'T &'T -- i64 ) ; ;\n\
+            "trait: Getter['T] : get ( &'T &'T -- i64 ) ; ;\n\
              type: Pt n i64 ;\n\
              : max ( &Pt &Pt -- i64 ) drop &n @ ;\n\
              impl: Getter for Pt\n\
                : get | a b | a b max ;\n\
              ;\n\
-             : getval ( &'T: Getter &'T -- i64 ) get ;\n\
+             : getval ['T: Getter] ( &'T &'T -- i64 ) get ;\n\
              : main ( -- ) 7 Pt |p| &p &p getval . p drop ;\n",
         );
         assert_eq!(

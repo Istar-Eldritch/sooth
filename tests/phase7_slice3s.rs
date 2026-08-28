@@ -65,7 +65,7 @@ fn build_and_run(entry: &Path) -> String {
 fn base_and_hub(t: &Tree, hub_import: &str) {
     t.write(
         "base.sth",
-        "trait: Greet 'T : greet ( &'T -- ) ; ;\nexport: Greet ;\n",
+        "trait: Greet['T] : greet ( &'T -- ) ; ;\nexport: Greet ;\n",
     );
     t.write("hub.sth", &format!("{hub_import}\nexport: Greet ;\n"));
 }
@@ -88,7 +88,7 @@ fn hub_reexported_trait_resolves_as_a_bound_via_selective_import() {
          impl: Greet for Point\n\
            : greet | p | p drop 42 .  ;\n\
          ;\n\
-         : greets ( &'T: Greet -- ) greet ;\n\
+         : greets ['T: Greet] ( &'T -- ) greet ;\n\
          : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
     );
     let out = build_and_run(&entry);
@@ -110,7 +110,7 @@ fn hub_reexported_trait_resolves_as_a_bound_via_bare_qualifier() {
          impl: h::Greet for Point\n\
            : greet | p | p drop 42 .  ;\n\
          ;\n\
-         : greets ( &'T: h::Greet -- ) greet ;\n\
+         : greets ['T: h::Greet] ( &'T -- ) greet ;\n\
          : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
     );
     let out = build_and_run(&entry);
@@ -160,7 +160,7 @@ fn trait_reexported_through_a_qualifier_only_hub_resolves() {
          impl: Greet for Point\n\
            : greet | p | p drop 42 .  ;\n\
          ;\n\
-         : greets ( &'T: Greet -- ) greet ;\n\
+         : greets ['T: Greet] ( &'T -- ) greet ;\n\
          : main ( -- ) 1 2 Point |p| &p greets p drop ;\n",
     );
     let out = build_and_run(&entry);

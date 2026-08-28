@@ -1452,7 +1452,7 @@ fn runtime_index_at_length_boundary_traps_and_aborts_native() {
 #[test]
 fn stack_dogfood_compiles_and_runs() {
     // Criterion 6: `examples/stack.sth`, a bounded `i64` stack embedding a
-    // `[i64 16]` field with a runtime `usize` cursor. Exercises
+    // `array[i64 16]` field with a runtime `usize` cursor. Exercises
     // array-as-struct-field, `push`/`pop`/`peek` reading and writing an
     // element through a reference, and the compile-time-constant `len`.
     let (stdout, code) = run_and_capture_stdout("examples/stack.sth");
@@ -1463,14 +1463,14 @@ fn stack_dogfood_compiles_and_runs() {
 #[test]
 fn nested_array_shapes_construct_and_read_back_native() {
     // Criterion 7: nesting both directions in one binary — array-of-struct
-    // (`[Vec2 2]`), array-of-array (`[[i64 2] 2]`), and struct-with-an-
-    // array-field (`Box { arr: [i64 3] }`) each construct via `fill` and read
+    // (`array[Vec2 2]`), array-of-array (`array[array[i64 2] 2]`), and struct-with-an-
+    // array-field (`Box { arr: array[i64 3] }`) each construct via `fill` and read
     // back correctly through the combined struct/array registry (R16, M3).
     let src = "type: Vec2 x i64 y i64 ;\n\
-type: Box arr [i64 3] ;\n\
-: vx ( [Vec2 2] usize -- i64 )\n\
+type: Box arr array[i64 3] ;\n\
+: vx ( array[Vec2 2] usize -- i64 )\n\
 | a i | &a i &> &x @ ;\n\
-: inner-at ( [[i64 2] 2] usize usize -- i64 )\n\
+: inner-at ( array[array[i64 2] 2] usize usize -- i64 )\n\
 | a i j | &a i &> j &> @ ;\n\
 : box-at ( Box usize -- i64 )\n\
 | b i | &b &arr i &> @ ;\n\
@@ -1618,7 +1618,7 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
     // -back-edge half was proven by a prior spike; the residual unproven
     // composition is enum-`get`-from-carried-array + tag dispatch in
     // constant stack. 1_000_000 back-edges each read the enum out of the
-    // carried `[Op 2]`, dispatch, and self-tail-call; naive recursion at that
+    // carried `array[Op 2]`, dispatch, and self-tail-call; naive recursion at that
     // depth overflows the default 8MB host stack, which `run_and_capture_stdout`
     // catches as a signal death (no exit code) and turns a no-op Slice 6
     // transform red. `idx` goes Bool -> index via `if 1 else 0 end >usize`
@@ -1626,8 +1626,8 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
     // the enum through a reference (`&>` then `@`) rather than `get`.
     let src = "type: Op | Step | Stop ;\n\
 : idx ( i64 -- usize ) | count | count 0 eq ~[ 1 ] ~[ 0 ] if >usize ;\n\
-: fetch ( [Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
-: run ( [Op 2] i64 i64 Op -- i64 )\n\
+: fetch ( array[Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
+: run ( array[Op 2] i64 i64 Op -- i64 )\n\
   ~[ ( Step ) drop | prog count acc |\n\
       prog\n\
       count 1 sub\n\
@@ -1636,8 +1636,8 @@ fn enum_get_from_carried_array_eliminator_dispatch_constant_stack() {
       run ]\n\
   ~[ ( Stop ) drop | prog count acc | acc ]\n\
   Op? ;\n\
-: build ( -- [Op 2] ) Step 2 fill | prog | &!prog 1 &!> Stop ! prog ;\n\
-: start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
+: build ( -- array[Op 2] ) Step 2 fill | prog | &!prog 1 &!> Stop ! prog ;\n\
+: start ( array[Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
 : main ( -- ) build start . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-vm-smoke-{}.sth", std::process::id()));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
@@ -1674,11 +1674,11 @@ fn vm_dogfood_compiles_and_runs() {
 | Halt\n\
 ;\n\
 type: Vm\n\
-  prog  [Op 13]\n\
+  prog  array[Op 13]\n\
   pc    usize\n\
-  stack [i64 8]\n\
+  stack array[i64 8]\n\
   sp    usize\n\
-  mem   [i64 4]\n\
+  mem   array[i64 4]\n\
 ;\n\
 type: Fetched vm Vm op Op ;\n\
 type: VmPop vm Vm val i64 ;\n\
@@ -1778,7 +1778,7 @@ type: VmPop vm Vm val i64 ;\n\
     swap drop\n\
   ]\n\
   Op? ;\n\
-: build ( -- [Op 13] )\n\
+: build ( -- array[Op 13] )\n\
   Halt 13 fill | prog |\n\
   &!prog 0  >usize &!> 0  >usize Load  !\n\
   &!prog 1  >usize &!> 11 >usize Jz    !\n\
@@ -2416,11 +2416,11 @@ fn fill_non_nullary_linear_seed_rejected_with_tabulate_hint() {
 
 #[test]
 fn linear_array_element_in_word_signature_is_ok() {
-    // A `[Spy 2]` slot in a word's stack effect names the type directly.
+    // A `array[Spy 2]` slot in a word's stack effect names the type directly.
     // The synthesized array destructor (Phase 4) disposes each element,
     // so this now compiles.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}: w ( [Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF}: w ( array[Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2432,7 +2432,7 @@ fn linear_array_element_in_struct_field_is_ok() {
     // Same boundary, reached via a `type:` field declaration instead of
     // a word signature.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Bag xs [Spy 2] ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF}type: Bag xs array[Spy 2] ;\n: main ( -- ) 0 . ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2446,7 +2446,7 @@ fn linear_array_element_via_linear_struct_in_struct_field_is_ok() {
     // The array destructor calls `emit_drop` on each `Holds`, which
     // dispatches to `Holds`'s struct destructor.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Holds s Spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF}type: Holds s Spy ;\ntype: Arr a array[Holds 2] ;\n: main ( -- ) 0 . ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2458,7 +2458,7 @@ fn linear_array_element_via_linear_struct_in_word_signature_is_ok() {
     // Same indirection, reached via a word signature slot instead of
     // a struct field.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Holds s Spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF}type: Holds s Spy ;\n: w ( array[Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2647,7 +2647,7 @@ fn owned_alloc_and_drop_traces_one_pair() {
 
 #[test]
 fn owned_alloc_dispose_loop_stays_within_memory_bound() {
-    // Criterion 1b: ~100k construct-and-dispose iterations of a `[u8 1024]`
+    // Criterion 1b: ~100k construct-and-dispose iterations of a `array[u8 1024]`
     // cell under a 64 MB `RLIMIT_AS`, gate off. Mirrors `countdown.sth`'s
     // tail-call -> loop shape (constant stack), so the outer loop itself
     // never grows memory; only a broken `free` (a real leak, or a fake one)
@@ -2729,7 +2729,7 @@ False ~[ 9 ^ Full ] ~[ Empty ] if drop ;\n",
 
 #[test]
 fn nested_owned_frees_outer_before_inner() {
-    // Criterion 11: `^^[u8 24]`. The inner and outer sizes are deliberately
+    // Criterion 11: `^^array[u8 24]`. The inner and outer sizes are deliberately
     // distinct (24 vs. the pointer-width 8) so the transcript order proves
     // the outer cell frees *before* the inner one (R8); equal sizes could not
     // distinguish that from the reverse.

@@ -158,7 +158,7 @@ fn copy_bounded_type_variable_word_runs_at_two_concrete_types() {
     // instantiations run and print both copies.
     let (stdout, code) = run_src(
         "dupit",
-        ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+        ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
          : main ( -- ) 5 dupit . . True dupit . . ;\n",
         false,
     );
@@ -170,11 +170,11 @@ fn copy_bounded_type_variable_word_runs_at_two_concrete_types() {
 fn length_polymorphic_word_runs_over_two_array_lengths() {
     // Criterion 4 (R1, R5, R9): the recon-2 "unwritable" case, now written. A
     // length variable is opaque through `len`; monomorphization discharges it
-    // to a concrete `N` per instantiation, so `alen` runs over both `[i64 4]`
-    // and `[i64 8]` and prints each length.
+    // to a concrete `N` per instantiation, so `alen` runs over both `array[i64 4]`
+    // and `array[i64 8]` and prints each length.
     let (stdout, code) = run_src(
         "alen",
-        ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+        ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
          : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;\n",
         false,
     );
@@ -191,7 +191,7 @@ fn row_variable_word_expands_to_a_multi_output_bundle_and_runs() {
     // does (D4, one mechanism): `1 2 dup2` leaves `1 2 1 2`, printed top-first.
     let (stdout, code) = run_src(
         "dup2",
-        ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+        ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
          : main ( -- ) 1 2 dup2 . . . . ;\n",
         false,
     );
@@ -208,7 +208,7 @@ fn row_variable_passes_a_non_empty_below_stack_through_in_order() {
     // yields the two duplicated outputs, then the two originals, then `8 9`.
     let (stdout, code) = run_src(
         "dup2_row",
-        ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+        ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
          : main ( -- ) 9 8 1 2 dup2 . . . . . . ;\n",
         false,
     );
@@ -425,13 +425,13 @@ fn struct_carried_across_back_edge_is_not_aliased() {
 
 #[test]
 fn array_carried_across_back_edge_is_not_aliased() {
-    // Criterion 2 (R1-R4, R7): an `[i64 4]` via `4 fill`, re-produced each
+    // Criterion 2 (R1-R4, R7): an `array[i64 4]` via `4 fill`, re-produced each
     // iteration and read (through `&>`/`@`) the iteration after. Was `0 2 1`;
     // correct `0 3 2`.
     let (stdout, code) = run_src(
         "arrayalias",
-        ": mkarr ( i64 -- [i64 4] ) 4 fill ;\n\
-         : loop ( i64 [i64 4] -- [i64 4] )\n\
+        ": mkarr ( i64 -- array[i64 4] ) 4 fill ;\n\
+         : loop ( i64 array[i64 4] -- array[i64 4] )\n\
            | n prev |\n\
            n 0 eq ~[ prev ] ~[\n\
              n mkarr | cur |\n\
@@ -757,7 +757,7 @@ fn quotation_passed_to_polymorphic_word_is_error() {
     // unification and binds `'T` to the placeholder without the guard. Reject
     // before `unify_poly_input`.
     let err = check_error(
-        ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
+        ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n: main ( -- ) [ add ] dupit drop drop ;\n",
     );
     assert!(
         err.contains("a quotation cannot be passed to `dupit`"),
@@ -1027,7 +1027,7 @@ fn quotation_left_as_a_declared_output_is_error() {
 
 #[test]
 fn times_body_changing_the_row_is_error() {
-    // Criterion R18c (D6 row-effect equality): `[ add 1 ]` leaves the row one
+    // Criterion R18c (D6 row-effect equality): `array[ add 1 ]` leaves the row one
     // deeper than it received, so the body's net effect is not identity.
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ add 1 ] times . ;\n"
@@ -1084,7 +1084,7 @@ fn poly_mymax_runs_at_i64_and_f64() {
     // trait dispatch while still producing the `Bool` its own `if` consumes.
     let (stdout, code) = run_src(
         "poly-mymax",
-        ": mymax inline ( 'T: Copy 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
+        ": mymax inline ['T: Copy] ( 'T 'T -- 'T ) over over ugt [ True ] [ False ] branch ~[ drop ] ~[ swap drop ] if ;\n\
          : main ( -- ) 3 7 mymax . 3.0 7.0 mymax . ;\n",
         false,
     );

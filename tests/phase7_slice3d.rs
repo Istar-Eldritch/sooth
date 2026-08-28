@@ -73,7 +73,7 @@ fn c1_call_on_literal_splices_body_in_place() {
     let src = "import: intrinsics * ;\n\
                type: Bool | False | True ;\n\
                : . ( Bool -- ) ~[ ( False ) drop \"False\\n\" . ] ~[ ( True ) drop \"True\\n\" . ] Bool? ;\n\
-               : bump ( 'T: Copy -- 'T 'T )\n\
+               : bump ['T: Copy] ( 'T -- 'T 'T )\n\
                | x | [ x x ] call\n\
                ;\n\
                : main ( -- )\n\
@@ -118,7 +118,7 @@ fn c2_literal_grounds_against_concrete_quotation_param() {
              : run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
                swap call\n\
              ;\n\
-             : c2_apply_and_pass_through ( 'T: Copy -- 'T i64 )\n\
+             : c2_apply_and_pass_through ['T: Copy] ( 'T -- 'T i64 )\n\
                | x | x [ 1 add ] 2 run1\n\
              ;\n\
              : main ( -- )\n\
@@ -152,7 +152,7 @@ fn c2_branch_tag_on_quotation_still_rejected() {
     // still renders.
     for name in ["branch", "tag"] {
         let err = check_err(&format!(
-            ": bad ( 'T: Copy -- 'T ) [ ] {name} ;\n : main ( -- ) 5 bad drop ;\n"
+            ": bad ['T: Copy] ( 'T -- 'T ) [ ] {name} ;\n : main ( -- ) 5 bad drop ;\n"
         ));
         assert!(
             err.contains(&format!(
@@ -173,8 +173,8 @@ fn c2_branch_tag_on_quotation_still_rejected() {
 #[test]
 fn c2_literal_to_poly_callee_is_rejected() {
     let err = check_err(
-        ": pq ( 'U: Copy -- 'U 'U ) dup ;\n\
-         : c2_literal_to_poly_callee_is_rejected ( 'T: Copy -- 'T i64 )\n\
+        ": pq ['U: Copy] ( 'U -- 'U 'U ) dup ;\n\
+         : c2_literal_to_poly_callee_is_rejected ['T: Copy] ( 'T -- 'T i64 )\n\
            | x | x [ 1 add ] pq call\n\
          ;\n\
          : main ( -- ) 5 c2_literal_to_poly_callee_is_rejected drop drop drop ;\n",
@@ -195,7 +195,7 @@ fn c2_overloaded_candidate_with_quotation_literal_is_located_rejection() {
     let err = check_err(
         ": run2 ( [ i64 -- i64 ] -- i64 ) 1 swap call ;\n\
          : run2 ( i64 -- i64 ) 1 add ;\n\
-         : c2_overloaded_candidate_with_quotation_literal_is_located_rejection ( 'T: Copy -- 'T i64 )\n\
+         : c2_overloaded_candidate_with_quotation_literal_is_located_rejection ['T: Copy] ( 'T -- 'T i64 )\n\
            | x | x [ 1 add ] run2\n\
          ;\n\
          : main ( -- ) 5 c2_overloaded_candidate_with_quotation_literal_is_located_rejection drop drop ;\n",
@@ -218,8 +218,8 @@ fn c2_overloaded_candidate_with_quotation_literal_is_located_rejection() {
 fn c2_literal_to_name_shared_with_a_poly_word_is_located_rejection() {
     let err = check_err(
         ": run1 ( [ i64 -- i64 ] i64 -- i64 ) swap call ;\n\
-         : run1 ( 'U: Copy -- 'U 'U ) dup ;\n\
-         : c2_literal_to_name_shared_with_a_poly_word_is_located_rejection ( 'T: Copy -- 'T i64 )\n\
+         : run1 ['U: Copy] ( 'U -- 'U 'U ) dup ;\n\
+         : c2_literal_to_name_shared_with_a_poly_word_is_located_rejection ['T: Copy] ( 'T -- 'T i64 )\n\
            | x | x [ 1 add ] 2 run1\n\
          ;\n\
          : main ( -- ) 5 c2_literal_to_name_shared_with_a_poly_word_is_located_rejection drop drop ;\n",

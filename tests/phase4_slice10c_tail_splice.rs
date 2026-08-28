@@ -275,7 +275,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
 #[test]
 fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
     let src = "\
-: mycmp inline ( 'T: Ord 'T -- Ordering ) cmp ;\n\
+: mycmp inline ['T: Ord] ( 'T 'T -- Ordering ) cmp ;\n\
 : countdown ( i64 -- i64 )\n\
   | n |\n\
   n 0 mycmp\n\

@@ -89,7 +89,7 @@ fn parse_error(src: &str) -> String {
 /// `&!Buf` with no rebuild, `byte-at` reads through a `&Buf`, and `copy-byte`
 /// holds one of each, rooted at two different places.
 const BUFFER_DOGFOOD: &str = "\
-type: Buf  data ^[u8 64]  len usize ;
+type: Buf  data ^array[u8 64]  len usize ;
 
 : new ( -- Buf )
   0 >u8 64 fill ^ 0 >usize Buf ;
@@ -308,7 +308,7 @@ fn element_projection_out_of_bounds_still_traps() {
     // traps rather than reading past the array.
     let (stdout, stderr, code) = run_src_traced(
         "element-projection-oob",
-        ": at ( &[u8 4] usize -- u8 ) &> @ ;\n\
+        ": at ( &array[u8 4] usize -- u8 ) &> @ ;\n\
          : main ( -- )\n  0 >u8 4 fill | arr |\n  1 .\n  &arr 4 1 add >usize at .\n  99 . ;\n",
         false,
     );
@@ -327,7 +327,7 @@ fn mutable_element_projection_through_shared_reference_is_error() {
     // mismatch, not a bounds or type error.
     let err = check_error(": main ( -- ) 0 4 fill | a | &a 0 &!> 99 ! &a 0 &> @ . ;");
     assert!(
-        err.contains("`&!>` expected `&![i64 4]`, found `&[i64 4]`"),
+        err.contains("`&!>` expected `&!array[i64 4]`, found `&array[i64 4]`"),
         "expected the receiver-mutability mismatch naming both types: {err}"
     );
 }
@@ -509,8 +509,9 @@ fn reference_in_cell_payload_is_error() {
 fn reference_returned_from_word_is_error() {
     // The direct consequence: a projection can never be factored into its own
     // helper word.
-    let err =
-        check_error("type: Buf data ^[u8 64] len usize ;\n: len-of ( &!Buf -- &!usize ) &!len ;\n");
+    let err = check_error(
+        "type: Buf data ^array[u8 64] len usize ;\n: len-of ( &!Buf -- &!usize ) &!len ;\n",
+    );
     assert!(
         err.contains("a reference cannot be stored")
             && err.contains("`len-of` declares the output `&!usize`"),
@@ -646,7 +647,7 @@ fn reborrow_while_projected_reference_still_live_is_error() {
     // over the place, and the derived `&!usize` two steps removed still holds
     // `b` suspended.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : two-live ( &!Buf -- )\n  | b |\n  b &!len\n  b &!len\n  1 +! 1 +! ;\n",
     );
     assert!(
@@ -670,7 +671,7 @@ fn mutable_borrow_bound_to_a_local_still_suspends_its_place_is_error() {
     // *after* the reborrow, so it must still be rejected exactly like the
     // stack-resident twin above.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf -- )\n  | p |\n  p &!len | e |\n  \
          p &!len 1 +!\n  e 1 +! ;\n: main ( -- ) ;\n",
     );
@@ -694,7 +695,7 @@ fn mutable_borrow_bound_to_a_local_over_an_owned_root_still_suspends_its_place_i
     // parameter-rooted reborrows: any bound reborrow lost protection.
     // Verified this shape was *also* silently accepted pre-fix.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | b |\n  \
          &!b | p |\n  p &!len | e |\n  p &!len 1 +!\n  \
          e 1 +!\n  b drop ;\n",
@@ -718,7 +719,7 @@ fn mutable_borrow_bound_to_a_local_released_at_its_last_use_is_accepted() {
     // the bind: the fix must not regress this into a spurious rejection.
     let (stdout, code) = run_src(
         "borrow-bound-local-released-at-last-use",
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf -- )\n  | p |\n  p &!len | e |\n  e 1 +!\n  \
          p &!len @ . ;\n: main ( -- )\n  \
          0 >u8 64 fill ^ 0 >usize Buf | b |\n  &!b f\n  b drop ;\n",
@@ -741,7 +742,7 @@ fn mutable_borrow_dead_before_an_if_arm_is_accepted() {
     // neither arm uses it, so it is dead throughout each.
     let (stdout, code) = run_src(
         "borrow-dead-before-if-arm",
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
          n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
@@ -760,7 +761,7 @@ fn mutable_borrow_dead_before_a_times_body_is_accepted() {
     let (stdout, code) = run_src(
         "borrow-dead-before-times-body",
         &format!(
-            "{}type: Buf data ^[u8 64] len usize ;\n\
+            "{}type: Buf data ^array[u8 64] len usize ;\n\
              : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  p @ drop\n  \
              3 ~[ drop b &!len 1 +! ] times ;\n\
              : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
@@ -780,7 +781,7 @@ fn mutable_borrow_dead_before_an_if_arm_through_a_projection_is_accepted() {
     // projected reference, not just a direct field borrow.
     let (stdout, code) = run_src(
         "borrow-dead-before-if-arm-through-projection",
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!data &!^ | arr |\n  \
          arr 0 >usize &!> 7 >u8 !\n  n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
@@ -800,7 +801,7 @@ fn mutable_borrow_used_then_reborrowed_within_one_if_arm_is_accepted() {
     // binary "unused anywhere" test OR-1/OR-2 rely on).
     let (stdout, code) = run_src(
         "borrow-used-then-reborrowed-within-one-if-arm",
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
          n 0 eq ~[\n    p @ drop\n    b &!len 1 +!\n  ] ~[\n    p @ drop\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
@@ -818,7 +819,7 @@ fn mutable_borrow_used_after_an_if_term_is_still_error() {
     // anyway would let `b`'s reborrow inside the arm outlive a use of `p`
     // that is genuinely still ahead.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
          n 0 eq ~[\n    b &!len 1 +!\n  ] ~[\n  ] if\n  p @ drop ;\n\
          : main ( -- ) ;\n",
@@ -838,7 +839,7 @@ fn mutable_borrow_used_across_a_times_back_edge_is_still_error() {
     // arm does -- iteration N's use of `p` follows iteration N-1 reaching the
     // body end while `p` is still meant to be live.
     let err = check_error(&format!(
-        "{TIMES_DEF}type: Buf data ^[u8 64] len usize ;\n\
+        "{TIMES_DEF}type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  \
          3 ~[ drop p @ drop b &!len 1 +! ] times ;\n\
          : main ( -- ) ;\n"
@@ -856,7 +857,7 @@ fn mutable_borrow_dead_before_two_levels_of_nested_if_arms_is_accepted() {
     // two levels deep is accepted exactly like OR-1's one-level case.
     let (stdout, code) = run_src(
         "borrow-dead-before-two-levels-of-nested-if-arms",
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  p @ drop\n  \
          n 0 eq ~[\n    True ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if ;\n\
          : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
@@ -872,7 +873,7 @@ fn mutable_borrow_used_after_two_levels_of_nested_if_arms_is_still_error() {
     // *outer* `if` finishes, so it must not be granted into either level's
     // arms, however deeply nested the reborrow is.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf i64 -- )\n  | b n |\n  b &!len | p |\n  \
          n 0 eq ~[\n    True ~[\n      b &!len 1 +!\n    ] ~[\n    ] if\n  ] ~[\n  ] if\n  \
          p @ drop ;\n\
@@ -892,7 +893,7 @@ fn mutable_borrow_captured_by_a_still_callable_quotation_is_still_error() {
     // -- a quotation on the stack is unconditionally live, regardless of
     // whether `p` would otherwise be `outer_releasable`.
     let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+        "type: Buf data ^array[u8 64] len usize ;\n\
          : f ( &!Buf -- )\n  | b |\n  b &!len | p |\n  \
          [ p @ drop ] | q |\n  b &!len 1 +!\n  q call ;\n\
          : main ( -- ) ;\n",
@@ -983,7 +984,7 @@ fn move_of_place_borrowed_on_stack_is_error() {
 /// `drop`), so naming it consumes it and the consume-while-borrowed check
 /// applies (T3/T4).
 const ACC_PRELUDE: &str = "\
-type: Acc arr [i64 4] ;
+type: Acc arr array[i64 4] ;
 : drop ( Acc -- ) | a | &a &arr 0 &> @ . a Acc> drop ;
 ";
 
@@ -1193,7 +1194,7 @@ fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
     // off an owned receiver still pushes the field's interior address, so
     // naming its result aliases the struct it was projected from.
     let err = check_error(
-        "type: S arr [i64 4] ;\n\
+        "type: S arr array[i64 4] ;\n\
          : main ( -- )\n  0 4 fill S | s |\n  s &arr | items |\n  \
          &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  s drop ;\n",
     );
@@ -1211,7 +1212,7 @@ fn dup_makes_gotten_field_independent_of_struct() {
     // `s`.
     let (stdout, code) = run_src(
         "dup-makes-gotten-field-independent",
-        "type: S arr [i64 4] ;\n\
+        "type: S arr array[i64 4] ;\n\
          : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop &arr | items |\n  \
          &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  drop\n  s drop ;\n",
     );
@@ -1534,7 +1535,7 @@ fn dup_makes_a_stack_alias_independent() {
 /// the moment `q`'s literal was written and a second live `&!arr` slipped
 /// through silently aliasing the first.
 const CAPTURE_PRELUDE: &str = "\
-: input ( -- [i64 4] ) 0 4 fill | s | s ;
+: input ( -- array[i64 4] ) 0 4 fill | s | s ;
 ";
 
 #[test]
@@ -1961,7 +1962,7 @@ fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
     // still live: the two-live-mutable-references hazard the suspend rule
     // exists to stop.
     let err = check_error(
-        "type: Buf  data ^[u8 64]  len usize ;\n\
+        "type: Buf  data ^array[u8 64]  len usize ;\n\
          : two-parents ( &!Buf &!Buf -- )\n  | p q |\n  \
          True ~[ p ] ~[ q ] if\n  &!len\n  q &!len 1 +!\n  1 +! ;\n\
          : main ( -- ) ;\n",

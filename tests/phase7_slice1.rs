@@ -100,7 +100,7 @@ fn projection_resolves_per_instantiation() {
         "per-instantiation",
         "type: S1 a i64 ;\n\
          type: S2 a i64 b i64 ;\n\
-         type: Box 'T val 'T tag i64 ;\n\
+         type: Box['T] val 'T tag i64 ;\n\
          : show1 ( Box[S1] -- ) &tag @ . drop ;\n\
          : show2 ( Box[S2] -- ) &tag @ . drop ;\n\
          : main ( -- )\n  \
@@ -148,7 +148,7 @@ fn projection_in_a_called_word_body_matches_an_inline_one() {
 /// freed heap block.
 #[test]
 fn drop_of_owned_receiver_through_a_reference_chain_while_projected_is_diagnostic() {
-    let src = "type: Buf data ^[u8 4] len usize ;\n\
+    let src = "type: Buf data ^array[u8 4] len usize ;\n\
                : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
                : main ( -- ) mk &data &^ swap drop 0 >usize &> @ >i64 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-p7s1-uaf-{}.sth", std::process::id()));

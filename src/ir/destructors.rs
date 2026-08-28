@@ -23,7 +23,7 @@ pub fn synthesize_aggregate_destructors(
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     let Registries {
         structs,
         enums,
@@ -34,7 +34,8 @@ pub fn synthesize_aggregate_destructors(
     // R9: an override's body is lowered by `lower_word_parts`, so it can carry
     // materialized quotations of its own (element 0 is the destructor itself);
     // the glue-only cases stay single-func, wrapped so the `flatten` is uniform.
-    let struct_destructors: Vec<IrFunc> = structs
+    let mut struct_destructors: Vec<IrFunc> = Vec::new();
+    for (idx, _) in structs
         .layouts
         .iter()
         .enumerate()
@@ -42,23 +43,22 @@ pub fn synthesize_aggregate_destructors(
         // outputs, moved out by the unpack the instant the call returns, so a
         // destructor for the shell would free a linear one a second time.
         .filter(|(_, layout)| layout.is_linear && !layout.bundle)
-        .flat_map(|(idx, _)| {
-            let id = StructId::from_index(idx);
-            match overrides.get(&id) {
-                Some(word) => synthesize_struct_destructor_override(
-                    id,
-                    word,
-                    env,
-                    resolve,
-                    regs,
-                    resolved_fields,
-                    resolved_variant_fields,
-                    combinators,
-                ),
-                None => vec![synthesize_struct_destructor(id, env, resolve, regs)],
-            }
-        })
-        .collect();
+    {
+        let id = StructId::from_index(idx);
+        match overrides.get(&id) {
+            Some(word) => struct_destructors.extend(synthesize_struct_destructor_override(
+                id,
+                word,
+                env,
+                resolve,
+                regs,
+                resolved_fields,
+                resolved_variant_fields,
+                combinators,
+            )?),
+            None => struct_destructors.push(synthesize_struct_destructor(id, env, resolve, regs)),
+        }
+    }
     let enum_destructors = enums
         .layouts
         .iter()
@@ -79,12 +79,12 @@ pub fn synthesize_aggregate_destructors(
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
         .map(|(idx, _)| synthesize_array_destructor(ArrayId::from_index(idx), env, resolve, regs));
-    struct_destructors
+    Ok(struct_destructors
         .into_iter()
         .chain(enum_destructors)
         .chain(cell_destructors)
         .chain(array_destructors)
-        .collect()
+        .collect())
 }
 
 /// One step of the route a fused destructor loop walks from a type back to
@@ -354,7 +354,7 @@ fn synthesize_struct_destructor_override(
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
-) -> Vec<IrFunc> {
+) -> Result<Vec<IrFunc>, String> {
     // R9: element 0 is the override body itself, renamed to the destructor
     // symbol every call site already targets; any materialized quotations it
     // produced follow, lowered under their own symbols.
@@ -380,9 +380,10 @@ fn synthesize_struct_destructor_override(
         empty_splice_trait_calls(),
         empty_member_uid_seeds(),
         0,
-    );
+        empty_member_spans(),
+    )?;
     funcs[0].name = struct_drop_symbol(id);
-    funcs
+    Ok(funcs)
 }
 
 /// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
@@ -1196,7 +1197,7 @@ mod tests {
         let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 2 ~[ 0 Spy ] tabulate drop ;"));
         assert!(
             ir.funcs.iter().any(|f| f.name == "sooth_array_drop_0"),
-            "a linear [Spy 2] array gets a synthesized destructor"
+            "a linear array[Spy 2] array gets a synthesized destructor"
         );
         // A non-linear array gets none.
         let ir2 = lower_src(": w ( -- ) 0 4 fill drop ;");
@@ -1204,7 +1205,7 @@ mod tests {
             !ir2.funcs
                 .iter()
                 .any(|f| f.name.starts_with("sooth_array_drop")),
-            "a non-linear [i64 4] array gets no destructor"
+            "a non-linear array[i64 4] array gets no destructor"
         );
     }
 
@@ -1297,7 +1298,7 @@ mod tests {
             enums: &Enums::default(),
             arrays: &Arrays {
                 layouts: vec![ArrayLayout {
-                    name: "[i64 0]",
+                    name: "array[i64 0]",
                     elem: IrType::I64,
                     count: 0,
                     stride: 8,
@@ -1331,7 +1332,7 @@ mod tests {
         let array_drop = array_drop_symbol(ArrayId::from_index(0));
         assert!(
             ir.funcs.iter().any(|f| f.name == array_drop),
-            "a nullary-variant [Opt 3] array gets a synthesized destructor"
+            "a nullary-variant array[Opt 3] array gets a synthesized destructor"
         );
         let dtor = ir
             .funcs

@@ -436,7 +436,7 @@ fn a_zero_receiver_member_dispatches_through_an_explicit_instantiation() {
     let out = build_and_run(
         "zero-receiver-headline",
         "import: intrinsics * ;\n\
-         trait: Default 'T : fresh ( -- 'T ) ; ;\n\
+         trait: Default['T] : fresh ( -- 'T ) ; ;\n\
          type: Point x i64 ;\n\
          type: Other x i64 ;\n\
          impl: Default for Point\n\
@@ -445,7 +445,7 @@ fn a_zero_receiver_member_dispatches_through_an_explicit_instantiation() {
          impl: Default for Other\n\
            : fresh 22 Other ;\n\
          ;\n\
-         : f ( -- 'T: Default ) fresh ;\n\
+         : f ['T: Default] ( -- 'T ) fresh ;\n\
          : main ( -- )\n\
            f[Point] |p| &p &x @ . p drop\n\
            f[Other] |o| &o &x @ . o drop\n\
@@ -466,7 +466,7 @@ fn a_nullary_member_dispatches_off_an_operand_grounded_variable() {
     let out = build_and_run(
         "nullary-operand-grounded",
         "import: intrinsics * ;\n\
-         trait: Default 'T : fresh ( -- i64 ) ; ;\n\
+         trait: Default['T] : fresh ( -- i64 ) ; ;\n\
          type: Point x i64 ;\n\
          type: Other x i64 ;\n\
          impl: Default for Point\n\
@@ -475,7 +475,7 @@ fn a_nullary_member_dispatches_off_an_operand_grounded_variable() {
          impl: Default for Other\n\
            : fresh 22 ;\n\
          ;\n\
-         : g ( 'T: Default -- ) drop fresh . ;\n\
+         : g ['T: Default] ( 'T -- ) drop fresh . ;\n\
          : main ( -- )\n\
            1 Point g\n\
            2 Other g\n\
@@ -495,7 +495,7 @@ fn a_nested_receiver_member_is_still_rejected() {
     let err = build_error(
         "nested-receiver",
         "import: intrinsics * ;\n\
-         trait: Show 'T : sum ( [ 'T 4 ] -- i64 ) ; ;\n",
+         trait: Show['T] : sum ( array[ 'T 4 ] -- i64 ) ; ;\n",
     );
     assert!(
         err.contains(
@@ -520,8 +520,8 @@ fn a_nullary_member_of_two_traits_on_one_variable_is_ambiguous() {
     let err = build_error(
         "ambiguous-one-var",
         "import: intrinsics * ;\n\
-         trait: A 'T : fresh ( -- 'T ) ; ;\n\
-         trait: B 'T : fresh ( -- 'T ) ; ;\n\
+         trait: A['T] : fresh ( -- 'T ) ; ;\n\
+         trait: B['T] : fresh ( -- 'T ) ; ;\n\
          type: Point x i64 ;\n\
          impl: A for Point\n\
            : fresh 1 Point ;\n\
@@ -529,7 +529,7 @@ fn a_nullary_member_of_two_traits_on_one_variable_is_ambiguous() {
          impl: B for Point\n\
            : fresh 2 Point ;\n\
          ;\n\
-         : f ( -- 'T: A B ) fresh ;\n\
+         : f ['T: A B] ( -- 'T ) fresh ;\n\
          : main ( -- ) f[Point] drop ;\n",
     );
     assert!(
@@ -548,8 +548,8 @@ fn a_nullary_member_across_two_variables_is_ambiguous() {
     let err = build_error(
         "ambiguous-two-vars",
         "import: intrinsics * ;\n\
-         trait: A 'T : fresh ( -- 'T ) ; ;\n\
-         trait: B 'T : fresh ( -- 'T ) ; ;\n\
+         trait: A['T] : fresh ( -- 'T ) ; ;\n\
+         trait: B['T] : fresh ( -- 'T ) ; ;\n\
          type: Point x i64 ;\n\
          type: Other x i64 ;\n\
          impl: A for Point\n\
@@ -558,7 +558,7 @@ fn a_nullary_member_across_two_variables_is_ambiguous() {
          impl: B for Other\n\
            : fresh 2 Other ;\n\
          ;\n\
-         : f ( -- 'T: A 'U: B ) fresh drop fresh ;\n\
+         : f ['T: A 'U: B] ( -- 'T 'U ) fresh drop fresh ;\n\
          : main ( -- ) f[Point Other] drop ;\n",
     );
     assert!(

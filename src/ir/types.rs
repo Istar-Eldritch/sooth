@@ -558,12 +558,12 @@ mod tests {
 
     #[test]
     fn ir_type_of_array_and_usize_map() {
-        let m = module_of(": w ( [i64 4] usize -- ) drop drop ;");
+        let m = module_of(": w ( array[i64 4] usize -- ) drop drop ;");
         let arr = m.resolve_type_name("usize").unwrap();
         assert_eq!(ir_type_of(arr), IrType::Usize);
-        // The `[i64 4]` shape is interned as ArrayId 0.
+        // The `array[i64 4]` shape is interned as ArrayId 0.
         assert_eq!(
-            ir_type_of(Type::Array(ArrayId::from_index(0), "[i64 4]")),
+            ir_type_of(Type::Array(ArrayId::from_index(0), "array[i64 4]")),
             IrType::Array(ArrayId::from_index(0))
         );
     }

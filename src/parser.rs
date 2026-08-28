@@ -76,7 +76,7 @@ fn prepass_type_decls(
                     // `prepass_generic_typedefs`, run over every file in the
                     // closure once this pass has registered every concrete
                     // name a generic field might forward-reference.
-                    if header_ty_var_count(tokens, i + 2) > 0 {
+                    if header_is_generic(tokens, i + 2) {
                         continue;
                     }
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
@@ -96,18 +96,51 @@ fn prepass_type_decls(
     Ok(decls)
 }
 
-/// The count of `'`-prefixed tokens starting at `start` (Phase 5 slice 1,
-/// R1/D2): a `type:` header's bound type variables, immediately following its
-/// declared name, zero for a concrete (non-generic) declaration. Shared by
-/// the pre-pass (which skips registering a generic header into the concrete
+/// P7.S6 (R5/R10): whether a `type:` header at `start` is generic -- i.e.
+/// whether it opens a bracketed type-variable list (`type: Box['T]`), which
+/// is the only spelling. A bare lookahead, no consumption. Shared by the
+/// pre-pass (which skips registering a generic header into the concrete
 /// registries) and the parser's own lookahead before dispatching to the
-/// generic or concrete production.
-fn header_ty_var_count(tokens: &[(Token, Span)], start: usize) -> usize {
-    let mut n = 0;
-    while matches!(tokens.get(start + n), Some((Token::Word(w), _)) if w.starts_with('\'')) {
-        n += 1;
+/// generic or concrete production, so the three sites can never disagree.
+/// The retired postfix form (`type: Box 'T`) is not merely non-generic: the
+/// concrete productions raise `reject_postfix_header_var` on it rather than
+/// letting it mis-parse as a concrete declaration.
+fn header_is_generic(tokens: &[(Token, Span)], start: usize) -> bool {
+    matches!(tokens.get(start), Some((Token::LBracket, _)))
+}
+
+/// P7.S6 (R10): the retired postfix header form, in which a `type:`/`trait:`
+/// declaration bound its type variables as bare `'`-prefixed words after its
+/// name. Without this the narrowed `header_is_generic` would silently classify
+/// `type: Box 'T val 'T ;` as *concrete* and the field loop would blame `'T`
+/// for not being a field name.
+fn postfix_header_var_error(kind: &str, decl_name: &str, var: &str, span: Span) -> String {
+    format!(
+        "error: `{kind} {decl_name} {var}` at line {}, col {} binds its type variables in the retired postfix form; write `{kind} {decl_name}[{var}]`",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R10): raise `postfix_header_var_error` when the token at `start` --
+/// the one directly following a declaration's name -- is a `'`-prefixed word.
+/// Called from both concrete `type:` productions, which is every entry path
+/// that reads a `type:` header -- including the REPL's own `type:`-line
+/// readers, which arrive without the module pre-pass. Not from the pre-pass:
+/// there it would only fire on a `type:` the parser never dispatches to a
+/// production at all (one inside a word body), where blaming the header form
+/// hides the real defect.
+fn reject_postfix_header_var(
+    kind: &str,
+    decl_name: &str,
+    tokens: &[(Token, Span)],
+    start: usize,
+) -> Result<(), String> {
+    if let Some((Token::Word(w), span)) = tokens.get(start) {
+        if w.starts_with('\'') {
+            return Err(postfix_header_var_error(kind, decl_name, w, *span));
+        }
     }
-    n
+    Ok(())
 }
 
 /// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
@@ -221,6 +254,16 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
             span.line, span.col
         ));
     }
+    // P7.S6 (R3): `array` is the named array type's spelling, intercepted at
+    // every type-position entry ahead of every user registry, so a type or
+    // variant declared under that name would be silently unreachable rather
+    // than merely shadowed -- the same reason `Slice` is reserved just above.
+    if matches!(kind, "type" | "variant") && name == ARRAY_TYPE_NAME {
+        return Err(format!(
+            "error: `{name}` is reserved for the array type syntax (`{ARRAY_TYPE_NAME}[T N]`) and cannot be used as a {kind} name at line {}, col {}",
+            span.line, span.col
+        ));
+    }
     // P7.S3h: `owning` is intercepted at every type-position entry ahead of
     // every user registry, so a type or variant declared under that name would
     // be silently unreachable rather than merely shadowed -- the same reason
@@ -233,6 +276,12 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     }
     Ok(())
 }
+
+/// P7.S6 (R1): the named array type's spelling. `array[T N]` resolves
+/// through the interned array registry, so it is intercepted by name ahead
+/// of every user lookup exactly as `Slice[T]` is. Reserved against
+/// `type:`/variant names by `reject_reserved_name`.
+pub const ARRAY_TYPE_NAME: &str = "array";
 
 /// P7 slice 3c (R1.1): the one surface spelling of a slice type. Not a
 /// registered `type:` name and not a generic header: `Slice[T]` resolves
@@ -378,7 +427,7 @@ fn bare_trait_member_error(trait_name: &str, member: &str, span: Span) -> String
 }
 
 // P7.S4 (R5/R6): render a `PolyType` target shape for the synthesized member
-// word name, so two generic impls for one trait (`['T N]` and `['T 4]`)
+// word name, so two generic impls for one trait (`['T N]` and `array['T 4]`)
 // produce distinct names. Unlike `poly_type_str` (which needs a `PolySig`
 // for variable name tables), this uses positional ids (`'T0`, `'N0`) since
 // the synth name is a compiler-internal spelling, never shown to the user.
@@ -417,7 +466,7 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
 /// P7.S4 (R1): an `impl:` target with a bound on one of its variables
 /// (`'T: Copy`). Bounds on impl variables are out of scope this slice.
 fn impl_target_bound_error() -> String {
-    "error: an `impl:` target variable may not carry an inline bound; use a `where`-clause instead (e.g. `impl: Show for ['T N] where 'T: Show`)".to_string()
+    "error: an `impl:` target variable may not carry an inline bound; use a `where`-clause instead (e.g. `impl: Show for array['T 'N] where 'T: Show`)".to_string()
 }
 
 /// P7.S4 (R1): an `impl:` target with a row variable (`..s`). Row variables
@@ -520,7 +569,7 @@ fn impl_member_binder_shadows_itself_error(member: &str, span: Span) -> String {
 ///
 /// P7.S4 (R5/R6): for a generic target the `PolyType` shape is rendered via
 /// `poly_type_shape_str` so two generic impls for one trait (e.g. `['T N]`
-/// and `['T 4]`) produce distinct synth names. A concrete target keeps the
+/// and `array['T 4]`) produce distinct synth names. A concrete target keeps the
 /// existing `target.name()` rendering.
 fn synth_member_word_name(
     member: &str,
@@ -766,7 +815,7 @@ pub struct ParsedBodies {
 /// `structs`/`enums` (own module first, then imports). `import:` forms are
 /// consumed and discarded (the driver resolved the graph from a prior scan);
 /// `export:` forms accumulate into the returned list (R7). Array/cell/ref
-/// shapes intern into the shared registries so two files' `[i64 8]` dedupe to
+/// shapes intern into the shared registries so two files' `array[i64 8]` dedupe to
 /// one `ArrayId` (R13).
 #[allow(clippy::too_many_arguments)]
 pub fn parse_bodies(
@@ -1218,12 +1267,12 @@ enum RawTy {
     /// top-level row, so it is already an id in that row id space).
     Quotation(Vec<RawTy>, Vec<RawTy>, bool, Option<u32>, Option<u32>),
     /// Slice 13 (R-A2): a `&`-led slot whose referent may itself be variable
-    /// (`&'T`, `&!['T 'N]`), folded to `PolyType::Ref` -- or to
+    /// (`&'T`, `&!array['T 'N]`), folded to `PolyType::Ref` -- or to
     /// `Concrete(Type::Ref)` when the referent folds fully concrete -- by
     /// `raw_to_poly_type`.
     Ref(Box<RawTy>, bool),
     /// P7.S3n (R3): a `^`-led slot whose payload may itself be variable
-    /// (`^'T`, `^['T 4]`), folded to `PolyType::OwnedCell` -- or to
+    /// (`^'T`, `^array['T 4]`), folded to `PolyType::OwnedCell` -- or to
     /// `Concrete(Type::OwnedCell)` when the payload folds fully concrete --
     /// by `raw_to_poly_type`, exactly as `Ref` folds.
     OwnedCell(Box<RawTy>),
@@ -1268,7 +1317,6 @@ struct PolyBuilder {
     ty_index: HashMap<String, u32>,
     len_index: HashMap<String, u32>,
     kind: HashMap<String, VarKind>,
-    bounds: Vec<(u32, Bound)>,
     row_in: Option<u32>,
     row_out: Option<u32>,
     /// Slice 10a (R7): the row-name id table, shared by the top-level row
@@ -1284,9 +1332,12 @@ struct PolyBuilder {
     /// checks each one once the whole signature is known, since only then can
     /// "is this the signature's own top-level row" be answered.
     pending_quotation_rows: Vec<(u32, String, Span)>,
-    /// P7.S4 (R1): when `true`, `parse_poly_ty_var` does not check for a `:`-
-    /// bound after a type variable. Set by `parse_impl_target` so the `:`
-    /// starting a member body (`: show ...`) is not consumed as a bound colon.
+    /// P7.S4 (R1): when `true`, only a *glued* `'T:` counts as a bound, so
+    /// the `:` starting a member body (`: show ...`) is not mistaken for a
+    /// bound colon. Set by `parse_impl_target`. P7.S6 (R7a): it is also the
+    /// selector between `parse_poly_ty_var`'s two rejections -- an `impl:`
+    /// target gets `impl_target_bound_error`, a word or trait-member effect
+    /// gets `bound_in_effect_error`.
     forbid_bounds: bool,
 }
 
@@ -1410,7 +1461,11 @@ impl PolyBuilder {
             inputs,
             outputs,
             row_out: self.row_out,
-            bounds: self.bounds,
+            // P7.S6 (R6/R7): bounds are declared only in a word's bound
+            // bracket, which `attach_bracket_bounds` fills in *after* this
+            // signature is built (so ids stay effect-derived). Nothing an
+            // effect can contain declares one.
+            bounds: Vec::new(),
             ty_var_names: self.ty_names,
             len_var_names: self.len_names,
             row_var_names: self.row_names,
@@ -1467,6 +1522,26 @@ fn row_var_misplaced_error(name: &str, span: Span) -> String {
 fn annotation_missing_arrow_error(span: Span) -> String {
     format!(
         "parse error: a quotation annotation must be written in full as `( inputs -- outputs )`, found `)` with no `--` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R4a): a bracket in a type position holding no top-depth `--`.
+/// After R4's retirement a bare `[` opens a quotation effect
+/// unconditionally, so this is what an author who meant an array now gets --
+/// hence the `array[T N]` half of the advice. That half is dropped when the
+/// bracket was opened with `~[`, which has no array reading anywhere in the
+/// grammar (every type-position reader rejects a bare `Token::TildeLBracket`
+/// outright), so offering it would send the author somewhere the parser
+/// refuses.
+fn quotation_effect_missing_arrow_error(span: Span, opened_with_tilde: bool) -> String {
+    let alternative = if opened_with_tilde {
+        ""
+    } else {
+        " (for an array type write `array[T N]`)"
+    };
+    format!(
+        "parse error: a quotation effect at line {}, col {} must be written in full as `[ inputs -- outputs ]`, found no top-depth `--`{alternative}",
         span.line, span.col
     )
 }
@@ -1543,9 +1618,14 @@ fn ref_no_referent_error(word: &str, span: Span) -> String {
     )
 }
 
-fn bound_on_use_error(name: &str, span: Span) -> String {
+/// P7.S6 (R7): a bound written inside a stack effect. Bounds live in the
+/// word's own bound bracket and only there, so the effect can never be the
+/// place a bound is *declared*. Selected against `impl_target_bound_error` by
+/// `PolyBuilder::forbid_bounds` inside `parse_poly_ty_var`, which is the only
+/// place that knows which of the two entry paths detected it.
+fn bound_in_effect_error(name: &str, span: Span) -> String {
     format!(
-        "error: bound on `{name}` at line {}, col {} must be written at its binding (first) occurrence, not a use",
+        "error: bound on `{name}` at line {}, col {} may not be written inside a stack effect; declare it in the word's bound bracket (e.g. `: f[{name}: Copy] ( ... )`)",
         span.line, span.col
     )
 }
@@ -1587,7 +1667,7 @@ fn var_kind_conflict_error(name: &str, span: Span) -> String {
 }
 
 /// Phase 5 slice 1 (R1, round-3 review): a generic `type:` header binding
-/// the same variable name twice (`type: Bad 'T 'T ...`). Caught here, at the
+/// the same variable name twice (`type: Bad['T 'T] ...`). Caught here, at the
 /// binding site, rather than left to surface as an unbound-or-phantom error
 /// once a field references the name: the second binding shadows nothing (the
 /// header has no scoping), so a field naming it would otherwise resolve
@@ -1596,6 +1676,25 @@ fn var_kind_conflict_error(name: &str, span: Span) -> String {
 fn duplicate_generic_ty_var_error(name: &str, decl_name: &str, span: Span) -> String {
     format!(
         "error: type variable `{name}` at line {}, col {} is bound twice by `type: {decl_name}`'s header",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R5): an empty type-variable bracket in a `type:`/`trait:` header
+/// (`type: Box[]`, `trait: Ord[]`). The bracket is present but binds nothing.
+fn empty_header_bracket_error(decl_name: &str, span: Span) -> String {
+    format!(
+        "error: empty type-variable bracket in `{decl_name}` at line {}, col {} (expected one or more `'`-prefixed variables, e.g. `type: {decl_name}['T]`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R5): a token inside a header bracket that is neither a `'`-prefixed
+/// variable nor `]`. The bracket's contents are `'`-prefixed words only (no
+/// bounds on a `type:`/`trait:` header), so anything else is a located error.
+fn header_bracket_non_var_error(decl_name: &str, tok: &Token, span: Span) -> String {
+    format!(
+        "error: expected a type variable (`'T`) or `]` inside `{decl_name}`'s bracket at line {}, col {}, found {tok:?}",
         span.line, span.col
     )
 }
@@ -1624,10 +1723,9 @@ fn phantom_ty_var_error(decl_name: &str, name: &str, span: Span) -> String {
 
 /// Phase 5 slice 1: the generic path's twin of the concrete odd-field-count
 /// error. It names the header's bound variables because the likeliest way to
-/// reach it is writing a `'`-prefixed *field* name directly after the type
-/// name (`type: Foo 'bar i64 ;`), which the header scan consumes as a type
-/// parameter -- leaving the plain message pointing at a token the author never
-/// got wrong.
+/// reach it is writing a `'`-prefixed *field* name inside the header bracket
+/// (`type: Foo['bar] i64 ;`), which binds it as a type parameter -- leaving the
+/// plain message pointing at a token the author never got wrong.
 fn generic_odd_field_count_error(
     decl_name: &str,
     ty_vars: &[(String, Span)],
@@ -1637,7 +1735,7 @@ fn generic_odd_field_count_error(
 ) -> String {
     let header: Vec<&str> = ty_vars.iter().map(|(n, _)| n.as_str()).collect();
     format!(
-        "parse error: field `{field_name}` has no type before `{before}` at line {}, col {} (odd field-token count in the body of generic `type: {decl_name} {}`; a `'`-prefixed word after the type name binds a type parameter)",
+        "parse error: field `{field_name}` has no type before `{before}` at line {}, col {} (odd field-token count in the body of generic `type: {decl_name}[{}]`; a `'`-prefixed word inside the header bracket binds a type parameter)",
         span.line,
         span.col,
         header.join(" "),
@@ -1668,6 +1766,17 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
     )
 }
 
+/// P7.S6 (R2): `array` in a type position with no following `[` is a located
+/// error naming the required form, not "unknown type `array`". Raised at the
+/// single funnel `resolve_type_or_apply`, which every bare-word type reader
+/// passes through.
+fn array_without_bracket_error(span: Span) -> String {
+    format!(
+        "error: `{ARRAY_TYPE_NAME}` must be followed by `[T N]` to form an array type at line {}, col {}",
+        span.line, span.col
+    )
+}
+
 /// P7.S3t (R2): a glued `[` opened an explicit type instantiation and the end
 /// of input arrived before its `]`. Named after the call rather than reported
 /// as a generic "expected `]`", since the construct only exists because of the
@@ -1685,6 +1794,36 @@ fn unterminated_instantiation_error(name: &str, span: Span) -> String {
 fn empty_instantiation_error(name: &str, span: Span) -> String {
     format!(
         "error: `{name}[]` at line {}, col {} instantiates nothing; name one concrete type per declared variable, or insert a space for a quotation literal",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): an empty bound bracket on a word definition (`: f[] ( ... )`).
+/// The bracket is present but declares no variables.
+fn empty_bound_bracket_error(span: Span) -> String {
+    format!(
+        "error: empty bound bracket at line {}, col {} (expected one or more `'`-prefixed variable declarations, e.g. `['T: Copy]`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): a token inside a bound bracket that is neither a `'`-prefixed
+/// variable nor `]`. Inside the bracket only variable declarations and the
+/// closing `]` are legal.
+fn bound_bracket_non_var_error(tok: &Token, span: Span) -> String {
+    format!(
+        "error: expected a type variable (`'T`) or `]` inside the bound bracket at line {}, col {}, found {tok:?}",
+        span.line, span.col
+    )
+}
+
+/// P7.S6 (R6): a bracket-declared variable that never appears in the word's
+/// effect. The bracket *adds* a bound declaration; the effect keeps every
+/// mention of the variable. A variable that appears in the bracket but not
+/// the effect would leave a bound on a variable with no slot.
+fn bracket_var_unused_error(name: &str, span: Span, word_name: &str) -> String {
+    format!(
+        "error: type variable `{name}` declared in the bound bracket of `{word_name}` at line {}, col {} never appears in the effect",
         span.line, span.col
     )
 }
@@ -1727,7 +1866,7 @@ fn generic_field_type_str(pty: &PolyType, ty_vars: &[(String, Span)]) -> String 
                 // array arm only ever builds `Len::Concrete`.
                 Len::Var(_) => unreachable!("a generic `type:` field has no length variable"),
             };
-            format!("[{} {}]", generic_field_type_str(elem, ty_vars), n)
+            format!("array[{} {}]", generic_field_type_str(elem, ty_vars), n)
         }
         PolyType::Ref(referent, mutable) => format!(
             "&{}{}",
@@ -1764,18 +1903,18 @@ fn quotation_field_ty_var_error(decl_name: &str, var: &str, span: Span) -> Strin
 
 /// P7.S3n (R8): reject a **growing** generic application anywhere in a
 /// field's type tree -- an application one of whose arguments is *compound*
-/// and mentions one of the declaration's own type variables (`L[['T 2]]`,
+/// and mentions one of the declaration's own type variables (`L[array['T 2]]`,
 /// `L[^'T]`, `L[&'T]`). Each such hop would instantiate the header at a
 /// strictly larger argument than the last, forever.
 ///
 /// The walk descends through every wrapper, not just a field whose own top
 /// level is an application: `^L[^'T]` is a cell over the application, and
 /// `[Ent['K 'V] 8]` is an array over one. An argument that is fully concrete
-/// at any depth (`L[[i64 2]]`) is inert -- it carries no variable to grow --
+/// at any depth (`L[array[i64 2]]`) is inert -- it carries no variable to grow --
 /// and a bare `'T` argument passes through unchanged, so both are admitted.
 ///
 /// Accepted over-rejection, stated so a future slice can lift it: a
-/// *non-recursive* wrapping application (`Outer 'T f Ent[['T 2] i64]`, where
+/// *non-recursive* wrapping application (`Outer 'T f Ent[array['T 2] i64]`, where
 /// `Ent` never names `Outer` back) also terminates, and is rejected here
 /// anyway. Admitting it needs an SCC pass over a header-level dependency
 /// graph, which nothing currently wanted requires -- `Map`'s backing store is
@@ -2025,12 +2164,24 @@ impl<'t> Parser<'t> {
         if declares_inline {
             self.pos += 1;
         }
+        // P7.S6 (R6): the optional bound bracket sits after `inline` and
+        // before `(`, e.g. `: max['T: Copy Ord] ( 'T 'T -- 'T )`. Parsed into
+        // a side table and attached to effect-derived ids after
+        // `parse_poly_effect` (never pre-interned), so ids stay effect-derived.
+        let bound_bracket = self.parse_optional_bound_bracket()?;
+        // A word carrying a non-empty bracket takes the `PolySig` path
+        // regardless of `effect_has_variable`.
+        let force_poly = bound_bracket.as_ref().is_some_and(|b| !b.is_empty());
         self.expect(Token::LParen)?;
         // R1/R2: a variable-bearing effect (`'T`, `'N`, `..s`) parses into a
         // `PolySig`; every other effect stays a concrete `StackEffect`, byte
         // for byte as before (the whole regression guarantee, R15).
-        let (effect, poly) = if self.effect_has_variable() {
-            let sig = self.parse_poly_effect()?;
+        let (effect, poly) = if force_poly || self.effect_has_variable() {
+            let mut sig = self.parse_poly_effect()?;
+            // R6: attach bracket bounds to the ids the effect interned.
+            if let Some(bracket) = &bound_bracket {
+                self.attach_bracket_bounds(&mut sig, bracket, &name)?;
+            }
             (StackEffect::default(), Some(Box::new(sig)))
         } else {
             (self.parse_effect()?, None)
@@ -2058,6 +2209,104 @@ impl<'t> Parser<'t> {
             span: name_span,
             declared_globals,
         })
+    }
+
+    /// P7.S6 (R6): parse the optional bound bracket `[ 'T: Copy 'U: Ord ]` that
+    /// sits after `inline` and before `(` in a word definition. Returns
+    /// `None` if no bracket is present, or a side table of
+    /// `(name, span, Vec<Bound>)` entries. The bracket is parsed into a local
+    /// side table and attached to effect-derived ids *after* `parse_poly_effect`
+    /// (never pre-interned), so ids stay effect-derived and `PolySig.ty_var_names`
+    /// order is unchanged.
+    ///
+    /// The bracket's grammar (R6a): `[' var_decl+ ]`, where each `var_decl`
+    /// is `'T` or `'T: bound_list`. A `bound_list` ends at the next `'`-prefixed
+    /// word or `]`; an unrecognised name inside a bound list is an
+    /// unknown-capability error (bracket mode), not a silent break.
+    #[allow(clippy::type_complexity)]
+    fn parse_optional_bound_bracket(
+        &mut self,
+    ) -> Result<Option<Vec<(String, Span, Vec<Bound>)>>, String> {
+        if !matches!(self.peek(), Some((Token::LBracket, _))) {
+            return Ok(None);
+        }
+        let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
+        self.pos += 1; // consume `[`
+        let mut entries: Vec<(String, Span, Vec<Bound>)> = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                Some((Token::Word(w), span)) if w.starts_with('\'') => {
+                    let glued_colon = w.ends_with(':') && w.len() > 1;
+                    let (name, span) = if glued_colon {
+                        (w[..w.len() - 1].to_string(), *span)
+                    } else {
+                        let (nw, ns) = self.expect_word_any_spanned()?;
+                        (nw, ns)
+                    };
+                    if glued_colon {
+                        self.pos += 1;
+                    }
+                    // Check for a standalone `:` (not glued).
+                    let bound_follows = if glued_colon {
+                        true
+                    } else {
+                        matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
+                    };
+                    if bound_follows && !glued_colon {
+                        self.pos += 1;
+                    }
+                    let bounds = if bound_follows {
+                        self.parse_capabilities(span, true)?
+                    } else {
+                        Vec::new()
+                    };
+                    if entries.iter().any(|(n, _, _)| n == &name) {
+                        return Err(duplicate_generic_ty_var_error(
+                            &name,
+                            "<bound bracket>",
+                            span,
+                        ));
+                    }
+                    entries.push((name, span, bounds));
+                }
+                Some((tok, span)) => {
+                    return Err(bound_bracket_non_var_error(tok, *span));
+                }
+                None => return Err(self.eof_error("`]` (unterminated bound bracket)")),
+            }
+        }
+        if entries.is_empty() {
+            return Err(empty_bound_bracket_error(bracket_span));
+        }
+        Ok(Some(entries))
+    }
+
+    /// P7.S6 (R6): attach bracket-declared bounds to the ids the effect
+    /// interned. Each bracket entry's variable name is looked up in
+    /// `sig.ty_var_names`; a name that never appears in the effect is a
+    /// located error (it would leave a bound on a variable with no slot).
+    fn attach_bracket_bounds(
+        &self,
+        sig: &mut PolySig,
+        bracket: &[(String, Span, Vec<Bound>)],
+        word_name: &str,
+    ) -> Result<(), String> {
+        for (name, span, bounds) in bracket {
+            let id = sig
+                .ty_var_names
+                .iter()
+                .position(|n| n == name)
+                .ok_or_else(|| bracket_var_unused_error(name, *span, word_name))?
+                as u32;
+            for b in bounds {
+                sig.bounds.push((id, *b));
+            }
+        }
+        Ok(())
     }
 
     /// Parse one `import:` form (R6, regrammared by P8 slice 1a OQ3):
@@ -2204,7 +2453,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    /// P7.S3e (R1/R3, decision 1): `trait: TraitName 'T : member ( &'T ... --
+    /// P7.S3e (R1/R3, decision 1): `trait: TraitName['T] : member ( &'T ... --
     /// ... ) ; : member2 ( ... ) ; ... ;` -- a trait name, its single (implicit)
     /// type variable header, then one or more member signatures over that
     /// variable. Single-type-variable traits only (R16): a second header
@@ -2215,20 +2464,44 @@ impl<'t> Parser<'t> {
         let span = self.expect_word("trait:")?;
         let (name, name_span) = self.expect_word_any_spanned()?;
         reject_reserved_name("trait", &name, name_span)?;
+        // P7.S6 (R5/R10): a `trait:` binds its single type variable in a
+        // *mandatory* bracket. There is no such thing as a non-generic trait,
+        // so the bracket is not optional the way a `type:`'s is.
         let (ty_var, ty_var_span) = match self.peek() {
-            Some((Token::Word(w), s)) if w.starts_with('\'') => {
-                let (w, s) = (w.clone(), *s);
-                self.pos += 1;
-                (w, s)
+            Some((Token::LBracket, _)) => {
+                let vars = self.parse_header_bracket(&name)?;
+                if vars.len() > 1 {
+                    return Err(multi_variable_trait_error(&name, vars[1].1));
+                }
+                vars.into_iter()
+                    .next()
+                    .expect("parse_header_bracket rejects an empty bracket")
             }
+            // R10: the retired postfix variable (`trait: Ord 'T`). Its own
+            // error rather than the neither-form one below, which would
+            // wrongly claim no type variable was written at all.
+            Some((Token::Word(w), s)) if w.starts_with('\'') => {
+                return Err(postfix_header_var_error("trait:", &name, w, *s));
+            }
+            // Neither form: the pre-existing located error, naming the bracket
+            // form. Both arms name it, not just the first, so a `trait: Ord`
+            // at EOF still advises the bracket rather than the postfix word.
             Some((tok, s)) => {
                 return Err(format!(
-                    "parse error: expected a type variable (`'T`) after `trait: {name}`, found {tok:?} at line {}, col {}",
+                    "parse error: expected a type variable or bracketed header (`trait: {name}['T]`) after `trait: {name}`, found {tok:?} at line {}, col {}",
                     s.line, s.col
                 ));
             }
-            None => return Err(self.eof_error("a type variable (`'T`)")),
+            None => {
+                return Err(self.eof_error(&format!(
+                    "a type variable (`'T`) or bracketed header (`trait: {name}['T]`)"
+                )))
+            }
         };
+        // A `'`-prefixed word *after* the bracket is a second header variable
+        // written in the retired postfix form; `multi_variable_trait_error` is
+        // the sharper report of the two, since one variable is the hard limit
+        // either way.
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             return Err(multi_variable_trait_error(&name, ty_var_span));
         }
@@ -2278,8 +2551,15 @@ impl<'t> Parser<'t> {
                     if declares_inline {
                         self.pos += 1;
                     }
+                    // P7.S6 (R6): the same bound bracket `parse_worddef`
+                    // admits, in the same slot relative to `inline`. A
+                    // trait member's implicit header variable is unchanged.
+                    let bound_bracket = self.parse_optional_bound_bracket()?;
                     self.expect(Token::LParen)?;
-                    let sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    let mut sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    if let Some(bracket) = &bound_bracket {
+                        self.attach_bracket_bounds(&mut sig, bracket, &member_name)?;
+                    }
                     self.expect(Token::RParen)?;
                     self.expect(Token::Semicolon)?;
                     members.push(TraitMember {
@@ -2385,7 +2665,7 @@ impl<'t> Parser<'t> {
     ///
     /// P7.S4 (R1): the target is a `PolyType` pattern over the impl's own
     /// variables (`['T N]`, `'T`, `Box['T]`), not a concrete `Type`. A concrete
-    /// target (`Point`, `[i64 4]`) folds to `PolyType::Concrete(t)` and keeps
+    /// target (`Point`, `array[i64 4]`) folds to `PolyType::Concrete(t)` and keeps
     /// the existing monomorphic path; a generic target carries variables and
     /// the member word is polymorphic.
     fn parse_impl_decl(&mut self) -> Result<(ImplDecl, Vec<WordDef>), String> {
@@ -2447,18 +2727,13 @@ impl<'t> Parser<'t> {
     /// `^'T`, `Box['T]`) but forbids the bound syntax (`'T: Copy`, the
     /// `:`-bound arm of `parse_poly_ty_var`) and row variables (`..s`), which
     /// are out of scope for an impl target. A concrete target (`Point`,
-    /// `[i64 4]`) folds to `PolyType::Concrete(t)`.
+    /// `array[i64 4]`) folds to `PolyType::Concrete(t)`.
     fn parse_impl_target(&mut self) -> Result<ImplTarget, String> {
         let mut builder = PolyBuilder {
             forbid_bounds: true,
             ..PolyBuilder::default()
         };
         let raw = self.parse_poly_slot(&mut builder, false)?;
-        if !builder.bounds.is_empty() {
-            // A glued bound (`'T: Copy`) bypassed `forbid_bounds`'s standalone
-            // `:` check. Reject it explicitly.
-            return Err(impl_target_bound_error());
-        }
         if builder.row_in.is_some() || builder.row_out.is_some() {
             return Err(impl_target_row_var_error());
         }
@@ -2477,12 +2752,11 @@ impl<'t> Parser<'t> {
     /// target's already-parsed `ty_var_names` table (erroring on an unknown
     /// name), then `:` and the bound list reuse `parse_capabilities` (the
     /// existing bound-list parser). This deliberately does NOT reuse
-    /// `parse_poly_ty_var`: that function interns the variable via
-    /// `intern_ty_var` and rejects bounds on a non-binding (already-interned)
-    /// occurrence (`bound_on_use_error`), but `parse_impl_target` has already
-    /// interned every target variable, so a `where`-clause re-mention is a
-    /// *use*, not a binding. A target with no `where`-clause behaves exactly
-    /// as today (`bounds: vec![]`).
+    /// `parse_poly_ty_var`: since P7.S6 (R7) that function *rejects* every
+    /// bound it detects (bounds belong in a word's bound bracket, and on an
+    /// `impl:` target in this `where`-clause), so routing a `where`-clause
+    /// through it would reject the one spelling that is legal here. A target
+    /// with no `where`-clause behaves exactly as today (`bounds: vec![]`).
     fn parse_impl_bounds(&mut self, target: &ImplTarget) -> Result<Vec<(u32, Bound)>, String> {
         if !matches!(self.peek(), Some((Token::Word(w), _)) if w == "where") {
             return Ok(Vec::new());
@@ -2551,7 +2825,7 @@ impl<'t> Parser<'t> {
             if !glued_colon {
                 self.pos += 1; // consume standalone `:`
             }
-            let caps = self.parse_capabilities(colon_span)?;
+            let caps = self.parse_capabilities(colon_span, false)?;
             for b in caps {
                 bounds.push((id, b));
             }
@@ -2970,11 +3244,17 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             return self.parse_poly_quotation_inner(builder, true, word_is_output);
         }
-        if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                return self.parse_poly_quotation(builder, word_is_output);
-            }
+        // P7.S6 (R1): `array[T N]` -- the named array type. The word
+        // `array` followed by `[` enters the poly array reader, which threads
+        // `builder` so a variable element/count is preserved.
+        if self.array_type_ahead() {
+            self.pos += 1;
             return self.parse_poly_array(builder, word_is_output);
+        }
+        // P7.S6 (R4): a bare `[` is a quotation effect unconditionally; an
+        // array is spelled `array[T N]` and was taken by the arm above.
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            return self.parse_poly_quotation(builder, word_is_output);
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
@@ -2992,7 +3272,7 @@ impl<'t> Parser<'t> {
                 let sigil_len = if w.starts_with("&!") { 2 } else { 1 };
                 let mutable = sigil_len == 2;
                 let remainder = &w[sigil_len..];
-                // Bare sigil (`& 'T`, `&['T 4]`): the referent is a genuine
+                // Bare sigil (`& 'T`, `&array['T 4]`): the referent is a genuine
                 // following token, so recurse into it as a poly slot.
                 if remainder.is_empty() {
                     self.pos += 1;
@@ -3017,6 +3297,18 @@ impl<'t> Parser<'t> {
                     let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
                     return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
+                // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
+                // glued into one word, so the `[`-dispatch sites cannot
+                // reach this spelling. Intercept `array` ahead of the
+                // concrete-reader fallthrough, dispatching into the *poly*
+                // array reader so a variable element is preserved.
+                if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    self.pos += 1;
+                    let inner = self.parse_poly_array(builder, word_is_output)?;
+                    return Ok(RawTy::Ref(Box::new(inner), mutable));
+                }
             }
         }
         // P7.S3n (R3): a `^`-led slot, intercepted before the
@@ -3031,7 +3323,7 @@ impl<'t> Parser<'t> {
             if w.starts_with('^') {
                 let run_len = w.chars().take_while(|&c| c == '^').count();
                 let remainder = &w[run_len..];
-                // Bare run (`^ 'T`, `^['T 4]`): the payload is a genuine
+                // Bare run (`^ 'T`, `^array['T 4]`): the payload is a genuine
                 // following token, so recurse into it as a poly slot.
                 let inner = if remainder.is_empty() {
                     self.pos += 1;
@@ -3052,6 +3344,13 @@ impl<'t> Parser<'t> {
                     };
                     self.pos += 1;
                     Some(self.parse_poly_ty_var(builder, &remainder, remainder_span)?)
+                } else if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    // P7.S6 (R1a): `^array['T 4]` -- same interception as the
+                    // `&` arm above, dispatching into the poly array reader.
+                    self.pos += 1;
+                    Some(self.parse_poly_array(builder, word_is_output)?)
                 } else {
                     None
                 };
@@ -3203,23 +3502,19 @@ impl<'t> Parser<'t> {
         } else {
             glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
         };
-        if bound_follows && !glued_colon {
-            self.pos += 1; // the standalone `:`
+        // P7.S6 (R7/R7a): a bound is detected here but never parsed here --
+        // it belongs in the word's own bound bracket. The two entry paths get
+        // different errors, and this is the only site that knows which one it
+        // is on, so the selection happens here rather than post hoc in
+        // `parse_impl_target`.
+        if bound_follows {
+            return Err(if builder.forbid_bounds {
+                impl_target_bound_error()
+            } else {
+                bound_in_effect_error(&name, span)
+            });
         }
-        let bounds = if bound_follows {
-            Some(self.parse_capabilities(span)?)
-        } else {
-            None
-        };
-        let (id, is_binding) = builder.intern_ty_var(&name, span)?;
-        if let Some(bounds) = bounds {
-            if !is_binding {
-                return Err(bound_on_use_error(&name, span));
-            }
-            for b in bounds {
-                builder.bounds.push((id, b));
-            }
-        }
+        let (id, _) = builder.intern_ty_var(&name, span)?;
         Ok(RawTy::Var(id))
     }
 
@@ -3240,6 +3535,10 @@ impl<'t> Parser<'t> {
     /// `Token::LBracket` and `parse_poly_slot`'s `~[` arm consumes as part of
     /// `Token::TildeLBracket` (Slice 10a R1). Split out so the token that
     /// already ate the bracket has somewhere to resume.
+    ///
+    /// P7.S6 (R4a(i)): being entered *past* the opener is why R4a's validator
+    /// is called here, once, at depth base `1`, rather than in each of the
+    /// three callers.
     #[allow(clippy::type_complexity)]
     fn parse_poly_quotation_inner(
         &mut self,
@@ -3247,6 +3546,7 @@ impl<'t> Parser<'t> {
         is_inline: bool,
         word_is_output: bool,
     ) -> Result<RawTy, String> {
+        self.require_top_depth_arrow(1)?;
         let (inputs, row_in, row_in_span) =
             self.parse_poly_quot_list(builder, true, word_is_output)?;
         self.expect_word("--")?;
@@ -3289,7 +3589,11 @@ impl<'t> Parser<'t> {
     }
 
     /// One side of a polymorphic quotation effect, stopping on the top-depth
-    /// `--` (inputs) or `]` (outputs). A leading `..`-prefixed name is R4's
+    /// `--` (inputs) or `]` (outputs). Like its concrete twin
+    /// (`parse_quot_type_list`) this loop cannot detect a *missing* `--`:
+    /// a bare array count reaches `parse_poly_slot` and fails there before the
+    /// `]` is observed, so R4a's validator runs ahead of it.
+    /// A leading `..`-prefixed name is R4's
     /// row mention: it must already denote the signature's own top-level
     /// row, and its name/span are returned alongside so the caller can
     /// render R5's one-sided-row error.
@@ -3334,7 +3638,7 @@ impl<'t> Parser<'t> {
         Ok((out, row, row_span))
     }
 
-    /// A polymorphic array `[ elem count ]`: `elem` recurses (so `['T 'N]`
+    /// A polymorphic array `[ elem count ]`: `elem` recurses (so `array['T 'N]`
     /// nests a variable element), `count` is a decimal literal or a length
     /// variable `'N`.
     fn parse_poly_array(
@@ -3357,7 +3661,7 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 return Err(format!(
-                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 <= N <= {})",
+                    "error: array type has invalid length {n} at line {}, col {} (`array[T N]` requires 1 <= N <= {})",
                     span.line, span.col, u32::MAX
                 ));
             }
@@ -3385,7 +3689,18 @@ impl<'t> Parser<'t> {
     /// not a bespoke reserved-word check. A `Nominal` (user-declared) trait
     /// name resolves through the same table (R18, `bound_trait_id`) and
     /// yields `Bound::User`.
-    fn parse_capabilities(&mut self, colon_span: Span) -> Result<Vec<Bound>, String> {
+    /// P7.S6 (R6a): `bracket_mode` changes the `None` fallthrough. Outside a
+    /// bracket, an unrecognised word is the enclosing signature's next slot,
+    /// so the greedy list ends silently (`break`). Inside a bracket there is
+    /// no next slot -- the only things that can follow a bound are another
+    /// `'`-var (the next `var_decl`) or `]` -- so an unrecognised
+    /// non-`'`-prefixed name is an unknown-capability error, not a silent
+    /// break. A `'`-prefixed word still breaks (it is the next `var_decl`).
+    fn parse_capabilities(
+        &mut self,
+        colon_span: Span,
+        bracket_mode: bool,
+    ) -> Result<Vec<Bound>, String> {
         let mut out = Vec::new();
         while let Some((Token::Word(c), span)) = self.peek() {
             let (c, span) = (c.clone(), *span);
@@ -3406,7 +3721,12 @@ impl<'t> Parser<'t> {
                 None if out.is_empty() => {
                     return Err(unknown_capability_error(&c, span));
                 }
-                None => break,
+                None => {
+                    if bracket_mode && !c.starts_with('\'') {
+                        return Err(unknown_capability_error(&c, span));
+                    }
+                    break;
+                }
             }
         }
         if out.is_empty() {
@@ -3618,15 +3938,23 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
-        // An array type has no name of its own to lead with (`[i64 4]` opens
-        // on `[`, not a word), so an unnamed array slot is recognised before
-        // the usual name-then-optional-`:type` read (R3, R7).
+        // P7.S6 (R1): `array[T N]` -- the named array type. The word `array`
+        // followed by `[` enters the concrete array reader. A slot *named*
+        // `array` (`array : i64`) has `:` as its next token, so this check
+        // declines and `array` is consumed as a slot name below (R1b: no
+        // special-case code needed).
+        if self.array_type_ahead() {
+            self.pos += 1;
+            let ty = self.parse_array_type_expr()?;
+            return Ok(TypedSlot { name: None, ty });
+        }
+        // A quotation-effect type has no name of its own to lead with, so a
+        // bare `[` slot is recognised before the usual
+        // name-then-optional-`:type` read (R3, R7). P7.S6 (R4): it is a
+        // quotation effect unconditionally -- the array spelling leads with
+        // the word `array` and was taken by the arm above.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            let ty = if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()?
-            } else {
-                self.parse_array_type_expr()?
-            };
+            let ty = self.parse_quotation_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
         // An owning-cell type is likewise nameless, so it too is recognised
@@ -3683,12 +4011,14 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_array_type_expr();
+        }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()
-            } else {
-                self.parse_array_type_expr()
-            }
+            // P7.S6 (R4): a bare `[` is a quotation effect unconditionally.
+            self.parse_quotation_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
             self.parse_ref_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
@@ -3723,12 +4053,13 @@ impl<'t> Parser<'t> {
         Ok(crate::ast::owning_quotation_type(inputs, outputs))
     }
 
-    /// Whether the very next token opens a quotation *effect* (a `[` whose
-    /// matching `]` holds a top-depth `--`) rather than an array type or
-    /// anything else. `quotation_type_ahead` requires its caller to have
-    /// already confirmed the `[`, which the `owning` readers have not.
+    /// Whether the very next token opens a quotation *effect*. Since P7.S6
+    /// (R4) a bare `[` in a type position is unconditionally a quotation
+    /// effect -- an array is spelled `array[T N]` -- so this is a plain peek.
+    /// It stays a named predicate because the `owning` readers ask the
+    /// question to raise their own error rather than to dispatch.
     fn quotation_effect_opens_here(&self) -> bool {
-        matches!(self.peek(), Some((Token::LBracket, _))) && self.quotation_type_ahead()
+        matches!(self.peek(), Some((Token::LBracket, _)))
     }
 
     /// `^` is not a lexer delimiter, so `^^i64` arrives as one word.
@@ -3739,7 +4070,7 @@ impl<'t> Parser<'t> {
 
     /// Resolve a `^`-led type word already lifted off the stream: count the
     /// leading `^`-run, resolve the remainder (recursing into the ongoing
-    /// token stream when the run is bare, e.g. `^[u8 4]`), then wrap once per
+    /// token stream when the run is bare, e.g. `^array[u8 4]`), then wrap once per
     /// `^`. Split from `parse_owning_cell_type_expr` so the reference splitter
     /// can hand it a `^`-led *remainder* of its own word (`&!^List`) rather
     /// than a token.
@@ -3770,6 +4101,11 @@ impl<'t> Parser<'t> {
             }
             let (inputs, outputs) = self.parse_quotation_effect_rows()?;
             crate::ast::owning_quotation_type(inputs, outputs)
+        } else if remainder == ARRAY_TYPE_NAME && matches!(self.peek(), Some((Token::LBracket, _)))
+        {
+            // P7.S6 (R1a): `^array[T N]` -- same interception as the `&`
+            // splitter, dispatching into the concrete array reader.
+            self.parse_array_type_expr()?
         } else {
             // `span` names the whole word (e.g. `^Nope` starts at the `^`);
             // point at the remainder's own column so the error names and
@@ -3790,7 +4126,7 @@ impl<'t> Parser<'t> {
     /// over. Neither `&` nor `!` nor `^` is a delimiter but `[` is, so:
     /// `&!Buf` arrives as one word and splits within itself; `&!^List` also
     /// arrives as one word and hands its `^`-led remainder to the owning-cell
-    /// splitter; `&![u8 64]` splits *across* tokens and recurses into the
+    /// splitter; `&!array[u8 64]` splits *across* tokens and recurses into the
     /// ongoing stream, exactly as a bare `^`-run does.
     fn parse_ref_type_expr(&mut self) -> Result<Type, String> {
         let (word, span) = self.expect_word_any_spanned()?;
@@ -3808,6 +4144,13 @@ impl<'t> Parser<'t> {
             self.parse_type_expr()?
         } else if remainder.starts_with('^') {
             self.split_owning_cell_word(remainder, remainder_span)?
+        } else if remainder == ARRAY_TYPE_NAME && matches!(self.peek(), Some((Token::LBracket, _)))
+        {
+            // P7.S6 (R1a): `&array[T N]` -- `&` and `array` are glued into
+            // one word, so the `[`-dispatch sites cannot reach this spelling.
+            // Intercept `array` ahead of `resolve_type_or_apply`, which would
+            // report "unknown type `array`".
+            self.parse_array_type_expr()?
         } else {
             self.resolve_type_or_apply(remainder, remainder_span)?
         };
@@ -3830,41 +4173,81 @@ impl<'t> Parser<'t> {
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
 
-    /// Slice 6a (R1): whether the `[` the parser is positioned on opens a
-    /// **quotation effect** rather than an array type, decided by scanning to
-    /// its matching `]` for a **top-depth `--`**. An array type can never
-    /// contain a `--` (arrays hold no quotations, slice 4), and a quotation
-    /// effect always contains exactly one at depth 1, so the scan is local and
-    /// unambiguous with no new token or sigil. A nested `[ [ i64 -- ] 3 ]` has
-    /// its inner `--` at depth 2, so the outer `[` reads as an array (R7a then
-    /// rejects the array-of-quotation at check time). Caller has already
-    /// confirmed `self.peek()` is `[`.
-    fn quotation_type_ahead(&self) -> bool {
-        let mut depth = 0i32;
+    /// P7.S6 (R1): whether the parser is positioned on the word `array`
+    /// followed by `[`, which opens a named array type (`array[T N]`).
+    /// `array` is reserved (R3), so no user type can shadow it and the
+    /// dispatch is unambiguous. The existing array readers consume the `[`
+    /// themselves, so callers advance past the `array` word before calling
+    /// them.
+    fn array_type_ahead(&self) -> bool {
+        matches!(self.peek(), Some((Token::Word(w), _)) if w == ARRAY_TYPE_NAME)
+            && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+    }
+
+    /// P7.S6 (R4a): the bracket being entered must hold a top-depth `--`,
+    /// i.e. it must really be a quotation effect. Since R4 retired the
+    /// bare-`[`-as-array spelling, a quotation reader is entered on a bare
+    /// `[` unconditionally, so what used to be a *disambiguator*
+    /// is a *validator*, not a disambiguator: a bracket with no `--` is a
+    /// located error naming the missing `--`, not a silent reroute into the
+    /// array production.
+    ///
+    /// `depth_base` is the bracket nesting the caller has already consumed:
+    /// `0` when the parser still sits *on* the opening bracket
+    /// (`parse_quotation_effect_rows`), `1` when it has been consumed
+    /// (`parse_poly_quotation_inner`, entered past its opener by all three of
+    /// its callers). It is explicit rather than defaulted so no call site can
+    /// be added without ruling on it: seeded at `0` past the bracket, a legal
+    /// `~[ 'T -- Bool ]` meets its closing `]` first, falls to `-1`, never
+    /// satisfies the `depth == 0` stop and runs to EOF -- false-rejecting
+    /// every inline combinator.
+    ///
+    /// `Token::TildeLBracket` is a single token that opens a bracket, so the
+    /// walk counts it too. Without that the validator fails *open*: a bracket
+    /// holding a nested `~[ … -- … ]` passes vacuously on the inner arrow and
+    /// then dies further down with a worse diagnostic.
+    fn require_top_depth_arrow(&self, depth_base: i32) -> Result<(), String> {
+        // R4a(iii): `~[` has no array reading anywhere in the grammar, so the
+        // error must not offer `array[T N]` to an author who opened with one.
+        // Every base-1 caller consumed exactly one opener token immediately
+        // before entry, so the token behind the cursor *is* that opener.
+        let opened_with_tilde = depth_base > 0
+            && matches!(
+                self.tokens.get(self.pos - 1),
+                Some((Token::TildeLBracket, _))
+            );
+        let opener = if depth_base > 0 {
+            self.tokens.get(self.pos - 1)
+        } else {
+            self.tokens.get(self.pos)
+        };
+        let span = opener.map(|(_, s)| *s).unwrap_or_default();
+        let mut depth = depth_base;
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
             match tok {
-                Token::LBracket => depth += 1,
+                Token::LBracket | Token::TildeLBracket => depth += 1,
                 Token::RBracket => {
                     depth -= 1;
                     if depth == 0 {
-                        return false;
+                        break;
                     }
                 }
-                Token::Word(w) if w == "--" && depth == 1 => return true,
+                Token::Word(w) if w == "--" && depth == 1 => return Ok(()),
                 _ => {}
             }
             i += 1;
         }
-        false
+        Err(quotation_effect_missing_arrow_error(
+            span,
+            opened_with_tilde,
+        ))
     }
 
     /// Slice 6a (R2): parse `[ <in-types> -- <out-types> ]` into a
     /// `Type::Quotation`. Each side is a possibly-empty list of ordinary type
     /// expressions (reusing `parse_type_expr`, so a nested array/ref/effect is
-    /// read the same way), so the nil effect `[ -- ]` is legal. Only called
-    /// once `quotation_type_ahead` has confirmed a top-depth `--` exists, so
-    /// the input-list scan always terminates on it.
+    /// read the same way), so the nil effect `[ -- ]` is legal.
     fn parse_quotation_type_expr(&mut self) -> Result<Type, String> {
         let (inputs, outputs) = self.parse_quotation_effect_rows()?;
         Ok(crate::ast::quotation_type(inputs, outputs))
@@ -3874,6 +4257,9 @@ impl<'t> Parser<'t> {
     /// Shared by the plain and the `owning` reader so the two spellings can
     /// never drift apart on what an effect's rows are.
     fn parse_quotation_effect_rows(&mut self) -> Result<(Vec<Type>, Vec<Type>), String> {
+        // R4a: the one depth-base-0 validator call -- the parser is still on
+        // the `[`, which the `expect` below consumes.
+        self.require_top_depth_arrow(0)?;
         self.expect(Token::LBracket)?;
         let inputs = self.parse_quot_type_list(true)?;
         self.expect_word("--")?;
@@ -3884,7 +4270,11 @@ impl<'t> Parser<'t> {
 
     /// One side of a quotation effect: type expressions until the delimiter
     /// (`--` for the input side, `]` for the output side). A malformed type on
-    /// either side is a located parse error from `parse_type_expr` (R3).
+    /// either side is a located parse error from `parse_type_expr` (R3). This
+    /// loop cannot be where a missing `--` is detected: it dispatches every
+    /// unmatched token to `parse_type_expr`, which dies on a bare array count
+    /// (`4` is a `Token::Int`) before the `]` is ever observed. Hence R4a's
+    /// validator ahead of the reader.
     fn parse_quot_type_list(&mut self, stop_on_arrow: bool) -> Result<Vec<Type>, String> {
         let mut out = Vec::new();
         loop {
@@ -4089,7 +4479,7 @@ impl<'t> Parser<'t> {
     /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
     /// (M1: no const-expr eval, so a non-literal count is always a located
     /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
-    /// a located error naming the full `[T N]` spelling and the invalid
+    /// a located error naming the full `array[T N]` spelling and the invalid
     /// length (X2).
     fn parse_array_count(&mut self, element: &str) -> Result<u32, String> {
         match self.peek().cloned() {
@@ -4100,19 +4490,19 @@ impl<'t> Parser<'t> {
             Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{element} {n}]` has invalid length {n} at line {}, col {} (`[T N]` requires N <= {})",
+                    "error: array type `array[{element} {n}]` has invalid length {n} at line {}, col {} (`array[T N]` requires N <= {})",
                     span.line, span.col, u32::MAX
                 ))
             }
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
                 Err(format!(
-                    "error: array type `[{element} {n}]` has invalid length {n} at line {}, col {} (`[T N]` requires N >= 1)",
+                    "error: array type `array[{element} {n}]` has invalid length {n} at line {}, col {} (`array[T N]` requires N >= 1)",
                     span.line, span.col
                 ))
             }
             Some((tok, span)) => Err(format!(
-                "error: array count must be a decimal literal, found `{}` at line {}, col {} (`[T N]` requires a literal N, no const-expr eval)",
+                "error: array count must be a decimal literal, found `{}` at line {}, col {} (`array[T N]` requires a literal N, no const-expr eval)",
                 describe_token(&tok), span.line, span.col
             )),
             None => Err(self.eof_error("an array count literal")),
@@ -4125,7 +4515,12 @@ impl<'t> Parser<'t> {
     /// defining-word field type, or a missing `;` is a located parse error.
     fn parse_typedef(&mut self) -> Result<Vec<(String, Type)>, String> {
         self.expect_word("type:")?;
-        self.expect_word_any()?; // the struct name; already registered by the pre-pass
+        // The struct name is already registered by the pre-pass.
+        let name = self.expect_word_any()?;
+        // P7.S6 (R10): the REPL's `type:`-line readers reach this production
+        // without the module pre-pass, so the postfix-form rejection is raised
+        // here too rather than relied on from there.
+        reject_postfix_header_var("type:", &name, self.tokens, self.pos)?;
         let mut fields = Vec::new();
         loop {
             match self.peek() {
@@ -4156,12 +4551,14 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
+            return self.parse_array_type_expr();
+        }
+        // P7.S6 (R4): a bare `[` is a quotation effect unconditionally.
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            return if self.quotation_type_ahead() {
-                self.parse_quotation_type_expr()
-            } else {
-                self.parse_array_type_expr()
-            };
+            return self.parse_quotation_type_expr();
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             return self.parse_owning_cell_type_expr();
@@ -4260,19 +4657,20 @@ impl<'t> Parser<'t> {
     /// position is an enum (D1's `|`-separated-variants body), per
     /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`.
     /// `body_has_pipe_before_semicolon` scans forward for the first `Pipe` or
-    /// `Semicolon` and ignores every other token, so a generic header's bound
-    /// type variables (Phase 5 slice 1, always plain `Word` tokens) in the
-    /// scanned range don't change the verdict; the search need not skip past
-    /// them first.
+    /// `Semicolon` and ignores every other token, so a generic header's
+    /// bracketed type-variable list in the scanned range doesn't change the
+    /// verdict (it holds only `'`-prefixed words and its own brackets); the
+    /// search need not skip past it first.
     fn current_typedef_is_enum(&self) -> bool {
         body_has_pipe_before_semicolon(self.tokens, self.pos + 2)
     }
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
-    /// position is generic (Phase 5 slice 1, R1/D2) -- its header binds one or
-    /// more type variables. `self.pos` must point at `type:`.
+    /// position is generic (Phase 5 slice 1, R1/D2 / P7.S6 R5) -- its header
+    /// binds one or more type variables in a bracket (`type: Box['T]`).
+    /// `self.pos` must point at `type:`.
     fn current_typedef_is_generic(&self) -> bool {
-        header_ty_var_count(self.tokens, self.pos + 2) > 0
+        header_is_generic(self.tokens, self.pos + 2)
     }
 
     /// The enum `type:` production (D1, M3): `type: Name '|'? variant ('|'
@@ -4283,7 +4681,11 @@ impl<'t> Parser<'t> {
     /// variant at all) is a located malformed-declaration error (M3).
     fn parse_enum_typedef(&mut self) -> Result<Vec<Vec<(String, Type)>>, String> {
         let type_span = self.expect_word("type:")?;
-        let name = self.expect_word_any()?; // the enum name; already registered by the pre-pass
+        // The enum name is already registered by the pre-pass.
+        let name = self.expect_word_any()?;
+        // P7.S6 (R10): as in `parse_typedef` -- the REPL's enum `type:`-line
+        // reader arrives here without the module pre-pass.
+        reject_postfix_header_var("type:", &name, self.tokens, self.pos)?;
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
@@ -4452,7 +4854,8 @@ impl<'t> Parser<'t> {
     fn parse_generic_header(&mut self) -> Result<GenericHeader, String> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars(&name)?;
+        // `header_is_generic` gates every route here, so the `[` is present.
+        let ty_vars = self.parse_header_bracket(&name)?;
         Ok((name, ty_vars, type_span))
     }
 
@@ -4557,7 +4960,7 @@ impl<'t> Parser<'t> {
         let mut i = 0;
         while i < self.tokens.len() {
             if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
-                && header_ty_var_count(self.tokens, i + 2) > 0
+                && header_is_generic(self.tokens, i + 2)
             {
                 self.pos = i;
                 if self.generic_header_at_cursor_is_registered(already) {
@@ -4729,6 +5132,15 @@ impl<'t> Parser<'t> {
             let mutable = name == MUT_SLICE_TYPE_NAME;
             return Ok(crate::ast::intern_slice_type(self.slices, args[0], mutable));
         }
+        // P7.S6 (R2): `array` is the named array type's spelling. When
+        // followed by `[` it is intercepted at the bracket-dispatch sites
+        // (R1) or at the `&`/`^` splitters (R1a) and never reaches here. The
+        // only way `array` arrives at this funnel is without a following `[`,
+        // which is a located error naming the required form -- not "unknown
+        // type `array`".
+        if name == ARRAY_TYPE_NAME {
+            return Err(array_without_bracket_error(span));
+        }
         let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
                 Some(&target) => (base, target, Some(qualifier)),
@@ -4828,7 +5240,7 @@ impl<'t> Parser<'t> {
 
     /// R2/R3: a generic-type application's bracketed argument list,
     /// `[ type-expr* ]`, each argument a full type expression (so
-    /// `Wrap[Box[i64]]` and `Buf[[i64 4]]` fall out of the recursion).
+    /// `Wrap[Box[i64]]` and `Buf[array[i64 4]]` fall out of the recursion).
     ///
     /// Bracketed rather than juxtaposed (`Box i64`) because R3's
     /// argument-count error has to be *decidable*: juxtaposed, a signature
@@ -4866,31 +5278,44 @@ impl<'t> Parser<'t> {
         Ok(args)
     }
 
-    /// A generic `type:` header's bound type variables (R1/D2): one or more
-    /// `'`-prefixed words immediately following the declared name, each
-    /// interned with its span for the phantom-variable diagnostic. The
-    /// caller (`current_typedef_is_generic`) has already established at
-    /// least one is present. A name bound twice in one header is rejected
-    /// here, at the binding site, rather than left for a field reference to
-    /// misreport as unbound or phantom.
-    fn parse_generic_header_vars(
-        &mut self,
-        decl_name: &str,
-    ) -> Result<Vec<(String, Span)>, String> {
+    /// P7.S6 (R5): parse a bracketed type-variable list `['T 'U]` from a
+    /// `type:`/`trait:` header. Assumes `[` is the current token; consumes
+    /// through the matching `]`. The bracket's contents are `'`-prefixed words
+    /// only (no bounds on a header -- bounds are a word-definition feature,
+    /// R6). An empty bracket, a duplicate variable, or a non-`'`/non-`]` token
+    /// are located errors.
+    fn parse_header_bracket(&mut self, decl_name: &str) -> Result<Vec<(String, Span)>, String> {
+        let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
+        self.pos += 1; // consume `[`
         let mut ty_vars: Vec<(String, Span)> = Vec::new();
-        while matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
-            let (w, span) = self.expect_word_any_spanned()?;
-            if ty_vars.iter().any(|(n, _)| *n == w) {
-                return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                Some((Token::Word(w), span)) if w.starts_with('\'') => {
+                    let (w, span) = self.expect_word_any_spanned()?;
+                    if ty_vars.iter().any(|(n, _)| *n == w) {
+                        return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
+                    }
+                    ty_vars.push((w, span));
+                }
+                Some((tok, span)) => {
+                    return Err(header_bracket_non_var_error(decl_name, tok, *span));
+                }
+                None => return Err(self.eof_error("`]` (unterminated type-variable list)")),
             }
-            ty_vars.push((w, span));
+        }
+        if ty_vars.is_empty() {
+            return Err(empty_header_bracket_error(decl_name, bracket_span));
         }
         Ok(ty_vars)
     }
 
     /// A generic `type:` field's type (R1): a recursive descent over the
     /// shapes that can wrap one of the header's bound variables -- array
-    /// (`['T 2]`, nested to any depth), reference (`&'T`, `&!'T`), owning
+    /// (`array['T 2]`, nested to any depth), reference (`&'T`, `&!'T`), owning
     /// cell (`^'T`), and generic application (`Ent['K 'V]`) -- with every
     /// leaf `'name` resolved against `ty_vars` and marked used (for the
     /// phantom check, at whatever depth it sits). A fully-concrete field
@@ -4926,22 +5351,24 @@ impl<'t> Parser<'t> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
         }
-        // A `[` opens either a quotation effect or an array type, decided by
-        // `quotation_type_ahead`'s top-depth `--` scan exactly as
-        // `parse_field_type_expr` decides it -- without this the array
-        // production would misparse a legal concrete quotation field.
-        if matches!(self.peek(), Some((Token::LBracket, _))) {
-            if self.quotation_type_ahead() {
-                // R7: a quotation field naming the declaration's own type
-                // variable is out of scope, rejected here rather than left
-                // to misreport `'T` as an unknown concrete type. A quotation
-                // field over concrete types alone still parses.
-                if let Some((var, span)) = self.quotation_effect_ty_var_ahead(ty_vars) {
-                    return Err(quotation_field_ty_var_error(decl_name, &var, span));
-                }
-                return Ok(PolyType::Concrete(self.parse_quotation_type_expr()?));
-            }
+        // P7.S6 (R1): `array[T N]` -- the named array type.
+        if self.array_type_ahead() {
+            self.pos += 1;
             return self.parse_generic_field_array(decl_name, ty_vars, used);
+        }
+        // P7.S6 (R4): a bare `[` opens a quotation effect unconditionally;
+        // an array field is spelled `array['T N]` and was taken above.
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            // R7: a quotation field naming the declaration's own type
+            // variable is out of scope, rejected here rather than left
+            // to misreport `'T` as an unknown concrete type. A quotation
+            // field over concrete types alone still parses. This scan runs
+            // *ahead* of the reader, so it also fires ahead of R4a's
+            // missing-`--` validator on a variable-bearing bracket.
+            if let Some((var, span)) = self.quotation_effect_ty_var_ahead(ty_vars) {
+                return Err(quotation_field_ty_var_error(decl_name, &var, span));
+            }
+            return Ok(PolyType::Concrete(self.parse_quotation_type_expr()?));
         }
         if let Some((Token::Word(w), span)) = self.peek() {
             let (w, span) = (w.clone(), *span);
@@ -4980,6 +5407,21 @@ impl<'t> Parser<'t> {
                         remainder_span,
                     )?;
                     return Ok(self.fold_field_ref(PolyType::Var(id), mutable));
+                }
+                // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
+                // glued into one word, so the `[`-dispatch sites cannot
+                // reach this spelling. Intercept `array` ahead of
+                // `poly_generic_header`, which looks it up in the user
+                // registries and would misreport "unknown type `array`".
+                // Placed before the `poly_generic_header` case, since `array`
+                // must be recognised ahead of the user registry exactly as
+                // `resolve_type_or_apply` recognises `Slice`.
+                if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    self.pos += 1;
+                    let inner = self.parse_generic_field_array(decl_name, ty_vars, used)?;
+                    return Ok(self.fold_field_ref(inner, mutable));
                 }
                 // A run glued to a generic header that is then applied
                 // (`&Ent['K i64]`), mirroring the `^` arm below. Without it
@@ -5037,6 +5479,14 @@ impl<'t> Parser<'t> {
                         remainder_span,
                     )?;
                     Some(PolyType::Var(id))
+                } else if remainder == ARRAY_TYPE_NAME
+                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                {
+                    // P7.S6 (R1a): `^array['T 4]` -- same interception as
+                    // the `&` arm above, dispatching into the generic-field
+                    // array reader.
+                    self.pos += 1;
+                    Some(self.parse_generic_field_array(decl_name, ty_vars, used)?)
                 } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
                     match self.poly_generic_header(&remainder, remainder_span)? {
                         Some((is_enum, idx, module)) => {
@@ -5105,7 +5555,7 @@ impl<'t> Parser<'t> {
     }
 
     /// A generic field's array type `[ elem count ]`, `elem` recursing so a
-    /// nested `[['T 2] 2]` falls out. N3: a struct header binds no *length*
+    /// nested `array[array['T 2] 2]` falls out. N3: a struct header binds no *length*
     /// variable, so the count is always a literal here -- `parse_array_count`
     /// is reused verbatim and no `Len::Var` path exists.
     fn parse_generic_field_array(
@@ -5627,7 +6077,7 @@ mod tests {
     #[test]
     fn parse_generic_typedef_and_enum_stamp_the_parser_module_id() {
         let tokens =
-            lex("type: Box 'T val 'T ; type: Result 'T 'E | Ok val 'T | Err val 'E ;\n").unwrap();
+            lex("type: Box['T] val 'T ; type: Result['T 'E] | Ok val 'T | Err val 'E ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
@@ -6775,7 +7225,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_single_var_registers_decl() {
-        let module = parse_src("type: Box 'T val 'T ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;").unwrap();
         // A generic header mints no concrete struct entry (R1/D5): only the
         // side registry gains an entry.
         assert!(module.structs.is_empty());
@@ -6790,7 +7240,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_multi_var_binds_each_field_to_its_own_variable() {
-        let module = parse_src("type: Pair 'A 'B a 'A b 'B ;").unwrap();
+        let module = parse_src("type: Pair['A 'B] a 'A b 'B ;").unwrap();
         assert_eq!(module.generic_structs.len(), 1);
         let decl = &module.generic_structs[0];
         assert_eq!(decl.name, "Pair");
@@ -6801,7 +7251,7 @@ mod tests {
 
     #[test]
     fn parse_generic_typedef_concrete_field_resolves_alongside_a_variable_field() {
-        let module = parse_src("type: Wrap 'T tag i64 val 'T ;").unwrap();
+        let module = parse_src("type: Wrap['T] tag i64 val 'T ;").unwrap();
         let decl = &module.generic_structs[0];
         assert_eq!(
             decl.fields[0],
@@ -6813,18 +7263,18 @@ mod tests {
     #[test]
     fn parse_generic_typedef_field_naming_unbound_variable_is_error() {
         // R1: `'E` is never bound by `Box`'s header.
-        let result = parse_src("type: Box 'T val 'E ;");
+        let result = parse_src("type: Box['T] val 'E ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("'E"), "unexpected message: {err}");
         assert!(err.contains("Box"), "unexpected message: {err}");
-        assert!(err.contains("line 1, col 18"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 19"), "unlocated: {err}");
     }
 
     #[test]
     fn parse_generic_typedef_phantom_variable_is_error() {
         // R1 (round 2): `'T` is bound but never used in any field.
-        let result = parse_src("type: Phantom 'T x i64 ;");
+        let result = parse_src("type: Phantom['T] x i64 ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("phantom"), "unexpected message: {err}");
@@ -6841,7 +7291,7 @@ mod tests {
         // referencing `'T` used to resolve against the first entry and leave
         // the second entry's `used` flag false, misreporting this as a
         // phantom-variable error rather than naming the real fault.
-        let result = parse_src("type: Bad 'T 'T x 'T ;");
+        let result = parse_src("type: Bad['T 'T] x 'T ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("bound twice"), "unexpected message: {err}");
@@ -6870,13 +7320,13 @@ mod tests {
         // `'z` in a variant body opens a positional field, so what rejects
         // this is `'z` not being bound by the `E 'T` header. Binding it (`type:
         // E 'T 'z | Ok v 'T 'z ;`) parses clean.
-        let result = parse_src("type: E 'T | Ok v 'T 'z ;");
+        let result = parse_src("type: E['T] | Ok v 'T 'z ;");
         let err = result.unwrap_err();
         assert!(err.contains("'z"), "unexpected message: {err}");
         assert!(err.contains("bound by"), "unexpected message: {err}");
-        assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 23"), "unlocated: {err}");
         assert!(
-            parse_src("type: E 'T 'z | Ok v 'T 'z ;").is_ok(),
+            parse_src("type: E['T 'z] | Ok v 'T 'z ;").is_ok(),
             "binding `'z` in the header should make the same body legal"
         );
     }
@@ -6887,18 +7337,18 @@ mod tests {
         // name with no type. The plain odd-field-count message would name
         // `i64`, a token the author never got wrong; this one says the header
         // was read as generic over `'bar`.
-        let result = parse_src("type: Foo 'bar i64 ;");
+        let result = parse_src("type: Foo['bar] i64 ;");
         let err = result.unwrap_err();
         assert!(
-            err.contains("generic `type: Foo 'bar`"),
+            err.contains("generic `type: Foo['bar]`"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("line 1, col 20"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 21"), "unlocated: {err}");
     }
 
     #[test]
     fn parse_generic_enum_typedef_registers_decl() {
-        let module = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'E ;").unwrap();
+        let module = parse_src("type: Result['T 'E] | Ok val 'T | Err val 'E ;").unwrap();
         // A generic header mints no concrete enum entry at all (R1/D5).
         assert!(module.enums.is_empty());
         assert_eq!(module.generic_enums.len(), 1);
@@ -6920,7 +7370,7 @@ mod tests {
 
     #[test]
     fn parse_generic_enum_typedef_without_leading_pipe_registers_first_variant() {
-        let module = parse_src("type: Maybe 'T None | Some v 'T ;").unwrap();
+        let module = parse_src("type: Maybe['T] None | Some v 'T ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(decl.variants[0].name, "None");
         assert!(decl.variants[0].fields.is_empty());
@@ -6933,7 +7383,7 @@ mod tests {
 
     #[test]
     fn parse_generic_enum_typedef_field_naming_unbound_variable_is_error() {
-        let result = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'X ;");
+        let result = parse_src("type: Result['T 'E] | Ok val 'T | Err val 'X ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("'X"), "unexpected message: {err}");
@@ -6941,7 +7391,7 @@ mod tests {
 
     #[test]
     fn parse_generic_enum_typedef_phantom_variable_is_error() {
-        let result = parse_src("type: Result 'T 'E | Ok val 'T | Err other i64 ;");
+        let result = parse_src("type: Result['T 'E] | Ok val 'T | Err other i64 ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("phantom"), "unexpected message: {err}");
@@ -6950,7 +7400,7 @@ mod tests {
 
     #[test]
     fn parse_generic_enum_typedef_zero_variants_is_error() {
-        let result = parse_src("type: Empty 'T | ;");
+        let result = parse_src("type: Empty['T] | ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("zero variants"), "unexpected message: {err}");
@@ -6962,7 +7412,7 @@ mod tests {
         // generic header entirely, so the reserved-name gate on a variant
         // must run inside `parse_generic_variant_fields` itself, not rely on
         // the pre-pass having already caught it.
-        let result = parse_src("type: Bad 'T | ^Evil val 'T ;");
+        let result = parse_src("type: Bad['T] | ^Evil val 'T ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("^Evil"), "unexpected message: {err}");
@@ -6974,7 +7424,7 @@ mod tests {
         // OQ4/Phase 1: `Option`'s exact shape -- a zero-field variant
         // (`None`) and a one-field variant with no leading field name
         // (`Some 'T`).
-        let module = parse_src("type: Option 'T | None | Some 'T ;").unwrap();
+        let module = parse_src("type: Option['T] | None | Some 'T ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(decl.variants[0].name, "None");
         assert!(decl.variants[0].fields.is_empty());
@@ -6990,7 +7440,7 @@ mod tests {
     #[test]
     fn parse_generic_enum_typedef_attributeless_two_var_variants_parse() {
         // `Result`'s exact shape: both arms attributeless.
-        let module = parse_src("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap();
+        let module = parse_src("type: Result['T 'E] | Ok 'T | Err 'E ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(decl.variants[0].name, "Ok");
         assert_eq!(decl.variants[0].fields.len(), 1);
@@ -7007,7 +7457,7 @@ mod tests {
         // leading `'` always opens an attributeless field, regardless of
         // what came before it in the same variant), so this is accepted
         // rather than rejected.
-        let module = parse_src("type: E 'T 'U | V val 'T 'U ;").unwrap();
+        let module = parse_src("type: E['T 'U] | V val 'T 'U ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(decl.variants[0].name, "V");
         assert_eq!(decl.variants[0].fields.len(), 2);
@@ -7023,7 +7473,7 @@ mod tests {
         // error alongside an ordinary word def. The end-to-end claim (a whole
         // program with this shape builds and runs) is the actual golden,
         // `tests/phase5_slice1.rs::generic_type_declared_but_never_used_builds_and_runs`.
-        let module = parse_src("type: Box 'T val 'T ; : main ( -- ) ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ; : main ( -- ) ;").unwrap();
         assert_eq!(module.generic_structs.len(), 1);
         assert!(module.words.iter().any(|w| w.name == "main"));
     }
@@ -7032,7 +7482,7 @@ mod tests {
     fn parse_generic_typedef_does_not_shadow_a_concrete_typedef_registered_after_it() {
         // A generic header is skipped entirely by the concrete pre-pass, so a
         // concrete `type:` elsewhere in the file is unaffected.
-        let module = parse_src("type: Box 'T val 'T ; type: Vec2 x i64 y i64 ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ; type: Vec2 x i64 y i64 ;").unwrap();
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
         assert_eq!(module.generic_structs.len(), 1);
@@ -7054,7 +7504,7 @@ mod tests {
         // descent this was `error: unknown type 'T` -- the variable sits one
         // token deeper than the old single-`if` production could look.
         assert_eq!(
-            sole_generic_field("type: Pair 'T items ['T 2] ;"),
+            sole_generic_field("type: Pair['T] items array['T 2] ;"),
             PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2))
         );
     }
@@ -7063,7 +7513,7 @@ mod tests {
     fn parse_generic_field_nested_array_of_ty_var_builds_nested_polytype() {
         // R1: the descent recurses, so depth is unbounded rather than one.
         assert_eq!(
-            sole_generic_field("type: NestArr 'T grid [['T 2] 3] ;"),
+            sole_generic_field("type: NestArr['T] grid array[array['T 2] 3] ;"),
             PolyType::Array(
                 Box::new(PolyType::Array(
                     Box::new(PolyType::Var(0)),
@@ -7079,12 +7529,12 @@ mod tests {
         // R3: `^'T` arrives as one glued token, so the payload is a substring
         // rather than a following token.
         assert_eq!(
-            sole_generic_field("type: Cell 'T c ^'T ;"),
+            sole_generic_field("type: Cell['T] c ^'T ;"),
             PolyType::OwnedCell(Box::new(PolyType::Var(0)))
         );
         // A `^`-run nests, one wrapper per caret.
         assert_eq!(
-            sole_generic_field("type: Cell2 'T c ^^'T ;"),
+            sole_generic_field("type: Cell2['T] c ^^'T ;"),
             PolyType::OwnedCell(Box::new(PolyType::OwnedCell(Box::new(PolyType::Var(0)))))
         );
     }
@@ -7094,11 +7544,11 @@ mod tests {
         // R1/R10: `&'T` *parses* -- it does not build, but the rejection must
         // come from the no-stored-reference rule rather than `unknown type`.
         assert_eq!(
-            sole_generic_field("type: Box 'T r &'T ;"),
+            sole_generic_field("type: Box['T] r &'T ;"),
             PolyType::Ref(Box::new(PolyType::Var(0)), false)
         );
         assert_eq!(
-            sole_generic_field("type: BoxM 'T r &!'T ;"),
+            sole_generic_field("type: BoxM['T] r &!'T ;"),
             PolyType::Ref(Box::new(PolyType::Var(0)), true)
         );
     }
@@ -7108,7 +7558,7 @@ mod tests {
         // R1: each argument is a field type in its own right, so the header's
         // variables reach an application's argument list.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: Wrap 'K 'V e Ent['K 'V] ;\n").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: Wrap['K 'V] e Ent['K 'V] ;\n").unwrap();
         let wrap = module
             .generic_structs
             .iter()
@@ -7129,7 +7579,7 @@ mod tests {
         // purpose -- `Ent['K i64]` and `Ent[i64 'K]` are distinguishable,
         // which a same-type pair would not be.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K i64] ;\n").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] e Ent['K i64] ;\n").unwrap();
         let w = module
             .generic_structs
             .iter()
@@ -7148,10 +7598,10 @@ mod tests {
         // R1: the leaf error is the field parser's own, naming the
         // declaration -- not `PolyBuilder`'s word-signature wording, and not
         // a bare `unknown type`.
-        let err = parse_src("type: Box 'T items ['E 2] ;").unwrap_err();
+        let err = parse_src("type: Box['T] items array['E 2] ;").unwrap_err();
         assert!(err.contains("'E"), "unexpected message: {err}");
         assert!(err.contains("Box"), "unexpected message: {err}");
-        assert!(err.contains("line 1, col 21"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 27"), "unlocated: {err}");
     }
 
     #[test]
@@ -7159,16 +7609,16 @@ mod tests {
         // N4: `check_no_phantom_ty_var` reads the `used` bitmap alone, so the
         // descent has to set it at the leaf, at whatever depth. Without that
         // this fixture is rejected as a phantom parameter.
-        assert!(parse_src("type: Pair 'T items ['T 2] ;").is_ok());
-        assert!(parse_src("type: Cell 'T c ^'T ;").is_ok());
-        assert!(parse_src("type: Deep 'T g [[^'T 2] 3] ;").is_ok());
+        assert!(parse_src("type: Pair['T] items array['T 2] ;").is_ok());
+        assert!(parse_src("type: Cell['T] c ^'T ;").is_ok());
+        assert!(parse_src("type: Deep['T] g array[array[^'T 2] 3] ;").is_ok());
     }
 
     #[test]
     fn parse_generic_enum_variant_named_field_array_of_ty_var_builds_array_polytype() {
         // R1: the enum twin shares the field parser, but routes through
         // `parse_generic_variant_fields` rather than the struct field loop.
-        let module = parse_src("type: Buf 'T | Some xs ['T 2] | None ;").unwrap();
+        let module = parse_src("type: Buf['T] | Some xs array['T 2] | None ;").unwrap();
         let decl = &module.generic_enums[0];
         assert_eq!(
             decl.variants[0].fields[0].1,
@@ -7182,7 +7632,7 @@ mod tests {
         // parsed. Nothing here needs R1's descent -- the argument is fully
         // concrete -- which is why this is R2's own witness. Before the
         // two-stage split this was `error: unknown type 'L'`.
-        let module = parse_src("type: L 'T v 'T next ^L[i64] ;").unwrap();
+        let module = parse_src("type: L['T] v 'T next ^L[i64] ;").unwrap();
         let decl = &module.generic_structs[0];
         match decl.fields[1].1 {
             PolyType::Concrete(Type::OwnedCell(..)) => {}
@@ -7211,7 +7661,7 @@ mod tests {
         // deferred fill, not from the empty list minted at that moment. A
         // variant-less `L[i64]` here is the silent-wrong-mint failure the
         // enum-side pending machinery exists to prevent.
-        let module = parse_src("type: L 'T | Node v 'T n ^L[i64] | Nil ;").unwrap();
+        let module = parse_src("type: L['T] | Node v 'T n ^L[i64] | Nil ;").unwrap();
         let inst = module
             .enums
             .iter()
@@ -7230,7 +7680,7 @@ mod tests {
         // `generic_header_at_cursor_is_registered`'s snapshot must not let
         // that push make the *second* `Box` look pre-registered -- which
         // would swallow it before `check_duplicate_type_names` ever saw it.
-        let module = parse_src("type: Box 'T v 'T ; type: Box 'T w 'T ;").unwrap();
+        let module = parse_src("type: Box['T] v 'T ; type: Box['T] w 'T ;").unwrap();
         assert_eq!(
             module.generic_structs.len(),
             2,
@@ -7245,7 +7695,7 @@ mod tests {
         // immediately before parsing its own fields still fails here, because
         // `B` has no placeholder yet when `A`'s field list is read.
         let module =
-            parse_src("type: A 'T v 'T next ^B['T] ;\ntype: B 'T w 'T back ^A['T] ;\n").unwrap();
+            parse_src("type: A['T] v 'T next ^B['T] ;\ntype: B['T] w 'T back ^A['T] ;\n").unwrap();
         let a = module
             .generic_structs
             .iter()
@@ -7265,17 +7715,17 @@ mod tests {
         // R8: each hop wraps `'T` in another cell, so `L` would need
         // instantiating at a strictly larger argument forever. Rejected
         // structurally, at the field, with no instantiation involved.
-        let err = parse_src("type: L 'T v 'T next ^L[^'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[^'T] ;").unwrap_err();
         assert!(err.contains("owning cell over"), "unexpected: {err}");
         assert!(
             err.contains("fully concrete or a bare type variable"),
             "the message must name the restriction, not just say `recursive`: {err}"
         );
-        assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 23"), "unlocated: {err}");
         // The array and reference wrappers are the same rule.
-        let err = parse_src("type: L 'T v 'T next ^L[['T 2]] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[array['T 2]] ;").unwrap_err();
         assert!(err.contains("array of"), "unexpected: {err}");
-        let err = parse_src("type: L 'T v 'T next ^L[&'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T next ^L[&'T] ;").unwrap_err();
         assert!(err.contains("reference to"), "unexpected: {err}");
     }
 
@@ -7285,15 +7735,15 @@ mod tests {
         // varies the offending argument's wrapper while pinning the field's
         // own top level as `^`, so it only ever exercises the `OwnedCell`
         // arm of the walk. Both other wrapper arms can be stubbed to `Ok(())`
-        // with the whole suite still green, and `[L[^'T] 2]` -- an array of
+        // with the whole suite still green, and `array[L[^'T] 2]` -- an array of
         // an application, the shape `Map`'s backing store actually takes --
         // is then silently admitted.
-        let err = parse_src("type: L 'T v 'T kids [L[^'T] 2] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T kids array[L[^'T] 2] ;").unwrap_err();
         assert!(
             err.contains("owning cell over"),
             "the walk must descend through an array field: {err}"
         );
-        let err = parse_src("type: L 'T v 'T kids & L[^'T] ;").unwrap_err();
+        let err = parse_src("type: L['T] v 'T kids & L[^'T] ;").unwrap_err();
         assert!(
             err.contains("owning cell over"),
             "the walk must descend through a reference field: {err}"
@@ -7308,7 +7758,7 @@ mod tests {
         // own variables is refused.
         //
         // The argument list has to be *mixed* for this to witness anything.
-        // An all-concrete list (`^L[Ent[i64 u32]]`, `^L[[i64 2]]`) folds the
+        // An all-concrete list (`^L[Ent[i64 u32]]`, `^L[array[i64 2]]`) folds the
         // whole application to `PolyType::Concrete` at parse time, leaving no
         // `Generic` node in the tree for R8's walk to reach -- so such a
         // fixture passes with the accept clause deleted outright, and is a
@@ -7316,11 +7766,12 @@ mod tests {
         // and the compound concrete argument beside it is what the clause has
         // to admit.
         assert!(
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K e Ent['K [i64 2]] ;\n").is_ok(),
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] e Ent['K array[i64 2]] ;\n")
+                .is_ok(),
             "a concrete array argument beside a variable one is inert"
         );
         assert!(
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W2 'K e Ent['K Ent[i64 u32]] ;\n")
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W2['K] e Ent['K Ent[i64 u32]] ;\n")
                 .is_ok(),
             "a concrete *nested application* argument is inert too -- and is \
              deliberately asymmetric with the word-signature path, which \
@@ -7334,7 +7785,7 @@ mod tests {
         // sigil whose referent turns out concrete must intern a real
         // `Type::Ref` rather than leaving a second representation of one
         // shape (`Ref(Concrete(..))`) for substitution to trip over.
-        let module = parse_src("type: B 'T v 'T r & [i64 2] ;").unwrap();
+        let module = parse_src("type: B['T] v 'T r & array[i64 2] ;").unwrap();
         match module.generic_structs[0].fields[1].1 {
             PolyType::Concrete(Type::Ref(..)) => {}
             ref other => panic!("expected a folded concrete reference, got {other:?}"),
@@ -7345,11 +7796,11 @@ mod tests {
     fn parse_generic_field_variable_quotation_is_error() {
         // R7: out of scope, and a located rejection rather than `'T` being
         // misreported as an unknown concrete type.
-        let err = parse_src("type: QF 'T f [ 'T -- 'T ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ 'T -- 'T ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(err.contains("QF"), "unexpected: {err}");
-        assert!(err.contains("line 1, col 17"), "unlocated: {err}");
+        assert!(err.contains("line 1, col 18"), "unlocated: {err}");
     }
 
     #[test]
@@ -7359,7 +7810,7 @@ mod tests {
         // ends the scan before `'T`, and the field then falls through to the
         // concrete parser, which misreports `'T` as an unknown type instead of
         // naming the unsupported shape.
-        let err = parse_src("type: QF 'T f [ [i64 2] -- 'T ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ array[i64 2] -- 'T ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(
             !err.contains("unknown type"),
@@ -7373,7 +7824,7 @@ mod tests {
         // token, so the scan must peel the sigil off before comparing against
         // `ty_vars` -- otherwise the variable is invisible to this rule and
         // falls through to the concrete parser's misleading `unknown type`.
-        let err = parse_src("type: QF 'T f [ ^'T -- ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ ^'T -- ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(
@@ -7381,7 +7832,7 @@ mod tests {
             "the glued cell sigil must not hide the variable: {err}"
         );
 
-        let err = parse_src("type: QF 'T f [ &'T -- ] ;").unwrap_err();
+        let err = parse_src("type: QF['T] f [ &'T -- ] ;").unwrap_err();
         assert!(err.contains("quotation field"), "unexpected: {err}");
         assert!(err.contains("'T"), "unexpected: {err}");
         assert!(
@@ -7393,9 +7844,9 @@ mod tests {
         // shape R1 admits outside a quotation (it builds nested cells), so a
         // single-strip peel leaves R7 blind to something R1 accepts.
         for src in [
-            "type: QF 'T f [ ^^'T -- ] ;",
-            "type: QF 'T f [ ^^^'T -- ] ;",
-            "type: QF 'T f [ &!^'T -- ] ;",
+            "type: QF['T] f [ ^^'T -- ] ;",
+            "type: QF['T] f [ ^^^'T -- ] ;",
+            "type: QF['T] f [ &!^'T -- ] ;",
         ] {
             let err = parse_src(src).unwrap_err();
             assert!(err.contains("quotation field"), "{src}: unexpected: {err}");
@@ -7415,7 +7866,7 @@ mod tests {
         // `&` intercept exists to prevent. The field itself still never
         // builds (R10, phase 2); this is about which diagnostic it reaches.
         let module =
-            parse_src("type: Ent 'K 'V k 'K v 'V ;\ntype: W 'K k 'K w &Ent['K i64] ;").unwrap();
+            parse_src("type: Ent['K 'V] k 'K v 'V ;\ntype: W['K] k 'K w &Ent['K i64] ;").unwrap();
         let w = module
             .generics
             .structs
@@ -7439,12 +7890,11 @@ mod tests {
 
     #[test]
     fn parse_generic_field_concrete_quotation_still_parses() {
-        // R7/N4: the `[`-arm has to replicate `quotation_type_ahead`'s
-        // top-depth `--` scan, or the array production misparses a legal
-        // concrete quotation field. `Q` needs a variable-bearing field of its
-        // own too, else the phantom check rejects the fixture for an
-        // unrelated reason.
-        let module = parse_src("type: Q 'T v 'T f [ i64 -- i64 ] ;").unwrap();
+        // R7/N4: a bare `[` field is a quotation effect (P7.S6 R4), so a
+        // legal concrete quotation field must still declare. `Q` needs a
+        // variable-bearing field of its own too, else the phantom check
+        // rejects the fixture for an unrelated reason.
+        let module = parse_src("type: Q['T] v 'T f [ i64 -- i64 ] ;").unwrap();
         let decl = &module.generic_structs[0];
         match decl.fields[1].1 {
             PolyType::Concrete(Type::Quotation(_)) => {}
@@ -7507,7 +7957,7 @@ mod tests {
         // R2/R4/R5: `Box[i64]` in a field position mints an ordinary concrete
         // `StructDecl` -- substituted fields, appended after every pre-pass
         // entry -- and the field carries its `StructId`.
-        let module = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64] ;").unwrap();
         assert_eq!(module.structs.len(), 2);
         let (box_id, boxed) = struct_by_name(&module, "Box[i64]");
         assert_eq!(boxed.fields, vec![("val".to_string(), Type::I64)]);
@@ -7524,7 +7974,7 @@ mod tests {
         // R4: two applications of one generic type are two registry entries
         // with their own field layouts, not one shared entry.
         let module =
-            parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] y Box[u32] ;").unwrap();
+            parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64] y Box[u32] ;").unwrap();
         let (int_id, int_box) = struct_by_name(&module, "Box[i64]");
         let (u32_id, u32_box) = struct_by_name(&module, "Box[u32]");
         assert_ne!(int_id, u32_id);
@@ -7538,7 +7988,7 @@ mod tests {
         // direct assertion (mirrors `intern_bundle_struct`'s own dedup test):
         // three uses across two declarations and a signature, one entry.
         let module = parse_src(
-            "type: Box 'T val 'T ;\ntype: A x Box[i64] ;\ntype: B y Box[i64] ;\n: f ( Box[i64] -- ) drop ;",
+            "type: Box['T] val 'T ;\ntype: A x Box[i64] ;\ntype: B y Box[i64] ;\n: f ( Box[i64] -- ) drop ;",
         )
         .unwrap();
         assert_eq!(
@@ -7564,7 +8014,7 @@ mod tests {
     fn parse_generic_application_resolves_at_a_word_signature_slot() {
         // R2: a signature slot is a distinct parser call site from a field
         // (`parse_slot`, not `parse_field_type_expr`).
-        let module = parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] -- Box[i64] ) ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\n: f ( Box[i64] -- Box[i64] ) ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         let f = module.words.iter().find(|w| w.name == "f").unwrap();
         assert_eq!(f.effect.inputs[0].ty, Type::Struct(box_id, "Box[i64]"));
@@ -7576,7 +8026,7 @@ mod tests {
         // R2: the third call site, `parse_poly_slot`'s concrete fallthrough --
         // a variable-bearing signature never reaches `parse_slot` at all.
         let module =
-            parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] 'A -- 'A Box[i64] ) ;").unwrap();
+            parse_src("type: Box['T] val 'T ;\n: f ( Box[i64] 'A -- 'A Box[i64] ) ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         let f = module.words.iter().find(|w| w.name == "f").unwrap();
         let poly = f.poly.as_ref().expect("a `'A` slot makes the word poly");
@@ -7591,7 +8041,7 @@ mod tests {
         // R6: an argument is a full type expression, so a concrete
         // application inside another resolves by recursion, minting the inner
         // instantiation first.
-        let module = parse_src("type: Box 'T val 'T ;\ntype: W x Box[Box[i64]] ;").unwrap();
+        let module = parse_src("type: Box['T] val 'T ;\ntype: W x Box[Box[i64]] ;").unwrap();
         let (inner_id, _) = struct_by_name(&module, "Box[i64]");
         let (_, outer) = struct_by_name(&module, "Box[Box[i64]]");
         assert_eq!(outer.fields[0].1, Type::Struct(inner_id, "Box[i64]"));
@@ -7602,7 +8052,7 @@ mod tests {
         // The generic declarations are parsed ahead of the body pass, so an
         // application need not follow its declaration -- the order
         // independence a concrete `type:` name already has from the pre-pass.
-        let module = parse_src("type: Wrap x Box[i64] ;\ntype: Box 'T val 'T ;").unwrap();
+        let module = parse_src("type: Wrap x Box[i64] ;\ntype: Box['T] val 'T ;").unwrap();
         let (box_id, _) = struct_by_name(&module, "Box[i64]");
         assert_eq!(
             struct_by_name(&module, "Wrap").1.fields[0].1,
@@ -7613,7 +8063,7 @@ mod tests {
     #[test]
     fn parse_generic_application_with_no_arguments_is_a_located_error() {
         // R3: a generic name is never a type by itself.
-        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box ;").unwrap_err();
         assert!(
             err.contains("generic type `Box` declares 1 type variable"),
             "unexpected message: {err}"
@@ -7626,7 +8076,7 @@ mod tests {
     fn parse_generic_application_with_too_many_arguments_is_a_located_error() {
         // R3: the over-applied case, decidable only because the argument list
         // is bracketed.
-        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64 u32] ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\ntype: Wrap x Box[i64 u32] ;").unwrap_err();
         assert!(
             err.contains("generic type `Box` declares 1 type variable"),
             "unexpected message: {err}"
@@ -7640,7 +8090,7 @@ mod tests {
         // R3 for a multi-variable header: the count is what's checked, not
         // merely the presence of a bracket.
         let err =
-            parse_src("type: Pair 'A 'B a 'A b 'B ;\n: f ( Pair[i64] -- ) drop ;").unwrap_err();
+            parse_src("type: Pair['A 'B] a 'A b 'B ;\n: f ( Pair[i64] -- ) drop ;").unwrap_err();
         assert!(
             err.contains("generic type `Pair` declares 2 type variables"),
             "unexpected message: {err}"
@@ -7654,7 +8104,7 @@ mod tests {
         // R4: the instantiation key is the ordered argument list, so the two
         // orderings are two entries with mirrored field types.
         let module =
-            parse_src("type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64 u32] y Pair[u32 i64] ;")
+            parse_src("type: Pair['A 'B] a 'A b 'B ;\ntype: W x Pair[i64 u32] y Pair[u32 i64] ;")
                 .unwrap();
         let (first, _) = struct_by_name(&module, "Pair[i64 u32]");
         let (second, _) = struct_by_name(&module, "Pair[u32 i64]");
@@ -7675,7 +8125,7 @@ mod tests {
         // spelling as their enum, so two instantiations' `Ok` constructors
         // can't clobber each other in a name-keyed registry.
         let module =
-            parse_src("type: Res 'T 'E | Ok val 'T | Err val 'E ;\ntype: W r Res[i64 u32] ;")
+            parse_src("type: Res['T 'E] | Ok val 'T | Err val 'E ;\ntype: W r Res[i64 u32] ;")
                 .unwrap();
         assert_eq!(module.enums.len(), 1);
         let minted = &module.enums[0];
@@ -7703,7 +8153,7 @@ mod tests {
     /// so cannot discriminate.
     #[test]
     fn parse_generic_application_from_another_module_is_unknown() {
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -7746,7 +8196,7 @@ mod tests {
     /// case needs the export to reach the application at all.
     #[test]
     fn parse_qualified_generic_application_from_another_module_resolves() {
-        let owner = lex("type: Box 'T val 'T ;\nexport: Box ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\nexport: Box ;\n").unwrap();
         let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -7798,7 +8248,7 @@ mod tests {
     /// concrete one is not.
     #[test]
     fn parse_qualified_generic_application_of_unexported_type_is_not_exported() {
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( b::Box[i64] -- ) drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -7841,7 +8291,7 @@ mod tests {
     /// local `Box`.
     #[test]
     fn parse_generic_application_with_unbound_qualifier_is_unknown_type() {
-        let err = parse_src("type: Box 'T val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( q::Box[i64] -- ) drop ;").unwrap_err();
         assert!(err.contains("unknown type `q::Box`"), "unexpected: {err}");
     }
 
@@ -7852,7 +8302,7 @@ mod tests {
     #[test]
     fn parse_generic_application_stamps_the_instantiating_module_id() {
         let tokens = lex(
-            "type: Box 'T val 'T ;\ntype: Res 'T | Ok v 'T ;\n: f ( Box[i64] Res[u32] -- ) drop drop ;\n",
+            "type: Box['T] val 'T ;\ntype: Res['T] | Ok v 'T ;\n: f ( Box[i64] Res[u32] -- ) drop drop ;\n",
         )
         .unwrap();
         let mut arrays = Vec::new();
@@ -7898,13 +8348,13 @@ mod tests {
 
     #[test]
     fn parse_slot_array_type_resolves_and_interns() {
-        let module = parse_src(": w ( [i64 4] -- i64 ) drop 0 ;").unwrap();
+        let module = parse_src(": w ( array[i64 4] -- i64 ) drop 0 ;").unwrap();
         let w = &module.words[0];
         assert_eq!(module.arrays.len(), 1);
         match w.effect.inputs[0].ty {
             Type::Array(id, name) => {
                 assert_eq!(id.index(), 0);
-                assert_eq!(name, "[i64 4]");
+                assert_eq!(name, "array[i64 4]");
             }
             other => panic!("expected Type::Array, got {other:?}"),
         }
@@ -7915,7 +8365,8 @@ mod tests {
     #[test]
     fn parse_slot_array_type_same_shape_dedups_to_one_array_id() {
         let module =
-            parse_src(": a ( [i64 4] -- i64 ) drop 0 ; : b ( [i64 4] -- i64 ) drop 0 ;").unwrap();
+            parse_src(": a ( array[i64 4] -- i64 ) drop 0 ; : b ( array[i64 4] -- i64 ) drop 0 ;")
+                .unwrap();
         assert_eq!(module.arrays.len(), 1);
         let a_ty = module.words[0].effect.inputs[0].ty;
         let b_ty = module.words[1].effect.inputs[0].ty;
@@ -7966,8 +8417,8 @@ mod tests {
              type: S q owning [ -- ] ;\n\
              type: E | None | Some q owning [ -- ] ;\n\
              : nested ( [ owning [ -- ] -- ] -- ) drop ;\n\
-             : elem ( [owning [ -- ] 4] -- ) drop ;\n\
-             : poly ( 'T: Copy owning [ -- ] -- 'T ) drop ;\n",
+             : elem ( array[owning [ -- ] 4] -- ) drop ;\n\
+             : poly ['T: Copy] ( 'T owning [ -- ] -- 'T ) drop ;\n",
         )
         .unwrap();
         let own_nil = crate::ast::owning_quotation_type(Vec::new(), Vec::new());
@@ -7982,7 +8433,7 @@ mod tests {
         };
         assert_eq!(eff.inputs, vec![own_nil]);
         let Type::Array(id, _) = module.words[2].effect.inputs[0].ty else {
-            panic!("a `[T N]` slot is an array");
+            panic!("a `array[T N]` slot is an array");
         };
         assert_eq!(module.arrays[id.index()].element, own_nil);
         assert_eq!(
@@ -8028,7 +8479,7 @@ mod tests {
     fn owning_without_a_quotation_effect_is_located() {
         for src in [
             ": f ( owning i64 -- ) drop ;",
-            ": f ( owning [i64 4] -- ) drop ;",
+            ": f ( owning array[i64 4] -- ) drop ;",
             ": f ( owning ~[ -- ] -- ) drop ;",
             "type: S q owning i64 ;",
             ": f ( ^owning i64 -- ) drop ;",
@@ -8047,7 +8498,7 @@ mod tests {
     /// the type inequality between the flavours is the whole safety story.
     #[test]
     fn owning_quotation_carrying_a_type_variable_is_rejected() {
-        let err = parse_src(": f ( 'T: Copy owning [ 'T -- ] -- ) drop ;").unwrap_err();
+        let err = parse_src(": f ['T: Copy] ( 'T owning [ 'T -- ] -- ) drop ;").unwrap_err();
         assert!(
             err.contains("cannot carry a type variable"),
             "unexpected message: {err}"
@@ -8104,20 +8555,20 @@ mod tests {
 
     #[test]
     fn parse_slot_nested_array_type_resolves_both_shapes() {
-        let module = parse_src(": w ( [[i64 4] 4] -- i64 ) drop 0 ;").unwrap();
+        let module = parse_src(": w ( array[array[i64 4] 4] -- i64 ) drop 0 ;").unwrap();
         assert_eq!(module.arrays.len(), 2);
         match module.words[0].effect.inputs[0].ty {
-            Type::Array(_, name) => assert_eq!(name, "[[i64 4] 4]"),
+            Type::Array(_, name) => assert_eq!(name, "array[array[i64 4] 4]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
     }
 
     #[test]
     fn parse_typedef_array_field_resolves() {
-        let module = parse_src("type: Buf items [i64 16] top i64 ;").unwrap();
+        let module = parse_src("type: Buf items array[i64 16] top i64 ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
         match module.structs[0].fields[0].1 {
-            Type::Array(_, name) => assert_eq!(name, "[i64 16]"),
+            Type::Array(_, name) => assert_eq!(name, "array[i64 16]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
         assert_eq!(module.structs[0].fields[1].1, Type::I64);
@@ -8125,18 +8576,18 @@ mod tests {
 
     #[test]
     fn parse_typedef_enum_variant_array_field_resolves() {
-        let module = parse_src("type: Shape | Poly pts [f64 3] ;").unwrap();
+        let module = parse_src("type: Shape | Poly pts array[f64 3] ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
         match module.enums[0].variants[0].fields[0].1 {
-            Type::Array(_, name) => assert_eq!(name, "[f64 3]"),
+            Type::Array(_, name) => assert_eq!(name, "array[f64 3]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
     }
 
     #[test]
     fn parse_array_type_unknown_element_is_error() {
-        // X1: an unknown element type in `[T N]` names the unknown element.
-        let result = parse_src(": w ( [Nope 4] -- ) drop ;");
+        // X1: an unknown element type in `array[T N]` names the unknown element.
+        let result = parse_src(": w ( array[Nope 4] -- ) drop ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("unknown type"), "unexpected message: {err}");
@@ -8146,17 +8597,17 @@ mod tests {
     #[test]
     fn parse_array_type_zero_length_is_error() {
         // X2: a zero (or negative) length names the type and the invalid length.
-        let result = parse_src(": w ( [i64 0] -- ) drop ;");
+        let result = parse_src(": w ( array[i64 0] -- ) drop ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.contains("[i64 0]"), "unexpected message: {err}");
+        assert!(err.contains("array[i64 0]"), "unexpected message: {err}");
         assert!(err.contains(">= 1"), "unexpected message: {err}");
     }
 
     #[test]
     fn parse_array_type_non_literal_count_is_error() {
         // X3: a non-literal count names the offending count token.
-        let result = parse_src(": w ( [i64 n] -- ) drop ;");
+        let result = parse_src(": w ( array[i64 n] -- ) drop ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("decimal literal"), "unexpected message: {err}");
@@ -8172,7 +8623,7 @@ mod tests {
     #[test]
     fn parse_array_type_count_exceeding_u32_max_is_error() {
         // A count above u32::MAX is a located error, not a silent truncation.
-        let result = parse_src(": w ( [i64 4294967297] -- ) drop ;");
+        let result = parse_src(": w ( array[i64 4294967297] -- ) drop ;");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("4294967297"), "unexpected message: {err}");
@@ -8185,13 +8636,13 @@ mod tests {
         // it (a struct's `has_drop_overload` bit isn't set until `check` sees
         // its `drop` overload, and array-of-linear rejection runs there, not
         // here); the name itself resolves from the parser's name pre-pass.
-        let result = parse_src(&format!("{SPY_DEF}: w ( [Spy 2] -- ) drop ;"));
+        let result = parse_src(&format!("{SPY_DEF}: w ( array[Spy 2] -- ) drop ;"));
         assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     #[test]
     fn parse_typedef_linear_array_field_parses_ok() {
-        let result = parse_src(&format!("{SPY_DEF}type: Bag xs [Spy 2] ;"));
+        let result = parse_src(&format!("{SPY_DEF}type: Bag xs array[Spy 2] ;"));
         assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
@@ -8246,36 +8697,36 @@ mod tests {
     fn parse_owning_cell_array_buffer_type_resolves() {
         // R1: a fixed-capacity heap buffer is `^[u8 N]`, distinct from `^T`
         // over a scalar/struct.
-        let module = parse_src(": w ( ^[u8 4] -- ) ;").unwrap();
+        let module = parse_src(": w ( ^array[u8 4] -- ) ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
         assert_eq!(module.owned_cells.len(), 1);
         match module.words[0].effect.inputs[0].ty {
-            Type::OwnedCell(_, name) => assert_eq!(name, "^[u8 4]"),
+            Type::OwnedCell(_, name) => assert_eq!(name, "^array[u8 4]"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }
         match module.owned_cells[0].payload {
-            Type::Array(_, name) => assert_eq!(name, "[u8 4]"),
+            Type::Array(_, name) => assert_eq!(name, "array[u8 4]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
     }
 
     #[test]
     fn parse_owning_cell_nested_array_buffer_type_resolves() {
-        let module = parse_src(": w ( ^^[u8 4] -- ) ;").unwrap();
+        let module = parse_src(": w ( ^^array[u8 4] -- ) ;").unwrap();
         assert_eq!(module.owned_cells.len(), 2);
         match module.words[0].effect.inputs[0].ty {
-            Type::OwnedCell(_, name) => assert_eq!(name, "^^[u8 4]"),
+            Type::OwnedCell(_, name) => assert_eq!(name, "^^array[u8 4]"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }
     }
 
     #[test]
     fn parse_owning_cell_type_resolves_in_struct_field_position() {
-        // R19: without the field position, `type: Buf b ^[u8 4] ;` fails to
+        // R19: without the field position, `type: Buf b ^array[u8 4] ;` fails to
         // parse; this is the buffer case R1 advertises.
-        let module = parse_src("type: Buf b ^[u8 4] ;").unwrap();
+        let module = parse_src("type: Buf b ^array[u8 4] ;").unwrap();
         match module.structs[0].fields[0].1 {
-            Type::OwnedCell(_, name) => assert_eq!(name, "^[u8 4]"),
+            Type::OwnedCell(_, name) => assert_eq!(name, "^array[u8 4]"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }
     }
@@ -8400,13 +8851,13 @@ mod tests {
 
     #[test]
     fn parse_named_slot_array_type_resolves() {
-        // The named-slot path (`name : type`) also recognises `[T N]`, not
+        // The named-slot path (`name : type`) also recognises `array[T N]`, not
         // just the unnamed-slot shortcut.
-        let module = parse_src(": w ( arr : [i64 4] -- i64 ) drop 0 ;").unwrap();
+        let module = parse_src(": w ( arr : array[i64 4] -- i64 ) drop 0 ;").unwrap();
         let w = &module.words[0];
         assert_eq!(w.effect.inputs[0].name.as_deref(), Some("arr"));
         match w.effect.inputs[0].ty {
-            Type::Array(_, name) => assert_eq!(name, "[i64 4]"),
+            Type::Array(_, name) => assert_eq!(name, "array[i64 4]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
     }
@@ -8438,8 +8889,8 @@ mod tests {
     fn parse_reference_to_array_type_splits_across_tokens() {
         // `[` *is* a delimiter, so this case recurses into the ongoing token
         // stream instead of splitting within one word.
-        let module = parse_src(": w ( &![u8 64] -- ) drop ;").unwrap();
-        assert_eq!(module.words[0].effect.inputs[0].ty.name(), "&![u8 64]");
+        let module = parse_src(": w ( &!array[u8 64] -- ) drop ;").unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].ty.name(), "&!array[u8 64]");
     }
 
     #[test]
@@ -8536,7 +8987,7 @@ mod tests {
     fn parse_trait_decl_records_its_members() {
         // P7.S3e (R1/R3): a trait declaration parses into `Module::traits`,
         // its members sharing one implicit type variable (id 0).
-        let module = parse_src("trait: Show 'T : show ( &'T -- ) ; ;").unwrap();
+        let module = parse_src("trait: Show['T] : show ( &'T -- ) ; ;").unwrap();
         assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Show");
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
@@ -8552,7 +9003,7 @@ mod tests {
     /// name and its `(` sets `declares_inline == true` on the member.
     #[test]
     fn parse_trait_decl_records_an_inline_member() {
-        let module = parse_src("trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;").unwrap();
+        let module = parse_src("trait: Ord['T] : cmp inline ( 'T 'T -- i64 ) ; ;").unwrap();
         let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
         assert_eq!(ord.members.len(), 1);
         assert_eq!(ord.members[0].name, "cmp");
@@ -8561,20 +9012,20 @@ mod tests {
 
     #[test]
     fn parse_trait_decl_zero_members_is_error() {
-        let err = parse_src("trait: Show 'T ;").unwrap_err();
+        let err = parse_src("trait: Show['T] ;").unwrap_err();
         assert!(err.contains("declares no members"), "{err}");
     }
 
     #[test]
     fn parse_trait_decl_second_header_variable_is_error() {
         // R16: single-type-variable traits only.
-        let err = parse_src("trait: Rel 'T 'U : cmp ( &'T &'U -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Rel['T] 'U : cmp ( &'T &'U -- ) ; ;").unwrap_err();
         assert!(err.contains("more than one type variable"), "{err}");
     }
 
     #[test]
     fn parse_trait_decl_member_introducing_a_second_variable_is_error() {
-        let err = parse_src("trait: Rel 'T : cmp ( &'T &'U -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Rel['T] : cmp ( &'T &'U -- ) ; ;").unwrap_err();
         assert!(err.contains("more than one type variable"), "{err}");
     }
 
@@ -8586,7 +9037,7 @@ mod tests {
         // panic later. (A fully-concrete quotation, with no `'T` inside it,
         // folds to `PolyType::Concrete` at parse time and needs no grounding
         // at all -- not this case.)
-        let err = parse_src("trait: Apply 'T : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Apply['T] : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
@@ -8597,7 +9048,7 @@ mod tests {
         // `^'T` member would ground to nothing. Adding it to the supported
         // list is the mutation this catches, and it is a located rejection
         // rather than a wildcard fall-through.
-        let err = parse_src("trait: Sink 'T : sink ( ^'T -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Sink['T] : sink ( ^'T -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
@@ -8611,7 +9062,7 @@ mod tests {
         // ordinary library trait now), so this still fires for `Copy` alone
         // -- confirmed by asserting `check_trait_decls` still runs the
         // reserved-module branch and not some other collision arm.
-        let module = parse_src("trait: Copy 'T : foo ( &'T -- ) ; ;").unwrap();
+        let module = parse_src("trait: Copy['T] : foo ( &'T -- ) ; ;").unwrap();
         assert_eq!(
             module.traits.len(),
             2,
@@ -8630,11 +9081,11 @@ mod tests {
         // `member_shape_is_supported` never sees it and the body-form desugar
         // grounds `inputs`/`outputs` alone -- unrejected, the row would be
         // dropped from the synthesized word's effect.
-        let err = parse_src("trait: F 'T : go ( ..a &'T -- ..a ) ; ;").unwrap_err();
+        let err = parse_src("trait: F['T] : go ( ..a &'T -- ..a ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..a`"), "{err}");
         // Input-side only, so the `row_in` arm is what rejects it (the case
         // above sets `row_out` too, and would still be caught by that alone).
-        let err = parse_src("trait: F 'T : go ( ..a &'T -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: F['T] : go ( ..a &'T -- ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..a`"), "{err}");
     }
 
@@ -8642,7 +9093,7 @@ mod tests {
     fn parse_trait_decl_member_with_an_output_only_row_variable_is_error() {
         // The output side carries its own `row_out`, reached only when the
         // input side declares none.
-        let err = parse_src("trait: F 'T : go ( &'T -- ..b ) ; ;").unwrap_err();
+        let err = parse_src("trait: F['T] : go ( &'T -- ..b ) ; ;").unwrap_err();
         assert!(err.contains("declares the row variable `..b`"), "{err}");
     }
 
@@ -8651,7 +9102,7 @@ mod tests {
     /// replacement, not a generic token mismatch.
     #[test]
     fn parse_trait_decl_bare_member_names_the_colon_form() {
-        let err = parse_src("trait: Ord 'T cmp ( 'T 'T -- Ordering ) ;").unwrap_err();
+        let err = parse_src("trait: Ord['T] cmp ( 'T 'T -- Ordering ) ;").unwrap_err();
         assert!(
             err.contains("trait `Ord` declares member `cmp` without a leading `:`"),
             "{err}"
@@ -8669,7 +9120,7 @@ mod tests {
         // The member's `;` is required before the trait's own `;`. With only
         // one `;`, the member consumes it and the trait terminator is left
         // missing, so the error is the unterminated-trait EOF path.
-        let err = parse_src("trait: Ord 'T : cmp ( 'T 'T -- i64 ) ;").unwrap_err();
+        let err = parse_src("trait: Ord['T] : cmp ( 'T 'T -- i64 ) ;").unwrap_err();
         assert!(err.contains("unterminated `trait:`"), "{err}");
     }
 
@@ -8679,7 +9130,7 @@ mod tests {
     /// `inline` keyword slot sees the `(` that follows, not the name.
     #[test]
     fn parse_trait_decl_member_named_inline_still_parses() {
-        let module = parse_src("trait: Show 'T : inline ( &'T -- ) ; ;").unwrap();
+        let module = parse_src("trait: Show['T] : inline ( &'T -- ) ; ;").unwrap();
         let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
         assert_eq!(show.members.len(), 1);
         assert_eq!(show.members[0].name, "inline");
@@ -8692,7 +9143,7 @@ mod tests {
     /// through to `expect(LParen)` and fails there, located.
     #[test]
     fn parse_trait_decl_member_double_inline_is_error() {
-        let err = parse_src("trait: Show 'T : foo inline inline ( &'T -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Show['T] : foo inline inline ( &'T -- ) ; ;").unwrap_err();
         assert!(err.contains("expected LParen"), "{err}");
     }
 
@@ -8712,25 +9163,32 @@ mod tests {
 
     #[test]
     fn parse_trait_decl_member_with_a_length_variable_array_shape_is_error() {
-        // A length-variable array (`&['T 'N]`) is not a supported member
+        // A length-variable array (`&array['T 'N]`) is not a supported member
         // shape: `ground_member_type` only grounds `Len::Concrete`, so it must
         // be rejected here at the trait decl -- otherwise the body-form desugar
         // panics grounding it.
-        let err = parse_src("trait: Foo 'T : bar ( &['T 'N] -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Foo['T] : bar ( &array['T 'N] -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
     }
 
     #[test]
-    fn parse_trait_decl_member_bound_reports_bound_on_use_not_unknown_capability() {
+    fn parse_trait_decl_member_bound_in_effect_is_error() {
         // `prepass_trait_decls` used to build its inner `Parser` with an
         // empty `traits` slice, so a bound (`'T: Copy`) inside a member
         // signature saw no predicate-trait table and reported "unknown
-        // capability `Copy`" instead of the located bound-on-use error.
-        let err = parse_src("trait: Show 'T : show ( 'T: Copy -- ) ; ;").unwrap_err();
+        // capability `Copy`" instead of a located bound diagnostic. That
+        // subject -- a member-signature bound must not misreport "unknown
+        // capability `Copy`" -- is unchanged; P7.S6 (R7a) only changes *which*
+        // located diagnostic it is. A trait-member effect runs with
+        // `forbid_bounds == false`, so it is the word-def message, not the
+        // `impl:` one.
+        let err = parse_src("trait: Show['T] : show ( 'T: Copy -- ) ; ;").unwrap_err();
         assert!(
-            err.contains("must be written at its binding"),
+            err.contains("may not be written inside a stack effect"),
             "unexpected message: {err}"
         );
+        assert!(!err.contains("unknown capability"), "{err}");
+        assert!(!err.contains("`impl:` target"), "{err}");
     }
 
     /// P7.S3r (R2): the body form's whole desugar, read off the AST -- the
@@ -8740,7 +9198,7 @@ mod tests {
     #[test]
     fn parse_impl_body_synthesizes_a_word_with_the_inherited_effect() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop 7 ;\n\
              ;",
@@ -8784,7 +9242,7 @@ mod tests {
     #[test]
     fn parse_impl_body_inherits_the_members_inline_flag() {
         let module = parse_src(
-            "trait: Ord 'T : cmp inline ( 'T 'T -- i64 ) ; ;
+            "trait: Ord['T] : cmp inline ( 'T 'T -- i64 ) ; ;
 \
              impl: Ord for i64
 \
@@ -8809,9 +9267,9 @@ mod tests {
     #[test]
     fn parse_impl_body_generic_target_inherits_the_members_inline_flag() {
         let module = parse_src(
-            "trait: Show 'T : show inline ( &'T -- ) ; ;
+            "trait: Show['T] : show inline ( &'T -- ) ; ;
 \
-             impl: Show for ['T 4]
+             impl: Show for array['T 4]
 \
                : show | p | p drop ;
 \
@@ -8834,7 +9292,7 @@ mod tests {
     #[test]
     fn parse_impl_body_rewrites_the_members_own_name_inside_a_quotation() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | p | ~[ p show ] drop ;\n\
              ;",
@@ -8869,7 +9327,7 @@ mod tests {
     #[test]
     fn parse_impl_body_binder_named_after_the_member_is_error() {
         let err = parse_src(
-            "trait: Show 'T : show ( &'T -- i64 ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- i64 ) ; ;\n\
              impl: Show for i64\n\
                : show | show | show drop 7 ;\n\
              ;",
@@ -8890,7 +9348,7 @@ mod tests {
     #[test]
     fn parse_impl_decl_zero_bindings_is_error() {
         let err =
-            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\nimpl: Show for i64 ;").unwrap_err();
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\nimpl: Show for i64 ;").unwrap_err();
         assert!(err.contains("binds no members"), "{err}");
     }
 
@@ -9182,7 +9640,7 @@ mod tests {
         // The clause reads the same after a variable-bearing effect (the
         // `parse_poly_effect` path), unaffected by D2's byte-for-byte
         // guarantee on the effect reader itself.
-        let module = parse_src(": dupit ( 'T: Copy -- 'T 'T ) global: COUNT w dup ;").unwrap();
+        let module = parse_src(": dupit ['T: Copy] ( 'T -- 'T 'T ) global: COUNT w dup ;").unwrap();
         let entries = module.words[0].declared_globals.as_ref().unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "COUNT");
@@ -9202,7 +9660,7 @@ mod tests {
     fn parse_poly_type_variable_word_attaches_a_poly_sig() {
         // R1/R4: a `'T` effect parses into a `PolySig`, and the concrete
         // effect is left empty (its whole signature lives in `poly`).
-        let module = parse_src(": dupit ( 'T: Copy -- 'T 'T ) dup ;").unwrap();
+        let module = parse_src(": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
         assert_eq!(sig.inputs.len(), 1);
@@ -9223,7 +9681,7 @@ mod tests {
         // `parse_capabilities_composes_a_predicate_and_a_user_trait` below
         // pins `'T: Copy <user trait>` folding to
         // `[Bound::Copy, Bound::User(id)]`.
-        let module = parse_src(": f ( 'T: Copy -- 'T ) ;").unwrap();
+        let module = parse_src(": f ['T: Copy] ( 'T -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
     }
@@ -9232,7 +9690,7 @@ mod tests {
     fn parse_capabilities_unknown_name_is_still_an_error() {
         // A name that resolves to neither a pre-seeded predicate entry nor a
         // declared trait is still X3.
-        let err = parse_src(": f ( 'T: Nope -- 'T ) ;").unwrap_err();
+        let err = parse_src(": f ['T: Nope] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
     }
 
@@ -9243,7 +9701,8 @@ mod tests {
         // `Bound::User(TraitId)` before `Resolver::rewrite` ever runs. Index 1
         // because the one pre-seeded predicate entry (`Copy`) occupies 0.
         let module =
-            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f ( 'T: Show -- 'T ) ;").unwrap();
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\n: f ['T: Show] ( 'T -- 'T ) ;")
+                .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
     }
@@ -9253,7 +9712,7 @@ mod tests {
         // R5: the capability list stays greedy across the two kinds, in
         // source order.
         let module = parse_src(
-            "trait: Order 'T : cmp ( &'T &'T -- i64 ) ; ;\n: f ( 'T: Copy Order -- 'T ) ;",
+            "trait: Order['T] : cmp ( &'T &'T -- i64 ) ; ;\n: f ['T: Copy Order] ( 'T -- 'T ) ;",
         )
         .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
@@ -9264,12 +9723,16 @@ mod tests {
     }
 
     #[test]
-    fn parse_capabilities_stops_before_a_following_type_slot() {
-        // The greedy list ends at the first word the trait table does not
-        // know, which is then the enclosing signature's next input slot --
-        // not a capability, and not an error.
+    fn parse_bound_bracket_ends_at_close_and_effect_follows() {
+        // P7.S6 (R6a): the greedy bound list inside a bracket ends at `]`, not
+        // at the enclosing effect's next input slot (there is no next slot inside
+        // a bracket). Retargeted from `parse_capabilities_stops_before_a_following_type_slot`:
+        // the old fixture's `'T: Show` token *was* the first input slot, so both
+        // spellings have two inputs. The migration strips the `: Show` off that
+        // slot and restates it in the bracket; the `sig.inputs` assertion is
+        // unchanged, byte for byte.
         let module =
-            parse_src("trait: Show 'T : show ( &'T -- ) ; ;\n: f ( 'T: Show i64 -- 'T ) ;")
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\n: f['T: Show] ( 'T i64 -- 'T ) ;")
                 .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.bounds, vec![(0, Bound::User(TraitId::from_index(1)))]);
@@ -9284,24 +9747,50 @@ mod tests {
         // R18(a): `parse_capabilities` has no `resolve_type` to delegate to,
         // so an unresolvable qualifier needs its own located rejection rather
         // than falling through to the generic unknown-capability message.
-        let err = parse_src(": f ( 'T: q::Show -- 'T ) ;").unwrap_err();
+        // P7.S6 (R6a): migrated to bracket spelling.
+        let err = parse_src(": f['T: q::Show] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown module qualifier `q`"), "{err}");
         assert!(err.contains("`q::Show`"), "{err}");
     }
 
     #[test]
-    fn parse_capabilities_unbound_qualifier_after_a_bound_is_the_next_slot() {
-        // Review finding 2: an unresolvable qualifier used to raise the
-        // unbound-qualifier error unconditionally, even past the first bound
-        // -- so a legal signature whose next input happens to be a qualified
-        // type (unrelated to any bound) was misdiagnosed as a bad bound.
+    fn parse_bound_bracket_unknown_name_after_a_bound_is_an_error() {
+        // P7.S6 (R6a): inside a bracket there is no next slot to fall through
+        // to, so an unrecognised name past the first bound must now error
+        // rather than silently breaking. Retired from
+        // `parse_capabilities_unbound_qualifier_after_a_bound_is_the_next_slot`,
+        // whose subject (an unresolvable qualifier falling through to the next
+        // slot) is destroyed by the bracket grammar.
         let err = parse_src(
-            "trait: Copy2 'T : dummy ( 'T -- ) ; ;\n: f ( 'T: Copy2 q::Point -- 'T ) drop ;",
+            "trait: Copy2['T] : dummy ( 'T -- ) ; ;\n: f['T: Copy2 q::Point] ( 'T -- 'T ) ;",
         )
         .unwrap_err();
-        // `q::Point` is not itself resolvable to anything here (no `q`
-        // import exists), so this must fail as an ordinary unknown-type
-        // error on the next slot, never as an unbound-bound-qualifier one.
+        // Pinned to the *discriminating* text. Reverting the gate does not
+        // make this program build -- the bracket loop's own
+        // `bound_bracket_non_var_error` catches the broken-out token -- so an
+        // "is an error" assertion, or one satisfied by either message naming
+        // `q::Point`, passes with the gate deleted and guards nothing.
+        assert!(
+            err.contains("unknown capability `q::Point`"),
+            "the bound list must reject the name itself: {err}"
+        );
+        assert!(
+            !err.contains("inside the bound bracket"),
+            "the name must not break out to the bracket loop's shape error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_bound_bracket_qualified_type_in_effect_still_resolves_as_a_slot() {
+        // P7.S6 (R6a): the companion to the test above, keeping the original's
+        // real-world case alive on the effect side. A qualified type in the
+        // effect (not the bracket) is still an ordinary input slot, not a
+        // bound -- so `q::Point` fails as an unknown-type error on the slot,
+        // never as an in-bound error.
+        let err = parse_src(
+            "trait: Copy2['T] : dummy ( 'T -- ) ; ;\n: f['T: Copy2] ( 'T q::Point -- 'T ) ;",
+        )
+        .unwrap_err();
         assert!(!err.contains("in bound"), "{err}");
         assert!(err.contains("q::Point"), "{err}");
     }
@@ -9310,7 +9799,7 @@ mod tests {
     fn parse_length_variable_in_count_position() {
         // R1: `'N` in an array count slot is a length variable, lexically
         // identical to a type variable but distinguished by position.
-        let module = parse_src(": alen ( [i64 'N] -- [i64 'N] usize ) len ;").unwrap();
+        let module = parse_src(": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
         assert!(sig.ty_var_names.is_empty());
@@ -9356,7 +9845,7 @@ mod tests {
         // occurrence attaches to `'T` itself. Splitting the sigil without
         // that shared path would intern a variable spelled `'T:`, silently
         // distinct from every later `'T`.
-        let module = parse_src(": f ( &'T: Copy -- 'T ) ;").unwrap();
+        let module = parse_src(": f ['T: Copy] ( &'T -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
         assert!(sig.has_bound(0, Bound::Copy));
@@ -9365,10 +9854,10 @@ mod tests {
 
     #[test]
     fn parse_poly_ref_slot_with_bare_sigil_recurses_on_the_next_token() {
-        // Slice 13 (R-A3, bare-sigil case): `[` *is* a delimiter, so `&['T 4]`
+        // Slice 13 (R-A3, bare-sigil case): `[` *is* a delimiter, so `&array['T 4]`
         // arrives as a lone `&` followed by a genuine array token, which
         // recurses as a poly slot rather than resolving concretely.
-        let module = parse_src(": peek ( ['T 4] -- &['T 4] ) ;").unwrap();
+        let module = parse_src(": peek ( array['T 4] -- &array['T 4] ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         let PolyType::Ref(referent, false) = &sig.outputs[0] else {
             panic!(
@@ -9384,12 +9873,12 @@ mod tests {
         // Slice 13 (R-A4): a `&`-slot whose referent folds fully concrete
         // interns a real `Type::Ref`, exactly as a concrete array shape does;
         // only a variable-bearing referent stays `PolyType::Ref`.
-        let module = parse_src(": f ( 'T [i64 4] -- 'T &[i64 4] ) ;").unwrap();
+        let module = parse_src(": f ( 'T array[i64 4] -- 'T &array[i64 4] ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         let PolyType::Concrete(ty) = sig.outputs[1] else {
             panic!("expected a folded `Concrete`, got {:?}", sig.outputs[1]);
         };
-        assert_eq!(ty.name(), "&[i64 4]");
+        assert_eq!(ty.name(), "&array[i64 4]");
     }
 
     #[test]
@@ -9409,7 +9898,7 @@ mod tests {
         // signature's own variables parses, where it used to die on `'T` as
         // an unknown type (probed at HEAD before this slice).
         let module = parse_src(
-            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;",
         )
         .unwrap();
@@ -9432,7 +9921,7 @@ mod tests {
         // `PolyType::Generic`. Probed at HEAD: this signature already builds
         // and runs.
         let module = parse_src(
-            "type: Result 'T 'E | Ok 'T | Err 'E ;\n\
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : wrap ( 'T -- Result[i64 i64] ) drop 1 Ok ;",
         )
         .unwrap();
@@ -9444,8 +9933,8 @@ mod tests {
     fn parse_poly_generic_nested_depth_two_is_error() {
         // D5: a generic type argument that is itself a generic application
         // is rejected at nesting depth > 1, naming both headers.
-        let err =
-            parse_src("type: Box 'T val 'T ;\n: f ( 'T Box[Box['T]] -- ) drop drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( 'T Box[Box['T]] -- ) drop drop ;")
+            .unwrap_err();
         assert!(
             err.contains("names `Box[...]` as a type argument"),
             "unexpected message: {err}"
@@ -9456,7 +9945,7 @@ mod tests {
     fn parse_poly_generic_arity_mismatch_is_error() {
         // R1: the poly-slot argument list reuses `generic_arity_error`
         // exactly as the concrete path does.
-        let err = parse_src("type: Box 'T val 'T ;\n: f ( Box['T 'E] -- ) drop ;").unwrap_err();
+        let err = parse_src("type: Box['T] val 'T ;\n: f ( Box['T 'E] -- ) drop ;").unwrap_err();
         assert!(
             err.contains("declares 1 type variable"),
             "unexpected message: {err}"
@@ -9469,7 +9958,7 @@ mod tests {
         // privacy gate, so a qualified generic application inside a poly
         // slot is rejected exactly as the concrete path already rejects
         // `parse_qualified_generic_application_of_unexported_type_is_not_exported`.
-        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let owner = lex("type: Box['T] val 'T ;\n").unwrap();
         let other = lex(": f ( 'T b::Box['T] -- ) drop drop ;\n").unwrap();
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
@@ -9511,7 +10000,8 @@ mod tests {
     fn parse_row_variable_records_both_sides() {
         // R1: a `..s` at the deepest slot of each side is the row variable.
         let module =
-            parse_src(": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;").unwrap();
+            parse_src(": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;")
+                .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert!(sig.row_in.is_some());
         assert!(sig.row_out.is_some());
@@ -9523,7 +10013,7 @@ mod tests {
     fn parse_x1_name_as_both_type_and_length_variable_is_error() {
         // X1: one `'`-name in both a type slot and a count slot is a located
         // declaration error naming the variable.
-        let err = parse_src(": f ( 'N [i64 'N] -- i64 ) drop drop ;").unwrap_err();
+        let err = parse_src(": f ( 'N array[i64 'N] -- i64 ) drop drop ;").unwrap_err();
         assert!(err.contains("'N"), "unexpected message: {err}");
         assert!(
             err.contains("type variable") && err.contains("length variable"),
@@ -9748,7 +10238,7 @@ mod tests {
         // Coverage gap (review cycle 3): the guard must also reach a
         // row-bearing quotation appearing as an array element type.
         let err =
-            parse_src(": fx ( ..s i64 [ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;").unwrap_err();
+            parse_src(": fx ( ..s i64 array[ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;").unwrap_err();
         assert!(err.contains("..s"), "unexpected message: {err}");
         assert!(err.contains("inline"), "unexpected message: {err}");
     }
@@ -9763,17 +10253,38 @@ mod tests {
     }
 
     #[test]
-    fn parse_x3_bound_on_use_occurrence_is_error() {
-        // X3: a bound must be written at the binding occurrence, not a use.
-        let err = parse_src(": f ( 'T: Copy 'T: Copy -- 'T ) drop ;").unwrap_err();
+    fn parse_worddef_bound_in_effect_is_error() {
+        // P7.S6 (R7): a bound written inside an effect is a located error
+        // naming the bracket form. Retired from
+        // `parse_x3_bound_on_use_occurrence_is_error`, whose subject (a bound
+        // legal at a *binding* occurrence but not at a *use*) no longer exists
+        // -- neither occurrence may carry one. The `written twice` half of that
+        // subject survives in the bracket, as a duplicate declaration.
+        let err = parse_src(": f ( 'T: Copy 'T -- 'T ) drop ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
-        assert!(err.contains("binding"), "unexpected message: {err}");
+        assert!(
+            err.contains("may not be written inside a stack effect"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("bound bracket"), "unexpected message: {err}");
+        // The use-occurrence spelling is the same error, not a different one.
+        let at_use = parse_src(": f ( 'T 'T: Copy -- 'T ) drop ;").unwrap_err();
+        assert!(
+            at_use.contains("may not be written inside a stack effect"),
+            "unexpected message: {at_use}"
+        );
+        // And a variable declared twice in the bracket is the duplicate error.
+        let dup = parse_src(": f['T: Copy 'T: Copy] ( 'T -- 'T ) drop ;").unwrap_err();
+        assert!(
+            dup.contains("more than once") || dup.contains("twice"),
+            "{dup}"
+        );
     }
 
     #[test]
     fn parse_x3_unknown_capability_is_error() {
         // X3: an unknown capability name after a bound colon is a located error.
-        let err = parse_src(": f ( 'T: Frobnicate -- 'T ) ;").unwrap_err();
+        let err = parse_src(": f ['T: Frobnicate] ( 'T -- 'T ) ;").unwrap_err();
         assert!(err.contains("Frobnicate"), "unexpected message: {err}");
         assert!(err.contains("capability"), "unexpected message: {err}");
     }
@@ -9803,7 +10314,7 @@ mod tests {
 
     #[test]
     fn array_constructor_compound_element_no_longer_parses() {
-        let err = parse_src(": w ( -- ) [ [i64 3] ; 4 ] drop ;").unwrap_err();
+        let err = parse_src(": w ( -- ) [ array[i64 3] ; 4 ] drop ;").unwrap_err();
         assert!(err.contains("parse error"), "unexpected message: {err}");
     }
 
@@ -9879,8 +10390,8 @@ mod tests {
     #[test]
     fn parse_impl_target_generic_array_var_elem_and_len_parses() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -9896,7 +10407,7 @@ mod tests {
     #[test]
     fn parse_impl_target_generic_var_parses() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for 'T\n\
                : show | a | a drop ;\n\
              ;",
@@ -9909,7 +10420,7 @@ mod tests {
     #[test]
     fn parse_impl_target_concrete_still_parses() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
              impl: Show for i64\n\
                : show | p | p drop ;\n\
              ;",
@@ -9922,8 +10433,8 @@ mod tests {
     #[test]
     fn parse_impl_target_bound_on_var_is_error() {
         let err = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T: Copy 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T: Copy 'N]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -9937,8 +10448,8 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_single_bound_threads_into_poly_sig() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'T: Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'T: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -9958,9 +10469,9 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_multiple_bounds_on_one_var() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             trait: Eq 'T : eq ( &'T &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'T: Show Eq\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             trait: Eq['T] : eq ( &'T &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'T: Show Eq\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -9976,9 +10487,9 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_multiple_variables() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             trait: Eq 'T : eq ( &'T &'T -- ) ; ;\n\
-             type: Pair 'A 'B a 'A b 'B ;\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             trait: Eq['T] : eq ( &'T &'T -- ) ; ;\n\
+             type: Pair['A 'B] a 'A b 'B ;\n\
              impl: Show for Pair['T 'V] where 'T: Show 'V: Eq\n\
                : show | a | a drop ;\n\
              ;",
@@ -9999,11 +10510,11 @@ mod tests {
 
     #[test]
     fn parse_impl_where_clause_length_var_is_error() {
-        // 'N in ['T 'N] is a length variable, not in ty_var_names, so a
+        // 'N in array['T 'N] is a length variable, not in ty_var_names, so a
         // `where`-clause bound on it is an unknown-type-variable error.
         let err = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'N: Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'N: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -10015,8 +10526,8 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_no_where_keeps_bounds_empty() {
         let module = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N]\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -10029,8 +10540,8 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_unknown_variable_is_error() {
         let err = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'X: Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'X: Show\n\
                : show | a | a drop ;\n\
              ;",
         )
@@ -10042,12 +10553,647 @@ mod tests {
     #[test]
     fn parse_impl_where_clause_missing_colon_is_error() {
         let err = parse_src(
-            "trait: Show 'T : show ( &'T -- ) ; ;\n\
-             impl: Show for ['T 'N] where 'T Show\n\
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N] where 'T Show\n\
                : show | a | a drop ;\n\
              ;",
         )
         .unwrap_err();
         assert!(err.contains("expected `:` after"), "{err}");
+    }
+
+    // ---- P7.S6 Phase 1: the named array type (R1/R1a/R1b/R2/R3) ----
+
+    #[test]
+    fn parse_poly_slot_named_array_parses() {
+        let module = parse_src(": f ( array['T 'N] -- array['T 'N] ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Array(e, Len::Var(0)) if **e == PolyType::Var(0)),
+            "input should be array['T 'N]"
+        );
+        assert!(
+            matches!(&sig.outputs[0], PolyType::Array(e, Len::Var(0)) if **e == PolyType::Var(0)),
+            "output should be array['T 'N]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_nested_named_array_parses() {
+        let module = parse_src(": f ( array[array['T 2] 3] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Array(outer, Len::Concrete(3)) if matches!(&**outer, PolyType::Array(inner, Len::Concrete(2)) if **inner == PolyType::Var(0))),
+            "input should be array[array['T 2] 3]"
+        );
+    }
+
+    #[test]
+    fn parse_slot_named_array_parses() {
+        let module = parse_src(": f ( array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::Array(_, _)),
+            "input should be a Type::Array"
+        );
+    }
+
+    #[test]
+    fn parse_slot_named_array_with_type_annotation_parses() {
+        // R1b: a slot *named* `array` (`array : i64`) needs no special-case
+        // code. R1's dispatch predicate requires `array` followed by `[`, and
+        // here the next token is `:`, so no dispatch is entered. This is a
+        // plain regression test, not mutation-testable.
+        let module = parse_src(": f ( array : i64 -- ) drop ;").unwrap();
+        assert_eq!(
+            module.words[0].effect.inputs[0].name.as_deref(),
+            Some("array"),
+            "`array` should be the slot name"
+        );
+    }
+
+    #[test]
+    fn parse_ref_type_expr_named_array_parses() {
+        // R1a concrete path: `&array[i64 4]` -- `&` and `array` are glued
+        // into one word, so the `[`-dispatch sites cannot reach this
+        // spelling. `parse_ref_type_expr` intercepts `array` and dispatches
+        // into `parse_array_type_expr`.
+        let module = parse_src(": f ( &array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::Ref(_, false, _)),
+            "input should be a Type::Ref over an array"
+        );
+    }
+
+    #[test]
+    fn split_owning_cell_word_named_array_parses() {
+        // R1a concrete path: `^array[i64 4]` -- same interception in
+        // `split_owning_cell_word`.
+        let module = parse_src(": f ( ^array[i64 4] -- ) drop ;").unwrap();
+        assert!(
+            matches!(module.words[0].effect.inputs[0].ty, Type::OwnedCell(_, _)),
+            "input should be a Type::OwnedCell over an array"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_ref_named_array_parses() {
+        // R1a poly path: `&array['T 4]` inside a PolySig. The `&` and `array`
+        // are glued, so `parse_poly_slot`'s `&` arm intercepts `array` and
+        // dispatches into `parse_poly_array` (not the concrete array reader,
+        // which cannot hold a type-variable element).
+        let module = parse_src(": f ( &array['T 4] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "input should be &array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_owned_cell_named_array_parses() {
+        // R1a poly path: `^array['T 4]` inside a PolySig.
+        let module = parse_src(": f ( ^array['T 4] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "input should be ^array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_shape_ref_named_array_parses() {
+        // R1a generic-field path: `&array['T 4]` in a generic struct field.
+        // This is a regression test: today's `&array['T 4]` field spelling builds
+        // via the bare-sigil recursion, so migrating to `array[…]` must not
+        // break it. The co-assertion that `&array['T 4]` still builds is
+        // phases 1–3 only.
+        let named = sole_generic_field("type: Box['T] f &array['T 4] ;");
+        assert!(
+            matches!(&named, PolyType::Ref(r, false) if matches!(&**r, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "field should be &array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_shape_owned_cell_named_array_parses() {
+        // R1a generic-field path: `^array['T 4]` in a generic struct field.
+        // Same rationale as the `&` twin above.
+        let named = sole_generic_field("type: Box['T] f ^array['T 4] ;");
+        assert!(
+            matches!(&named, PolyType::OwnedCell(c) if matches!(&**c, PolyType::Array(e, Len::Concrete(4)) if **e == PolyType::Var(0))),
+            "field should be ^array['T 4]"
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_shape_bare_bracket_after_retirement_is_a_quotation_error() {
+        // R1a: the successor to the two tests above's phases-1–3 co-assertion
+        // that `&['T 4]` still built. After R4 a bare `[` is a quotation
+        // effect, so that spelling is now rejected -- with a *pinned* message,
+        // since "rejected" alone can hold for an unrelated upstream reason.
+        //
+        // Two arms, because `parse_generic_field_shape`'s ty-var scan
+        // (`quotation_effect_ty_var_ahead`) runs ahead of the reader and so
+        // fires ahead of R4a's validator.
+        let with_var = parse_src("type: Box['T] f &['T 4] ;").unwrap_err();
+        assert!(
+            with_var.contains("quotation") && with_var.contains("'T"),
+            "the declaration's own variable inside a quotation field: {with_var}"
+        );
+        let concrete = parse_src("type: Box['T] f &[i64 4] g 'T ;").unwrap_err();
+        assert!(
+            concrete.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "the concrete twin routes through R4a's validator: {concrete}"
+        );
+        assert!(concrete.contains("array[T N]"), "{concrete}");
+    }
+
+    #[test]
+    fn parse_type_expr_array_without_bracket_is_error() {
+        // R2: `array` in a type position with no following `[` is a located
+        // error naming the required form, not "unknown type `array`".
+        let err = parse_src(": f ( array -- ) drop ;").unwrap_err();
+        assert!(err.contains("`array`"), "names the word: {err}");
+        assert!(err.contains("`[T N]`"), "names the required form: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "not an unknown-type error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_ref_type_expr_array_without_bracket_is_error() {
+        // R2 via the `&` splitter: `&array` with no following `[` falls
+        // through to `resolve_type_or_apply`, which is R2's single raise site.
+        let err = parse_src(": f ( &array -- ) drop ;").unwrap_err();
+        assert!(err.contains("`array`"), "names the word: {err}");
+        assert!(err.contains("`[T N]`"), "names the required form: {err}");
+        assert!(
+            !err.contains("unknown type"),
+            "not an unknown-type error: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_reserved_name_array_type_is_error() {
+        let err = parse_src("type: array x i64 ;").unwrap_err();
+        assert!(
+            err.contains("reserved") && err.contains("`array`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_reserved_name_array_variant_is_error() {
+        let err = parse_src("type: E | array | Other ;").unwrap_err();
+        assert!(
+            err.contains("reserved") && err.contains("`array`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn a_word_named_array_still_parses() {
+        // R3: `array` is reserved against `type:`/variant names, not against
+        // every use of the spelling. A word named `array` is legal.
+        let module = parse_src(": array ( i64 -- i64 ) ;").unwrap();
+        assert_eq!(module.words[0].name, "array");
+    }
+
+    #[test]
+    fn parse_impl_target_named_array_parses() {
+        // R8 (first half): `impl: Show for array['T 'N]` falls out of R1
+        // through `parse_poly_slot`.
+        let module = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 'N]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_concrete());
+        assert!(
+            module.words[0].poly.is_some(),
+            "generic impl member word should be polymorphic"
+        );
+    }
+
+    // ---- P7.S6 Phase 2: R5/R5a/R5b/R6/R6a bracket binding sites ----
+
+    #[test]
+    fn parse_typedef_generic_header_brackets_parses() {
+        // R5: `type: Box['T] val 'T ;` parses as a generic struct with one
+        // type variable.
+        let module = parse_src("type: Box['T] val 'T ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        assert_eq!(
+            module.generic_structs[0].ty_var_names,
+            vec!["'T".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_brackets_enum_parses() {
+        // R5: `type: Result['T 'E] | Ok 'T | Err 'E ;` parses as a generic enum.
+        let module = parse_src("type: Result['T 'E] | Ok 'T | Err 'E ;").unwrap();
+        assert_eq!(module.generic_enums.len(), 1);
+        assert_eq!(
+            module.generic_enums[0].ty_var_names,
+            vec!["'T".to_string(), "'E".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_empty_bracket_is_error() {
+        let err = parse_src("type: Box[] val 'T ;").unwrap_err();
+        assert!(err.contains("empty type-variable bracket"), "{err}");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_duplicate_var_is_error() {
+        let err = parse_src("type: Box['T 'T] val 'T ;").unwrap_err();
+        assert!(err.contains("bound twice"), "{err}");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_bare_name_is_concrete() {
+        // R5: a bare name with no following `[` is a concrete (non-generic)
+        // declaration, unchanged.
+        let module = parse_src("type: Ordering | Less | Equal | Greater ;").unwrap();
+        assert!(module.generic_structs.is_empty());
+        assert!(module.generic_enums.is_empty());
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].name, "Ordering");
+    }
+
+    #[test]
+    fn parse_typedef_generic_header_non_var_token_in_bracket_is_error() {
+        // R5: a non-`'`, non-`]` token inside a header bracket is a located
+        // error naming the expected form.
+        let err = parse_src("type: Box[i64] val 'T ;").unwrap_err();
+        assert!(err.contains("expected a type variable"), "{err}");
+    }
+
+    #[test]
+    fn header_is_generic_rejects_postfix_after_retirement() {
+        // R10: the bracket form is the only generic spelling. Replaces
+        // `header_is_generic_accepts_both_bracket_and_postfix_during_migration`,
+        // whose dual acceptance was a phases-2–3 scaffold.
+        let bracket_module = parse_src("type: Box['T] val 'T ;").unwrap();
+        assert_eq!(bracket_module.generic_structs.len(), 1);
+        assert_eq!(bracket_module.generic_structs[0].ty_var_names, ["'T"]);
+
+        // The postfix form is no longer *classified* as concrete and left to
+        // mis-parse: it is its own located error.
+        let err = parse_src("type: Box 'T val 'T ;").unwrap_err();
+        assert!(err.contains("retired postfix form"), "{err}");
+        assert!(err.contains("type: Box['T]"), "{err}");
+    }
+
+    #[test]
+    fn parse_typedef_postfix_header_var_is_error() {
+        // R10: the located error reaches the struct production and the enum
+        // production.
+        let struct_err = parse_src("type: Box 'T val 'T ;").unwrap_err();
+        assert!(struct_err.contains("retired postfix form"), "{struct_err}");
+        assert!(struct_err.contains("type: Box['T]"), "{struct_err}");
+        // A `'`-prefixed word is not merely rejected as a field name.
+        assert!(
+            !struct_err.contains("cannot be a field name"),
+            "{struct_err}"
+        );
+
+        let enum_err = parse_src("type: Result 'T 'E | Ok 'T | Err 'E ;").unwrap_err();
+        assert!(enum_err.contains("retired postfix form"), "{enum_err}");
+        assert!(enum_err.contains("type: Result['T]"), "{enum_err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_bracket_header_parses() {
+        // R5b: `trait: Ord['T]` parses with the bracketed header form.
+        let module = parse_src("trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;").unwrap();
+        assert_eq!(module.traits.len(), 2, "Copy pre-seeded, plus Ord");
+        let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
+        assert_eq!(ord.members.len(), 1);
+    }
+
+    #[test]
+    fn parse_trait_decl_two_bracket_vars_is_error() {
+        // R5b: a second variable inside the bracket keeps
+        // `multi_variable_trait_error`.
+        let err = parse_src("trait: Ord['T 'U] : cmp ( &'T &'T -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("more than one type variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_with_neither_form_is_still_an_error() {
+        // R5b: with neither form present the existing located error fires,
+        // retargeted in message text to name `trait: Name['T]`.
+        let err = parse_src("trait: Ord : cmp ( i64 i64 -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("bracketed header"), "{err}");
+        assert!(err.contains("trait: Ord['T]"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_postfix_header_var_is_error() {
+        // R10: `parse_trait_decl` drops R5b's postfix disjunct. Replaces
+        // `parse_trait_decl_accepts_both_bracket_and_postfix_during_migration`.
+        // Distinct from the neither-form error above, which would wrongly
+        // claim no type variable was written at all.
+        let err = parse_src("trait: Ord 'T : cmp ( &'T &'T -- i64 ) ; ;").unwrap_err();
+        assert!(err.contains("retired postfix form"), "{err}");
+        assert!(err.contains("trait: Ord['T]"), "{err}");
+        assert!(!err.contains("expected a type variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_parses() {
+        // R6: `: f['T: Copy] ( 'T -- 'T )` parses with the bound bracket.
+        let module =
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\n: f['T: Copy] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_after_inline_parses() {
+        // R6: the bracket sits after `inline` and before `(`.
+        let module = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n: f inline ['T: Copy] ( 'T -- 'T ) ;",
+        )
+        .unwrap();
+        assert!(module.words[0].declares_inline);
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_var_unused_in_effect_is_error() {
+        // R6: a bracket-declared variable that never appears in the effect is
+        // a located error.
+        let err = parse_src(": f['T: Copy] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("never appears in the effect"), "{err}");
+        assert!(err.contains("'T"), "{err}");
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_var_id_order_follows_effect() {
+        // R6: ids stay effect-derived. The bracket must not pre-intern its
+        // variables; `ty_var_names` order follows the effect's first-mention
+        // order, not the bracket's declaration order.
+        let module = parse_src(": f['U: Copy 'T: Copy] ( 'T 'U -- 'T 'U ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        // Effect mentions 'T first, then 'U, so id 0 is 'T and id 1 is 'U --
+        // even though the bracket declares 'U first.
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string(), "'U".to_string()]);
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_preserves_effect_arity() {
+        // R6: moving a bound into the bracket never removes a slot. The
+        // bound-bearing occurrence is a stack slot and stays one.
+        // `: eq['T: Ord] ( 'T 'T -- Bool )` has two inputs (before and after).
+        let module = parse_src(
+            "type: Bool | False | True ;\ntrait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;\n: eq['T: Ord] ( 'T 'T -- Bool ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.inputs.len(), 2, "two inputs preserved");
+        assert_eq!(sig.outputs.len(), 1);
+    }
+
+    #[test]
+    fn parse_bound_bracket_multiple_bound_vars_parse() {
+        // R6a: `['T: Copy 'U: Ord]` parses as two var_decls.
+        let module = parse_src(
+            "trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;\n: f['T: Copy 'U: Ord] ( 'T 'U -- 'T ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_bound_bracket_unbounded_var_parses() {
+        // R6a: `['T 'U: Ord]` is legal -- `'T` unbounded, declared for
+        // documentation, but it must still appear in the effect.
+        let module = parse_src(
+            "trait: Ord['T] : cmp ( &'T &'T -- i64 ) ; ;\n: f['T 'U: Ord] ( 'T 'U -- 'T ) ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(!sig.has_bound(0, Bound::Copy));
+        assert!(sig.has_bound(1, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_bound_bracket_empty_is_error() {
+        // R6: an empty bound bracket is a located error.
+        let err = parse_src(": f[] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("empty bound bracket"), "{err}");
+    }
+
+    #[test]
+    fn parse_bound_bracket_non_var_token_is_error() {
+        // R6: a non-`'`, non-`]` token inside a bound bracket is a located error.
+        let err = parse_src(": f[i64] ( i64 -- i64 ) ;").unwrap_err();
+        assert!(err.contains("expected a type variable"), "{err}");
+    }
+
+    #[test]
+    fn skip_typedef_with_bracket_header_skips_whole_decl() {
+        // R5: `skip_typedef` and the pipe/variant scans must remain correct
+        // with header brackets present. The bracket contains only
+        // `'`-prefixed words, so no Pipe/Semicolon enters the scanned range.
+        // This test verifies a bracketed generic `type:` header is correctly
+        // skipped by `parse_generic_typedefs` and doesn't leave a residue that
+        // breaks the body pass.
+        let module = parse_src("type: Box['T] val 'T ;\n: f ( i64 -- i64 ) 1 add ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        assert_eq!(module.words.len(), 1);
+        assert_eq!(module.words[0].name, "f");
+    }
+
+    #[test]
+    fn enum_detection_with_bracket_header_is_correct() {
+        // R5: a bracketed generic enum header is correctly classified as an
+        // enum (the pipe/variant scan must not be confused by the bracket).
+        let module =
+            parse_src("type: Result['T 'E] | Ok 'T | Err 'E ;\n: f ( i64 -- i64 ) ;").unwrap();
+        assert_eq!(module.generic_enums.len(), 1);
+        assert_eq!(module.generic_enums[0].ty_var_names.len(), 2);
+        assert_eq!(module.words.len(), 1);
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_with_user_trait_bound_parses() {
+        // R6: a user-trait bound inside the bracket resolves at parse time.
+        let module =
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\n: f['T: Show] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::User(TraitId::from_index(1))));
+    }
+
+    #[test]
+    fn parse_worddef_bound_bracket_glued_colon_parses() {
+        // R6a: the `:` may be glued (`'T:`) or spaced, exactly as in the
+        // in-effect bound syntax.
+        let module =
+            parse_src("trait: Show['T] : show ( &'T -- ) ; ;\n: f['T: Copy] ( 'T -- 'T ) ;")
+                .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn parse_trait_member_bound_bracket_parses() {
+        // R6: the same bracket is admitted on a trait member declaration, in
+        // the same slot relative to its own `inline` peek.
+        let module = parse_src("trait: Show['T] : show ['T: Copy] ( 'T -- ) ; ;").unwrap();
+        let show = module.traits.iter().find(|t| t.name == "Show").unwrap();
+        let sig = &show.members[0].sig;
+        assert!(sig.has_bound(0, Bound::Copy));
+    }
+
+    #[test]
+    fn generic_field_type_str_renders_named_array() {
+        // R8b: `generic_field_type_str` renders `array[...]` (not `[...]`)
+        // for an array type, so a generic struct field's surface spelling is
+        // copy-pasteable source.
+        let ty_vars = [("'T".to_string(), Span::default())];
+        let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(generic_field_type_str(&arr, &ty_vars), "array['T 4]");
+        // A nested array also picks up the new spelling.
+        let nested = PolyType::Array(Box::new(arr), Len::Concrete(2));
+        assert_eq!(
+            generic_field_type_str(&nested, &ty_vars),
+            "array[array['T 4] 2]"
+        );
+    }
+
+    #[test]
+    fn parse_poly_slot_bare_bracket_is_quotation() {
+        // R4: an array-shaped bare bracket in a poly slot is a quotation
+        // effect now, not an array -- so it is R4a's missing-`--` error.
+        let err = parse_src(": f ( [ 'T 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(err.contains("array[T N]"), "{err}");
+        // And the named spelling in the same position still parses as an array.
+        let module = parse_src(": f ( array[ 'T 4 ] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(
+            sig.inputs[0],
+            PolyType::Array(_, Len::Concrete(4))
+        ));
+    }
+
+    #[test]
+    fn parse_quotation_effect_missing_arrow_is_error() {
+        // R4a, concrete reader, depth base 0, opener `[`. The message *does*
+        // name `array[T N]`: a plain `[` is exactly where an author who meant
+        // an array lands.
+        let err = parse_src(": f ( [ i64 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(
+            err.contains("array[T N]"),
+            "a plain `[` opener gets the array advice: {err}"
+        );
+        // Located at the opening bracket, not at EOF.
+        assert!(err.contains("line 1, col 7"), "{err}");
+    }
+
+    #[test]
+    fn parse_poly_quotation_missing_arrow_is_error() {
+        // R4a(iii), poly reader, depth base 1, opener `~[`. `~[` has no array
+        // reading anywhere in the grammar (every type-position reader rejects
+        // a bare `Token::TildeLBracket`), so the advice must NOT offer
+        // `array[T N]` -- that would send the author somewhere the parser
+        // refuses. Pinned to a different opener than the base-0 test above so
+        // both entry points are covered independently.
+        let err = parse_src(": f ( ~[ i64 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("array[T N]"),
+            "a `~[` opener must not be offered the array spelling: {err}"
+        );
+        // Located at the `~[`, which the base-1 caller has already consumed,
+        // so the span comes from behind the cursor rather than at it.
+        assert!(err.contains("line 1, col 7"), "{err}");
+    }
+
+    #[test]
+    fn parse_poly_quotation_legal_inline_effect_still_parses() {
+        // R4a(i)'s guard: `parse_poly_quotation_inner` is entered *past* its
+        // opener by all three of its callers, so the validator must be seeded
+        // at depth base 1. Seeded at 0 this legal `~[ 'T -- Bool ]` meets its
+        // closing `]` first, falls to -1, never satisfies the `depth == 0`
+        // stop, runs to EOF and is false-rejected -- as would every inline
+        // combinator in `lib/combinators.sth`.
+        let module = parse_src(": f inline ( 'T ~[ 'T -- i64 ] -- i64 ) call ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[1], PolyType::Quotation(ins, outs, true, _, _)
+                if ins.len() == 1 && outs.len() == 1),
+            "the inline quotation parameter should survive: {:?}",
+            sig.inputs[1]
+        );
+        // The `owning [ ... ]` and plain `[ ... ]` openers reach the same
+        // base-1 site; neither may be false-rejected either.
+        parse_src(": g ( [ i64 -- i64 ] 'T -- 'T ) drop ;").expect("a plain poly quotation slot");
+    }
+
+    #[test]
+    fn require_top_depth_arrow_counts_a_nested_tilde_bracket() {
+        // R4a(ii): `Token::TildeLBracket` is a single token that opens a
+        // bracket. A walk that counts only `Token::LBracket` fails *open*
+        // here -- the inner `~[`'s `--` is seen at depth 1 and the outer
+        // bracket passes vacuously, then dies further down with a worse
+        // diagnostic. The author meant `array[ ~[ i64 -- i64 ] 4 ]`, and the
+        // outer opener is a plain `[`, so the array advice is present and
+        // correct.
+        let err = parse_src(": f ( [ ~[ i64 -- i64 ] 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{err}"
+        );
+        assert!(err.contains("array[T N]"), "{err}");
+        // The all-`[` twin, which a counter blind to `~[` gets right anyway.
+        let plain = parse_src(": f ( [ [ i64 -- i64 ] 4 ] -- ) drop ;").unwrap_err();
+        assert!(
+            plain.contains("must be written in full as `[ inputs -- outputs ]`"),
+            "{plain}"
+        );
+        // And the named spelling parses, so the fixture's only defect is the
+        // missing `array`.
+        parse_src(": f ( array[ ~[ i64 -- i64 ] 4 ] -- ) drop ;")
+            .expect("the named array of inline quotations parses");
+    }
+
+    #[test]
+    fn poly_type_shape_str_renders_old_spelling_by_exemption() {
+        // R8b: `poly_type_shape_str` is the ruled-on exemption — it renders
+        // `[...]` (not `array[...]`) because it keys synthesized member word
+        // names, a compiler-internal spelling never shown to the user. Assert
+        // *no* change so a well-meaning sweep cannot quietly rename synthesized
+        // member words.
+        let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(poly_type_shape_str(&arr), "['T0 4]");
     }
 }

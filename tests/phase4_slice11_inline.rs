@@ -418,7 +418,7 @@ fn inline_reference_to_linear_local_is_rejected() {
     // never consumed and rejects it by the pre-existing must-consume rule --
     // reject-safe, and reached with no special case for references. Deleting the
     // borrow-and-return is not what makes this pass; consuming `b` is.
-    let src = "type: Buf  data ^[u8 64]  len usize ;\n\
+    let src = "type: Buf  data ^array[u8 64]  len usize ;\n\
                : fresh inline ( -- &!usize )\n\
                  0 >u8 64 fill ^ 0 >usize Buf | b |\n\
                  &!b &!len ;\n";
@@ -488,22 +488,22 @@ fn combinators_source(quotation_kind: &str) -> String {
 : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | n | 0 n f times-helper ;
 
-: each inline ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
+: each inline ( array['T 'N] {quotation_kind}[ 'T -- ] -- )
   | f | len >i64 | count | | arr |
   count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: map inline ( ['T 'N] {quotation_kind}[ 'T -- 'T ] -- ['T 'N] )
+: map inline ( array['T 'N] {quotation_kind}[ 'T -- 'T ] -- array['T 'N] )
   | f | len >i64 | count | | arr |
   count ~[ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
   arr ;
 
-: fold inline ( ['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
+: fold inline ( array['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
   | f | | acc | len >i64 | count | | arr |
   acc count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- Bool ] -- ['T 'N] usize )
+: filter inline ['T: Copy] ( array['T 'N] {quotation_kind}[ 'T -- Bool ] -- array['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n ~[ | i | &arr i >usize &> @ dup p call ~[
           | v | &!arr over >usize &!> v ! 1 add
@@ -525,7 +525,7 @@ fn combinators_source(quotation_kind: &str) -> String {
 fn combinators_main(quotation_kind: &str) -> String {
     format!(
         "\
-: mkarr ( -- [i64 4] ) 0 4 fill ;
+: mkarr ( -- array[i64 4] ) 0 4 fill ;
 
 : main ( -- )
   mkarr {quotation_kind}[ 1 add drop ] each

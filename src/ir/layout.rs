@@ -170,7 +170,7 @@ pub struct VariantLayout {
 /// (`round_up(elem_size, elem_align)`, so element `i` sits at `i * stride`),
 /// the total `size` (`count * stride`), and the `align` (the element's align).
 /// A `usize` element sizes from `WORD_WIDTH` (R15) via the same path as a
-/// scalar field. `name` is the leaked `[T N]` spelling the backend emits
+/// scalar field. `name` is the leaked `array[T N]` spelling the backend emits
 /// as `:name`.
 #[derive(Debug, Clone)]
 pub struct ArrayLayout {
@@ -307,7 +307,7 @@ pub struct Refs {
 /// is only what lowering needs to reach the buffer behind the view: the
 /// element's `IrType` (the referent an indexed element reference records) and
 /// its `stride` (the same figure `ArrayLayout` computes, since a view over
-/// `[T N]` walks that array's own elements). The backend sees none of it --
+/// `array[T N]` walks that array's own elements). The backend sees none of it --
 /// the element type is erased there exactly as it is for the `Ptr` every `&T`
 /// becomes.
 #[derive(Debug, Default)]
@@ -977,26 +977,26 @@ mod tests {
 
         // A struct with two `usize` fields and an array of `usize`: both resize
         // with the parameter.
-        let m = module_of(": w ( [usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
+        let m = module_of(": w ( array[usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
         let (s8, _, a8, ..) =
             build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 8);
         let (s4, _, a4, ..) =
             build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 4);
         assert_eq!(s8.layouts[0].size, 16, "two usize fields at width 8");
         assert_eq!(s4.layouts[0].size, 8, "two usize fields at width 4");
-        assert_eq!(a8.layouts[0].size, 32, "[usize 4] at width 8");
-        assert_eq!(a4.layouts[0].size, 16, "[usize 4] at width 4");
+        assert_eq!(a8.layouts[0].size, 32, "array[usize 4] at width 8");
+        assert_eq!(a4.layouts[0].size, 16, "array[usize 4] at width 4");
     }
 
     #[test]
     fn array_layout_stride_size_align_from_element() {
         // M2: `stride = round_up(elem_size, elem_align)`, `size = count*stride`,
         // `align = elem_align`. An `i64` element: stride 8, size 32, align 8.
-        let a = arrays_of(": w ( [i64 4] -- ) drop ;");
+        let a = arrays_of(": w ( array[i64 4] -- ) drop ;");
         assert_eq!((a.layouts[0].stride, a.layouts[0].size), (8, 32));
         assert_eq!(a.layouts[0].align, 8);
         // A sub-word `u8` element: stride 1, size 3, align 1.
-        let b = arrays_of(": w ( [u8 3] -- ) drop ;");
+        let b = arrays_of(": w ( array[u8 3] -- ) drop ;");
         assert_eq!(
             (b.layouts[0].stride, b.layouts[0].size, b.layouts[0].align),
             (1, 3, 1)
@@ -1005,10 +1005,14 @@ mod tests {
 
     #[test]
     fn array_layout_nested_array_of_array_sizes_via_registry() {
-        // M3: `[[i64 4] 2]` sizes its element (the inner `[i64 4]`, 32 bytes)
+        // M3: `array[array[i64 4] 2]` sizes its element (the inner `array[i64 4]`, 32 bytes)
         // via the registry: outer stride 32, size 64, align 8.
-        let a = arrays_of(": w ( [[i64 4] 2] -- ) drop ;");
-        let outer = a.layouts.iter().find(|l| l.name == "[[i64 4] 2]").unwrap();
+        let a = arrays_of(": w ( array[array[i64 4] 2] -- ) drop ;");
+        let outer = a
+            .layouts
+            .iter()
+            .find(|l| l.name == "array[array[i64 4] 2]")
+            .unwrap();
         assert_eq!((outer.stride, outer.size, outer.align), (32, 64, 8));
     }
 
@@ -1021,7 +1025,7 @@ mod tests {
     /// its width either way).
     #[test]
     fn build_slices_records_element_type_and_array_matching_stride() {
-        let src = "type: Pair a i64 b i64 ;\n: f ( [Pair 4] -- ) drop ;\n: main ( -- ) ;\n";
+        let src = "type: Pair a i64 b i64 ;\n: f ( array[Pair 4] -- ) drop ;\n: main ( -- ) ;\n";
         let tokens = crate::lexer::lex(src).unwrap();
         let module = crate::test_support::parse_with_core(&tokens).unwrap();
         let (structs, enums, arrays, cells, refs) = build_registries(
@@ -1318,7 +1322,7 @@ mod tests {
                    type: EnumInStruct e Item ; \
                    type: StructInEnum | Some h Holds | None ; \
                    type: EnumInEnum | Inner i EnumInStruct | Outer ; \
-                   type: PlainArr xs [i64 4] ; \
+                   type: PlainArr xs array[i64 4] ; \
                    type: Boxed b ^i64 ; \
                    type: BoxedPlain p ^Plain ; \
                    type: MaybeBoxed | Full b ^i64 | Empty ; \
@@ -1327,7 +1331,7 @@ mod tests {
         let tokens = lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
-        // `SpyArr` (a `[Spy 4]` field) is spliced in directly rather than
+        // `SpyArr` (a `array[Spy 4]` field) is spliced in directly rather than
         // through source: Item 1's array-type-use rejection means no source
         // program can spell this declaration any more, but the predicate
         // must still be correct on the type alone. Reuses the real `Spy`
@@ -1338,7 +1342,7 @@ mod tests {
         let spy_name_static = module.structs[spy_id.index()].name_static;
         let spy_ty = Type::Struct(spy_id, spy_name_static);
         let spy_array_id = ArrayId::from_index(module.arrays.len());
-        let spy_array_name: &'static str = "[Spy 4]";
+        let spy_array_name: &'static str = "array[Spy 4]";
         module.arrays.push(ArrayDecl {
             element: spy_ty,
             count: 4,
@@ -1413,8 +1417,8 @@ mod tests {
             );
         }
         // Criterion (item 3): an array field is linear iff its element is,
-        // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
-        // (a `[Spy 4]` field, spliced in above) is linear even though no
+        // transitively; `PlainArr` (an `array[i64 4]` field) stays Copy, `SpyArr`
+        // (a `array[Spy 4]` field, spliced in above) is linear even though no
         // source program can declare that field any more, so the predicate
         // must be correct on the type alone.
         let plain_arr_idx = structs

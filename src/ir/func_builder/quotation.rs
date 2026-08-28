@@ -762,7 +762,7 @@ mod tests {
         // each call site targets its own instantiation's symbol through the
         // R14 table, not `dupit`.
         let ir = lower_src(
-            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+            ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
              : main ( -- ) 5 dupit . . 5 >u32 dupit . . ;",
         );
         assert!(

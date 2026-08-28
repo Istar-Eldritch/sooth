@@ -2,8 +2,8 @@
 //!
 //! Driven through the real `sooth` binary, so a generic `impl:` exercises the
 //! whole check → lower → link → run pipeline. A single generic `impl: Show for
-//! ['T 'N]` compiles and runs identically to a hand-written `impl: Show for
-//! [i64 4]` (R11), and two `impl:` blocks with overlapping-but-unequal targets
+//! array['T 'N]` compiles and runs identically to a hand-written `impl: Show for
+//! array[i64 4]` (R11), and two `impl:` blocks with overlapping-but-unequal targets
 //! are accepted as declarations (R7).
 
 use std::path::{Path, PathBuf};
@@ -73,14 +73,14 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
     (t, entry)
 }
 
-/// R11: a single generic `impl: Show for ['T 'N]` compiles, links, runs, and
+/// R11: a single generic `impl: Show for array['T 'N]` compiles, links, runs, and
 /// produces output identical to the same program with a hand-written
-/// `impl: Show for [i64 4]`.
+/// `impl: Show for array[i64 4]`.
 #[test]
 fn generic_impl_runs_identically_to_concrete_impl() {
     let trait_and_words = "\
-trait: Show 'T : show ( &'T -- ) ; ;\n\
-: shows ( &'T: Show -- ) show ;\n\
+trait: Show['T] : show ( &'T -- ) ; ;\n\
+: shows ['T: Show] ( &'T -- ) show ;\n\
 : main ( -- )\n\
   42 .\n\
   0 4 fill |a|\n\
@@ -90,9 +90,9 @@ trait: Show 'T : show ( &'T -- ) ; ;\n\
 ;\n";
 
     let generic_src =
-        format!("impl: Show for ['T 'N]\n  : show | a | a drop ;\n;\n{trait_and_words}");
+        format!("impl: Show for array['T 'N]\n  : show | a | a drop ;\n;\n{trait_and_words}");
     let concrete_src =
-        format!("impl: Show for [i64 4]\n  : show | a | a drop ;\n;\n{trait_and_words}");
+        format!("impl: Show for array[i64 4]\n  : show | a | a drop ;\n;\n{trait_and_words}");
 
     let (_tg, entry_generic) = single_file("generic", &generic_src);
     let (_tc, entry_concrete) = single_file("concrete", &concrete_src);
@@ -117,12 +117,12 @@ trait: Show 'T : show ( &'T -- ) ; ;\n\
 fn generic_impl_dispatch_via_composed_cross_call_runs() {
     let (_t, entry) = single_file(
         "composed_dispatch",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for ['T 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
-         : inner ( &'T: Show -- ) show ;\n\
-         : outer ( &'T: Show -- ) inner ;\n\
+         : inner ['T: Show] ( &'T -- ) show ;\n\
+         : outer ['T: Show] ( &'T -- ) inner ;\n\
          : main ( -- )\n\
            42 .\n\
            0 4 fill |a|\n\
@@ -142,11 +142,11 @@ fn generic_impl_dispatch_via_composed_cross_call_runs() {
 fn generic_impl_target_var_parses_and_runs() {
     let (_t, entry) = single_file(
         "var_target",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
          impl: Show for 'T\n\
            : show | a | a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            42 .\n\
            0 4 fill |a|\n\
@@ -167,11 +167,11 @@ fn generic_impl_target_var_parses_and_runs() {
 fn overlapping_unequal_targets_accepted_as_declarations() {
     let (_t, entry) = single_file(
         "overlap",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for ['T 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
-         impl: Show for ['T 4]\n\
+         impl: Show for array['T 4]\n\
            : show | a | a drop ;\n\
          ;\n\
          : main ( -- ) ;\n",
@@ -191,11 +191,11 @@ fn overlapping_unequal_targets_accepted_as_declarations() {
 fn alpha_equivalent_generic_targets_are_duplicate_error() {
     let (_t, entry) = single_file(
         "dup",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for ['T 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
-         impl: Show for ['U 'M]\n\
+         impl: Show for array['U 'M]\n\
            : show | a | a drop ;\n\
          ;\n\
          : main ( -- ) ;\n",
@@ -210,8 +210,8 @@ fn alpha_equivalent_generic_targets_are_duplicate_error() {
 fn generic_impl_in_trait_module_accepted() {
     let (_t, entry) = single_file(
         "orphan_ok",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for ['T 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
          : main ( -- ) ;\n",
@@ -233,13 +233,13 @@ fn generic_impl_outside_trait_module_is_orphan_error() {
     let t = Tree::new("orphan-generic");
     t.write(
         "trait.sth",
-        "trait: Show 'T : show ( &'T -- ) ; ;\nexport: Show ;\n",
+        "trait: Show['T] : show ( &'T -- ) ; ;\nexport: Show ;\n",
     );
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
          import: \"trait.sth\" t | Show | ;\n\
-         impl: Show for ['T 'N]\n\
+         impl: Show for array['T 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
          : main ( -- ) ;\n",
@@ -254,7 +254,7 @@ fn generic_impl_outside_trait_module_is_orphan_error() {
         "should explain the generic target has no home module: {err}"
     );
     assert!(
-        err.contains("['T 'N]"),
+        err.contains("array['T 'N]"),
         "should name the target shape family: {err}"
     );
 }
@@ -262,22 +262,22 @@ fn generic_impl_outside_trait_module_is_orphan_error() {
 // P7.S4 Phase 2 goldens: the specificity partial order and the ambiguity
 // error (R3, R8, R12).
 
-/// R12: a concrete `impl: Show for [i64 4]` overrides a generic
-/// `impl: Show for ['T 'N]` at `[i64 4]`; the generic covers `[i64 2]`.
+/// R12: a concrete `impl: Show for array[i64 4]` overrides a generic
+/// `impl: Show for array['T 'N]` at `array[i64 4]`; the generic covers `array[i64 2]`.
 /// The concrete impl prints `1`, the generic prints `2`, so the output
 /// proves which target dispatched.
 #[test]
 fn concrete_impl_overrides_generic_at_shared_instantiation() {
     let (_t, entry) = single_file(
         "override",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for [i64 4]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array[i64 4]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
-         impl: Show for ['T 'N]\n\
+         impl: Show for array['T 'N]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |a|\n\
            &a shows\n\
@@ -288,14 +288,14 @@ fn concrete_impl_overrides_generic_at_shared_instantiation() {
          ;\n",
     );
     let out = build_and_run(&entry);
-    // The concrete impl ([i64 4]) prints 1; the generic (['T 'N]) prints 2.
+    // The concrete impl (array[i64 4]) prints 1; the generic (array['T 'N]) prints 2.
     assert!(
         out.contains("1\n"),
-        "concrete impl should win at [i64 4]: {out}"
+        "concrete impl should win at array[i64 4]: {out}"
     );
     assert!(
         out.contains("2\n"),
-        "generic impl should cover [i64 2]: {out}"
+        "generic impl should cover array[i64 2]: {out}"
     );
 }
 
@@ -310,14 +310,14 @@ fn concrete_impl_overrides_generic_at_shared_instantiation() {
 fn concrete_impl_overrides_generic_reversed_declaration_order() {
     let (_t, entry) = single_file(
         "override_reversed",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for ['T 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array['T 'N]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
-         impl: Show for [i64 4]\n\
+         impl: Show for array[i64 4]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |a|\n\
            &a shows\n\
@@ -330,16 +330,16 @@ fn concrete_impl_overrides_generic_reversed_declaration_order() {
     let out = build_and_run(&entry);
     assert!(
         out.contains("1\n"),
-        "concrete impl should win at [i64 4] regardless of declaration order: {out}"
+        "concrete impl should win at array[i64 4] regardless of declaration order: {out}"
     );
     assert!(
         out.contains("2\n"),
-        "generic impl should cover [i64 2]: {out}"
+        "generic impl should cover array[i64 2]: {out}"
     );
 }
 
 /// Review fix (R3): a bare-variable target (`'T`, one structural position)
-/// loses to a structurally deeper target (`['T 'N]`, two positions) at a
+/// loses to a structurally deeper target (`array['T 'N]`, two positions) at a
 /// shared instantiation, even though the two targets don't flatten to the
 /// same length. Before the fix, `specificity` rejected any differently-
 /// sized pair as incomparable, so this raised a spurious ambiguity error
@@ -348,14 +348,14 @@ fn concrete_impl_overrides_generic_reversed_declaration_order() {
 fn array_impl_overrides_bare_var_impl_depth_mismatch() {
     let (_t, entry) = single_file(
         "depth_mismatch",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
          impl: Show for 'T\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
-         impl: Show for ['T 'N]\n\
+         impl: Show for array['T 'N]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |a|\n\
            &a shows\n\
@@ -369,21 +369,21 @@ fn array_impl_overrides_bare_var_impl_depth_mismatch() {
     );
 }
 
-/// R12: two incomparable matching targets (`[i64 'N]` vs `['T 4]` at
-/// `[i64 4]`) produce a located ambiguity error naming both targets and
+/// R12: two incomparable matching targets (`array[i64 'N]` vs `array['T 4]` at
+/// `array[i64 4]`) produce a located ambiguity error naming both targets and
 /// the concrete type.
 #[test]
 fn incomparable_targets_produce_ambiguity_error() {
     let (_t, entry) = single_file(
         "ambiguity",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for [i64 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array[i64 'N]\n\
            : show | a | a drop ;\n\
          ;\n\
-         impl: Show for ['T 4]\n\
+         impl: Show for array['T 4]\n\
            : show | a | a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |a|\n\
            &a shows\n\
@@ -393,18 +393,18 @@ fn incomparable_targets_produce_ambiguity_error() {
     let err = build_error(&entry);
     assert!(err.contains("ambiguous"), "{err}");
     assert!(err.contains("Show"), "{err}");
-    // The concrete type `[i64 4]` must appear in the diagnostic.
-    assert!(err.contains("[i64 4]"), "{err}");
+    // The concrete type `array[i64 4]` must appear in the diagnostic.
+    assert!(err.contains("array[i64 4]"), "{err}");
     // Review fix (R8): both competing target *patterns* must be named, not
     // merely subsumed by the concrete-instantiation check above (which
     // `[i64` / `4]` substring checks were -- both are satisfied by
-    // `[i64 4]` alone and would pass even if neither target rendered).
-    assert!(err.contains("[i64 'N]"), "{err}");
-    assert!(err.contains("['T 4]"), "{err}");
+    // `array[i64 4]` alone and would pass even if neither target rendered).
+    assert!(err.contains("array[i64 'N]"), "{err}");
+    assert!(err.contains("array['T 4]"), "{err}");
 }
 
-/// R12: `[['T 'N] 'N]` and `[['T 'N] 'M]` both match `[[i64 4] 4]` and
-/// the more specific `[['T 'N] 'N]` wins (its partition forces the inner and
+/// R12: `array[array['T 'N] 'N]` and `array[array['T 'N] 'M]` both match `array[array[i64 4] 4]` and
+/// the more specific `array[array['T 'N] 'N]` wins (its partition forces the inner and
 /// outer lengths equal, which is the more constrained match). The
 /// shared-var impl prints `1`, the distinct-var impl prints `2`. This is
 /// the shared-variable golden test (the `Map['T 'T]` vs `Map['T 'U]`
@@ -414,14 +414,14 @@ fn incomparable_targets_produce_ambiguity_error() {
 fn shared_var_target_more_specific_wins() {
     let (_t, entry) = single_file(
         "shared_var",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for [['T 'N] 'N]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array[array['T 'N] 'N]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
-         impl: Show for [['T 'N] 'M]\n\
+         impl: Show for array[array['T 'N] 'M]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |inner|\n\
            inner 4 fill |outer|\n\
@@ -433,11 +433,11 @@ fn shared_var_target_more_specific_wins() {
     let out = build_and_run(&entry);
     assert!(
         out.contains("1\n"),
-        "[['T 'N] 'N] should win at [[i64 4] 4]: {out}"
+        "array[array['T 'N] 'N] should win at array[array[i64 4] 4]: {out}"
     );
     assert!(
         !out.contains("2\n"),
-        "[['T 'N] 'M] should not dispatch: {out}"
+        "array[array['T 'N] 'M] should not dispatch: {out}"
     );
 }
 
@@ -450,14 +450,14 @@ fn shared_var_target_more_specific_wins() {
 fn shared_var_target_more_specific_reversed_declaration_order() {
     let (_t, entry) = single_file(
         "shared_var_reversed",
-        "trait: Show 'T : show ( &'T -- ) ; ;\n\
-         impl: Show for [['T 'N] 'M]\n\
+        "trait: Show['T] : show ( &'T -- ) ; ;\n\
+         impl: Show for array[array['T 'N] 'M]\n\
            : show | a | 2 . a drop ;\n\
          ;\n\
-         impl: Show for [['T 'N] 'N]\n\
+         impl: Show for array[array['T 'N] 'N]\n\
            : show | a | 1 . a drop ;\n\
          ;\n\
-         : shows ( &'T: Show -- ) show ;\n\
+         : shows ['T: Show] ( &'T -- ) show ;\n\
          : main ( -- )\n\
            0 4 fill |inner|\n\
            inner 4 fill |outer|\n\
@@ -469,10 +469,10 @@ fn shared_var_target_more_specific_reversed_declaration_order() {
     let out = build_and_run(&entry);
     assert!(
         out.contains("1\n"),
-        "[['T 'N] 'N] should win at [[i64 4] 4] regardless of declaration order: {out}"
+        "array[array['T 'N] 'N] should win at array[array[i64 4] 4] regardless of declaration order: {out}"
     );
     assert!(
         !out.contains("2\n"),
-        "[['T 'N] 'M] should not dispatch: {out}"
+        "array[array['T 'N] 'M] should not dispatch: {out}"
     );
 }

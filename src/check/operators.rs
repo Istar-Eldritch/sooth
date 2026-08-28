@@ -842,9 +842,12 @@ mod tests {
     }
     #[test]
     fn check_print_on_array_is_error() {
-        // X6/R13: `.` on an array is a sharp located error naming `[T N]`.
+        // X6/R13: `.` on an array is a sharp located error naming `array[T N]`.
         let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();
-        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+        assert!(
+            err.contains("array[i64 4]"),
+            "should name the array type: {err}"
+        );
     }
     #[test]
     fn check_usize_mixed_with_bool_is_error() {

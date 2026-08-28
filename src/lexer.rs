@@ -350,10 +350,11 @@ mod tests {
 
     #[test]
     fn lex_brackets_are_distinct_tokens_expected() {
-        let tokens = lex("[i64 4]").unwrap();
+        let tokens = lex("array[i64 4]").unwrap();
         assert_eq!(
             words(&tokens),
             vec![
+                Token::Word("array".into()),
                 Token::LBracket,
                 Token::Word("i64".into()),
                 Token::Int(4),
@@ -439,13 +440,13 @@ mod tests {
 
     #[test]
     fn lex_owning_cell_array_type_splits_at_bracket() {
-        // R12/criterion 20: `[` is a delimiter, so `^[u8 4]` splits into a
+        // R12/criterion 20: `[` is a delimiter, so `^array[u8 4]` splits into a
         // bare `^`-run word followed by the usual array-type tokens.
-        let tokens = lex("^[u8 4]").unwrap();
+        let tokens = lex("^array[u8 4]").unwrap();
         assert_eq!(
             words(&tokens),
             vec![
-                Token::Word("^".into()),
+                Token::Word("^array".into()),
                 Token::LBracket,
                 Token::Word("u8".into()),
                 Token::Int(4),
@@ -513,12 +514,12 @@ mod tests {
 
     #[test]
     fn lex_reference_to_array_type_splits_at_bracket() {
-        // `[` *is* a delimiter, so `&![u8 64]` splits across tokens while
+        // `[` *is* a delimiter, so `&!array[u8 64]` splits across tokens while
         // `&!^List` stays whole.
         assert_eq!(
-            words(&lex("&![u8 64]").unwrap()),
+            words(&lex("&!array[u8 64]").unwrap()),
             vec![
-                Token::Word("&!".into()),
+                Token::Word("&!array".into()),
                 Token::LBracket,
                 Token::Word("u8".into()),
                 Token::Int(64),

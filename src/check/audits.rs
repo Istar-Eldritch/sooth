@@ -108,7 +108,7 @@ fn duplicate_drop_overload_error(word: &WordDef, target: &StructDecl) -> String 
 }
 
 /// Takes `&mut Module` because an array word (`fill`) interns its result
-/// shape `[T N]` into `module.arrays` during checking (R3, R10): the same
+/// shape `array[T N]` into `module.arrays` during checking (R3, R10): the same
 /// registry `ir::lower` then reads, so the checker and the layout builder
 /// share one `ArrayId` numbering. `check` runs before `lower`, so the
 /// interned shapes are present when codegen consults them.
@@ -290,8 +290,8 @@ pub(crate) fn audit_word_quotation_positions(
 /// Phase 2 fix: the poly twin of `check_reference_free_signature`
 /// (`word_entry.rs`). That check runs on `word.effect`, which is empty for a
 /// poly word, so it never sees a poly signature at all -- Phase 2 made `&'T`
-/// a producible output (`peek`'s `&['T 4]`), and nothing rejected the
-/// signature the monomorphic checker forbids outright (`peeki`'s `&[i64 4]`),
+/// a producible output (`peek`'s `&array['T 4]`), and nothing rejected the
+/// signature the monomorphic checker forbids outright (`peeki`'s `&array[i64 4]`),
 /// so the escaping reference reached lowering and hit
 /// `checked: every reference value records its referent`. Skipped for a
 /// combinator, mirroring `check_word`'s own skip: a spliced word has no frame
@@ -549,7 +549,7 @@ mod tests {
         // too, so it must name an attributeless field by position rather than
         // leaking the internal placeholder.
         let err = check_src(
-            "type: Option 'T | None | Some 'T ;\n: w ( Option[[ i64 -- i64 ]] -- ) drop ;\n: main ( -- ) ;\n",
+            "type: Option['T] | None | Some 'T ;\n: w ( Option[[ i64 -- i64 ]] -- ) drop ;\n: main ( -- ) ;\n",
         )
         .unwrap_err();
         assert!(
@@ -580,8 +580,8 @@ mod tests {
         // own `Ref` arm, but never `reject_poly_quotation_anywhere`'s `Ref` arm --
         // reached only when a `Ref` shows up *inside* a position that arm is
         // already recursing through (here, an array element). Stubbing that
-        // arm to `Ok(())` lets `[&[ 'T -- ] 4]` sail through the checker.
-        let err = check_src(": f ( [&[ 'T -- ] 4] -- ) drop ;\n").unwrap_err();
+        // arm to `Ok(())` lets `array[&[ 'T -- ] 4]` sail through the checker.
+        let err = check_src(": f ( array[&[ 'T -- ] 4] -- ) drop ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a quotation type `[ 'T -- ]` cannot appear as a reference's referent: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
@@ -597,12 +597,12 @@ mod tests {
         // monomorphic twin of this signature is already rejected at
         // declaration; the poly path must match.
         let err = check_src(
-            ": peek ( ['T: Copy 4] -- &['T 4] ) | a | &a ;\n: main ( -- ) 10 4 fill peek drop ;\n",
+            ": peek['T: Copy] ( array['T 4] -- &array['T 4] ) | a | &a ;\n: main ( -- ) 10 4 fill peek drop ;\n",
         )
         .unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `peek` declares the output `&['T 4]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `peek` declares the output `&array['T 4]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
     }
 
@@ -610,12 +610,12 @@ mod tests {
     fn poly_input_carrying_a_nested_reference_is_rejected() {
         // Phase 2 review blocker: an input may *be* a reference at the top
         // level, but not carry one nested inside an aggregate -- the
-        // monomorphic checker already rejects `[&i64 4]` this way, and the
-        // poly path was missing the same check for `[&'T 4]`.
-        let err = check_src(": g ( 'T: Copy [&'T 4] -- ) drop ;\n").unwrap_err();
+        // monomorphic checker already rejects `array[&i64 4]` this way, and the
+        // poly path was missing the same check for `array[&'T 4]`.
+        let err = check_src(": g ['T: Copy] ( 'T array[&'T 4] -- ) drop ;\n").unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `g` declares the input `[&'T 4]`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
+            "error: a reference cannot be stored: `g` declares the input `array[&'T 4]`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
         );
     }
 
@@ -626,7 +626,7 @@ mod tests {
         // is -- `reject_poly_quotation_anywhere`'s `Generic` arm recurses
         // into `args` rather than accepting them unseen.
         let err =
-            check_src("type: Box 'T val 'T ;\n: f ( Box[[ 'T -- 'T ]] -- ) drop ;\n").unwrap_err();
+            check_src("type: Box['T] val 'T ;\n: f ( Box[[ 'T -- 'T ]] -- ) drop ;\n").unwrap_err();
         assert_eq!(
             err,
             "error: a quotation type `[ 'T -- 'T ]` cannot appear as a generic type argument: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
@@ -639,7 +639,7 @@ mod tests {
         // into `args`, so a reference carried inside a generic argument
         // (`Box[&'T]`) still trips the reference-cannot-be-stored audit on
         // an output, exactly as a bare `&'T` output does.
-        let err = check_src("type: Box 'T val 'T ;\n: f ( &'T -- Box[&'T] ) | r | Box r ;\n")
+        let err = check_src("type: Box['T] val 'T ;\n: f ( &'T -- Box[&'T] ) | r | Box r ;\n")
             .unwrap_err();
         assert_eq!(
             err,
@@ -684,7 +684,7 @@ mod tests {
         // `Concrete(Type::Ref)`, not `PolyType::Ref` (R-A4), so a top-level
         // test written only against the latter rejected a signature the
         // monomorphic rule accepts.
-        check_src(": g ( &i64 'T: Copy -- 'T ) | r t | r drop t ;\n")
+        check_src(": g ['T: Copy] ( &i64 'T -- 'T ) | r t | r drop t ;\n")
             .expect("a top-level concrete reference input is legal");
     }
 
@@ -802,7 +802,7 @@ mod tests {
         assert!(err.contains("drop"), "unexpected message: {err}");
         assert!(err.contains("type:"), "unexpected message: {err}");
 
-        let array_input = ": drop ( [i64 4] -- ) drop ;";
+        let array_input = ": drop ( array[i64 4] -- ) drop ;";
         let err = check_src(array_input).unwrap_err();
         assert!(err.contains("drop"), "unexpected message: {err}");
 
@@ -1030,7 +1030,7 @@ mod tests {
     fn owning_quotation_element_is_rejected() {
         // Array: rejected by the audit as a quotation type in an illegal
         // position.
-        let arr_err = check_src(": f ( [owning [ -- ] 4] -- ) drop ;\n").unwrap_err();
+        let arr_err = check_src(": f ( array[owning [ -- ] 4] -- ) drop ;\n").unwrap_err();
         assert!(
             arr_err.contains("owning [ -- ]")
                 && arr_err.contains("cannot appear as an array element"),
@@ -1084,7 +1084,7 @@ mod tests {
         // the shape that gets all the way through.
         let generic = check_src(
             ": use ( owning [ -- ] -- ) call ;\n\
-             : g ( 'T: Copy owning [ -- ] -- 'T ) | x q | q use x ;\n",
+             : g ['T: Copy] ( 'T owning [ -- ] -- 'T ) | x q | q use x ;\n",
         )
         .unwrap_err();
         assert!(

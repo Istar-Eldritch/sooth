@@ -247,7 +247,7 @@ access they couple to.
 
 The shuffles sit just above this floor: `swap`/`over`/`rot` move and `dup` copies
 today as compiler-known names, but each is an ordinary combinator's job once generics
-land — `dup ( ..s 'a: Copy -- ..s 'a 'a )` needs only the `Copy` bound that already
+land — `dup['a: Copy] ( ..s 'a -- ..s 'a 'a )` needs only the `Copy` bound that already
 parses, and combinator splicing is what lets a quotation literal ride through them
 unchanged. `times` has already demoted this way (slice 10b): the loop underneath is
 carried by quotations, `call` and the self-tail-call transform alone.

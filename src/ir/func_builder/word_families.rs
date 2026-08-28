@@ -383,7 +383,7 @@ impl<'a> FuncBuilder<'a> {
     /// (slice 6h; was N unrolled stores, which was QBE-quadratic on one large
     /// straight-line block); `len` = a constant `usize` from the layout,
     /// non-consuming.
-    pub(super) fn lower_array_word(&mut self, name: &str, span: Span) {
+    pub(super) fn lower_array_word(&mut self, name: &str, span: Span) -> Result<(), String> {
         match name {
             // Slice 6h (D4): one `Instr::Alloc` plus a `begin_loop`/
             // `finalize_loop`-bounded loop storing the `Copy` seed `n` times
@@ -458,7 +458,7 @@ impl<'a> FuncBuilder<'a> {
 
                 self.restore_loop_state(saved_loop_state);
             }
-            // R1: `tabulate ( usize ~[ -- T ] -- [T N] )` allocates an array
+            // R1: `tabulate ( usize ~[ -- T ] -- array[T N] )` allocates an array
             // and, for each index 0..N, splices the quotation to produce a
             // fresh `T` and stores it. The quotation body is spliced via
             // `lower_terms` (the same `call`-of-literal uses), so each slot
@@ -489,7 +489,7 @@ impl<'a> FuncBuilder<'a> {
                 // Lower the body once: determine the element type and produce
                 // the value for slot 0.
                 let locals_depth = self.locals.len();
-                self.lower_terms(&body, false);
+                self.lower_terms(&body, false)?;
                 let first_val = self.stack.pop().expect("tabulate: body produces one value");
                 self.locals.truncate(locals_depth);
                 let elem = self.value_type(first_val);
@@ -524,7 +524,7 @@ impl<'a> FuncBuilder<'a> {
                     self.start_block(body_block);
                     self.terminated = false;
                     let locals_depth2 = self.locals.len();
-                    self.lower_terms(&body, false);
+                    self.lower_terms(&body, false)?;
                     let val = self.stack.pop().expect("tabulate: body produces one value");
                     self.locals.truncate(locals_depth2);
                     let fptr = self.elem_addr(dst, index_phi, stride);
@@ -602,7 +602,7 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.pop();
                     let (_, len) = self.load_slice_parts(top);
                     self.stack.push(len);
-                    return;
+                    return Ok(());
                 }
                 // Non-consuming (R10): the array stays; the constant folds in.
                 let array = top;
@@ -617,6 +617,7 @@ impl<'a> FuncBuilder<'a> {
             }
             _ => unreachable!("lower_array_word only handles fill/tabulate/len/slice/subslice"),
         }
+        Ok(())
     }
 
     /// The `OwnedCellId` whose payload shape is `payload`: `^`'s target shape,
@@ -1514,7 +1515,7 @@ mod tests {
     fn lower_reference_element_read_is_elem_addr_and_load() {
         // `&>` addresses the element (`ElemAddr`); `@` loads it
         // (`FieldLoad`); neither allocs, since the array is never rebuilt.
-        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
+        let ir = lower_src(": w ( array[i64 4] -- i64 ) | a | &a 0 &> @ ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 1);
@@ -1525,7 +1526,7 @@ mod tests {
     fn lower_reference_element_store_is_elem_addr_and_store_no_rebuild() {
         // `&!>` addresses the element; `!` stores directly, with no alloc and
         // no blit: replacing `set`'s whole-array rebuild is the point.
-        let ir = lower_src(": w ( [i64 4] usize i64 -- ) | a i x | &!a i &!> x ! ;");
+        let ir = lower_src(": w ( array[i64 4] usize i64 -- ) | a i x | &!a i &!> x ! ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 1);
@@ -1537,7 +1538,7 @@ mod tests {
     fn lower_reference_element_runtime_index_emits_bounds_guard_and_trap_call() {
         // A runtime (non-literal) index guards the access with `index < N`
         // and jumps to a trap block that calls the OOB helper.
-        let ir = lower_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
+        let ir = lower_src(": w ( array[i64 4] usize -- i64 ) | a i | &a i &> @ ;");
         let w = &ir.funcs[0];
         assert!(w
             .blocks
@@ -1556,7 +1557,7 @@ mod tests {
     fn lower_reference_element_constant_index_has_no_runtime_guard() {
         // A checked literal index is bounds-verified at compile time, so it
         // skips the runtime guard entirely — no branch, no trap call.
-        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
+        let ir = lower_src(": w ( array[i64 4] -- i64 ) | a | &a 0 &> @ ;");
         let w = &ir.funcs[0];
         assert!(!w
             .blocks
@@ -1575,7 +1576,7 @@ mod tests {
     fn lower_len_is_a_constant_with_no_memory_access() {
         // R18: `len` folds to a constant `usize` (the count) with no load and
         // no element addressing.
-        let ir = lower_src(": w ( [i64 4] -- usize ) len swap drop ;");
+        let ir = lower_src(": w ( array[i64 4] -- usize ) len swap drop ;");
         let w = &ir.funcs[0];
         assert!(instrs(w).iter().any(|i| matches!(i, Instr::Const(_, 4))));
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 0);
@@ -1812,7 +1813,7 @@ mod tests {
     /// iteration and stores the result.
     #[test]
     fn tabulate_lowers_to_alloc_plus_store_loop() {
-        let module = lower_src(": f ( -- [i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
+        let module = lower_src(": f ( -- array[i64 3] ) 3 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
         let f = func(&module, "f");
         // One `Alloc` for the array.
         assert_eq!(
@@ -1846,7 +1847,7 @@ mod tests {
     /// and 2; slot 0 is unrolled).
     #[test]
     fn tabulate_loop_has_header_phi_and_back_edge() {
-        let module = lower_src(": f ( -- [i64 4] ) 4 ~[ 7 ] tabulate ;\n: main ( -- ) ;\n");
+        let module = lower_src(": f ( -- array[i64 4] ) 4 ~[ 7 ] tabulate ;\n: main ( -- ) ;\n");
         let f = func(&module, "f");
         // A phi in a non-entry block is the loop header's induction variable.
         let has_phi = f
@@ -1880,7 +1881,7 @@ mod tests {
     /// spliced once, the result stored, and no phi/back-edge is emitted.
     #[test]
     fn tabulate_count_one_unrolls_without_a_loop() {
-        let module = lower_src(": f ( -- [i64 1] ) 1 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
+        let module = lower_src(": f ( -- array[i64 1] ) 1 ~[ 42 ] tabulate ;\n: main ( -- ) ;\n");
         let f = func(&module, "f");
         assert_eq!(
             count(f, |i| matches!(i, Instr::Alloc(..))),

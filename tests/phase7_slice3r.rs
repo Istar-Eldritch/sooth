@@ -140,10 +140,10 @@ fn impl_body_form_builds_and_runs() {
         "import: intrinsics * ;\n\
          import: core::prelude | if Bool lt gt | ;\n\
          type: Rank | Under | Same | Over ;\n\
-         trait: Order 'T\n\
+         trait: Order['T]\n\
            : cmp ( &'T &'T -- Rank ) ;\n\
          ;\n\
-         trait: Show 'T\n\
+         trait: Show['T]\n\
            : show ( &'T -- ) ;\n\
          ;\n\
          type: Point x i64 y i64 ;\n\
@@ -170,7 +170,7 @@ fn impl_body_form_builds_and_runs() {
            : show\n\
              | p | \"(\" . p &x @ . \",\" . p &y @ . \")\" . ;\n\
          ;\n\
-         : show_larger ( &'T: Order Show &'T -- )\n\
+         : show_larger ['T: Order Show] ( &'T &'T -- )\n\
            | b | | a |\n\
            a b cmp\n\
            ~[ ( Under ) drop b show ]\n\
@@ -206,7 +206,7 @@ fn impl_body_restated_signature_is_rejected() {
         "restated-signature",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get ( &Point -- i64 ) | p | p &n @ ;\n\
          ;\n\
@@ -231,7 +231,7 @@ fn impl_body_non_member_is_rejected() {
         "non-member",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p &n @ ;\n\
            : bogus | p | p &n @ ;\n\
@@ -254,7 +254,7 @@ fn impl_body_binder_named_after_the_member_is_rejected() {
         "binder-shadows-member",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | get | get &n @ ;\n\
          ;\n\
@@ -284,7 +284,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     for member in ["max", "dup", ">u8"] {
         let (_t, entry) = program(
             "builtin-member",
-            &format!("trait: Getter 'T\n  : {member} ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n"),
+            &format!("trait: Getter['T]\n  : {member} ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n"),
         );
         let err = build_error(&entry);
         assert!(
@@ -303,7 +303,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     }
     let (_t, entry) = program(
         "access-word-member",
-        "trait: Getter 'T\n  : @ ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
+        "trait: Getter['T]\n  : @ ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -314,7 +314,7 @@ fn trait_member_named_after_a_builtin_is_rejected() {
     );
     let (_t, entry) = program(
         "caret-member",
-        "trait: Getter 'T\n  : ^cell ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
+        "trait: Getter['T]\n  : ^cell ( &'T -- i64 ) ;\n;\n: main ( -- ) ;\n",
     );
     let err = build_error(&entry);
     assert!(
@@ -340,7 +340,7 @@ fn trait_member_named_after_a_comparison_is_accepted() {
          import: core::prelude | lt | ;\n\
          import: core::bool | Bool | ;\n\
          type: Point n i64 ;\n\
-         trait: Keyed 'T : eq ( &'T &'T -- Bool ) ; ;\n\
+         trait: Keyed['T] : eq ( &'T &'T -- Bool ) ; ;\n\
          impl: Keyed for Point\n\
            : eq | a b | a &n @ b &n @ lt ;\n\
          ;\n\
@@ -361,7 +361,7 @@ fn impl_body_member_calls_itself_recursively() {
         "import: intrinsics * ;\n\
          import: core::prelude | if Bool gt | ;\n\
          type: Counter n i64 ;\n\
-         trait: Countdown 'T : count ( 'T -- i64 ) ; ;\n\
+         trait: Countdown['T] : count ( 'T -- i64 ) ; ;\n\
          impl: Countdown for Counter\n\
            : count\n\
              | c |\n\
@@ -371,7 +371,7 @@ fn impl_body_member_calls_itself_recursively() {
              ~[ 0 ]\n\
              if ;\n\
          ;\n\
-         : counted ( 'T: Countdown -- i64 ) count ;\n\
+         : counted ['T: Countdown] ( 'T -- i64 ) count ;\n\
          : main ( -- ) 3 Counter counted . ;\n",
     );
     assert_eq!(build_and_run(&entry), "3\n");
@@ -387,16 +387,16 @@ fn impl_body_trait_qualifier_disambiguates_shared_member_name() {
         "shared-member-name",
         "import: intrinsics * ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
-         trait: Setter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
+         trait: Setter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p &x @ ;\n\
          ;\n\
          impl: Setter for Point\n\
            : get | p | p &y @ ;\n\
          ;\n\
-         : via_getter ( &'T: Getter -- i64 ) get ;\n\
-         : via_setter ( &'T: Setter -- i64 ) get ;\n\
+         : via_getter ['T: Getter] ( &'T -- i64 ) get ;\n\
+         : via_setter ['T: Setter] ( &'T -- i64 ) get ;\n\
          : main ( -- )\n\
            3 4 Point | p |\n\
            &p via_getter .\n\
@@ -416,11 +416,11 @@ fn impl_body_disambiguates_same_named_traits_from_two_modules() {
     let t = Tree::with_modules("same-named-traits", "a b");
     t.write(
         "a.sth",
-        "export: Getter ;\ntrait: Getter 'T : get ( &'T -- i64 ) ; ;\n",
+        "export: Getter ;\ntrait: Getter['T] : get ( &'T -- i64 ) ; ;\n",
     );
     t.write(
         "b.sth",
-        "export: Getter ;\ntrait: Getter 'T : get ( &'T -- i64 ) ; ;\n",
+        "export: Getter ;\ntrait: Getter['T] : get ( &'T -- i64 ) ; ;\n",
     );
     let entry = t.entry(
         "import: intrinsics * ;\n\
@@ -433,8 +433,8 @@ fn impl_body_disambiguates_same_named_traits_from_two_modules() {
          impl: b::Getter for Point\n\
            : get | p | p &y @ ;\n\
          ;\n\
-         : via_a ( &'T: a::Getter -- i64 ) get ;\n\
-         : via_b ( &'T: b::Getter -- i64 ) get ;\n\
+         : via_a ['T: a::Getter] ( &'T -- i64 ) get ;\n\
+         : via_b ['T: b::Getter] ( &'T -- i64 ) get ;\n\
          : main ( -- )\n\
            3 4 Point | p |\n\
            &p via_a .\n\
@@ -452,7 +452,7 @@ fn impl_body_unterminated_block_at_eof_is_error() {
         "unterminated-eof",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p &n @ ;\n",
     );
@@ -472,7 +472,7 @@ fn impl_body_unterminated_block_absorbs_next_decl() {
         "unterminated-absorbs",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p &n @ ;\n\
          : main ( -- ) ;\n",
@@ -496,7 +496,7 @@ fn impl_body_wrong_effect_names_readable_member() {
         "import: intrinsics * ;\n\
          type: Ordering | Less | Equal | Greater ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Order 'T : cmp ( &'T &'T -- Ordering ) ; ;\n\
+         trait: Order['T] : cmp ( &'T &'T -- Ordering ) ; ;\n\
          impl: Order for Point\n\
            : cmp | a b | a drop b drop ;\n\
          ;\n\
@@ -523,7 +523,7 @@ fn impl_body_wrong_effect_is_rejected_in_body() {
         "import: intrinsics * ;\n\
          type: Ordering | Less | Equal | Greater ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Order 'T\n\
+         trait: Order['T]\n\
            : lo ( &'T -- i64 ) ;\n\
            : cmp ( &'T &'T -- Ordering ) ;\n\
          ;\n\
@@ -551,7 +551,7 @@ fn impl_body_wrong_effect_type_names_readable_member() {
         "import: intrinsics * ;\n\
          type: Ordering | Less | Equal | Greater ;\n\
          type: Point x i64 y i64 ;\n\
-         trait: Order 'T : cmp ( &'T &'T -- Ordering ) ; ;\n\
+         trait: Order['T] : cmp ( &'T &'T -- Ordering ) ; ;\n\
          impl: Order for Point\n\
            : cmp | a b | a drop b drop 0 ;\n\
          ;\n\
@@ -576,7 +576,7 @@ fn impl_body_underflow_names_readable_member() {
         "body-underflow",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p drop add ;\n\
          ;\n\
@@ -603,7 +603,7 @@ fn impl_body_unknown_word_names_readable_member() {
         "body-unknown-word",
         "import: intrinsics * ;\n\
          type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p bogus ;\n\
          ;\n\
@@ -627,7 +627,7 @@ fn impl_body_ungated_intrinsic_names_readable_member() {
     let (_t, entry) = program(
         "body-ungated-intrinsic",
         "type: Point n i64 ;\n\
-         trait: Getter 'T : get ( &'T -- i64 ) ; ;\n\
+         trait: Getter['T] : get ( &'T -- i64 ) ; ;\n\
          impl: Getter for Point\n\
            : get | p | p &n @ 1 add ;\n\
          ;\n\
@@ -655,7 +655,7 @@ fn impl_body_sibling_call_does_not_reach_the_sibling() {
          import: core::prelude | if eq lt | ;\n\
          import: core::bool | Bool | ;\n\
          type: Point n i64 ;\n\
-         trait: Keyed 'T\n\
+         trait: Keyed['T]\n\
            : eq ( &'T &'T -- Bool ) ;\n\
            : hash ( &'T -- i64 ) ;\n\
          ;\n\
@@ -663,7 +663,7 @@ fn impl_body_sibling_call_does_not_reach_the_sibling() {
            : eq | a b | a &n @ b &n @ lt ;\n\
            : hash | p | p &n @ | n | n n eq ~[ 7 ] ~[ 9 ] if ;\n\
          ;\n\
-         : hashed ( &'T: Keyed -- i64 ) hash ;\n\
+         : hashed ['T: Keyed] ( &'T -- i64 ) hash ;\n\
          : main ( -- ) 4 Point | p | &p hashed . p drop ;\n",
     );
     assert_eq!(build_and_run(&entry), "7\n");

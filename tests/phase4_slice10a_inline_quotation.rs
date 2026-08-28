@@ -104,7 +104,7 @@ fn inline_quotation_as_struct_field_is_error() {
 fn inline_quotation_as_array_element_is_error() {
     // `[ ~[ ... ] 3 ]` here is a *type* position (a struct field's array
     // type), not a term-level quotation literal.
-    let err = parse_error("type: Box f [ ~[ i64 -- i64 ] 3 ] ;\n");
+    let err = parse_error("type: Box f array[ ~[ i64 -- i64 ] 3 ] ;\n");
     assert!(
         err.contains("cannot appear here"),
         "a `~` array element should be a located rejection, got: {err}"

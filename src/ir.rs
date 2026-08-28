@@ -87,6 +87,16 @@ pub(crate) fn empty_member_uid_seeds() -> &'static HashMap<String, u32> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7.S10 (R3.3): the declaration-span companion of `empty_member_uid_seeds`,
+/// handed to every lowering path with no `module.words` to key spans from
+/// (the REPL, destructor synthesis, unit tests). A splice-budget guard fired
+/// on this path reports its diagnostic with the location clause omitted
+/// rather than a wrong span (R3.3's lookup-miss ruling).
+pub(crate) fn empty_member_spans() -> &'static HashMap<String, Span> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, Span>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
 /// handed to every lowering path with no user builtin overloads (destructor
 /// synthesis, unit tests, and every corpus program).

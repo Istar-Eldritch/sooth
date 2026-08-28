@@ -939,20 +939,30 @@ corrected line references: the diagnostic is at `src/check.rs:3227` (not `:3135`
 (`src/ir/destructors.rs:37`) does not handle arrays. The orphaned testing-vocabulary brief
 was renamed and split into **P7.S7a-S7d** (see that entry below).
 
-**P7.S6 -- Surface syntax unification.** `[ planned ]` A legibility pass over the polymorphic
-surface: the anonymous array type `['T 'N]` becomes `array['T 'N]` (naming the type, as
-`Slice[T]` already is, so a bare `[` unambiguously opens a quotation and the
-`quotation_type_ahead` lookahead scan is deleted); `type:`/`trait:` binding sites move from
-postfix type variables (`type: Box 'T`, `trait: Ord 'T`) to bracketed parameter lists
-(`type: Box['T]`, `trait: Ord['T]`), unifying the spelling with generic application
-(`Box[i64]`); and a word's bounds move from inside the effect (`: word ( 'T: Ord 'T -- )`)
-to a bracket before it (`: word['T: Ord] ( 'T -- )`), separating variable-and-bound
-declaration from the stack effect. The `'` prefix on type variables is retained; `^'T` (owning
-cell) and `&'T` (reference) stay sigiled. Parser-and-test change only: the AST and every
-downstream checker/lowering/IR consumer are unchanged. The bracket binding site this slice
-introduces is the foundation for the kind-annotation syntax `: Len` that **S6a** adds for
-length parameters, and that **P7b** extends to `: * -> *` for higher-kinded type
-variables. Detail: [slice6-brief](./P7/slice6-brief.md).
+**P7.S6 -- Surface syntax unification.** `[ done ]` Every bracket in a type position is
+preceded by the name of what it parameterizes. The array type is named -- `array['T 'N]`,
+as `Slice[T]` and `Box[i64]` already were -- so a bare `[` in a type position opens a
+quotation effect unconditionally, with no lookahead: a bracket carrying no top-depth `--`
+is a located error naming the missing `--` and the `array[T N]` alternative. `array` is a
+reserved `type:`/`variant` name and unparseable without its bracket, but stays legal as a
+word, field or slot name. `type:` and `:` bind their type variables in an *optional*
+bracket (`type: Box['T]`; a bare name is a concrete declaration) and `trait:` in a
+*mandatory* one (`trait: Ord['T]`), unifying the spelling with generic application. A
+word's bounds live in a bracket between its name and its effect, after the optional
+`inline` (`: max['T: Copy Ord] ( 'T 'T 'T -- 'T )`); a bound written inside an effect is a
+located error. The bracket only *adds* a bound declaration and never changes arity -- the
+bound-bearing token was always an input slot, so the effect keeps every mention of the
+variable. Bracket variables are not pre-interned: ids stay effect-first-mention-derived, so
+`PolySig.ty_var_names` order and monomorph symbol names are unchanged. An unbounded
+variable still binds at its first mention and needs no bracket. The `'` prefix on type
+variables is retained; `^'T` (owning cell) and `&'T` (reference) stay sigiled. Parser,
+tests, and one rendering: `ArrayDecl::name_static` renders `array[i64 4]`, which changes
+the emitted QBE symbol of an array-typed monomorph (accepted; `type_arg_key` and
+`poly_type_shape_str` are the two identity-keying exemptions). The AST and every downstream
+checker/lowering/IR consumer are unchanged. The bracket binding site is the foundation for
+the kind-annotation syntax `: Len` that **S6a** adds for length parameters, and that
+**P7b** extends to `: * -> *` for higher-kinded type variables. Detail:
+[slice6-spec](./P7/slice6-spec.md).
 
 **P7.S6a -- Length parameters in `type:` headers and the `Kind` type.** `[ planned ]` Sequenced
 after S6 (which lands the bracket binding site), this subslice makes a user-defined type
@@ -1088,14 +1098,9 @@ CLAUDE.md's five split signals against `src/ir/func_builder/calls.rs`: 0 of 5 fi
 `use super::*`, nine functions in a single call chain, no import divergence, no mixed
 high/low-level code) -- no split.
 
-`check_no_combinator_cycle` (`src/check/combinators.rs`) matches a call's surface name
-against `c.word.name` to detect a combinator recursing through itself; an `impl:` member is
-named `cmp;Ord;Point`, so a bare `cmp` call inside the same member's body adds no edge and
-the cycle guard never fires. A recursive `impl: Ord` whose `cmp` calls a surface comparison
-on its own type therefore splices forever -- a compiler stack overflow (SIGABRT), not a
-diagnostic. Pre-existing (reachable at base via a user `inline` combinator calling `cmp`);
-this slice moves it onto the shipped library comparisons, so it is reachable from any
-recursive-type `impl: Ord`. Not fixed here; no owning slice yet.
+A recursive `impl: Ord` -- one whose `cmp` compares values of its own type rather than
+delegating to its fields -- is reachable from the library comparisons this slice made
+`inline`; it is bounded and diagnosed at lowering by P7.S10.
 
 Two more follow-ups the slice deliberately did not fix:
 
@@ -1131,6 +1136,90 @@ dropping the interactive-book entry is tracked as follow-up doc work, not part o
 this slice's exit criteria.
 
 **Exit:** `sooth repl` does not exist as a subcommand; no source file references the
-REPL or its former incremental-compile machinery; `cargo fmt --check && cargo clippy
--- -D warnings && cargo test` is green with no REPL-only test module skipped or
-stubbed out.
+REPL or its former incremental-compile machinery; every workaround named above is
+deleted, not merely unreached, confirmed by grepping the corpus for its own
+review-graph notes; `cargo fmt --check && cargo clippy -- -D warnings && cargo test`
+is green with no REPL-only test module skipped or stubbed out.
+
+**P7.S10 -- Bound the splice, diagnose the recursive impl.** `[ done ]` A recursive
+`impl: Ord` -- one whose `cmp` compares values of its own type rather than
+delegating to its fields -- is bounded and diagnosed at lowering. `lower_resolved_word_call`
+(`src/ir/func_builder/calls.rs:229`) guards the member-splice arm with a budget on
+`member_splice_depth`, `SPLICE_BUDGET = 64` (the legitimate maximum across the corpus is 2;
+an unguarded splice overflows at depth 148 on a 2MB stack). The guard cannot
+false-reject: it bounds recursion rather than changing acceptance. `Result<_, String>` is
+threaded through the full lowering tree up to `lower`'s existing
+`Result<IrModule, String>`, with no `.expect()`/panic left on the guarded path. The
+diagnostic names the *outermost* spliced member (not the frame that trips the budget) via
+`render_word`, and points at that member's own declaration site, not a call site:
+
+```text
+error: a trait member cannot dispatch back to itself (lowering would splice it forever): `cmp` (member of trait `Ord` for `Wrap`) exceeded the splice budget of 64 (line 6, col 5)
+```
+
+A lookup miss for the declaration span (the REPL/destructor paths, which carry no
+`member_spans`) omits the `(line …, col …)` clause rather than substituting a wrong span;
+the guard still fires and still reports. Catching this statically instead is refuted --
+`check_combinator_cycles` runs pre-dispatch, and widening it to edge a bare trait-member
+callee to every impl false-rejects the ordinary field-delegating `impl: Ord` P7.S8 shipped
+to enable. Detail: [slice10-brief](./P7/slice10-brief.md).
+
+The declaration-site location is behaviour, not decoration: it is what separates this from
+the bare stack overflow it replaces. Witnessed end-to-end by
+`a_recursive_impl_ord_is_a_located_diagnostic_not_a_stack_overflow`, with
+`a_recursive_impl_ord_diagnostic_line_tracks_the_declaration_site` shifting the `impl:`
+block down two lines so the reported line cannot be a pinned constant.
+
+CLAUDE.md's five split signals re-run against the two files the slice grew,
+`src/ir/func_builder/calls.rs` (+203 lines, ~150 of them the new test module) and
+`src/ir/driver.rs` (+52): calls.rs stays at 0 of 5, as at P7.S8. driver.rs fires 1 of 5 --
+`lower` and `lower_line` are separate entry points that never call each other -- which is
+below the two-signal threshold and predates this slice. Neither splits.
+
+**P7.S11 -- Grounding a generic type applied to its own type variable inside an inline
+combinator's standalone check.** `[ planned ]` P7.S3a taught the checker to ground
+`PolyType::Generic` (`Option['T]`, `Result['T 'E]`, ...) at a call site inside an ordinary
+poly word's own body, by minting through the live `GenericTypes` instantiator threaded on
+`Ctx::Word`. `check_poly_combinator_standalone` (`src/check/poly.rs:381`) -- the path that
+type-checks an `inline` combinator's body once, standalone, against `i64` stand-ins, rather
+than per call site -- was deliberately excluded from that wiring: it builds its `Ctx` with
+`generics: None`, so any `PolyType::Generic` construction or grounding inside such a body
+hits `poly_generic_not_yet_groundable_error` (`src/check/poly.rs:7408`) unconditionally,
+regardless of whether a real registry exists elsewhere in the program. Reproduced: an
+`inline` word over `Option['T]` (`: map inline ( Option['T] ~[ 'T -- 'U ] -- Option['U] )
+...`) fails at its own body's construction of the `Some`/`None` result, not at any call
+site. This blocks writing `Option`/`Result`-shaped combinators (`map`, `and_then`, ...) as
+library words at all. Detail: [slice11-brief](./P7/slice11-brief.md).
+
+**P7.S12 -- A generic enum's eliminator, and its generated words, are monomorph-blind
+inside a poly body.** `[ planned ]` Two defects, specified together because the second is
+the first's exit criterion. Detail: [slice12-spec](./P7/slice12-spec.md).
+
+(A) A generic enum's eliminator (`Option?`) cannot be called inside a polymorphic body when
+the scrutinee is still an ungrounded `PolyType::Generic` (`Option['T]`), for two reasons in
+two mechanisms: `eliminator_registry` (`src/check/declarations.rs:1889`) is keyed only from
+`enums: &[EnumDecl]`, the module's already-monomorphized enum declarations, so a generic
+header with no concrete instantiation anywhere in the program is never a key; and
+`poly_eliminator_call` (`src/check/poly.rs:2973`) has no scrutinee arm for
+`PolyType::Generic` even when the key exists. The rejection is rendered through
+`eliminator_arm_outside_call_error` (`src/check/terms.rs:1178`), the message for a
+written-adjacency mistake, which is the wrong cause. Control: the identical shape over a
+concrete, non-generic enum inside a poly word, and over a concretely-instantiated generic
+enum (`Option[i64]`) inside a monomorphic word, both work.
+
+(B) Every generated enum word reached from a poly body resolves to the wrong monomorph. A
+concrete call site resolves through the checker-recorded mangled symbol in
+`builtin_overloads`; a poly body records none (its walk is abstract and its spans are shared
+by all instantiations), so `Construct`, `Destructure` and `Eliminate` all fall to the bare
+surface key in `ewords` (`src/ir/layout.rs:651-686`), which is last-write-wins across every
+monomorph of one header. `eliminator_registry` has the same bare-key collision one stage up,
+and there the id is used as identity rather than as a family gate. Reproduced against
+`afd3d52`, all order-dependent on which monomorph is declared last: a poly word eliminating
+a concrete `Pair[i64]` is falsely rejected as expecting `Pair[Pt]` in one order and builds
+in the other; a poly word constructing `Pair['T]` segfaults (`EXIT=139`) in one order and
+dies at `src/backend/qbe.rs:534` ("an aggregate field is copied by blit, not
+scalar-stored") in the other. The concrete path is correct in every control.
+
+Together these block `Option`/`Result`-shaped library words (`is-some`, `unwrap_or`,
+`and_then`) entirely. The name gate is shared with P7.S11's combinator path, so the
+standalone-combinator and `inline`-splice routes each need an explicit ruling here.

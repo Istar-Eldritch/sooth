@@ -132,7 +132,7 @@ fn a_generic_body_compares_its_own_variable_through_an_imported_generic_word() {
     let entry = t.write(
         "main.sth",
         &format!(
-            "{MYLT}: mylt ( 'T: Copy Ord 'T -- Bool ) lt ;\n\
+            "{MYLT}: mylt ['T: Copy Ord] ( 'T 'T -- Bool ) lt ;\n\
              : main ( -- )\n\
                1 2 mylt ~[ 1 . ] ~[ 0 . ] if\n\
                5 4 mylt ~[ 1 . ] ~[ 0 . ] if\n\
@@ -155,7 +155,7 @@ fn a_bound_the_caller_does_not_declare_is_a_located_call_site_error() {
     let entry = t.write(
         "main.sth",
         &format!(
-            "{MYLT}: mylt ( 'T: Copy 'T -- Bool ) lt ;\n\
+            "{MYLT}: mylt ['T: Copy] ( 'T 'T -- Bool ) lt ;\n\
              : main ( -- ) 1 2 mylt drop ;\n"
         ),
     );
@@ -189,7 +189,7 @@ fn a_cross_call_growing_the_type_is_a_located_rejection() {
     let entry = t.write(
         "main.sth",
         "import: intrinsics * ;\n\
-         type: Box 'T | Box 'T ;\n\
+         type: Box['T] | Box 'T ;\n\
          : h ( 'U -- 'U ) ;\n\
          : g ( 'T -- ) Box h drop ;\n\
          : main ( -- ) 1 g ;\n",
@@ -276,8 +276,8 @@ fn a_mutual_non_growing_generic_pair_compiles_runs_and_terminates() {
         "main.sth",
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         : h ( 'U: Copy i64 -- 'U ) dup 0 gt ~[ 1 sub g 0 drop ] ~[ drop ] if ;\n\
-         : g ( 'T: Copy i64 -- 'T ) dup 0 gt ~[ 1 sub h 0 drop ] ~[ drop ] if ;\n\
+         : h ['U: Copy] ( 'U i64 -- 'U ) dup 0 gt ~[ 1 sub g 0 drop ] ~[ drop ] if ;\n\
+         : g ['T: Copy] ( 'T i64 -- 'T ) dup 0 gt ~[ 1 sub h 0 drop ] ~[ drop ] if ;\n\
          : main ( -- ) 7 5 g . ;\n",
     );
     assert_eq!(build_and_run(&entry), "7\n");
