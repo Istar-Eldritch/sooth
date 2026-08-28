@@ -1091,8 +1091,8 @@ pub(super) fn aliasing_origin<'a>(
 }
 
 /// Where a block's extent ended, for the scope-end linearity diagnostic (R6):
-/// a word body or REPL line can only cite a line, while an `if` arm cites the
-/// exact terminator token that closed it.
+/// a word body can only cite a line, while an `if` arm cites the exact
+/// terminator token that closed it.
 pub(super) enum BlockEnd {
     Body(u32),
     Arm { token: &'static str, span: Span },

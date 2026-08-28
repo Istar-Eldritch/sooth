@@ -1873,6 +1873,31 @@ mod tests {
     }
 
     #[test]
+    fn emit_scalar_store_of_a_word_wide_value_uses_storel() {
+        // The float witness above cannot reach `Instr::Store`'s word-wide arm.
+        // Borrowing a cell *local* is its one production producer: the cell
+        // pointer has no address of its own, so `&^` allocs a one-word place
+        // and stores the pointer into it.
+        //
+        // Pinned to that place, not to any `storel` in the body: `^`'s own
+        // payload store is emitted by `store_op`'s separate width table, so a
+        // `contains("storel")` form passes with this arm mutated -- measured.
+        let il = emit_src(": w ( -- i64 ) 7 ^ | c | &c &^ @ c ^> drop ;");
+        let w = func_body(&il, "export function l $w()");
+        let slot = w
+            .lines()
+            .find_map(|l| l.trim().strip_suffix(" =l alloc8 8"))
+            .unwrap_or_else(|| panic!("borrowing a cell local allocs a place: {w}"));
+        assert!(
+            w.lines().any(|l| {
+                let l = l.trim();
+                l.starts_with("storel ") && l.ends_with(&format!(", {slot}"))
+            }),
+            "expected the cell pointer stored into its place at `l` width: {w}"
+        );
+    }
+
+    #[test]
     fn emit_if_has_jnz_and_phi() {
         let il = emit_src(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
         assert!(il.contains("jnz "));

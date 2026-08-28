@@ -2930,9 +2930,9 @@ fn borrow_mutability(ty: Type, refs: &[RefDecl]) -> Option<bool> {
     }
 }
 
-/// ` in `word`` for a word body, empty for a bare REPL line: the suffix the
-/// slice's own diagnostics use to place themselves the way every other
-/// located error here does.
+/// ` in `word``: the suffix the slice's own diagnostics use to place
+/// themselves the way every other located error here does. Always renders now
+/// that every checked body is a word's.
 fn in_word(ctx: &Ctx) -> String {
     format!(" in {}", ctx.rendered_word())
 }

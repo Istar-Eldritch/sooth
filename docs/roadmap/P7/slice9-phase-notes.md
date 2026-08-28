@@ -985,17 +985,38 @@ class (`grep` for the two accessor spellings inside quoted literals: zero remain
 
 ### R6 (d): doc prose naming a signature this phase changed
 
-The labelled exception was applied, and extended to every comment naming an item this
-phase deleted (not only the six the spec listed): `check/word_families.rs` ×2 (`Ctx::Line`
-prose on `intrinsic_is_gated_out` and `drop_import_visibility_error`),
-`check/engine.rs` ×3 (the `modules`/`generics`/`mangled` field docs, `infer_probe_body`'s
-`Ctx::Word` mention, `drop_res`'s), `check/poly.rs` ×1 (`Ctx::Word.effect`; the
-`repl.rs`-sourced `None` note at `poly.rs:489` names a fact this phase did not change --
-it stays, per the E5 table below), `check.rs` ×2 and `test_support.rs` ×1 (`infer_line`),
+The labelled exception was applied to more than the six sites the spec listed:
+`check/word_families.rs` ×2 (`Ctx::Line` prose on `intrinsic_is_gated_out` and
+`drop_import_visibility_error`), `check/engine.rs` ×3 (the `modules`/`generics`/`mangled`
+field docs, `infer_probe_body`'s `Ctx::Word` mention, `drop_res`'s), `check/poly.rs` ×1
+(`Ctx::Word.effect`), `check.rs` ×2 and `test_support.rs` ×1 (`infer_line`),
 `ir/destructors.rs`, `ir/driver.rs` and `ir/func_builder/mod.rs` ×2 (`lower_word`),
 `check/word_entry.rs` (`word_declares_quotation_parameter`), plus the two test-side
 mentions above. The test `ctx_word_carries_owning_module` was renamed
 `ctx_carries_owning_module`: its name asserted a variant that no longer exists.
+
+Three further sites were caught in review and fixed here, all of them (d) proper -- a
+comment asserting a control-flow fact this phase falsified:
+
+- `check/engine.rs`'s `BlockEnd` doc said the `Body` arm serves "a word body or REPL
+  line". Only a word body reaches it now (`check/word_entry.rs:311` is the sole
+  `BlockEnd::Body` construction).
+- `check.rs`'s `in_word` doc said "empty for a bare REPL line". The empty branch died
+  with `rendered_word_or`'s fallback; the body is now an unconditional `format!`.
+- `check/poly.rs:489` said `check_poly_body`'s `modules` is "`Some` from `check::check`,
+  `None` from `repl.rs`". Both halves are false: `repl.rs` is gone, and
+  `grep -rn 'check_poly_body(' src/` shows exactly one caller (`check.rs:811`, passing
+  `Some(modules)`), so no `None` reaches it at all. An earlier revision of this report
+  claimed this line named a fact the phase did not change; that was wrong.
+
+**Do not read the (d) application as exhaustive.** It is not, and an earlier revision of
+this report claimed it was. Comments elsewhere in `src/` still assert the REPL as a live
+path -- `check.rs:3114` and `check/word_families.rs:1198` ("`ctx.modules()` is `None` on
+the REPL path"), the six `PolyCtx` field docs at `check.rs:120`-`:165` ("scratch on the
+REPL paths"), `check/terms.rs:50` and `:518`, `check/poly.rs:4457` and `:5720`,
+`check/operators.rs:360` and `:506`. They are left to phase 10, which derives its list
+from E2's grep and will find them; they are named here so phase 10 does not have to
+rediscover the reasoning, not to pre-empt its scope.
 
 **Correction to the spec's (d) list.** The spec names `src/driver.rs:1103` and
 `src/check/poly.rs:2046` as "two stale doc comments that describe `ctx.mangled_name()`'s
@@ -1036,14 +1057,50 @@ it in a later slice: the forcing it selects is what closes the QBE symbol-hijack
   `check_poly_combinator_standalone` (`check/poly.rs:376`) hardcodes `None`, and
   `check::check` reaches it for every `inline` polymorphic combinator. `static_type`
   trivially keeps its `Option`. Neither was collapsed.
-- **Phase 6's carried-forward claim is confirmed: `Instr::Store`'s `_ => storel` arm
-  (`src/backend/qbe.rs:1412`) is now uncovered.** Measured in an isolated copy after this
-  phase's deletions (`src tests lib examples Cargo.*`, baseline recorded first, never a
-  `cp -r` of the worktree): baseline 2686 passed / 0 failed; mutating `storel` → `stores`
-  gives **2686 passed / 0 failed**. The mutation survives. Its last witness was
+- **Phase 6's carried-forward claim is confirmed, and worse than "uncovered":
+  `Instr::Store`'s `_ => storel` arm (`src/backend/qbe.rs:1412`) was **unreached**.**
+  Measured in an isolated copy after this phase's deletions (`src tests lib examples
+  Cargo.*`, baseline recorded first, never a `cp -r` of the worktree): mutating `storel`
+  → `stores` gives 2686 passed / 0 failed, and so does replacing the arm's body outright
+  with `panic!` -- so no test in the suite compiled a program that reached it, rather
+  than reaching it and not observing the result. The probe is sound rather than a stale
+  binary: with the `panic!` in place, `./target/debug/sooth run` on a cell-local program
+  does panic, while `examples/refs.sth` (whose cells are struct fields, blitted) builds
+  clean. Its last witness was
   `repl::tests::session_rich_rendering_shows_struct_contents_through_real_session`, which
-  died with `repl.rs` in this phase. Phase 8 should list it with the other unwitnessed
-  width arms, not assume it live.
+  died with `repl.rs` in this phase.
+
+  **Re-witnessed here**, rather than handed on: an earlier revision of this report passed
+  it to phase 8, which owns `parse_line`/`ast::Line`/`lower_line` and has no reason to
+  open `backend/qbe.rs`. The new witness is
+  `backend::qbe::tests::emit_scalar_store_of_a_word_wide_value_uses_storel`, beside the
+  `stored`/`loadl` test that pins the arm's float sibling. It borrows a cell *local*
+  (`: w ( -- i64 ) 7 ^ | c | &c &^ @ c ^> drop ;`): the cell pointer has no address of
+  its own, so `&^` allocs a one-word place and stores the pointer into it through this
+  arm. That producer is production code (`ir/func_builder/word_families.rs:152`) and
+  survives phase 8; the arm's other feeder, `lower_line`'s residual store
+  (`ir/driver.rs:675`/`:689`), does not.
+
+  The assertion is pinned to the `alloc8` place, not to any `storel` in the body, and the
+  first draft of it was a placebo that this caught: `^`'s own payload store emits
+  `storel` from `store_op`'s **separate** width table (`qbe.rs:514`), so a
+  `contains("storel")` form passed with the arm mutated. Re-measured after the fix,
+  `storel` → `stores` gives 2686 passed / **1 failed**, killed by the new test and by
+  nothing else -- confirming both that the witness works and that it was the only one.
+
+- **`quotation_taking_word_mints_no_symbol`'s control now open-codes its predicate, and
+  that is deliberate.** Deleting `word_declares_quotation_parameter` (REPL-only:
+  `repl.rs:2017`, `:3067`) left that test's control asserting
+  `!w.effect.inputs.iter().any(is_quotation_type)` inline. Review flagged it as drift
+  risk. Left as it is: the open-coded form calls `crate::ast::is_quotation_type`, the
+  live shared primitive, which has its own test
+  (`ast.rs:2986 is_quotation_type_accepts_all_three_variants_only`, covering the inline
+  `~` flavour the deleted `word_declares_quotation_parameter_recognizes_inline` covered),
+  and the poly half is covered by
+  `check/poly.rs:9589 poly_input_is_quotation_recognizes_inline` against the surviving
+  `poly_input_is_quotation`. So no coverage was lost, and retaining a `#[cfg(test)]`
+  copy of a predicate no production path consults would tie the control to a dead item
+  rather than to the live rule.
 
 ### Deletion proof (E5, this phase's items)
 
@@ -1058,7 +1115,7 @@ one, which is a retirement note phase 6 wrote and not a live reference:
 | `lower_word`, `DropOverride` | 0 | 0 |
 | `lower_instantiation` | 0 | 1 — `tests/phase7_slice3t.rs:260`, phase 6's note recording why `explicit_instantiation_is_rejected_at_the_repl` was unmigratable |
 | `editor.rs` | 0 | 0 |
-| `repl.rs` | 2 | 4 — all comment prose (`backend/qbe.rs:303`'s `sooth_line_{seq}` note, `check/poly.rs:489`'s `None` note, three test retirement notes), which phase 10's E2 sweep owns |
+| `repl.rs` | 1 — `backend/qbe.rs:303`'s `sooth_line_{seq}` note; `check/poly.rs:489`'s was the second and is corrected above | 4 — comment prose in three test retirement notes, which phase 10's E2 sweep owns |
 
 `docs/roadmap/` hits for every one of these are in this slice's own spec/brief and in the
 historical implementation specs the spec puts out of scope; none is a statement of current
@@ -1070,11 +1127,16 @@ design.
   phase, and that is correct: each is `pub` in a `pub` module, so nothing warns. Phase 8
   removes them. `grep -rn 'parse_line\|ast::Line\|Line::Expr\|line_terms\|lower_line' src/`
   is phase 8's precondition and this phase did not change its answer for the test tree.
-- Phase 10's E2 sweep inherits six `repl.rs`/`session` comment mentions in `src/` and the
-  three test-side retirement notes listed above. That six counts only that literal
-  spelling; the bare word `REPL` appears in prose across 154 sites in 23 files. Most of
-  those die with phases 8/9's own deletions, but phase 10 must derive its own list from
-  a fresh grep rather than scope from this six.
+- Phase 10's E2 sweep inherits **235 hits across 25 files** in `src/`, measured with E2's
+  own command at the end of this phase:
+  `grep -rniE 'repl|session|dlopen|override_epoch|drop_generation' src/ | grep -viE 'replac|replic'`
+  (the spec measured 275 across 28 at spec time, on the same exclusion of `repl.rs` and
+  `editor.rs`), plus the three test-side retirement notes listed above. Earlier revisions
+  of this report said "six", which matched no measurement: the `repl.rs` literal is now 1,
+  a case-insensitive `session` is 38, and the bare word `REPL` is 148. Much of the 235
+  dies with phases 8/9's own deletions -- `is_repl` alone accounts for most of
+  `parser.rs`'s 79 -- so phase 10 must still derive its list from a fresh grep rather than
+  scope from this figure.
 - Phase 11's split-signal re-run inherits four files that shrank here: `src/check.rs`
   (−236 lines), `src/check/engine.rs`, `src/check/poly.rs`, `src/parser.rs` (unchanged
   this phase; phase 8 shrinks it).
@@ -1082,5 +1144,6 @@ design.
 ### Gate
 
 `cargo fmt --check` clean, `cargo clippy -- -D warnings` clean,
-`cargo test --no-fail-fast`: **2686 passed, 0 failed**, 3 ignored (the three non-REPL
-`phase7_slice3b_follow.rs` notes). Zero `tests/qbe_baseline` diffs.
+`cargo test --no-fail-fast`: **2687 passed, 0 failed**, 3 ignored (the three non-REPL
+`phase7_slice3b_follow.rs` notes). Zero `tests/qbe_baseline` diffs. 2687 rather than the
+2686 this phase first reported: the review-fix round added the `storel` witness above.

@@ -485,8 +485,9 @@ pub fn check_poly_body(
 ) -> Result<(), String> {
     // R12 (slice 8b, 8a): the caller module's operator visibility rides on
     // `ctx`, so a bare operator in a poly body resolves against the same
-    // scoped candidate set a concrete body does. `Some` from `check::check`,
-    // `None` from `repl.rs` (the REPL path is unscoped, R8).
+    // scoped candidate set a concrete body does. `check::check` is the only
+    // caller and it passes `Some`; the `Option` is the shared parameter
+    // shape, not a live unscoped path.
     //
     // P7.S3g-follow (1a): the *populated* tail index, so
     // `ctx.is_self_tail_call()` answers for a generic body what it answers
