@@ -1740,7 +1740,7 @@ a new one. No split action is recommended from this phase.
 ### Final gate (E10)
 
 ```
-$ cargo fmt --check && cargo clippy -- -D warnings && cargo test --no-fail-fast
+cargo fmt --check && cargo clippy -- -D warnings && cargo test --no-fail-fast
 ```
 
 `cargo fmt --check`: clean. `cargo clippy -- -D warnings`: clean. `cargo test
