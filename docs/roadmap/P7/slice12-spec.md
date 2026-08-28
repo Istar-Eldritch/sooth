@@ -408,6 +408,14 @@ through the colliding keys.
   asymmetric-payload destructure, which is what R8.9's mutation 3 (reverse the `args`) kills.
   **Recommendation for phase 4:** mutation 3 is R5.4's only positional evidence -- it must not
   be retired or classified as inert without one.
+
+  **Amended in phase 4:** paid off. `Option['T]` has one type parameter, so even R8.3's
+  destructure could not have witnessed mutation 3 -- reversing a 1-element list is the
+  identity. `a_two_field_variant_destructures_fields_in_declared_order_and_type` (a
+  two-parameter, two-field header, `Two['A 'B] | Both fst 'A snd 'B`, each field a different
+  type) is what mutation 3 actually needs, and it also witnesses R6.1's field-push-order
+  claim below in the same fixture: both mutations turn it into `` `f` leaves `'B`, but the
+  declared outputs are `'A` `` at check time.
 - **R5.5** The escape check (R3.4) rejects a `GenericVariant` leaving an arm on exactly the
   grounds it rejects `Type::Variant`. Same message, the variant rendered through
   `poly_type_str`. A `Ref` wrapping a `GenericVariant` is caught too, matching the concrete
@@ -436,6 +444,14 @@ through the colliding keys.
   `{Variant}>` whose operand is a `GenericVariant` pushes that variant's fields, in declared
   order (first field deepest), each substituted through R4.1 with the variant's own `args`.
   It records its header and variant index for R1.2.
+
+  **Amended in phase 4:** "records its header and variant index" overstates the implementation
+  by one field. `poly_destructure_generic` (`src/check/poly.rs:4425`) records only the header
+  (`tctx.enum_sites.push` carries a `PolyType::Generic` with no variant slot); the variant
+  index is not pushed here. This is not a gap: `apply_subst`'s `Generic` arm grounds the
+  header to a concrete `Type::Enum`, and `lower_clauses` reads the variant index off the
+  eliminator's own family id at lowering time (R1.4), not off `enum_sites`. Read "records its
+  header" and drop "and variant index" as this rule's actual scope.
 - **R6.2** It is the exact dual of `poly_bind_construction_arg` (`src/check/poly.rs:3929`):
   construction binds header variables from operands, destructure applies them to fields. The
   two read the same `GenericVariantDecl.fields` and share R4.2's arm set.
@@ -457,6 +473,20 @@ through the colliding keys.
   `eliminator_arm_outside_call_error`, including the trailing `(line {})` and the `in_word`
   clause, and it keeps the `"error: "` literal its siblings carry (the doubled prefix is a
   known, separately-tracked defect; match the siblings, do not fix it here).
+
+  **Amended in phase 4:** the implementation narrows this rule further than written --
+  `tagged_literal_reaches_an_eliminator_call` only classifies a call as `NamesNoEliminator`
+  when the name both fails the registry lookup **and** ends in `?`; a non-`?` call falls to
+  `NotAdjacent` (the adjacency message) instead. This resolves a real R7.1/R7.2 tension
+  rather than being an oversight: R7.1's "adjacency states" is plural and R7.3's own
+  `drop`/`swap` witnesses (`tests/phase6_slice3b.rs:105`, `tests/phase7_slice3b.rs:135,170`,
+  `src/check.rs:5437`) all pin the adjacency text for a non-eliminator-shaped call sitting
+  right there. `?` is the generated-eliminator naming convention
+  (`eliminator_registry`'s own key shape), so a `?`-suffixed miss reads as a typo'd
+  eliminator name specifically, while any other call reads as a genuine written-adjacency
+  problem. Both call sites carry this narrowing (`src/check/poly.rs:746` for a poly body,
+  `src/check/terms.rs:1077` for a concrete one; the latter was previously unwitnessed, closed
+  by `a_typod_eliminator_call_in_a_concrete_body_names_no_eliminator_rather_than_an_adjacency_mistake`).
 - **R7.3** After this slice, the brief's repro is accepted, so its message is not merely
   reworded. A witness for R7.2 has to be a genuinely absent eliminator (a typo'd `Optionn?`).
 - **R7.4** R1.5's splice rejection and R2.4's stand-in rejection are each their own located

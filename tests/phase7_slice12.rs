@@ -800,3 +800,48 @@ fn a_typod_eliminator_call_names_no_eliminator_rather_than_an_adjacency_mistake(
         "expected R7.2's own located rejection, got: {err}"
     );
 }
+
+/// R7.2's other gate: the *concrete* body arm in `check_term`'s
+/// `TermKind::Quotation` handling (`f` below is monomorphic, no `'T`
+/// anywhere), which is a separate call site from `poly_walk`'s and was
+/// otherwise unwitnessed by the suite.
+#[test]
+fn a_typod_eliminator_call_in_a_concrete_body_names_no_eliminator_rather_than_an_adjacency_mistake()
+{
+    let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
+         : f ( Shape -- i64 )\n\
+           ~[ ( Circle ) drop 1 ]\n\
+           ~[ ( Rect ) drop drop 0 ]\n\
+           Shapee? ;\n\
+         : main ( -- ) 2.0 Circle f . ;\n";
+    let prog = Scratch::write("r72-typo-concrete", src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("the call `Shapee?` it is adjacent to names no eliminator in scope"),
+        "expected R7.2's own located rejection from the concrete-body arm, got: {err}"
+    );
+}
+
+/// R6.1 ("fields push in declared order, first field deepest") and R8.3's
+/// positional half, neither previously witnessed: `Option['T]` has only one
+/// type parameter, so R8.3's own two-instantiation tests can't tell a
+/// positional mixup from an identity. `Two['A 'B]` has two, at a
+/// two-*field* variant, so `take-a`/`take-b` each read a different field at
+/// a different type: reversing either the field push order or the narrowed
+/// scrutinee's own argument list swaps which value each returns.
+#[test]
+fn a_two_field_variant_destructures_fields_in_declared_order_and_type() {
+    let src = "type: Two['A 'B] | Both fst 'A snd 'B ;\n\
+         type: Pt x i64 y i64 ;\n\
+         : take-a ( Two['A 'B] -- 'A ) ~[ ( Both ) Both> drop ] Two? ;\n\
+         : take-b ( Two['A 'B] -- 'B ) ~[ ( Both ) Both> swap drop ] Two? ;\n\
+         : mk1 ( -- Two[i64 Pt] ) 7 1 2 Pt Both ;\n\
+         : mk2 ( -- Two[i64 Pt] ) 7 1 2 Pt Both ;\n\
+         : main ( -- )\n  \
+           mk1 take-a .\n  \
+           mk2 take-b Pt> swap drop . ;\n";
+    let prog = Scratch::write("r61-r83-two-field", src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "7\n2\n");
+}
