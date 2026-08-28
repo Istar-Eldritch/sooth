@@ -59,8 +59,7 @@ fn testing_fixture(t: &Tree) -> PathBuf {
     t.write("sooth.pkg", &manifest());
     t.write(
         "main.sth",
-        "import: intrinsics * ;\n\
-         import: core::prelude * ;\n\
+        "import: core::prelude * ;\n\
          import: hosted::testing t | expect expect-eq | ;\n\
          : main ( -- )\n\
          True \"true is true\" expect\n\
