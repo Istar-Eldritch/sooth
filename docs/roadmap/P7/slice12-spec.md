@@ -547,3 +547,17 @@ and this slice adds to it) and over `src/ir/func_builder/calls.rs`.
   non-adjacent.
 - No `_ =>` catch-all for `PolyType::GenericVariant` anywhere, and every wildcard in R3.4's
   list is either converted or justified in the phase report.
+
+## Phases (JSON)
+
+```json
+{
+  "phases": [
+    { "phase": 1, "focus": "per-monomorph identity, check and lowering sides", "effort": "L", "difficulty": "standard" },
+    { "phase": 2, "focus": "PolyType GenericVariant and field substitution", "effort": "M", "difficulty": "standard" },
+    { "phase": 3, "focus": "registry widening and generic eliminator branch", "effort": "L", "difficulty": "hard" },
+    { "phase": 4, "focus": "destructure intercept and diagnostic split", "effort": "M", "difficulty": "standard" },
+    { "phase": 5, "focus": "bookkeeping and growth-signal re-run", "effort": "S", "difficulty": "standard" }
+  ]
+}
+```
