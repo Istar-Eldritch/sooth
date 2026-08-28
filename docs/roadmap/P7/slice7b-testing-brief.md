@@ -35,7 +35,11 @@ loop is run-the-program.
 A test program that traps or aborts already exits non-zero, which the runner
 reports as failure; build errors are failures on their own channel. A suite that
 wants to abort itself deliberately (a fatal precondition, not an assertion) reaches
-for S7a's `exit`, not a new primitive here.
+for S7a's `exit`, not a new primitive here. `exit` does not diverge (S7a R3.3): the
+checker still requires the calling word's own body to satisfy its declared effect
+and drop its linear values on the path that follows the call, even though that path
+never runs. A suite-abort call site needs its `main` written with that in mind — no
+`!`/`Never` output shape exists to let unreachable code skip the checker.
 
 ### R2 — The vocabulary is `hosted::testing`, two words
 

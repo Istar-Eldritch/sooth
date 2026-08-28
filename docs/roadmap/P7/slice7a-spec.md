@@ -1,6 +1,6 @@
 # P7.S7a -- `lib/core` / `lib/hosted` package split, and `lib/hosted/libc.sth` (spec)
 
-Status: **phases 1--2 shipped, phase 3 (bookkeeping) not started.** `lib/core/` and
+Status: **shipped.** `lib/core/` and
 `lib/hosted/` both exist as sibling packages and the tree is green on them. Input:
 [slice7a-libc-brief](./slice7a-libc-brief.md). Roadmap:
 [P7-language-prereqs](../P7-language-prereqs.md), P7.S7a.
@@ -245,10 +245,10 @@ no assertion edits, plus R5.2a.
 plus review follow-ups (`3ace465` and this one). Exit met: R5.1, R5.2b, R5.3 (folded into
 R5.8(2)), R5.4, R5.5, R5.6, R5.8, and all three R7 mutations caught.
 
-**Phase 3 -- bookkeeping (S). Not started.** P7.S7a to `[ done ]` with the delivered shape;
-note R3.3 in the S7b brief so its `exit` call site is written knowing `exit` does not
-diverge. No growth-signal re-run due: no Rust module gained code (`src/packages.rs` gained
-only two unit tests).
+**Phase 3 -- bookkeeping (S). Shipped.** P7.S7a marked `[ done ]` in
+[P7-language-prereqs](../P7-language-prereqs.md); R3.3 noted in the S7b brief so its `exit`
+call site is written knowing `exit` does not diverge. No growth-signal re-run due: no Rust
+module gained code (`src/packages.rs` gained only two unit tests).
 
 ## Exit criteria
 
