@@ -52,7 +52,8 @@ fn entry_and_manifest_or_usage(args: &[String]) -> (PathBuf, Option<PathBuf>) {
     parse_entry_and_manifest(args).unwrap_or_else(|()| usage())
 }
 
-/// Split `test`'s trailing arguments into a `[path...]` list (R3.2). No
+/// Split `test`'s trailing arguments into a `[path...]` list: empty for the
+/// no-path case (R3.1), or explicit files/directories (R3.2). No
 /// `--manifest`: each entry resolves through its own ancestor manifest.
 /// `Err` for any `--flag`, kept out of this function so it stays testable
 /// without exiting the process.

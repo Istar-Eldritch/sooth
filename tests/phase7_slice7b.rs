@@ -353,3 +353,48 @@ fn driver_test_discovery_empty_tests_dir_is_error() {
     std::fs::create_dir_all(t.0.join("tests")).unwrap();
     assert!(driver::discover_test_entries(&t.0, &[]).is_err());
 }
+
+//
+// Phase 3 -- `sooth test`: the CLI subcommand end to end.
+//
+
+/// R3.1: `sooth test` with no path resolves the package containing the
+/// process's cwd -- the CLI's own `current_dir()` read, exercised nowhere
+/// else in the slice.
+#[test]
+fn cli_test_with_no_path_discovers_pkgroot_tests_dir() {
+    let t = Tree::new("cli-no-path");
+    t.write("sooth.pkg", &pkg_manifest());
+    passing_entry(&t, "tests/a.sth");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("test")
+        .current_dir(&t.0)
+        .output()
+        .expect("sooth test should spawn");
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        stdout.contains("1 entries, 0 failed"),
+        "the report reaches stdout: {stdout}"
+    );
+}
+
+/// A failing suite's exit code must reach the process: the driver's return
+/// code propagated through `main`, not swallowed by a stray `exit(0)`.
+#[test]
+fn cli_test_with_failing_suite_exits_nonzero() {
+    let t = Tree::new("cli-fail");
+    t.write("sooth.pkg", &pkg_manifest());
+    failing_entry(&t, "tests/a.sth");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("test")
+        .current_dir(&t.0)
+        .output()
+        .expect("sooth test should spawn");
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        stdout.contains("FAIL "),
+        "the failed verdict reaches stdout: {stdout}"
+    );
+}
