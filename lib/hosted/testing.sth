@@ -1,0 +1,23 @@
+\ `hosted::testing` -- the assertion vocabulary a Sooth test program writes
+\ its checks against. Each assertion prints exactly one `ok -- <label>` or
+\ `not ok -- <label>` line (numberless TAP at line granularity); nothing here
+\ threads state across assertions or asserts an ordering. Printing is
+\ inescapably an OS-facing capability, so this lives in `hosted`, not `core`,
+\ even though `.` remains a compiler intrinsic callable from any layer today.
+import: intrinsics | . | ;
+import: core::bool | Bool if | ;
+import: core::cmp | Ord eq | ;
+
+export: expect expect-eq ;
+
+: expect ( Bool str -- )
+  | label |
+  ~[ "ok -- " . label . "\n" . ]
+  ~[ "not ok -- " . label . "\n" . ]
+  if ;
+
+\ Not `inline`: this word's own body binds `Bound::User` (the `'T: Ord`
+\ instantiation), independent of `eq`'s own `inline`-ness at HEAD.
+: expect-eq ['T: Ord] ( 'T 'T str -- )
+  | label |
+  eq label expect ;
