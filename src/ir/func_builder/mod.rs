@@ -1107,8 +1107,7 @@ pub(super) fn lower_word_parts(
 /// Slice 7a (R9): lower a batch of materialized quotations into standalone
 /// `IrFunc`s. Each is an ordinary term-bodied word under its minted symbol and
 /// declared effect; `lower_word_parts` handles it (and any nested quotation it
-/// materializes) exactly like a user word. Shared by `lower_word_parts` and
-/// `lower_line`, the two lowering entry points that own a `FuncBuilder`.
+/// materializes) exactly like a user word.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn lower_materialized(
     mats: Vec<MaterializedQuot>,

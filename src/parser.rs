@@ -18,7 +18,7 @@
 use crate::ast::{
     ground_member_poly, ground_member_type, intern_array_type, is_name_dispatched_builtin,
     ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl,
-    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len, Line,
+    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len,
     Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
     RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
     TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
@@ -813,7 +813,6 @@ pub fn parse_bodies(
         trait_origin,
         generics,
         traits,
-        is_repl: false,
     };
     parser.parse_generic_typedefs()?;
     while parser.pos < parser.tokens.len() {
@@ -891,7 +890,6 @@ pub(crate) fn prepass_generic_typedefs(
         type_origin: &[],
         trait_origin: &[],
         traits: crate::ast::predicate_traits(),
-        is_repl: false,
     };
     parser.parse_generic_typedefs()
 }
@@ -962,7 +960,6 @@ pub(crate) fn prepass_trait_decls(
                 // reserved-predicate table even though it never looks up a
                 // user trait declared earlier in the registry-so-far.
                 traits: crate::ast::predicate_traits(),
-                is_repl: false,
             };
             let decl = parser.parse_trait_decl()?;
             i = parser.pos;
@@ -1142,7 +1139,6 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
-                is_repl: false,
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -1189,7 +1185,6 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
-                is_repl: false,
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -1198,250 +1193,6 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
         i += 1;
     }
     Ok(exports)
-}
-
-/// Parse a single REPL line: a `:`-led definition, or a bare term sequence run
-/// to end of input. One line is one complete unit (an unterminated def is a
-/// normal parse error).
-pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
-    let mut arrays = Vec::new();
-    let mut owned_cells = Vec::new();
-    let mut refs = Vec::new();
-    let mut slices = Vec::new();
-    parse_line_with_structs(
-        tokens,
-        &[],
-        &[],
-        &mut arrays,
-        &mut owned_cells,
-        &mut refs,
-        &mut slices,
-        ImportCtx::empty(),
-    )
-}
-
-/// The three module-resolution tables a REPL parser entry point threads to
-/// `Parser::resolve_type` (slice 5b, R8d): the qualifier->module `imports`
-/// map, the selective bare-name->module map, and the per-module `export:`
-/// lists that gate a qualified type reference. They always travel together, so
-/// they ride one borrowed struct rather than three parallel parameters.
-pub struct ImportCtx<'a> {
-    pub imports: &'a HashMap<String, u32>,
-    pub selective: &'a HashMap<String, u32>,
-    pub exports: &'a [Vec<(String, Span)>],
-}
-
-impl ImportCtx<'_> {
-    /// The no-import context: the native `.sth` parse path and any
-    /// import-free REPL line resolve types with empty maps, exactly as before
-    /// slice 5b threaded real ones.
-    pub fn empty() -> ImportCtx<'static> {
-        static NO_IMPORTS: std::sync::OnceLock<HashMap<String, u32>> = std::sync::OnceLock::new();
-        let no_imports = NO_IMPORTS.get_or_init(HashMap::new);
-        ImportCtx {
-            imports: no_imports,
-            selective: no_imports,
-            exports: &[],
-        }
-    }
-}
-
-/// Parse a REPL line resolving struct and enum type names in a `:`
-/// definition's effect against the session's registries, so a word may take
-/// or return a previously-declared struct or enum. A bare expression carries
-/// no type names, so the registries are unused there. `arrays` is the
-/// session's interned array-type registry (R22/R23): a `[T N]` in a word
-/// effect interns into it in place, so the `ArrayId` it returns stays valid
-/// for later lines in the same session.
-#[allow(clippy::too_many_arguments)]
-pub fn parse_line_with_structs(
-    tokens: &[(Token, Span)],
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &mut Vec<ArrayDecl>,
-    owned_cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    slices: &mut Vec<SliceDecl>,
-    ctx: ImportCtx,
-) -> Result<Line, String> {
-    // The REPL has no generic `type:` declarations (they are rejected at
-    // declaration), so nothing here can apply one: a scratch registry, never read.
-    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        structs,
-        enums,
-        arrays,
-        owned_cells,
-        refs,
-        slices,
-        module: 0,
-        imports: ctx.imports,
-        exports: ctx.exports,
-        selective: ctx.selective,
-        generics: &mut generics,
-        type_origin: &[],
-        trait_origin: &[],
-        // P7.S3e (R2): a REPL word def still needs `'T: Copy` to work; a
-        // user `trait:` declaration is not yet supported at REPL scope, so
-        // the reserved predicate-only table is all this context ever sees.
-        // P7.S3s (R8): `Ord` no longer lives in that table -- it is an
-        // ordinary library trait now, so a REPL bound naming it gets a
-        // located, REPL-specific diagnostic (`is_repl` below), not a silent
-        // fold.
-        traits: crate::ast::predicate_traits(),
-        is_repl: true,
-    };
-    if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
-        let def = parser.parse_worddef()?;
-        if let Some((tok, span)) = parser.peek() {
-            return Err(format!(
-                "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
-                span.line, span.col
-            ));
-        }
-        return Ok(Line::Def(def));
-    }
-    let mut terms = Vec::new();
-    while parser.pos < parser.tokens.len() {
-        terms.push(parser.parse_term()?);
-    }
-    Ok(Line::Expr(terms))
-}
-
-/// Parse a single REPL `type:` line into its ordered `(field-name, Type)`
-/// list, resolving field types against `structs` (the session's accumulated
-/// registry, with the just-declared name already appended so a self-reference
-/// resolves, which the checker then rejects as recursion). Trailing
-/// tokens after `;` are a located error (one line is one complete unit).
-pub fn parse_typedef_line(
-    tokens: &[(Token, Span)],
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &mut Vec<ArrayDecl>,
-    owned_cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    ctx: ImportCtx,
-) -> Result<Vec<(String, Type)>, String> {
-    // The REPL has no generic `type:` declarations (they are rejected at
-    // declaration), so nothing here can apply one: a scratch registry, never read.
-    // A `type:` field can never be a slice (a slice is banned from every
-    // field position, so the checker rejects one), and nothing else in a
-    // typedef line resolves a slice type: a scratch registry, never read.
-    let mut slices = Vec::new();
-    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        structs,
-        enums,
-        arrays,
-        owned_cells,
-        refs,
-        slices: &mut slices,
-        module: 0,
-        imports: ctx.imports,
-        exports: ctx.exports,
-        selective: ctx.selective,
-        generics: &mut generics,
-        type_origin: &[],
-        trait_origin: &[],
-        traits: crate::ast::predicate_traits(),
-        is_repl: true,
-    };
-    reject_generic_typedef_in_repl(&parser)?;
-    let fields = parser.parse_typedef()?;
-    if let Some((tok, span)) = parser.peek() {
-        return Err(format!(
-            "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
-            span.line, span.col
-        ));
-    }
-    Ok(fields)
-}
-
-/// Phase 5 slice 1: a generic `type:` header (`type: Box 'T ...`) has no REPL
-/// support yet -- `parse_typedef_line`/`parse_enum_typedef_line` only ever
-/// reach the concrete productions, so without this gate a generic header runs
-/// straight into `parse_typedef`'s/`parse_enum_typedef`'s field loop and
-/// reports a nonsense "unknown type" error naming a type variable. `parser`
-/// must not have consumed any tokens yet (`self.pos` still points at `type:`).
-fn reject_generic_typedef_in_repl(parser: &Parser) -> Result<(), String> {
-    if parser.current_typedef_is_generic() {
-        let (_, span) = parser.tokens[parser.pos];
-        return Err(format!(
-            "error: generic `type:` declarations are not supported in the REPL yet at line {}, col {}",
-            span.line, span.col
-        ));
-    }
-    Ok(())
-}
-
-/// Whether a `type:` line is an enum declaration (a `|`-bearing body, D1), so
-/// the REPL routes it to the enum registry rather than the struct one.
-/// `tokens` must start at `type:`.
-pub fn typedef_line_is_enum(tokens: &[(Token, Span)]) -> bool {
-    body_has_pipe_before_semicolon(tokens, 2)
-}
-
-/// The `(name, span)` of every variant in a `type:` enum line, in source
-/// order (D8's variant pre-pass at REPL scope), so the REPL can register the
-/// variant-name skeleton before parsing variant fields. `tokens` must start
-/// at `type:`.
-pub fn enum_variant_names(tokens: &[(Token, Span)]) -> Vec<(String, Span)> {
-    scan_variant_names(tokens, 2)
-}
-
-/// Parse a single REPL `type:` enum line into its ordered per-variant
-/// `(field-name, Type)` lists, resolving field types against the session's
-/// registries (the just-declared enum already appended so a self-reference
-/// resolves, which the checker then rejects as recursion). Trailing tokens
-/// after `;` are a located error.
-pub fn parse_enum_typedef_line(
-    tokens: &[(Token, Span)],
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-    arrays: &mut Vec<ArrayDecl>,
-    owned_cells: &mut Vec<OwnedCellDecl>,
-    refs: &mut Vec<RefDecl>,
-    ctx: ImportCtx,
-) -> Result<Vec<Vec<(String, Type)>>, String> {
-    // The REPL has no generic `type:` declarations (they are rejected at
-    // declaration), so nothing here can apply one: a scratch registry, never read.
-    // A `type:` field can never be a slice (a slice is banned from every
-    // field position, so the checker rejects one), and nothing else in a
-    // typedef line resolves a slice type: a scratch registry, never read.
-    let mut slices = Vec::new();
-    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
-    let mut parser = Parser {
-        tokens,
-        pos: 0,
-        structs,
-        enums,
-        arrays,
-        owned_cells,
-        refs,
-        slices: &mut slices,
-        module: 0,
-        imports: ctx.imports,
-        exports: ctx.exports,
-        selective: ctx.selective,
-        generics: &mut generics,
-        type_origin: &[],
-        trait_origin: &[],
-        traits: crate::ast::predicate_traits(),
-        is_repl: true,
-    };
-    reject_generic_typedef_in_repl(&parser)?;
-    let variant_fields = parser.parse_enum_typedef()?;
-    if let Some((tok, span)) = parser.peek() {
-        return Err(format!(
-            "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
-            span.line, span.col
-        ));
-    }
-    Ok(variant_fields)
 }
 
 /// P7.S3n (R2): a generic `type:` header on its own -- the declared name, the
@@ -1814,22 +1565,6 @@ fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
 fn unknown_capability_error(name: &str, span: Span) -> String {
     format!(
         "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or a trait in scope)",
-        span.line, span.col
-    )
-}
-
-/// P7.S3s (R8): the REPL carries no whole-program trait/`impl:` registry
-/// (`traits` is always `predicate_traits()` there, `Copy` only now that
-/// `Ord` is an ordinary library trait), so `Ord` specifically can never
-/// resolve at REPL scope, not even though it would resolve in a file.
-/// Distinct wording from `unknown_capability_error` so a REPL user hitting
-/// this one real name is pointed at the real cause (no registry) instead of
-/// being told the name is simply wrong. Any other name is not a trait
-/// anywhere, in a file or at the REPL, so it stays on the generic
-/// diagnostic -- see `parse_capabilities`'s two `c == "Ord"` gates.
-fn repl_unknown_capability_error(name: &str, span: Span) -> String {
-    format!(
-        "error: unknown capability `{name}` at line {}, col {} (`{name}` is a core::cmp trait; the REPL carries no trait or impl: registry to resolve it against -- define a word needing it in a file and load that instead)",
         span.line, span.col
     )
 }
@@ -2218,14 +1953,6 @@ struct Parser<'t> {
     /// scope, the same bypass pattern `structs`/`enums` already follow
     /// there).
     traits: &'t [TraitDecl],
-    /// P7.S3s (R8): true at the three REPL construction sites
-    /// (`parse_line_with_structs`, `parse_typedef_line`,
-    /// `parse_enum_typedef_line`), false everywhere else. `traits` alone
-    /// cannot distinguish REPL scope from a file-parsing prepass/scratch
-    /// site -- both see only `predicate_traits()` -- so `parse_capabilities`
-    /// needs this explicit signal to choose the REPL-specific
-    /// unknown-capability wording.
-    is_repl: bool,
 }
 
 impl<'t> Parser<'t> {
@@ -3681,23 +3408,7 @@ impl<'t> Parser<'t> {
                 // been read yet, where the colon has already committed to a
                 // bound (X3).
                 None if out.is_empty() => {
-                    return Err(if self.is_repl && c == "Ord" {
-                        repl_unknown_capability_error(&c, span)
-                    } else {
-                        unknown_capability_error(&c, span)
-                    });
-                }
-                // P7.S3s (R8, review round 2): `Ord` at REPL scope is the one
-                // name that breaks the rule above. `'T: Copy Ord` -- the
-                // shape every in-tree `Ord` signature uses -- folds `Copy`
-                // first, so `Ord` reaches this arm and would become the next
-                // slot, reported by the slot parser as `unknown type `Ord``:
-                // strictly less informative than the generic capability text
-                // R8 set out to improve on. Only when the session declares no
-                // type of that name, since a REPL `type: Ord ...` makes `Ord`
-                // a legitimate slot and that program must keep parsing.
-                None if self.is_repl && c == "Ord" && !self.declares_type(&c) => {
-                    return Err(repl_unknown_capability_error(&c, span));
+                    return Err(unknown_capability_error(&c, span));
                 }
                 None => break,
             }
@@ -3706,21 +3417,6 @@ impl<'t> Parser<'t> {
             return Err(unknown_capability_error("<none>", colon_span));
         }
         Ok(out)
-    }
-
-    /// Whether `name` resolves to a declared struct or enum in this scope,
-    /// by the same lookup `resolve_type` performs for a slot.
-    fn declares_type(&self, name: &str) -> bool {
-        crate::ast::resolve_type_name_in_module(
-            self.structs,
-            self.enums,
-            name,
-            self.module,
-            self.imports,
-            self.selective,
-            self.type_origin,
-        )
-        .is_some()
     }
 
     /// P7.S3e (R18): resolve a bound's trait name at parse time, through the
@@ -6841,60 +6537,28 @@ mod tests {
         assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "if"));
     }
 
-    fn parse_line_src(src: &str) -> Result<Line, String> {
-        let tokens = lex(src).unwrap();
-        parse_line(&tokens)
+    /// Migrated off the retired REPL bare-line path (R5b): a bare term
+    /// sequence's own shape (multiple terms, an int literal, a trailing
+    /// call) is a general parsing fact with no REPL-only content, so it moves
+    /// onto a one-word module body.
+    #[test]
+    fn parse_bare_term_sequence_is_a_multi_term_body() {
+        let module = parse_src(": w ( i64 i64 -- i64 ) 2 3 add ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0].kind, TermKind::IntLit(2)));
+        assert!(matches!(&body[2].kind, TermKind::Call(w, _) if w == "add"));
     }
 
+    /// Migrated off the retired REPL bare-line path (R5b): a float literal
+    /// token parses to `TermKind::FloatLit`, a general lexing/parsing fact,
+    /// not a REPL one.
     #[test]
-    fn parse_line_bare_expression_is_expr() {
-        match parse_line_src("2 3 add").unwrap() {
-            Line::Expr(terms) => {
-                assert_eq!(terms.len(), 3);
-                assert!(matches!(terms[0].kind, TermKind::IntLit(2)));
-                assert!(matches!(&terms[2].kind, TermKind::Call(w, _) if w == "add"));
-            }
-            other => panic!("expected Expr, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_line_float_lit_is_float_lit() {
-        match parse_line_src("2.5").unwrap() {
-            Line::Expr(terms) => {
-                assert_eq!(terms.len(), 1);
-                assert!(matches!(terms[0].kind, TermKind::FloatLit(v) if v == 2.5));
-            }
-            other => panic!("expected Expr, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_line_colon_is_def() {
-        match parse_line_src(": sq ( i64 -- i64 ) dup mul ;").unwrap() {
-            Line::Def(def) => assert_eq!(def.name, "sq"),
-            other => panic!("expected Def, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_line_trailing_tokens_after_def_is_error() {
-        let result = parse_line_src(": sq ( i64 -- i64 ) dup mul ; 5 sq");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.contains("after `;`"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn parse_line_unterminated_def_is_error() {
-        let result = parse_line_src(": sq ( i64 -- i64 ) dup mul");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("unexpected end of input"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("`;`"), "unexpected message: {err}");
+    fn parse_float_lit_term_is_float_lit() {
+        let module = parse_src(": w ( -- f64 ) 2.5 ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(body[0].kind, TermKind::FloatLit(v) if v == 2.5));
     }
 
     #[test]
@@ -9574,129 +9238,6 @@ mod tests {
         // declared trait is still X3.
         let err = parse_src(": f ( 'T: Nope -- 'T ) ;").unwrap_err();
         assert!(err.contains("unknown capability"), "{err}");
-    }
-
-    /// P7.S3s (R8): `is_repl` picks the REPL-specific wording, distinct from
-    /// the file-parsing text pinned above -- same unresolved name, different
-    /// message, because the REPL's cause (no trait/`impl:` registry at all)
-    /// is not "the name is wrong".
-    #[test]
-    fn parse_capabilities_at_repl_scope_is_a_located_repl_specific_error() {
-        let tokens = lex(": f ( 'T: Ord 'T -- 'T ) drop ;").unwrap();
-        let mut arrays = Vec::new();
-        let mut owned_cells = Vec::new();
-        let mut refs = Vec::new();
-        let mut slices = Vec::new();
-        let err = parse_line_with_structs(
-            &tokens,
-            &[],
-            &[],
-            &mut arrays,
-            &mut owned_cells,
-            &mut refs,
-            &mut slices,
-            ImportCtx::empty(),
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
-            "{err}"
-        );
-    }
-
-    /// P7.S3s (R8, review round 1): only `Ord` is a real trait the REPL
-    /// cannot resolve. A typo or any other unknown name is not a trait
-    /// anywhere, so it must not be told it is a `core::cmp trait` -- that
-    /// wording is only true for `Ord`.
-    #[test]
-    fn parse_capabilities_at_repl_scope_unknown_name_keeps_the_generic_error() {
-        let tokens = lex(": f ( 'T: Bogus 'T -- 'T ) drop ;").unwrap();
-        let mut arrays = Vec::new();
-        let mut owned_cells = Vec::new();
-        let mut refs = Vec::new();
-        let mut slices = Vec::new();
-        let err = parse_line_with_structs(
-            &tokens,
-            &[],
-            &[],
-            &mut arrays,
-            &mut owned_cells,
-            &mut refs,
-            &mut slices,
-            ImportCtx::empty(),
-        )
-        .unwrap_err();
-        assert!(err.contains("unknown capability `Bogus`"), "{err}");
-        assert!(!err.contains("core::cmp trait"), "{err}");
-    }
-
-    /// P7.S3s (R8, review round 2): the shape R8 exists for. `Copy` folds
-    /// first, so `Ord` is no longer the first bound and reaches the greedy
-    /// list's break arm -- where, without its own gate, it would become the
-    /// next stack slot and be reported as an unknown *type*.
-    #[test]
-    fn parse_capabilities_at_repl_scope_reports_ord_after_a_folded_predicate() {
-        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
-        let mut arrays = Vec::new();
-        let mut owned_cells = Vec::new();
-        let mut refs = Vec::new();
-        let mut slices = Vec::new();
-        let err = parse_line_with_structs(
-            &tokens,
-            &[],
-            &[],
-            &mut arrays,
-            &mut owned_cells,
-            &mut refs,
-            &mut slices,
-            ImportCtx::empty(),
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("the REPL carries no trait or impl: registry to resolve it against"),
-            "{err}"
-        );
-        assert!(!err.contains("unknown type"), "{err}");
-    }
-
-    /// The gate above must stay narrow: a session that declares a type named
-    /// `Ord` makes it a legitimate slot, so `'T: Copy Ord` parses (and fails
-    /// later, on its stack effect) instead of being claimed as the trait.
-    #[test]
-    fn parse_capabilities_at_repl_scope_yields_ord_to_a_declared_type() {
-        let structs = vec![StructDecl {
-            name: "Ord".to_string(),
-            name_static: "Ord",
-            fields: vec![("val".to_string(), Type::I64)],
-            span: Span::default(),
-            has_drop_overload: false,
-            is_bundle: false,
-            module: 0,
-        }];
-        let tokens = lex(": f ( 'T: Copy Ord 'T -- 'T ) drop ;").unwrap();
-        let mut arrays = Vec::new();
-        let mut owned_cells = Vec::new();
-        let mut refs = Vec::new();
-        let mut slices = Vec::new();
-        let line = parse_line_with_structs(
-            &tokens,
-            &structs,
-            &[],
-            &mut arrays,
-            &mut owned_cells,
-            &mut refs,
-            &mut slices,
-            ImportCtx::empty(),
-        )
-        .expect("`Ord` names a declared type here, so it is the next slot");
-        let Line::Def(def) = line else {
-            panic!("expected a word definition");
-        };
-        let sig = def.poly.as_ref().expect("poly sig present");
-        assert_eq!(sig.bounds, vec![(0, Bound::Copy)]);
-        // Three inputs: the bound site `'T` is itself a slot, then `Ord`,
-        // then the declared `'T`.
-        assert_eq!(sig.inputs.len(), 3, "`Ord` became an input slot");
     }
 
     #[test]

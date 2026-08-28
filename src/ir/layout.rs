@@ -330,39 +330,6 @@ pub(super) fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
     (bytes, bytes)
 }
 
-/// The carried-stack bytes a slot of `ty` occupies. A scalar stays a
-/// byte-identical 8-byte cell, so every scalar-only line marshals exactly as
-/// before; a struct or enum occupies its aggregate size rounded up to a
-/// multiple of 8 so the next slot stays 8-aligned. Cumulative sums give each
-/// carried slot's byte offset in the buffer.
-pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> u32 {
-    match ty {
-        IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
-        IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
-        IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
-        // A quotation value is a three-slot aggregate (code, env, disposer);
-        // it marshals like any aggregate, its size rounded up so the next
-        // slot stays 8-aligned.
-        IrType::Quotation(_) | IrType::OwningQuotation(_) => {
-            round_up(quotation_layout(WORD_WIDTH).size, 8)
-        }
-        // P7 slice 3c (R2.2): a slice marshals as its two-slot `{ptr, len}`
-        // aggregate, like `Quotation` and unlike the 8-byte scalar arm below
-        // -- `Str`'s one-word answer would truncate the length.
-        IrType::Slice(_) => round_up(slice_layout(WORD_WIDTH).size, 8),
-        IrType::Int { .. }
-        | IrType::Float { .. }
-        | IrType::Bool
-        | IrType::Usize
-        | IrType::Isize
-        | IrType::Ptr
-        | IrType::OwnedCell(_)
-        | IrType::Str
-        | IrType::Cstr
-        | IrType::Code => 8,
-    }
-}
-
 impl Structs {
     /// Build just the struct registry (no enums). A thin wrapper over
     /// `build_registries` for struct-only callers; a struct with an enum field
@@ -1075,42 +1042,6 @@ mod tests {
     }
 
     #[test]
-    fn carried_slot_bytes_scalar_is_eight_struct_is_aligned_aggregate() {
-        // A scalar always occupies a byte-identical 8-byte carried cell (so
-        // every scalar-only line marshals unchanged); a struct occupies its
-        // aggregate size rounded up to a multiple of 8.
-        let s = structs_of("type: Pair a i8 b i8 ;\ntype: Vec2 x i64 y i64 ;");
-        assert_eq!(
-            carried_slot_bytes(IrType::I64, &s, &Enums::default(), &Arrays::default()),
-            8
-        );
-        assert_eq!(
-            carried_slot_bytes(IrType::Bool, &s, &Enums::default(), &Arrays::default()),
-            8
-        );
-        // Pair is two i8s = 2 bytes, rounded up to one 8-byte cell.
-        assert_eq!(
-            carried_slot_bytes(
-                IrType::Struct(StructId::from_index(0)),
-                &s,
-                &Enums::default(),
-                &Arrays::default()
-            ),
-            8
-        );
-        // Vec2 is two i64s = 16 bytes, already a multiple of 8.
-        assert_eq!(
-            carried_slot_bytes(
-                IrType::Struct(StructId::from_index(1)),
-                &s,
-                &Enums::default(),
-                &Arrays::default()
-            ),
-            16
-        );
-    }
-
-    #[test]
     fn word_width_parameter_sizes_size_types_not_a_literal_eight() {
         // Criterion 2 (structural): both size types' size/align derive from the
         // word width parameter, not a hardcoded `8`. At the default width it is
@@ -1159,46 +1090,6 @@ mod tests {
         let a = arrays_of(": w ( [[i64 4] 2] -- ) drop ;");
         let outer = a.layouts.iter().find(|l| l.name == "[[i64 4] 2]").unwrap();
         assert_eq!((outer.stride, outer.size, outer.align), (32, 64, 8));
-    }
-
-    #[test]
-    fn carried_slot_bytes_array_is_aligned_aggregate() {
-        // R16/M2: a carried array slot occupies its size rounded up to a
-        // multiple of 8. `[u8 3]` is 3 bytes, rounding up to one 8-byte cell.
-        let a = arrays_of(": w ( [u8 3] -- ) drop ;");
-        assert_eq!(
-            carried_slot_bytes(
-                IrType::Array(ArrayId::from_index(0)),
-                &Structs::default(),
-                &Enums::default(),
-                &a
-            ),
-            8
-        );
-    }
-
-    /// P7 slice 3c (R2.2): a carried slice slot is its whole 16-byte
-    /// `{ptr, len}` aggregate, not the 8-byte scalar cell `Str` gets. Getting
-    /// this wrong shifts every slot above it in the carried buffer.
-    #[test]
-    fn carried_slot_bytes_slice_is_aligned_aggregate() {
-        let mut slices = Vec::new();
-        let slice = match ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false)) {
-            IrType::Slice(id) => IrType::Slice(id),
-            other => panic!("expected an IrType::Slice, got {other:?}"),
-        };
-        assert_eq!(
-            carried_slot_bytes(
-                slice,
-                &Structs::default(),
-                &Enums::default(),
-                &Arrays::default()
-            ),
-            16
-        );
-        // ...and the figure comes from `slice_layout`, which is two words
-        // wide, so it is 16 for the same reason a two-`i64` struct is.
-        assert_eq!(slice_layout(WORD_WIDTH).size, 16);
     }
 
     /// P7 slice 3c (R2.1): the per-`SliceId` registry carries what lowering
@@ -1410,33 +1301,6 @@ mod tests {
         assert_eq!((t.fields[0].offset, t.fields[0].size), (0, 24));
         assert_eq!(t.fields[1].offset, 24);
         assert_eq!((t.size, t.align), (32, 8));
-    }
-
-    #[test]
-    fn carried_slot_bytes_enum_is_aligned_aggregate() {
-        // R17: a carried enum slot occupies its size rounded up to a multiple
-        // of 8. Shape is 24 bytes (already a multiple of 8); a tag-only enum
-        // (4 bytes pre-Slice-9, now a 1-byte scalar) rounds up to one 8-byte
-        // cell either way.
-        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
-        assert_eq!(
-            carried_slot_bytes(
-                IrType::Enum(enum_id(&e, "Shape")),
-                &Structs::default(),
-                &e,
-                &Arrays::default()
-            ),
-            24
-        );
-        assert_eq!(
-            carried_slot_bytes(
-                IrType::Enum(enum_id(&e, "Dir")),
-                &Structs::default(),
-                &e,
-                &Arrays::default()
-            ),
-            8
-        );
     }
 
     // Phase 3 Slice 1, Phase 2: struct linearity + the synthesized destructor

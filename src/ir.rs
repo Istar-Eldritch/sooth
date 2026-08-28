@@ -25,7 +25,7 @@ mod types;
 
 pub(crate) use self::destructors::synthesize_aggregate_destructors;
 use self::destructors::PathStep;
-use self::func_builder::{lower_materialized, lower_word_parts, word_ret_ty, EnvPlan, FuncBuilder};
+use self::func_builder::{lower_word_parts, word_ret_ty, EnvPlan, FuncBuilder};
 
 use self::types::QuotId;
 pub use self::types::{
@@ -35,15 +35,14 @@ pub use self::types::{
     SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
-pub use self::driver::{lower, lower_line};
+pub use self::driver::lower;
 use self::layout::{
     array_drop_symbol, cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align,
     struct_drop_symbol, EnumWord, StructWord,
 };
 pub(crate) use self::layout::{
-    build_registries, build_slices, build_statics, carried_slot_bytes, ArrayLayout, Arrays, Cells,
-    DropOverrides, EnumLayout, Enums, FieldLayout, Registries, Slices, Statics, StructLayout,
-    Structs,
+    build_registries, build_slices, build_statics, ArrayLayout, Arrays, Cells, DropOverrides,
+    EnumLayout, Enums, FieldLayout, Registries, Slices, Statics, StructLayout, Structs,
 };
 // `Refs` has no non-test caller anywhere in the crate today (every one is a
 // unit test's empty stand-in), and `empty_slices`/`empty_statics` exist for

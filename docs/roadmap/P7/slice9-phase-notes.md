@@ -1147,3 +1147,108 @@ design.
 `cargo test --no-fail-fast`: **2687 passed, 0 failed**, 3 ignored (the three non-REPL
 `phase7_slice3b_follow.rs` notes). Zero `tests/qbe_baseline` diffs. 2687 rather than the
 2686 this phase first reported: the review-fix round added the `storel` witness above.
+
+## Phase 8 (R5b) — the bare-line entry-point family
+
+Re-grepped every item before deleting, as the spec instructs, rather than trusting its
+list. All matched: `parse_line`'s only non-test callers were gone with `repl.rs`;
+`parse_line_with_structs`'s were `repl.rs:1418`/`:1694` only; `lower_line`'s was
+`repl.rs:3414` only; `reject_generic_typedef_in_repl` had **two** call sites, not the
+spec's one — `parser.rs:1353` (inside `parse_typedef_line`) and `:1436` (inside
+`parse_enum_typedef_line`) — both inside the family, so the extra site changes nothing
+about scope; `repl_unknown_capability_error` was called only from the two `is_repl`
+readers. Deleted: `ast::Line`; `parse_line`, `parse_line_with_structs`;
+`reject_generic_typedef_in_repl`; `repl_unknown_capability_error`; the `is_repl` field
+with all 8 assignments and both readers; `ir::lower_line` and its `ir.rs` re-export.
+
+### An unnamed fourth of the family: the REPL `type:`-line parsers
+
+The spec's deletion list does not name `parse_typedef_line`, `parse_enum_typedef_line`,
+`typedef_line_is_enum` or `enum_variant_names`, but all four are REPL-only entry points
+in exactly the sense R5b describes, and all four construct `is_repl: true` and (the
+first two) call `reject_generic_typedef_in_repl`. `grep -rn` for each, over `src/` and
+`tests/`, found zero callers anywhere once `repl.rs` was gone — not even a test. Leaving
+them would have meant either resurrecting `is_repl`/`reject_generic_typedef_in_repl` for
+their sake (defeating the phase) or open-coding a stub, so they were deleted alongside
+the four named items, and `ImportCtx` (the import/selective/exports bundle threaded only
+to these four parsers and their tests) went with them. This is the same class of gap
+phase 7 found in its own forced list (the spec's four items there were incomplete too);
+it is recorded here so a later reader does not read the spec's silence on these four as
+a ruling that they should stay.
+
+### A second unnamed forcing: `carried_slot_bytes`
+
+Deleting `lower_line` left `ir/layout.rs`'s `carried_slot_bytes` with no caller but its
+own four unit tests. Unlike `parse_line`/`ast::Line`/`lower_line` — each `pub` in a `pub`
+module, hence R5b's whole premise that `-D warnings` does not force this phase — `ir.rs`
+re-exports it via `pub(crate) use`, not `pub use`, which is crate-visible only and *does*
+trigger `dead_code` once its last caller dies (the same rule that made `InferredLine`
+and `check_poly_combinator_repl` fire in phase 7). `cargo build --lib` confirmed this:
+`carried_slot_bytes` warned the moment `lower_line` was gone. Deleted the function, its
+`ir.rs` re-export, and its four REPL-carried-slot unit tests
+(`carried_slot_bytes_scalar_is_eight_struct_is_aligned_aggregate`,
+`carried_slot_bytes_array_is_aligned_aggregate`,
+`carried_slot_bytes_slice_is_aligned_aggregate`,
+`carried_slot_bytes_enum_is_aligned_aggregate`) — each tested only the carried-buffer
+marshalling fact ("a slot this wide rounds up to an 8-byte cell"), which is REPL-only
+subject matter, not a shared layout fact: `StructLayout`/`EnumLayout`/`ArrayLayout`'s own
+`size`/`align` fields keep their existing non-REPL tests untouched. `round_up` stays; it
+has five other production callers in `ir/layout.rs`.
+
+### The parser unit tests
+
+`parse_line_src` and its five tests were classified per test, not deleted as a block:
+
+- `parse_line_bare_expression_is_expr` and `parse_line_float_lit_is_float_lit` test a
+  general parsing fact with no REPL content (a multi-term sequence, a float literal
+  token) that had no other witness in the tree (`grep -n 'FloatLit'` outside these two
+  found nothing test-level). **Migrated**, not deleted: `parse_bare_term_sequence_is_a_
+  multi_term_body` and `parse_float_lit_term_is_float_lit` re-express the same fact over
+  a one-word module body via `parse_src`/`terms_body`. Mutation-proved individually in an
+  isolated edit-and-revert (not a worktree copy): relabelling `TermKind::IntLit(n)` to
+  `IntLit(n + 1)` fails the migrated multi-term test; relabelling `FloatLit(v)` to
+  `FloatLit(v + 1.0)` fails the migrated float test. Both reverted after.
+- `parse_line_colon_is_def` tests the `Line::Def`/`Line::Expr` split itself, which is the
+  REPL mechanism this phase deletes — **retired**, no twin needed.
+- `parse_line_trailing_tokens_after_def_is_error` tests "one line is one complete unit",
+  a rule with no file-parsing counterpart (a module is an unbounded sequence of
+  definitions; trailing tokens after one `;` are simply the next definition) —
+  **retired**.
+- `parse_line_unterminated_def_is_error` pins "unexpected end of input … `;`" for an
+  unterminated `:` body. `parse_missing_semicolon_is_error` (`parser.rs`, module-level)
+  already pins the identical fact (`: w ( -- ) 1` with no closing `;`) — **retired as a
+  duplicate**, named here as the covering test.
+
+The four `parse_capabilities_at_repl_scope_*` tests (`_is_a_located_repl_specific_error`,
+`_unknown_name_keeps_the_generic_error`, `_reports_ord_after_a_folded_predicate`,
+`_yields_ord_to_a_declared_type`) pinned `is_repl`'s `Ord`-specific wording, which no
+longer exists once `is_repl` and `repl_unknown_capability_error` are gone — **retired**.
+The surviving non-REPL golden, `parse_capabilities_unknown_name_is_still_an_error`,
+already pins the generic `unknown capability` wording the collapsed `Ord` case now falls
+into; built and ran `sooth build` over `: f ( 'T: Ord 'T -- 'T ) drop ;` to confirm the
+collapse actually produces `error: unknown capability \`Ord\` at line 1, col 11 (a bound
+names \`Copy\` or a trait in scope)` — the generic arm, byte-identical to the file-parsing
+wording, not a retyped REPL string.
+
+### Deletion proof (E5, this phase's items)
+
+`grep -rn 'parse_line\|InferredLine\|lower_line\|is_repl\|ast::Line\|Line::Def\|Line::Expr\|ImportCtx\|reject_generic_typedef_in_repl\|repl_unknown_capability_error\|carried_slot_bytes' src/` and the same over `tests/`: **both empty.** `docs/roadmap/` still names
+several of these (this slice's own spec/brief/phase-notes, plus historical `P2`/`P3`/`P4`/
+`P7` implementation specs recording what was built at the time) — out of scope per the
+spec, not a statement of current design.
+
+### Carried forward
+
+- Phase 9 (R7) is unaffected: `generation`'s field and its one remaining unit witness
+  (`lower_call_uses_resolved_generation_symbol`) were untouched here.
+- Phase 10's E2 sweep should re-derive its file list fresh; this phase's deletions
+  (`is_repl` alone was most of `parser.rs`'s share of phase 7's 235-hit count) shrink it
+  further, and phase 10 must not assume the count from phase 7's report still holds.
+
+### Gate
+
+`cargo fmt --check` clean, `cargo clippy -- -D warnings` clean,
+`cargo test --no-fail-fast`: **2676 passed, 0 failed**, 3 ignored (unchanged — the three
+non-REPL `phase7_slice3b_follow.rs` notes). Net change from phase 7's 2687: −11
+(parser.rs: −9 tests / +2 migrated = −7; ir/layout.rs: −4 `carried_slot_bytes` tests).
+Zero `tests/qbe_baseline` diffs.
