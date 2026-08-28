@@ -833,6 +833,28 @@ mod tests {
         manifest::parse_manifest(&src, &manifest_path).expect("lib/core/sooth.pkg should parse");
     }
 
+    /// R5.2b/R5.8(1): the real, committed `lib/hosted/sooth.pkg` parses, and
+    /// parses as `layer: hosted` -- asserted on the parsed `PackageLayer`,
+    /// not on the manifest text, per R5.8's own distinction.
+    #[test]
+    fn lib_hosted_manifest_parses_as_hosted_layer() {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/hosted/sooth.pkg");
+        let src = std::fs::read_to_string(&manifest_path)
+            .expect("lib/hosted/sooth.pkg should be readable");
+        let manifest = manifest::parse_manifest(&src, &manifest_path)
+            .expect("lib/hosted/sooth.pkg should parse");
+        assert_eq!(manifest.layer, PackageLayer::Hosted);
+    }
+
+    /// R5.6: `find_package_root` on `lib/hosted/libc.sth` returns
+    /// `lib/hosted`, the sibling package, not `lib`.
+    #[test]
+    fn find_package_root_lib_hosted_libc_returns_lib_hosted() {
+        let libc = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/hosted/libc.sth");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/hosted");
+        assert_eq!(find_package_root(&libc), Some(root));
+    }
+
     #[test]
     fn find_package_root_nested_manifest_inner_wins() {
         let sb = Sandbox::new("nested");
