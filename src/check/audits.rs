@@ -368,6 +368,11 @@ fn contains_poly_reference(
         PolyType::Generic { args, .. } => args
             .iter()
             .any(|a| contains_poly_reference(a, structs, enums, arrays)),
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this audit walks.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 
@@ -419,6 +424,11 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
             }
             Ok(())
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this audit walks.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 
@@ -459,6 +469,11 @@ fn reject_poly_quotation_anywhere(
         )),
         // P7 slice 3b: a body-only marker, never in a declared signature.
         PolyType::QuotLit => unreachable!("a quotation-literal marker never reaches a signature"),
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this audit walks.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 

@@ -631,6 +631,11 @@ pub(super) fn subst_polytype(
                 "checked: apply_subst already minted this generic instantiation at check time",
             )
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this walk grounds.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 

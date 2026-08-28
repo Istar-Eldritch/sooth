@@ -1861,6 +1861,9 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
         PolyType::QuotLit => {
             unreachable!("a quotation-literal marker never reaches a signature")
         }
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row (R3.5); a trait member signature never carries one"
+        ),
     }
 }
 
@@ -2036,6 +2039,82 @@ pub enum PolyType {
         args: Vec<PolyType>,
         name: &'static str,
     },
+    /// P7.S12 (R3): a generic enum's variant narrowed by an eliminator arm
+    /// (`Option['T]`'s `Some`), the poly twin of `Type::Variant`. Identity is
+    /// `(idx, module, vi)`, mirroring `Generic`'s own `(is_enum, idx, module)`
+    /// -- `idx`/`module` index the same `GenericTypes::enums` header a
+    /// `Generic { is_enum: true, .. }` scrutinee names, `vi` the variant
+    /// within it. `args` is the scrutinee's own argument list, carried
+    /// forward unchanged (R5.4): nothing re-unifies, since the scrutinee
+    /// already carries the substitution. A separate variant rather than a
+    /// flag on `Generic`: every predicate that must reject a *variant*
+    /// (escape, `Copy`, projection) has to see it without reasoning about a
+    /// boolean. `name` is the leaked `Enum.Variant` display spelling
+    /// (`generic_variant_type`, the sole constructor), diagnostics only, and
+    /// unconstructible outside an eliminator arm's own input row (R3.5): no
+    /// parse route, no signature spelling, no constructor elsewhere.
+    GenericVariant {
+        idx: u32,
+        module: u32,
+        vi: usize,
+        args: Vec<PolyType>,
+        name: &'static str,
+    },
+}
+
+/// P7.S12 (R3.2): the **sole** constructor of a `PolyType::GenericVariant`,
+/// mirroring `variant_type`'s role for `Type::Variant`: it leaks
+/// `{header name}.{variant surface name}` once, so two constructions of the
+/// same `(idx, module, vi)` compare equal (`PolyType` derives `PartialEq` +
+/// `Eq`, and `&'static str` equality is content-based regardless of the
+/// leak, exactly as `Generic`'s own `name` field already relies on).
+pub fn generic_variant_type(
+    generics: &GenericTypes,
+    idx: u32,
+    module: u32,
+    vi: usize,
+    args: Vec<PolyType>,
+) -> PolyType {
+    let decl = &generics.enums[idx as usize];
+    let variant = &decl.variants[vi];
+    let display = format!("{}.{}", decl.name, generic_surface_name(&variant.name));
+    PolyType::GenericVariant {
+        idx,
+        module,
+        vi,
+        args,
+        name: Box::leak(display.into_boxed_str()),
+    }
+}
+
+/// P7.S12 (R4): substitute a generic enum variant field's declared
+/// `PolyType` against the eliminated scrutinee's own argument list,
+/// symbolically -- an adaptation of `ground_member_poly`'s
+/// `PolyType -> PolyType` walk (substituting `Var` against a single target
+/// there, against an indexed argument list here), sized to what a variant
+/// field can actually be rather than to `ground_member_poly`'s wider arm set.
+///
+/// R4.2: the identical arm set to `poly_bind_construction_arg`
+/// (`src/check/poly.rs`), its dual -- construction binds header variables
+/// from operands, destructure applies them to fields -- which is required: a
+/// field shape one accepts and the other rejects is a defect. A generic enum
+/// *variant* field can only be `Var` or `Concrete` at HEAD (measured:
+/// `array['A 2]`, `Inner['A]`, `Cell2['A]`, `&'A` and `^'A` are all parser
+/// rejections for a variant field; generic *struct* fields admit a wider set,
+/// which is why `substitute_generic_field` carries it -- this function is
+/// called only on enum variant fields).
+///
+/// R4.3: takes no `MutRegistries` and interns nothing -- folding an
+/// all-`Concrete` result is `apply_subst`'s job at grounding time, which
+/// needs the instantiator this function deliberately does not hold.
+pub fn substitute_generic_variant_field(field_pty: &PolyType, args: &[PolyType]) -> PolyType {
+    match field_pty {
+        PolyType::Var(v) => args[*v as usize].clone(),
+        PolyType::Concrete(t) => PolyType::Concrete(*t),
+        other => unreachable!(
+            "a generic enum variant field is never {other:?}: `array['A N]`, `Inner['A]`, `&'A` and `^'A` are all parser rejections for a variant field"
+        ),
+    }
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature
@@ -4040,6 +4119,67 @@ mod tests {
         generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
         let mono = variant_type(&generics.inst_enums, EnumId::from_index(0), 0);
         assert_eq!(mono.name(), "Res[i64].Ok");
+    }
+
+    /// P7.S12 (R3.2): `generic_variant_type` is the sole constructor, mirroring
+    /// `variant_type`'s stability property -- two constructions of the same
+    /// `(idx, module, vi)` compare equal, even though each leaks its own
+    /// display string (`PolyType` derives `PartialEq`/`Eq`, and `&'static str`
+    /// equality is content-based).
+    #[test]
+    fn generic_variant_type_is_stable_across_calls_and_renders_enum_dot_variant() {
+        let decl = GenericEnumDecl {
+            name: "Pair".to_string(),
+            ty_var_names: vec!["'A".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "One".to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(decl);
+        let args = vec![PolyType::Var(0)];
+        let a = generic_variant_type(&generics, 0, 0, 0, args.clone());
+        let b = generic_variant_type(&generics, 0, 0, 0, args);
+        assert_eq!(a, b);
+        let PolyType::GenericVariant { name, .. } = a else {
+            panic!("generic_variant_type always returns GenericVariant: {a:?}")
+        };
+        assert_eq!(name, "Pair.One");
+    }
+
+    /// P7.S12 (R4.1/R4.3): a `Var` field resolves positionally against the
+    /// scrutinee's own argument list; a `Concrete` field passes through
+    /// unchanged. Neither touches `refs`/`arrays` -- built with entries
+    /// already in them and asserted untouched afterward, since an interning
+    /// slip is invisible in the returned shape alone.
+    #[test]
+    fn substitute_generic_variant_field_var_and_concrete_arms_intern_nothing() {
+        let mut scratch = ScratchRegs::default();
+        scratch.arrays.push(ArrayDecl {
+            name_static: "array[i64 4]",
+            element: Type::I64,
+            count: 4,
+        });
+        scratch.refs.push(RefDecl {
+            name_static: "&i64",
+            referent: Type::I64,
+            mutable: false,
+        });
+        let args = vec![PolyType::Concrete(Type::U32)];
+
+        let var_field = substitute_generic_variant_field(&PolyType::Var(0), &args);
+        assert_eq!(var_field, PolyType::Concrete(Type::U32));
+
+        let concrete_field =
+            substitute_generic_variant_field(&PolyType::Concrete(Type::I64), &args);
+        assert_eq!(concrete_field, PolyType::Concrete(Type::I64));
+
+        assert_eq!(scratch.arrays.len(), 1);
+        assert_eq!(scratch.refs.len(), 1);
     }
 
     /// Round-2 review fix (R4): a struct argument's bare name is the plain

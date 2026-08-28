@@ -200,6 +200,9 @@ pub(super) fn poly_is_copy(
         // per-argument derivation is a new rule (out of scope for v1); never
         // `Copy` is the conservative answer consistent with the linear spine.
         PolyType::Generic { .. } => false,
+        // P7.S12 (R3.1): never `Copy` -- it wraps a possibly-linear payload,
+        // and the concrete twin (`Type::Variant`) is never `Copy` either.
+        PolyType::GenericVariant { .. } => false,
     }
 }
 
@@ -380,6 +383,9 @@ fn is_reference_slot(pt: &PolyType) -> bool {
         // itself (a reference nested inside one is D5's out-of-scope depth,
         // or, if concrete, was already rejected by the audits below).
         PolyType::Generic { .. } => false,
+        // P7.S12 (R3.1): a variant is not a reference itself; a reference
+        // nested inside a field is unreachable through this slot.
+        PolyType::GenericVariant { .. } => false,
     }
 }
 
@@ -2313,6 +2319,21 @@ fn poly_cross_match(
                         "passing a quotation to a polymorphic word",
                     ))
                 }
+                // P7.S12 (R3.4/R6.4): a narrowed generic variant reaching a
+                // cross-call is field projection's own out-of-scope
+                // territory one door over -- the callee's `'T` has no way to
+                // name a payload it would have to be projected out of, and
+                // `poly_type_mentions_caller_var` below has no defined
+                // answer for a shape that carries no `Type`. Located rather
+                // than falling into that call unguarded.
+                PolyType::GenericVariant { .. } => {
+                    return Err(poly_cross_call_unsupported_error(
+                        ctx,
+                        span,
+                        callee,
+                        "passing a generic variant to a cross-called polymorphic word",
+                    ))
+                }
                 // R6 fires only when the compound image actually mentions a
                 // caller variable (the caller wrapped its own variable
                 // before handing it in). A fully concrete compound (`&i64`,
@@ -2507,6 +2528,11 @@ fn poly_type_mentions_caller_var(pt: &PolyType) -> bool {
         PolyType::Quotation(ins, outs, ..) => {
             ins.iter().chain(outs).any(poly_type_mentions_caller_var)
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this predicate walks.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 
@@ -2519,6 +2545,11 @@ fn poly_mentions_len_var(pt: &PolyType) -> bool {
         PolyType::Generic { args, .. } => args.iter().any(poly_mentions_len_var),
         PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(poly_mentions_len_var),
         PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this predicate walks.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 
@@ -3345,6 +3376,31 @@ fn poly_walk_arms(
                     literal_span,
                     name,
                     escaping,
+                ));
+            }
+            // P7.S12 (R3.4): the narrowed-generic-variant twin of the check
+            // above -- a `GenericVariant` (or a reference to one) escaping
+            // its arm is the identical hazard `Type::Variant` is guarded
+            // against here, but it has no concrete `Type` to render, so it
+            // goes through the `poly_type_str`-rendered sibling error
+            // instead. Load-bearing ahead of any construction of one
+            // (Phase 3): an unconverted wildcard here would read an escaped
+            // narrowed variant as trivially `Copy`, and a later `dup` would
+            // double-drop a linear payload.
+            let escaping_variant = match &slot.pt {
+                PolyType::GenericVariant { .. } => Some(&slot.pt),
+                PolyType::Ref(referent, _) => match referent.as_ref() {
+                    pt @ PolyType::GenericVariant { .. } => Some(pt),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(pt) = escaping_variant {
+                return Err(poly_eliminator_variant_escape_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    &poly_type_str(pt, sig),
                 ));
             }
             // S3b L2: nor may a quotation literal, which would then have to be
@@ -4563,6 +4619,15 @@ pub(super) fn poly_copy_gate(
         // P7 slice 3a (D5/R5.4): `poly_is_copy` never returns `true` for a
         // generic applied to a variable, so this always reaches the error.
         PolyType::Generic { .. } => Err(poly_copy_generic_error(
+            ctx,
+            span,
+            op,
+            &poly_type_str(pt, sig),
+        )),
+        // P7.S12 (R3.1): `poly_is_copy` never returns `true` for a narrowed
+        // generic variant -- it wraps a possibly-linear payload -- so this
+        // always reaches the error.
+        PolyType::GenericVariant { .. } => Err(poly_copy_generic_variant_error(
             ctx,
             span,
             op,
@@ -6622,6 +6687,11 @@ fn match_impl_target_rec(
             }
             Some(())
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in an `impl:` target pattern.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
+        ),
     }
 }
 
@@ -6741,6 +6811,11 @@ fn collect_positions(
             }
             Some(())
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in an `impl:` target pattern.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
+        ),
     }
 }
 
@@ -7512,6 +7587,11 @@ pub(super) fn unify_poly_input(
                 )?;
             }
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, which `pty` (the callee's *declared* input) never is.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
     Ok(())
 }
@@ -7690,6 +7770,53 @@ pub(super) fn apply_subst(
                 g.instantiate_struct(*idx as usize, &concrete_args, *module, regs)
             })
         }
+        // P7.S12 (R3.1/R4.1): ground the header the same way the `Generic`
+        // arm does, then read the narrowed variant's `Type::Variant` off the
+        // resulting monomorph -- the same `(idx, module, args)` id space, S3a
+        // D3. The mint may not be flushed into `ctx.enums()` yet (it can be
+        // this very call), so a body-local decl is read through
+        // `GenericTypes::enum_decl` first, mirroring `poly_eliminator_call`'s
+        // own guard.
+        PolyType::GenericVariant {
+            idx,
+            module,
+            vi,
+            args,
+            name: _,
+        } => {
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                ));
+            };
+            let mut concrete_args = Vec::with_capacity(args.len());
+            for a in args {
+                concrete_args.push(apply_subst(
+                    sig, a, subst, name, span, ctx, arrays, cells, refs,
+                )?);
+            }
+            let regs = crate::ast::MutRegistries {
+                structs: ctx.structs(),
+                enums: ctx.enums(),
+                arrays,
+                cells,
+                refs,
+            };
+            let mut g = cell.borrow_mut();
+            let Type::Enum(id, _) =
+                g.instantiate_enum(*idx as usize, &concrete_args, *module, regs)
+            else {
+                unreachable!("instantiate_enum always returns Type::Enum")
+            };
+            let display = g
+                .enum_decl(id)
+                .map(|d| d.variants[*vi].display_static)
+                .unwrap_or_else(|| ctx.enums()[id.index()].variants[*vi].display_static);
+            Ok(Type::Variant(id, *vi, display))
+        }
     }
 }
 
@@ -7771,6 +7898,18 @@ pub(super) fn poly_copy_generic_error(ctx: &Ctx, span: Span, op: &str, ty: &str)
     )
 }
 
+/// P7.S12 (R3.1/R5.5): `dup`/`over` on a narrowed generic variant. The same
+/// class of fact as `poly_copy_generic_error`, naming the variant rather than
+/// the header since a variant's own field types are what may be linear.
+pub(super) fn poly_copy_generic_variant_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: cannot `{op}` a generic variant in {where_} (line {})\n  `{ty}` may carry a linear field at some instantiation, so it cannot be duplicated",
+        span.line
+    )
+}
+
 /// P7 slice 3c (R1.2, phase 4): `slice` over a buffer whose *element* is still
 /// generic. The view's length may be a variable -- that is what a view erases
 /// -- but its element may not: a generic element is a locked non-goal, so the
@@ -7810,6 +7949,10 @@ pub(super) fn poly_op_on_variable_error(
         // names which generic header and which arguments, not just "a
         // generic type".
         PolyType::Generic { .. } => format!("a generic type `{}`", poly_type_str(pt, sig)),
+        // P7.S12 (R3.1): rendered with the variant, mirroring `Generic`.
+        PolyType::GenericVariant { .. } => {
+            format!("a generic variant `{}`", poly_type_str(pt, sig))
+        }
     };
     format!(
         "error: `{op}` is not permitted on {what} in {where_} (line {})",
@@ -7961,6 +8104,11 @@ fn receiver_is_aggregate_projection(stack: &[PolySlot]) -> bool {
             // enum header (never yet a `Type::Struct`/`Type::Enum` to match
             // above), so it is a projection receiver exactly the same way.
             | PolyType::Generic { .. }
+            // P7.S12 (R3.4/R6.4): a narrowed generic variant is a projection
+            // receiver too -- field projection into one is a standing,
+            // separately-tracked gap, but the `&f` guard must say so rather
+            // than claim `f` is not a local.
+            | PolyType::GenericVariant { .. }
     )
 }
 
@@ -8296,6 +8444,25 @@ pub(super) fn poly_reference_scrutinee_error(
     )
 }
 
+/// P7.S12 (R3.4/R5.5): the poly twin of `eliminator_variant_escape_error` --
+/// an arm leaves a *narrowed generic* variant (or a reference to one) on the
+/// stack. `found` has no concrete `Type` to render, so it takes the already
+/// `poly_type_str`-rendered spelling instead, the same rendering split
+/// `poly_rendered_type_mismatch_error` draws against `type_mismatch_error`.
+pub(super) fn poly_eliminator_variant_escape_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    found: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: an arm of `{word}` leaves `{found}` on the stack in {where_} (line {})\n  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead",
+        span.line,
+    )
+}
+
 /// P7.S12 (R1.5): a generated enum word constructed with an ungrounded
 /// generic argument inside a combinator's own body. The construction's
 /// concrete identity depends on the combinator's own type variable, so it
@@ -8617,6 +8784,10 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             let args: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
             format!("{name}[{}]", args.join(" "))
         }
+        // P7.S12 (R3.3): `Enum.Variant`, mirroring `Type::Variant`'s own
+        // display spelling -- `name` is cached on the variant for exactly
+        // this (`generic_variant_type`'s doc), so no registry lookup needed.
+        PolyType::GenericVariant { name, .. } => name.to_string(),
     }
 }
 

@@ -658,6 +658,11 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
                 collect_poly_concrete(a, out);
             }
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a declared signature this walk sees.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
+        ),
     }
 }
 

@@ -361,7 +361,10 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         PolyType::OwnedCell(_)
         | PolyType::Quotation(..)
         | PolyType::Generic { .. }
-        | PolyType::QuotLit => false,
+        | PolyType::QuotLit
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in a trait member signature.
+        | PolyType::GenericVariant { .. } => false,
     }
 }
 
@@ -460,6 +463,11 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
         }
         PolyType::Quotation(_, _, _, _, _) => "[quotation]".to_string(),
         PolyType::QuotLit => "[quotlit]".to_string(),
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never in an `impl:` target shape.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target shape"
+        ),
     }
 }
 
@@ -1888,6 +1896,11 @@ fn generic_field_type_str(pty: &PolyType, ty_vars: &[(String, Span)]) -> String 
         PolyType::Quotation(..) | PolyType::QuotLit => {
             unreachable!("a generic `type:` field is never a quotation shape")
         }
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never a generic `type:` field's shape.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
+        ),
     }
 }
 
@@ -1941,6 +1954,11 @@ fn reject_growing_generic_argument(
             Ok(())
         }
         PolyType::Quotation(..) | PolyType::QuotLit => Ok(()),
+        // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
+        // input row, never a generic `type:` field's shape.
+        PolyType::GenericVariant { .. } => unreachable!(
+            "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
+        ),
     }
 }
 
