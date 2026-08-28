@@ -817,10 +817,12 @@ impl<'a> FuncBuilder<'a> {
         self.materialize_quot_args(&mut args, &arity.quot_inputs);
         // R11: a multi-output callee returns one bundle, unpacked back
         // onto the stack below, so the lowering stack matches the
-        // stack the checker verified. The discriminator is the
-        // bundle's own flag, not `out_arity >= 2`: an `extern:` declaration's
-        // env entry derives a multi-output `ret_ty` from the first output
-        // alone and interns no bundle, and must not enter this branch.
+        // stack the checker verified. The discriminator is the bundle's
+        // own flag, not `out_arity >= 2`: on every surviving path a
+        // ≥2-output word always interns a bundle (`extern_multi_output_error`
+        // rejects a multi-output `extern:` outright), but this branch still
+        // tests the flag rather than the arity, since the flag is what the
+        // struct layout actually carries.
         let bundle = match arity.ret_ty {
             Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
             _ => None,

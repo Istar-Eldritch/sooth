@@ -156,8 +156,7 @@ import: core::combinators | times | ;
 
 **Modules and packages.** A file is a compilation unit, a directory tree under
 a `sooth.pkg` manifest is a package. `import:`/`export:` with qualified access,
-selective imports, and transitive dependency resolution. Works natively and at
-the REPL.
+selective imports, and transitive dependency resolution.
 
 **Recursion.** Self-tail-recursion is a guaranteed constant-stack transform
 (tail self-call → jump). A recursive list destructor disposes in constant stack,

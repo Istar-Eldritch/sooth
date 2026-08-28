@@ -122,10 +122,6 @@ use-site disambiguation: two selective imports exposing the same unqualified nam
 an error at the second, naming both modules, and a selectively-exposed name colliding
 with a local definition is the same error.
 
-**Slice 5b's interactive import path is retired.** It once answered what an import
-means in a live session; the whole interactive path was removed along with the REPL
-(P7.S9), and every surviving import is resolved by the native path described above.
-
 Out of scope for this slice, all deferred to Phase 8's eventual package/versioning
 layer or later: a serializable API description and semver enforcement (which will
 consume this slice's export list, not redefine it), package manifests and a registry,

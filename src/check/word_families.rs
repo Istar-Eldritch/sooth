@@ -1195,7 +1195,7 @@ pub(super) fn ungated_intrinsic_error(ctx: &Ctx, span: Span, name: &str) -> Stri
 
 /// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
 /// module. `None` means "module scoping does not apply -- use the flat
-/// `env.get(name)`": only a standalone probe with no module view, where
+/// `env.get(name)`": only a unit test's `word_ctx` with no module view, where
 /// `ctx.modules()` is `None`.
 /// Every operator decl is mangled per module, so a bare lookup of `add` is
 /// `None`; assemble the caller's own overload (under `mangle(name, M)`) plus

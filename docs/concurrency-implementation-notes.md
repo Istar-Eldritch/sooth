@@ -204,11 +204,12 @@ Both are equally safe.
   today. Mutual recursion between actors (A sends to B, B sends back to A) does
   not need mutual TCO — each actor is an independent self-recursive loop, and
   the message handoff is a channel operation, not a tail call.
-- **Interacts with "REPL late binding for redefinition" (Open/deferred).** A
-  running actor holds a frozen reference to its word's generation, consistent
-  with the frozen-binding rule every REPL word already follows. Redefining an
-  actor's handler word does not affect a running actor; a new actor spawned
-  after the redefinition binds the new generation.
+- **Interacts with "Late binding for redefinition" (Open/deferred).** No
+  redefinition path exists today, so this is moot in practice: a running
+  actor's word binding is simply the one compiled into the binary. It becomes
+  a live question only if a future `driver::Library`-based reload path
+  introduces redefinition, at which point a running actor's handler should
+  stay bound to the word it started with rather than pick up a new one.
 - **Interacts with "No loop keywords" (DESIGN.md).** The `begin ... again` in
   DESIGN.md's `worker` example is illustrative pseudo-syntax. The real shape is a
   self-tail-recursive word (today) or a quotation-based loop combinator (after

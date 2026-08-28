@@ -53,7 +53,6 @@ pub fn find_drop_overloads(
 /// overrides, or a located error citing the word's own declaration --
 /// modeled on `check_main_effect`'s shape (find the offending word by name,
 /// report its span).
-///
 pub fn drop_overload_struct_id(word: &WordDef) -> Result<StructId, String> {
     if !word.effect.outputs.is_empty() {
         return Err(drop_overload_output_error(word));

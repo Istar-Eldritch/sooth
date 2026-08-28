@@ -1870,12 +1870,14 @@ struct Parser<'t> {
     /// The struct registry (names always populated by the pre-pass, fields
     /// populated for the `type:` bodies already parsed at the point of
     /// lookup, but resolution only needs the id/name so declaration order
-    /// among structs doesn't matter). Empty only in a unit test that passes
-    /// no struct registry at all.
+    /// among structs doesn't matter). Empty for the import/export scans
+    /// (`scan_imports`/`scan_exports`), which resolve no type name, and in a
+    /// unit test that passes no struct registry at all.
     structs: &'t [StructDecl],
     /// The enum registry, parallel to `structs` (names, and each enum's
-    /// variant names, always populated by the pre-pass; empty only in a unit
-    /// test that passes no enum registry at all).
+    /// variant names, always populated by the pre-pass). Empty for the same
+    /// reason `structs` is: the import/export scans resolve no type name,
+    /// and a unit test may pass no enum registry at all.
     enums: &'t [EnumDecl],
     /// The interned array-type registry (D3, M1): unlike `structs`/`enums`,
     /// an array shape has no declared name a pre-pass could register ahead

@@ -420,8 +420,8 @@ replaced the stack bundle they guarded; the in-frame path is unchanged.
 **Two restrictions shipped here, both since lifted by P7.S3v's per-construction-site disposer:**
 discarding an owning closure unexecuted (`drop`), and storing one in an aggregate (a struct
 field, a variant field or an owned cell; an array or slice element waits on **P7.S5**).
-Standing hazard, unchanged: a materialized quotation still cannot be linked in the REPL (a
-session line building a `(code, env)` value dies on a non-PIC `__quot0` relocation).
+Standing hazard, now moot: the REPL no longer exists (P7.S9), so there is no session line
+left to build a `(code, env)` value that could hit the non-PIC `__quot0` relocation.
 **Exit:** a linear value can be moved into an escaping closure's env, the closure returned
 from the word that built it, and calling it observes the capture and disposes it exactly once
 -- one observation, not zero and not two -- with a forgotten closure and a capture the body
@@ -1106,13 +1106,11 @@ Two more follow-ups the slice deliberately did not fix:
   wrote. The second, useful line (`no ( T T -- Ordering ) found`) is unchanged. Restoring
   the caller's attribution needs a splice-origin span carried through unsatisfied-bound
   reporting: a diagnostics feature with its own design surface, not a uid fix.
-- **REPL trait/impl checking.** `src/check.rs`'s two REPL check sites hardcode
-  `TraitResolveCtx::scratch()`, whose premise (a session declares no `trait:`) is false the
-  moment a session imports `core::cmp`; a comparison call then indexes past the scratch
-  trait table and ICEs at `src/check/poly.rs:976`. Ten `#[ignore]`d REPL tests state this
-  as their reason. The fix needs a `Session`-level traits/impls accumulation table (Session
-  has `structs`/`enums` but no trait analogue) threaded through both sites -- comparable in
-  size to the earlier struct/enum REPL work, so it is its own slice.
+- **REPL trait/impl checking is moot: the REPL no longer exists (P7.S9).** `src/check.rs`'s
+  two REPL check sites, the `Session`-level table this item would have added, and the ten
+  `#[ignore]`d REPL tests that stated the ICE as their reason are all deleted.
+  `TraitResolveCtx::scratch()` still exists but has no REPL caller left to expose the
+  premise this item was tracking.
 
 **P7.S9 -- Remove the REPL.** `[ done ]` There is no interactive execution path: `sooth
 repl` is not a subcommand, and every word is compiled through `build`/`run`'s ordinary

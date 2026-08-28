@@ -458,10 +458,11 @@ that were argued out rather than assumed.
   row. Open: count spelling, `..N`/`'N` relationship, diagnostic on disagreement.
 - **Owning a native backend.** Deferred. Reconsider after self-hosting, and only if
   the pull is genuine. Detail: [codegen](./docs/design/codegen.md).
-- **Late binding for redefinition.** Words are frozen at their compile-time
-  generation; redefining a callee doesn't update existing callers. Falls out of
-  `driver::Library`'s `dlopen` architecture. Revisit only if live-patching against
-  that primitive is wanted, as its own design track.
+- **Late binding for redefinition.** No redefinition path exists today: there is
+  no interactive execution path, and nothing currently calls `driver::Library`'s
+  `dlopen`/`dlsym` primitive to reload a word. Revisit only if a future consumer
+  of that primitive (a hot-reload host, incremental compilation) introduces
+  redefinition, as its own design track.
 
 ## Declined
 

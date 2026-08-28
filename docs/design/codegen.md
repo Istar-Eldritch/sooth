@@ -94,4 +94,8 @@ share one native engine. Two decisions remove the need for it outright:
 
 Word bodies compute entirely in SSA/registers; the compile-time-virtual-stack
 invariant holds regardless of which loading path a compiled word reaches the
-process through.
+process through. The **uniform runtime stack** reserved for escaping quotations
+(Phase 4) is the same shape as any such loading path's stack-bridging buffer --
+marshal to/from a byte buffer at a compiled boundary -- reused there for closures
+that must cross into `alloc` rather than for bridging separately-compiled units.
+Neither case puts a runtime stack inside a word body.

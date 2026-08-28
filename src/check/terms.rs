@@ -515,8 +515,8 @@ fn check_term(
             // R12 (slice 8b, 8a): a bare operator resolves against the
             // overloads visible to the calling module, not the flat `env`
             // lookup that misses a per-module-mangled decl in a multi-module
-            // build. `None` (single-module, or any standalone probe with no
-            // module view) falls back to the flat lookup unchanged.
+            // build. `None` (single-module, or a unit test's `word_ctx` with
+            // no module view) falls back to the flat lookup unchanged.
             // P8 S2 (R2): an unimported intrinsic gets no operator candidates
             // either. The operator dispatch is the intrinsics' own machinery --
             // a module-visible overload of `add` is an overload *of the
