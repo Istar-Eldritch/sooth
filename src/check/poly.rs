@@ -3045,7 +3045,7 @@ fn poly_eliminator_call(
                 Some(Type::Enum(gate_id, decl.name_static)),
             )
         }
-        EliminatorTarget::Generic { idx, .. } => {
+        EliminatorTarget::Generic { idx } => {
             // `ctx_eliminator_registry` builds the header half of the registry
             // out of `ctx.generics()` itself, so a `Generic` entry reaching
             // this call implies the instantiator is live: the two Ctx-less

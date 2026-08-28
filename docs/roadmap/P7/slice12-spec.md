@@ -237,15 +237,16 @@ through the colliding keys.
   throughout, matching `PolyType::Generic`'s own field types, `src/ast.rs:2029-2035`), built
   from `enums` **and** from `ctx.generics()`'s `enums: Vec<GenericEnumDecl>`.
 
-  **Amended in phase 3:** `module` is carried for shape parity with `PolyType::Generic` and
-  is not read by any consumer -- `poly_eliminator_call`'s `Generic` scrutinee arm destructures
-  `{ idx, .. }` and says why in its own comment (declaring-module identity is the wrong notion
-  at an instantiation site). `eliminator_registry_prefers_a_monomorph_over_its_own_header`
-  asserts the field equals `generics.enums[bare].module`, i.e. the same value the code reads
-  it from, so it proves storage, not use. Not a defect: nothing in R1-R7 needs to disambiguate
-  two same-named generic headers declared in different modules yet. If a future phase adds
-  such a consumer, that is when this field's assertion needs a multi-module fixture to stop
-  being a placebo.
+  **Amended in phase 3, and the rule is corrected:** the `Generic` arm is
+  `Generic { idx: u32 }` -- no `module`. Carrying it was shape parity with `PolyType::Generic`
+  and nothing more: no consumer reads it (`poly_eliminator_call`'s `Generic` scrutinee arm
+  needs only the header's variant list, and declaring-module identity is the wrong notion at
+  an instantiation site -- the family is compared through the carried header *spelling*, as
+  R5.1's own comment says). Its only assertion read the field back from
+  `generics.enums[bare].module`, i.e. the value the code had just written there, so it proved
+  storage and not use. A phase that needs to disambiguate two same-named headers from
+  different modules adds the field back *with* a multi-module fixture; adding it ahead of that
+  consumer buys a placebo.
 - **R2.2 (threading, and the one site that cannot be threaded)** There are six call sites:
   `check_module` (`src/check.rs:692`), `check_def_collecting_drop_sites` (`:1284`),
   `infer_line` (`:1378`), `check_poly_combinator_repl` (`src/check/poly.rs:489`), `poly_walk`
@@ -398,10 +399,28 @@ through the colliding keys.
 - **R5.4** Each arm's narrowed input is `generic_variant_type(idx, module, vi, args)` where
   `args` is the scrutinee's own `Generic.args`, unchanged. Nothing re-unifies: the scrutinee
   already carries the substitution.
+
+  **Amended in phase 3:** built, but witnessed for *arity and family only* --
+  `poly_eliminator_narrows_a_two_parameter_header_at_swapped_monomorphs` says so in its own
+  comment. Nothing before phase 4's R6 destructure *reads* a narrowed variant's fields, so
+  swapping the carried `args` is unobservable from either the unit test or its
+  swapped-monomorph golden twin. The positional half of this rule has no witness until phase 4 lands R8.3's
+  asymmetric-payload destructure, which is what R8.9's mutation 3 (reverse the `args`) kills.
+  **Recommendation for phase 4:** mutation 3 is R5.4's only positional evidence -- it must not
+  be retired or classified as inert without one.
 - **R5.5** The escape check (R3.4) rejects a `GenericVariant` leaving an arm on exactly the
   grounds it rejects `Type::Variant`. Same message, the variant rendered through
   `poly_type_str`. A `Ref` wrapping a `GenericVariant` is caught too, matching the concrete
   arm's `Ref` case.
+
+  **Amended in phase 3:** the bare `GenericVariant` half is witnessed
+  (`a_generic_variant_escaping_its_arm_is_rejected`, and mutation 4 kills exactly it). The
+  `Ref` half is **unreachable today** and therefore unwitnessed: producing a `Ref` to a
+  narrowed variant needs the variant parked in a local first, and binding one is rejected
+  earlier -- ``cannot borrow the local `v` of type `Option.Some` `` (measured on
+  `~[ ( Some ) | v | &v .. ]`). It stays in, at exactly the depth the concrete arm has always
+  looked to, because the peel is what makes the classification exhaustive; it is a
+  guard-in-advance, not a closed hazard.
 - **R5.6** `drop` of a narrowed `GenericVariant` inside its arm is accepted (the concrete
   twin accepts `drop` of a `Type::Variant`) and lowers per instantiation.
 - **R5.7** Scrutinee modes: this slice admits the **owning** mode only. `&`/`&!` narrowing
@@ -457,6 +476,21 @@ backend panic is a failure rather than a missing line.
   **two instantiations with different payload layouts** (`i64` and a struct), asserting both
   stdout values. One instantiation cannot witness R1 (S3a R4's rule: an all-`i64` pair is a
   layout placebo, and a symmetric pair cannot tell positional routing from its swap).
+
+  **Amended in phase 3:** witnessed over a **locally declared** `Option['T]`, not over
+  `lib/option.sth`'s. Two walls stand between the two, both pre-existing and neither in this
+  slice's scope:
+  1. a poly word over an *imported* generic enum is rejected at its call site --
+     `: idop ( o::Option['T] -- o::Option['T] ) ;` gives ``expected `o::Option['T]`, found
+     `Option[i64]` ``, with no eliminator anywhere in the program;
+  2. behind it, `poly_eliminator_call`'s family gate compares surface *spellings*, so an
+     imported scrutinee renders `o::Option['T]` against family name `Option` and falls into
+     the rendered-mismatch arm (``expected `Option`, found `o::Option['T]` ``).
+
+  The second is a distinct fix from the first, so clearing the call-site mismatch alone will
+  not reach `lib/option.sth`. **Recommendation for whichever slice takes cross-module generic
+  instantiation** (see the standing `export:`-cannot-carry-`Result[i64 i64]` limit): budget
+  both, and re-key the family gate off header identity rather than its rendered spelling.
 - **R8.3 (payload golden)** `unwrap_or`-shaped: a poly word whose `Some` arm destructures the
   payload and returns it, run at two instantiations. This is R6's only end-to-end witness.
 - **R8.4 (construction inside the poly body)** A poly word that both constructs and

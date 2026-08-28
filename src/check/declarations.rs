@@ -1875,10 +1875,15 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
 }
 
 /// P7.S12 (R2.1): what a name in the eliminator registry names -- one
-/// monomorph, or a generic header no instantiation has grounded yet. `u32`
-/// throughout the `Generic` arm, matching `PolyType::Generic`'s own field
-/// types, since `(idx, module)` is exactly the header identity a
-/// `Generic { is_enum: true, .. }` scrutinee carries.
+/// monomorph, or a generic header no instantiation has grounded yet. `idx` is
+/// a `u32`, matching `PolyType::Generic`'s own field type, and indexes the
+/// instantiator's `enums`.
+///
+/// `PolyType::Generic`'s other identity half, `module`, is deliberately *not*
+/// carried: declaring-module identity is the wrong notion at an instantiation
+/// site, so no consumer reads it, and nothing in R1-R7 needs to disambiguate
+/// two same-named headers from different modules. A future phase that does can
+/// add it back with a multi-module fixture to witness it.
 ///
 /// R2 second half: this value never decides *identity*. Both consumers read
 /// the operative header off the scrutinee's own type
@@ -1888,7 +1893,7 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EliminatorTarget {
     Concrete(EnumId),
-    Generic { idx: u32, module: u32 },
+    Generic { idx: u32 },
 }
 
 /// Phase 6 slice 3 (R3): the checker-side eliminator registry, bare surface
@@ -1925,10 +1930,7 @@ pub fn eliminator_registry(
     for (idx, decl) in generic_enums.iter().enumerate() {
         registry
             .entry(format!("{}?", generic_surface_name(&decl.name)))
-            .or_insert(EliminatorTarget::Generic {
-                idx: idx as u32,
-                module: decl.module,
-            });
+            .or_insert(EliminatorTarget::Generic { idx: idx as u32 });
     }
     registry
 }
@@ -2141,10 +2143,7 @@ mod tests {
             .expect("`Bare`'s header is staged by the parse-time prepass");
         assert_eq!(
             registry.get("Bare?"),
-            Some(&EliminatorTarget::Generic {
-                idx: bare as u32,
-                module: generics.enums[bare].module,
-            }),
+            Some(&EliminatorTarget::Generic { idx: bare as u32 }),
             "a header with no monomorph registers as the header itself"
         );
     }
