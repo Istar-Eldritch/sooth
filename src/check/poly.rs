@@ -13517,7 +13517,7 @@ mod tests {
         let mut refs: Vec<RefDecl> = Vec::new();
 
         let unflushed = {
-            let ctx = Ctx::Word {
+            let ctx = Ctx {
                 mangled: "f",
                 effect: &effect,
                 structs: &[],
@@ -13562,7 +13562,7 @@ mod tests {
             "the flush moved the mint into `ctx.enums()`"
         );
 
-        let ctx = Ctx::Word {
+        let ctx = Ctx {
             mangled: "f",
             effect: &effect,
             structs: &[],

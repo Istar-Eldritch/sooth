@@ -1214,7 +1214,7 @@ pub(super) fn infer_probe_body(
     let mut impl_monos = Vec::new();
     let poly_env = PolyEnv::new();
     let combinators = CombinatorEnv::default();
-    let eliminators = eliminator_registry(enums);
+    let eliminators = eliminator_registry(enums, &[]);
     let mut poly = PolyCtx {
         env: &poly_env,
         insts: &mut insts,
